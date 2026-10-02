@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{OwnedMutexGuard, broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -219,23 +219,38 @@ impl AppState {
         wire_attachments: Vec<ImageAttachment>,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
+        let cancel = self.runtime.turn_cancellation();
+        self.run_query(id, text, wire_attachments, tx, cancel).await
+    }
+
+    /// [`Self::handle_query`] for a turn whose cancellation token was
+    /// taken earlier; the prompt is dropped if `cancel` has already fired.
+    pub(super) async fn run_query(
+        self: Arc<Self>,
+        id: String,
+        text: String,
+        wire_attachments: Vec<ImageAttachment>,
+        tx: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    ) -> Result<(), DispatchError> {
+        let _cancel_on_return = cancel.clone().drop_guard();
         let attachments = self
             .prepare_attachments(&id, &wire_attachments, &tx)
             .await?;
-        let _session_guards = self.acquire_query_guards(&id, &tx).await?;
-        let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let Some((_session_guards, agent_guard)) = self.admit_turn(&id, &tx, &cancel).await? else {
+            return finish_interrupted_before_start(&tx, id).await;
+        };
         if let Some(revalidator) = &self.subsystems.vision_revalidator {
             revalidator
                 .revalidate_if_stale(&self.subsystems.presence)
                 .await;
         }
+        if cancel.is_cancelled() {
+            return finish_interrupted_before_start(&tx, id).await;
+        }
 
         let (current_session, turn_id) = self.open_persistence_turn(&text).await;
         self.assemble_transient_context(&text).await;
-
-        let cancel = CancellationToken::new();
-        let _cancel_on_return = cancel.clone().drop_guard();
-        *self.runtime.current_cancel.lock().await = Some(cancel.clone());
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
@@ -251,7 +266,6 @@ impl AppState {
             .await;
 
         let agent_result = agent_task.await;
-        *self.runtime.current_cancel.lock().await = None;
         drop(agent_guard);
 
         if done_emitted && matches!(&agent_result, Ok(Ok(()))) {
@@ -277,6 +291,24 @@ impl AppState {
             send_error(tx, id.to_string(), e.to_string()).await;
         }
         decoded
+    }
+
+    async fn admit_turn(
+        &self,
+        id: &str,
+        tx: &mpsc::Sender<Event>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<(QueryGuards, OwnedMutexGuard<()>)>, DispatchError> {
+        let admission = async {
+            let guards = self.acquire_query_guards(id, tx).await?;
+            let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+            Ok((guards, agent_guard))
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(None),
+            admitted = admission => admitted.map(Some),
+        }
     }
 
     async fn acquire_query_guards(
@@ -527,6 +559,19 @@ impl AppState {
             }
         }
     }
+}
+
+pub(super) async fn finish_interrupted_before_start(
+    tx: &mpsc::Sender<Event>,
+    id: String,
+) -> Result<(), DispatchError> {
+    debug!(
+        target: "assistd::state",
+        id = %id,
+        "turn interrupted before reaching the model; dropping the prompt"
+    );
+    let _ = tx.send(Event::Done { id }).await;
+    Ok(())
 }
 
 fn cancel_for_departed_client(cancel: &CancellationToken, id: &str) {

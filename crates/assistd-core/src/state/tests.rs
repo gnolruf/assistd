@@ -559,6 +559,26 @@ async fn dispatch_ptt_stop_with_text_runs_query() {
 }
 
 #[tokio::test]
+async fn interrupt_between_ptt_press_and_release_drops_the_prompt() {
+    let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into())));
+    let (res, _) = dispatch(&state, Request::PttStart { id: "p".into() }).await;
+    res.unwrap();
+    let (res, _) = dispatch(&state, Request::InterruptTurn { id: "int".into() }).await;
+    res.unwrap();
+
+    let (res, events) = dispatch(&state, Request::PttStop { id: "p".into() }).await;
+    res.unwrap();
+    assert_eq!(
+        events,
+        [
+            voice_state("p", VoiceCaptureState::Transcribing),
+            voice_state("p", VoiceCaptureState::Idle),
+            done("p"),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn dispatch_ptt_stop_empty_transcription_skips_query() {
     let state = state_with_voice(MockVoice::new(Ok(()), Ok(String::new())));
     let (res, events) = dispatch(&state, Request::PttStop { id: "p4".into() }).await;
@@ -1107,6 +1127,37 @@ async fn interrupt_turn_preempts_hung_tool() {
         "hung tool kept running after the turn was interrupted"
     );
     assert_eq!(events.last(), Some(&done("q")), "{events:?}");
+}
+
+#[tokio::test]
+async fn interrupt_drops_a_turn_still_waiting_to_start() {
+    let (state, conv, _session, branch) = fresh_branch_state().await;
+    let earlier_turn = state.runtime.agent_turn_lock.clone().lock_owned().await;
+    let query_state = state.clone();
+    let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "abandoned")).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (res, _) = dispatch(&state, Request::InterruptTurn { id: "int".into() }).await;
+    res.unwrap();
+    let (res, events) = tokio::time::timeout(Duration::from_secs(5), queued)
+        .await
+        .expect("InterruptTurn left the queued turn waiting")
+        .unwrap();
+    res.unwrap();
+    assert_eq!(events, [done("q")]);
+
+    drop(earlier_turn);
+    let (res, events) = dispatch(&state, query("q2", "kept")).await;
+    res.unwrap();
+    assert_eq!(events.last(), Some(&done("q2")), "{events:?}");
+    state.drain_persistence_inflight().await;
+    let rows = conv.load_branch_history(branch).await.unwrap();
+    let user_prompts: Vec<_> = rows
+        .iter()
+        .filter(|r| r.role == PersistedRole::User)
+        .map(|r| r.content.as_str())
+        .collect();
+    assert_eq!(user_prompts, ["kept"]);
 }
 
 #[tokio::test(start_paused = true)]

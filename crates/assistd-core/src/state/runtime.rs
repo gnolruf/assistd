@@ -71,6 +71,15 @@ struct ConversationContextInner {
     branch_id: Option<BranchId>,
 }
 
+/// What a push-to-talk press hands to its release.
+#[derive(Debug)]
+pub(in crate::state) struct PttCapture {
+    /// Presence warmup started by the press.
+    pub(in crate::state) warmup: JoinHandle<()>,
+    /// The turn the release will run, so an interrupt mid-capture drops it.
+    pub(in crate::state) cancel: CancellationToken,
+}
+
 /// Per-process request bookkeeping: the active conversation, turn
 /// serialisation and cancellation, persistence ordering, and the events
 /// bus.
@@ -81,10 +90,11 @@ pub struct RuntimeState {
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
-    /// Presence warmup spawned by PTT-start and joined by PTT-stop.
-    pub(in crate::state) warmup_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    /// Cancellation token for the running agent turn.
-    pub(in crate::state) current_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    /// The push-to-talk press awaiting its release.
+    pub(in crate::state) ptt_capture: Arc<Mutex<Option<PttCapture>>>,
+    /// Parent of every turn's cancellation token; an interrupt cancels it
+    /// and installs a fresh one.
+    interrupt: StdMutex<CancellationToken>,
     /// Completion signal of the most recently queued persistence write,
     /// which the next write awaits so `seq` follows emission order.
     pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
@@ -101,8 +111,8 @@ impl RuntimeState {
             conversation_ctx: Arc::new(ConversationContext::new(SessionId::new(), None)),
             agent_turn_lock: Arc::new(Mutex::new(())),
             persistence_tracker: TaskTracker::new(),
-            warmup_handle: Arc::new(Mutex::new(None)),
-            current_cancel: Arc::new(Mutex::new(None)),
+            ptt_capture: Arc::new(Mutex::new(None)),
+            interrupt: StdMutex::new(CancellationToken::new()),
             persist_chain: StdMutex::new(None),
             events_bus,
             bus_interest: Arc::default(),
@@ -113,6 +123,19 @@ impl RuntimeState {
     pub fn with_conversation_ctx(mut self, ctx: Arc<ConversationContext>) -> Self {
         self.conversation_ctx = ctx;
         self
+    }
+
+    /// A token for a turn starting now, cancelled by the next
+    /// [`Self::interrupt_turns`].
+    pub(in crate::state) fn turn_cancellation(&self) -> CancellationToken {
+        self.interrupt.lock().child_token()
+    }
+
+    /// Cancel every turn started so far, queued or running; later turns
+    /// are unaffected.
+    pub(in crate::state) fn interrupt_turns(&self) {
+        let interrupted = std::mem::replace(&mut *self.interrupt.lock(), CancellationToken::new());
+        interrupted.cancel();
     }
 
     /// A handle to the tracker of fire-and-forget persistence tasks.
