@@ -44,7 +44,9 @@ pub enum McpServerConfig {
         command: PathBuf,
         #[serde(default)]
         args: Vec<String>,
-        /// Extra environment variables for the child.
+        /// Environment variables for the child, which inherits from the daemon
+        /// only `HOME`, `LANG`, `LANGUAGE`, `LC_*`, `LOGNAME`, `PATH`, `SHELL`,
+        /// `TERM`, `TMPDIR`, `TZ` and `USER`. Set credentials here.
         #[serde(default)]
         env: HashMap<String, String>,
         /// Per-request JSON-RPC timeout in seconds.

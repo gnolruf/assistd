@@ -171,6 +171,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # transport = "stdio"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"]
+# env = { API_TOKEN = "..." }  # only PATH, HOME, locale and a few basics are inherited
 #
 # [[mcp.servers]]
 # name = "remote-search"
