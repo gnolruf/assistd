@@ -1,5 +1,5 @@
-//! Multi-turn conversation state with best-effort token budgeting. The
-//! bytes-per-token heuristic over-counts multi-byte text on purpose.
+//! Multi-turn conversation state with token budgeting: a bytes-per-token
+//! heuristic, corrected by the prompt size the server last measured.
 
 use std::borrow::Cow;
 
@@ -92,8 +92,7 @@ pub struct Message {
     pub tool_calls: Vec<ToolCallRecord>,
     /// On [`Role::Tool`] messages: the id of the call this answers.
     pub tool_call_id: Option<String>,
-    /// Reasoning behind an assistant's `tool_calls`; cleared by the next
-    /// user turn.
+    /// Reasoning behind an assistant's `tool_calls`, sent back with them.
     pub reasoning: String,
     /// Context block rendered at the head of a user message's text,
     /// keeping earlier turns byte-identical for the prefix cache.
@@ -137,6 +136,9 @@ pub struct Conversation {
     pending_context: Option<String>,
     transient_note: Option<String>,
     messages: Vec<Message>,
+    /// How far the server's measured prompt size was from the heuristic
+    /// on the last measured request, in tokens.
+    calibration: i32,
 }
 
 impl Conversation {
@@ -147,12 +149,13 @@ impl Conversation {
             pending_context: None,
             transient_note: None,
             messages: Vec::new(),
+            calibration: 0,
         }
     }
 
     /// Stash the context block for the next user turn, replacing any
     /// pending one. It attaches when that turn is pushed and renders at
-    /// the head of its text until the following user turn.
+    /// the head of its text.
     pub fn set_transient_context(&mut self, text: String) {
         self.pending_context = Some(text);
     }
@@ -174,16 +177,15 @@ impl Conversation {
         self.pending_context.as_deref()
     }
 
-    /// Appends a plain-text user turn, closing the previous turn.
+    /// Appends a plain-text user turn.
     pub fn push_user(&mut self, content: String) {
         self.push_user_with_attachments(content, Vec::new());
     }
 
     /// Append a user turn whose wire form is a multimodal `content`
     /// array: one `text` part followed by one `image_url` part per
-    /// attachment. Closes the previous turn like [`Self::push_user`].
+    /// attachment.
     pub fn push_user_with_attachments(&mut self, content: String, attachments: Vec<Attachment>) {
-        self.close_previous_turn();
         self.messages.push(Message {
             attachments: encode_all(attachments),
             context: self.pending_context.take(),
@@ -241,13 +243,6 @@ impl Conversation {
         });
     }
 
-    fn close_previous_turn(&mut self) {
-        for message in &mut self.messages {
-            message.reasoning.clear();
-            message.context = None;
-        }
-    }
-
     /// Drop the most recent message if it is a user message, returning its
     /// context block to pending so a retried turn still carries it.
     pub fn rollback_last_user(&mut self) {
@@ -264,16 +259,13 @@ impl Conversation {
         self.messages = msgs;
         self.pending_context = None;
         self.transient_note = None;
+        self.calibration = 0;
     }
 
     /// Drop everything from the latest non-tool-result user message onward
     /// and clear pending context and note. Returns the number removed.
     pub fn truncate_to_last_real_user(&mut self) -> usize {
-        let Some(idx) = self
-            .messages
-            .iter()
-            .rposition(|m| m.role == Role::User && !Self::is_tool_result(m))
-        else {
+        let Some(idx) = self.last_real_user_index() else {
             return 0;
         };
         let removed = self.messages.len() - idx;
@@ -283,8 +275,28 @@ impl Conversation {
         removed
     }
 
-    /// Estimates the total token count of the conversation using a bytes-per-token heuristic.
+    /// Estimated prompt size in tokens: [`Self::heuristic_tokens`] shifted
+    /// by the error the server last measured in it.
     pub fn approx_total_tokens(&self) -> u32 {
+        self.heuristic_tokens()
+            .saturating_add_signed(self.calibration)
+    }
+
+    /// Record that a request whose [`Self::heuristic_tokens`] was
+    /// `estimated` measured `prompt_tokens` on the server.
+    pub fn calibrate(&mut self, estimated: u32, prompt_tokens: u32) {
+        let error = i64::from(prompt_tokens) - i64::from(estimated);
+        let bounded = error.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+        self.calibration = i32::try_from(bounded).unwrap_or_default();
+    }
+
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Token count of the conversation by a bytes-per-token heuristic. It
+    /// knows nothing of tool schemas or the chat template's own tokens.
+    pub fn heuristic_tokens(&self) -> u32 {
         let mut total = 0u32;
         if !self.system_prompt.is_empty() {
             total = total.saturating_add(
@@ -334,10 +346,10 @@ impl Conversation {
         ))
     }
 
-    /// Keep the approximate token total under budget, summarizing the
-    /// oldest turns if needed. Returns an error, with history unchanged,
-    /// if the summarizer fails or returns empty text;
-    /// [`Self::truncate_to_budget`] is the infallible fallback.
+    /// Keep the approximate token total under budget, folding the oldest
+    /// turns and any earlier summary into one summary if needed. Returns an
+    /// error, with history unchanged, if the summarizer fails or returns
+    /// empty text; [`Self::truncate_to_budget`] is the infallible fallback.
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
@@ -345,7 +357,7 @@ impl Conversation {
         model: &ModelConfig,
     ) -> Result<(), ChatClientError> {
         let budget = effective_budget(chat, model);
-        if self.approx_total_tokens() <= budget {
+        if !self.exceeds_budget(chat, model) {
             return Ok(());
         }
 
@@ -362,7 +374,7 @@ impl Conversation {
             return Ok(());
         }
 
-        let dialogue = serialize_tail(&self.messages[tail_start..preserve_from]);
+        let dialogue = serialize_tail(&self.messages[..preserve_from]);
         if dialogue.trim().is_empty() {
             self.truncate_to_budget(chat, model);
             return Ok(());
@@ -389,10 +401,12 @@ impl Conversation {
             trimmed.to_string()
         };
 
-        self.messages.drain(tail_start..preserve_from);
-        self.messages.insert(
-            tail_start,
-            Message::text(Role::System, format!("{SUMMARY_PREFIX}{body}")),
+        self.messages.splice(
+            ..preserve_from,
+            [Message::text(
+                Role::System,
+                format!("{SUMMARY_PREFIX}{body}"),
+            )],
         );
 
         if self.approx_total_tokens() > budget {
@@ -405,16 +419,20 @@ impl Conversation {
         Ok(())
     }
 
+    pub fn exceeds_budget(&self, chat: &ChatConfig, model: &ModelConfig) -> bool {
+        self.approx_total_tokens() > effective_budget(chat, model)
+    }
+
     /// Drop the oldest messages after any summary until the conversation
-    /// fits the budget or only the latest user turn remains. Tool calls
-    /// and their results are dropped together.
+    /// fits the budget, then the oldest tool steps of the current turn. The
+    /// latest user message and the newest step always stay.
     pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
         let budget = effective_budget(chat, model);
         while self.approx_total_tokens() > budget {
             let Some(idx) = self.first_droppable_index() else {
                 warn!(
                     target: "assistd::chat",
-                    "truncate_to_budget: cannot drop any more messages without losing the latest user turn"
+                    "truncate_to_budget: cannot drop any more messages without losing the current turn"
                 );
                 break;
             };
@@ -452,7 +470,8 @@ impl Conversation {
     }
 
     /// Start of the newest `preserve_pairs` user/assistant pairs, widened so
-    /// the boundary never splits a tool call from its results.
+    /// the boundary never splits a tool call from its results or passes the
+    /// latest user message.
     fn first_preserved_index(&self, preserve_pairs: usize) -> usize {
         let len = self.messages.len();
         let start = self.summary_insertion_index();
@@ -477,24 +496,36 @@ impl Conversation {
         while idx > start && self.messages.get(idx).is_some_and(Self::is_tool_result) {
             idx -= 1;
         }
-        idx.max(start)
+        idx.min(self.current_turn_start()).max(start)
     }
 
     fn first_droppable_index(&self) -> Option<usize> {
         let start = self.summary_insertion_index();
-        if start >= self.messages.len() {
-            return None;
-        }
-        let last_user = self
-            .messages
-            .iter()
-            .rposition(|m| m.role == Role::User)
-            .unwrap_or(self.messages.len());
-        if start == last_user {
-            None
-        } else {
+        let turn_start = self.current_turn_start();
+        if start < turn_start {
             Some(start)
+        } else {
+            self.oldest_superseded_step(turn_start)
         }
+    }
+
+    /// The first tool step of the turn starting at `turn_start`, unless it
+    /// is also the newest one.
+    fn oldest_superseded_step(&self, turn_start: usize) -> Option<usize> {
+        let is_step = |m: &Message| m.role == Role::Assistant && !m.tool_calls.is_empty();
+        let oldest = turn_start + 1;
+        let newest = self.messages.iter().rposition(is_step)?;
+        (self.messages.get(oldest).is_some_and(is_step) && oldest < newest).then_some(oldest)
+    }
+
+    fn last_real_user_index(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .rposition(|m| m.role == Role::User && !Self::is_tool_result(m))
+    }
+
+    fn current_turn_start(&self) -> usize {
+        self.last_real_user_index().unwrap_or(self.messages.len())
     }
 }
 

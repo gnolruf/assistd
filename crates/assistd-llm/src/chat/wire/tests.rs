@@ -17,6 +17,7 @@ fn request(messages: Vec<ChatMessage<'_>>) -> ChatRequest<'_> {
         model: "local",
         messages,
         stream: true,
+        stream_options: None,
         temperature: 0.5,
         max_tokens: 128,
         top_p: None,
@@ -136,4 +137,36 @@ fn deserializes_tool_call_delta_chunk() {
     let function = call.function.as_ref().unwrap();
     assert_eq!(function.name.as_deref(), Some("run"));
     assert_eq!(function.arguments.as_deref(), Some("{\"com"));
+}
+
+#[test]
+fn final_chunk_carries_usage_with_no_choices() {
+    let chunk: ChatCompletionChunk = serde_json::from_value(json!({
+        "choices": [],
+        "usage": {
+            "completion_tokens": 3,
+            "prompt_tokens": 275,
+            "total_tokens": 278,
+            "prompt_tokens_details": {"cached_tokens": 271},
+        },
+        "timings": {"cache_n": 271, "prompt_n": 4},
+    }))
+    .unwrap();
+    assert_eq!(chunk.usage.map(|u| u.prompt_tokens), Some(275));
+
+    let plain: ChatCompletionChunk =
+        serde_json::from_value(json!({"choices": [{"delta": {"content": "hi"}}]})).unwrap();
+    assert!(plain.usage.is_none());
+}
+
+#[test]
+fn stream_options_serialize_when_set() {
+    let mut req = request(Vec::new());
+    req.stream_options = Some(StreamOptions {
+        include_usage: true,
+    });
+    assert_eq!(
+        serde_json::to_value(&req).unwrap()["stream_options"],
+        json!({"include_usage": true})
+    );
 }

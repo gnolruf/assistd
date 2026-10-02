@@ -203,8 +203,7 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     /// [`StepOutcome::Final`].
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome>;
 
-    /// Stash a context block rendered ahead of the next user turn's text
-    /// until the following user turn replaces it.
+    /// Stash a context block rendered ahead of the next user turn's text.
     async fn set_transient_context(&self, _text: String) -> LlmResult<()> {
         Ok(())
     }

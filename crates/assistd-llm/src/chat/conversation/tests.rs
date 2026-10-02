@@ -189,7 +189,7 @@ fn transient_context_attaches_to_image_turns_too() {
 }
 
 #[test]
-fn transient_context_survives_the_tool_loop_and_is_dropped_by_the_next_user_turn() {
+fn transient_context_stays_on_its_turn_so_the_prefix_never_changes() {
     let mut c = Conversation::new("sys".into());
     c.set_transient_context("ctx".into());
     c.push_user("look".into());
@@ -208,10 +208,22 @@ fn transient_context_survives_the_tool_loop_and_is_dropped_by_the_next_user_turn
     );
 
     c.push_assistant("done".into());
+    let turn_end = serde_json::to_value(c.as_wire_messages()).unwrap();
+    c.set_transient_context("newer ctx".into());
     c.push_user("thanks".into());
-    let next_turn = c.as_wire_messages();
-    assert_eq!(user_text(&next_turn[1]), "look");
-    assert_eq!(user_text(next_turn.last().expect("messages")), "thanks");
+    let next_turn = serde_json::to_value(c.as_wire_messages()).unwrap();
+    let next_turn = next_turn.as_array().unwrap();
+    assert_eq!(
+        &next_turn[..5],
+        turn_end.as_array().unwrap(),
+        "a new turn must not rewrite the one before it"
+    );
+    let wire = c.as_wire_messages();
+    assert_eq!(user_text(&wire[1]), with_context("ctx", "look"));
+    assert_eq!(
+        user_text(wire.last().expect("messages")),
+        with_context("newer ctx", "thanks")
+    );
 }
 
 #[test]
@@ -263,7 +275,7 @@ fn image_tool_results_do_not_close_the_turn() {
 }
 
 #[test]
-fn reasoning_is_sent_with_its_tool_call_and_dropped_by_the_next_user_turn() {
+fn reasoning_is_sent_with_its_tool_call_and_kept_across_user_turns() {
     let mut c = Conversation::new("sys".into());
     c.push_user("look".into());
     c.push_assistant_with_tool_calls(None, "list first".into(), vec![mk_call("c-1", "{}")]);
@@ -280,14 +292,11 @@ fn reasoning_is_sent_with_its_tool_call_and_dropped_by_the_next_user_turn() {
 
     c.push_assistant("done".into());
     c.push_user("thanks".into());
-    assert_eq!(reasoning_on_wire(&c), None);
+    assert_eq!(reasoning_on_wire(&c).as_deref(), Some("list first"));
     assert_eq!(
         c.approx_total_tokens(),
-        in_loop - approx_tokens("list first")
-            + 2 * TOKENS_PER_MESSAGE_OVERHEAD
-            + approx_tokens("done")
-            + approx_tokens("thanks"),
-        "cleared reasoning must stop counting toward the budget"
+        in_loop + 2 * TOKENS_PER_MESSAGE_OVERHEAD + approx_tokens("done") + approx_tokens("thanks"),
+        "kept reasoning keeps counting toward the budget"
     );
 }
 
@@ -563,6 +572,48 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
 }
 
 #[tokio::test]
+async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
+    let user = |i: usize| format!("user {i} message with enough length to count");
+    let assistant = |i: usize| format!("assistant {i} message with enough length to count");
+    let mut c = Conversation::new("sys".into());
+    c.messages.push(message(
+        Role::System,
+        "[Conversation summary] first summary",
+    ));
+    for i in 0..6 {
+        c.push_user(user(i));
+        c.push_assistant(assistant(i));
+    }
+    c.push_user("current question with enough length to count".into());
+
+    let fake = FakeSummarizer::new("second summary");
+    let (chat, model) = spec(120, 2, 10_000);
+    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+
+    let captured = fake.captured.lock().await;
+    assert!(
+        captured[0].starts_with("system: [Conversation summary] first summary\n"),
+        "{captured:?}"
+    );
+    assert_eq!(
+        contents(&c),
+        [
+            "[Conversation summary] second summary",
+            user(5).as_str(),
+            assistant(5).as_str(),
+            "current question with enough length to count",
+        ]
+    );
+    let system_positions: Vec<usize> = c
+        .as_wire_messages()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| (m.role == "system").then_some(i))
+        .collect();
+    assert_eq!(system_positions, [0]);
+}
+
+#[tokio::test]
 async fn ensure_budget_summarize_failure_propagates() {
     let mut c = Conversation::new("sys".into());
     for i in 0..20 {
@@ -818,4 +869,110 @@ async fn summarize_preserves_tool_call_pair_boundary() {
         c.messages[1].tool_calls,
         [mk_call("c-99", r#"{"command":"ls"}"#)]
     );
+}
+
+fn push_tool_steps(c: &mut Conversation, steps: usize) {
+    for i in 0..steps {
+        c.push_assistant_with_tool_calls(
+            None,
+            String::new(),
+            vec![mk_call(&format!("c-{i}"), r#"{"command":"ls"}"#)],
+        );
+        c.push_tool_result(format!("c-{i}"), format!("output {i} with enough padding"));
+    }
+}
+
+fn real_user_contents(c: &Conversation) -> Vec<&str> {
+    c.messages
+        .iter()
+        .filter(|m| m.role == Role::User && !Conversation::is_tool_result(m))
+        .map(|m| m.content.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn summarize_keeps_the_question_of_a_long_tool_loop() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("old question with some filler text".into());
+    c.push_assistant("old answer with some filler text".into());
+    c.push_user("current question".into());
+    push_tool_steps(&mut c, 12);
+
+    let fake = FakeSummarizer::new("summary");
+    let (chat, model) = spec(200, 2, 10_000);
+    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+
+    assert_eq!(real_user_contents(&c), ["current question"]);
+    assert_eq!(c.messages[0].content, "[Conversation summary] summary");
+}
+
+#[test]
+fn truncate_keeps_the_question_and_newest_step_of_a_long_tool_loop() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("old question".into());
+    c.push_tool_result_with_attachments("run", "old image result", Vec::new());
+    c.push_assistant("old answer".into());
+    c.push_user("current question".into());
+    push_tool_steps(&mut c, 12);
+
+    let (chat, model) = spec(60, 2, 10_000);
+    c.truncate_to_budget(&chat, &model);
+
+    assert_eq!(c.messages[0].content, "current question");
+    assert_eq!(
+        c.messages.last().map(|m| m.content.as_str()),
+        Some("output 11 with enough padding")
+    );
+    assert!(c.messages.len() < 25, "older steps must be dropped");
+    assert!(c.approx_total_tokens() <= 60);
+}
+
+#[test]
+fn truncate_never_drops_the_only_step_of_the_current_turn() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("current question".into());
+    push_tool_steps(&mut c, 1);
+
+    let (chat, model) = spec(5, 2, 10_000);
+    c.truncate_to_budget(&chat, &model);
+
+    assert_eq!(c.messages.len(), 3);
+}
+
+#[test]
+fn calibration_shifts_the_estimate_by_the_measured_error() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("a question".into());
+    let heuristic = c.heuristic_tokens();
+    assert_eq!(c.approx_total_tokens(), heuristic);
+
+    c.calibrate(heuristic, heuristic + 500);
+    c.push_assistant("an answer".into());
+    assert_eq!(c.approx_total_tokens(), c.heuristic_tokens() + 500);
+
+    c.calibrate(c.heuristic_tokens(), 3);
+    assert_eq!(c.approx_total_tokens(), 3);
+
+    c.replace_messages(Vec::new());
+    assert_eq!(c.approx_total_tokens(), c.heuristic_tokens());
+}
+
+#[tokio::test]
+async fn a_measured_overrun_triggers_summarization_the_heuristic_would_skip() {
+    let mut c = Conversation::new("sys".into());
+    for i in 0..4 {
+        c.push_user(format!("question {i}"));
+        c.push_assistant(format!("answer {i}"));
+    }
+    c.push_user("latest".into());
+    let fake = FakeSummarizer::new("summary");
+    let (chat, model) = spec(200, 1, 10_000);
+
+    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    assert_eq!(c.message_count(), 9, "the heuristic alone is under budget");
+
+    c.calibrate(c.heuristic_tokens(), 400);
+    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    assert_eq!(c.messages[0].content, "[Conversation summary] summary");
+    assert!(c.message_count() < 9);
 }

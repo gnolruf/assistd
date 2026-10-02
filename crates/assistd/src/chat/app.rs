@@ -162,9 +162,6 @@ pub(super) struct App {
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     pub listen_active: bool,
-    /// `(call id, command)` awaiting its result; the agent loop runs tools
-    /// serially, so one slot suffices.
-    pending_tool_call: Option<(String, String)>,
     pub pending_attachments: Vec<PendingAttachment>,
     picker: Option<Picker>,
     ipc: Arc<IpcClient>,
@@ -185,8 +182,8 @@ pub(super) struct App {
     slash_dismissed: bool,
     /// `/resume` picker; `modal` takes precedence while both are open.
     pub picker_modal: Option<BranchPickerModal>,
-    /// Throttles rewraps for a live thinking block's timer to 1 Hz.
-    last_thinking_seconds: Option<u64>,
+    /// Throttles rewraps for a live block's timer to 1 Hz.
+    last_live_seconds: Option<u64>,
     pub session_title: Option<String>,
     /// Ctrl+O: force-expands every thinking and tool block without
     /// touching their per-item `expanded` flags.
@@ -272,7 +269,6 @@ impl App {
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             listen_active: false,
-            pending_tool_call: None,
             pending_attachments: Vec::new(),
             picker,
             ipc,
@@ -285,7 +281,7 @@ impl App {
             slash_selected: 0,
             slash_dismissed: false,
             picker_modal: None,
-            last_thinking_seconds: None,
+            last_live_seconds: None,
             session_title: None,
             verbose: false,
         }
@@ -341,11 +337,11 @@ impl App {
         {
             self.notice = None;
         }
-        let live_secs = self.output.live_thinking_seconds();
-        if live_secs != self.last_thinking_seconds {
-            self.last_thinking_seconds = live_secs;
+        let live_secs = self.output.live_block_seconds();
+        if live_secs != self.last_live_seconds {
+            self.last_live_seconds = live_secs;
             if live_secs.is_some() {
-                self.output.refresh_live_thinking();
+                self.output.refresh_live_block();
             }
         }
     }
