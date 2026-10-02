@@ -572,6 +572,48 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
 }
 
 #[tokio::test]
+async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
+    let user = |i: usize| format!("user {i} message with enough length to count");
+    let assistant = |i: usize| format!("assistant {i} message with enough length to count");
+    let mut c = Conversation::new("sys".into());
+    c.messages.push(message(
+        Role::System,
+        "[Conversation summary] first summary",
+    ));
+    for i in 0..6 {
+        c.push_user(user(i));
+        c.push_assistant(assistant(i));
+    }
+    c.push_user("current question with enough length to count".into());
+
+    let fake = FakeSummarizer::new("second summary");
+    let (chat, model) = spec(120, 2, 10_000);
+    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+
+    let captured = fake.captured.lock().await;
+    assert!(
+        captured[0].starts_with("system: [Conversation summary] first summary\n"),
+        "{captured:?}"
+    );
+    assert_eq!(
+        contents(&c),
+        [
+            "[Conversation summary] second summary",
+            user(5).as_str(),
+            assistant(5).as_str(),
+            "current question with enough length to count",
+        ]
+    );
+    let system_positions: Vec<usize> = c
+        .as_wire_messages()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| (m.role == "system").then_some(i))
+        .collect();
+    assert_eq!(system_positions, [0]);
+}
+
+#[tokio::test]
 async fn ensure_budget_summarize_failure_propagates() {
     let mut c = Conversation::new("sys".into());
     for i in 0..20 {

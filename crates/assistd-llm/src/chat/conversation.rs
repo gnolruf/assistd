@@ -349,8 +349,9 @@ impl Conversation {
         ))
     }
 
-    /// Keep the approximate token total under budget, summarizing the
-    /// oldest turns if needed. Returns an error, with history unchanged,
+    /// Keep the approximate token total under budget, folding the oldest
+    /// turns and any earlier summary into one summary if needed. Returns
+    /// an error, with history unchanged,
     /// if the summarizer fails or returns empty text;
     /// [`Self::truncate_to_budget`] is the infallible fallback.
     pub async fn ensure_budget(
@@ -377,7 +378,7 @@ impl Conversation {
             return Ok(());
         }
 
-        let dialogue = serialize_tail(&self.messages[tail_start..preserve_from]);
+        let dialogue = serialize_tail(&self.messages[..preserve_from]);
         if dialogue.trim().is_empty() {
             self.truncate_to_budget(chat, model);
             return Ok(());
@@ -404,10 +405,12 @@ impl Conversation {
             trimmed.to_string()
         };
 
-        self.messages.drain(tail_start..preserve_from);
-        self.messages.insert(
-            tail_start,
-            Message::text(Role::System, format!("{SUMMARY_PREFIX}{body}")),
+        self.messages.splice(
+            ..preserve_from,
+            [Message::text(
+                Role::System,
+                format!("{SUMMARY_PREFIX}{body}"),
+            )],
         );
 
         if self.approx_total_tokens() > budget {
