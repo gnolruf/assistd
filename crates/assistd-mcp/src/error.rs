@@ -44,6 +44,10 @@ pub enum McpError {
     #[error("too many in-flight MCP requests (cap reached)")]
     TooManyInFlight,
 
+    /// The server's reply was discarded for exceeding `limit` bytes.
+    #[error("MCP reply exceeded the {limit}-byte limit")]
+    ReplyTooLarge { limit: usize },
+
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
@@ -111,6 +115,10 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
             "[error] {tool_name}: too many in-flight MCP requests. \
              Try: the call again after pending requests drain\n"
         ),
+        McpError::ReplyTooLarge { limit } => format!(
+            "[error] {tool_name}: MCP reply exceeded the {limit}-byte limit and was discarded. \
+             Try: arguments that make the tool return less data\n"
+        ),
         McpError::Json(source) => format!(
             "[error] {tool_name}: MCP JSON error: {source}. \
              Check: daemon logs for transport details\n"
@@ -177,6 +185,12 @@ mod tests {
             ),
             ("server_down", McpError::ServerDown),
             ("too_many", McpError::TooManyInFlight),
+            (
+                "reply_too_large",
+                McpError::ReplyTooLarge {
+                    limit: 32 * 1024 * 1024,
+                },
+            ),
             (
                 "json",
                 McpError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),

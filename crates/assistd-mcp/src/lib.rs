@@ -17,6 +17,7 @@ pub mod handle;
 pub mod health_route;
 pub mod jsonrpc;
 mod protocol;
+mod response_id;
 pub mod sse;
 pub mod stdio;
 

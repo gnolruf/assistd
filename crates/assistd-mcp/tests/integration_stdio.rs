@@ -80,7 +80,8 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
         [
             "mcp__fake__echo",
             "mcp__fake__crash_me",
-            "mcp__fake__flood_stdout",
+            "mcp__fake__oversize_reply",
+            "mcp__fake__close_stdout",
             "mcp__fake__spawn_orphan_and_crash",
             "mcp__fake__env_names",
         ]
@@ -190,6 +191,39 @@ async fn server_crash_short_circuits_subsequent_calls() {
 }
 
 #[tokio::test]
+async fn oversize_reply_fails_its_call_without_restarting_the_server() {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
+        .await
+        .expect("server should start");
+    let watch_health = handle.watch_health();
+    let client = handle.client();
+
+    let (oversized, echoed) = tokio::join!(
+        client.invoke("oversize_reply", json!({})),
+        client.invoke("echo", json!({"msg": "alongside"})),
+    );
+
+    let err = oversized.expect_err("an oversize reply must fail its call");
+    assert!(matches!(err, McpError::ReplyTooLarge { .. }), "{err}");
+    assert!(
+        matches!(echoed, Ok(ToolResult::Text(ref text)) if text == "echo:alongside"),
+        "{echoed:?}"
+    );
+    let after = client.invoke("echo", json!({"msg": "after"})).await;
+    assert!(
+        matches!(after, Ok(ToolResult::Text(ref text)) if text == "echo:after"),
+        "{after:?}"
+    );
+    assert!(
+        !watch_health.has_changed().unwrap(),
+        "an oversize reply must not restart the server"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
@@ -203,14 +237,14 @@ async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
         .iter()
         .find(|tool| tool.name() == "mcp__fake__echo")
         .expect("echo present");
-    let flood = tools
+    let close_stdout = tools
         .iter()
-        .find(|tool| tool.name() == "mcp__fake__flood_stdout")
-        .expect("flood_stdout present");
+        .find(|tool| tool.name() == "mcp__fake__close_stdout")
+        .expect("close_stdout present");
 
     let mut watch_health = handle.watch_health();
 
-    let _ = flood.invoke(json!({})).await;
+    let _ = close_stdout.invoke(json!({})).await;
 
     let flipped = tokio::time::timeout(Duration::from_secs(5), async {
         while watch_health.changed().await.is_ok() {

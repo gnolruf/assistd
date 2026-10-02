@@ -15,8 +15,12 @@ use crate::error::McpError;
 /// from leaking memory by never replying.
 pub const MAX_IN_FLIGHT: usize = 256;
 
-/// Outcome of one JSON-RPC round trip.
+/// Our answer to a request the server sent us.
 pub type Reply = Result<Value, RpcError>;
+
+/// Outcome of one of our requests: the server's result, its
+/// [`McpError::RpcError`], or a local failure such as an oversize reply.
+pub type Outcome = Result<Value, McpError>;
 
 /// Outbound JSON-RPC 2.0 request frame.
 #[derive(Debug, Serialize)]
@@ -91,11 +95,21 @@ pub struct RpcError {
     pub data: Option<Value>,
 }
 
+impl From<RpcError> for McpError {
+    fn from(error: RpcError) -> Self {
+        Self::RpcError {
+            code: error.code,
+            message: error.message,
+            data: error.data,
+        }
+    }
+}
+
 /// Matches outbound JSON-RPC request ids to their waiting [`oneshot`] receivers.
 #[derive(Debug)]
 pub struct Correlator {
     next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Outcome>>>,
 }
 
 impl Correlator {
@@ -140,20 +154,27 @@ impl Correlator {
         let Some(id) = response.id else {
             return;
         };
-        let tx = {
-            let mut guard = self.pending.lock();
-            guard.remove(&id)
+        let outcome = match (response.result, response.error) {
+            (_, Some(error)) => Err(error.into()),
+            (Some(value), None) => Ok(value),
+            (None, None) => Ok(Value::Null),
         };
+        self.complete(id, outcome);
+    }
+
+    /// Wake the request waiting on `id` with a local `error`; unknown
+    /// ids are logged and dropped.
+    pub fn fail(&self, id: u64, error: McpError) {
+        self.complete(id, Err(error));
+    }
+
+    fn complete(&self, id: u64, outcome: Outcome) {
+        let tx = self.pending.lock().remove(&id);
         let Some(tx) = tx else {
             tracing::warn!(target: "assistd::mcp", id, "received response for unknown request id");
             return;
         };
-        let reply = match (response.result, response.error) {
-            (_, Some(err)) => Err(err),
-            (Some(value), None) => Ok(value),
-            (None, None) => Ok(Value::Null),
-        };
-        let _ = tx.send(reply);
+        let _ = tx.send(outcome);
     }
 
     /// Drop every pending reply sender, so each waiting receiver
@@ -183,7 +204,7 @@ pub struct Pending<'a> {
     pub id: u64,
     method: &'static str,
     params: Value,
-    pub rx: oneshot::Receiver<Reply>,
+    pub rx: oneshot::Receiver<Outcome>,
 }
 
 impl Drop for Pending<'_> {
@@ -340,10 +361,30 @@ mod tests {
             }),
         });
         let err = (&mut pending.rx).await.unwrap().unwrap_err();
-        assert_eq!(
-            (err.code, err.message.as_str()),
-            (-32601, "method not found")
+        assert!(
+            matches!(
+                &err,
+                McpError::RpcError { code: -32601, message, .. } if message == "method not found"
+            ),
+            "{err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn fail_wakes_only_the_named_request() {
+        let correlator = Correlator::new();
+        let mut failed = correlator.next_request("a", json!({})).unwrap();
+        let mut waiting = correlator.next_request("b", json!({})).unwrap();
+
+        correlator.fail(failed.id, McpError::ReplyTooLarge { limit: 1 });
+
+        let err = (&mut failed.rx).await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, McpError::ReplyTooLarge { limit: 1 }),
+            "{err:?}"
+        );
+        assert!(matches!(waiting.rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(correlator.in_flight(), 1);
     }
 
     #[test]

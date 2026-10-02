@@ -12,7 +12,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rustix::process::Signal;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::process::{Child, ChildStderr, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::AbortOnDropHandle;
@@ -23,11 +25,16 @@ use assistd_utils::process_group::ProcessGroup;
 
 use crate::error::McpError;
 use crate::jsonrpc::{Correlator, Incoming, notification_line, reply_line};
+use crate::response_id::ResponseIdScanner;
 use crate::{McpClient, ToolResult, ToolSchema, protocol};
 
-/// The reader drops the connection rather than buffer a line past
-/// this, so a misbehaving server cannot exhaust memory.
-const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// Longest line the reader buffers. A longer line is discarded as it
+/// streams in, failing only the call it answers.
+const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Line buffer capacity kept between lines, so one large reply does not
+/// pin [`MAX_LINE_BYTES`] of memory for the life of the connection.
+const RETAINED_LINE_CAPACITY: usize = 64 * 1024;
 
 /// Daemon variables a server inherits besides `LC_*`; anything else,
 /// credentials included, must come from [`StdioConfig::env`].
@@ -342,6 +349,17 @@ impl TransportHandles {
     }
 }
 
+/// How one line read from the server's stdout ended.
+enum LineRead {
+    /// A line of at most [`MAX_LINE_BYTES`] is in the buffer.
+    Complete,
+    /// A longer line was discarded; `response_id` names the call it answered.
+    Oversize {
+        response_id: Option<u64>,
+    },
+    Eof,
+}
+
 async fn read_loop<R: AsyncRead + Unpin>(
     stream: R,
     correlator: Arc<Correlator>,
@@ -353,12 +371,16 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let mut line = Vec::new();
     loop {
         line.clear();
-        let read = (&mut reader)
-            .take(MAX_LINE_BYTES as u64 + 1)
-            .read_until(b'\n', &mut line)
-            .await;
-        let bytes_read = match read {
-            Ok(bytes_read) => bytes_read,
+        line.shrink_to(RETAINED_LINE_CAPACITY);
+        match read_line(&mut reader, &mut line).await {
+            Ok(LineRead::Complete) => dispatch_line(&line, &correlator, &write_tx, &label).await,
+            Ok(LineRead::Oversize { response_id }) => {
+                reject_oversize_reply(&correlator, &label, response_id);
+            }
+            Ok(LineRead::Eof) => {
+                debug!(target: "assistd::mcp", server = %label, "MCP stdout EOF");
+                break;
+            }
             Err(e) => {
                 warn!(
                     target: "assistd::mcp",
@@ -367,42 +389,98 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 );
                 break;
             }
-        };
-        if bytes_read == 0 {
-            debug!(target: "assistd::mcp", server = %label, "MCP stdout EOF");
-            break;
-        }
-        if bytes_read > MAX_LINE_BYTES {
-            warn!(
-                target: "assistd::mcp",
-                server = %label,
-                "MCP stdout line over {MAX_LINE_BYTES} bytes; dropping connection",
-            );
-            break;
-        }
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match Incoming::parse(&line) {
-            Ok(Incoming::Response(response)) => correlator.deliver(response),
-            Ok(Incoming::Request { id, method }) => {
-                answer_server_request(&write_tx, &label, id, &method).await;
-            }
-            Ok(Incoming::Notification { method }) => {
-                debug!(target: "assistd::mcp", server = %label, method, "ignoring server notification");
-            }
-            Err(e) => {
-                warn!(
-                    target: "assistd::mcp",
-                    server = %label,
-                    "MCP stdout JSON parse error: {e}; line: {}",
-                    String::from_utf8_lossy(&line).trim(),
-                );
-            }
         }
     }
     correlator.fail_all();
     let _ = done_tx.send(());
+}
+
+async fn read_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> io::Result<LineRead> {
+    let bytes_read = (&mut *reader)
+        .take(MAX_LINE_BYTES as u64 + 1)
+        .read_until(b'\n', line)
+        .await?;
+    if bytes_read == 0 {
+        return Ok(LineRead::Eof);
+    }
+    if bytes_read <= MAX_LINE_BYTES {
+        return Ok(LineRead::Complete);
+    }
+    let mut scanner = ResponseIdScanner::default();
+    scanner.feed(line);
+    if line.last() != Some(&b'\n') {
+        skip_rest_of_line(reader, &mut scanner).await?;
+    }
+    Ok(LineRead::Oversize {
+        response_id: scanner.response_id(),
+    })
+}
+
+async fn skip_rest_of_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    scanner: &mut ResponseIdScanner,
+) -> io::Result<()> {
+    loop {
+        let buffered = reader.fill_buf().await?;
+        if buffered.is_empty() {
+            return Ok(());
+        }
+        let newline = buffered.iter().position(|&byte| byte == b'\n');
+        let consumed = newline.map_or(buffered.len(), |at| at + 1);
+        scanner.feed(&buffered[..consumed]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(());
+        }
+    }
+}
+
+async fn dispatch_line(
+    line: &[u8],
+    correlator: &Correlator,
+    write_tx: &mpsc::Sender<Vec<u8>>,
+    label: &str,
+) {
+    if line.iter().all(u8::is_ascii_whitespace) {
+        return;
+    }
+    match Incoming::parse(line) {
+        Ok(Incoming::Response(response)) => correlator.deliver(response),
+        Ok(Incoming::Request { id, method }) => {
+            answer_server_request(write_tx, label, id, &method).await;
+        }
+        Ok(Incoming::Notification { method }) => {
+            debug!(target: "assistd::mcp", server = %label, method, "ignoring server notification");
+        }
+        Err(e) => {
+            warn!(
+                target: "assistd::mcp",
+                server = %label,
+                "MCP stdout JSON parse error: {e}; line: {}",
+                String::from_utf8_lossy(line).trim(),
+            );
+        }
+    }
+}
+
+fn reject_oversize_reply(correlator: &Correlator, label: &str, response_id: Option<u64>) {
+    warn!(
+        target: "assistd::mcp",
+        server = %label,
+        ?response_id,
+        "MCP stdout line over {MAX_LINE_BYTES} bytes; discarded",
+    );
+    if let Some(id) = response_id {
+        correlator.fail(
+            id,
+            McpError::ReplyTooLarge {
+                limit: MAX_LINE_BYTES,
+            },
+        );
+    }
 }
 
 async fn answer_server_request(
@@ -673,29 +751,100 @@ mod tests {
         handles.shutdown_and_join().await;
     }
 
+    fn spawn_list_tools(
+        client: &Arc<StdioMcpClient>,
+    ) -> JoinHandle<Result<Vec<ToolSchema>, McpError>> {
+        let client = client.clone();
+        tokio::spawn(async move { client.list_tools().await })
+    }
+
+    async fn next_request_id(from_client: &mut BufReader<DuplexStream>) -> Value {
+        let mut request = String::new();
+        from_client.read_line(&mut request).await.unwrap();
+        serde_json::from_str::<Value>(&request).unwrap()["id"].clone()
+    }
+
+    fn empty_tools_reply(id: &Value) -> String {
+        format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": id, "result": {"tools": []}})
+        )
+    }
+
     #[tokio::test]
-    async fn oversize_line_ends_the_read_loop_without_waiting_for_a_newline() {
-        let (client_write, _server_read) = duplex(8192);
-        let (mut server_write, client_read) = duplex(8192);
-        let (_client, mut handles) = StdioMcpClient::from_streams(
+    async fn oversize_reply_fails_only_its_own_call() {
+        let (client_write, server_read) = duplex(64 * 1024);
+        let (mut server_write, client_read) = duplex(64 * 1024);
+        let (client, mut handles) = StdioMcpClient::from_streams(
             client_read,
             client_write,
-            "flood".into(),
+            "big".into(),
             Duration::from_secs(5),
         )
         .unwrap();
+        let mut from_client = BufReader::new(server_read);
 
-        let flood = tokio::spawn(async move {
-            let chunk = vec![b'x'; 64 * 1024];
-            while server_write.write_all(&chunk).await.is_ok() {}
-        });
+        let oversized = spawn_list_tools(&client);
+        let oversized_id = next_request_id(&mut from_client).await;
+        let normal = spawn_list_tools(&client);
+        let normal_id = next_request_id(&mut from_client).await;
 
-        tokio::time::timeout(Duration::from_secs(5), &mut handles.read_done)
+        let padding = "x".repeat(MAX_LINE_BYTES);
+        let reply = format!(
+            "{{\"jsonrpc\":\"2.0\",\"result\":{{\"tools\":[],\"padding\":\"{padding}\"}},\"id\":{oversized_id}}}\n"
+        );
+        server_write.write_all(reply.as_bytes()).await.unwrap();
+        server_write
+            .write_all(empty_tools_reply(&normal_id).as_bytes())
             .await
-            .expect("read loop must stop at the line cap, not buffer until a newline")
-            .expect("read loop signals termination");
+            .unwrap();
 
-        flood.abort();
+        let err = oversized.await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                McpError::ReplyTooLarge {
+                    limit: MAX_LINE_BYTES
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(normal.await.unwrap().unwrap().is_empty());
+        assert!(
+            matches!(
+                handles.read_done.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "an oversize reply must not end the read loop"
+        );
+        handles.shutdown_and_join().await;
+    }
+
+    #[tokio::test]
+    async fn oversize_line_ending_at_the_read_limit_leaves_the_next_line_intact() {
+        let (client_write, server_read) = duplex(64 * 1024);
+        let (mut server_write, client_read) = duplex(64 * 1024);
+        let (client, handles) = StdioMcpClient::from_streams(
+            client_read,
+            client_write,
+            "edge".into(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut from_client = BufReader::new(server_read);
+
+        let call = spawn_list_tools(&client);
+        let id = next_request_id(&mut from_client).await;
+
+        let mut junk = vec![b'x'; MAX_LINE_BYTES];
+        junk.push(b'\n');
+        server_write.write_all(&junk).await.unwrap();
+        server_write
+            .write_all(empty_tools_reply(&id).as_bytes())
+            .await
+            .unwrap();
+
+        assert!(call.await.unwrap().unwrap().is_empty());
         handles.shutdown_and_join().await;
     }
 

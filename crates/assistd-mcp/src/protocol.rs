@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 
 use crate::error::McpError;
-use crate::jsonrpc::{Reply, RpcError};
+use crate::jsonrpc::{Outcome, Reply, RpcError};
 use crate::{ToolResult, ToolSchema};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -139,22 +139,13 @@ fn parse_content_entry(entry: Value) -> Result<ToolResult, McpError> {
 }
 
 /// Await a correlated reply within `timeout`, mapping a dropped sender
-/// to `TransportClosed` and a server-side error to `RpcError`.
+/// to `TransportClosed`.
 pub(crate) async fn await_reply(
-    rx: &mut oneshot::Receiver<Reply>,
+    rx: &mut oneshot::Receiver<Outcome>,
     timeout: Duration,
 ) -> Result<Value, McpError> {
     match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(Ok(value))) => Ok(value),
-        Ok(Ok(Err(RpcError {
-            code,
-            message,
-            data,
-        }))) => Err(McpError::RpcError {
-            code,
-            message,
-            data,
-        }),
+        Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => Err(McpError::TransportClosed),
         Err(_) => Err(McpError::RequestTimeout(timeout)),
     }
