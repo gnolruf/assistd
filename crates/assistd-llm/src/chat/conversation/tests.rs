@@ -242,6 +242,23 @@ fn rollback_last_user_returns_its_context_to_the_pending_slot() {
 }
 
 #[test]
+fn rollback_last_user_keeps_an_image_tool_result() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("look".into());
+    c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
+    c.push_tool_result_with_attachments(
+        "see",
+        "a picture",
+        vec![Attachment::Image {
+            mime: "image/png".into(),
+            bytes: vec![0xAB],
+        }],
+    );
+    c.rollback_last_user();
+    assert_eq!(c.message_count(), 3);
+}
+
+#[test]
 fn image_tool_results_do_not_close_the_turn() {
     let mut c = Conversation::new("sys".into());
     c.set_transient_context("ctx".into());

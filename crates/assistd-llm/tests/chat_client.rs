@@ -1006,6 +1006,47 @@ async fn step_discards_tool_calls_from_a_stream_cut_off_before_its_finish_chunk(
 }
 
 #[tokio::test]
+async fn step_failing_before_any_output_drops_the_user_message() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::HttpError(500, "oom".into()))
+        .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["fine".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    client
+        .push_user("first try".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let err = client.step(Vec::new(), tx.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            LlmError::Chat(ChatClientError::Server { status: 500, .. })
+        ),
+        "{err:?}"
+    );
+
+    client
+        .push_user("second try".into(), Vec::new())
+        .await
+        .unwrap();
+    client.step(Vec::new(), tx).await.unwrap();
+    let captured = script.captured().await;
+    assert_eq!(
+        captured[1].body["messages"],
+        json!([
+            {"role": "system", "content": "test system prompt"},
+            {"role": "user", "content": "second try"},
+        ])
+    );
+}
+
+#[tokio::test]
 async fn step_parses_tool_call_across_argument_chunks() {
     let script = Script::new();
     script

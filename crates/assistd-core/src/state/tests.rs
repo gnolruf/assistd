@@ -5,7 +5,9 @@ use parking_lot::Mutex as StdMutex;
 use tokio::sync::{Notify, watch};
 
 use assistd_config::ToolsOutputConfig;
-use assistd_ipc::{Component, PresenceState, StatusKind, StatusSeverity, VoiceCaptureState};
+use assistd_ipc::{
+    Component, ImageAttachment, PresenceState, StatusKind, StatusSeverity, VoiceCaptureState,
+};
 use assistd_llm::{
     EchoBackend, FailedBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
 };
@@ -306,6 +308,26 @@ async fn dispatch_query_backend_error_emits_error_event() {
         [error(
             "q-err",
             "llm backend error: LLM backend unavailable: backend broken"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn dispatch_query_refuses_images_without_vision() {
+    let request = Request::Query {
+        id: "q-img".into(),
+        text: "what is this?".into(),
+        attachments: vec![ImageAttachment::from_bytes("image/png", &[0xAB])],
+    };
+    let (res, events) = dispatch(&default_state(), request).await;
+
+    let err = res.unwrap_err();
+    assert!(matches!(err, DispatchError::VisionUnsupported), "{err:?}");
+    assert_eq!(
+        events,
+        [error(
+            "q-img",
+            "vision not available: model does not support images"
         )]
     );
 }
