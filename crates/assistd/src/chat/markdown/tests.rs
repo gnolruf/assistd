@@ -285,6 +285,14 @@ fn link_shows_label_then_dimmed_url() {
 }
 
 #[test]
+fn hard_break_inside_link_label_does_not_panic() {
+    assert_eq!(
+        rendered("*see* the [docs  \nhere](https://x.y)", 80),
+        ["see the docs", "here (https://x.y)"]
+    );
+}
+
+#[test]
 fn bare_url_is_not_repeated() {
     assert_eq!(rendered("<https://x.y>", 80), ["https://x.y"]);
 }

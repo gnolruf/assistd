@@ -315,7 +315,10 @@ impl Renderer {
         let Some((start, url)) = self.link_starts.pop() else {
             return;
         };
-        let label: String = self.inline[start..]
+        let label: String = self
+            .inline
+            .get(start..)
+            .unwrap_or_default()
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
