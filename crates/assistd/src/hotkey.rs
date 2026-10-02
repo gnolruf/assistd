@@ -12,7 +12,7 @@ use assistd_core::{
     VoiceOutputController, spawn_supervised,
 };
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{info, warn};
 
@@ -199,6 +199,7 @@ async fn run_listener(
     let mut tick = tokio::time::interval(Duration::from_millis(50));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut handlers = JoinSet::new();
+    let mut ptt_started = None;
 
     loop {
         tokio::select! {
@@ -209,7 +210,13 @@ async fn run_listener(
                         .find(|(_, h)| h.id() == event.id)
                         .map(|(b, _)| *b);
                     if let Some(binding) = binding {
-                        on_hotkey(binding, event.state, &subsystems, &mut handlers);
+                        on_hotkey(
+                            binding,
+                            event.state,
+                            &subsystems,
+                            &mut handlers,
+                            &mut ptt_started,
+                        );
                     }
                 }
             }
@@ -239,12 +246,15 @@ async fn run_listener(
 }
 
 /// Route one hotkey event to its subsystem on a task in `handlers`, so
-/// the listener never blocks on a slow transition.
+/// the listener never blocks on a slow transition. `ptt_started` resolves
+/// once the latest push-to-talk press has finished opening the mic, so its
+/// release cannot overtake it.
 fn on_hotkey(
     binding: Binding,
     state: HotKeyState,
     subsystems: &Subsystems,
     handlers: &mut JoinSet<()>,
+    ptt_started: &mut Option<oneshot::Receiver<()>>,
 ) {
     let pressed = state == HotKeyState::Pressed;
     match binding {
@@ -254,13 +264,19 @@ fn on_hotkey(
             }
         }
         Binding::Voice if pressed => {
+            let (started_tx, started_rx) = oneshot::channel();
+            *ptt_started = Some(started_rx);
             handlers.spawn(begin_push_to_talk(
                 subsystems.voice.clone(),
                 subsystems.voice_output.clone(),
+                started_tx,
             ));
         }
         Binding::Voice => {
-            handlers.spawn(end_push_to_talk(subsystems.voice.clone()));
+            handlers.spawn(end_push_to_talk(
+                subsystems.voice.clone(),
+                ptt_started.take(),
+            ));
         }
         Binding::Listen if pressed => {
             if let Some(listener) = subsystems.listener.clone() {
@@ -297,6 +313,7 @@ async fn cycle_presence(presence: Arc<PresenceManager>) {
 async fn begin_push_to_talk(
     voice: Arc<dyn VoiceInput>,
     voice_output: Option<Arc<VoiceOutputController>>,
+    started: oneshot::Sender<()>,
 ) {
     if let Some(ctrl) = voice_output {
         ctrl.interrupt().await;
@@ -307,9 +324,16 @@ async fn begin_push_to_talk(
             "voice start_recording failed: {e:#}"
         );
     }
+    let _ = started.send(());
 }
 
-async fn end_push_to_talk(voice: Arc<dyn VoiceInput>) {
+async fn end_push_to_talk(
+    voice: Arc<dyn VoiceInput>,
+    press_started: Option<oneshot::Receiver<()>>,
+) {
+    if let Some(press_started) = press_started {
+        let _ = press_started.await;
+    }
     match voice.stop_and_transcribe().await {
         Ok(text) if text.trim().is_empty() => {
             info!(
@@ -374,9 +398,43 @@ fn is_wayland_only() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use assistd_core::VoiceCaptureState;
+    use assistd_voice::VoiceInputError;
+    use async_trait::async_trait;
+
     use super::*;
 
     const GARBAGE: &str = "### bogus ###";
+
+    /// Records call order; `start_recording` is slow, like a real mic open.
+    #[derive(Debug, Default)]
+    struct CallOrderVoice {
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait]
+    impl VoiceInput for CallOrderVoice {
+        async fn start_recording(&self) -> Result<(), VoiceInputError> {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.calls.lock().unwrap().push("start");
+            Ok(())
+        }
+
+        async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
+            self.calls.lock().unwrap().push("stop");
+            Ok(String::new())
+        }
+
+        fn state(&self) -> VoiceCaptureState {
+            VoiceCaptureState::Idle
+        }
+
+        fn subscribe(&self) -> watch::Receiver<VoiceCaptureState> {
+            watch::channel(VoiceCaptureState::Idle).1
+        }
+    }
 
     type Edit = fn(&mut PresenceConfig, &mut VoiceConfig);
 
@@ -465,5 +523,33 @@ mod tests {
             let (p, v) = configs(edit);
             validate(&p, &v).unwrap_or_else(|e| panic!("{label}: {e:#}"));
         }
+    }
+
+    #[tokio::test]
+    async fn quick_tap_stops_only_after_recording_started() {
+        let voice = Arc::new(CallOrderVoice::default());
+        let subsystems = Subsystems {
+            presence: None,
+            voice: voice.clone(),
+            listener: None,
+            voice_output: None,
+        };
+        let mut handlers = JoinSet::new();
+        let mut ptt_started = None;
+
+        for state in [HotKeyState::Pressed, HotKeyState::Released] {
+            on_hotkey(
+                Binding::Voice,
+                state,
+                &subsystems,
+                &mut handlers,
+                &mut ptt_started,
+            );
+        }
+        while let Some(res) = handlers.join_next().await {
+            res.expect("handler panicked");
+        }
+
+        assert_eq!(*voice.calls.lock().unwrap(), ["start", "stop"]);
     }
 }
