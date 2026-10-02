@@ -62,14 +62,9 @@ async fn serve(responses: Vec<Value>) -> (SocketAddr, JoinHandle<Vec<Value>>) {
 }
 
 async fn embedder_at(addr: SocketAddr) -> LlamaEmbedder {
-    LlamaEmbedder::new(
-        &addr.ip().to_string(),
-        addr.port(),
-        "m".into(),
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("probe succeeds")
+    LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5))
+        .await
+        .expect("probe succeeds")
 }
 
 fn probe_response() -> Value {

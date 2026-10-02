@@ -1,5 +1,6 @@
 //! HTTP client for llama-server's `/v1/embeddings` endpoint.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -40,8 +41,7 @@ impl LlamaEmbedder {
     /// Probe the server once to learn the vector dimension; `request_timeout` applies to
     /// the probe and every later request. Errors if the probe fails or returns no vector.
     pub async fn new(
-        host: &str,
-        port: u16,
+        addr: SocketAddr,
         model: String,
         request_timeout: Duration,
     ) -> Result<Self, EmbedError> {
@@ -51,7 +51,7 @@ impl LlamaEmbedder {
             .timeout(request_timeout)
             .build()
             .map_err(EmbedError::Client)?;
-        let base_url = format!("http://{host}:{port}");
+        let base_url = format!("http://{addr}");
 
         let dim = embed_raw(&client, &base_url, &model, &["x"])
             .await?
