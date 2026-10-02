@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
@@ -84,6 +84,9 @@ pub enum PresenceError {
     /// The child may outlive the daemon.
     #[error("llama-server shutdown timed out after {secs}s")]
     ShutdownTimeout { secs: u64 },
+
+    #[error("wake task panicked")]
+    WakeTaskPanicked,
 
     /// Sleep/wake churn kept the daemon out of `Active` on every retry.
     #[error("failed to acquire active request guard after {attempts} retries")]
@@ -253,7 +256,7 @@ impl PresenceManager {
 
     /// Acquire a [`RequestGuard`] that holds the daemon `Active`, waking it
     /// first if needed. While a wake runs, emits `ModelLoading` status on
-    /// `tx` every few seconds.
+    /// `tx` every few seconds. Cancel-safe: dropping it leaves the wake running.
     pub async fn acquire_request_guard_with_progress(
         self: &Arc<Self>,
         request_id: String,
@@ -279,7 +282,7 @@ impl PresenceManager {
             let progress_task = progress.as_ref().map(|(request_id, tx)| {
                 spawn_load_progress_emitter(Arc::clone(self), request_id.clone(), tx.clone())
             });
-            let result = self.ensure_active().await;
+            let result = self.ensure_active_detached().await;
             if let Some(task) = progress_task {
                 task.abort();
                 let _ = task.await;
@@ -289,6 +292,24 @@ impl PresenceManager {
         Err(PresenceError::GuardRetriesExhausted {
             attempts: GUARD_ACQUIRE_RETRIES,
         })
+    }
+
+    /// [`Self::ensure_active`] on a supervised task, so a dropped waiter
+    /// stops waiting without aborting a half-done wake.
+    async fn ensure_active_detached(self: &Arc<Self>) -> Result<(), PresenceError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let presence = Arc::clone(self);
+        spawn_supervised(
+            "request_wake",
+            Component::Llm,
+            async move {
+                let _ = result_tx.send(presence.ensure_active().await);
+            }
+            .in_current_span(),
+        );
+        result_rx
+            .await
+            .map_err(|_| PresenceError::WakeTaskPanicked)?
     }
 
     fn wake_in_progress(&self) -> Option<Instant> {

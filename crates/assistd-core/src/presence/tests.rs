@@ -93,6 +93,28 @@ async fn acquire_request_guard_fast_path_when_active() {
 }
 
 #[tokio::test]
+async fn dropped_guard_waiter_leaves_its_wake_running() {
+    let m = PresenceManager::stub(PresenceState::Drowsy);
+    let transition = m.transition.lock().await;
+    let waiter = timeout(
+        Duration::from_millis(50),
+        m.acquire_request_guard_inner(None),
+    )
+    .await;
+    assert!(waiter.is_err(), "acquire finished while a transition ran");
+    assert_eq!(Arc::strong_count(&m), 2, "the wake died with its waiter");
+
+    drop(transition);
+    timeout(Duration::from_secs(2), async {
+        while Arc::strong_count(&m) > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the detached wake never finished");
+}
+
+#[tokio::test]
 async fn sleep_defers_for_inflight_request() {
     let m = PresenceManager::stub(PresenceState::Active);
     let guard = m.acquire_request_guard_inner(None).await.unwrap();

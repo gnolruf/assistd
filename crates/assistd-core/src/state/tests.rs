@@ -1109,6 +1109,37 @@ async fn interrupt_turn_preempts_hung_tool() {
     assert_eq!(events.last(), Some(&done("q")), "{events:?}");
 }
 
+#[tokio::test]
+async fn interrupt_drops_a_turn_still_waiting_to_start() {
+    let (state, conv, _session, branch) = fresh_branch_state().await;
+    let earlier_turn = state.runtime.agent_turn_lock.clone().lock_owned().await;
+    let query_state = state.clone();
+    let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "abandoned")).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (res, _) = dispatch(&state, Request::InterruptTurn { id: "int".into() }).await;
+    res.unwrap();
+    let (res, events) = tokio::time::timeout(Duration::from_secs(5), queued)
+        .await
+        .expect("InterruptTurn left the queued turn waiting")
+        .unwrap();
+    res.unwrap();
+    assert_eq!(events, [done("q")]);
+
+    drop(earlier_turn);
+    let (res, events) = dispatch(&state, query("q2", "kept")).await;
+    res.unwrap();
+    assert_eq!(events.last(), Some(&done("q2")), "{events:?}");
+    state.drain_persistence_inflight().await;
+    let rows = conv.load_branch_history(branch).await.unwrap();
+    let user_prompts: Vec<_> = rows
+        .iter()
+        .filter(|r| r.role == PersistedRole::User)
+        .map(|r| r.content.as_str())
+        .collect();
+    assert_eq!(user_prompts, ["kept"]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn query_turn_outlives_the_dispatch_envelope() {
     let backend = ToolCallBackend::new(
