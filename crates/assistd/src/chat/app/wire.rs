@@ -75,8 +75,8 @@ impl App {
                 self.throughput.on_delta(now);
                 self.output.append_thinking(&text);
             }
-            Event::ToolCall { id, args, name, .. } => self.on_tool_call(id, name, &args),
-            Event::ToolResult { id, result, .. } => self.on_tool_result(&id, &result),
+            Event::ToolCall { args, name, .. } => self.on_tool_call(name, &args),
+            Event::ToolResult { result, .. } => self.on_tool_result(&result),
             Event::ConfirmRequest {
                 confirm_id,
                 tool,
@@ -101,16 +101,16 @@ impl App {
         }
     }
 
-    fn on_tool_call(&mut self, id: String, name: String, args: &Value) {
+    fn on_tool_call(&mut self, name: String, args: &Value) {
         self.output.finish_thinking();
         let command = args
             .get("command")
             .and_then(Value::as_str)
             .map_or(name, str::to_string);
-        self.pending_tool_call = Some((id, command));
+        self.output.begin_tool_block(command);
     }
 
-    fn on_tool_result(&mut self, id: &str, result: &Value) {
+    fn on_tool_result(&mut self, result: &Value) {
         let output = result
             .get("output")
             .and_then(Value::as_str)
@@ -125,13 +125,8 @@ impl App {
             .get("duration_ms")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let command = self
-            .pending_tool_call
-            .take()
-            .filter(|(call_id, _)| call_id == id)
-            .map_or_else(|| "<?>".to_string(), |(_, command)| command);
         self.output
-            .push_tool_block(command, output, exit_code, duration_ms);
+            .finish_tool_block(output, exit_code, duration_ms);
     }
 
     /// Daemon and model state shown in the status bar.
@@ -160,6 +155,9 @@ impl App {
                 match event {
                     StatusKind::Restarting => {
                         self.close_discarded_step(&format!("[{component} restarting…]"));
+                    }
+                    StatusKind::CompactingHistory => {
+                        self.output.push_info("[compacting history…]");
                     }
                     StatusKind::OutputTruncated => {
                         self.close_discarded_step(&format!(
@@ -374,11 +372,12 @@ impl App {
     fn finish_reply(&mut self, now: Instant) {
         self.throughput.on_done(now);
         self.output.finish_thinking();
+        self.output.abandon_running_tool();
         self.output.finish_assistant();
         self.generating = false;
         self.active_reply = None;
         self.modal = None;
-        self.last_thinking_seconds = None;
+        self.last_live_seconds = None;
     }
 
     fn finish_stream(&mut self, stream: WireStream, now: Instant) {

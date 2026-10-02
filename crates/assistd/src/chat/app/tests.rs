@@ -504,7 +504,12 @@ fn tool_call_then_result_creates_one_block_with_command() {
         name: "run".into(),
         args: serde_json::json!({"command": "ls /tmp"}),
     }));
-    assert!(app.pending_tool_call.is_some());
+    let running = rendered(&mut app);
+    assert!(running.contains(&"▎ $ ls /tmp".to_string()), "{running:#?}");
+    assert!(
+        running.contains(&"▎ running… (0s)".to_string()),
+        "{running:#?}"
+    );
     app.on_chat_event(reply(Event::ToolResult {
         id: "c1".into(),
         name: "run".into(),
@@ -515,11 +520,29 @@ fn tool_call_then_result_creates_one_block_with_command() {
             "duration_ms": 5,
         }),
     }));
-    assert!(app.pending_tool_call.is_none());
     let lines = rendered(&mut app);
+    assert!(!lines.iter().any(|l| l.contains("running…")), "{lines:#?}");
+    assert_eq!(lines.iter().filter(|l| l.contains("$ ls /tmp")).count(), 1);
     assert!(lines.contains(&"▎ $ ls /tmp".to_string()), "{lines:#?}");
     assert!(
         lines.iter().any(|l| l.ends_with("[exit:0 | 5ms]")),
+        "{lines:#?}"
+    );
+}
+
+#[test]
+fn compacting_history_status_leaves_a_line_in_the_transcript() {
+    let (mut app, _rx) = test_app();
+    app.on_chat_event(reply(Event::Status {
+        id: "r1".into(),
+        severity: assistd_ipc::StatusSeverity::Info,
+        component: assistd_ipc::Component::Llm,
+        event: assistd_ipc::StatusKind::CompactingHistory,
+        message: "compacting history…".into(),
+    }));
+    let lines = rendered(&mut app);
+    assert!(
+        lines.contains(&"[compacting history…]".to_string()),
         "{lines:#?}"
     );
 }

@@ -17,16 +17,33 @@ const COLLAPSE_THRESHOLD: usize = 20;
 /// Leading body lines kept visible while collapsed; stderr lines stay
 /// visible regardless.
 const COLLAPSED_HEAD_LINES: usize = 10;
+/// Body and exit status of a tool block whose result never arrived.
+const NO_RESULT_OUTPUT: &str = "[stderr] no result received";
+const NO_RESULT_EXIT_CODE: i32 = -1;
+/// Command shown for a result whose call was never announced.
+const UNANNOUNCED_COMMAND: &str = "<?>";
 
-/// One tool invocation: command, output as the daemon delivered it
-/// (already truncated, with its banner and footer), exit status, timing.
+/// One tool invocation, shown from the moment it is called.
 #[derive(Debug, Clone)]
 pub(super) struct ToolBlock {
     pub command: String,
-    pub output: String,
-    pub exit_code: i32,
-    pub duration_ms: u64,
+    pub state: ToolState,
     pub expanded: bool,
+}
+
+/// Whether a tool invocation has been answered yet.
+#[derive(Debug, Clone)]
+pub(super) enum ToolState {
+    Running {
+        started_at: Instant,
+    },
+    /// `output` is as the daemon delivered it: already truncated, with
+    /// its banner and footer.
+    Finished {
+        output: String,
+        exit_code: i32,
+        duration_ms: u64,
+    },
 }
 
 pub(super) struct ThumbnailItem {
@@ -157,8 +174,8 @@ impl OutputPane {
         )));
     }
 
-    /// Blocks whose body exceeds [`COLLAPSE_THRESHOLD`] lines start
-    /// collapsed.
+    /// Append a finished tool block. Blocks whose body exceeds
+    /// [`COLLAPSE_THRESHOLD`] lines start collapsed.
     pub(super) fn push_tool_block(
         &mut self,
         command: String,
@@ -167,14 +184,64 @@ impl OutputPane {
         duration_ms: u64,
     ) {
         self.close_open_assistant();
-        let expanded = body_line_count(&output) <= COLLAPSE_THRESHOLD;
         self.items.push(OutputItem::Tool(ToolBlock {
             command,
+            expanded: starts_expanded(&output),
+            state: ToolState::Finished {
+                output,
+                exit_code,
+                duration_ms,
+            },
+        }));
+    }
+
+    /// Open a tool block for a call whose result has not arrived.
+    pub(super) fn begin_tool_block(&mut self, command: String) {
+        self.close_open_assistant();
+        self.items.push(OutputItem::Tool(ToolBlock {
+            command,
+            state: ToolState::Running {
+                started_at: Instant::now(),
+            },
+            expanded: true,
+        }));
+    }
+
+    /// Fill in the running tool block's result. A result whose call was
+    /// never announced gets a finished block of its own.
+    pub(super) fn finish_tool_block(&mut self, output: String, exit_code: i32, duration_ms: u64) {
+        let Some((idx, block)) = self.running_tool() else {
+            self.push_tool_block(UNANNOUNCED_COMMAND.into(), output, exit_code, duration_ms);
+            return;
+        };
+        block.expanded = starts_expanded(&output);
+        block.state = ToolState::Finished {
             output,
             exit_code,
             duration_ms,
-            expanded,
-        }));
+        };
+        self.wrap.invalidate(idx);
+    }
+
+    /// Close the running tool block as failed when its result will never
+    /// arrive. No-op when none is running.
+    pub(super) fn abandon_running_tool(&mut self) {
+        if self.running_tool().is_some() {
+            self.finish_tool_block(NO_RESULT_OUTPUT.into(), NO_RESULT_EXIT_CODE, 0);
+        }
+    }
+
+    fn running_tool(&mut self) -> Option<(usize, &mut ToolBlock)> {
+        self.items
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, item)| match item {
+                OutputItem::Tool(block) if matches!(block.state, ToolState::Running { .. }) => {
+                    Some((idx, block))
+                }
+                _ => None,
+            })
     }
 
     /// Toggle the most recent tool or thinking block.
@@ -236,27 +303,32 @@ impl OutputPane {
         }
     }
 
-    /// Whole seconds the live thinking block has run, if any.
-    pub(super) fn live_thinking_seconds(&self) -> Option<u64> {
-        self.live_thinking()
-            .map(|(_, t)| t.started_at.elapsed().as_secs())
+    /// Whole seconds the live thinking or running tool block has run, if
+    /// any.
+    pub(super) fn live_block_seconds(&self) -> Option<u64> {
+        self.live_block()
+            .map(|(_, started_at)| started_at.elapsed().as_secs())
     }
 
-    /// Rewrap the live thinking block on the next render so its
-    /// elapsed-time header advances. No-op when none is live.
-    pub(super) fn refresh_live_thinking(&mut self) {
-        if let Some((idx, _)) = self.live_thinking() {
+    /// Rewrap the live block on the next render so its elapsed time
+    /// advances. No-op when none is live.
+    pub(super) fn refresh_live_block(&mut self) {
+        if let Some((idx, _)) = self.live_block() {
             self.wrap.invalidate(idx);
         }
     }
 
-    fn live_thinking(&self) -> Option<(usize, &ThinkingBlock)> {
+    fn live_block(&self) -> Option<(usize, Instant)> {
         self.items
             .iter()
             .enumerate()
             .rev()
             .find_map(|(idx, item)| match item {
-                OutputItem::Thinking(t) if t.ended_at.is_none() => Some((idx, t)),
+                OutputItem::Thinking(t) if t.ended_at.is_none() => Some((idx, t.started_at)),
+                OutputItem::Tool(ToolBlock {
+                    state: ToolState::Running { started_at },
+                    ..
+                }) => Some((idx, *started_at)),
                 _ => None,
             })
     }
@@ -562,27 +634,60 @@ fn thinking_header_text(t: &ThinkingBlock) -> String {
 }
 
 fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, verbose: bool) {
-    let bar_color = if b.exit_code == 0 {
-        Color::Green
-    } else {
-        Color::Red
-    };
-    let bar = Span::styled(
-        "▎ ",
-        Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
-    );
     let inner_w = width.saturating_sub(2).max(1);
+    match &b.state {
+        ToolState::Running { started_at } => {
+            let bar = tool_bar(Color::Yellow);
+            push_tool_header(out, &bar, &b.command, inner_w);
+            let status = format!("running… ({}s)", started_at.elapsed().as_secs());
+            push_barred(out, &bar, &status, tool_running_style(), inner_w);
+        }
+        ToolState::Finished {
+            output,
+            exit_code,
+            duration_ms,
+        } => {
+            let bar_color = if *exit_code == 0 {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            let bar = tool_bar(bar_color);
+            push_tool_header(out, &bar, &b.command, inner_w);
+            let collapsible = !verbose && !b.expanded;
+            push_tool_body(out, &bar, output, collapsible, inner_w);
+            let footer = format!("[exit:{exit_code} | {duration_ms}ms]");
+            push_tool_footer(out, &bar, footer, bar_color, inner_w);
+        }
+    }
+    out.push(Line::from(""));
+}
 
-    push_barred(
-        out,
-        &bar,
-        &format!("$ {}", b.command),
-        header_style(),
-        inner_w,
-    );
+fn tool_bar(color: Color) -> Span<'static> {
+    Span::styled(
+        "▎ ",
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
 
-    let body_lines = split_body(&b.output);
-    let collapsed = !verbose && !b.expanded && body_lines.len() > COLLAPSE_THRESHOLD;
+fn push_tool_header(
+    out: &mut Vec<Line<'static>>,
+    bar: &Span<'static>,
+    command: &str,
+    inner_w: u16,
+) {
+    push_barred(out, bar, &format!("$ {command}"), header_style(), inner_w);
+}
+
+fn push_tool_body(
+    out: &mut Vec<Line<'static>>,
+    bar: &Span<'static>,
+    output: &str,
+    collapsible: bool,
+    inner_w: u16,
+) {
+    let body_lines = split_body(output);
+    let collapsed = collapsible && body_lines.len() > COLLAPSE_THRESHOLD;
     let visible_idxs = visible_body_indices(&body_lines, collapsed);
 
     for i in &visible_idxs {
@@ -592,14 +697,14 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, ve
         } else {
             tool_result_style()
         };
-        push_barred(out, &bar, line, style, inner_w);
+        push_barred(out, bar, line, style, inner_w);
     }
     if collapsed {
         let hidden = body_lines.len() - visible_idxs.len();
         if hidden > 0 {
             push_barred(
                 out,
-                &bar,
+                bar,
                 &format!("… ({hidden} more lines, Tab to expand)"),
                 Style::default()
                     .fg(Color::DarkGray)
@@ -608,19 +713,24 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, ve
             );
         }
     }
+}
 
-    let footer = format!("[exit:{} | {}ms]", b.exit_code, b.duration_ms);
+fn push_tool_footer(
+    out: &mut Vec<Line<'static>>,
+    bar: &Span<'static>,
+    footer: String,
+    color: Color,
+    inner_w: u16,
+) {
     let pad = (inner_w as usize).saturating_sub(footer.chars().count());
     out.push(Line::from(vec![
         bar.clone(),
         Span::raw(" ".repeat(pad)),
         Span::styled(
             footer,
-            Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ]));
-
-    out.push(Line::from(""));
 }
 
 fn push_barred(
@@ -670,6 +780,10 @@ fn split_body(output: &str) -> Vec<String> {
     lines
 }
 
+fn starts_expanded(output: &str) -> bool {
+    body_line_count(output) <= COLLAPSE_THRESHOLD
+}
+
 fn body_line_count(output: &str) -> usize {
     let n = output.lines().count();
     if output.contains("[exit:") {
@@ -701,6 +815,12 @@ fn tool_call_style() -> Style {
 
 fn tool_result_style() -> Style {
     Style::default().fg(Color::DarkGray)
+}
+
+fn tool_running_style() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::ITALIC)
 }
 
 fn header_style() -> Style {

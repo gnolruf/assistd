@@ -53,9 +53,10 @@ struct SpeechTrimmer {
 }
 
 impl SpeechTrimmer {
-    fn load(params: &SileroVadParams, use_gpu: bool) -> Result<Self, TranscriptionError> {
+    fn load(params: &SileroVadParams) -> Result<Self, TranscriptionError> {
         let mut context_params = WhisperVadContextParams::new();
-        context_params.set_use_gpu(use_gpu);
+        // whisper.cpp aborts on GPU VAD: weights go to the GPU, the backend stays CPU-only.
+        context_params.set_use_gpu(false);
         let context = WhisperVadContext::new(&params.model_path, context_params)
             .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))?;
         Ok(Self {
@@ -287,7 +288,7 @@ impl WhisperTranscriberBuilder {
         let use_gpu = should_use_gpu(self.prefer_gpu);
         let ctx = load_context(&model_path, use_gpu).await?;
         let trimmer = match vad {
-            Some(vad) => Some(Arc::new(load_trimmer(vad, use_gpu).await?)),
+            Some(vad) => Some(Arc::new(load_trimmer(vad).await?)),
             None => None,
         };
 
@@ -430,11 +431,8 @@ async fn fetch_vad(
     })
 }
 
-async fn load_trimmer(
-    params: SileroVadParams,
-    use_gpu: bool,
-) -> Result<SpeechTrimmer, TranscriptionError> {
-    tokio::task::spawn_blocking(move || SpeechTrimmer::load(&params, use_gpu)).await?
+async fn load_trimmer(params: SileroVadParams) -> Result<SpeechTrimmer, TranscriptionError> {
+    tokio::task::spawn_blocking(move || SpeechTrimmer::load(&params)).await?
 }
 
 async fn load_context(

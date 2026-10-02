@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
+use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::conversation::{
     Conversation, Message, Role, Summarizer, TOOL_RESULT_PREFIX, ToolCallRecord,
@@ -80,6 +81,9 @@ impl LlamaChatClient {
             model: self.model.name.as_str(),
             messages,
             stream: true,
+            stream_options: Some(wire::StreamOptions {
+                include_usage: true,
+            }),
             temperature: self.chat.temperature,
             max_tokens: self.chat.max_response_tokens.get(),
             top_p: self.chat.top_p,
@@ -183,7 +187,21 @@ impl LlamaChatClient {
         StreamOutcome::Ok(Box::new(accum))
     }
 
-    async fn fit_budget(&self, conv: &mut Conversation) {
+    /// Compact `conv` when it is over budget, telling the consumer first:
+    /// summarizing can take as long as a reply.
+    async fn fit_budget(&self, conv: &mut Conversation, tx: &mpsc::Sender<LlmEvent>) {
+        if !conv.exceeds_budget(&self.chat, &self.model) {
+            return;
+        }
+        let _ = tx
+            .send(LlmEvent::Status {
+                severity: StatusSeverity::Info,
+                component: Component::Llm,
+                event: StatusKind::CompactingHistory,
+                message: "compacting history…".into(),
+            })
+            .await;
+        let before = (conv.message_count(), conv.approx_total_tokens());
         if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
             warn!(
                 target: "assistd::chat",
@@ -191,6 +209,14 @@ impl LlamaChatClient {
             );
             conv.truncate_to_budget(&self.chat, &self.model);
         }
+        info!(
+            target: "assistd::chat",
+            messages_before = before.0,
+            messages_after = conv.message_count(),
+            tokens_before = before.1,
+            tokens_after = conv.approx_total_tokens(),
+            "history compacted to fit the token budget"
+        );
     }
 
     fn request_timeout(&self) -> Duration {
@@ -322,6 +348,9 @@ impl LlamaChatClient {
             Ok(parsed) => parsed,
             Err(e) => return Err(self.fail(take(accum), ChatClientError::Json(e), pid_at_request)),
         };
+        if let Some(usage) = parsed.usage {
+            accum.prompt_tokens = Some(usage.prompt_tokens);
+        }
         let Some(choice) = parsed.choices.into_iter().next() else {
             return Ok(());
         };
@@ -350,7 +379,7 @@ impl LlamaChatClient {
 #[async_trait]
 impl LlmBackend for LlamaChatClient {
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        let body_bytes = {
+        let (body_bytes, estimated_tokens) = {
             let lock_start = std::time::Instant::now();
             let mut conv = self.conv.lock().await;
             if lock_start.elapsed() > Duration::from_secs(1) {
@@ -361,10 +390,10 @@ impl LlmBackend for LlamaChatClient {
                 );
             }
             conv.push_user(prompt);
-            self.fit_budget(&mut conv).await;
+            self.fit_budget(&mut conv, &tx).await;
             let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
-                Ok(b) => b,
+                Ok(b) => (b, conv.heuristic_tokens()),
                 Err(e) => {
                     conv.rollback_last_user();
                     return Err(LlmError::Chat(ChatClientError::Json(e)));
@@ -375,6 +404,7 @@ impl LlmBackend for LlamaChatClient {
         let outcome = self.stream_openai(body_bytes, &tx).await;
 
         let mut conv = self.conv.lock().await;
+        calibrate_from(&mut conv, estimated_tokens, &outcome);
         match outcome {
             StreamOutcome::Ok(accum) => {
                 conv.push_assistant(accum.text);
@@ -427,20 +457,23 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        let body_bytes = {
+        let (body_bytes, estimated_tokens) = {
             let mut conv = self.conv.lock().await;
-            self.fit_budget(&mut conv).await;
+            self.fit_budget(&mut conv, &tx).await;
             let mut payload = self.base_request(conv.as_wire_messages());
             if !tools.is_empty() {
                 payload.tools = Some(tools);
                 payload.tool_choice = Some("auto");
             }
-            serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
+            let body = serde_json::to_vec(&payload)
+                .map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?;
+            (body, conv.heuristic_tokens())
         };
 
         let outcome = self.stream_openai(body_bytes, &tx).await;
 
         let mut conv = self.conv.lock().await;
+        calibrate_from(&mut conv, estimated_tokens, &outcome);
         match outcome {
             StreamOutcome::Ok(accum)
             | StreamOutcome::PartialAfterEmit(accum)
@@ -542,6 +575,7 @@ impl Summarizer for LlamaChatClient {
                 wire::ChatMessage::plain("user", wire::ContentBody::Text(dialogue.as_str().into())),
             ],
             stream: false,
+            stream_options: None,
             temperature: self.chat.summary_temperature,
             max_tokens,
             top_p: None,
@@ -588,6 +622,8 @@ struct StreamAccum {
     /// Keyed by the model's `index` so finalization keeps emission order.
     tool_calls: BTreeMap<u32, ToolCallBuilder>,
     finish_reason: Option<String>,
+    /// The prompt size the server measured, once its usage chunk arrives.
+    prompt_tokens: Option<u32>,
     has_emitted: bool,
     splitter: ThinkSplitter,
 }
@@ -672,6 +708,32 @@ enum StreamOutcome {
         accum: Box<StreamAccum>,
         pre_emit: bool,
     },
+}
+
+impl StreamOutcome {
+    /// The prompt size the server reported, when the stream got that far.
+    fn prompt_tokens(&self) -> Option<u32> {
+        match self {
+            Self::Ok(accum) | Self::PartialAfterEmit(accum) | Self::ClientDisconnected(accum) => {
+                accum.prompt_tokens
+            }
+            Self::PreEmitError(_) | Self::ServerRestart { .. } => None,
+        }
+    }
+}
+
+/// Correct `conv`'s token estimate with the count the server measured for
+/// the request that was estimated at `estimated_tokens`.
+fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &StreamOutcome) {
+    if let Some(prompt_tokens) = outcome.prompt_tokens() {
+        debug!(
+            target: "assistd::chat",
+            estimated_tokens,
+            prompt_tokens,
+            "calibrating token estimate from server usage"
+        );
+        conv.calibrate(estimated_tokens, prompt_tokens);
+    }
 }
 
 /// Send one classified segment, recording visible text on `accum`.

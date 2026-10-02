@@ -10,8 +10,10 @@ use crate::commands::read_regular_file;
 /// BRE metacharacters spelled with a backslash, which the regex crate
 /// reads as the literal character.
 const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
+/// What `-l` names when the input is a pipe.
+const STDIN_LABEL: &str = "(standard input)";
 
-/// `grep [-icnrv] PATTERN [FILE|DIR]...`: print lines from the named files
+/// `grep [-cilnrv] [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...`: print lines from the named files
 /// or stdin matching `PATTERN`. Exits 0 on a match, 1 on none, 2 on errors.
 #[derive(Debug)]
 pub struct GrepCommand;
@@ -23,6 +25,53 @@ struct Flags {
     count_only: bool,
     line_numbers: bool,
     recursive: bool,
+    files_only: bool,
+    /// Context lines printed before and after each match.
+    before: usize,
+    after: usize,
+}
+
+impl Flags {
+    fn prints_lines(&self) -> bool {
+        !self.count_only && !self.files_only
+    }
+
+    fn has_context(&self) -> bool {
+        self.before > 0 || self.after > 0
+    }
+
+    fn set_context(&mut self, flag: char, lines: usize) {
+        if flag != 'A' {
+            self.before = lines;
+        }
+        if flag != 'B' {
+            self.after = lines;
+        }
+    }
+}
+
+/// One output line: where it came from and whether it matched.
+struct OutputLine<'a> {
+    label: Option<&'a str>,
+    number: Option<usize>,
+    matched: bool,
+    text: &'a str,
+}
+
+impl OutputLine<'_> {
+    fn write_to(&self, out: &mut Vec<u8>) {
+        let separator = if self.matched { ':' } else { '-' };
+        if let Some(label) = self.label {
+            out.extend_from_slice(format!("{label}{separator}").as_bytes());
+        }
+        if let Some(number) = self.number {
+            out.extend_from_slice(format!("{number}{separator}").as_bytes());
+        }
+        out.extend_from_slice(self.text.as_bytes());
+        if !self.text.ends_with('\n') {
+            out.push(b'\n');
+        }
+    }
 }
 
 enum TargetError {
@@ -56,11 +105,11 @@ impl Command for GrepCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "filter lines matching an ERE regex (quote it: \"a|b\"); -i, -v, -c, -n, -r"
+        "filter lines matching an ERE regex (quote it: \"a|b\"); -icnrvl, -A/-B/-C N"
     }
 
     fn help(&self) -> String {
-        "usage: grep [-icnrv] PATTERN [FILE|DIR]...\n\
+        "usage: grep [-cilnrv] [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...\n\
          \n\
          Print lines matching the regex PATTERN, read from the named \
          paths or from stdin when none are given.\n\
@@ -76,10 +125,18 @@ impl Command for GrepCommand {
            -v  invert match (print non-matching lines)\n  \
            -c  print the count instead of the matching lines\n  \
            -n  prefix each line with its 1-based line number\n  \
-           -r  descend into directory arguments\n\
+           -r  descend into directory arguments\n  \
+           -l  print only the names of files with a match\n  \
+           -A N  also print N lines after each match\n  \
+           -B N  also print N lines before each match\n  \
+           -C N  also print N lines before and after each match\n  \
+           -E  accepted and ignored (PATTERN is always ERE)\n\
          \n\
-         Flags can be combined (e.g. `-rn`). Output lines carry a \
-         `PATH:` prefix whenever more than one file is searched. Binary \
+         Flags can be combined (e.g. `-rn`, `-nC2`) and must come \
+         before PATTERN. Context lines use `-` where a matching line has \
+         `:`, and `--` separates groups that are not adjacent. Output \
+         lines carry a `PATH:` prefix whenever more than one file is \
+         searched. Binary \
          files, symlinks and unreadable entries found while descending \
          are skipped; a path named on the command line that cannot be \
          read is an error.\n\
@@ -156,13 +213,26 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
             if rest.is_empty() {
                 break;
             }
-            for ch in rest.chars() {
+            for (offset, ch) in rest.char_indices() {
                 match ch {
                     'i' => flags.case_insensitive = true,
                     'v' => flags.invert = true,
                     'c' => flags.count_only = true,
                     'n' => flags.line_numbers = true,
                     'r' => flags.recursive = true,
+                    'l' => flags.files_only = true,
+                    'E' => {}
+                    'A' | 'B' | 'C' => {
+                        let attached = &rest[offset + 1..];
+                        let value = if attached.is_empty() {
+                            pos += 1;
+                            argv.get(pos).map(String::as_str)
+                        } else {
+                            Some(attached)
+                        };
+                        flags.set_context(ch, parse_context_lines(ch, value)?);
+                        break;
+                    }
                     other => return Err(format!("unknown flag '-{other}'")),
                 }
             }
@@ -172,6 +242,12 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
         }
     }
     Ok((flags, &argv[pos..]))
+}
+
+fn parse_context_lines(flag: char, value: Option<&str>) -> Result<usize, String> {
+    value
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("flag '-{flag}' needs a line count, as in -{flag} 3"))
 }
 
 fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
@@ -189,7 +265,9 @@ fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
     };
     let mut out = Vec::new();
     let count = scan(re, flags, text, None, &mut out);
-    let stdout = if flags.count_only {
+    let stdout = if flags.files_only {
+        matching_file_line(STDIN_LABEL, count)
+    } else if flags.count_only {
         format!("{count}\n").into_bytes()
     } else {
         out
@@ -214,12 +292,14 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
         let display = path.to_string_lossy();
         let label = label_lines.then_some(display.as_ref());
         let count = scan(re, flags, text, label, &mut out);
-        if flags.count_only && label_lines {
+        if flags.files_only {
+            out.extend(matching_file_line(&display, count));
+        } else if flags.count_only && label_lines {
             out.extend_from_slice(format!("{display}:{count}\n").as_bytes());
         }
         total += count;
     }
-    let stdout = if flags.count_only && !label_lines {
+    let stdout = if flags.count_only && !flags.files_only && !label_lines {
         format!("{total}\n").into_bytes()
     } else {
         out
@@ -228,25 +308,48 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
 }
 
 fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Vec<u8>) -> usize {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let output_line = |index: usize, matched: bool| OutputLine {
+        label,
+        number: flags.line_numbers.then_some(index + 1),
+        matched,
+        text: lines[index],
+    };
     let mut count = 0;
-    for (index, line) in text.split_inclusive('\n').enumerate() {
-        if !(re.is_match(line) ^ flags.invert) {
+    let mut next_unprinted = 0;
+    let mut trailing = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let matched = re.is_match(line) ^ flags.invert;
+        count += usize::from(matched);
+        if !flags.prints_lines() {
             continue;
         }
-        count += 1;
-        if flags.count_only {
+        if matched {
+            let first = index.saturating_sub(flags.before).max(next_unprinted);
+            let starts_group = next_unprinted == 0 || first > next_unprinted;
+            if flags.has_context() && starts_group && !out.is_empty() {
+                out.extend_from_slice(b"--\n");
+            }
+            (first..index).for_each(|before| output_line(before, false).write_to(out));
+            output_line(index, true).write_to(out);
+            trailing = flags.after;
+        } else if trailing > 0 {
+            output_line(index, false).write_to(out);
+            trailing -= 1;
+        } else {
             continue;
         }
-        if let Some(label) = label {
-            out.extend_from_slice(label.as_bytes());
-            out.push(b':');
-        }
-        if flags.line_numbers {
-            out.extend_from_slice(format!("{}:", index + 1).as_bytes());
-        }
-        out.extend_from_slice(line.as_bytes());
+        next_unprinted = index + 1;
     }
     count
+}
+
+fn matching_file_line(name: &str, count: usize) -> Vec<u8> {
+    if count == 0 {
+        Vec::new()
+    } else {
+        format!("{name}\n").into_bytes()
+    }
 }
 
 /// A zero-match result is the only moment a dialect mismatch is
@@ -360,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn filters_stdin_per_flags() {
-        let cases: [(&[&str], &[u8], i32, &str); 9] = [
+        let cases: [(&[&str], &[u8], i32, &str); 12] = [
             (
                 &["ERROR"],
                 b"INFO ok\nERROR boom\nINFO also\n",
@@ -385,6 +488,14 @@ mod tests {
             (&["-c", "ERROR"], b"ERROR a\nINFO\nERROR b\n", 0, "2\n"),
             (&["-c", "ZZZ"], b"a\nb\n", 1, "0\n"),
             (&["-ivc", "error"], b"ERROR\ninfo\nError\nok\n", 0, "2\n"),
+            (&["-Ei", "error|warn"], b"WARN a\nok\n", 0, "WARN a\n"),
+            (
+                &["-l", "ERROR"],
+                b"ERROR a\nERROR b\n",
+                0,
+                "(standard input)\n",
+            ),
+            (&["-l", "ZZZ"], b"a\nb\n", 1, ""),
         ];
         for (args, stdin, exit_code, stdout) in cases {
             let out = run_grep(args, stdin).await;
@@ -460,6 +571,71 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             format!("{root}/top.txt:1:alpha ERROR\n{root}/sub/deep.txt:2:delta ERROR\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn context_flags_print_neighbouring_lines() {
+        let stdin = b"a1\nb2\nHIT3\nc4\nd5\ne6\nf7\nHIT8\ng9\n";
+        let cases: [(&[&str], &str); 7] = [
+            (&["-A", "1", "HIT"], "HIT3\nc4\n--\nHIT8\ng9\n"),
+            (&["-B1", "HIT"], "b2\nHIT3\n--\nf7\nHIT8\n"),
+            (&["-C", "1", "HIT"], "b2\nHIT3\nc4\n--\nf7\nHIT8\ng9\n"),
+            (
+                &["-nC1", "HIT"],
+                "2-b2\n3:HIT3\n4-c4\n--\n7-f7\n8:HIT8\n9-g9\n",
+            ),
+            (
+                &["-C", "2", "HIT"],
+                "a1\nb2\nHIT3\nc4\nd5\ne6\nf7\nHIT8\ng9\n",
+            ),
+            (&["-A", "9", "HIT8"], "HIT8\ng9\n"),
+            (&["-c", "-C", "2", "HIT"], "2\n"),
+        ];
+        for (args, stdout) in cases {
+            let out = run_grep(args, stdin).await;
+            assert_eq!(out.exit_code, 0, "{args:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), stdout, "{args:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn context_marks_files_and_separates_them() {
+        let dir = tree();
+        let root = dir.path().to_string_lossy().into_owned();
+        let out = run_grep(&["-rn", "-C", "1", "ERROR", &root], b"").await;
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!(
+                "{root}/top.txt:1:alpha ERROR\n{root}/top.txt-2-beta\n--\n\
+                 {root}/sub/deep.txt-1-gamma\n{root}/sub/deep.txt:2:delta ERROR\n"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn context_flag_without_a_count_errors() {
+        for args in [&["-A", "HIT"][..], &["-C"][..], &["-Bx", "HIT"][..]] {
+            let out = run_grep(args, b"HIT\n").await;
+            assert_eq!(out.exit_code, 2, "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("needs a line count"),
+                "{args:?}: {out:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn l_flag_names_each_matching_file_once() {
+        let dir = tree();
+        std::fs::write(dir.path().join("clean.txt"), b"nothing\n").expect("clean");
+        std::fs::write(dir.path().join("twice.txt"), b"ERROR\nERROR\n").expect("twice");
+        let root = dir.path().to_string_lossy().into_owned();
+        let out = run_grep(&["-rl", "ERROR", &root], b"").await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{root}/top.txt\n{root}/twice.txt\n{root}/sub/deep.txt\n")
         );
     }
 

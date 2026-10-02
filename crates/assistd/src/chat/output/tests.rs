@@ -311,14 +311,14 @@ fn finish_thinking_is_idempotent() {
 }
 
 #[test]
-fn live_thinking_seconds_counts_only_the_live_block() {
+fn live_block_seconds_counts_only_the_live_block() {
     let mut p = OutputPane::new();
-    assert_eq!(p.live_thinking_seconds(), None);
+    assert_eq!(p.live_block_seconds(), None);
     p.append_thinking("x");
     last_thinking(&mut p).started_at -= Duration::from_secs(5);
-    assert_eq!(p.live_thinking_seconds(), Some(5));
+    assert_eq!(p.live_block_seconds(), Some(5));
     p.finish_thinking();
-    assert_eq!(p.live_thinking_seconds(), None);
+    assert_eq!(p.live_block_seconds(), None);
 }
 
 #[test]
@@ -487,7 +487,7 @@ fn incremental_rewrap_matches_full_rewrap() {
             p.append_thinking("at the directory\n\nwith ls");
             last_thinking(p).started_at -= Duration::from_millis(5500);
         }),
-        (40, |p| p.refresh_live_thinking()),
+        (40, |p| p.refresh_live_block()),
         (40, |p| assert!(p.toggle_last_expandable())),
         (40, |p| p.append_thinking(" and some more reasoning")),
         (40, |p| p.finish_thinking()),
@@ -587,4 +587,58 @@ fn thumbnail_slots_line_up_with_rendered_rows_at_narrow_widths() {
         }
         assert_eq!(rendered[slots[0].start_row + slots[0].height], "below");
     }
+}
+
+#[test]
+fn running_tool_block_shows_its_command_until_the_result_fills_it() {
+    let mut p = OutputPane::new();
+    p.begin_tool_block("ls /tmp".into());
+    assert_eq!(
+        rendered_lines(&mut p, 40, 10),
+        ["▎ $ ls /tmp", "▎ running… (0s)", ""]
+    );
+    assert_eq!(p.live_block_seconds(), Some(0));
+
+    p.finish_tool_block("a\nb\n[exit:0 | 5ms]".into(), 0, 5);
+    assert_eq!(
+        rendered_lines(&mut p, 40, 10),
+        [
+            "▎ $ ls /tmp".to_string(),
+            "▎ a".to_string(),
+            "▎ b".to_string(),
+            footer(38, "[exit:0 | 5ms]"),
+            String::new(),
+        ]
+    );
+    assert_eq!(p.live_block_seconds(), None);
+}
+
+#[test]
+fn a_long_result_collapses_the_block_it_fills() {
+    let mut p = OutputPane::new();
+    p.begin_tool_block("seq 30".into());
+    let body: String =
+        (0..30).map(|i| format!("line {i}\n")).collect::<String>() + "[exit:0 | 1ms]";
+    p.finish_tool_block(body, 0, 1);
+    assert_eq!(body_rows(&rendered_lines(&mut p, 40, 60)).len(), 10);
+}
+
+#[test]
+fn abandoned_tool_block_ends_as_a_failure() {
+    let mut p = OutputPane::new();
+    p.abandon_running_tool();
+    assert!(p.items.is_empty());
+
+    p.begin_tool_block("sleep 60".into());
+    p.abandon_running_tool();
+    let lines = rendered_lines(&mut p, 40, 10);
+    assert_eq!(lines[1], "▎ [stderr] no result received");
+    assert_eq!(lines[2], footer(38, "[exit:-1 | 0ms]"));
+}
+
+#[test]
+fn a_result_without_a_running_block_gets_its_own_block() {
+    let mut p = OutputPane::new();
+    p.finish_tool_block("[exit:-1 | 0ms]".into(), -1, 0);
+    assert_eq!(rendered_lines(&mut p, 40, 10)[0], "▎ $ <?>");
 }

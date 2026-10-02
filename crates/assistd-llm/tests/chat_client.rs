@@ -19,6 +19,7 @@ use tokio::time::timeout;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
+use assistd_ipc::StatusKind;
 use assistd_llm::{
     ChatClientError, LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome, Thinking,
     ToolCall, ToolResultPayload,
@@ -717,6 +718,68 @@ async fn summarization_triggered_when_over_budget() {
 }
 
 #[tokio::test]
+async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip() {
+    let script = Script::new();
+    let reply_with_usage = |prompt_tokens: u32| {
+        StreamResponse::RawFrames(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n".into(),
+            format!("data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":{prompt_tokens}}}}}\n\n"),
+            "data: [DONE]\n\n".into(),
+        ])
+    };
+    script.push_stream(reply_with_usage(20)).await;
+    script.push_stream(reply_with_usage(20)).await;
+    script.push_stream(reply_with_usage(20_000)).await;
+    script.push_stream(reply_with_usage(20)).await;
+    script
+        .push_summary(SummaryResponse::Ok("earlier turns".into()))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let mut spec = chat_spec(port);
+    spec.chat.preserve_recent_turns = nz32(1);
+    let client = build_client(&spec);
+    let mut compaction_notices = Vec::new();
+    for i in 0..4 {
+        let (tx, mut rx) = mpsc::channel(32);
+        client.generate(format!("turn {i}"), tx).await.unwrap();
+        let announced = drain(&mut rx).await.iter().any(|ev| {
+            matches!(
+                ev,
+                LlmEvent::Status {
+                    event: StatusKind::CompactingHistory,
+                    ..
+                }
+            )
+        });
+        compaction_notices.push(announced);
+    }
+    assert_eq!(
+        compaction_notices,
+        [false, false, false, true],
+        "only the turn that compacts announces it"
+    );
+
+    let captured = script.captured().await;
+    let streams: Vec<_> = captured.iter().filter(|r| r.stream).collect();
+    assert!(
+        streams
+            .iter()
+            .all(|r| r.body["stream_options"]["include_usage"] == true),
+        "every streamed request asks for usage"
+    );
+    let summaries_before_last_turn = captured
+        .iter()
+        .take_while(|r| !(r.stream && r.body.to_string().contains("turn 3")))
+        .filter(|r| !r.stream)
+        .count();
+    assert_eq!(
+        summaries_before_last_turn, 1,
+        "the 20k measurement, not the tiny heuristic, must force one summary"
+    );
+}
+
+#[tokio::test]
 async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     let script = Script::new();
     let long_reply: String = "padding word ".repeat(20);
@@ -1271,7 +1334,7 @@ async fn transient_note_is_the_last_wire_message_for_exactly_one_step() {
 }
 
 #[tokio::test]
-async fn reasoning_rides_along_with_its_tool_call_until_the_next_user_turn() {
+async fn reasoning_rides_along_with_its_tool_call_across_user_turns() {
     let script = Script::new();
     let mut frames = tool_call_frames("call-1", "run", &[r#"{"command":"ls"}"#]);
     frames.insert(
@@ -1329,8 +1392,9 @@ async fn reasoning_rides_along_with_its_tool_call_until_the_next_user_turn() {
         "list it, then read",
         "both reasoning channels must reach the next step of the loop"
     );
-    assert!(
-        calling(&captured[2]).get("reasoning_content").is_none(),
-        "a new user turn ends the loop the reasoning belonged to"
+    assert_eq!(
+        calling(&captured[2]),
+        calling(&captured[1]),
+        "a new user turn must not rewrite the previous turn's messages"
     );
 }

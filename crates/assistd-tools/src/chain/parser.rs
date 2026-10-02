@@ -143,7 +143,11 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 i += 1;
             }
             b'>' | b'<' => {
-                return Err(ParseError::Redirection(redirection_kind(&tokens, bytes, i)));
+                let Some(next) = discarded_stderr_end(&tokens, input, i) else {
+                    return Err(ParseError::Redirection(redirection_kind(&tokens, bytes, i)));
+                };
+                tokens.pop();
+                i = next;
             }
             _ => {
                 let (word, next) = read_word(input, i)?;
@@ -160,6 +164,23 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
 /// split into two commands.
 fn follows_unquoted_backslash(tokens: &[Token]) -> bool {
     matches!(tokens.last(), Some(Token::Word(w)) if !w.quoted && w.text.ends_with('\\'))
+}
+
+/// The offset just past a `2>/dev/null` whose `>` is at `i`. It is dropped
+/// rather than rejected: a command's stderr is reported either way.
+fn discarded_stderr_end(tokens: &[Token], input: &str, i: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let fd_adjacent = bytes[..i].last() == Some(&b'2')
+        && matches!(tokens.last(), Some(Token::Word(w)) if !w.quoted && w.text == "2");
+    if bytes[i] != b'>' || !fd_adjacent {
+        return None;
+    }
+    let target_start = bytes[i + 1..]
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .map(|offset| i + 1 + offset)?;
+    let (target, next) = read_word(input, target_start).ok()?;
+    (target.text == "/dev/null").then_some(next)
 }
 
 /// Classify the redirection starting at `i`. An unquoted `1` or `2` word
@@ -446,7 +467,9 @@ mod tests {
             ("cat < in", Redirection::Input),
             ("cat <<< text", Redirection::HereDoc),
             ("wm list 2>&1", Redirection::Stderr),
-            ("grep x f 2>/dev/null", Redirection::Stderr),
+            ("grep x f 2>err.log", Redirection::Stderr),
+            ("grep x f 2>>/dev/null", Redirection::Stderr),
+            ("echo 2 >/dev/null", Redirection::Stderr),
             ("ls &> out", Redirection::Stderr),
         ] {
             assert_eq!(
@@ -454,6 +477,36 @@ mod tests {
                 Err(ParseError::Redirection(expected)),
                 "wrong classification for {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn tokenize_drops_stderr_sent_to_dev_null() {
+        for (line, expected) in [
+            (
+                "grep x f 2>/dev/null",
+                vec![bare("grep"), bare("x"), bare("f")],
+            ),
+            (
+                "grep x f 2> /dev/null",
+                vec![bare("grep"), bare("x"), bare("f")],
+            ),
+            (
+                "grep x f 2>/dev/null | head",
+                vec![
+                    bare("grep"),
+                    bare("x"),
+                    bare("f"),
+                    op(Op::Pipe),
+                    bare("head"),
+                ],
+            ),
+            (
+                "ls 2>/dev/null; cat f",
+                vec![bare("ls"), op(Op::Seq), bare("cat"), bare("f")],
+            ),
+        ] {
+            assert_eq!(tokenize(line), Ok(expected), "{line:?}");
         }
     }
 

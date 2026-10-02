@@ -13,6 +13,8 @@ pub struct ChatRequest<'a> {
     pub model: &'a str,
     pub messages: Vec<ChatMessage<'a>>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
     pub temperature: f32,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,6 +35,13 @@ pub struct ChatRequest<'a> {
     /// Extra variables handed to llama.cpp's Jinja chat template.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs<'a>>,
+}
+
+/// Options that only apply to a streamed response.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StreamOptions {
+    /// Ask for a final chunk carrying the request's token [`Usage`].
+    pub include_usage: bool,
 }
 
 /// Chat-template variables; templates ignore the ones they don't use.
@@ -143,6 +152,16 @@ pub struct ChatChoiceMessage {
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionChunk {
     pub choices: Vec<ChatChunkChoice>,
+    /// Present only on the final chunk, and only when requested.
+    #[serde(default)]
+    pub usage: Option<Usage>,
+}
+
+/// Token counts the server measured for one request.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct Usage {
+    /// Tokens in the rendered prompt, cached or not.
+    pub prompt_tokens: u32,
 }
 
 /// One choice slot in a streaming [`ChatCompletionChunk`].
