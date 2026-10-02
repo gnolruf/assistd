@@ -474,7 +474,10 @@ impl LlmBackend for LlamaChatClient {
                 let _ = conv.consume_transient_note();
                 result
             }
-            StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
+            StreamOutcome::PreEmitError(e) => {
+                conv.rollback_last_user();
+                Err(LlmError::Chat(e))
+            }
             StreamOutcome::ServerRestart { accum, pre_emit } => {
                 let bytes_so_far = accum.text.len();
                 let tool_builders = accum.tool_calls.len();

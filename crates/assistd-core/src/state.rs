@@ -52,6 +52,9 @@ pub enum DispatchError {
         source: base64::DecodeError,
     },
 
+    #[error("vision not available: model does not support images")]
+    VisionUnsupported,
+
     #[error(transparent)]
     Llm(#[from] LlmError),
 

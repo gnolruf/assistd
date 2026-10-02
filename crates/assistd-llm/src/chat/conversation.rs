@@ -243,10 +243,14 @@ impl Conversation {
         });
     }
 
-    /// Drop the most recent message if it is a user message, returning its
-    /// context block to pending so a retried turn still carries it.
+    /// Drop the most recent message if it is a real user message (not a
+    /// tool result), returning its context block to pending so a retried
+    /// turn still carries it.
     pub fn rollback_last_user(&mut self) {
-        if matches!(self.messages.last().map(|m| m.role), Some(Role::User))
+        if self
+            .messages
+            .last()
+            .is_some_and(|m| m.role == Role::User && !Self::is_tool_result(m))
             && let Some(user) = self.messages.pop()
         {
             self.pending_context = user.context;

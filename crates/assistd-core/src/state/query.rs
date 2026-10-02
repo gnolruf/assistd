@@ -248,6 +248,7 @@ impl AppState {
         if cancel.is_cancelled() {
             return finish_interrupted_before_start(&tx, id).await;
         }
+        self.require_vision_for(&id, &attachments, &tx).await?;
 
         let (current_session, turn_id) = self.open_persistence_turn(&text).await;
         self.assemble_transient_context(&text).await;
@@ -291,6 +292,25 @@ impl AppState {
             send_error(tx, id.to_string(), e.to_string()).await;
         }
         decoded
+    }
+
+    async fn require_vision_for(
+        &self,
+        id: &str,
+        attachments: &[Attachment],
+        tx: &mpsc::Sender<Event>,
+    ) -> Result<(), DispatchError> {
+        let supported = self
+            .subsystems
+            .vision_revalidator
+            .as_ref()
+            .is_some_and(|revalidator| revalidator.gate().supported());
+        if attachments.is_empty() || supported {
+            return Ok(());
+        }
+        let error = DispatchError::VisionUnsupported;
+        send_error(tx, id.to_string(), error.to_string()).await;
+        Err(error)
     }
 
     async fn admit_turn(
