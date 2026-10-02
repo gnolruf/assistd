@@ -17,10 +17,8 @@ const COLLAPSE_THRESHOLD: usize = 20;
 /// Leading body lines kept visible while collapsed; stderr lines stay
 /// visible regardless.
 const COLLAPSED_HEAD_LINES: usize = 10;
-/// Body and exit status of a tool block whose result never arrived.
 const NO_RESULT_OUTPUT: &str = "[stderr] no result received";
 const NO_RESULT_EXIT_CODE: i32 = -1;
-/// Command shown for a result whose call was never announced.
 const UNANNOUNCED_COMMAND: &str = "<?>";
 
 /// One tool invocation, shown from the moment it is called.
@@ -195,7 +193,6 @@ impl OutputPane {
         }));
     }
 
-    /// Open a tool block for a call whose result has not arrived.
     pub(super) fn begin_tool_block(&mut self, command: String) {
         self.close_open_assistant();
         self.items.push(OutputItem::Tool(ToolBlock {
@@ -207,8 +204,8 @@ impl OutputPane {
         }));
     }
 
-    /// Fill in the running tool block's result. A result whose call was
-    /// never announced gets a finished block of its own.
+    /// A result whose call was never announced gets a finished block of its
+    /// own.
     pub(super) fn finish_tool_block(&mut self, output: String, exit_code: i32, duration_ms: u64) {
         let Some((idx, block)) = self.running_tool() else {
             self.push_tool_block(UNANNOUNCED_COMMAND.into(), output, exit_code, duration_ms);
@@ -223,8 +220,7 @@ impl OutputPane {
         self.wrap.invalidate(idx);
     }
 
-    /// Close the running tool block as failed when its result will never
-    /// arrive. No-op when none is running.
+    /// Mark the running tool block failed. No-op when none is running.
     pub(super) fn abandon_running_tool(&mut self) {
         if self.running_tool().is_some() {
             self.finish_tool_block(NO_RESULT_OUTPUT.into(), NO_RESULT_EXIT_CODE, 0);

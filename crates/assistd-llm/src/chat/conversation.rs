@@ -92,8 +92,7 @@ pub struct Message {
     pub tool_calls: Vec<ToolCallRecord>,
     /// On [`Role::Tool`] messages: the id of the call this answers.
     pub tool_call_id: Option<String>,
-    /// Reasoning behind an assistant's `tool_calls`, sent back with them
-    /// for as long as the message stays in history.
+    /// Reasoning behind an assistant's `tool_calls`, sent back with them.
     pub reasoning: String,
     /// Context block rendered at the head of a user message's text,
     /// keeping earlier turns byte-identical for the prefix cache.
@@ -156,7 +155,7 @@ impl Conversation {
 
     /// Stash the context block for the next user turn, replacing any
     /// pending one. It attaches when that turn is pushed and renders at
-    /// the head of its text for as long as the turn stays in history.
+    /// the head of its text.
     pub fn set_transient_context(&mut self, text: String) {
         self.pending_context = Some(text);
     }
@@ -185,8 +184,7 @@ impl Conversation {
 
     /// Append a user turn whose wire form is a multimodal `content`
     /// array: one `text` part followed by one `image_url` part per
-    /// attachment. Earlier turns are left untouched so their rendered
-    /// text, and the server's cache of it, stays valid.
+    /// attachment.
     pub fn push_user_with_attachments(&mut self, content: String, attachments: Vec<Attachment>) {
         self.messages.push(Message {
             attachments: encode_all(attachments),
@@ -292,7 +290,6 @@ impl Conversation {
         self.calibration = i32::try_from(bounded).unwrap_or_default();
     }
 
-    /// Number of messages held, including any summary.
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
@@ -350,10 +347,9 @@ impl Conversation {
     }
 
     /// Keep the approximate token total under budget, folding the oldest
-    /// turns and any earlier summary into one summary if needed. Returns
-    /// an error, with history unchanged,
-    /// if the summarizer fails or returns empty text;
-    /// [`Self::truncate_to_budget`] is the infallible fallback.
+    /// turns and any earlier summary into one summary if needed. Returns an
+    /// error, with history unchanged, if the summarizer fails or returns
+    /// empty text; [`Self::truncate_to_budget`] is the infallible fallback.
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
@@ -423,8 +419,6 @@ impl Conversation {
         Ok(())
     }
 
-    /// Whether the estimated prompt is past the token budget, so the next
-    /// [`Self::ensure_budget`] will compact it.
     pub fn exceeds_budget(&self, chat: &ChatConfig, model: &ModelConfig) -> bool {
         self.approx_total_tokens() > effective_budget(chat, model)
     }
@@ -530,7 +524,6 @@ impl Conversation {
             .rposition(|m| m.role == Role::User && !Self::is_tool_result(m))
     }
 
-    /// Index of the latest user message, or the length when there is none.
     fn current_turn_start(&self) -> usize {
         self.last_real_user_index().unwrap_or(self.messages.len())
     }

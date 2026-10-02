@@ -138,8 +138,6 @@ impl LlamaChatClient {
         }
     }
 
-    /// True when the child's pid changed or vanished since the request was
-    /// sent, or readiness left `Ready`. Always false without a probe.
     fn looks_like_server_crash(&self, pid_at_request: Option<u32>) -> bool {
         let Some(probe) = self.health.as_ref() else {
             return false;
@@ -187,8 +185,6 @@ impl LlamaChatClient {
         StreamOutcome::Ok(Box::new(accum))
     }
 
-    /// Compact `conv` when it is over budget, telling the consumer first:
-    /// summarizing can take as long as a reply.
     async fn fit_budget(&self, conv: &mut Conversation, tx: &mpsc::Sender<LlmEvent>) {
         if !conv.exceeds_budget(&self.chat, &self.model) {
             return;
@@ -223,9 +219,6 @@ impl LlamaChatClient {
         Duration::from_secs(self.chat.request_timeout_secs.get())
     }
 
-    /// POST the request and return the response once it is known to be
-    /// a success from a server that has not restarted since it was sent.
-    /// Errors if the response headers have not arrived by `first_byte_by`.
     async fn send_request(
         &self,
         body: Vec<u8>,
@@ -275,9 +268,6 @@ impl LlamaChatClient {
         Ok(response)
     }
 
-    /// Drive the SSE stream until `[DONE]` or EOF, forwarding events
-    /// through `tx`; returns whether `[DONE]` was seen. Only the first
-    /// chunk and each inter-chunk gap are bounded, never the whole stream.
     async fn read_stream(
         &self,
         response: &mut reqwest::Response,
@@ -622,7 +612,6 @@ struct StreamAccum {
     /// Keyed by the model's `index` so finalization keeps emission order.
     tool_calls: BTreeMap<u32, ToolCallBuilder>,
     finish_reason: Option<String>,
-    /// The prompt size the server measured, once its usage chunk arrives.
     prompt_tokens: Option<u32>,
     has_emitted: bool,
     splitter: ThinkSplitter,
@@ -711,7 +700,6 @@ enum StreamOutcome {
 }
 
 impl StreamOutcome {
-    /// The prompt size the server reported, when the stream got that far.
     fn prompt_tokens(&self) -> Option<u32> {
         match self {
             Self::Ok(accum) | Self::PartialAfterEmit(accum) | Self::ClientDisconnected(accum) => {
@@ -722,8 +710,6 @@ impl StreamOutcome {
     }
 }
 
-/// Correct `conv`'s token estimate with the count the server measured for
-/// the request that was estimated at `estimated_tokens`.
 fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &StreamOutcome) {
     if let Some(prompt_tokens) = outcome.prompt_tokens() {
         debug!(
@@ -736,7 +722,6 @@ fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &Stre
     }
 }
 
-/// Send one classified segment, recording visible text on `accum`.
 async fn forward_segment(
     tx: &mpsc::Sender<LlmEvent>,
     segment: Segment,
@@ -771,8 +756,6 @@ async fn forward_reasoning(
     forward(tx, LlmEvent::ReasoningDelta { text }, accum).await
 }
 
-/// Send `event`, or hand back everything accumulated so far when the
-/// consumer has gone away.
 async fn forward(
     tx: &mpsc::Sender<LlmEvent>,
     event: LlmEvent,
@@ -861,8 +844,6 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
     Ok(StepOutcome::ToolCalls(parsed))
 }
 
-/// Replay one persisted row. A tool row without a call id is an
-/// image-carrying result, so it keeps the tagged user shape.
 fn history_message(entry: HistoryEntry) -> LlmResult<Message> {
     Ok(match entry.role {
         HistoryRole::System => Message::text(Role::System, entry.content),

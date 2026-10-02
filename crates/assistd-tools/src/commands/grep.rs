@@ -10,7 +10,6 @@ use crate::commands::read_regular_file;
 /// BRE metacharacters spelled with a backslash, which the regex crate
 /// reads as the literal character.
 const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
-/// What `-l` names when the input is a pipe.
 const STDIN_LABEL: &str = "(standard input)";
 
 /// `grep [-cilnrv] [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...`: print lines from the named files
@@ -26,7 +25,6 @@ struct Flags {
     line_numbers: bool,
     recursive: bool,
     files_only: bool,
-    /// Context lines printed before and after each match.
     before: usize,
     after: usize,
 }
@@ -50,7 +48,6 @@ impl Flags {
     }
 }
 
-/// One output line: where it came from and whether it matched.
 struct OutputLine<'a> {
     label: Option<&'a str>,
     number: Option<usize>,

@@ -405,8 +405,7 @@ pub enum StatusKind {
     ModelLoading,
     /// A subsystem failed to start and is unavailable this run.
     StartupFailed,
-    /// The conversation outgrew its token budget; older history is being
-    /// summarized before the turn continues.
+    /// Older history is being summarized to fit the token budget.
     CompactingHistory,
 }
 

@@ -37,7 +37,6 @@ pub struct ChatRequest<'a> {
     pub chat_template_kwargs: Option<ChatTemplateKwargs<'a>>,
 }
 
-/// Options that only apply to a streamed response.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct StreamOptions {
     /// Ask for a final chunk carrying the request's token [`Usage`].
