@@ -1,7 +1,7 @@
 //! Minimal MCP server fixture: newline-delimited JSON-RPC on
 //! stdin/stdout, answering `initialize`, `ping`, `tools/list` and
-//! `tools/call` for the `echo`, `crash_me`, `flood_stdout` and
-//! `spawn_orphan_and_crash` tools.
+//! `tools/call` for the `echo`, `crash_me`, `flood_stdout`,
+//! `spawn_orphan_and_crash` and `env_names` tools.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::Stdio;
@@ -140,6 +140,11 @@ fn tools_list(id: &Value) -> Value {
                     "name": "spawn_orphan_and_crash",
                     "description": "spawns a grandchild, answers with its pid, then exits",
                     "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "env_names",
+                    "description": "answers with the names of its environment variables",
+                    "inputSchema": {"type": "object", "properties": {}}
                 }
             ]
         }
@@ -186,6 +191,7 @@ fn call_tool(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
             let _ = write_line(out, &response);
             std::process::exit(0)
         }
+        "env_names" => Some(env_names(id)),
         other => Some(json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -195,6 +201,20 @@ fn call_tool(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
             }
         })),
     }
+}
+
+fn env_names(id: &Value) -> Value {
+    let names: Vec<String> = std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{"type": "text", "text": names.join("\n")}],
+            "isError": false
+        }
+    })
 }
 
 /// Overshoot the client's 1 MiB line cap by less than a pipe buffer, so

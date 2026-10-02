@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_mcp::{
-    HealthState, McpError, McpServerHandle, StdioConfig, TransportConfig, adapt_handle_as_tools,
-    mcp_error_line,
+    HealthState, McpClient, McpError, McpServerHandle, StdioConfig, StdioMcpClient, ToolResult,
+    TransportConfig, adapt_handle_as_tools, mcp_error_line,
 };
 use assistd_tools::presentation::PresentSpec;
 use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool};
@@ -82,6 +82,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
             "mcp__fake__crash_me",
             "mcp__fake__flood_stdout",
             "mcp__fake__spawn_orphan_and_crash",
+            "mcp__fake__env_names",
         ]
     );
 
@@ -301,4 +302,29 @@ async fn failed_initialize_kills_the_process_group() {
         wait_until_process_is_gone(orphan).await,
         "grandchild {orphan} must be killed when the handshake fails"
     );
+}
+
+#[tokio::test]
+async fn server_sees_only_inherited_and_configured_environment() {
+    assert!(
+        std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
+        "cargo sets CARGO_MANIFEST_DIR for test processes"
+    );
+    let mut cfg = StdioConfig::new("fake", fake_server_path());
+    cfg.request_timeout = Duration::from_secs(5);
+    cfg.env.insert("CONFIGURED_TOKEN".into(), "secret".into());
+    let (client, lifeline) = StdioMcpClient::spawn(cfg)
+        .await
+        .expect("server should start");
+
+    let result = client.invoke("env_names", json!({})).await.unwrap();
+    let ToolResult::Text(listing) = result else {
+        panic!("expected a text listing, got {result:?}");
+    };
+    let names: Vec<&str> = listing.lines().collect();
+    assert!(names.contains(&"PATH"), "{names:?}");
+    assert!(names.contains(&"CONFIGURED_TOKEN"), "{names:?}");
+    assert!(!names.contains(&"CARGO_MANIFEST_DIR"), "{names:?}");
+
+    lifeline.shutdown(Duration::from_secs(1)).await;
 }

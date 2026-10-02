@@ -2,6 +2,7 @@
 //! stderr is forwarded to tracing.
 
 use std::collections::{BTreeSet, HashMap};
+use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::process::Stdio;
@@ -28,12 +29,19 @@ use crate::{McpClient, ToolResult, ToolSchema, protocol};
 /// this, so a misbehaving server cannot exhaust memory.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
+/// Daemon variables a server inherits besides `LC_*`; anything else,
+/// credentials included, must come from [`StdioConfig::env`].
+const INHERITED_ENV: &[&str] = &[
+    "HOME", "LANG", "LANGUAGE", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "TZ", "USER",
+];
+
 /// Per-server stdio transport configuration. `Debug` lists env var names,
 /// never values.
 #[derive(Clone)]
 pub struct StdioConfig {
     pub command: String,
     pub args: Vec<String>,
+    /// Set on top of the few daemon variables every server inherits.
     pub env: HashMap<String, String>,
     pub request_timeout: Duration,
     /// Server name used in tracing logs.
@@ -82,6 +90,8 @@ impl StdioMcpClient {
         let mut command = Command::new(&cfg.command);
         command
             .args(&cfg.args)
+            .env_clear()
+            .envs(inherited_env(std::env::vars_os()))
             .envs(cfg.env.iter())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -439,6 +449,14 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     }
 }
 
+fn inherited_env(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> impl Iterator<Item = (OsString, OsString)> {
+    let inherited = |name: &str| INHERITED_ENV.contains(&name) || name.starts_with("LC_");
+    vars.into_iter()
+        .filter(move |(name, _)| name.to_str().is_some_and(inherited))
+}
+
 async fn forward_stderr(stream: ChildStderr, label: String) {
     let forwarded = forward_lines(
         stream,
@@ -765,5 +783,21 @@ mod tests {
         let rendered = format!("{cfg:?}");
         assert!(rendered.contains("API_TOKEN"), "{rendered}");
         assert!(!rendered.contains("hunter2"), "{rendered}");
+    }
+
+    #[test]
+    fn servers_inherit_only_basic_session_and_locale_variables() {
+        let vars = [
+            "PATH",
+            "HOME",
+            "LC_ALL",
+            "TZ",
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "SSH_AUTH_SOCK",
+        ]
+        .map(|name| (OsString::from(name), OsString::from("value")));
+        let names: Vec<_> = inherited_env(vars).map(|(name, _)| name).collect();
+        assert_eq!(names, ["PATH", "HOME", "LC_ALL", "TZ"]);
     }
 }
