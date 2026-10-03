@@ -121,8 +121,8 @@ impl Default for ToolsBashConfig {
 pub struct ToolsWriteConfig {
     /// Non-empty path prefixes `write` may create files under; symlinks and dot
     /// entries at any depth below a prefix are refused (list one to allow it).
-    /// Writes outside `/tmp` ask the user first. `~` / `~user` expand;
-    /// relative entries error, missing ones are dropped.
+    /// Writes outside `/tmp` ask the user first. `~` and `~/` expand to
+    /// `$HOME`; any other relative entry errors, missing ones are dropped.
     pub writable_paths: Vec<String>,
 }
 
