@@ -7,7 +7,7 @@ pub mod parser;
 
 pub use executor::{OUTPUT_MAX, execute};
 pub use expand::expand_args;
-pub use parser::{ParseError, Redirection, parse_chain};
+pub use parser::{MAX_OPERATORS, ParseError, Redirection, parse_chain};
 
 /// One argv entry as written, plus whether any part of it was quoted.
 /// Quoting suppresses tilde and glob expansion.

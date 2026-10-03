@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use super::*;
-use crate::chain::parse_chain;
+use crate::chain::{MAX_OPERATORS, parse_chain};
 use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
 
 /// Emits fixed stdout, stderr and exit code, ignoring its input.
@@ -307,4 +307,13 @@ async fn stderr_lines_are_each_prefixed_with_the_command_name() {
     let out = run_line("boom", &r).await;
     assert_eq!(out.exit_code, 1);
     assert_eq!(out.stderr, b"[boom]\tfirst\n[boom]\tsecond");
+}
+
+#[tokio::test]
+async fn a_chain_at_the_operator_limit_runs_without_exhausting_the_stack() {
+    let r = registry_of([Stub::new("ok", b"x", 0)]);
+    let line = ["ok"; MAX_OPERATORS + 1].join(" && ");
+    let out = run_line(&line, &r).await;
+    assert_eq!(out.stdout, vec![b'x'; MAX_OPERATORS + 1]);
+    assert_eq!(out.exit_code, 0);
 }
