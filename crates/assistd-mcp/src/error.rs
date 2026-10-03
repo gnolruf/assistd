@@ -1,9 +1,10 @@
 use std::time::Duration;
 
+use rmcp::service::{ClientInitializeError, ServiceError};
 use thiserror::Error;
 
-/// Errors from the MCP transports and the per-server supervisor.
-/// [`mcp_error_line`] renders each variant for the model.
+/// Errors from an MCP server or its supervisor. [`mcp_error_line`]
+/// renders each variant for the model.
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("failed to spawn MCP server `{path}`: {source}")]
@@ -13,6 +14,9 @@ pub enum McpError {
         source: std::io::Error,
     },
 
+    #[error("MCP initialize failed: {0}")]
+    Initialize(#[source] Box<ClientInitializeError>),
+
     #[error("MCP transport closed")]
     TransportClosed,
 
@@ -20,57 +24,29 @@ pub enum McpError {
     RequestTimeout(Duration),
 
     #[error("MCP server reported an error (code {code}): {message}")]
-    RpcError {
-        code: i64,
-        message: String,
-        data: Option<serde_json::Value>,
-    },
+    RpcError { code: i32, message: String },
 
-    /// The server diverged from the MCP spec.
+    /// The server's answer was not one the client could use.
     #[error("MCP protocol error: {0}")]
     Protocol(String),
 
-    /// The local server config is unusable (bad URL, bad header).
-    #[error("MCP config error: {context}: {source}")]
-    Config {
-        context: String,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync + 'static>,
-    },
+    #[error("MCP tool arguments must be a JSON object")]
+    ArgumentsNotObject,
 
     #[error("MCP server is currently unavailable")]
     ServerDown,
-
-    #[error("too many in-flight MCP requests (cap reached)")]
-    TooManyInFlight,
-
-    /// The server's reply was discarded for exceeding `limit` bytes.
-    #[error("MCP reply exceeded the {limit}-byte limit")]
-    ReplyTooLarge { limit: usize },
-
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-
-    /// A POST of `method` was answered with a non-success status.
-    #[error("POST {method} failed: HTTP {status}")]
-    HttpStatus {
-        method: &'static str,
-        status: reqwest::StatusCode,
-    },
 }
 
-impl McpError {
-    /// A [`McpError::Config`] wrapping `source` with `context`.
-    pub fn config(
-        context: impl Into<String>,
-        source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
-        Self::Config {
-            context: context.into(),
-            source: Box::new(source),
+impl From<ServiceError> for McpError {
+    fn from(error: ServiceError) -> Self {
+        match error {
+            ServiceError::McpError(data) => Self::RpcError {
+                code: data.code.0,
+                message: data.message.into_owned(),
+            },
+            ServiceError::TransportClosed | ServiceError::TransportSend(_) => Self::TransportClosed,
+            ServiceError::Timeout { timeout } => Self::RequestTimeout(timeout),
+            other => Self::Protocol(other.to_string()),
         }
     }
 }
@@ -83,19 +59,19 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
             "[error] {tool_name}: failed to spawn MCP server `{path}`: {source}. \
              Check: the server command/args in config.toml\n"
         ),
+        McpError::Initialize(source) => format!(
+            "[error] {tool_name}: MCP initialize failed: {source}. \
+             Check: daemon logs for the server's startup output\n"
+        ),
         McpError::TransportClosed => format!(
             "[error] {tool_name}: MCP transport closed. \
-             Try: another tool while the server reconnects\n"
+             Try: another tool while the server restarts\n"
         ),
         McpError::RequestTimeout(timeout) => format!(
             "[error] {tool_name}: MCP request timed out after {timeout:?}. \
              Try: the call again or a smaller request\n"
         ),
-        McpError::RpcError {
-            code,
-            message,
-            data: _,
-        } => format!(
+        McpError::RpcError { code, message } => format!(
             "[error] {tool_name}: MCP server returned error code {code}: {message}. \
              Check: the arguments and try again\n"
         ),
@@ -103,60 +79,29 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
             "[error] {tool_name}: MCP protocol error: {detail}. \
              Check: daemon logs for malformed responses\n"
         ),
-        McpError::Config { context, source } => format!(
-            "[error] {tool_name}: MCP config error: {context}: {source}. \
-             Check: ~/.config/assistd/config.toml `[[mcp.servers]]` block\n"
+        McpError::ArgumentsNotObject => format!(
+            "[error] {tool_name}: MCP tool arguments must be a JSON object. \
+             Use: an object matching the tool's parameters schema\n"
         ),
         McpError::ServerDown => format!(
             "[error] {tool_name}: MCP server is currently unavailable. \
-             Try: another tool while the server reconnects\n"
-        ),
-        McpError::TooManyInFlight => format!(
-            "[error] {tool_name}: too many in-flight MCP requests. \
-             Try: the call again after pending requests drain\n"
-        ),
-        McpError::ReplyTooLarge { limit } => format!(
-            "[error] {tool_name}: MCP reply exceeded the {limit}-byte limit and was discarded. \
-             Try: arguments that make the tool return less data\n"
-        ),
-        McpError::Json(source) => format!(
-            "[error] {tool_name}: MCP JSON error: {source}. \
-             Check: daemon logs for transport details\n"
-        ),
-        McpError::Http(source) => format!(
-            "[error] {tool_name}: MCP HTTP error: {source}. \
-             Check: daemon logs for transport details\n"
-        ),
-        McpError::HttpStatus { method, status } => format!(
-            "[error] {tool_name}: MCP POST {method} failed: HTTP {status}. \
-             Check: daemon logs for transport details\n"
+             Try: another tool while the server restarts\n"
         ),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rmcp::model::{ErrorCode, ErrorData};
+
     use super::*;
 
     fn contains_hint(s: &str) -> bool {
         s.contains("Use:") || s.contains("Try:") || s.contains("Check:") || s.contains("Available:")
     }
 
-    /// `reqwest` has no public error constructor; a request to a
-    /// malformed URL fails before touching the network.
-    async fn fake_http_error() -> reqwest::Error {
-        reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("client builds")
-            .get("not-a-valid-url")
-            .send()
-            .await
-            .expect_err("must error on malformed URL")
-    }
-
-    #[tokio::test]
-    async fn every_variant_emits_convention_compliant_line() {
+    #[test]
+    fn every_variant_emits_convention_compliant_line() {
         let cases: Vec<(&str, McpError)> = vec![
             (
                 "spawn",
@@ -165,6 +110,12 @@ mod tests {
                     source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
                 },
             ),
+            (
+                "initialize",
+                McpError::Initialize(Box::new(ClientInitializeError::ConnectionClosed(
+                    "eof".into(),
+                ))),
+            ),
             ("transport_closed", McpError::TransportClosed),
             ("timeout", McpError::RequestTimeout(Duration::from_secs(30))),
             (
@@ -172,37 +123,11 @@ mod tests {
                 McpError::RpcError {
                     code: -32602,
                     message: "Invalid params".into(),
-                    data: None,
                 },
             ),
             ("protocol", McpError::Protocol("bad frame".into())),
-            (
-                "config",
-                McpError::config(
-                    "invalid header `X-Bad`",
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "not ascii"),
-                ),
-            ),
+            ("arguments", McpError::ArgumentsNotObject),
             ("server_down", McpError::ServerDown),
-            ("too_many", McpError::TooManyInFlight),
-            (
-                "reply_too_large",
-                McpError::ReplyTooLarge {
-                    limit: 32 * 1024 * 1024,
-                },
-            ),
-            (
-                "json",
-                McpError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
-            ),
-            ("http", McpError::Http(fake_http_error().await)),
-            (
-                "http_status",
-                McpError::HttpStatus {
-                    method: "tools/call",
-                    status: reqwest::StatusCode::BAD_GATEWAY,
-                },
-            ),
         ];
         for (label, err) in cases {
             let line = mcp_error_line("mcp__web__search", &err);
@@ -222,18 +147,9 @@ mod tests {
     fn lines_carry_the_variant_details_and_matching_hint() {
         let cases = [
             (
-                McpError::config(
-                    "invalid header `X-Bad`",
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad bytes"),
-                ),
-                "[error] mcp__web__search: MCP config error: invalid header `X-Bad`: bad bytes. \
-                 Check: ~/.config/assistd/config.toml `[[mcp.servers]]` block\n",
-            ),
-            (
                 McpError::RpcError {
                     code: -32602,
                     message: "Invalid params: missing `query`".into(),
-                    data: None,
                 },
                 "[error] mcp__web__search: MCP server returned error code -32602: \
                  Invalid params: missing `query`. Check: the arguments and try again\n",
@@ -246,11 +162,33 @@ mod tests {
             (
                 McpError::ServerDown,
                 "[error] mcp__web__search: MCP server is currently unavailable. \
-                 Try: another tool while the server reconnects\n",
+                 Try: another tool while the server restarts\n",
             ),
         ];
         for (err, expected) in cases {
             assert_eq!(mcp_error_line("mcp__web__search", &err), expected);
         }
+    }
+
+    #[test]
+    fn service_errors_map_to_the_matching_variant() {
+        let rpc = McpError::from(ServiceError::McpError(ErrorData::new(
+            ErrorCode(-32601),
+            "method not found",
+            None,
+        )));
+        assert!(
+            matches!(&rpc, McpError::RpcError { code: -32601, message } if message == "method not found"),
+            "{rpc:?}"
+        );
+        let closed = McpError::from(ServiceError::TransportClosed);
+        assert!(matches!(closed, McpError::TransportClosed), "{closed:?}");
+        let timeout = McpError::from(ServiceError::Timeout {
+            timeout: Duration::from_secs(3),
+        });
+        assert!(
+            matches!(timeout, McpError::RequestTimeout(after) if after == Duration::from_secs(3)),
+            "{timeout:?}"
+        );
     }
 }

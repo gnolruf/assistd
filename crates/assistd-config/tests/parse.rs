@@ -65,18 +65,16 @@ fn stale_mcp_server_keys_are_reported_by_index() {
     let toml_src = "\
 [[mcp.servers]]
 name = \"a\"
-transport = \"stdio\"
 command = \"npx\"
 
 [[mcp.servers]]
 name = \"b\"
-transport = \"sse\"
-url = \"https://example.com/sse\"
-sse_read_timeout_secs = 300
+transport = \"stdio\"
+command = \"npx\"
 ";
     let (cfg, unknown) = parse_reporting_unknown_keys(toml_src);
     assert_eq!(cfg.mcp.servers.len(), 2);
-    assert_eq!(unknown, ["mcp.servers[1].sse_read_timeout_secs"]);
+    assert_eq!(unknown, ["mcp.servers[1].transport"]);
 }
 
 #[test]
@@ -84,7 +82,6 @@ fn map_valued_keys_are_not_reported() {
     let toml_src = "\
 [[mcp.servers]]
 name = \"a\"
-transport = \"stdio\"
 command = \"npx\"
 env = { API_KEY = \"x\" }
 ";
@@ -198,7 +195,7 @@ fn mcp_server_names_that_could_share_a_tool_name_are_rejected() {
     for name in ["a__b", "a_", "a___b"] {
         let cfg: Config = toml::from_str(&format!(
             "[mcp]\nenabled = true\n[[mcp.servers]]\nname = \"{name}\"\n\
-             transport = \"stdio\"\ncommand = \"npx\"\n"
+             command = \"npx\"\n"
         ))
         .expect("config must parse");
         let err = cfg
@@ -213,7 +210,7 @@ fn mcp_server_names_that_could_share_a_tool_name_are_rejected() {
 fn mcp_server_names_with_single_underscores_validate() {
     let cfg: Config = toml::from_str(
         "[mcp]\nenabled = true\n[[mcp.servers]]\nname = \"google_calendar-v2\"\n\
-         transport = \"stdio\"\ncommand = \"npx\"\n",
+         command = \"npx\"\n",
     )
     .expect("config must parse");
     cfg.validate()

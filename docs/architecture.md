@@ -36,7 +36,7 @@ the vocabulary established here.
 │ llm  │  │  tools   │  │  voice   │  │    wm    │  │   mcp    │
 │      │  │          │  │          │  │          │  │          │
 │chat  │  │ run +    │  │ Whisper  │  │ i3 IPC   │  │ stdio    │
-│loop  │  │ commands │  │ + Piper  │  │ + Sway   │  │ + SSE    │
+│loop  │  │ commands │  │ + Piper  │  │ + Sway   │  │ (rmcp)   │
 └──┬───┘  └─┬────┬───┘  └────┬─────┘  └────┬─────┘  └────┬─────┘
    │        │    │           │             │             │
    │        │    └────► ipc (wire types, shared by clients + daemon)
@@ -75,7 +75,7 @@ the vocabulary established here.
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils` (default features only, so client-only builds stay small)                |
 | `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
-| `assistd-mcp`    | MCP client (stdio + SSE) and adapter that exposes discovered MCP tools through the `Tool` trait.     | `tools`, `utils`                                                                 |
+| `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, XDG dirs, tilde expansion, `human_size`, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, and the `ChildServer` supervisor. | none                                                                             |
@@ -280,22 +280,23 @@ sandbox binds in place of the real one for `wm open`.
 ### MCP (`assistd-mcp`)
 
 External tool servers configured under `[[mcp.servers]]`. Each entry
-spawns a transport (a child process for stdio servers, a long-lived
-HTTP+SSE connection for remote ones) and runs the MCP handshake.
-Discovered tools are wrapped by `McpToolAdapter`, which implements
-`Tool` over the discovered schema, and registered into the same
-`ToolRegistry` the LLM sees, under the name
+is a child process the daemon spawns in its own process group, with a
+scrubbed environment, and speaks MCP to over stdin/stdout through the
+`rmcp` crate. Discovered tools are wrapped by `McpToolAdapter`, which
+implements `Tool` over the discovered schema, and registered into the
+same `ToolRegistry` the LLM sees, under the name
 `mcp__<server-name>__<tool-name>`. Each call asks the user first until
 that tool is "always allowed". Text and JSON results obey the same
 `[tools.output]` caps as `run`, spilling overflow to
 `mcp-<server-name>-<n>.txt`.
 
-The supervisor restarts crashed stdio servers with exponential
-backoff and re-runs discovery on each restart. SSE servers
-auto-reconnect on transport drop. The daemon never blocks on a
-slow MCP server: each call is bounded by that server's
-`request_timeout_secs`, and a timeout surfaces as a structured error
-to the model.
+When a server's process or session ends, its process group is killed
+at once, and the next call to one of its tools starts it again. Restarts
+follow exponential backoff; a call inside the backoff fails with a
+"server unavailable" error instead of waiting. The daemon never blocks
+on a slow MCP server: the handshake and each call are bounded by that
+server's `request_timeout_secs`, and a timeout surfaces as a structured
+error to the model.
 
 ## Data flow: end-to-end query
 

@@ -161,7 +161,6 @@ async fn start(
     let tools = tools_init::init(
         &config,
         config_path,
-        &stages.tools,
         ToolDeps {
             vision_gate: vision_revalidator.gate(),
             memory: &memory,
