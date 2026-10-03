@@ -449,11 +449,127 @@ fn redirections_that_write_are_found_in_nested_scripts() {
 #[test]
 fn comparisons_in_arithmetic_are_not_redirections() {
     assert_all(&[
-        ("(( x > 3 ))", None),
-        ("if (( n >= 1 )); then echo y; fi", None),
-        ("echo $(( a > b ))", None),
-        ("echo $(( (a > b) + 1 ))", None),
-        ("for (( i = 0; i < n; i++ )); do :; done", None),
+        ("(( 4 > 3 ))", None),
+        ("if (( 2 >= 1 )); then echo y; fi", None),
+        ("echo $(( 2 > 1 ))", None),
+        ("echo $(( (2 > 1) + 1 ))", None),
+        ("for (( ; 1 < 0; )); do :; done", None),
+    ]);
+}
+
+#[test]
+fn conditional_expressions_run_nothing_but_their_substitutions() {
+    assert_all(&[
+        ("[[ a && rm -rf ~ ]]", None),
+        ("[[ a > ~/f ]]", None),
+        ("[[ ( a == b ) || rm -rf ~ ]]", None),
+        ("if [[ a &&\n  b ]]; then rm -rf ~; fi", RM),
+        ("time -p [[ a > ~/f ]]", None),
+        ("[[ a ]] && rm -rf ~", RM),
+        ("[[ $(rm -rf ~) ]]", RM),
+        ("[[ -n <(rm -rf ~) ]]", RM),
+        ("x=1 [[ a && rm -rf ~ ]]", RM),
+        ("if -p [[ a && rm -rf ~ ]]", RM),
+        ("echo [[ && rm -rf ~", RM),
+        ("[[ a ; rm -rf ~ ]]", RM),
+        ("[[ a\nb", UNVERIFIABLE),
+    ]);
+}
+
+#[test]
+fn quotes_inside_arithmetic_hide_no_substitution() {
+    assert_all(&[
+        ("(( '$(rm -rf ~)' ))", RM),
+        ("echo $[ '$(rm -rf ~)' ]", RM),
+        ("a['$(rm -rf ~)']=1", RM),
+        ("b=(['$(rm -rf ~)']=1)", RM),
+        ("echo ${a['$(rm -rf ~)']}", RM),
+        ("echo ${s:'$(rm -rf ~)'}", RM),
+        ("echo \"${s:'$(rm -rf ~)'}\"", RM),
+        ("echo ${@:1:'$(rm -rf ~)'}", RM),
+        ("echo ${x:-'$(rm -rf ~)'}", None),
+    ]);
+}
+
+#[test]
+fn arithmetic_that_reads_a_variable_is_unverifiable() {
+    assert_all(&[
+        ("x='a[$(rm -rf ~)]'; echo $((x))", UNVERIFIABLE),
+        ("echo $(($x))", UNVERIFIABLE),
+        ("(( x > 3 ))", UNVERIFIABLE),
+        ("echo $[n]", UNVERIFIABLE),
+        ("for (( i = 0; i < n; i++ )); do :; done", UNVERIFIABLE),
+        ("let n++", UNVERIFIABLE),
+        ("builtin let n", UNVERIFIABLE),
+        ("a[i]=1", UNVERIFIABLE),
+        ("a+=([i]=1)", UNVERIFIABLE),
+        ("echo ${a[i]}", UNVERIFIABLE),
+        ("echo \"${s:i:2}\"", UNVERIFIABLE),
+        ("echo ${@:i}", UNVERIFIABLE),
+        ("[[ x -eq 0 ]]", UNVERIFIABLE),
+        ("if [[ -f x && n -gt 1 ]]; then :; fi", UNVERIFIABLE),
+        ("[[ ( n -lt 1 ) ]]", UNVERIFIABLE),
+        ("[[ ( 2 ) -lt 1 ]]", UNVERIFIABLE),
+        ("echo $((1 << 2)) $[2 * 3] $((16#ff + 0x1f))", None),
+        ("a[0]=1; b=([1]=x)", None),
+        ("echo ${a[0]} ${a[@]} ${#a[*]} ${!a[@]} ${!BASH@}", None),
+        ("echo ${s:1:2} ${s: -1} ${x:-y} ${x:=y} ${#x} ${!} $#", None),
+        ("[[ 1 -lt 2 ]] && [[ $x == y ]]", None),
+        ("[ \"$n\" -eq 0 ] && test x -lt 1", None),
+        ("ls -lt", None),
+    ]);
+}
+
+#[test]
+fn values_bash_takes_as_variable_names_are_unverifiable() {
+    assert_all(&[
+        ("echo ${!x}", UNVERIFIABLE),
+        ("echo \"${!x}\"", UNVERIFIABLE),
+        ("echo ${x@P}", UNVERIFIABLE),
+        ("printf -v \"$name\" x", UNVERIFIABLE),
+        ("printf -v 'a[$(rm -rf ~)]' x", UNVERIFIABLE),
+        ("o=-v; printf $o 'a[i]' x", UNVERIFIABLE),
+        ("printf \"$o\" 'a[i]' x", UNVERIFIABLE),
+        ("read \"$name\" <<< x", UNVERIFIABLE),
+        ("read -ra 'a[i]' <<< x", UNVERIFIABLE),
+        ("read -p $prompt x", UNVERIFIABLE),
+        ("unset 'a[i]'", UNVERIFIABLE),
+        ("getopts ab \"$name\"", UNVERIFIABLE),
+        ("wait -p 'a[i]'", UNVERIFIABLE),
+        ("[[ -v $name ]]", UNVERIFIABLE),
+        ("test -v 'a[i]'", UNVERIFIABLE),
+        ("[ $x ]", UNVERIFIABLE),
+        ("declare \"$name=1\"", UNVERIFIABLE),
+        ("local 'a[i]=1'", UNVERIFIABLE),
+        ("declare -i n", UNVERIFIABLE),
+        ("local -n ref=x", UNVERIFIABLE),
+        ("PS4='$(rm -rf ~) '; set -x", UNVERIFIABLE),
+    ]);
+}
+
+#[test]
+fn variable_names_bash_can_see_need_no_confirmation() {
+    assert_all(&[
+        (
+            "while IFS= read -r line; do echo \"$line\"; done < /tmp/f",
+            None,
+        ),
+        ("read -ra parts <<< \"$x\"", None),
+        ("read -t 5 -p \"$prompt\" -d '' answer", None),
+        ("printf '%s\\n' \"$x\"; printf \"$fmt\"", None),
+        ("printf -v out '%s' \"$x\"", None),
+        ("getopts ab: opt", None),
+        (
+            "local x=\"$1\" y; export FOO=bar; declare -a arr=(1 2)",
+            None,
+        ),
+        ("unset x 'a[0]'", None),
+        (
+            "[ -n \"$x\" ] && [ $# -eq 0 ] && test -v x && [[ -v y ]]",
+            None,
+        ),
+        ("wait $!", None),
+        ("echo $PS4", None),
     ]);
 }
 
@@ -586,6 +702,25 @@ fn dev_machine() -> Programs {
         ],
         &["cat", "env", "xargs", "nice"],
     )
+}
+
+#[test]
+fn words_inside_conditionals_and_brackets_are_not_programs() {
+    let machine = dev_machine();
+    for script in [
+        "[[ -n x && cargo == y ]]",
+        "if [[ -n x ||\n  cargo == y ]]; then cat x; fi",
+        "[[ ( cargo < y ) ]]",
+        "cat foo[cargo] && echo ${a[0]}",
+        "a=([0]=cargo)",
+        "echo $((1 + 2))",
+    ] {
+        assert_eq!(machine.review(script, &[]), None, "{script:?}");
+    }
+    assert_eq!(
+        machine.review("[[ -n x ]] && cargo build", &[]),
+        unlisted(&["cargo"], true)
+    );
 }
 
 #[test]

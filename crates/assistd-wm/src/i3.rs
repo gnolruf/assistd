@@ -34,7 +34,7 @@ pub struct I3Backend {
 #[derive(Debug)]
 pub struct I3Handle {
     pub backend: Arc<I3Backend>,
-    supervisor_task: JoinHandle<()>,
+    pub(crate) supervisor_task: JoinHandle<()>,
 }
 
 impl I3Handle {

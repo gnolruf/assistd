@@ -7,6 +7,8 @@ use std::{fmt, iter, mem};
 use super::allowlist::{Allowlist, Verdict};
 use super::shell::{self, Redirect, Script, SimpleCommand, Word};
 
+mod evaluated;
+
 /// How many scripts deep (`eval`, `trap`, …) the matcher looks before
 /// calling a script unverifiable.
 const MAX_NESTED_SCRIPTS: usize = 16;
@@ -413,6 +415,9 @@ impl<'a> Matcher<'a> {
                 format!("the script changes {variable}, so the programs it names cannot be checked")
             });
         }
+        if let Some(why) = evaluated::in_script(&script) {
+            out.unverifiable(|| why);
+        }
         for (index, cmd) in script.commands.iter().enumerate() {
             if out.settled() {
                 return;
@@ -515,7 +520,8 @@ impl<'a> Matcher<'a> {
     }
 
     /// What `word`, run with `args`, runs in turn: a script handed to a
-    /// builtin, or a command line hidden in an `env` option.
+    /// builtin, a subscript a builtin evaluates, or a command line hidden
+    /// in an `env` option.
     fn runs(&self, word: &Word, args: &[Word], site: Site<'_>, out: &mut Findings<'a>) {
         let Site { cmd, script, depth } = site;
         let program = program(&word.text);
@@ -553,7 +559,11 @@ impl<'a> Matcher<'a> {
                     });
                 }
             }
-            _ => {}
+            _ => {
+                if let Some(why) = evaluated::by_builtin(&program, args) {
+                    out.unverifiable(|| why);
+                }
+            }
         }
     }
 
