@@ -71,6 +71,22 @@ impl OutputLine<'_> {
     }
 }
 
+/// A file to search, tagged with how it was reached.
+enum Target {
+    /// Named on the command line; failing to read it is an error.
+    Named(PathBuf),
+    /// Found while descending; skipped when unreadable.
+    Found(PathBuf),
+}
+
+impl Target {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Named(path) | Self::Found(path) => path,
+        }
+    }
+}
+
 enum TargetError {
     Unreadable {
         path: String,
@@ -189,11 +205,10 @@ impl Command for GrepCommand {
             };
         }
 
-        let targets = match collect_targets(paths, flags.recursive).await {
-            Ok(t) => t,
-            Err(e) => return CommandOutput::failed(2, e.error_line().into_bytes()),
-        };
-        annotate_dialect(search_files(&re, &flags, &targets).await, pattern)
+        match search_paths(&re, &flags, paths).await {
+            Ok(out) => annotate_dialect(out, pattern),
+            Err(e) => CommandOutput::failed(2, e.error_line().into_bytes()),
+        }
     }
 }
 
@@ -272,23 +287,30 @@ fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
     outcome(count, stdout)
 }
 
-async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> CommandOutput {
+async fn search_paths(
+    re: &Regex,
+    flags: &Flags,
+    paths: &[String],
+) -> Result<CommandOutput, TargetError> {
+    let targets = collect_targets(paths, flags.recursive).await?;
+    search_files(re, flags, &targets).await
+}
+
+async fn search_files(
+    re: &Regex,
+    flags: &Flags,
+    targets: &[Target],
+) -> Result<CommandOutput, TargetError> {
     let label_lines = targets.len() > 1 || flags.recursive;
     let mut out = Vec::new();
     let mut total = 0usize;
-    for path in targets {
-        let Ok(bytes) = read_regular_file(path).await else {
+    for target in targets {
+        let Some(text) = read_text(target).await? else {
             continue;
         };
-        if sniff_binary(&bytes).is_some() {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            continue;
-        };
-        let display = path.to_string_lossy();
+        let display = target.path().to_string_lossy();
         let label = label_lines.then_some(display.as_ref());
-        let count = scan(re, flags, text, label, &mut out);
+        let count = scan(re, flags, &text, label, &mut out);
         if flags.files_only {
             out.extend(matching_file_line(&display, count));
         } else if flags.count_only && label_lines {
@@ -301,7 +323,26 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
     } else {
         out
     };
-    outcome(total, stdout)
+    Ok(outcome(total, stdout))
+}
+
+/// Text of `target`, or `None` when it is binary, not UTF-8, or an
+/// unreadable [`Target::Found`].
+async fn read_text(target: &Target) -> Result<Option<String>, TargetError> {
+    let bytes = match (read_regular_file(target.path()).await, target) {
+        (Ok(bytes), _) => bytes,
+        (Err(_), Target::Found(_)) => return Ok(None),
+        (Err(source), Target::Named(path)) => {
+            return Err(TargetError::Unreadable {
+                path: path.to_string_lossy().into_owned(),
+                source,
+            });
+        }
+    };
+    if sniff_binary(&bytes).is_some() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8(bytes).ok())
 }
 
 fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Vec<u8>) -> usize {
@@ -380,7 +421,7 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     }
 }
 
-async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<PathBuf>, TargetError> {
+async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<Target>, TargetError> {
     let mut targets = Vec::with_capacity(paths.len());
     for raw in paths {
         let path = Path::new(raw);
@@ -392,7 +433,7 @@ async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<PathBu
                     source,
                 })?;
         if !meta.is_dir() {
-            targets.push(path.to_path_buf());
+            targets.push(Target::Named(path.to_path_buf()));
             continue;
         }
         if !recursive {
@@ -405,7 +446,7 @@ async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<PathBu
 
 /// Append every non-directory entry under `root` in sorted depth-first
 /// order, skipping symlinks and anything unreadable.
-async fn descend(root: &Path, targets: &mut Vec<PathBuf>) {
+async fn descend(root: &Path, targets: &mut Vec<Target>) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(mut reader) = tokio::fs::read_dir(&dir).await else {
@@ -428,7 +469,7 @@ async fn descend(root: &Path, targets: &mut Vec<PathBuf>) {
         }
         files.sort();
         dirs.sort();
-        targets.extend(files);
+        targets.extend(files.into_iter().map(Target::Found));
         stack.extend(dirs.into_iter().rev());
     }
 }
@@ -438,6 +479,7 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use super::*;
+    use crate::commands::FILE_READ_MAX;
 
     /// `root/top.txt`, `root/sub/deep.txt`, `root/sub/notes.bin`.
     fn tree() -> TempDir {
@@ -447,6 +489,13 @@ mod tests {
         std::fs::write(dir.path().join("sub/deep.txt"), b"gamma\ndelta ERROR\n").expect("deep");
         std::fs::write(dir.path().join("sub/notes.bin"), b"ERROR\0binary\n").expect("bin");
         dir
+    }
+
+    fn write_oversized(path: &Path) {
+        std::fs::File::create(path)
+            .expect("create")
+            .set_len(FILE_READ_MAX + 1)
+            .expect("set_len");
     }
 
     async fn run_grep(args: &[&str], stdin: &[u8]) -> CommandOutput {
@@ -676,6 +725,37 @@ mod tests {
             String::from_utf8_lossy(&out.stderr),
             "[error] grep: file not found: /definitely/not/here.txt. \
              Use: ls /definitely/not to see what is there\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_named_file_is_an_error_even_beside_a_match() {
+        let dir = tree();
+        let huge = dir.path().join("huge.log");
+        write_oversized(&huge);
+        let huge = huge.to_string_lossy().into_owned();
+        let top = dir.path().join("top.txt").to_string_lossy().into_owned();
+        let out = run_grep(&["ERROR", &top, &huge], b"").await;
+        assert_eq!(out.exit_code, 2);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with(&format!("[error] grep: {huge}: ")),
+            "{stderr}"
+        );
+        assert!(stderr.contains("read limit"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn unreadable_file_found_while_descending_is_skipped() {
+        let dir = tree();
+        write_oversized(&dir.path().join("sub/huge.log"));
+        let root = dir.path().to_string_lossy().into_owned();
+        let out = run_grep(&["-rl", "ERROR", &root], b"").await;
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stderr.is_empty(), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{root}/top.txt\n{root}/sub/deep.txt\n")
         );
     }
 
