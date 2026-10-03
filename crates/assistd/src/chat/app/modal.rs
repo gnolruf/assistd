@@ -1,7 +1,5 @@
 //! The command-confirmation and branch-picker overlays.
 
-use std::time::Instant;
-
 use assistd_ipc::Request;
 use assistd_tools::{Approval, ConfirmationRequest};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -21,11 +19,7 @@ impl App {
             self.send_confirm_response(&confirm_id, Approval::Deny);
             return;
         }
-        self.modal = Some(ConfirmationModal {
-            request,
-            confirm_id,
-            opened_at: Instant::now(),
-        });
+        self.modal = Some(ConfirmationModal::new(confirm_id, request));
     }
 
     pub(super) fn resolve_modal(&mut self, approval: Approval) {
@@ -75,7 +69,11 @@ impl App {
             KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 self.resolve_modal(Approval::Deny);
             }
-            _ => {}
+            _ => {
+                if let Some(modal) = self.modal.as_mut() {
+                    modal.restart_arm_delay();
+                }
+            }
         }
     }
 
