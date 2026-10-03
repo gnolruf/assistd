@@ -26,8 +26,9 @@ mod wire;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
-/// Approving keys are ignored for this long after the confirmation modal
-/// opens, so a keystroke aimed at the input line cannot approve unseen.
+/// Approving keys are ignored until the confirmation modal has been open
+/// this long with no keystroke, so typing aimed at the input line cannot
+/// approve unseen.
 const CONFIRM_ARM_DELAY: Duration = Duration::from_millis(750);
 
 /// An image staged by `/attach` for the next submission.
@@ -128,14 +129,27 @@ pub(super) struct ConfirmationModal {
     pub request: ConfirmationRequest,
     /// Echoed back in the `Request::ConfirmResponse`.
     confirm_id: String,
-    opened_at: Instant,
+    /// When the modal opened or last received a key it did not accept.
+    quiet_since: Instant,
 }
 
 impl ConfirmationModal {
-    /// Whether the modal has been visible long enough to accept approval.
-    /// Denial is accepted at any time.
+    pub(super) fn new(confirm_id: String, request: ConfirmationRequest) -> Self {
+        Self {
+            request,
+            confirm_id,
+            quiet_since: Instant::now(),
+        }
+    }
+
+    /// Whether the modal has gone long enough without a keystroke to
+    /// accept approval. Denial is accepted at any time.
     pub(super) fn armed(&self) -> bool {
-        self.opened_at.elapsed() >= CONFIRM_ARM_DELAY
+        self.quiet_since.elapsed() >= CONFIRM_ARM_DELAY
+    }
+
+    fn restart_arm_delay(&mut self) {
+        self.quiet_since = Instant::now();
     }
 }
 

@@ -363,7 +363,7 @@ fn presence_event_updates_state() {
 
 fn arm_modal(app: &mut App) {
     if let Some(modal) = app.modal.as_mut() {
-        modal.opened_at = Instant::now()
+        modal.quiet_since = Instant::now()
             .checked_sub(CONFIRM_ARM_DELAY)
             .expect("uptime exceeds the arm delay");
     }
@@ -446,8 +446,25 @@ async fn modal_ignores_a_when_nothing_is_offered() {
     app.on_key(typed('a'));
     assert!(app.modal.is_some());
     assert!(writer_rx.try_recv().is_err());
+    arm_modal(&mut app);
     app.on_key(typed('y'));
     assert_eq!(confirm_answer_in_full(&mut writer_rx).await, (true, false));
+}
+
+#[tokio::test]
+async fn modal_typing_restarts_the_arm_delay() {
+    let (mut app, _rx, mut writer_rx) = app_with_modal();
+    app.modal = None;
+    open_modal_offering(&mut app, vec!["cargo".into()]);
+    arm_modal(&mut app);
+    app.on_key(typed('s'));
+    app.on_key(typed('a'));
+    app.on_key(typed('y'));
+    assert!(
+        app.modal.is_some(),
+        "keys typed in a burst must not approve"
+    );
+    assert!(writer_rx.try_recv().is_err());
 }
 
 #[tokio::test]
