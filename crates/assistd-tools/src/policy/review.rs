@@ -45,10 +45,10 @@ const KEYWORDS: &[&str] = &[
 /// Builtins that run no code and reach nothing outside the shell.
 const SAFE_BUILTINS: &[&str] = &[
     ":", "[", "bg", "break", "caller", "cd", "compopt", "continue", "declare", "dirs", "disown",
-    "echo", "exit", "export", "false", "fg", "getopts", "hash", "help", "history", "jobs", "let",
-    "local", "logout", "popd", "printf", "pushd", "pwd", "read", "readonly", "return", "set",
-    "shift", "shopt", "suspend", "test", "times", "true", "type", "typeset", "ulimit", "umask",
-    "unalias", "unset", "wait",
+    "echo", "exit", "export", "false", "fg", "getopts", "hash", "help", "jobs", "let", "local",
+    "logout", "popd", "printf", "pushd", "pwd", "read", "readonly", "return", "set", "shift",
+    "shopt", "suspend", "test", "times", "true", "type", "typeset", "ulimit", "umask", "unalias",
+    "unset", "wait",
 ];
 
 /// Builtins and keywords whose arguments are checked in their place.
@@ -56,13 +56,15 @@ const RUNS_ITS_ARGUMENTS: &[&str] = &[
     ".", "alias", "builtin", "command", "coproc", "eval", "exec", "source", "time", "trap",
 ];
 
-/// Builtins that can run or load code no check can see, so they always ask.
+/// Builtins that can run or load code no check can see, or write files
+/// no redirection names (`history -w`), so they always ask.
 const RISKY_BUILTINS: &[&str] = &[
     "bind",
     "compgen",
     "complete",
     "enable",
     "fc",
+    "history",
     "mapfile",
     "readarray",
 ];
@@ -462,6 +464,7 @@ impl<'a> Matcher<'a> {
             return;
         };
         let mut fed = false;
+        let mut fed_wrapper: Option<&Word> = None;
         let mut placeholders: Vec<Placeholder<'_>> = Vec::new();
         for Candidate { at, may_be_command } in candidates(words, start) {
             if out.settled() {
@@ -484,9 +487,16 @@ impl<'a> Matcher<'a> {
             if may_be_command {
                 self.allowed(word, index, script, depth, out);
                 self.runs(word, args, Site { cmd, script, depth }, out);
+                fed_wrapper =
+                    (fed && wrapper_operands(word, args.first()).is_some()).then_some(word);
                 fed |= program(&word.text) == FEEDS_ARGUMENTS;
                 placeholders.extend(placeholder::placeholders(word, args));
             }
+        }
+        if let Some(wrapper) = fed_wrapper {
+            out.unverifiable(|| {
+                format!("`{}` runs a command xargs reads from stdin", wrapper.text)
+            });
         }
     }
 
@@ -776,15 +786,21 @@ fn needs_no_allowlist(word: &Word, index: usize, script: &Script) -> bool {
             .any(|(name, defined)| name == text && *defined <= index)
 }
 
-/// The first variable the script may change that the allowlist cannot see
-/// past: the search path, the dynamic loader's, or bash's startup file.
+/// The first variable the script may change that the checks cannot see
+/// past: the search path, the dynamic loader's, bash's startup file, or a
+/// file of options an allowed program reads (`rg --pre`).
 fn changed_sensitive_variable(script: &Script) -> Option<&str> {
     script
         .commands
         .iter()
         .flat_map(|cmd| &cmd.words)
         .flat_map(|word| changed_variables(&word.text))
-        .find(|name| matches!(*name, "PATH" | "BASH_ENV" | "GCONV_PATH") || name.starts_with("LD_"))
+        .find(|name| {
+            matches!(
+                *name,
+                "PATH" | "BASH_ENV" | "GCONV_PATH" | "RIPGREP_CONFIG_PATH"
+            ) || name.starts_with("LD_")
+        })
 }
 
 /// Variables a word may assign, wherever it sits: `NAME=…`, a bare
