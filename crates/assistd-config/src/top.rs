@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
+use assistd_utils::path::tilde_remainder;
 use assistd_utils::xdg;
 use serde::{Deserialize, Serialize};
 
@@ -288,6 +289,13 @@ fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
             "tools.write.writable_paths must not be empty (the write command would be unusable)"
                 .into(),
         );
+    }
+    for entry in &tools.write.writable_paths {
+        if tilde_remainder(entry).is_none() && !Path::new(entry).is_absolute() {
+            errors.push(format!(
+                "tools.write.writable_paths entry {entry:?} must be absolute or start with `~/`"
+            ));
+        }
     }
 }
 

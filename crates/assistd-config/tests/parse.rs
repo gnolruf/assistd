@@ -167,6 +167,33 @@ fn relative_overflow_dir_is_rejected() {
 }
 
 #[test]
+fn relative_writable_paths_are_rejected() {
+    for entry in [".", "docs", "~alice/notes", "./tmp"] {
+        let cfg: Config = toml::from_str(&format!(
+            "[tools.write]\nwritable_paths = [\"/tmp\", \"{entry}\"]\n"
+        ))
+        .expect("config must parse");
+        let err = cfg
+            .validate()
+            .expect_err("a relative writable_paths entry must not validate");
+        let message = err.to_string();
+        assert!(
+            message.contains("tools.write.writable_paths"),
+            "{entry}: {message}"
+        );
+    }
+}
+
+#[test]
+fn home_relative_and_absolute_writable_paths_validate() {
+    let cfg: Config =
+        toml::from_str("[tools.write]\nwritable_paths = [\"~\", \"~/notes\", \"/tmp\"]\n")
+            .expect("config must parse");
+    cfg.validate()
+        .expect("tilde and absolute entries are valid");
+}
+
+#[test]
 fn history_and_response_must_fit_the_context_together() {
     let parse = |response: u32| -> Config {
         toml::from_str(&format!(
