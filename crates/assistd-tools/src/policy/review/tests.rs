@@ -371,6 +371,27 @@ fn commands_xargs_fills_in_are_unverifiable() {
 }
 
 #[test]
+fn wrappers_xargs_hands_no_command_are_unverifiable() {
+    assert_all(&[
+        ("printf 'rm -rf ~' | xargs env", UNVERIFIABLE),
+        ("xargs env FOO=1", UNVERIFIABLE),
+        ("xargs env -i", UNVERIFIABLE),
+        ("xargs nice", UNVERIFIABLE),
+        ("xargs nice -n 5", UNVERIFIABLE),
+        ("xargs nohup", UNVERIFIABLE),
+        ("xargs stdbuf -oL", UNVERIFIABLE),
+        ("xargs timeout 5", UNVERIFIABLE),
+        ("xargs -0 xargs", UNVERIFIABLE),
+        ("xargs", None),
+        ("xargs env cat", None),
+        ("xargs timeout 5 cat", None),
+        ("xargs env -S 'cat x'", None),
+        ("env", None),
+        ("nice", None),
+    ]);
+}
+
+#[test]
 fn run_time_arguments_may_supply_required_ones() {
     assert_all(&[
         ("rm \"$f\"", RM),
@@ -806,6 +827,10 @@ fn every_program_a_script_runs_must_be_allowed() {
             unlisted(&["source venv/bin/activate"], false),
         ),
         ("enable -f x.so y", unlisted(&["enable"], false)),
+        (
+            "history -s x; history -w ~/repo/.git/config",
+            unlisted(&["history"], false),
+        ),
         ("cargo build; ./x", unlisted(&["cargo", "./x"], false)),
     ] {
         assert_eq!(machine.review(script, &[]), expected, "{script:?}");
@@ -885,7 +910,7 @@ fn a_program_on_a_path_is_allowed_only_where_it_is_trusted() {
 }
 
 #[test]
-fn changing_the_search_path_or_loader_makes_names_unverifiable() {
+fn changing_where_programs_are_found_or_configured_is_unverifiable() {
     let machine = dev_machine();
     for script in [
         "PATH=/tmp:$PATH cat x",
@@ -897,6 +922,8 @@ fn changing_the_search_path_or_loader_makes_names_unverifiable() {
         "env BASH_ENV=/tmp/x bash -c 'cat x'",
         "declare -n ref=PATH; ref=/tmp",
         ": ${PATH:=/tmp}",
+        "RIPGREP_CONFIG_PATH=/tmp/rc cat x",
+        "export RIPGREP_CONFIG_PATH=/tmp/rc; cat x",
     ] {
         assert!(
             matches!(
