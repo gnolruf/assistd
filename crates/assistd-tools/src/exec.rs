@@ -16,7 +16,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use crate::chain::PIPE_BUF_MAX;
+use crate::chain::OUTPUT_MAX;
 use crate::command::{CommandOutput, Hint, error_line};
 
 /// Exit code for policy denial (POSIX "found but not executable").
@@ -31,7 +31,7 @@ pub(crate) const TIMEOUT_EXIT: i32 = 137;
 
 /// Max bytes captured per stream from a supervised child, enforced while it
 /// runs so a runaway script cannot balloon daemon memory before the timeout.
-pub(crate) const OUTPUT_BUF_MAX: usize = PIPE_BUF_MAX;
+pub(crate) const OUTPUT_BUF_MAX: usize = OUTPUT_MAX;
 
 /// Pipe read size; heap-allocated so reader futures stay small.
 const READ_CHUNK_BYTES: usize = 8192;

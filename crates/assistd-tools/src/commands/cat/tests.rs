@@ -183,3 +183,15 @@ async fn cat_b_reports_the_size_of_a_file_over_the_read_limit() {
     let expected = format!("{} bytes", FILE_READ_MAX + 1);
     assert!(stdout.contains(&expected), "{stdout}");
 }
+
+#[tokio::test]
+async fn cat_stops_reading_files_once_output_passes_output_max() {
+    let dir = tempdir().unwrap();
+    let half = vec![b'a'; OUTPUT_MAX / 2 + 1];
+    let first = write_file(&dir, "first.txt", &half);
+    let second = write_file(&dir, "second.txt", &half);
+    let never_read = dir.path().join("missing.txt");
+    let out = run_cat(&[&first, &second, &never_read.to_string_lossy()], None).await;
+    assert_eq!(out.exit_code, 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.stdout.len(), 2 * half.len());
+}

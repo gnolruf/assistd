@@ -113,7 +113,7 @@ impl Command for StdinKind {
     }
 }
 
-/// Emits bytes of configurable length; exercises `PIPE_BUF_MAX`.
+/// Emits bytes of configurable length; exercises `OUTPUT_MAX`.
 #[derive(Debug)]
 struct Flood(usize);
 #[async_trait]
@@ -226,9 +226,9 @@ async fn unknown_command_returns_127_with_available_list() {
 }
 
 #[tokio::test]
-async fn pipe_buf_max_stops_a_flood_before_the_next_stage() {
+async fn output_max_stops_a_flood_before_the_next_stage() {
     let mut r = CommandRegistry::new();
-    r.register(Flood(PIPE_BUF_MAX + 1024));
+    r.register(Flood(OUTPUT_MAX + 1024));
     r.register(LineCount);
     let out = run_line("flood | lc", &r).await;
     assert_eq!(out.exit_code, 141);
@@ -236,10 +236,49 @@ async fn pipe_buf_max_stops_a_flood_before_the_next_stage() {
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         format!(
-            "[error] pipe: stage output exceeded {PIPE_BUF_MAX} bytes. \
+            "[error] pipe: stage output exceeded {OUTPUT_MAX} bytes. \
              Try: pipe through wc -l or head first to shrink the stream\n"
         )
     );
+}
+
+const RUN_OVERFLOW: &str = "[error] run: output exceeded 10485760 bytes. \
+     Try: fewer files per command, or grep -l / grep -c to find what matters first\n";
+
+#[tokio::test]
+async fn seq_joined_output_past_output_max_fails_as_a_whole() {
+    let mut r = CommandRegistry::new();
+    r.register(Flood(OUTPUT_MAX / 2 + 1));
+    let out = run_line("flood; flood", &r).await;
+    assert_eq!(out.exit_code, 141);
+    assert!(out.stdout.is_empty(), "joined bytes must be dropped");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), RUN_OVERFLOW);
+}
+
+#[tokio::test]
+async fn overflowing_stage_fails_so_or_falls_back() {
+    let mut r = registry_of([Stub::new("fallback", b"ok\n", 0)]);
+    r.register(Flood(OUTPUT_MAX + 1));
+    let out = run_line("flood || fallback", &r).await;
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout, b"ok\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), RUN_OVERFLOW);
+}
+
+#[test]
+fn stderr_past_output_max_is_cut_to_whole_lines() {
+    let line = b"abcdef\n";
+    let out = within_output_max(CommandOutput::failed(
+        1,
+        line.repeat(OUTPUT_MAX / line.len() + 1),
+    ));
+    assert_eq!(out.exit_code, 141);
+    let kept = out
+        .stderr
+        .strip_suffix(RUN_OVERFLOW.as_bytes())
+        .expect("ends with the overflow line");
+    assert_eq!(kept.len(), OUTPUT_MAX / line.len() * line.len());
+    assert!(kept.chunks(line.len()).all(|chunk| chunk == line));
 }
 
 /// `a && b | lc || d` parses as `(a && (b | lc)) || d`; the `||` sees

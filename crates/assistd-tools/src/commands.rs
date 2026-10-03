@@ -6,7 +6,7 @@ use std::path::Path;
 use assistd_utils::text::human_size;
 use tokio::io::AsyncReadExt;
 
-use crate::chain::PIPE_BUF_MAX;
+use crate::chain::OUTPUT_MAX;
 use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
 
 pub mod bash;
@@ -48,7 +48,7 @@ pub(crate) use test_support::{RecordingGate, test_patterns, test_registry};
 
 /// Largest file a command reads into memory; a bigger one would overflow
 /// a pipeline stage anyway.
-pub(crate) const FILE_READ_MAX: u64 = PIPE_BUF_MAX as u64;
+pub(crate) const FILE_READ_MAX: u64 = OUTPUT_MAX as u64;
 
 /// Read `path` whole, refusing anything that is not a regular file or is
 /// (or grows while being read to be) larger than [`FILE_READ_MAX`].
@@ -58,7 +58,7 @@ pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> io::Result<Vec<
             ErrorKind::FileTooLarge,
             format!(
                 "file exceeds the {} read limit",
-                human_size(PIPE_BUF_MAX as u64)
+                human_size(OUTPUT_MAX as u64)
             ),
         )
     };
@@ -100,7 +100,8 @@ async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {
 }
 
 /// Input for a stdin-or-files command: named files (concatenated, binary
-/// refused) win over stdin. `Ok(None)` means neither was supplied.
+/// refused, at most [`OUTPUT_MAX`] in all) win over stdin. `Ok(None)` means
+/// neither was supplied.
 pub(crate) async fn collect_input(
     cmd: &str,
     files: &[String],
@@ -128,6 +129,21 @@ pub(crate) async fn collect_input(
             ));
         }
         out.extend_from_slice(&bytes);
+        if out.len() > OUTPUT_MAX {
+            return Err(CommandOutput::failed(
+                1,
+                error_line(
+                    cmd,
+                    format_args!(
+                        "files together exceed the {} read limit",
+                        human_size(OUTPUT_MAX as u64)
+                    ),
+                    Hint::Try,
+                    format_args!("fewer files per {cmd}"),
+                )
+                .into_bytes(),
+            ));
+        }
     }
     Ok(Some(out))
 }
