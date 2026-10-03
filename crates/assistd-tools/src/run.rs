@@ -151,6 +151,10 @@ fn parse_error_line(e: &ParseError) -> String {
             Hint::Use,
             "a quoted ERE pattern, as in `grep \"TODO|FIXME\" FILE`",
         ),
+        ParseError::TooManyOperators => (
+            Hint::Try,
+            "splitting it into several run calls, or bash \"...\" for a script",
+        ),
         ParseError::Redirection(r) => match r {
             Redirection::Output | Redirection::Append => {
                 (Hint::Use, "write PATH, as in `<cmd> | write /tmp/out.txt`")

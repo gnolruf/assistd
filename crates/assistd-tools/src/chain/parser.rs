@@ -8,6 +8,9 @@ use thiserror::Error;
 
 use super::{Chain, Word};
 
+/// Most `|`, `&&`, `||`, and `;` operators one command line may contain.
+pub const MAX_OPERATORS: usize = 128;
+
 /// Error returned by [`parse_chain`] when the input cannot be parsed.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
@@ -30,6 +33,8 @@ pub enum ParseError {
          on the previous word"
     )]
     UnquotedAlternation,
+    #[error("more than {MAX_OPERATORS} operators in one command line")]
+    TooManyOperators,
 }
 
 /// Which redirection the line asked for; each shape has a different
@@ -92,10 +97,15 @@ impl Op {
 /// pipe    := cmd   ( '|'            cmd    )*
 /// cmd     := WORD+
 /// ```
+///
+/// Fails with [`ParseError::TooManyOperators`] past [`MAX_OPERATORS`].
 pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
         return Err(ParseError::Empty);
+    }
+    if count_operators(&tokens) > MAX_OPERATORS {
+        return Err(ParseError::TooManyOperators);
     }
     Parser {
         tokens: tokens.into_iter().peekable(),
@@ -158,6 +168,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
     }
 
     Ok(tokens)
+}
+
+fn count_operators(tokens: &[Token]) -> usize {
+    tokens.iter().filter(|t| matches!(t, Token::Op(_))).count()
 }
 
 /// An unquoted `a\|b` is a BRE alternation that the pipe would silently
@@ -570,5 +584,13 @@ mod tests {
         ] {
             assert_eq!(parse_chain(line), Err(expected), "{line:?}");
         }
+    }
+
+    #[test]
+    fn parse_caps_the_operator_count() {
+        let at_limit = "echo; ".repeat(MAX_OPERATORS);
+        assert!(parse_chain(&at_limit).is_ok());
+        let past_limit = "echo && ".repeat(MAX_OPERATORS + 1) + "echo";
+        assert_eq!(parse_chain(&past_limit), Err(ParseError::TooManyOperators));
     }
 }
