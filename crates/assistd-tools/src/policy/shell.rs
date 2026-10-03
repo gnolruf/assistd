@@ -11,6 +11,11 @@ const MAX_DEPTH: usize = 64;
 /// Redirection operators other than here-documents, longest first.
 const REDIRECT_OPERATORS: &[&str] = &["&>>", "&>", ">>", ">|", ">&", "<&", "<>", ">", "<"];
 
+/// Reserved words after which bash still reads `[[` as a reserved word.
+const BEFORE_CONDITIONAL: &[&str] = &[
+    "!", "{", "if", "then", "else", "elif", "do", "while", "until", "time",
+];
+
 /// A shell word after quote removal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Word {
@@ -75,6 +80,11 @@ pub(super) struct Script {
     /// Each function defined, with the index into [`Script::commands`] of
     /// the first command after its definition began.
     pub functions: Vec<(String, usize)>,
+    /// Arithmetic expressions as written: `$((…))`, `((…))`, `$[…]`, and
+    /// the subscripts of assignments and array elements.
+    pub arithmetic: Vec<String>,
+    /// The text inside each `${…}`, as written.
+    pub parameters: Vec<String>,
     /// The script ended inside a quote, substitution or subshell.
     pub incomplete: bool,
 }
@@ -107,7 +117,6 @@ struct Lexer<'s, 'o> {
     depth: usize,
     heredocs: Vec<Heredoc>,
     incomplete: bool,
-    arithmetic: bool,
 }
 
 impl<'s, 'o> Lexer<'s, 'o> {
@@ -119,7 +128,6 @@ impl<'s, 'o> Lexer<'s, 'o> {
             depth,
             heredocs: Vec::new(),
             incomplete: false,
-            arithmetic: false,
         }
     }
 
@@ -170,13 +178,29 @@ impl<'s, 'o> Lexer<'s, 'o> {
     fn commands(&mut self, in_parens: bool) -> Result<(), TooDeep> {
         self.descend()?;
         let mut cmd = SimpleCommand::default();
+        let mut conditional = false;
         loop {
+            conditional &= !cmd.words.is_empty();
             let Some(c) = self.peek() else {
-                self.incomplete |= in_parens;
+                self.incomplete |= in_parens || conditional;
                 break;
             };
             match c {
                 ' ' | '\t' => self.skip(1),
+                '\n' if conditional => self.skip(1),
+                '&' | '|' if conditional && self.peek_at(1) == Some(c) => {
+                    self.conditional_operator(&mut cmd, 2);
+                }
+                '(' | ')' => {
+                    if conditional {
+                        self.conditional_operator(&mut cmd, 1);
+                    } else if self.parens(&mut cmd, in_parens)? {
+                        break;
+                    }
+                }
+                '<' | '>' if conditional && self.peek_at(1) != Some('(') => {
+                    self.conditional_operator(&mut cmd, 1);
+                }
                 '\n' => {
                     self.skip(1);
                     self.end_command(&mut cmd);
@@ -191,35 +215,51 @@ impl<'s, 'o> Lexer<'s, 'o> {
                     self.skip(1);
                     self.end_command(&mut cmd);
                 }
-                '(' if self.peek_at(1) == Some('(') => {
-                    self.end_command(&mut cmd);
-                    self.skip(2);
-                    self.double_parens()?;
-                }
-                '(' => {
-                    self.skip(1);
-                    if self.function_definition(&mut cmd) {
-                        continue;
-                    }
-                    self.end_command(&mut cmd);
-                    self.commands(true)?;
-                }
-                ')' => {
-                    self.skip(1);
-                    if in_parens {
-                        break;
-                    }
-                    self.end_command(&mut cmd);
-                }
                 '&' | '<' | '>' if c == '&' || self.peek_at(1) != Some('(') => {
                     self.redirect(&mut cmd)?;
                 }
-                _ => self.command_word(&mut cmd)?,
+                _ => {
+                    self.command_word(&mut cmd, conditional)?;
+                    conditional = if conditional {
+                        !cmd.words.last().is_some_and(|word| is_bare(word, "]]"))
+                    } else {
+                        opens_conditional(&cmd.words)
+                    };
+                }
             }
         }
         self.end_command(&mut cmd);
         self.depth -= 1;
         Ok(())
+    }
+
+    /// Lex a `(` or `)` outside `[[ … ]]`, returning whether it closes the
+    /// commands being lexed.
+    fn parens(&mut self, cmd: &mut SimpleCommand, in_parens: bool) -> Result<bool, TooDeep> {
+        if self.eat("((") {
+            self.end_command(cmd);
+            self.double_parens()?;
+        } else if self.eat("(") {
+            if !self.function_definition(cmd) {
+                self.end_command(cmd);
+                self.commands(true)?;
+            }
+        } else {
+            self.skip(1);
+            if in_parens {
+                return Ok(true);
+            }
+            self.end_command(cmd);
+        }
+        Ok(false)
+    }
+
+    /// Consume an operator of `[[ … ]]` that is `len` characters long as a
+    /// word of `cmd`.
+    fn conditional_operator(&mut self, cmd: &mut SimpleCommand, len: usize) {
+        let start = self.pos;
+        self.skip(len);
+        cmd.words.push(Word::literal(&self.src[start..self.pos]));
     }
 
     fn skip_comment(&mut self) {
@@ -229,10 +269,10 @@ impl<'s, 'o> Lexer<'s, 'o> {
     }
 
     /// Lex one word into `cmd`, dropping a file-descriptor prefix on a
-    /// redirection.
-    fn command_word(&mut self, cmd: &mut SimpleCommand) -> Result<(), TooDeep> {
+    /// redirection outside a `conditional`.
+    fn command_word(&mut self, cmd: &mut SimpleCommand, conditional: bool) -> Result<(), TooDeep> {
         if let Some(word) = self.word()? {
-            let fd = matches!(self.peek(), Some('<' | '>')) && is_fd(&word);
+            let fd = !conditional && matches!(self.peek(), Some('<' | '>')) && is_fd(&word);
             if !fd {
                 cmd.words.push(word);
             }
@@ -306,9 +346,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             return Ok(());
         };
         self.skip_blanks();
-        if let Some(target) = self.word()?
-            && !self.arithmetic
-        {
+        if let Some(target) = self.word()? {
             cmd.redirects.push(Redirect { operator, target });
         }
         Ok(())
@@ -319,9 +357,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             let (body, closed) = self.heredoc_body(&doc);
             self.incomplete |= !closed;
             if doc.expands {
-                let mut lexer = Lexer::new(&body, &mut *self.out, self.depth);
-                lexer.double_quoted(&mut WordBuf::default(), false)?;
-                self.incomplete |= lexer.incomplete;
+                self.expansions_in(&body)?;
             }
             self.out.inputs[doc.input] = body;
         }
@@ -351,23 +387,45 @@ impl<'s, 'o> Lexer<'s, 'o> {
         (body, false)
     }
 
-    /// Lex `src` as a script of its own, or as an `arithmetic` expression,
-    /// adding its commands to ours.
-    fn nested(&mut self, src: &str, arithmetic: bool) -> Result<(), TooDeep> {
+    /// Lex `src` as a script of its own, adding its commands to ours.
+    fn nested(&mut self, src: &str) -> Result<(), TooDeep> {
         let mut lexer = Lexer::new(src, &mut *self.out, self.depth);
-        lexer.arithmetic = arithmetic;
         lexer.commands(false)?;
         self.incomplete |= lexer.incomplete;
         Ok(())
     }
 
+    fn expansions_in(&mut self, src: &str) -> Result<(), TooDeep> {
+        self.descend()?;
+        let mut lexer = Lexer::new(src, &mut *self.out, self.depth);
+        lexer.double_quoted(&mut WordBuf::default(), false)?;
+        self.incomplete |= lexer.incomplete;
+        self.depth -= 1;
+        Ok(())
+    }
+
     /// Consume up to the `close` that balances `depth` consumed `open`s and
-    /// lex what lies between as commands. Used for subscripts, extglobs and
-    /// `${ …; }`, so a `<<` shift inside is never read as a here-document.
+    /// lex what lies between as commands. Used for extglobs and `${ …; }`,
+    /// so a `<<` shift inside is never read as a here-document.
     fn balanced(&mut self, open: char, close: char, depth: usize) -> Result<(), TooDeep> {
         let src = self.src;
         let span = self.balanced_span(open, close, depth);
-        self.nested(&src[span.text], false)
+        self.nested(&src[span.text])
+    }
+
+    fn bracketed_arithmetic(&mut self) -> Result<&'s str, TooDeep> {
+        let src = self.src;
+        let span = self.balanced_span('[', ']', 1);
+        let expression = &src[span.text];
+        self.expansions_in(expression)?;
+        Ok(expression)
+    }
+
+    fn assigned_subscript(&mut self, subscript: &str) {
+        let rest = &self.src[self.pos..];
+        if rest.starts_with('=') || rest.starts_with("+=") {
+            self.out.arithmetic.push(subscript.to_string());
+        }
     }
 
     /// After `((` or `$((`: an arithmetic expression or, as bash reads it
@@ -375,7 +433,12 @@ impl<'s, 'o> Lexer<'s, 'o> {
     fn double_parens(&mut self) -> Result<(), TooDeep> {
         let src = self.src;
         let span = self.balanced_span('(', ')', 2);
-        self.nested(&src[span.text], span.closes_together)
+        let text = &src[span.text];
+        if !span.closes_together {
+            return self.nested(text);
+        }
+        self.out.arithmetic.push(text.to_string());
+        self.expansions_in(text)
     }
 
     /// Consume up to the `close` that balances `depth` consumed `open`s.
@@ -428,6 +491,11 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 }
                 Some(' ' | '\t' | '\n') => self.skip(1),
                 Some('#') => self.skip_comment(),
+                Some('[') => {
+                    self.skip(1);
+                    let subscript = self.bracketed_arithmetic()?;
+                    self.assigned_subscript(subscript);
+                }
                 Some(_) => {
                     let before = self.pos;
                     self.word()?;
@@ -481,7 +549,8 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 '[' if buf.is_bare_name() => {
                     let start = self.pos;
                     self.skip(1);
-                    self.balanced('[', ']', 1)?;
+                    let subscript = self.bracketed_arithmetic()?;
+                    self.assigned_subscript(subscript);
                     buf.expansion(&src[start..self.pos], true);
                 }
                 '(' => break,
@@ -513,16 +582,9 @@ impl<'s, 'o> Lexer<'s, 'o> {
         let src = self.src;
         let start = self.pos;
         self.skip(2);
-        self.substitution()?;
+        self.commands(true)?;
         buf.expansion(&src[start..self.pos], true);
         Ok(())
-    }
-
-    fn substitution(&mut self) -> Result<(), TooDeep> {
-        let arithmetic = mem::take(&mut self.arithmetic);
-        let lexed = self.commands(true);
-        self.arithmetic = arithmetic;
-        lexed
     }
 
     fn single_quoted(&mut self, buf: &mut WordBuf) {
@@ -604,7 +666,8 @@ impl<'s, 'o> Lexer<'s, 'o> {
             }
             Some('[') => {
                 self.skip(1);
-                self.balanced('[', ']', 1)?;
+                let expression = self.bracketed_arithmetic()?;
+                self.out.arithmetic.push(expression.to_string());
             }
             Some('{') if matches!(self.peek_at(1), Some(' ' | '\t' | '\n' | '|')) => {
                 self.skip(1);
@@ -612,7 +675,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
             }
             Some('(') => {
                 self.skip(1);
-                self.substitution()?;
+                self.commands(true)?;
             }
             Some('{') => {
                 self.skip(1);
@@ -637,19 +700,65 @@ impl<'s, 'o> Lexer<'s, 'o> {
         Ok(Some(!quoted))
     }
 
-    /// Consume a `${…}` body, lexing the substitutions inside it.
+    /// Consume a `${…}` body, lexing the substitutions inside it and
+    /// recording it in [`Script::parameters`]. A subscript or substring
+    /// offset is arithmetic, so quotes inside it hide nothing.
     fn braced(&mut self, quoted: bool) -> Result<(), TooDeep> {
         self.descend()?;
+        let src = self.src;
+        let start = self.pos;
+        self.parameter_reference()?;
+        let end = if self.at_offset() {
+            self.skip(1);
+            let span = self.balanced_span('{', '}', 1);
+            let end = span.text.end;
+            self.expansions_in(&src[span.text])?;
+            end
+        } else {
+            self.parameter_operation(quoted)?
+        };
+        self.out.parameters.push(src[start..end].to_string());
+        self.depth -= 1;
+        Ok(())
+    }
+
+    fn parameter_reference(&mut self) -> Result<(), TooDeep> {
+        while matches!(self.peek(), Some('!' | '#')) {
+            self.skip(1);
+        }
+        let name_start = self.pos;
+        while self
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            self.skip(1);
+        }
+        if self.pos == name_start && self.peek().is_some_and(|c| "@*?-$!".contains(c)) {
+            self.skip(1);
+        }
+        if self.peek() == Some('[') {
+            self.skip(1);
+            self.bracketed_arithmetic()?;
+        }
+        Ok(())
+    }
+
+    fn at_offset(&self) -> bool {
+        self.peek() == Some(':') && !matches!(self.peek_at(1), Some('-' | '=' | '?' | '+'))
+    }
+
+    fn parameter_operation(&mut self, quoted: bool) -> Result<usize, TooDeep> {
         let mut scratch = WordBuf::default();
         loop {
             let Some(c) = self.peek() else {
                 self.incomplete = true;
-                break;
+                return Ok(self.src.len());
             };
             match c {
                 '}' => {
+                    let end = self.pos;
                     self.skip(1);
-                    break;
+                    return Ok(end);
                 }
                 '\\' => self.skip(2),
                 '\'' if !quoted => {
@@ -665,8 +774,6 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 _ => self.skip(1),
             }
         }
-        self.depth -= 1;
-        Ok(())
     }
 
     fn ansi_c(&mut self) {
@@ -709,7 +816,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 Some(c) => body.push(c),
             }
         }
-        self.nested(&body, false)?;
+        self.nested(&body)?;
         buf.expansion(&src[start..self.pos], !quoted);
         Ok(())
     }
@@ -838,6 +945,24 @@ pub(super) fn parse(src: &str) -> Result<Script, TooDeep> {
 pub(super) fn is_name(text: &str) -> bool {
     text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn opens_conditional(words: &[Word]) -> bool {
+    let Some((last, before)) = words.split_last() else {
+        return false;
+    };
+    is_bare(last, "[[")
+        && before.iter().enumerate().all(|(at, word)| {
+            BEFORE_CONDITIONAL
+                .iter()
+                .any(|keyword| is_bare(word, keyword))
+                || (is_bare(word, "-p") && at > 0 && is_bare(&before[at - 1], "time"))
+        })
+}
+
+/// Whether `word` is `text`, unquoted and known before run time.
+fn is_bare(word: &Word, text: &str) -> bool {
+    !word.quoted && !word.dynamic && word.text == text
 }
 
 /// A `>&` or `<&` target that names a file descriptor to duplicate or

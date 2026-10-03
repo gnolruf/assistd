@@ -31,7 +31,7 @@ pub struct SwayBackend {
 #[derive(Debug)]
 pub struct SwayHandle {
     pub backend: Arc<SwayBackend>,
-    supervisor_task: JoinHandle<()>,
+    pub(crate) supervisor_task: JoinHandle<()>,
 }
 
 impl SwayHandle {

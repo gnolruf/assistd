@@ -8,6 +8,7 @@ use std::num::NonZeroU64;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use tokio::task::JoinHandle;
 
 pub mod criteria;
 pub mod error;
@@ -70,11 +71,15 @@ impl WmHandle {
     /// Awaits the supervisor task. Flip the shutdown watch first or
     /// this blocks until the compositor connection drops.
     pub async fn shutdown(self) {
+        let _ = self.into_supervisor_task().await;
+    }
+
+    fn into_supervisor_task(self) -> JoinHandle<()> {
         match self {
             #[cfg(feature = "i3")]
-            Self::I3(handle) => handle.shutdown().await,
+            Self::I3(handle) => handle.supervisor_task,
             #[cfg(feature = "sway")]
-            Self::Sway(handle) => handle.shutdown().await,
+            Self::Sway(handle) => handle.supervisor_task,
         }
     }
 }
