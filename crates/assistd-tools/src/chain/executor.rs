@@ -8,14 +8,24 @@ use super::expand::{ExpandError, expand_args};
 use super::{Chain, Word};
 use crate::command::{CommandInput, CommandOutput, CommandRegistry, Hint, error_line};
 
-/// Maximum bytes buffered between pipe stages. Overflow exits 141, the
-/// SIGPIPE code, so `||` fallbacks still fire.
-pub const PIPE_BUF_MAX: usize = 10 * 1024 * 1024;
+/// Most bytes of stdout, or of stderr, that one stage or a whole chain may
+/// hold. Overflow exits 141, the SIGPIPE code, so `||` fallbacks still fire.
+pub const OUTPUT_MAX: usize = 10 * 1024 * 1024;
 
 /// Execute a parsed chain. Pipes run sequentially, the left stage's stdout
-/// (capped at [`PIPE_BUF_MAX`]) becoming the right's stdin; every stage's
-/// stderr lines are kept, prefixed `[name]\t`. Short-circuited stages emit nothing.
+/// becoming the right's stdin; every stage's stderr lines are kept, prefixed
+/// `[name]\t`. Short-circuited stages emit nothing. A pipe stage whose stdout
+/// passes [`OUTPUT_MAX`] stops the pipe; any other output past it, including
+/// the streams `;`, `&&` and `||` join, is replaced by an overflow failure.
 pub fn execute<'a>(
+    chain: &'a Chain,
+    registry: &'a CommandRegistry,
+    stdin: Option<Vec<u8>>,
+) -> Pin<Box<dyn Future<Output = CommandOutput> + Send + 'a>> {
+    Box::pin(async move { within_output_max(execute_uncapped(chain, registry, stdin).await) })
+}
+
+fn execute_uncapped<'a>(
     chain: &'a Chain,
     registry: &'a CommandRegistry,
     stdin: Option<Vec<u8>>,
@@ -24,12 +34,12 @@ pub fn execute<'a>(
         match chain {
             Chain::Command(argv) => run_command(argv, registry, stdin).await,
             Chain::Pipe(l, r) => {
-                let mut left = execute(l, registry, stdin).await;
+                let mut left = execute_uncapped(l, registry, stdin).await;
                 let piped = std::mem::take(&mut left.stdout);
-                if piped.len() > PIPE_BUF_MAX {
+                if piped.len() > OUTPUT_MAX {
                     return left.then(pipe_overflow());
                 }
-                let right = execute(r, registry, Some(piped)).await;
+                let right = execute_uncapped(r, registry, Some(piped)).await;
                 left.then(right)
             }
             Chain::And(l, r) | Chain::Or(l, r) => {
@@ -50,12 +60,37 @@ pub fn execute<'a>(
     })
 }
 
+fn within_output_max(mut out: CommandOutput) -> CommandOutput {
+    if out.stdout.len() <= OUTPUT_MAX && out.stderr.len() <= OUTPUT_MAX {
+        return out;
+    }
+    out.stdout.clear();
+    out.stderr.truncate(last_line_end_within_max(&out.stderr));
+    out.then(CommandOutput::failed(
+        141,
+        error_line(
+            "run",
+            format_args!("output exceeded {OUTPUT_MAX} bytes"),
+            Hint::Try,
+            "fewer files per command, or grep -l / grep -c to find what matters first",
+        )
+        .into_bytes(),
+    ))
+}
+
+fn last_line_end_within_max(stream: &[u8]) -> usize {
+    stream[..stream.len().min(OUTPUT_MAX)]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |newline| newline + 1)
+}
+
 fn pipe_overflow() -> CommandOutput {
     CommandOutput::failed(
         141,
         error_line(
             "pipe",
-            format_args!("stage output exceeded {PIPE_BUF_MAX} bytes"),
+            format_args!("stage output exceeded {OUTPUT_MAX} bytes"),
             Hint::Try,
             "pipe through wc -l or head first to shrink the stream",
         )

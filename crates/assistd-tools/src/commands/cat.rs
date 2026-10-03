@@ -1,6 +1,7 @@
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
+use crate::chain::OUTPUT_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::commands::{read_regular_file, read_regular_head};
 
@@ -70,6 +71,9 @@ impl Command for CatCommand {
             match chunk {
                 Ok(bytes) => out.extend_from_slice(&bytes),
                 Err(failure) => return failure,
+            }
+            if out.len() > OUTPUT_MAX {
+                break;
             }
         }
         CommandOutput::ok(number_if(out, &flags))

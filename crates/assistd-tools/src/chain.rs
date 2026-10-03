@@ -5,7 +5,7 @@ pub mod executor;
 pub mod expand;
 pub mod parser;
 
-pub use executor::{PIPE_BUF_MAX, execute};
+pub use executor::{OUTPUT_MAX, execute};
 pub use expand::expand_args;
 pub use parser::{ParseError, Redirection, parse_chain};
 

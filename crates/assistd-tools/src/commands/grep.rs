@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use regex::{Regex, RegexBuilder};
 
+use crate::chain::OUTPUT_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::commands::cat::sniff_binary;
 use crate::commands::read_regular_file;
@@ -295,6 +296,9 @@ async fn search_files(re: &Regex, flags: &Flags, targets: &[PathBuf]) -> Command
             out.extend_from_slice(format!("{display}:{count}\n").as_bytes());
         }
         total += count;
+        if out.len() > OUTPUT_MAX {
+            break;
+        }
     }
     let stdout = if flags.count_only && !flags.files_only && !label_lines {
         format!("{total}\n").into_bytes()
@@ -327,7 +331,12 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
             if flags.has_context() && starts_group && !out.is_empty() {
                 out.extend_from_slice(b"--\n");
             }
-            (first..index).for_each(|before| output_line(before, false).write_to(out));
+            for before in first..index {
+                output_line(before, false).write_to(out);
+                if out.len() > OUTPUT_MAX {
+                    break;
+                }
+            }
             output_line(index, true).write_to(out);
             trailing = flags.after;
         } else if trailing > 0 {
@@ -337,6 +346,9 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
             continue;
         }
         next_unprinted = index + 1;
+        if out.len() > OUTPUT_MAX {
+            break;
+        }
     }
     count
 }
@@ -665,6 +677,24 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
             format!("[error] grep: {root} is a directory. Use: grep -r PATTERN {root}\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn output_stops_growing_once_past_output_max() {
+        let dir = tempdir().expect("tempdir");
+        let line = format!("{}\n", "x".repeat(1024 * 1024));
+        let path_of = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let (first, second, never_read) = (path_of("a.txt"), path_of("b.txt"), path_of("c.txt"));
+        std::fs::write(&first, line.repeat(6)).expect("a");
+        std::fs::write(&second, line.repeat(6)).expect("b");
+        std::fs::write(&never_read, &line).expect("c");
+        let out = run_grep(&["x", &first, &second, &never_read], b"").await;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.len() <= OUTPUT_MAX + second.len() + line.len() + 1);
+        assert!(
+            !stdout.contains(&never_read),
+            "third file must not be searched"
         );
     }
 

@@ -112,6 +112,7 @@ fn unsupported(flag: &str) -> CommandOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::OUTPUT_MAX;
 
     async fn run_wc(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
         WcCommand
@@ -170,6 +171,22 @@ mod tests {
         .await;
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.stdout, b"2\n");
+    }
+
+    #[tokio::test]
+    async fn files_past_output_max_together_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let half = vec![b'a'; OUTPUT_MAX / 2 + 1];
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, &half).unwrap();
+        std::fs::write(&second, &half).unwrap();
+        let out = run_wc(&[first.to_str().unwrap(), second.to_str().unwrap()], None).await;
+        assert_eq!(out.exit_code, 1);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "[error] wc: files together exceed the 10.0MB read limit. Try: fewer files per wc\n"
+        );
     }
 
     #[tokio::test]
