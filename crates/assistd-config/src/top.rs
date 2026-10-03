@@ -325,7 +325,7 @@ fn validate_mcp(errors: &mut Vec<String>, mcp: &McpConfig) {
     }
     let mut seen_names: HashSet<&str> = HashSet::new();
     for (i, server) in mcp.servers.iter().enumerate() {
-        let name = server.name();
+        let name = server.name.as_str();
         if name.is_empty() {
             errors.push(format!("mcp.servers[{i}].name must not be empty"));
         } else if !seen_names.insert(name) {

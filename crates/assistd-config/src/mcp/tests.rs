@@ -8,7 +8,6 @@ fn parses_stdio_server_minimally() {
 
         [[servers]]
         name = "filesystem"
-        transport = "stdio"
         command = "npx"
         args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     "#;
@@ -17,7 +16,7 @@ fn parses_stdio_server_minimally() {
         cfg,
         McpConfig {
             enabled: true,
-            servers: vec![McpServerConfig::Stdio {
+            servers: vec![McpServerConfig {
                 name: "filesystem".into(),
                 command: "npx".into(),
                 args: vec![
@@ -33,63 +32,18 @@ fn parses_stdio_server_minimally() {
 }
 
 #[test]
-fn parses_sse_server_minimally() {
+fn keys_of_the_removed_sse_transport_are_unknown() {
     let toml = r#"
-        enabled = true
-
-        [[servers]]
-        name = "remote"
-        transport = "sse"
-        url = "https://mcp.example.com/sse"
-
-        [servers.headers]
-        Authorization = "Bearer xyz"
-    "#;
-    let cfg: McpConfig = toml::from_str(toml).unwrap();
-    assert_eq!(
-        cfg,
-        McpConfig {
-            enabled: true,
-            servers: vec![McpServerConfig::Sse {
-                name: "remote".into(),
-                url: Url::parse("https://mcp.example.com/sse").unwrap(),
-                headers: HashMap::from([("Authorization".into(), "Bearer xyz".into())]),
-                request_timeout_secs: DEFAULT_MCP_REQUEST_TIMEOUT_SECS,
-            }],
-        }
-    );
-}
-
-#[test]
-fn transport_specific_keys_do_not_cross_variants() {
-    let stdio_with_url = r#"
         [[mcp.servers]]
         name = "x"
         transport = "stdio"
         command = "npx"
         url = "https://example.com/sse"
     "#;
-    assert_eq!(unknown_keys(stdio_with_url), ["mcp.servers[0].url"]);
-
-    let sse_with_command = r#"
-        [[mcp.servers]]
-        name = "x"
-        transport = "sse"
-        url = "https://example.com/sse"
-        command = "npx"
-    "#;
-    assert_eq!(unknown_keys(sse_with_command), ["mcp.servers[0].command"]);
-}
-
-#[test]
-fn malformed_url_is_rejected_at_load() {
-    let toml = r#"
-        [[servers]]
-        name = "x"
-        transport = "sse"
-        url = "not a url"
-    "#;
-    toml::from_str::<McpConfig>(toml).expect_err("a malformed url must not parse");
+    assert_eq!(
+        unknown_keys(toml),
+        ["mcp.servers[0].transport", "mcp.servers[0].url"]
+    );
 }
 
 #[test]
@@ -97,7 +51,6 @@ fn zero_request_timeout_is_rejected_at_load() {
     let toml = r#"
         [[servers]]
         name = "x"
-        transport = "stdio"
         command = "npx"
         request_timeout_secs = 0
     "#;
@@ -115,22 +68,11 @@ fn debug_lists_secret_names_but_not_values() {
     let toml = r#"
         [[servers]]
         name = "local"
-        transport = "stdio"
         command = "server"
         env = { API_TOKEN = "stdio-secret" }
-
-        [[servers]]
-        name = "remote"
-        transport = "sse"
-        url = "http://127.0.0.1:1/sse"
-        headers = { Authorization = "sse-secret" }
     "#;
     let cfg: McpConfig = toml::from_str(toml).unwrap();
     let rendered = format!("{cfg:?}");
-    for name in ["API_TOKEN", "Authorization"] {
-        assert!(rendered.contains(name), "{rendered}");
-    }
-    for secret in ["stdio-secret", "sse-secret"] {
-        assert!(!rendered.contains(secret), "{rendered}");
-    }
+    assert!(rendered.contains("API_TOKEN"), "{rendered}");
+    assert!(!rendered.contains("stdio-secret"), "{rendered}");
 }

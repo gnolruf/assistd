@@ -40,7 +40,6 @@ pub(super) struct ToolDeps<'a> {
 pub(super) async fn init(
     config: &Config,
     config_path: &Path,
-    shutdown_tx: &watch::Sender<bool>,
     deps: ToolDeps<'_>,
 ) -> Result<ToolsSubsystem> {
     let sandbox = match assistd_core::probe_tool_sandbox(config, config_path)? {
@@ -58,7 +57,7 @@ pub(super) async fn init(
         gate.clone(),
         Arc::new(assistd_core::mcp_tool_approvals(config_path)?),
     );
-    let mut mcp = mcp_init::init(config, shutdown_tx, &mcp_approvals).await;
+    let mut mcp = mcp_init::init(config, &mcp_approvals).await;
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let registry = assistd_core::build_tools(BuildToolsDeps {
         config,

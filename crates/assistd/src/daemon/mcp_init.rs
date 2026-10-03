@@ -1,28 +1,26 @@
 //! MCP subsystem wiring for the daemon.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_core::{Config, McpServerConfig, McpStartupFailure};
-use assistd_mcp::{
-    McpServerHandle, SseConfig, StdioConfig, TransportConfig, adapt_handle_as_tools,
-};
+use assistd_mcp::{McpServer, StdioConfig, adapt_client_as_tools};
 use assistd_tools::presentation::PresentSpec;
-use assistd_tools::{ApprovalGate, MCP_TOOL_NAME_PREFIX, Tool};
-use tokio::sync::watch;
+use assistd_tools::{ApprovalGate, Tool};
 use tracing::info;
 
 #[derive(Default)]
 pub(super) struct McpSubsystem {
-    pub handles: Vec<McpServerHandle>,
+    pub servers: Vec<Arc<McpServer>>,
     pub tools: Vec<Box<dyn Tool>>,
     pub startup_failures: Vec<McpStartupFailure>,
 }
 
 impl McpSubsystem {
     pub(super) async fn shutdown(self) {
-        for handle in self.handles {
-            handle.shutdown().await;
+        for server in self.servers {
+            server.shutdown().await;
         }
     }
 }
@@ -30,11 +28,7 @@ impl McpSubsystem {
 /// Start every configured MCP server, whose tools ask before each call
 /// unless `approvals` holds them. A server that fails to start or to
 /// list its tools is recorded in `startup_failures` and skipped.
-pub(super) async fn init(
-    config: &Config,
-    shutdown_tx: &watch::Sender<bool>,
-    approvals: &ApprovalGate,
-) -> McpSubsystem {
+pub(super) async fn init(config: &Config, approvals: &ApprovalGate) -> McpSubsystem {
     let mut subsystem = McpSubsystem::default();
     if !config.mcp.enabled {
         info!("mcp: disabled in config (mcp.enabled = false)");
@@ -44,12 +38,10 @@ pub(super) async fn init(
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let output = PresentSpec::from_config(&config.tools.output, overflow_dir);
     for server in &config.mcp.servers {
-        let started =
-            start_server(server, output.clone(), shutdown_tx.subscribe(), approvals).await;
-        match started {
-            Ok((handle, tools)) => {
+        match start_server(server, output.clone(), approvals).await {
+            Ok((server, tools)) => {
                 subsystem.tools.extend(tools);
-                subsystem.handles.push(handle);
+                subsystem.servers.push(server);
             }
             Err(failure) => subsystem.startup_failures.push(failure),
         }
@@ -62,70 +54,45 @@ pub(super) async fn init(
 async fn start_server(
     server: &McpServerConfig,
     output: PresentSpec,
-    shutdown: watch::Receiver<bool>,
     approvals: &ApprovalGate,
-) -> Result<(McpServerHandle, Vec<Box<dyn Tool>>), McpStartupFailure> {
-    let transport = build_transport_config(server);
-    let label = server.name().to_string();
-    let handle = match McpServerHandle::start(label.clone(), transport, shutdown).await {
-        Ok(handle) => handle,
+) -> Result<(Arc<McpServer>, Vec<Box<dyn Tool>>), McpStartupFailure> {
+    let name = server.name.clone();
+    let started = match McpServer::start(name.clone(), stdio_config(server)).await {
+        Ok(started) => Arc::new(started),
         Err(e) => {
             let reason = format!("failed to start: {e:#}");
-            tracing::warn!("mcp: {label} {reason}; skipping");
+            tracing::warn!("mcp: {name} {reason}; skipping");
             return Err(McpStartupFailure {
-                server_name: label,
+                server_name: name,
                 reason,
             });
         }
     };
 
-    let prefix = format!("{MCP_TOOL_NAME_PREFIX}{}", handle.name);
-    match adapt_handle_as_tools(&handle, &prefix, output, approvals).await {
+    match adapt_client_as_tools(started.clone(), &name, output, approvals).await {
         Ok(tools) => {
-            info!(
-                "mcp: {} ready ({} tools, transport={})",
-                handle.name,
-                tools.len(),
-                server.transport()
-            );
-            Ok((handle, tools))
+            info!("mcp: {name} ready ({} tools)", tools.len());
+            Ok((started, tools))
         }
         Err(e) => {
             let reason = format!("discovery failed: {e:#}");
-            tracing::warn!("mcp: {} {reason}; shutting down server", handle.name);
-            let failure = McpStartupFailure {
-                server_name: handle.name.clone(),
+            tracing::warn!("mcp: {name} {reason}; shutting down server");
+            started.shutdown().await;
+            Err(McpStartupFailure {
+                server_name: name,
                 reason,
-            };
-            handle.shutdown().await;
-            Err(failure)
+            })
         }
     }
 }
 
-fn build_transport_config(server: &McpServerConfig) -> TransportConfig {
-    let request_timeout = Duration::from_secs(server.request_timeout_secs().get());
-    match server {
-        McpServerConfig::Stdio {
-            name,
-            command,
-            args,
-            env,
-            ..
-        } => {
-            let mut stdio = StdioConfig::new(name.clone(), command.to_string_lossy().into_owned());
-            stdio.args.clone_from(args);
-            stdio.env.clone_from(env);
-            stdio.request_timeout = request_timeout;
-            TransportConfig::Stdio(stdio)
-        }
-        McpServerConfig::Sse {
-            name, url, headers, ..
-        } => {
-            let mut sse = SseConfig::new(name.clone(), url.to_string());
-            sse.headers.clone_from(headers);
-            sse.request_timeout = request_timeout;
-            TransportConfig::Sse(sse)
-        }
-    }
+fn stdio_config(server: &McpServerConfig) -> StdioConfig {
+    let mut stdio = StdioConfig::new(
+        server.name.clone(),
+        server.command.to_string_lossy().into_owned(),
+    );
+    stdio.args.clone_from(&server.args);
+    stdio.env.clone_from(&server.env);
+    stdio.request_timeout = Duration::from_secs(server.request_timeout_secs.get());
+    stdio
 }

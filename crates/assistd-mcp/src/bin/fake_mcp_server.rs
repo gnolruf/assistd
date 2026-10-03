@@ -1,9 +1,10 @@
 //! Minimal MCP server fixture: newline-delimited JSON-RPC on
 //! stdin/stdout, answering `initialize`, `ping`, `tools/list` and
-//! `tools/call` for the `echo`, `crash_me`, `flood_stdout`,
-//! `spawn_orphan_and_crash` and `env_names` tools.
+//! `tools/call` for the `echo`, `crash_me`, `never_answers`,
+//! `close_stdout`, `spawn_orphan_and_crash` and `env_names` tools.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
 use serde_json::{Value, json};
@@ -132,8 +133,13 @@ fn tools_list(id: &Value) -> Value {
                     "inputSchema": {"type": "object", "properties": {}}
                 },
                 {
-                    "name": "flood_stdout",
-                    "description": "writes one oversized line and stays alive",
+                    "name": "never_answers",
+                    "description": "accepts the call and never replies",
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "close_stdout",
+                    "description": "closes stdout without answering and stays alive",
                     "inputSchema": {"type": "object", "properties": {}}
                 },
                 {
@@ -174,10 +180,8 @@ fn call_tool(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
             }))
         }
         "crash_me" => std::process::exit(0),
-        "flood_stdout" => {
-            flood_stdout(out);
-            None
-        }
+        "never_answers" => None,
+        "close_stdout" => close_stdout(),
         "spawn_orphan_and_crash" => {
             let orphan = spawn_orphan();
             let response = json!({
@@ -217,13 +221,12 @@ fn env_names(id: &Value) -> Value {
     })
 }
 
-/// Overshoot the client's 1 MiB line cap by less than a pipe buffer, so
-/// the write completes and this process keeps reading stdin.
-fn flood_stdout(out: &mut impl Write) {
-    let mut junk = vec![b'x'; 1024 * 1024 + 1024];
-    junk.push(b'\n');
-    let _ = out.write_all(&junk);
-    let _ = out.flush();
+fn close_stdout() -> ! {
+    let err = std::process::Command::new("sleep")
+        .arg("300")
+        .stdout(Stdio::null())
+        .exec();
+    panic!("exec sleep: {err}");
 }
 
 fn write_line(out: &mut impl Write, response: &Value) -> std::io::Result<()> {

@@ -1,91 +1,48 @@
-//! MCP (Model Context Protocol) client. A server is reached over stdio
-//! or HTTP+SSE, supervised by [`McpServerHandle`], and each tool it
-//! exposes becomes a [`Tool`] via [`adapt_handle_as_tools`].
+//! MCP (Model Context Protocol) client. Each server runs as a child
+//! process managed by [`McpServer`], and each tool it exposes becomes a
+//! [`Tool`] via [`adapt_client_as_tools`].
 
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
 use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
-use assistd_tools::{ApprovalGate, ConfirmationRequest, Tool, ToolError};
+use assistd_tools::{ApprovalGate, ConfirmationRequest, MCP_TOOL_NAME_PREFIX, Tool, ToolError};
 use async_trait::async_trait;
-use base64::Engine;
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 
-pub mod error;
-pub mod handle;
-pub mod health_route;
-pub mod jsonrpc;
-mod protocol;
-pub mod sse;
-pub mod stdio;
+mod error;
+mod server;
+mod stdio;
 
 pub use error::{McpError, mcp_error_line};
-pub use handle::{HealthState, McpServerHandle, SwitchingClient, TransportConfig};
-pub use health_route::HealthRoutedTool;
-pub use sse::{SseConfig, SseLifeline, SseMcpClient};
-pub use stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
-
-/// One tool exposed by an MCP server.
-#[derive(Debug, Clone)]
-pub struct ToolSchema {
-    /// Server-native tool name, without any registry prefix.
-    pub name: String,
-    pub description: String,
-    /// JSON Schema for the `arguments` object, forwarded verbatim.
-    pub input_schema: Value,
-}
-
-/// Result of an MCP tool invocation.
-#[derive(Debug, Clone)]
-pub enum ToolResult {
-    Text(String),
-    Image { mime: String, bytes: Vec<u8> },
-    Json(Value),
-}
+pub use server::McpServer;
+pub use stdio::StdioConfig;
 
 /// A connection to a single MCP server.
 #[async_trait]
 pub trait McpClient: fmt::Debug + Send + Sync + 'static {
     /// Every tool the server currently exposes. Safe to call concurrently.
-    async fn list_tools(&self) -> Result<Vec<ToolSchema>, McpError>;
+    async fn list_tools(&self) -> Result<Vec<rmcp::model::Tool>, McpError>;
 
     /// Invoke the server-native tool `name` with `arguments`.
-    async fn invoke(&self, name: &str, arguments: Value) -> Result<ToolResult, McpError>;
+    async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError>;
 }
 
 /// Exposes one MCP tool as a [`Tool`] under `registry_name`; the
-/// server-native name stays in `schema.name`. Each call asks the user
+/// server-native name stays in `tool.name`. Each call asks the user
 /// first until the tool is approved for good.
 #[derive(Debug)]
-pub struct McpToolAdapter {
+struct McpToolAdapter {
     client: Arc<dyn McpClient>,
-    schema: ToolSchema,
+    tool: rmcp::model::Tool,
     registry_name: String,
     truncator: Arc<TextTruncator>,
     approvals: ApprovalGate,
 }
 
 impl McpToolAdapter {
-    /// Adapter that invokes `schema.name` on `client`, asking first unless
-    /// `approvals` holds the tool, and cutting text and JSON results with
-    /// `truncator` before they reach the model.
-    pub fn new(
-        client: Arc<dyn McpClient>,
-        schema: ToolSchema,
-        registry_name: String,
-        truncator: Arc<TextTruncator>,
-        approvals: ApprovalGate,
-    ) -> Self {
-        Self {
-            client,
-            schema,
-            registry_name,
-            truncator,
-            approvals,
-        }
-    }
-
     /// Whether the user allows this call with `args`; "always" approves
     /// the tool for good.
     async fn confirmed(&self, args: &Value) -> bool {
@@ -108,11 +65,11 @@ impl Tool for McpToolAdapter {
     }
 
     fn description(&self) -> &str {
-        &self.schema.description
+        self.tool.description.as_deref().unwrap_or_default()
     }
 
     fn parameters_schema(&self) -> Value {
-        self.schema.input_schema.clone()
+        self.tool.schema_as_json_value()
     }
 
     /// Always `Ok`: a declined or failed call becomes an error envelope.
@@ -121,13 +78,39 @@ impl Tool for McpToolAdapter {
             return Ok(declined_envelope(&self.registry_name));
         }
         let start = Instant::now();
-        let outcome = self.client.invoke(&self.schema.name, args).await;
+        let outcome = self.client.invoke(&self.tool.name, args).await;
         let duration_ms = start.elapsed().as_millis();
         match outcome {
             Ok(result) => Ok(tool_result_to_json(result, duration_ms, &self.truncator)),
             Err(err) => Ok(error_envelope(&self.registry_name, &err, duration_ms)),
         }
     }
+}
+
+/// [`Tool`] entries for every tool `client` exposes, named
+/// `mcp__<server_name>__<tool>`. Results past `output`'s caps are cut, with
+/// the overflow spilled as `mcp-<server_name>-<n>.txt`. Each call asks
+/// first unless `approvals` holds the tool.
+pub async fn adapt_client_as_tools(
+    client: Arc<dyn McpClient>,
+    server_name: &str,
+    output: PresentSpec,
+    approvals: &ApprovalGate,
+) -> Result<Vec<Box<dyn Tool>>, McpError> {
+    let tools = client.list_tools().await?;
+    let truncator = Arc::new(TextTruncator::new(output, format!("mcp-{server_name}")));
+    Ok(tools
+        .into_iter()
+        .map(|tool| {
+            Box::new(McpToolAdapter {
+                client: client.clone(),
+                registry_name: format!("{MCP_TOOL_NAME_PREFIX}{server_name}__{}", tool.name),
+                tool,
+                truncator: truncator.clone(),
+                approvals: approvals.clone(),
+            }) as Box<dyn Tool>
+        })
+        .collect())
 }
 
 /// Same shape as a successful result, with `exit_code: -1` and an
@@ -155,31 +138,39 @@ fn declined_envelope(tool_name: &str) -> Value {
     })
 }
 
-/// Render a [`ToolResult`] as the tool-result envelope; text and JSON
-/// bodies are cut by `truncator`, an image goes into
-/// `attachments[].data` as base64.
-fn tool_result_to_json(result: ToolResult, duration_ms: u128, truncator: &TextTruncator) -> Value {
-    match result {
-        ToolResult::Text(text) => text_envelope("text", truncator.truncate(text), duration_ms),
-        ToolResult::Json(value) => {
+/// Render the first content block of `result` as the tool-result
+/// envelope. Text and JSON bodies are cut by `truncator`, an `isError`
+/// text is prefixed, and an image goes into `attachments[]` as is.
+fn tool_result_to_json(
+    result: CallToolResult,
+    duration_ms: u128,
+    truncator: &TextTruncator,
+) -> Value {
+    match result.content.into_iter().next() {
+        None => text_envelope("text", truncator.truncate(String::new()), duration_ms),
+        Some(ContentBlock::Text(text)) => {
+            let text = match result.is_error {
+                Some(true) => format!("[mcp tool error] {}", text.text),
+                _ => text.text,
+            };
+            text_envelope("text", truncator.truncate(text), duration_ms)
+        }
+        Some(ContentBlock::Image(image)) => json!({
+            "type": "image",
+            "output": format!("(image: {})", image.mime_type),
+            "exit_code": 0,
+            "duration_ms": duration_ms,
+            "truncated": false,
+            "attachments": [
+                {"type": "image", "mime": image.mime_type, "data": image.data}
+            ],
+        }),
+        Some(other) => {
+            let value = serde_json::to_value(other).unwrap_or_default();
             let mut envelope =
                 text_envelope("json", truncator.truncate(value.to_string()), duration_ms);
             envelope["value"] = value;
             envelope
-        }
-        ToolResult::Image { mime, bytes } => {
-            let len = bytes.len();
-            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            json!({
-                "type": "image",
-                "output": format!("(image: {mime}, {len} bytes)"),
-                "exit_code": 0,
-                "duration_ms": duration_ms,
-                "truncated": false,
-                "attachments": [
-                    {"type": "image", "mime": mime, "data": data_b64}
-                ],
-            })
         }
     }
 }
@@ -196,72 +187,6 @@ fn text_envelope(kind: &str, cut: TruncatedText, duration_ms: u128) -> Value {
         envelope["overflow_file"] = json!(path.to_string_lossy());
     }
     envelope
-}
-
-/// [`Tool`] entries for every tool the server exposes, named
-/// `<name_prefix>__<tool>` and gated on the supervisor's health. Results
-/// past `output`'s caps are cut, with the overflow spilled as
-/// `mcp-<server>-<n>.txt`. Each call asks first unless `approvals` holds
-/// the tool.
-pub async fn adapt_handle_as_tools(
-    handle: &McpServerHandle,
-    name_prefix: &str,
-    output: PresentSpec,
-    approvals: &ApprovalGate,
-) -> Result<Vec<Box<dyn Tool>>, McpError> {
-    let client = handle.client();
-    let schemas = client.list_tools().await?;
-    let health_rx = handle.watch_health();
-    let server_name = handle.name.clone();
-    let truncator = Arc::new(TextTruncator::new(output, format!("mcp-{server_name}")));
-
-    let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(schemas.len());
-    for schema in schemas {
-        let registry_name = registry_name(name_prefix, &schema.name);
-        let adapter = McpToolAdapter::new(
-            client.clone(),
-            schema,
-            registry_name,
-            truncator.clone(),
-            approvals.clone(),
-        );
-        let routed = HealthRoutedTool::new(adapter, server_name.clone(), health_rx.clone());
-        tools.push(Box::new(routed));
-    }
-    Ok(tools)
-}
-
-#[cfg(test)]
-async fn adapt_client_as_tools(
-    client: Arc<dyn McpClient>,
-    name_prefix: &str,
-    output: PresentSpec,
-    approvals: &ApprovalGate,
-) -> Result<Vec<Box<dyn Tool>>, McpError> {
-    let schemas = client.list_tools().await?;
-    let truncator = Arc::new(TextTruncator::new(output, "mcp-test"));
-    Ok(schemas
-        .into_iter()
-        .map(|schema| {
-            let name = registry_name(name_prefix, &schema.name);
-            let adapter = McpToolAdapter::new(
-                client.clone(),
-                schema,
-                name,
-                truncator.clone(),
-                approvals.clone(),
-            );
-            Box::new(adapter) as Box<dyn Tool>
-        })
-        .collect())
-}
-
-fn registry_name(prefix: &str, server_native: &str) -> String {
-    if prefix.is_empty() {
-        server_native.to_string()
-    } else {
-        format!("{prefix}__{server_native}")
-    }
 }
 
 #[cfg(test)]

@@ -6,33 +6,60 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_mcp::{
-    HealthState, McpClient, McpError, McpServerHandle, StdioConfig, StdioMcpClient, ToolResult,
-    TransportConfig, adapt_handle_as_tools, mcp_error_line,
+    McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools, mcp_error_line,
 };
 use assistd_tools::presentation::PresentSpec;
 use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
-use tokio::sync::watch;
 
 fn fake_server_path() -> String {
     env!("CARGO_BIN_EXE_fake_mcp_server").to_string()
 }
 
-fn make_stdio_config(label: &str) -> TransportConfig {
+fn make_stdio_config(label: &str) -> StdioConfig {
     let mut cfg = StdioConfig::new(label, fake_server_path());
     cfg.request_timeout = Duration::from_secs(5);
-    TransportConfig::Stdio(cfg)
+    cfg
 }
 
-/// [`adapt_handle_as_tools`] with every call allowed.
-async fn adapt_allowing(handle: &McpServerHandle) -> Result<Vec<Box<dyn Tool>>, McpError> {
+async fn start_fake() -> Arc<McpServer> {
+    let server = McpServer::start("fake".into(), make_stdio_config("fake"))
+        .await
+        .expect("server should start");
+    Arc::new(server)
+}
+
+/// [`adapt_client_as_tools`] with every call allowed.
+async fn adapt_allowing(server: &Arc<McpServer>) -> Vec<Box<dyn Tool>> {
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    adapt_handle_as_tools(handle, "mcp__fake", PresentSpec::default(), &approvals).await
+    adapt_client_as_tools(server.clone(), "fake", PresentSpec::default(), &approvals)
+        .await
+        .expect("discovery should succeed")
 }
 
-/// Resolves once the supervisor exits and drops its health sender.
-async fn supervisor_exited(health_rx: &mut watch::Receiver<HealthState>) {
-    while health_rx.changed().await.is_ok() {}
+fn find<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
+    tools
+        .iter()
+        .find(|tool| tool.name() == name)
+        .unwrap_or_else(|| panic!("{name} present"))
+        .as_ref()
+}
+
+/// Calls `echo` until it answers again, as it will once a later call
+/// has restarted the server past its backoff.
+async fn echo_answers_again(echo: &dyn Tool) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let result = echo.invoke(json!({"msg": "after"})).await.unwrap();
+            if result["output"] == "echo:after" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 /// True once `pid` no longer exists or is a zombie awaiting its reaper.
@@ -56,6 +83,14 @@ async fn wait_until_process_is_gone(pid: u32) -> bool {
     .is_ok()
 }
 
+/// The text of a result's first content block.
+fn first_text(result: &CallToolResult) -> Option<&str> {
+    match result.content.first() {
+        Some(ContentBlock::Text(text)) => Some(&text.text),
+        _ => None,
+    }
+}
+
 fn read_pid_file(path: &Path) -> u32 {
     std::fs::read_to_string(path)
         .expect("fixture wrote its orphan's pid")
@@ -66,205 +101,140 @@ fn read_pid_file(path: &Path) -> u32 {
 
 #[tokio::test]
 async fn discovers_and_invokes_a_tool_end_to_end() {
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
-        .await
-        .expect("server should start");
-
-    let tools = adapt_allowing(&handle)
-        .await
-        .expect("discovery should succeed");
+    let server = start_fake().await;
+    let tools = adapt_allowing(&server).await;
     let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
     assert_eq!(
         names,
         [
             "mcp__fake__echo",
             "mcp__fake__crash_me",
-            "mcp__fake__flood_stdout",
+            "mcp__fake__never_answers",
+            "mcp__fake__close_stdout",
             "mcp__fake__spawn_orphan_and_crash",
             "mcp__fake__env_names",
         ]
     );
 
-    let echo = tools
-        .iter()
-        .find(|tool| tool.name() == "mcp__fake__echo")
+    let result = find(&tools, "mcp__fake__echo")
+        .invoke(json!({"msg": "hi"}))
+        .await
         .unwrap();
-    let result = echo.invoke(json!({"msg": "hi"})).await.unwrap();
     assert_eq!(result["type"], "text");
     assert_eq!(result["output"], "echo:hi");
     assert_eq!(result["exit_code"], 0);
 
-    handle.shutdown().await;
+    server.shutdown().await;
 }
 
 #[tokio::test]
-async fn external_shutdown_stops_the_supervisor() {
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
-        .await
-        .expect("server should start");
-    let mut health_rx = handle.watch_health();
+async fn shut_down_server_refuses_calls_instead_of_restarting() {
+    let server = start_fake().await;
+    server.shutdown().await;
 
-    shutdown_tx.send(true).unwrap();
-
-    tokio::time::timeout(Duration::from_secs(5), supervisor_exited(&mut health_rx))
-        .await
-        .expect("supervisor must exit on daemon-wide shutdown");
-    let err = handle.client().list_tools().await.unwrap_err();
+    let err = server.list_tools().await.unwrap_err();
     assert!(matches!(err, McpError::ServerDown), "{err}");
-
-    tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
-        .await
-        .expect("shutdown of an exited supervisor must return promptly");
 }
 
 #[tokio::test]
-async fn dropping_handle_without_shutdown_aborts_supervisor() {
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
-        .await
-        .expect("server should start");
+async fn crashed_server_fails_fast_then_restarts_on_a_later_call() {
+    let server = start_fake().await;
+    let tools = adapt_allowing(&server).await;
+    let echo = find(&tools, "mcp__fake__echo");
 
-    let mut health_rx = handle.watch_health();
-    drop(handle);
+    let _ = find(&tools, "mcp__fake__crash_me").invoke(json!({})).await;
 
-    tokio::time::timeout(Duration::from_secs(2), supervisor_exited(&mut health_rx))
+    let post = tokio::time::timeout(Duration::from_secs(2), echo.invoke(json!({"msg": "x"})))
         .await
-        .expect("supervisor must release health_tx within 2s after Drop");
+        .expect("a call to a dead server must not hang")
+        .unwrap();
+    assert_eq!(post["type"], "error", "{post}");
+    assert_eq!(post["exit_code"], -1, "{post}");
+    assert!(
+        echo_answers_again(echo).await,
+        "a call after the backoff must restart the server"
+    );
+
+    server.shutdown().await;
 }
 
 #[tokio::test]
-async fn server_crash_short_circuits_subsequent_calls() {
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
-        .await
-        .expect("server should start");
+async fn crashed_server_is_refused_with_server_down_during_backoff() {
+    let server = start_fake().await;
+    let tools = adapt_allowing(&server).await;
+    let echo = find(&tools, "mcp__fake__echo");
 
-    let tools = adapt_allowing(&handle)
-        .await
-        .expect("discovery should succeed");
-    let echo = tools
-        .iter()
-        .find(|tool| tool.name() == "mcp__fake__echo")
-        .expect("echo present");
-    let crasher = tools
-        .iter()
-        .find(|tool| tool.name() == "mcp__fake__crash_me")
-        .expect("crash_me present");
+    let _ = find(&tools, "mcp__fake__crash_me").invoke(json!({})).await;
 
-    let pre = echo.invoke(json!({"msg": "before"})).await.unwrap();
-    assert_eq!(pre["output"], "echo:before");
-
-    let _ = crasher.invoke(json!({})).await;
-
-    let mut watch_health = handle.watch_health();
-    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+    let refused = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if *watch_health.borrow() != HealthState::Healthy {
+            let post = echo.invoke(json!({"msg": "x"})).await.unwrap();
+            if post["output"] == mcp_error_line("mcp__fake__echo", &McpError::ServerDown) {
                 return;
             }
-            let _ = watch_health.changed().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await;
-    assert_ne!(
-        handle.health(),
-        HealthState::Healthy,
-        "supervisor should have flipped health off Healthy after server exit"
+    assert!(
+        refused.is_ok(),
+        "calls inside the backoff must be refused as ServerDown"
     );
 
-    let post = tokio::time::timeout(Duration::from_secs(2), echo.invoke(json!({"msg": "after"})))
-        .await
-        .expect("invoke must not hang on a dead server")
-        .expect("invoke returns Ok with a typed error JSON");
-    assert_eq!(post["type"], "error");
-    assert_eq!(post["exit_code"], -1);
-    assert_eq!(post["server_name"], "fake");
-    assert_eq!(
-        post["output"],
-        mcp_error_line("mcp__fake__echo", &McpError::ServerDown)
-    );
-
-    handle.shutdown().await;
+    server.shutdown().await;
 }
 
 #[tokio::test]
-async fn dead_read_loop_under_a_live_child_is_noticed_and_restarted() {
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
+async fn unanswered_call_times_out_and_the_server_keeps_answering() {
+    let mut cfg = StdioConfig::new("fake", fake_server_path());
+    cfg.request_timeout = Duration::from_millis(300);
+    let server = McpServer::start("fake".into(), cfg)
         .await
         .expect("server should start");
 
-    let tools = adapt_allowing(&handle)
+    let err = server
+        .invoke("never_answers", json!({}))
         .await
-        .expect("discovery should succeed");
-    let echo = tools
-        .iter()
-        .find(|tool| tool.name() == "mcp__fake__echo")
-        .expect("echo present");
-    let flood = tools
-        .iter()
-        .find(|tool| tool.name() == "mcp__fake__flood_stdout")
-        .expect("flood_stdout present");
-
-    let mut watch_health = handle.watch_health();
-
-    let _ = flood.invoke(json!({})).await;
-
-    let flipped = tokio::time::timeout(Duration::from_secs(5), async {
-        while watch_health.changed().await.is_ok() {
-            if *watch_health.borrow_and_update() != HealthState::Healthy {
-                return true;
-            }
-        }
-        false
-    })
-    .await
-    .unwrap_or(false);
+        .expect_err("an unanswered call must time out");
     assert!(
-        flipped,
-        "supervisor must leave Healthy when the read loop dies under a live child"
+        matches!(err, McpError::RequestTimeout(after) if after == Duration::from_millis(300)),
+        "{err}"
+    );
+    let after = server
+        .invoke("echo", json!({"msg": "after"}))
+        .await
+        .unwrap();
+    assert_eq!(first_text(&after), Some("echo:after"), "{after:?}");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn closed_stdout_under_a_live_child_is_restarted() {
+    let server = start_fake().await;
+    let tools = adapt_allowing(&server).await;
+
+    let _ = find(&tools, "mcp__fake__close_stdout")
+        .invoke(json!({}))
+        .await;
+
+    assert!(
+        echo_answers_again(find(&tools, "mcp__fake__echo")).await,
+        "a server that can no longer answer must be restarted"
     );
 
-    let recovered = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if *watch_health.borrow_and_update() == HealthState::Healthy {
-                return true;
-            }
-            if watch_health.changed().await.is_err() {
-                return false;
-            }
-        }
-    })
-    .await
-    .unwrap_or(false);
-    assert!(recovered, "supervisor must restart the server");
-
-    let post = tokio::time::timeout(Duration::from_secs(5), echo.invoke(json!({"msg": "after"})))
-        .await
-        .expect("post-restart invoke must not hang")
-        .expect("post-restart invoke should succeed");
-    assert_eq!(post["output"], "echo:after");
-
-    handle.shutdown().await;
+    server.shutdown().await;
 }
 
 #[tokio::test]
 async fn crashed_server_takes_its_process_group_with_it() {
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    let handle = McpServerHandle::start("fake".into(), make_stdio_config("fake"), shutdown_rx)
-        .await
-        .expect("server should start");
-    let tools = adapt_allowing(&handle)
-        .await
-        .expect("discovery should succeed");
-    let spawner = tools
-        .iter()
-        .find(|tool| tool.name() == "mcp__fake__spawn_orphan_and_crash")
-        .expect("spawn_orphan_and_crash present");
+    let server = start_fake().await;
+    let tools = adapt_allowing(&server).await;
 
-    let result = spawner.invoke(json!({})).await.unwrap();
+    let result = find(&tools, "mcp__fake__spawn_orphan_and_crash")
+        .invoke(json!({}))
+        .await
+        .unwrap();
     let orphan: u32 = result["output"]
         .as_str()
         .and_then(|pid| pid.parse().ok())
@@ -274,28 +244,23 @@ async fn crashed_server_takes_its_process_group_with_it() {
         wait_until_process_is_gone(orphan).await,
         "grandchild {orphan} must be killed with the crashed server's process group"
     );
-    handle.shutdown().await;
+    server.shutdown().await;
 }
 
 #[tokio::test]
 async fn failed_initialize_kills_the_process_group() {
     let pid_dir = tempfile::tempdir().unwrap();
     let pid_file = pid_dir.path().join("orphan.pid");
-    let mut cfg = StdioConfig::new("fake", fake_server_path());
-    cfg.request_timeout = Duration::from_secs(5);
+    let mut cfg = make_stdio_config("fake");
     cfg.env.insert(
         "FAKE_MCP_FAIL_INIT_WITH_ORPHAN_PID_FILE".into(),
         pid_file.to_string_lossy().into_owned(),
     );
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let err = McpServerHandle::start("fake".into(), TransportConfig::Stdio(cfg), shutdown_rx)
+    let err = McpServer::start("fake".into(), cfg)
         .await
         .expect_err("fixture refuses initialize");
-    assert!(
-        matches!(err, McpError::RpcError { code: -32000, .. }),
-        "{err}"
-    );
+    assert!(matches!(err, McpError::Initialize(_)), "{err}");
 
     let orphan = read_pid_file(&pid_file);
     assert!(
@@ -310,21 +275,18 @@ async fn server_sees_only_inherited_and_configured_environment() {
         std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
         "cargo sets CARGO_MANIFEST_DIR for test processes"
     );
-    let mut cfg = StdioConfig::new("fake", fake_server_path());
-    cfg.request_timeout = Duration::from_secs(5);
+    let mut cfg = make_stdio_config("fake");
     cfg.env.insert("CONFIGURED_TOKEN".into(), "secret".into());
-    let (client, lifeline) = StdioMcpClient::spawn(cfg)
+    let server = McpServer::start("fake".into(), cfg)
         .await
         .expect("server should start");
 
-    let result = client.invoke("env_names", json!({})).await.unwrap();
-    let ToolResult::Text(listing) = result else {
-        panic!("expected a text listing, got {result:?}");
-    };
+    let result = server.invoke("env_names", json!({})).await.unwrap();
+    let listing = first_text(&result).expect("a text listing");
     let names: Vec<&str> = listing.lines().collect();
     assert!(names.contains(&"PATH"), "{names:?}");
     assert!(names.contains(&"CONFIGURED_TOKEN"), "{names:?}");
     assert!(!names.contains(&"CARGO_MANIFEST_DIR"), "{names:?}");
 
-    lifeline.shutdown(Duration::from_secs(1)).await;
+    server.shutdown().await;
 }
