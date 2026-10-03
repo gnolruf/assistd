@@ -6,8 +6,10 @@ use std::{fmt, iter, mem};
 
 use super::allowlist::{Allowlist, Verdict};
 use super::shell::{self, Redirect, Script, SimpleCommand, Word};
+use placeholder::Placeholder;
 
 mod evaluated;
+mod placeholder;
 
 /// How many scripts deep (`eval`, `trap`, …) the matcher looks before
 /// calling a script unverifiable.
@@ -103,7 +105,8 @@ const VALUE_OPTIONS: &[(&str, &[&str])] = &[
 /// The wrapper that appends arguments read from stdin to its command.
 const FEEDS_ARGUMENTS: &str = "xargs";
 
-/// Where [`FEEDS_ARGUMENTS`] puts an input item inside its command.
+/// Where `find -exec` and [`FEEDS_ARGUMENTS`] put an input item inside
+/// their command.
 const INPUT_PLACEHOLDER: &str = "{}";
 
 /// `find` flags after which it runs a command.
@@ -459,12 +462,13 @@ impl<'a> Matcher<'a> {
             return;
         };
         let mut fed = false;
+        let mut placeholders: Vec<Placeholder<'_>> = Vec::new();
         for Candidate { at, may_be_command } in candidates(words, start) {
             if out.settled() {
                 return;
             }
             let word = &words[at];
-            if word.dynamic_name || (fed && word.text.contains(INPUT_PLACEHOLDER)) {
+            if word.dynamic_name || placeholders.iter().any(|p| p.fills(word)) {
                 if may_be_command {
                     out.unverifiable(|| {
                         format!("command `{}` is only known at run time", word.text)
@@ -481,6 +485,7 @@ impl<'a> Matcher<'a> {
                 self.allowed(word, index, script, depth, out);
                 self.runs(word, args, Site { cmd, script, depth }, out);
                 fed |= program(&word.text) == FEEDS_ARGUMENTS;
+                placeholders.extend(placeholder::placeholders(word, args));
             }
         }
     }

