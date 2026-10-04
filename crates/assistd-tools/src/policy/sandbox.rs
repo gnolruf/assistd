@@ -231,7 +231,9 @@ impl SandboxInfo {
     {
         match &self.mode {
             ResolvedSandboxMode::None => self.unwrapped_command(program, args),
-            ResolvedSandboxMode::Bwrap { path } => self.bwrap_command(path, access, program, args),
+            ResolvedSandboxMode::Bwrap { path } => {
+                self.bwrap_command(path, std::env::var("HOME").ok(), access, program, args)
+            }
         }
     }
 
@@ -251,7 +253,8 @@ impl SandboxInfo {
             return cmd.spawn().map_err(LaunchError::Spawn);
         };
         let display = self.display.get().await?;
-        let mut cmd = self.bwrap_command(path, display.access(), program, args);
+        let home = std::env::var("HOME").ok();
+        let mut cmd = self.bwrap_command(path, home, display.access(), program, args);
         configure(&mut cmd);
         spawn_without_abstract_sockets(cmd)
     }
@@ -270,11 +273,13 @@ impl SandboxInfo {
     }
 
     /// Flag order is load-bearing: the profile, then the `access` binds
-    /// (after `--tmpfs /run`), then the shared directories, then
+    /// (after `--tmpfs /run`), then the shared directories, then the
+    /// read-only binds over `home`'s command directories and the
     /// protections, then the operator's `extra_args` so they win.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
+        home: Option<String>,
         access: SandboxAccess<'_>,
         program: &str,
         args: I,
@@ -283,7 +288,6 @@ impl SandboxInfo {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let home = std::env::var("HOME").ok();
         let mut cmd = ProcCommand::new(bwrap);
         cmd.env_clear().envs(kept_env(std::env::vars_os(), access));
         cmd.args(
@@ -305,6 +309,11 @@ impl SandboxInfo {
             .map(PathBuf::from)
             .into_iter()
             .collect();
+        cmd.args(
+            writable
+                .iter()
+                .flat_map(|home| home_command_dir_flags(home, &self.host_path)),
+        );
         cmd.args(protection_flags(&self.protected, &writable));
         cmd.args(self.extra_args.iter().map(OsStr::new));
         cmd.arg("--");
@@ -437,6 +446,37 @@ fn protection_flags(protected: &Protected, writable: &[PathBuf]) -> Vec<PathBuf>
             ]
         });
     dirs.chain(sockets).collect()
+}
+
+/// Read-only binds over the existing directories under `home`'s visible
+/// entries that host shells look programs up in: those of `host_path`, and
+/// `~/bin`, which login profiles commonly add. Symlinks are resolved first.
+fn home_command_dir_flags(home: &Path, host_path: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(real_home) = std::fs::canonicalize(home) else {
+        return Vec::new();
+    };
+    let home_bin = home.join("bin");
+    let mut dirs: Vec<PathBuf> = host_path
+        .iter()
+        .chain([&home_bin])
+        .filter_map(|dir| std::fs::canonicalize(dir).ok())
+        .filter(|dir| dir.is_dir() && is_within_visible_home_entry(dir, &real_home))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs.into_iter()
+        .flat_map(|dir| [PathBuf::from("--ro-bind"), dir.clone(), dir])
+        .collect()
+}
+
+/// Whether `dir` is `real_home`, whose visible files the profile binds
+/// writable, or lies under one of its visible entries.
+fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool {
+    dir.strip_prefix(real_home).is_ok_and(|rest| {
+        rest.components()
+            .next()
+            .is_none_or(|entry| !entry.as_os_str().as_encoded_bytes().starts_with(b"."))
+    })
 }
 
 /// Read-only root with (when bindable) the visible entries of `$HOME`
@@ -676,6 +716,8 @@ mod tests {
 
     #[test]
     fn bwrap_argv_is_profile_then_access_binds_then_extra_args_then_program() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = Some(home_dir.path().to_string_lossy().into_owned());
         let info = bwrap_info(vec!["--share-net".into()]);
         let tail = ["--share-net", "--", "firefox", "--new-window"].map(String::from);
         let session_binds = [
@@ -688,9 +730,15 @@ mod tests {
             (SandboxAccess::Default, Vec::new()),
             (session(), session_binds.to_vec()),
         ] {
-            let profile = default_bwrap_flags_for(std::env::var("HOME").ok(), access);
+            let profile = default_bwrap_flags_for(home.clone(), access);
             assert!(profile.windows(2).any(|w| w == ["--tmpfs", "/run"]));
-            let cmd = info.command(access, "firefox", ["--new-window"]);
+            let cmd = info.bwrap_command(
+                Path::new("/usr/bin/bwrap"),
+                home.clone(),
+                access,
+                "firefox",
+                ["--new-window"],
+            );
             assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
             let expected = [profile, binds, tail.to_vec()].concat();
             assert_eq!(argv_of(&cmd), expected, "{access:?}");
@@ -942,6 +990,99 @@ mod tests {
             .find(|w| w[0] == "--setenv" && w[1] == "HOME")
             .expect("HOME is exported into the sandbox");
         assert_eq!(setenv[2], dir_str);
+    }
+
+    fn read_only_binds_in(home: &Path, dirs: &[&str]) -> Vec<PathBuf> {
+        dirs.iter()
+            .flat_map(|dir| {
+                let dir = home.join(dir);
+                [PathBuf::from("--ro-bind"), dir.clone(), dir]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn home_command_dirs_on_the_host_path_stay_read_only() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        for dir in ["bin", "go/bin", "projects/tools/bin", ".local/bin", "docs"] {
+            std::fs::create_dir_all(home.join(dir)).expect(dir);
+        }
+        let host_path = [
+            home.join("go/bin"),
+            home.join("projects/tools/bin"),
+            home.join(".local/bin"),
+            home.join("missing/bin"),
+            elsewhere.path().to_path_buf(),
+            PathBuf::from("/usr/bin"),
+            home.join("go/bin"),
+        ];
+        assert_eq!(
+            home_command_dir_flags(&home, &host_path),
+            read_only_binds_in(&home, &["bin", "go/bin", "projects/tools/bin"])
+        );
+        assert_eq!(
+            home_command_dir_flags(&home, std::slice::from_ref(&home)),
+            read_only_binds_in(&home, &["", "bin"])
+        );
+    }
+
+    #[test]
+    fn home_bin_stays_read_only_off_the_host_path_and_through_a_symlink() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        assert!(home_command_dir_flags(&home, &[]).is_empty());
+        for dir in ["tools/bin", ".local/bin"] {
+            std::fs::create_dir_all(home.join(dir)).expect(dir);
+        }
+        for (target, expected) in [
+            (
+                home.join("tools/bin"),
+                read_only_binds_in(&home, &["tools/bin"]),
+            ),
+            (home.join(".local/bin"), Vec::new()),
+            (PathBuf::from("/usr/bin"), Vec::new()),
+        ] {
+            std::os::unix::fs::symlink(&target, home.join("bin")).expect("symlink");
+            assert_eq!(home_command_dir_flags(&home, &[]), expected, "{target:?}");
+            std::fs::remove_file(home.join("bin")).expect("remove symlink");
+        }
+    }
+
+    #[test]
+    fn home_command_dirs_are_bound_read_only_after_every_writable_bind() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        let go_bin = home.join("go/bin");
+        std::fs::create_dir_all(&go_bin).expect("go/bin");
+        let info = SandboxInfo {
+            shared: SharedDirs {
+                scratch: Some(go_bin.clone()),
+                read_only: Vec::new(),
+            },
+            host_path: vec![go_bin.clone()],
+            ..bwrap_info(Vec::new())
+        };
+        let argv = argv_of(&info.bwrap_command(
+            Path::new("/usr/bin/bwrap"),
+            Some(home.to_string_lossy().into_owned()),
+            SandboxAccess::Default,
+            "true",
+            [""; 0],
+        ));
+        let go_bin = go_bin.to_string_lossy().into_owned();
+        let go = home.join("go").to_string_lossy().into_owned();
+        assert!(writable_binds(&argv).contains(&go.as_str()), "{argv:?}");
+        let last_writable = argv
+            .iter()
+            .rposition(|flag| flag == "--bind" || flag == "--bind-try")
+            .expect("writable binds");
+        let read_only = argv
+            .windows(3)
+            .position(|w| w == ["--ro-bind", go_bin.as_str(), go_bin.as_str()])
+            .expect("go/bin is bound read-only");
+        assert!(read_only > last_writable, "{argv:?}");
     }
 
     #[test]
