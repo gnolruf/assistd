@@ -13,12 +13,16 @@ fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
 }
 
 async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
-    WriteCommand::new(cfg_from(&[allowed]), Arc::new(AlwaysAllowGate))
-        .run(CommandInput {
-            args: args.iter().map(ToString::to_string).collect(),
-            stdin: stdin.map(<[u8]>::to_vec),
-        })
-        .await
+    WriteCommand::new(
+        cfg_from(&[allowed]),
+        Arc::new(AlwaysAllowGate),
+        SandboxInfo::none(),
+    )
+    .run(CommandInput {
+        args: args.iter().map(ToString::to_string).collect(),
+        stdin: stdin.map(<[u8]>::to_vec),
+    })
+    .await
 }
 
 #[test]
@@ -282,6 +286,7 @@ async fn hidden_directory_listed_as_a_prefix_is_writable() {
     let out = WriteCommand::new(
         cfg_from(&[dir.path(), hidden.as_path()]),
         Arc::new(AlwaysAllowGate),
+        SandboxInfo::none(),
     )
     .run(CommandInput {
         args: vec![target.to_string_lossy().into_owned(), "hi".into()],
@@ -318,12 +323,16 @@ async fn refuses_a_protected_directory_inside_a_writable_one() {
         .expect("non-empty allowlist")
         .protecting(vec![canonical]);
     let target = config.join("config.toml");
-    let out = WriteCommand::new(Arc::new(cfg), Arc::new(AlwaysAllowGate))
-        .run(CommandInput {
-            args: vec![target.to_string_lossy().into_owned(), "x".into()],
-            stdin: None,
-        })
-        .await;
+    let out = WriteCommand::new(
+        Arc::new(cfg),
+        Arc::new(AlwaysAllowGate),
+        SandboxInfo::none(),
+    )
+    .run(CommandInput {
+        args: vec![target.to_string_lossy().into_owned(), "x".into()],
+        stdin: None,
+    })
+    .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("assistd's own configuration"),
@@ -334,17 +343,23 @@ async fn refuses_a_protected_directory_inside_a_writable_one() {
 }
 
 #[tokio::test]
-async fn writes_under_tmp_are_not_confirmed() {
-    let gate = RecordingGate::answering(Approval::Deny);
-    let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone());
-    assert!(cmd.confirmed(Path::new("/tmp/notes/x.txt"), b"hi").await);
+async fn only_writes_under_the_shared_scratch_dir_are_not_confirmed() {
+    let gate = RecordingGate::answering(Approval::Once);
+    let sandbox = SandboxInfo::none_sharing(PathBuf::from("/srv/scratch"));
+    let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), sandbox);
+    assert!(
+        cmd.confirmed(Path::new("/srv/scratch/notes/x.txt"), b"hi")
+            .await
+    );
     assert!(gate.requests().is_empty());
+    assert!(cmd.confirmed(Path::new("/tmp/x.txt"), b"hi").await);
+    assert_eq!(gate.requests().len(), 1);
 }
 
 #[tokio::test]
-async fn writes_outside_tmp_ask_with_the_path_and_content() {
+async fn writes_outside_the_scratch_dir_ask_with_the_path_and_content() {
     let gate = RecordingGate::answering(Approval::Once);
-    let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone());
+    let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
     assert!(
         cmd.confirmed(Path::new("/home/u/bin/tool"), b"#!/bin/sh\n")
             .await
@@ -355,8 +370,32 @@ async fn writes_outside_tmp_ask_with_the_path_and_content() {
     };
     assert_eq!(request.tool, "write");
     assert_eq!(request.script, "write /home/u/bin/tool\n#!/bin/sh\n");
-    assert_eq!(request.matched_pattern, "writes a file outside /tmp");
+    assert_eq!(
+        request.matched_pattern,
+        "writes a file outside the scratch directory"
+    );
     assert!(request.always_allow.is_empty());
+}
+
+#[tokio::test]
+async fn a_path_off_the_allowlist_is_pointed_at_the_scratch_dir() {
+    let dir = tempdir().unwrap();
+    let out = WriteCommand::new(
+        cfg_from(&[dir.path()]),
+        Arc::new(AlwaysAllowGate),
+        SandboxInfo::none_sharing(PathBuf::from("/srv/scratch")),
+    )
+    .run(CommandInput {
+        args: vec!["/tmp/x.txt".into(), "x".into()],
+        stdin: None,
+    })
+    .await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "[error] write: /tmp/x.txt: path not in writable allowlist. \
+         Try: a path under /srv/scratch\n"
+    );
 }
 
 #[tokio::test]
@@ -364,18 +403,22 @@ async fn declined_write_outside_tmp_exits_126_without_writing() {
     let prefix = Path::new(env!("CARGO_MANIFEST_DIR"));
     let target = prefix.join(format!("declined-{}.txt", uuid::Uuid::new_v4()));
     let target_str = target.to_string_lossy().into_owned();
-    let out = WriteCommand::new(cfg_from(&[prefix]), Arc::new(DenyAllGate))
-        .run(CommandInput {
-            args: vec![target_str.clone(), "x".into()],
-            stdin: None,
-        })
-        .await;
+    let out = WriteCommand::new(
+        cfg_from(&[prefix]),
+        Arc::new(DenyAllGate),
+        SandboxInfo::none(),
+    )
+    .run(CommandInput {
+        args: vec![target_str.clone(), "x".into()],
+        stdin: None,
+    })
+    .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         format!(
             "[error] write: {target_str}: write cancelled by user. \
-             Try: a path under /tmp, or ask the user to make this change\n"
+             Try: asking the user to make this change\n"
         )
     );
     assert!(!target.exists());
@@ -389,4 +432,11 @@ fn confirmation_script_cuts_long_content() {
         script,
         format!("write /srv/a\n{}\n…", "x".repeat(PREVIEW_MAX_CHARS))
     );
+}
+
+#[test]
+fn hidden_from_bash_note_names_the_path_and_the_private_dir() {
+    let note = hidden_from_bash_note("/tmp/out.txt", Path::new("/tmp"), "a path under /shared");
+    assert!(note.starts_with("[note] write: /tmp/out.txt is written, but bash"));
+    assert!(note.ends_with("its own empty /tmp. Use: a path under /shared\n"));
 }

@@ -5,18 +5,44 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    default_bash_allowed_programs, default_bash_denylist, default_bash_destructive_patterns,
-    default_tools_overflow_dir, default_writable_paths,
+    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, default_bash_allowed_programs, default_bash_denylist,
+    default_bash_destructive_patterns, default_tools_overflow_dir, default_tools_scratch_dir,
+    default_writable_paths,
 };
 
 /// Tools subsystem configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ToolsConfig {
+    pub scratch: ToolsScratchConfig,
     pub output: ToolsOutputConfig,
     pub bash: ToolsBashConfig,
     pub write: ToolsWriteConfig,
     pub screenshot: ToolsScreenshotConfig,
+}
+
+/// The directory `bash` scripts and the other commands share.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ToolsScratchConfig {
+    /// Bound writable into the sandbox, and writable by `write` without
+    /// asking. Created owner-only on daemon startup. Must be absolute.
+    /// Defaults to `$XDG_RUNTIME_DIR/assistd/scratch`, else under the user
+    /// cache dir.
+    pub dir: PathBuf,
+    /// Days an entry in `dir` is kept after it last changed; older ones,
+    /// and directories that leaves empty, are removed on daemon startup.
+    /// 0 empties the directory at every startup.
+    pub retention_days: u32,
+}
+
+impl Default for ToolsScratchConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_tools_scratch_dir(),
+            retention_days: DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS,
+        }
+    }
 }
 
 /// Limits on a `run` or MCP tool result before it reaches the LLM; the
@@ -121,7 +147,8 @@ impl Default for ToolsBashConfig {
 pub struct ToolsWriteConfig {
     /// Non-empty path prefixes `write` may create files under; symlinks and dot
     /// entries at any depth below a prefix are refused (list one to allow it).
-    /// Writes outside `/tmp` ask the user first. `~` and `~/` expand to
+    /// Writes here ask the user first; `tools.scratch.dir` is always
+    /// writable, without asking. `~` and `~/` expand to
     /// `$HOME`; any other relative entry errors, missing ones are dropped.
     pub writable_paths: Vec<String>,
 }

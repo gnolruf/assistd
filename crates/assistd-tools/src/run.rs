@@ -1,7 +1,7 @@
 //! The LLM-facing `run` tool: parses a command line, executes the chain, and
 //! truncates only the final output, so every stage sees its whole input.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
@@ -44,6 +44,19 @@ impl RunTool {
             overflow_counter: Arc::new(AtomicU64::new(0)),
             description,
         }
+    }
+
+    /// Also tell the model that `scratch_dir` is where files shared between
+    /// `bash` scripts and the other commands go.
+    pub fn with_scratch_dir(mut self, scratch_dir: &Path) -> Self {
+        self.description.push_str(&format!(
+            " `bash` scripts run sandboxed with their own empty /tmp and \
+             /run, so a file that both a script and the other commands \
+             need goes under `{}`, which they share; the `Full output:` \
+             files are readable from scripts too.",
+            scratch_dir.display()
+        ));
+        self
     }
 }
 
@@ -157,7 +170,7 @@ fn parse_error_line(e: &ParseError) -> String {
         ),
         ParseError::Redirection(r) => match r {
             Redirection::Output | Redirection::Append => {
-                (Hint::Use, "write PATH, as in `<cmd> | write /tmp/out.txt`")
+                (Hint::Use, "a pipe into write, as in `<cmd> | write PATH`")
             }
             Redirection::Input => (Hint::Use, "a pipe, as in `cat FILE | <cmd>`"),
             Redirection::HereDoc => (Hint::Use, "a pipe, as in `echo TEXT | <cmd>`"),

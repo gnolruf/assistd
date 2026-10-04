@@ -89,6 +89,10 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 [daemon]
 # shutdown_grace_secs = 5  # 0 aborts in-flight requests immediately
 
+[tools.scratch]
+# dir = "/run/user/1000/assistd/scratch"  # shared by bash and the other commands
+# retention_days = 30  # pruned at startup; 0 empties it
+
 [tools.output]
 # max_lines = 200
 # max_kb = 50
@@ -140,7 +144,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # bwrap_extra_args = []  # e.g. ["--share-net"] to give bash the network
 
 [tools.write]
-# writable_paths = ["~", "/tmp"]
+# writable_paths = ["~"]  # besides tools.scratch.dir
 
 [tools.screenshot]
 # backend = "auto"  # auto | x11 | wayland

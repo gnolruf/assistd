@@ -35,7 +35,7 @@ pub use sleep::SleepConfig;
 pub use timeouts::TimeoutsConfig;
 pub use tools::{
     BashSandboxMode, ScreenshotBackend, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
-    ToolsScreenshotConfig, ToolsWriteConfig,
+    ToolsScratchConfig, ToolsScreenshotConfig, ToolsWriteConfig,
 };
 pub use top::Config;
 pub use tray::{PopupAnchor, TrayConfig, TrayPopupConfig, TrayPopupWakeConfig};

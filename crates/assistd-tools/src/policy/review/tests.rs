@@ -51,6 +51,7 @@ fn check_against(script: &str, patterns: &[DestructivePattern]) -> Option<String
         patterns,
         allowlist: &allowlist,
         protected: &[],
+        scratch: None,
     };
     match check_script(script, &rules)? {
         Confirmation::Pattern(pattern) => Some(pattern),
@@ -452,6 +453,7 @@ fn redirections_that_write_outside_tmp_are_unverifiable() {
                 patterns: &[],
                 allowlist: &no_programs(),
                 protected: &[],
+                scratch: None,
             }
         ),
         Some(Confirmation::Unverifiable(
@@ -681,6 +683,7 @@ fn argv_is_matched_without_reparsing_it() {
         patterns: &patterns,
         allowlist: &allowlist,
         protected: &[],
+        scratch: None,
     };
     let argv = |args: &[&str]| -> Vec<String> { args.iter().map(ToString::to_string).collect() };
     let check_argv = |args: &[&str]| check_argv(&argv(args), &rules).map(|found| found.to_string());
@@ -748,6 +751,7 @@ impl Programs {
                 patterns: &patterns,
                 allowlist: &self.allowlist,
                 protected,
+                scratch: None,
             },
         )
     }
@@ -962,4 +966,26 @@ fn naming_a_protected_directory_is_unverifiable() {
         );
     }
     assert_eq!(machine.review("cat /etc/hostname", &protected), None);
+}
+
+#[test]
+fn redirections_into_the_scratch_dir_need_no_confirmation() {
+    let allowlist = no_programs();
+    let rules = Rules {
+        patterns: &[],
+        allowlist: &allowlist,
+        protected: &[],
+        scratch: Some(Path::new("/run/user/1000/assistd/scratch")),
+    };
+    let asks = |script: &str| check_script(script, &rules).is_some();
+    assert!(!asks("echo x > /run/user/1000/assistd/scratch/out.txt"));
+    assert!(!asks("echo x >> /run/user/1000/assistd/scratch/a/b"));
+    assert!(asks("echo x > /run/user/1000/assistd/scratch"));
+    assert!(asks(
+        "echo x > /run/user/1000/assistd/scratch/../output/cmd-1.txt"
+    ));
+    assert!(asks(
+        "echo x > /run/user/1000/assistd/scratch-other/out.txt"
+    ));
+    assert!(asks("echo x > /run/user/1000/assistd/out.txt"));
 }

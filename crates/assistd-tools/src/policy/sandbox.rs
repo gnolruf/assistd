@@ -32,6 +32,16 @@ const SESSION_ENV: &[&str] = &[
     "XDG_SESSION_TYPE",
 ];
 
+/// The bwrap flags that mount a host path at their second argument.
+const BIND_FLAGS: &[&str] = &[
+    "--bind",
+    "--bind-try",
+    "--ro-bind",
+    "--ro-bind-try",
+    "--dev-bind",
+    "--dev-bind-try",
+];
+
 /// How sandboxing was requested for subprocess-spawning commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRequest {
@@ -80,6 +90,7 @@ pub struct SandboxInfo {
     /// Extra args appended verbatim to the bwrap invocation before `--`.
     pub extra_args: Vec<String>,
     pub protected: Protected,
+    pub shared: SharedDirs,
     /// Absolute directories unsandboxed commands look programs up in.
     host_path: Vec<PathBuf>,
     display: SharedDisplay,
@@ -94,6 +105,16 @@ pub struct Protected {
     /// Sockets hidden from sandboxed commands, such as the daemon's IPC
     /// socket, through which a command could answer its own prompts.
     pub sockets: Vec<PathBuf>,
+}
+
+/// Host directories [`SandboxAccess::Default`] commands see at their own
+/// paths, over the sandbox's private mounts.
+#[derive(Debug, Clone, Default)]
+pub struct SharedDirs {
+    /// Writable: where files cross between `bash` and the other commands.
+    pub scratch: Option<PathBuf>,
+    /// Read-only, such as the directory truncated output is spilled to.
+    pub read_only: Vec<PathBuf>,
 }
 
 /// Session resources a sandboxed command needs beyond the default profile.
@@ -119,6 +140,24 @@ impl SandboxInfo {
             mode: ResolvedSandboxMode::None,
             extra_args: Vec::new(),
             protected: Protected::default(),
+            shared: SharedDirs::default(),
+            host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
+            display: SharedDisplay::default(),
+        })
+    }
+
+    /// A configuration that never wraps, with `scratch` as the shared
+    /// scratch directory.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn none_sharing(scratch: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            mode: ResolvedSandboxMode::None,
+            extra_args: Vec::new(),
+            protected: Protected::default(),
+            shared: SharedDirs {
+                scratch: Some(scratch),
+                read_only: Vec::new(),
+            },
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
             display: SharedDisplay::default(),
         })
@@ -136,6 +175,48 @@ impl SandboxInfo {
                 dirs: std::env::split_paths(SANDBOX_PATH).collect(),
                 read_only: true,
             },
+        }
+    }
+
+    /// The recovery clause of a note about a private directory: where a
+    /// file both `bash` and the other commands need should go instead.
+    pub(crate) fn sharing_hint(&self) -> String {
+        match &self.shared.scratch {
+            Some(scratch) => format!(
+                "a path under {}, which bash scripts and the other commands share",
+                scratch.display()
+            ),
+            None => "a pipe, as in `cat FILE | bash \"<script>\"`".to_string(),
+        }
+    }
+
+    /// The tmpfs mounts of `cmd`, built by [`SandboxInfo::command`], that
+    /// `script` names a path in: empty directories of its own, sharing
+    /// nothing with other commands or later calls. Empty when unwrapped.
+    pub fn private_dirs_named(&self, cmd: &ProcCommand, script: &str) -> Vec<PathBuf> {
+        self.mounts_of(cmd)
+            .map(|mounts| mounts.private_dirs_named(script))
+            .unwrap_or_default()
+    }
+
+    /// The tmpfs mount that hides the host's `path` from sandboxed
+    /// commands, if any.
+    pub fn private_dir_hiding(&self, path: &Path) -> Option<PathBuf> {
+        let cmd = self.command(SandboxAccess::Default, "true", [""; 0]);
+        self.mounts_of(&cmd)?.private_dir_of(path).cloned()
+    }
+
+    fn mounts_of(&self, cmd: &ProcCommand) -> Option<Mounts> {
+        match self.mode {
+            ResolvedSandboxMode::None => None,
+            ResolvedSandboxMode::Bwrap { .. } => {
+                let flags: Vec<&OsStr> = cmd
+                    .as_std()
+                    .get_args()
+                    .take_while(|arg| *arg != "--")
+                    .collect();
+                Some(Mounts::of(&flags))
+            }
         }
     }
 
@@ -189,8 +270,8 @@ impl SandboxInfo {
     }
 
     /// Flag order is load-bearing: the profile, then the `access` binds
-    /// (after `--tmpfs /run`), then protections, then the operator's
-    /// `extra_args` so they win.
+    /// (after `--tmpfs /run`), then the shared directories, then
+    /// protections, then the operator's `extra_args` so they win.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
@@ -216,6 +297,8 @@ impl SandboxInfo {
         } = access
         {
             cmd.arg("--ro-bind").arg(restricted).arg(display);
+        } else {
+            cmd.args(shared_flags(&self.shared));
         }
         let writable: Vec<PathBuf> = home
             .filter(|h| is_bindable_home(h))
@@ -238,6 +321,98 @@ pub enum SandboxError {
          Install bubblewrap, or set sandbox to \"auto\" to start with tools disabled."
     )]
     BwrapNotFound,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Mounts {
+    /// Empty tmpfs mounts no later bind covers.
+    private: Vec<PathBuf>,
+    /// Host binds no later tmpfs covers.
+    shared: Vec<PathBuf>,
+}
+
+impl Mounts {
+    /// The mounts `flags`, the bwrap arguments before `--`, leave in place.
+    fn of(flags: &[&OsStr]) -> Self {
+        let mut mounts = Self::default();
+        let mut rest = flags;
+        while let [flag, tail @ ..] = rest {
+            rest = match (flag.to_str(), tail) {
+                (Some("--tmpfs"), [dir, tail @ ..]) => {
+                    mounts.mount_tmpfs(Path::new(dir));
+                    tail
+                }
+                (Some(flag), [_, dir, tail @ ..]) if BIND_FLAGS.contains(&flag) => {
+                    mounts.mount_bind(Path::new(dir));
+                    tail
+                }
+                _ => tail,
+            };
+        }
+        mounts
+    }
+
+    fn mount_tmpfs(&mut self, dir: &Path) {
+        self.private.retain(|private| !private.starts_with(dir));
+        self.shared.retain(|shared| !shared.starts_with(dir));
+        self.private.push(dir.to_path_buf());
+    }
+
+    fn mount_bind(&mut self, dir: &Path) {
+        self.private.retain(|private| !private.starts_with(dir));
+        self.shared.push(dir.to_path_buf());
+    }
+
+    /// The private mount `path` is in, unless a host bind inside that
+    /// mount covers it.
+    fn private_dir_of(&self, path: &Path) -> Option<&PathBuf> {
+        let shared_within = |private: &Path| {
+            self.shared
+                .iter()
+                .any(|shared| shared.starts_with(private) && path.starts_with(shared))
+        };
+        self.private
+            .iter()
+            .find(|private| path.starts_with(private) && !shared_within(private))
+    }
+
+    fn private_dirs_named(&self, script: &str) -> Vec<PathBuf> {
+        self.private
+            .iter()
+            .filter(|private| {
+                absolute_paths(script).any(|path| self.private_dir_of(path) == Some(*private))
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+fn absolute_paths(script: &str) -> impl Iterator<Item = &Path> {
+    script
+        .split(|c: char| !is_path_char(c))
+        .filter(|word| word.starts_with('/'))
+        .map(Path::new)
+}
+
+fn is_path_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~')
+}
+
+/// Binds of the shared directories at their own paths, skipped by bwrap
+/// for a directory that does not exist.
+fn shared_flags(shared: &SharedDirs) -> Vec<&OsStr> {
+    let scratch = shared
+        .scratch
+        .iter()
+        .flat_map(|dir| [OsStr::new("--bind-try"), dir.as_os_str(), dir.as_os_str()]);
+    let read_only = shared.read_only.iter().flat_map(|dir| {
+        [
+            OsStr::new("--ro-bind-try"),
+            dir.as_os_str(),
+            dir.as_os_str(),
+        ]
+    });
+    scratch.chain(read_only).collect()
 }
 
 /// Read-only binds over the protected directories, and `/dev/null` over the
@@ -361,15 +536,17 @@ pub fn probe_sandbox(
     request: SandboxRequest,
     extra_args: Vec<String>,
     protected: Protected,
+    shared: SharedDirs,
 ) -> Result<ToolSandbox, SandboxError> {
     let path_env = std::env::var_os("PATH").unwrap_or_default();
-    probe_sandbox_with_path(request, extra_args, protected, &path_env)
+    probe_sandbox_with_path(request, extra_args, protected, shared, &path_env)
 }
 
 fn probe_sandbox_with_path(
     request: SandboxRequest,
     extra_args: Vec<String>,
     protected: Protected,
+    shared: SharedDirs,
     path_env: &OsStr,
 ) -> Result<ToolSandbox, SandboxError> {
     let disabled = match (request, find_executable("bwrap", path_env)) {
@@ -382,6 +559,7 @@ fn probe_sandbox_with_path(
                 mode: ResolvedSandboxMode::Bwrap { path: bwrap },
                 extra_args,
                 protected,
+                shared,
                 host_path: host_path(path_env),
                 display: SharedDisplay::default(),
             })));
@@ -467,6 +645,7 @@ mod tests {
             },
             extra_args,
             protected: Protected::default(),
+            shared: SharedDirs::default(),
             host_path: Vec::new(),
             display: SharedDisplay::default(),
         }
@@ -532,6 +711,130 @@ mod tests {
                 "{access:?}"
             );
         }
+    }
+
+    fn named_in(info: &SandboxInfo, script: &str) -> Vec<PathBuf> {
+        let cmd = info.command(SandboxAccess::Default, "bash", ["-c", script]);
+        info.private_dirs_named(&cmd, script)
+    }
+
+    fn mounts_of(flags: &[&str]) -> Mounts {
+        let flags: Vec<&OsStr> = flags.iter().map(OsStr::new).collect();
+        Mounts::of(&flags)
+    }
+
+    #[test]
+    fn private_dirs_are_named_only_as_the_start_of_an_absolute_path() {
+        let mounts = mounts_of(&["--ro-bind", "/", "/", "--tmpfs", "/tmp", "--tmpfs", "/run"]);
+        for (script, expected) in [
+            ("cat /tmp/out.txt", vec!["/tmp"]),
+            ("ls -la /tmp/", vec!["/tmp"]),
+            ("ls /tmp", vec!["/tmp"]),
+            (
+                "sort --output=/tmp/sorted \"/run/user/1000/x\"",
+                vec!["/tmp", "/run"],
+            ),
+            (
+                "ls /var/tmp ~/tmp ./run /tmpfiles /runner $HOME/tmp",
+                vec![],
+            ),
+            ("cargo run", vec![]),
+        ] {
+            let expected: Vec<PathBuf> = expected.into_iter().map(PathBuf::from).collect();
+            assert_eq!(mounts.private_dirs_named(script), expected, "{script}");
+        }
+    }
+
+    #[test]
+    fn a_later_mount_replaces_what_it_covers() {
+        let rebound = mounts_of(&["--tmpfs", "/tmp", "--bind", "/tmp", "/tmp"]);
+        assert!(rebound.private.is_empty());
+        let hidden = mounts_of(&["--bind", "/srv/data", "/srv/data", "--tmpfs", "/srv"]);
+        assert_eq!(
+            hidden,
+            Mounts {
+                private: vec![PathBuf::from("/srv")],
+                shared: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_host_bind_inside_a_private_dir_is_shared() {
+        let mounts = mounts_of(&["--tmpfs", "/tmp", "--bind", "/tmp/shared", "/tmp/shared"]);
+        assert!(
+            mounts
+                .private_dirs_named("cat /tmp/shared/out.txt")
+                .is_empty()
+        );
+        assert_eq!(
+            mounts.private_dirs_named("cat /tmp/out.txt"),
+            [PathBuf::from("/tmp")]
+        );
+    }
+
+    #[test]
+    fn host_paths_under_a_private_dir_are_hidden_only_when_wrapped() {
+        let info = bwrap_info(Vec::new());
+        assert_eq!(
+            info.private_dir_hiding(Path::new("/tmp/out.txt")),
+            Some(PathBuf::from("/tmp"))
+        );
+        assert_eq!(info.private_dir_hiding(Path::new("/usr/share/x")), None);
+        assert_eq!(
+            SandboxInfo::none().private_dir_hiding(Path::new("/tmp/out.txt")),
+            None
+        );
+    }
+
+    #[test]
+    fn shared_dirs_are_bound_for_default_access_only_and_are_not_private() {
+        let info = SandboxInfo {
+            shared: SharedDirs {
+                scratch: Some(PathBuf::from("/run/user/1000/assistd/scratch")),
+                read_only: vec![PathBuf::from("/tmp/assistd-output")],
+            },
+            ..bwrap_info(Vec::new())
+        };
+        let binds = [
+            "--bind-try",
+            "/run/user/1000/assistd/scratch",
+            "/run/user/1000/assistd/scratch",
+            "--ro-bind-try",
+            "/tmp/assistd-output",
+            "/tmp/assistd-output",
+        ];
+        let has_binds = |access| {
+            let argv = argv_of(&info.command(access, "true", [""; 0]));
+            argv.windows(binds.len()).any(|w| w == binds)
+        };
+        assert!(has_binds(SandboxAccess::Default));
+        assert!(!has_binds(session()));
+        for shared in [
+            "/run/user/1000/assistd/scratch/out.txt",
+            "/tmp/assistd-output/cmd-1.txt",
+        ] {
+            assert_eq!(info.private_dir_hiding(Path::new(shared)), None, "{shared}");
+        }
+        assert_eq!(
+            info.private_dir_hiding(Path::new("/run/user/1000/other")),
+            Some(PathBuf::from("/run"))
+        );
+    }
+
+    #[test]
+    fn private_dirs_follow_the_profile_and_the_operator_extra_args() {
+        assert!(named_in(&SandboxInfo::none(), "ls /tmp").is_empty());
+        let default_profile = bwrap_info(Vec::new());
+        assert_eq!(
+            named_in(&default_profile, "ls /tmp /run /scratch"),
+            [PathBuf::from("/tmp"), PathBuf::from("/run")]
+        );
+        let extra = ["--bind", "/tmp", "/tmp", "--tmpfs", "/scratch"].map(String::from);
+        assert_eq!(
+            named_in(&bwrap_info(extra.into()), "ls /tmp /run /scratch"),
+            [PathBuf::from("/run"), PathBuf::from("/scratch")]
+        );
     }
 
     #[test]
@@ -671,9 +974,14 @@ mod tests {
             (SandboxRequest::None, ToolsDisabled::ByConfig),
             (SandboxRequest::Auto, ToolsDisabled::BwrapMissing),
         ] {
-            let probed =
-                probe_sandbox_with_path(request, Vec::new(), Protected::default(), OsStr::new(""))
-                    .unwrap_or_else(|e| panic!("{request:?}: {e}"));
+            let probed = probe_sandbox_with_path(
+                request,
+                Vec::new(),
+                Protected::default(),
+                SharedDirs::default(),
+                OsStr::new(""),
+            )
+            .unwrap_or_else(|e| panic!("{request:?}: {e}"));
             assert!(
                 matches!(probed, ToolSandbox::Disabled(reason) if reason == expected),
                 "{request:?}: {probed:?}"
@@ -691,6 +999,7 @@ mod tests {
             SandboxRequest::None,
             Vec::new(),
             Protected::default(),
+            SharedDirs::default(),
             dir.path().as_os_str(),
         )
         .expect("none never fails");
@@ -719,6 +1028,7 @@ mod tests {
             SandboxRequest::Bwrap,
             Vec::new(),
             Protected::default(),
+            SharedDirs::default(),
             OsStr::new(""),
         )
         .expect_err("bwrap is required but absent from PATH");

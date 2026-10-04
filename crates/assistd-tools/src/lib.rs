@@ -26,7 +26,7 @@ pub use policy::{
     APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
     Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter,
     ConfirmationGate, ConfirmationRequest, DestructivePattern, IpcConfirmationGate,
-    NoPendingConfirm, Protected, SandboxError, SandboxInfo, SandboxRequest, SearchPath,
+    NoPendingConfirm, Protected, SandboxError, SandboxInfo, SandboxRequest, SearchPath, SharedDirs,
     ToolSandbox, ToolsDisabled, inherit_confirm_router, probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]

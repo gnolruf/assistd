@@ -8,12 +8,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use assistd_tools::commands::{BashCommand, BashPolicyCfg};
+use assistd_tools::commands::{BashCommand, BashPolicyCfg, WriteCommand, WritePolicyCfg};
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
     ConfirmationRequest, DenyAllGate, DestructivePattern, Protected, SandboxInfo, SandboxRequest,
-    SearchPath,
+    SearchPath, SharedDirs,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
@@ -69,7 +69,14 @@ fn input(script: &str) -> CommandInput {
 }
 
 fn bwrap_or_none() -> Option<Arc<SandboxInfo>> {
-    match probe_sandbox(SandboxRequest::Bwrap, Vec::new(), Protected::default()).ok()? {
+    match probe_sandbox(
+        SandboxRequest::Bwrap,
+        Vec::new(),
+        Protected::default(),
+        SharedDirs::default(),
+    )
+    .ok()?
+    {
         ToolSandbox::Bwrap(info) => Some(info),
         ToolSandbox::Disabled(_) => None,
     }
@@ -274,6 +281,106 @@ async fn bwrap_hides_the_host_tmp() {
         .run(input(&format!("test -e {}", host_file.path().display())))
         .await;
     assert_eq!(out.exit_code, 1, "host /tmp is visible inside the sandbox");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("its own empty /tmp: "), "{stderr}");
+}
+
+#[tokio::test]
+async fn write_notes_a_file_the_sandbox_hides_from_bash() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let scratch = tempfile::Builder::new()
+        .prefix("assistd-write-note-")
+        .tempdir_in("/tmp")
+        .expect("host /tmp dir");
+    let target = scratch.path().join("out.txt");
+    let cfg = WritePolicyCfg::new(vec!["/tmp".into()]).expect("non-empty allowlist");
+    let cmd = WriteCommand::new(Arc::new(cfg), Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd
+        .run(CommandInput {
+            args: vec![target.to_string_lossy().into_owned(), "hi".into()],
+            stdin: None,
+        })
+        .await;
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(std::fs::read(&target).expect("written"), b"hi");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("bash scripts cannot see it"), "{stderr}");
+}
+
+#[tokio::test]
+async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
+    let scratch = tempfile::Builder::new()
+        .prefix("assistd-scratch-")
+        .tempdir_in("/tmp")
+        .expect("host scratch dir");
+    let spill = tempfile::Builder::new()
+        .prefix("assistd-spill-")
+        .tempdir_in("/tmp")
+        .expect("host spill dir");
+    std::fs::write(spill.path().join("cmd-1.txt"), "spilled\n").expect("spill file");
+    let shared = SharedDirs {
+        scratch: Some(scratch.path().to_path_buf()),
+        read_only: vec![spill.path().to_path_buf()],
+    };
+    let probed = probe_sandbox(
+        SandboxRequest::Bwrap,
+        Vec::new(),
+        Protected::default(),
+        shared,
+    );
+    let Ok(ToolSandbox::Bwrap(sandbox)) = probed else {
+        return;
+    };
+    let cfg = WritePolicyCfg::new(vec![scratch.path().to_path_buf()]).expect("allowlist");
+    let write = WriteCommand::new(Arc::new(cfg), Arc::new(PanicGate), sandbox.clone());
+    let from_write = scratch.path().join("from-write.txt");
+    let out = write
+        .run(CommandInput {
+            args: vec![from_write.to_string_lossy().into_owned(), "hi".into()],
+            stdin: None,
+        })
+        .await;
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bash = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let from_bash = scratch.path().join("from-bash.txt");
+    let script = format!(
+        "cat {} {} > {}; touch {} 2>/dev/null || echo read-only",
+        from_write.display(),
+        spill.path().join("cmd-1.txt").display(),
+        from_bash.display(),
+        spill.path().join("cmd-2.txt").display(),
+    );
+    let out = bash.run(input(&script)).await;
+    assert_eq!(out.stdout, b"read-only\n");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(&from_bash).expect("kept"), b"hispilled\n");
+}
+
+#[tokio::test]
+async fn bwrap_adds_no_note_to_a_script_outside_its_private_dirs() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd.run(input("echo ok")).await;
+    assert_eq!(out.stdout, b"ok\n");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[tokio::test]
@@ -352,7 +459,12 @@ fn probe_sandbox_auto_with_bwrap_present_resolves_to_bwrap() {
     if bwrap_or_none().is_none() {
         return;
     }
-    let probed =
-        probe_sandbox(SandboxRequest::Auto, Vec::new(), Protected::default()).expect("auto probe");
+    let probed = probe_sandbox(
+        SandboxRequest::Auto,
+        Vec::new(),
+        Protected::default(),
+        SharedDirs::default(),
+    )
+    .expect("auto probe");
     assert!(matches!(probed, ToolSandbox::Bwrap(_)));
 }

@@ -281,6 +281,9 @@ fn validate_sleep(errors: &mut Vec<String>, sleep: &SleepConfig) {
 }
 
 fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
+    if !tools.scratch.dir.is_absolute() {
+        errors.push("tools.scratch.dir must be an absolute path".into());
+    }
     if !tools.output.overflow_dir.is_absolute() {
         errors.push("tools.output.overflow_dir must be an absolute path".into());
     }
