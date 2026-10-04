@@ -132,6 +132,34 @@ impl Command for Flood {
     }
 }
 
+/// Attaches one image of configurable size; exercises the attachment caps.
+#[derive(Debug)]
+struct Picture {
+    name: &'static str,
+    size: usize,
+}
+#[async_trait]
+impl Command for Picture {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn summary(&self) -> &'static str {
+        "test: attach an image"
+    }
+    fn help(&self) -> String {
+        "usage: picture".to_string()
+    }
+    async fn run(&self, _input: CommandInput) -> CommandOutput {
+        CommandOutput {
+            attachments: vec![Attachment::Image {
+                mime: "image/png".to_string(),
+                bytes: vec![0; self.size],
+            }],
+            ..CommandOutput::ok(b"attached\n".to_vec())
+        }
+    }
+}
+
 fn registry_of(stubs: impl IntoIterator<Item = Stub>) -> CommandRegistry {
     let mut r = CommandRegistry::new();
     for stub in stubs {
@@ -316,4 +344,63 @@ async fn a_chain_at_the_operator_limit_runs_without_exhausting_the_stack() {
     let out = run_line(&line, &r).await;
     assert_eq!(out.stdout, vec![b'x'; MAX_OPERATORS + 1]);
     assert_eq!(out.exit_code, 0);
+}
+
+const ATTACHMENT_OVERFLOW: &str = "[error] run: images past 4 or 33554432 bytes in total were \
+     dropped. Try: fewer images per command, such as one see per run call\n";
+
+fn picture_registry(pictures: impl IntoIterator<Item = (&'static str, usize)>) -> CommandRegistry {
+    let mut r = registry_of([Stub::new("fallback", b"ok\n", 0)]);
+    r.register(Echo);
+    for (name, size) in pictures {
+        r.register(Picture { name, size });
+    }
+    r
+}
+
+fn attachment_sizes(out: &CommandOutput) -> Vec<usize> {
+    out.attachments.iter().map(attachment_bytes).collect()
+}
+
+#[tokio::test]
+async fn images_past_the_count_cap_are_dropped_and_reported_once() {
+    let r = picture_registry([("pic", 8)]);
+    let out = run_line(&["pic"; 6].join("; "), &r).await;
+    assert_eq!(attachment_sizes(&out), [8; ATTACHMENTS_MAX]);
+    assert_eq!(out.exit_code, 141);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), ATTACHMENT_OVERFLOW);
+}
+
+#[tokio::test]
+async fn images_past_the_byte_cap_are_dropped_with_every_later_one() {
+    let half = ATTACHMENT_BYTES_MAX / 2;
+    let r = picture_registry([("half", half), ("big", ATTACHMENT_BYTES_MAX), ("tiny", 1)]);
+    let out = run_line("half | echo_stdin; half; big; tiny", &r).await;
+    assert_eq!(attachment_sizes(&out), [half, half]);
+    assert_eq!(out.exit_code, 141);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), ATTACHMENT_OVERFLOW);
+}
+
+#[tokio::test]
+async fn a_dropped_image_fails_its_stage_so_and_stops_and_or_falls_back() {
+    let r = picture_registry([("pic", 8)]);
+    let and_line = ["pic"; ATTACHMENTS_MAX + 2].join(" && ");
+    let and_out = run_line(&format!("{and_line} && fallback"), &r).await;
+    assert_eq!(and_out.exit_code, 141);
+    assert!(!and_out.stdout.ends_with(b"ok\n"));
+
+    let or_line = ["pic"; ATTACHMENTS_MAX + 1].join("; ");
+    let or_out = run_line(&format!("{or_line} || fallback"), &r).await;
+    assert_eq!(or_out.exit_code, 0);
+    assert!(or_out.stdout.ends_with(b"ok\n"));
+    assert_eq!(attachment_sizes(&or_out), [8; ATTACHMENTS_MAX]);
+}
+
+#[tokio::test]
+async fn images_within_both_caps_pass_through_untouched() {
+    let r = picture_registry([("pic", 8), ("rest", ATTACHMENT_BYTES_MAX - 24)]);
+    let out = run_line("pic | echo_stdin; pic && pic || fallback; rest", &r).await;
+    assert_eq!(attachment_sizes(&out), [8, 8, 8, ATTACHMENT_BYTES_MAX - 24]);
+    assert_eq!(out.exit_code, 0);
+    assert!(out.stderr.is_empty());
 }
