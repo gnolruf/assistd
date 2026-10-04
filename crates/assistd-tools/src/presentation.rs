@@ -2,12 +2,13 @@
 //! binary, truncates long stdout and stderr (spilling each to a file),
 //! and ends with an `[exit:N | Mms]` footer.
 
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::cmp::Reverse;
+use std::fs::{DirEntry, Metadata, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use assistd_config::ToolsOutputConfig;
 use assistd_config::defaults::default_tools_overflow_dir;
@@ -18,6 +19,12 @@ use crate::commands::cat::sniff_binary;
 
 /// Spill files hold raw tool output, so only the daemon's user may read them.
 const OVERFLOW_FILE_MODE: u32 = 0o600;
+
+/// Most spill files kept in an overflow directory; older ones are deleted.
+const MAX_SPILL_FILES: usize = 64;
+
+/// Most spill bytes kept in an overflow directory; older files are deleted.
+const MAX_SPILL_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Limits and destinations for output rendering.
 #[derive(Debug, Clone)]
@@ -110,6 +117,44 @@ struct StreamCut {
 impl StreamCut {
     fn truncated(&self) -> bool {
         self.notice.is_some()
+    }
+}
+
+/// How many spill files, and how many bytes of them, an overflow
+/// directory keeps; the newest spill is kept even when it alone exceeds them.
+#[derive(Debug, Clone, Copy)]
+struct SpillLimits {
+    max_files: usize,
+    max_bytes: u64,
+}
+
+impl SpillLimits {
+    const DEFAULT: Self = Self {
+        max_files: MAX_SPILL_FILES,
+        max_bytes: MAX_SPILL_BYTES,
+    };
+}
+
+/// An existing `<stem>-<n>.txt` spill file in an overflow directory.
+#[derive(Debug)]
+struct SpillFile {
+    path: PathBuf,
+    modified: SystemTime,
+    sequence: u64,
+    len: u64,
+}
+
+impl SpillFile {
+    /// `None` unless `entry` is a regular file named like a spill.
+    fn from_dir_entry(entry: &DirEntry) -> Option<Self> {
+        let sequence = spill_sequence(entry.file_name().to_str()?)?;
+        let metadata = entry.metadata().ok().filter(Metadata::is_file)?;
+        Some(Self {
+            path: entry.path(),
+            modified: metadata.modified().ok()?,
+            sequence,
+            len: metadata.len(),
+        })
     }
 }
 
@@ -242,7 +287,15 @@ fn spill_overflow(
     let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
     let file_name = format!("{stem}-{n}.txt");
     match write_overflow_file(raw, &spec.overflow_dir.join(&file_name)) {
-        Ok(path) => Some(path),
+        Ok(path) => {
+            prune_spills(
+                &spec.overflow_dir,
+                &path,
+                raw.len() as u64,
+                SpillLimits::DEFAULT,
+            );
+            Some(path)
+        }
         Err(e) => {
             tracing::warn!(
                 "failed to write overflow file {file_name} to {}: {e}",
@@ -376,6 +429,71 @@ fn write_overflow_file(raw: &[u8], path: &Path) -> std::io::Result<PathBuf> {
         .open(path)?
         .write_all(raw)?;
     Ok(path.to_path_buf())
+}
+
+/// Delete the oldest spill files in `dir` until it holds at most `limits`,
+/// never touching `newest` (`newest_len` bytes); failures are only logged.
+fn prune_spills(dir: &Path, newest: &Path, newest_len: u64, limits: SpillLimits) {
+    let older = match older_spills(dir, newest) {
+        Ok(older) => older,
+        Err(e) => {
+            tracing::warn!("failed to list spill files in {}: {e}", dir.display());
+            return;
+        }
+    };
+    for spill in evicted_spills(older, newest_len, limits) {
+        if let Err(e) = std::fs::remove_file(&spill.path)
+            && e.kind() != ErrorKind::NotFound
+        {
+            tracing::warn!("failed to delete spill file {}: {e}", spill.path.display());
+        }
+    }
+}
+
+/// The spill files in `dir` other than `newest`, newest first.
+fn older_spills(dir: &Path, newest: &Path) -> std::io::Result<Vec<SpillFile>> {
+    let mut spills: Vec<SpillFile> = std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path() != newest)
+        .filter_map(|entry| SpillFile::from_dir_entry(&entry))
+        .collect();
+    spills.sort_unstable_by_key(|spill| Reverse((spill.modified, spill.sequence)));
+    Ok(spills)
+}
+
+/// The tail of newest-first `older` that does not fit in `limits`
+/// alongside the newest spill of `newest_len` bytes.
+fn evicted_spills(
+    mut older: Vec<SpillFile>,
+    newest_len: u64,
+    limits: SpillLimits,
+) -> Vec<SpillFile> {
+    let mut kept_bytes = newest_len;
+    let kept = older
+        .iter()
+        .take(limits.max_files.saturating_sub(1))
+        .take_while(|spill| {
+            kept_bytes = kept_bytes.saturating_add(spill.len);
+            kept_bytes <= limits.max_bytes
+        })
+        .count();
+    older.split_off(kept)
+}
+
+/// Whether `file_name` names a spill file: `<stem>-<n>.txt` with a
+/// non-empty stem and `n` ASCII digits that fit in a `u64`.
+pub fn is_spill_file_name(file_name: &str) -> bool {
+    spill_sequence(file_name).is_some()
+}
+
+/// The counter `n` of a spill file named `<stem>-<n>.txt`.
+fn spill_sequence(file_name: &str) -> Option<u64> {
+    let (stem, sequence) = file_name.strip_suffix(".txt")?.rsplit_once('-')?;
+    let digits_only = sequence.bytes().all(|b| b.is_ascii_digit());
+    (!stem.is_empty() && digits_only)
+        .then_some(sequence)?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]

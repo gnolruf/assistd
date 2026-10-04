@@ -57,7 +57,8 @@ pub struct ToolsOutputConfig {
     /// Spill directory for overflow (`cmd-<n>.txt` for `run`,
     /// `mcp-<server>-<n>.txt` for MCP tools); made owner-only on daemon
     /// startup, when earlier spill files are removed and nothing else is.
-    /// Must be absolute. Defaults to `$XDG_RUNTIME_DIR/assistd/output`,
+    /// Each new spill deletes the oldest ones beyond the newest 64 files
+    /// or 128 MiB. Must be absolute. Defaults to `$XDG_RUNTIME_DIR/assistd/output`,
     /// else under the user cache dir.
     pub overflow_dir: PathBuf,
 }

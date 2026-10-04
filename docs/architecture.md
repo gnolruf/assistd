@@ -344,7 +344,8 @@ A walk through `assistd query "what files changed this week?"`:
    stdout. If stdout exceeds the `[tools.output]` line or byte cap,
    `RunTool::invoke` cuts it to that head and spills the full text to
    `tools.output.overflow_dir` (default `$XDG_RUNTIME_DIR/assistd/output`,
-   owner-only, with earlier spill files removed at every daemon start); it then base64-encodes any image
+   owner-only, with earlier spill files removed at every daemon start and only the newest 64
+   files or 128 MiB kept while it runs); it then base64-encodes any image
    attachments and returns the JSON result.
 
 7. **Loop back.** Result emitted as `Event::ToolResult`, pushed back

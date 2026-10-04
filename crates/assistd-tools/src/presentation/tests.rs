@@ -26,6 +26,28 @@ fn present_ms(out: CommandOutput, spec: &PresentSpec, ms: u64) -> PresentResult 
     present(out, spec, &AtomicU64::new(0), Duration::from_millis(ms))
 }
 
+fn sorted_file_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+fn write_file_aged(dir: &Path, name: &str, len: usize, age_secs: u64) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, vec![b'x'; len]).unwrap();
+    let modified = SystemTime::now() - Duration::from_secs(age_secs);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    path
+}
+
 #[test]
 fn binary_label_flags_bytes_the_model_should_not_see() {
     let mut nul_text = b"plain text".to_vec();
@@ -403,4 +425,84 @@ fn present_binary_guard_still_truncates_stderr() {
             dir.path().join("cmd-1.txt").display(),
         )
     );
+}
+
+#[test]
+fn spilling_past_the_file_cap_keeps_only_the_newest_spills() {
+    let dir = tempdir().unwrap();
+    let spec = PresentSpec {
+        max_lines: 1,
+        ..spec_in(dir.path())
+    };
+    let truncator = TextTruncator::new(spec, "cmd");
+    let total = MAX_SPILL_FILES + 5;
+
+    for _ in 0..total {
+        let cut = truncator.truncate("a\nb\n".into());
+        assert!(cut.overflow_file.as_deref().is_some_and(Path::exists));
+    }
+
+    let mut expected: Vec<String> = (6..=total).map(|n| format!("cmd-{n}.txt")).collect();
+    expected.sort();
+    assert_eq!(sorted_file_names(dir.path()), expected);
+}
+
+#[test]
+fn is_spill_file_name_accepts_only_stem_dash_counter_dot_txt() {
+    let cases = [
+        ("cmd-1.txt", true),
+        ("mcp-files-12.txt", true),
+        ("cmd-007.txt", true),
+        ("cmd-18446744073709551615.txt", true),
+        ("cmd-18446744073709551616.txt", false),
+        ("notes.txt", false),
+        ("cmd1.txt", false),
+        ("cmd-.txt", false),
+        ("-3.txt", false),
+        ("cmd-+1.txt", false),
+        ("cmd-x.txt", false),
+        ("cmd-1.md", false),
+        ("cmd-1.txt.bak", false),
+    ];
+    for (name, expected) in cases {
+        assert_eq!(is_spill_file_name(name), expected, "{name}");
+    }
+}
+
+/// Age decides across stems whose counters are unrelated, and files not
+/// named like spills are never touched.
+#[test]
+fn prune_spills_evicts_the_oldest_until_under_the_byte_cap() {
+    let dir = tempdir().unwrap();
+    write_file_aged(dir.path(), "notes.txt", 500, 50);
+    write_file_aged(dir.path(), "mcp-web-9.txt", 100, 40);
+    write_file_aged(dir.path(), "cmd-1.txt", 100, 30);
+    write_file_aged(dir.path(), "mcp-web-10.txt", 100, 20);
+    let newest = write_file_aged(dir.path(), "cmd-2.txt", 100, 0);
+    let limits = SpillLimits {
+        max_files: 10,
+        max_bytes: 300,
+    };
+
+    prune_spills(dir.path(), &newest, 100, limits);
+
+    assert_eq!(
+        sorted_file_names(dir.path()),
+        ["cmd-1.txt", "cmd-2.txt", "mcp-web-10.txt", "notes.txt"]
+    );
+}
+
+#[test]
+fn prune_spills_keeps_the_new_spill_even_when_it_alone_exceeds_the_caps() {
+    let dir = tempdir().unwrap();
+    write_file_aged(dir.path(), "cmd-1.txt", 10, 0);
+    let newest = write_file_aged(dir.path(), "cmd-2.txt", 1000, 60);
+    let limits = SpillLimits {
+        max_files: 1,
+        max_bytes: 100,
+    };
+
+    prune_spills(dir.path(), &newest, 1000, limits);
+
+    assert_eq!(sorted_file_names(dir.path()), ["cmd-2.txt"]);
 }
