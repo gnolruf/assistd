@@ -228,7 +228,10 @@ second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
 store. The `recall` tool embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
-over conversation chunks from earlier sessions.
+over conversation chunks from earlier sessions. Like chat requests,
+embedding requests are sent only while the embedding server's
+supervisor is `Ready` with a live child; a row refused in the
+meantime stays unindexed until `assistd memory reindex` picks it up.
 
 ### Voice (`assistd-voice`)
 

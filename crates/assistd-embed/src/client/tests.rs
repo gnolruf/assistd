@@ -1,9 +1,11 @@
 use std::net::SocketAddr;
 
+use assistd_utils::child_server::ReadyState;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use super::*;
 
@@ -62,7 +64,7 @@ async fn serve(responses: Vec<Value>) -> (SocketAddr, JoinHandle<Vec<Value>>) {
 }
 
 async fn embedder_at(addr: SocketAddr) -> LlamaEmbedder {
-    LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5))
+    LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None)
         .await
         .expect("probe succeeds")
 }
@@ -200,4 +202,63 @@ fn l2_normalize_scales_to_unit_length_and_passes_degenerate_input_through() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn nothing_is_sent_while_the_embed_server_is_not_serving() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cases = [
+        ("starting", ReadyState::Starting, Some(7), true),
+        (
+            "backing off",
+            ReadyState::BackingOff { attempt: 1 },
+            None,
+            true,
+        ),
+        ("degraded", ReadyState::Degraded, None, true),
+        ("ready with its child gone", ReadyState::Ready, None, true),
+        ("supervisor stopped", ReadyState::Ready, Some(7), false),
+    ];
+    for (label, state, pid, supervisor_running) in cases {
+        let (ready_tx, status) = ChildServerStatus::scripted(state, pid);
+        let _supervisor = supervisor_running.then_some(ready_tx);
+        let result =
+            LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), Some(status)).await;
+        assert!(
+            matches!(result, Err(EmbedError::NotReady)),
+            "{label}: {result:?}"
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "a request reached the listener"
+    );
+}
+
+#[tokio::test]
+async fn embeds_are_refused_while_the_server_restarts_and_resume_once_it_serves() {
+    let (addr, server) = serve(vec![
+        probe_response(),
+        json!({ "data": [{ "index": 0, "embedding": [0.0, 1.0] }] }),
+    ])
+    .await;
+    let (ready_tx, status) = ChildServerStatus::scripted(ReadyState::Ready, Some(7));
+    let embedder = LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), Some(status))
+        .await
+        .expect("probe succeeds while serving");
+
+    ready_tx.send_replace(ReadyState::BackingOff { attempt: 1 });
+    let refused = embedder.embed("private memory".into()).await;
+    assert!(matches!(refused, Err(EmbedError::NotReady)), "{refused:?}");
+
+    ready_tx.send_replace(ReadyState::Ready);
+    let vector = embedder.embed("after restart".into()).await.unwrap();
+    assert_eq!(vector, vec![0.0, 1.0]);
+
+    let bodies = server.await.unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[1]["input"], json!(["after restart"]));
 }

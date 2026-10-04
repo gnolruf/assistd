@@ -10,6 +10,7 @@ default = []
 process = ["dep:tokio", "dep:rustix"]
 child-server = ["process", "dep:tracing", "dep:reqwest", "dep:thiserror", "dep:parking_lot"]
 tracing-init = ["dep:tracing-subscriber"]
+test-support = ["child-server"]
 
 [dependencies]
 tokio = { workspace = true, optional = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }

@@ -86,6 +86,7 @@ pub(super) async fn init(
         SocketAddr::new(config.embedding.host, config.embedding.port.get()),
         config.embedding.model.clone(),
         assistd_embed::REQUEST_TIMEOUT,
+        Some(service.status()),
     )
     .await
     {

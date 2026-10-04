@@ -29,8 +29,7 @@ pub enum ReadyState {
 pub struct ChildServer {
     server: &'static str,
     task: Option<JoinHandle<()>>,
-    ready_rx: watch::Receiver<ReadyState>,
-    pid: Arc<Mutex<Option<u32>>>,
+    status: ChildServerStatus,
 }
 
 impl ChildServer {
@@ -61,8 +60,7 @@ impl ChildServer {
                             return Ok(Self {
                                 server,
                                 task: Some(task),
-                                ready_rx,
-                                pid,
+                                status: ChildServerStatus { ready_rx, pid },
                             });
                         }
                         ReadyState::Degraded => {
@@ -86,28 +84,34 @@ impl ChildServer {
 
     /// Whether the supervisor is currently in [`ReadyState::Ready`].
     pub fn is_ready(&self) -> bool {
-        matches!(*self.ready_rx.borrow(), ReadyState::Ready)
+        self.status.is_ready()
     }
 
     /// Whether the supervisor is [`ReadyState::Ready`] and its child is alive,
     /// so the listener that passed the readiness check is still the child's.
     pub fn is_serving(&self) -> bool {
-        self.is_ready() && self.pid().is_some()
+        self.status.is_serving()
     }
 
     /// Snapshot of the current [`ReadyState`].
     pub fn state(&self) -> ReadyState {
-        *self.ready_rx.borrow()
+        *self.status.ready_rx.borrow()
     }
 
     /// Subscribe to the supervisor's readiness transitions.
     pub fn subscribe_ready(&self) -> watch::Receiver<ReadyState> {
-        self.ready_rx.clone()
+        self.status.ready_rx.clone()
     }
 
     /// PID of the currently running child, or `None` if no child is alive.
     pub fn pid(&self) -> Option<u32> {
-        *self.pid.lock()
+        self.status.pid()
+    }
+
+    /// A cloneable view of this server's readiness, for clients that must
+    /// check it before every request.
+    pub fn status(&self) -> ChildServerStatus {
+        self.status.clone()
     }
 
     /// Join the supervisor task. The shutdown watch passed to [`Self::start`]
@@ -126,5 +130,42 @@ impl Drop for ChildServer {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+    }
+}
+
+/// Read-only view of a [`ChildServer`]'s readiness and child pid. It never
+/// reports serving once the supervisor has stopped.
+#[derive(Debug, Clone)]
+pub struct ChildServerStatus {
+    ready_rx: watch::Receiver<ReadyState>,
+    pid: Arc<Mutex<Option<u32>>>,
+}
+
+impl ChildServerStatus {
+    /// A status driven by the returned sender, reporting `pid` as the child's.
+    /// Dropping the sender reads as a stopped supervisor.
+    #[cfg(feature = "test-support")]
+    pub fn scripted(state: ReadyState, pid: Option<u32>) -> (watch::Sender<ReadyState>, Self) {
+        let (ready_tx, ready_rx) = watch::channel(state);
+        let status = Self {
+            ready_rx,
+            pid: Arc::new(Mutex::new(pid)),
+        };
+        (ready_tx, status)
+    }
+
+    /// Whether the supervisor is running, [`ReadyState::Ready`], and its child
+    /// is alive, so the listener that passed the readiness check is still the child's.
+    pub fn is_serving(&self) -> bool {
+        let supervisor_running = self.ready_rx.has_changed().is_ok();
+        supervisor_running && self.is_ready() && self.pid().is_some()
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(*self.ready_rx.borrow(), ReadyState::Ready)
+    }
+
+    fn pid(&self) -> Option<u32> {
+        *self.pid.lock()
     }
 }
