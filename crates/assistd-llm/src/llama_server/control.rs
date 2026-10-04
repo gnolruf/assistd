@@ -247,23 +247,18 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
-    use crate::{HealthWaitError, ReadyState};
+    use crate::{HealthSnapshot, HealthWaitError, ReadyState};
 
     #[derive(Debug)]
     struct RestartingProbe;
 
     #[async_trait]
     impl LlmHealthProbe for RestartingProbe {
-        fn pid(&self) -> Option<u32> {
-            None
-        }
-
-        fn state(&self) -> Option<ReadyState> {
-            Some(ReadyState::BackingOff { attempt: 1 })
-        }
-
-        async fn is_serving(&self) -> bool {
-            false
+        async fn snapshot(&self) -> Option<HealthSnapshot> {
+            Some(HealthSnapshot {
+                state: ReadyState::BackingOff { attempt: 1 },
+                pid: None,
+            })
         }
 
         async fn wait_for_ready(&self, _timeout: Duration) -> Result<(), HealthWaitError> {

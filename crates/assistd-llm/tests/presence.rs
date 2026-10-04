@@ -33,7 +33,7 @@ use assistd_ipc::{Event, Request};
 use assistd_llm::chat::conversation::Summarizer;
 use assistd_llm::{
     EchoBackend, LlamaChatClient, LlamaServerError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
-    LlmResult, ReadyState, StepOutcome, ToolResultPayload,
+    LlmResult, ReadyState, StepOutcome, Thinking, ToolResultPayload,
 };
 use assistd_tools::Attachment;
 
@@ -401,6 +401,26 @@ async fn contend_for_llama_slot(manager: Arc<PresenceManager>, stop: Arc<AtomicB
     }
 }
 
+/// Run a summary, a one-shot completion and an agent step, asserting each succeeds.
+async fn complete_each_kind_of_request(client: &LlamaChatClient, round: usize) {
+    let summary = client.summarize("user: hi".into(), 16, 64).await;
+    assert!(summary.is_ok(), "summary {round}: {summary:?}");
+    let oneshot = client
+        .complete_oneshot("title?".into(), Thinking::Disabled)
+        .await;
+    assert!(oneshot.is_ok(), "one-shot {round}: {oneshot:?}");
+    client
+        .push_user(format!("question {round}"), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let step = client.step(Vec::new(), tx).await;
+    assert!(
+        matches!(step, Ok(StepOutcome::Final)),
+        "step {round}: {step:?}"
+    );
+}
+
 fn kill_child(pid: u32) {
     let pid = i32::try_from(pid)
         .ok()
@@ -424,7 +444,7 @@ async fn squat_on(port: u16) -> TcpListener {
 async fn wait_for_supervisor_restarting(manager: &PresenceManager) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !matches!(
-        manager.llama_state_blocking(),
+        manager.llama_health().await.map(|health| health.state),
         Some(ReadyState::Starting | ReadyState::BackingOff { .. })
     ) {
         assert!(
@@ -731,11 +751,10 @@ async fn requests_wait_out_a_contended_llama_slot_instead_of_failing() {
             Instant::now() < deadline,
             "slot seen contended {contended_snapshots} times in {requests} requests"
         );
-        if manager.llama_state_blocking().is_none() {
+        if manager.llama_pid_blocking().is_none() {
             contended_snapshots += 1;
         }
-        let summary = client.summarize("user: hi".into(), 16, 64).await;
-        assert!(summary.is_ok(), "request {requests}: {summary:?}");
+        complete_each_kind_of_request(&client, requests).await;
         requests += 1;
     }
 

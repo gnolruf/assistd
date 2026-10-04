@@ -18,8 +18,8 @@ use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, Event, PresenceState, StatusKind, StatusSeverity};
 use assistd_llm::{
-    HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec, LlmHealthProbe,
-    ReadyState,
+    HealthSnapshot, HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec,
+    LlmHealthProbe, ReadyState,
 };
 use assistd_utils::child_server::{ChildServer, ChildServerError};
 
@@ -209,13 +209,17 @@ impl PresenceManager {
             .is_some_and(ChildServer::is_serving)
     }
 
-    /// Non-blocking snapshot of the supervisor's [`ReadyState`]. `None`
-    /// when no service is attached or a transition holds the slot.
-    pub fn llama_state_blocking(&self) -> Option<ReadyState> {
+    /// The llama-server supervisor's state and child pid, read under one wait
+    /// for the slot. `None` when no service is attached.
+    pub async fn llama_health(&self) -> Option<HealthSnapshot> {
         self.llama
-            .try_lock()
-            .ok()
-            .and_then(|svc| svc.as_ref().map(ChildServer::state))
+            .lock()
+            .await
+            .as_ref()
+            .map(|service| HealthSnapshot {
+                state: service.state(),
+                pid: service.pid(),
+            })
     }
 
     /// Wait until llama-server reports `ReadyState::Ready` or `budget`
@@ -686,16 +690,8 @@ impl PresenceLlmHealthProbe {
 
 #[async_trait]
 impl LlmHealthProbe for PresenceLlmHealthProbe {
-    fn pid(&self) -> Option<u32> {
-        self.presence.llama_pid_blocking()
-    }
-
-    fn state(&self) -> Option<ReadyState> {
-        self.presence.llama_state_blocking()
-    }
-
-    async fn is_serving(&self) -> bool {
-        self.presence.llama_serving().await
+    async fn snapshot(&self) -> Option<HealthSnapshot> {
+        self.presence.llama_health().await
     }
 
     async fn wait_for_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {

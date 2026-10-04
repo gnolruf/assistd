@@ -38,21 +38,37 @@ pub enum HealthWaitError {
     NoService,
 }
 
+/// A managed llama-server's supervisor state and child pid, read together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealthSnapshot {
+    pub state: ReadyState,
+    /// The live child's pid, or `None` when no child is alive.
+    pub pid: Option<u32>,
+}
+
+impl HealthSnapshot {
+    /// Whether the supervisor is `Ready` with a live child, so the listener
+    /// that passed the readiness check is still the child's.
+    pub fn is_serving(&self) -> bool {
+        self.state == ReadyState::Ready && self.pid.is_some()
+    }
+}
+
 /// Readiness view of a managed llama-server, for telling a crash-induced
 /// HTTP failure (worth replaying) from a transport error.
 #[async_trait]
 pub trait LlmHealthProbe: fmt::Debug + Send + Sync {
-    /// Current PID of the managed llama-server child, or `None` if none is alive.
-    fn pid(&self) -> Option<u32>;
+    /// The supervisor's state and child pid as one consistent reading, or
+    /// `None` when no service is attached. Contention is waited out, never
+    /// reported as a missing service or child.
+    async fn snapshot(&self) -> Option<HealthSnapshot>;
 
-    /// Snapshot of the supervisor's readiness state. Returns `None`
-    /// when no service is attached (presence asleep / not yet woken).
-    fn state(&self) -> Option<ReadyState>;
-
-    /// Whether the supervisor is `Ready` with a live child, so the listener
-    /// that passed the readiness check is still the child's. Read as one
-    /// consistent snapshot; contention is waited out, never reported as `false`.
-    async fn is_serving(&self) -> bool;
+    /// Whether a service is attached and [`HealthSnapshot::is_serving`].
+    async fn is_serving(&self) -> bool {
+        self.snapshot()
+            .await
+            .is_some_and(|snapshot| snapshot.is_serving())
+    }
 
     /// Block until the supervisor reports `ReadyState::Ready` or `timeout`
     /// elapses; fails fast with [`HealthWaitError::Degraded`].

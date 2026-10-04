@@ -22,8 +22,8 @@ use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::StatusKind;
 use assistd_llm::{
-    ChatClientError, HealthWaitError, LlamaChatClient, LlmBackend, LlmError, LlmEvent,
-    LlmHealthProbe, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
+    ChatClientError, HealthSnapshot, HealthWaitError, LlamaChatClient, LlmBackend, LlmError,
+    LlmEvent, LlmHealthProbe, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
 };
 
 const MAX_REQUEST_HEADER_BYTES: usize = 128 * 1024;
@@ -345,19 +345,9 @@ impl ScriptedProbe {
 
 #[async_trait]
 impl LlmHealthProbe for ScriptedProbe {
-    fn pid(&self) -> Option<u32> {
-        self.snapshot.lock().unwrap().1
-    }
-
-    fn state(&self) -> Option<ReadyState> {
-        self.snapshot.lock().unwrap().0
-    }
-
-    async fn is_serving(&self) -> bool {
-        matches!(
-            *self.snapshot.lock().unwrap(),
-            (Some(ReadyState::Ready), Some(_))
-        )
+    async fn snapshot(&self) -> Option<HealthSnapshot> {
+        let (state, pid) = *self.snapshot.lock().unwrap();
+        state.map(|state| HealthSnapshot { state, pid })
     }
 
     async fn wait_for_ready(&self, _timeout: Duration) -> Result<(), HealthWaitError> {
@@ -1597,4 +1587,43 @@ async fn history_is_not_sent_for_summarizing_while_the_server_is_not_serving() {
         sent_while_serving,
         "neither a summary nor a completion may be sent"
     );
+}
+
+#[tokio::test]
+async fn a_failed_stream_is_a_restart_only_when_the_supervisor_moved_on_mid_request() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::StallAfterDeltas(vec!["partial".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script).await;
+    let mut spec = chat_spec(port);
+    spec.timeouts.stream_inactivity_secs = 1;
+    let probe = ScriptedProbe::serving();
+    let client = build_probed_client(&spec, &probe);
+
+    let cases = [
+        ("same child", Some(ReadyState::Ready), Some(4242), false),
+        ("new child", Some(ReadyState::Ready), Some(5151), true),
+        (
+            "supervisor restarting",
+            Some(ReadyState::BackingOff { attempt: 1 }),
+            None,
+            true,
+        ),
+        ("service detached", None, None, true),
+    ];
+    for (label, state, pid, restarted) in cases {
+        probe.set(Some(ReadyState::Ready), Some(4242));
+        client.push_user("hi".into(), Vec::new()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel(32);
+        let change_supervisor_mid_stream = async {
+            assert_eq!(rx.recv().await, Some(delta("partial")), "{label}");
+            probe.set(state, pid);
+        };
+        let (step, ()) = tokio::join!(client.step(Vec::new(), tx), change_supervisor_mid_stream);
+        match (restarted, &step) {
+            (true, Err(LlmError::ServerRestarting(_))) | (false, Ok(StepOutcome::Final)) => {}
+            _ => panic!("{label}: {step:?}"),
+        }
+    }
 }
