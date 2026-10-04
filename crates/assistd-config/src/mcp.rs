@@ -42,7 +42,8 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     /// Environment variables for the child, which inherits from the daemon
     /// only `HOME`, `LANG`, `LANGUAGE`, `LC_*`, `LOGNAME`, `PATH`, `SHELL`,
-    /// `TERM`, `TMPDIR`, `TZ` and `USER`. Set credentials here.
+    /// `TERM`, `TMPDIR`, `TZ` and `USER`. Set credentials here, and keep the
+    /// config file mode `0600`.
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// Timeout in seconds for the initialize handshake and each request.

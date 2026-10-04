@@ -248,6 +248,7 @@ dependencies = [
  "assistd-utils",
  "serde",
  "shlex 2.0.1",
+ "tempfile",
  "thiserror 2.0.21",
  "toml",
  "tracing",
