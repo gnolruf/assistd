@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use assistd_utils::path::tilde_remainder;
 use async_trait::async_trait;
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{FileType, Mode, OFlags};
+use rustix::io::Errno;
 use tokio::io::AsyncWriteExt;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
@@ -156,8 +157,9 @@ impl Command for WriteCommand {
          \n\
          PATH must be absolute (relative paths are rejected) and must fall \
          under one of the prefixes in `[tools.write] writable_paths`. \
-         Symlinks, and hidden (dot) entries at any depth below a prefix, are \
-         refused. Writes outside the shared scratch directory ask the user first. A file under /tmp \
+         Symlinks, devices, pipes, sockets, and hidden (dot) entries at any \
+         depth below a prefix, are refused. Writes outside the shared scratch \
+         directory ask the user first. A file under /tmp \
          or /run is not visible to `bash` scripts, which get empty ones of \
          their own; for a file they must see, use {sharing_hint}. \
          Tilde expansion is supported. Exit 126 on policy denial or a \
@@ -212,7 +214,7 @@ impl Command for WriteCommand {
                     .unwrap_or_default(),
                 ..CommandOutput::default()
             },
-            Err(e) => CommandOutput::failed(1, io_error_nav("write", &raw_path, &e).into_bytes()),
+            Err(failure) => failure.output(&raw_path),
         }
     }
 }
@@ -279,20 +281,79 @@ impl PathResolveError {
     }
 }
 
-async fn write_without_symlinks(path: PathBuf, content: Vec<u8>) -> std::io::Result<()> {
+#[derive(Debug)]
+enum WriteFailure {
+    NotRegularFile,
+    Io(std::io::Error),
+}
+
+impl WriteFailure {
+    fn output(&self, raw_path: &str) -> CommandOutput {
+        match self {
+            Self::NotRegularFile => CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    "write",
+                    format_args!("{raw_path}: not a regular file (device, pipe, or socket)"),
+                    Hint::Try,
+                    "a path to a regular file, or to one that does not exist yet",
+                )
+                .into_bytes(),
+            ),
+            Self::Io(e) => {
+                CommandOutput::failed(1, io_error_nav("write", raw_path, e).into_bytes())
+            }
+        }
+    }
+}
+
+impl From<std::io::Error> for WriteFailure {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<Errno> for WriteFailure {
+    fn from(errno: Errno) -> Self {
+        Self::Io(errno.into())
+    }
+}
+
+async fn write_without_symlinks(path: PathBuf, content: Vec<u8>) -> Result<(), WriteFailure> {
     let open = tokio::task::spawn_blocking(move || open_without_symlinks(&path));
     let mut file = tokio::fs::File::from_std(open.await.map_err(std::io::Error::other)??);
     file.write_all(&content).await?;
-    file.flush().await
+    Ok(file.flush().await?)
 }
 
-fn open_without_symlinks(path: &Path) -> std::io::Result<std::fs::File> {
+/// Open `path` for writing without blocking, refusing anything but a
+/// regular file; a FIFO with no reader fails the open with `ENXIO`.
+fn open_without_symlinks(path: &Path) -> Result<std::fs::File, WriteFailure> {
     let fd = rustix::fs::openat2(
         rustix::fs::CWD,
         path,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
+        OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::TRUNC
+            | OFlags::CLOEXEC
+            | OFlags::NONBLOCK
+            | OFlags::NOCTTY,
         Mode::from_raw_mode(0o666),
         rustix::fs::ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|errno| {
+        if errno == Errno::NXIO {
+            WriteFailure::NotRegularFile
+        } else {
+            WriteFailure::from(errno)
+        }
+    })?;
+    if !FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode).is_file() {
+        return Err(WriteFailure::NotRegularFile);
+    }
+    rustix::fs::fcntl_setfl(
+        &fd,
+        rustix::fs::fcntl_getfl(&fd)?.difference(OFlags::NONBLOCK),
     )?;
     Ok(std::fs::File::from(fd))
 }

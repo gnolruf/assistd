@@ -1,3 +1,6 @@
+use std::os::unix::net::UnixListener;
+use std::time::Duration;
+
 use tempfile::tempdir;
 
 use super::*;
@@ -311,6 +314,66 @@ async fn overwrites_and_truncates_existing_file() {
     let out = write_under(dir.path(), &[&path.to_string_lossy(), "new"], None).await;
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
+}
+
+fn assert_not_regular_file_refusal(out: &CommandOutput, target: &str) {
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{target}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "[error] write: {target}: not a regular file (device, pipe, or socket). \
+             Try: a path to a regular file, or to one that does not exist yet\n"
+        )
+    );
+}
+
+#[tokio::test]
+async fn fifo_without_a_reader_is_refused_without_blocking() {
+    let dir = tempdir().unwrap();
+    let fifo = dir.path().join("pipe");
+    rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::from_raw_mode(0o600)).unwrap();
+    let target = fifo.to_string_lossy().into_owned();
+
+    let out = tokio::time::timeout(
+        Duration::from_secs(5),
+        write_under(dir.path(), &[&target, "hi"], None),
+    )
+    .await
+    .expect("writing to a FIFO must not block");
+    assert_not_regular_file_refusal(&out, &target);
+}
+
+#[tokio::test]
+async fn fifo_with_a_reader_is_refused() {
+    let dir = tempdir().unwrap();
+    let fifo = dir.path().join("pipe");
+    rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::from_raw_mode(0o600)).unwrap();
+    let _reader =
+        rustix::fs::open(&fifo, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty()).unwrap();
+    let target = fifo.to_string_lossy().into_owned();
+
+    let out = tokio::time::timeout(
+        Duration::from_secs(5),
+        write_under(dir.path(), &[&target, "hi"], None),
+    )
+    .await
+    .expect("writing to a FIFO must not block");
+    assert_not_regular_file_refusal(&out, &target);
+}
+
+#[tokio::test]
+async fn sockets_and_devices_are_refused() {
+    let dir = tempdir().unwrap();
+    let socket = dir.path().join("sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    for (allowed, target) in [
+        (dir.path(), socket.as_path()),
+        (Path::new("/dev"), Path::new("/dev/null")),
+    ] {
+        let target = target.to_string_lossy().into_owned();
+        let out = write_under(allowed, &[&target, "hi"], None).await;
+        assert_not_regular_file_refusal(&out, &target);
+    }
 }
 
 #[tokio::test]
