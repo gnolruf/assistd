@@ -58,6 +58,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The checkout is owned by the runner user but the container runs
+      # as root, so git refuses to read it until it is marked safe.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Check tag matches the workspace version
         run: |
           git rev-parse --verify --quiet "refs/tags/$TAG^{commit}" >/dev/null \
