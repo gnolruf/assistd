@@ -353,6 +353,13 @@ impl LlmHealthProbe for ScriptedProbe {
         self.snapshot.lock().unwrap().0
     }
 
+    async fn is_serving(&self) -> bool {
+        matches!(
+            *self.snapshot.lock().unwrap(),
+            (Some(ReadyState::Ready), Some(_))
+        )
+    }
+
     async fn wait_for_ready(&self, _timeout: Duration) -> Result<(), HealthWaitError> {
         Err(HealthWaitError::Timeout)
     }

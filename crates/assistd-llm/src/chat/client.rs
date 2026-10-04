@@ -158,8 +158,11 @@ impl LlamaChatClient {
     }
 
     /// True when no supervisor is attached or its child is serving.
-    fn may_send_request(&self) -> bool {
-        let serving = self.health.as_ref().is_none_or(|probe| probe.is_serving());
+    async fn may_send_request(&self) -> bool {
+        let serving = match &self.health {
+            Some(probe) => probe.is_serving().await,
+            None => true,
+        };
         if !serving {
             warn!(target: "assistd::chat", "llama-server is not ready; request not sent");
         }
@@ -238,7 +241,7 @@ impl LlamaChatClient {
         first_byte_by: Instant,
         pid_at_request: Option<u32>,
     ) -> Result<reqwest::Response, StreamOutcome> {
-        if !self.may_send_request() {
+        if !self.may_send_request().await {
             return Err(StreamOutcome::ServerRestart {
                 accum: Box::default(),
                 pre_emit: true,
@@ -576,7 +579,7 @@ impl Summarizer for LlamaChatClient {
         _target_tokens: u32,
         max_tokens: u32,
     ) -> Result<String, ChatClientError> {
-        if !self.may_send_request() {
+        if !self.may_send_request().await {
             return Err(ChatClientError::NotReady);
         }
         let url = format!("{}/v1/chat/completions", self.base_url);

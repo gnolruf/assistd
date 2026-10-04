@@ -199,6 +199,16 @@ impl PresenceManager {
             .and_then(|svc| svc.as_ref().and_then(ChildServer::pid))
     }
 
+    /// Whether a llama-server child is attached and serving. Waits for the
+    /// slot, so a transition holding it never reads as not serving.
+    pub async fn llama_serving(&self) -> bool {
+        self.llama
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(ChildServer::is_serving)
+    }
+
     /// Non-blocking snapshot of the supervisor's [`ReadyState`]. `None`
     /// when no service is attached or a transition holds the slot.
     pub fn llama_state_blocking(&self) -> Option<ReadyState> {
@@ -446,13 +456,7 @@ impl PresenceManager {
     }
 
     async fn unload_model(&self) -> Result<(), PresenceError> {
-        let serving = self
-            .llama
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(ChildServer::is_serving);
-        if !serving {
+        if !self.llama_serving().await {
             return Err(PresenceError::Unload {
                 model: self.model.name.clone(),
                 source: LlamaServerError::NotReady,
@@ -688,6 +692,10 @@ impl LlmHealthProbe for PresenceLlmHealthProbe {
 
     fn state(&self) -> Option<ReadyState> {
         self.presence.llama_state_blocking()
+    }
+
+    async fn is_serving(&self) -> bool {
+        self.presence.llama_serving().await
     }
 
     async fn wait_for_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {

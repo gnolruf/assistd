@@ -50,10 +50,9 @@ pub trait LlmHealthProbe: fmt::Debug + Send + Sync {
     fn state(&self) -> Option<ReadyState>;
 
     /// Whether the supervisor is `Ready` with a live child, so the listener
-    /// that passed the readiness check is still the child's.
-    fn is_serving(&self) -> bool {
-        self.state() == Some(ReadyState::Ready) && self.pid().is_some()
-    }
+    /// that passed the readiness check is still the child's. Read as one
+    /// consistent snapshot; contention is waited out, never reported as `false`.
+    async fn is_serving(&self) -> bool;
 
     /// Block until the supervisor reports `ReadyState::Ready` or `timeout`
     /// elapses; fails fast with [`HealthWaitError::Degraded`].

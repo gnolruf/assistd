@@ -780,6 +780,10 @@ impl LlmHealthProbe for MockProbe {
         None
     }
 
+    async fn is_serving(&self) -> bool {
+        false
+    }
+
     async fn wait_for_ready(&self, _budget: Duration) -> Result<(), HealthWaitError> {
         self.wait_calls.fetch_add(1, Ordering::SeqCst);
         self.wait_result

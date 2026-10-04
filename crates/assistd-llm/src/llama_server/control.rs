@@ -107,15 +107,15 @@ impl LlamaServerControl {
         }
     }
 
-    fn require_serving(&self) -> Result<(), LlamaServerError> {
+    async fn require_serving(&self) -> Result<(), LlamaServerError> {
         match &self.health {
-            Some(probe) if !probe.is_serving() => Err(LlamaServerError::NotReady),
+            Some(probe) if !probe.is_serving().await => Err(LlamaServerError::NotReady),
             _ => Ok(()),
         }
     }
 
     async fn fetch_models(&self) -> Result<ModelsResponse, LlamaServerError> {
-        self.require_serving()?;
+        self.require_serving().await?;
         let url = format!("{}/models", self.base_url);
         let resp = self.client.get(&url).send().await?;
         let status = resp.status();
@@ -126,7 +126,7 @@ impl LlamaServerControl {
     }
 
     async fn fetch_props(&self, base_url: &str) -> Result<Value, LlamaServerError> {
-        self.require_serving()?;
+        self.require_serving().await?;
         let resp = self
             .client
             .get(format!("{base_url}/props"))
@@ -145,7 +145,7 @@ impl LlamaServerControl {
         path: &'static str,
         model: &str,
     ) -> Result<(), LlamaServerError> {
-        self.require_serving()?;
+        self.require_serving().await?;
         let url = format!("{}{}", self.base_url, path);
         let body = ModelActionRequest { model };
         debug!(target: "assistd::llama_server", "POST {url} model={model}");
@@ -260,6 +260,10 @@ mod tests {
 
         fn state(&self) -> Option<ReadyState> {
             Some(ReadyState::BackingOff { attempt: 1 })
+        }
+
+        async fn is_serving(&self) -> bool {
+            false
         }
 
         async fn wait_for_ready(&self, _timeout: Duration) -> Result<(), HealthWaitError> {
