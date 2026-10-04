@@ -44,7 +44,9 @@ pub use wm::WmCommand;
 pub use write::{WriteCommand, WritePolicyCfg};
 
 #[cfg(test)]
-pub(crate) use test_support::{RecordingGate, test_patterns, test_registry};
+pub(crate) use test_support::{
+    RecordingGate, hold_fifo_open, make_fifo, test_patterns, test_registry,
+};
 
 /// Largest file a command reads into memory; a bigger one would overflow
 /// a pipeline stage anyway.
@@ -86,17 +88,16 @@ pub(crate) async fn read_regular_head(
     Ok((head, size))
 }
 
-/// Open `path` with its size, refusing devices, FIFOs and sockets before
-/// opening since they can block forever. Directories fall through to `EISDIR`.
+/// Open `path` with its size on the blocking pool, refusing devices, FIFOs
+/// and sockets without opening or blocking on them. Directories fall through
+/// to `EISDIR`.
 async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {
-    let meta = tokio::fs::metadata(path).await?;
-    if !meta.is_file() && !meta.is_dir() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "not a regular file (device, pipe, or socket)",
-        ));
-    }
-    Ok((tokio::fs::File::open(path).await?, meta.len()))
+    let path = path.to_owned();
+    let (file, size) =
+        tokio::task::spawn_blocking(move || assistd_utils::fs::open_regular_or_dir(&path))
+            .await
+            .map_err(io::Error::other)??;
+    Ok((tokio::fs::File::from_std(file), size))
 }
 
 /// Input for a stdin-or-files command: named files (concatenated, binary
