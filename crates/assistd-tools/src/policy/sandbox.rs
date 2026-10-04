@@ -1,11 +1,13 @@
 //! The bubblewrap sandbox subprocess-spawning commands run in.
 
 use std::ffi::{OsStr, OsString};
+use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use rustix::fs::Access;
 use tokio::process::{Child, Command as ProcCommand};
 use tracing::{info, warn};
 
@@ -274,7 +276,7 @@ impl SandboxInfo {
 
     /// Flag order is load-bearing: the profile, then the `access` binds
     /// (after `--tmpfs /run`), then the shared directories, then the
-    /// read-only binds over `home`'s command directories and the
+    /// read-only mounts over `home`'s command directories and the
     /// protections, then the operator's `extra_args` so they win.
     fn bwrap_command<I, S>(
         &self,
@@ -288,10 +290,11 @@ impl SandboxInfo {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        let home = SandboxHome::read(home);
         let mut cmd = ProcCommand::new(bwrap);
         cmd.env_clear().envs(kept_env(std::env::vars_os(), access));
         cmd.args(
-            default_bwrap_flags_for(home.clone(), access)
+            default_bwrap_flags_for(home.as_ref(), access)
                 .iter()
                 .map(OsStr::new),
         );
@@ -304,16 +307,11 @@ impl SandboxInfo {
         } else {
             cmd.args(shared_flags(&self.shared));
         }
-        let writable: Vec<PathBuf> = home
-            .filter(|h| is_bindable_home(h))
-            .map(PathBuf::from)
-            .into_iter()
-            .collect();
         cmd.args(
-            writable
-                .iter()
-                .flat_map(|home| home_command_dir_flags(home, &self.host_path)),
+            home.iter()
+                .flat_map(|home| home.command_dir_flags(&self.host_path)),
         );
+        let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         cmd.args(protection_flags(&self.protected, &writable));
         cmd.args(self.extra_args.iter().map(OsStr::new));
         cmd.arg("--");
@@ -334,7 +332,7 @@ pub enum SandboxError {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Mounts {
-    /// Empty tmpfs mounts no later bind covers.
+    /// Writable empty tmpfs mounts no later bind covers.
     private: Vec<PathBuf>,
     /// Host binds no later tmpfs covers.
     shared: Vec<PathBuf>,
@@ -349,6 +347,10 @@ impl Mounts {
             rest = match (flag.to_str(), tail) {
                 (Some("--tmpfs"), [dir, tail @ ..]) => {
                     mounts.mount_tmpfs(Path::new(dir));
+                    tail
+                }
+                (Some("--remount-ro"), [dir, tail @ ..]) => {
+                    mounts.private.retain(|private| private != Path::new(dir));
                     tail
                 }
                 (Some(flag), [_, dir, tail @ ..]) if BIND_FLAGS.contains(&flag) => {
@@ -393,6 +395,143 @@ impl Mounts {
             })
             .cloned()
             .collect()
+    }
+}
+
+/// A usable `$HOME`: an absolute path resolving to a directory other than
+/// `/`, with its visible (non-dot) entries listed once per command.
+#[derive(Debug)]
+struct SandboxHome {
+    dir: String,
+    real: PathBuf,
+    visible: Vec<VisibleEntry>,
+}
+
+#[derive(Debug)]
+struct VisibleEntry {
+    path: PathBuf,
+    /// Known not to be a symlink, so the profile may bind it writable.
+    bindable: bool,
+}
+
+impl SandboxHome {
+    /// `None` when `home` is unset, relative, or does not resolve to a
+    /// directory other than `/`.
+    fn read(home: Option<String>) -> Option<Self> {
+        let dir = home.filter(|home| Path::new(home).is_absolute())?;
+        let real = std::fs::canonicalize(&dir)
+            .ok()
+            .filter(|real| real.is_dir() && real.parent().is_some())?;
+        let visible = visible_entries(Path::new(&dir));
+        Some(Self { dir, real, visible })
+    }
+
+    fn writable_entries(&self) -> impl Iterator<Item = &str> {
+        self.visible
+            .iter()
+            .filter(|entry| entry.bindable)
+            .filter_map(|entry| entry.path.to_str())
+    }
+
+    fn bind_flags(&self) -> Vec<String> {
+        let home = ["--ro-bind", self.dir.as_str(), self.dir.as_str()];
+        let entries = self
+            .writable_entries()
+            .flat_map(|entry| ["--bind", entry, entry]);
+        home.into_iter().chain(entries).map(String::from).collect()
+    }
+
+    /// Read-only mounts over the directories under visible entries that host
+    /// shells look programs up in: binds over the existing ones, then empty
+    /// mounts over the missing `host_path` ones a command could create.
+    fn command_dir_flags(&self, host_path: &[PathBuf]) -> Vec<PathBuf> {
+        let existing = self.existing_command_dirs(host_path);
+        let placeholders = self.command_dir_placeholders(host_path, &existing);
+        let binds = existing
+            .into_iter()
+            .flat_map(|dir| [PathBuf::from("--ro-bind"), dir.clone(), dir]);
+        let empty_mounts = placeholders.into_iter().flat_map(|dir| {
+            [
+                PathBuf::from("--tmpfs"),
+                dir.clone(),
+                PathBuf::from("--remount-ro"),
+                dir,
+            ]
+        });
+        binds.chain(empty_mounts).collect()
+    }
+
+    /// The existing directories of `host_path`, `~/bin` and every
+    /// `~/<entry>/bin`, symlinks resolved, that are home or lie under a
+    /// visible entry.
+    fn existing_command_dirs(&self, host_path: &[PathBuf]) -> Vec<PathBuf> {
+        let home_bins = std::iter::once(Path::new(&self.dir).join("bin"))
+            .chain(self.visible.iter().map(|entry| entry.path.join("bin")));
+        let mut dirs: Vec<PathBuf> = host_path
+            .iter()
+            .map(std::fs::canonicalize)
+            .chain(home_bins.map(std::fs::canonicalize))
+            .filter_map(Result::ok)
+            .filter(|dir| dir.is_dir() && is_within_visible_home_entry(dir, &self.real))
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs
+    }
+
+    /// The missing `host_path` directories a command could create, except
+    /// those under one of `existing` or under one another.
+    fn command_dir_placeholders(
+        &self,
+        host_path: &[PathBuf],
+        existing: &[PathBuf],
+    ) -> Vec<PathBuf> {
+        let mut missing: Vec<PathBuf> = host_path
+            .iter()
+            .filter_map(|dir| self.placeholder_for(dir))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        let is_covered = |dir: &PathBuf| {
+            existing
+                .iter()
+                .chain(&missing)
+                .any(|outer| outer != dir && dir.starts_with(outer))
+        };
+        missing
+            .iter()
+            .filter(|dir| !is_covered(dir))
+            .cloned()
+            .collect()
+    }
+
+    /// Where missing `dir` would be created: its nearest existing ancestor,
+    /// symlinks resolved, joined with the rest. `None` unless that ancestor
+    /// is a directory this process may create in, inside a writable entry.
+    fn placeholder_for(&self, dir: &Path) -> Option<PathBuf> {
+        let (existing, real_existing) = dir
+            .ancestors()
+            .find_map(|ancestor| Some((ancestor, std::fs::canonicalize(ancestor).ok()?)))?;
+        let missing = dir.strip_prefix(existing).ok()?;
+        let first_missing = real_existing.join(missing.components().next()?);
+        let creatable = missing
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+            && is_absent(&first_missing)
+            && self.is_in_writable_entry(&real_existing)
+            && can_create_in(&real_existing);
+        creatable.then(|| real_existing.join(missing))
+    }
+
+    fn is_in_writable_entry(&self, real_path: &Path) -> bool {
+        real_path
+            .strip_prefix(&self.real)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .is_some_and(|entry| {
+                self.writable_entries()
+                    .any(|writable| Path::new(writable).file_name() == Some(entry.as_os_str()))
+            })
     }
 }
 
@@ -448,27 +587,6 @@ fn protection_flags(protected: &Protected, writable: &[PathBuf]) -> Vec<PathBuf>
     dirs.chain(sockets).collect()
 }
 
-/// Read-only binds over the existing directories under `home`'s visible
-/// entries that host shells look programs up in: those of `host_path`, and
-/// `~/bin`, which login profiles commonly add. Symlinks are resolved first.
-fn home_command_dir_flags(home: &Path, host_path: &[PathBuf]) -> Vec<PathBuf> {
-    let Ok(real_home) = std::fs::canonicalize(home) else {
-        return Vec::new();
-    };
-    let home_bin = home.join("bin");
-    let mut dirs: Vec<PathBuf> = host_path
-        .iter()
-        .chain([&home_bin])
-        .filter_map(|dir| std::fs::canonicalize(dir).ok())
-        .filter(|dir| dir.is_dir() && is_within_visible_home_entry(dir, &real_home))
-        .collect();
-    dirs.sort();
-    dirs.dedup();
-    dirs.into_iter()
-        .flat_map(|dir| [PathBuf::from("--ro-bind"), dir.clone(), dir])
-        .collect()
-}
-
 /// Whether `dir` is `real_home`, whose visible files the profile binds
 /// writable, or lies under one of its visible entries.
 fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool {
@@ -483,13 +601,12 @@ fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool {
 /// writable, fresh `/tmp`, `/dev`, `/proc` and `/run`, isolated pid/ipc/uts
 /// namespaces, and for [`SandboxAccess::Default`] no network; the operator
 /// restores it with `--share-net` in `bwrap_extra_args`.
-fn default_bwrap_flags_for(home: Option<String>, access: SandboxAccess<'_>) -> Vec<String> {
+fn default_bwrap_flags_for(home: Option<&SandboxHome>, access: SandboxAccess<'_>) -> Vec<String> {
     let mut flags: Vec<String> = ["--ro-bind", "/", "/", "--tmpfs", "/tmp"]
         .map(String::from)
         .into();
-    let home = home.filter(|h| is_bindable_home(h));
-    match &home {
-        Some(home) => flags.extend(home_bind_flags(home)),
+    match home {
+        Some(home) => flags.extend(home.bind_flags()),
         None => warn!(
             target: "assistd::policy",
             "HOME is unset or not a non-root absolute directory; sandboxed commands \
@@ -515,38 +632,34 @@ fn default_bwrap_flags_for(home: Option<String>, access: SandboxAccess<'_>) -> V
     }
     flags.extend(["--new-session", "--die-with-parent"].map(String::from));
     if let Some(home) = home {
-        flags.extend(["--setenv".into(), "HOME".into(), home]);
+        flags.extend(["--setenv".into(), "HOME".into(), home.dir.clone()]);
     }
     flags.extend(["--setenv".into(), "PATH".into(), SANDBOX_PATH.into()]);
     flags
 }
 
-fn home_bind_flags(home: &str) -> Vec<String> {
-    let mut flags: Vec<String> = vec!["--ro-bind".into(), home.into(), home.into()];
-    for entry in writable_home_entries(Path::new(home)) {
-        flags.extend(["--bind".into(), entry.clone(), entry]);
-    }
-    flags
-}
-
-fn writable_home_entries(home: &Path) -> Vec<String> {
+fn visible_entries(home: &Path) -> Vec<VisibleEntry> {
     let Ok(entries) = std::fs::read_dir(home) else {
         return Vec::new();
     };
-    let mut writable: Vec<String> = entries
+    let mut visible: Vec<VisibleEntry> = entries
         .filter_map(Result::ok)
         .filter(|entry| !entry.file_name().as_encoded_bytes().starts_with(b"."))
-        .filter(|entry| entry.file_type().is_ok_and(|kind| !kind.is_symlink()))
-        .filter_map(|entry| entry.path().into_os_string().into_string().ok())
+        .map(|entry| VisibleEntry {
+            bindable: entry.file_type().is_ok_and(|kind| !kind.is_symlink()),
+            path: entry.path(),
+        })
         .collect();
-    writable.sort();
-    writable
+    visible.sort_by(|a, b| a.path.cmp(&b.path));
+    visible
 }
 
-fn is_bindable_home(home: &str) -> bool {
-    let path = Path::new(home);
-    path.is_absolute()
-        && std::fs::canonicalize(path).is_ok_and(|real| real.is_dir() && real.parent().is_some())
+fn is_absent(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
+fn can_create_in(dir: &Path) -> bool {
+    dir.is_dir() && rustix::fs::access(dir, Access::WRITE_OK | Access::EXEC_OK).is_ok()
 }
 
 /// The `access` subset of `vars`: [`KEPT_ENV`], `LC_*`, and for
@@ -730,7 +843,7 @@ mod tests {
             (SandboxAccess::Default, Vec::new()),
             (session(), session_binds.to_vec()),
         ] {
-            let profile = default_bwrap_flags_for(home.clone(), access);
+            let profile = default_bwrap_flags_for(SandboxHome::read(home.clone()).as_ref(), access);
             assert!(profile.windows(2).any(|w| w == ["--tmpfs", "/run"]));
             let cmd = info.bwrap_command(
                 Path::new("/usr/bin/bwrap"),
@@ -805,6 +918,19 @@ mod tests {
                 shared: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn a_read_only_tmpfs_is_not_private() {
+        let mounts = mounts_of(&[
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/home/u/go/bin",
+            "--remount-ro",
+            "/home/u/go/bin",
+        ]);
+        assert_eq!(mounts.private, [PathBuf::from("/tmp")]);
     }
 
     #[test]
@@ -975,7 +1101,8 @@ mod tests {
         let dir_str = home.path().to_string_lossy().into_owned();
         let entry = |name: &str| home.path().join(name).to_string_lossy().into_owned();
 
-        let flags = default_bwrap_flags_for(Some(dir_str.clone()), SandboxAccess::Default);
+        let flags =
+            default_bwrap_flags_for(Some(&sandbox_home(home.path())), SandboxAccess::Default);
         assert!(
             flags
                 .windows(3)
@@ -990,6 +1117,10 @@ mod tests {
             .find(|w| w[0] == "--setenv" && w[1] == "HOME")
             .expect("HOME is exported into the sandbox");
         assert_eq!(setenv[2], dir_str);
+    }
+
+    fn sandbox_home(dir: &Path) -> SandboxHome {
+        SandboxHome::read(Some(dir.to_string_lossy().into_owned())).expect("usable home")
     }
 
     fn read_only_binds_in(home: &Path, dirs: &[&str]) -> Vec<PathBuf> {
@@ -1019,12 +1150,12 @@ mod tests {
             home.join("go/bin"),
         ];
         assert_eq!(
-            home_command_dir_flags(&home, &host_path),
+            sandbox_home(&home).command_dir_flags(&host_path),
             read_only_binds_in(&home, &["bin", "go/bin", "projects/tools/bin"])
         );
         assert_eq!(
-            home_command_dir_flags(&home, std::slice::from_ref(&home)),
-            read_only_binds_in(&home, &["", "bin"])
+            sandbox_home(&home).command_dir_flags(std::slice::from_ref(&home)),
+            read_only_binds_in(&home, &["", "bin", "go/bin"])
         );
     }
 
@@ -1032,20 +1163,24 @@ mod tests {
     fn home_bin_stays_read_only_off_the_host_path_and_through_a_symlink() {
         let home_dir = tempfile::tempdir().expect("tempdir");
         let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
-        assert!(home_command_dir_flags(&home, &[]).is_empty());
-        for dir in ["tools/bin", ".local/bin"] {
+        assert!(sandbox_home(&home).command_dir_flags(&[]).is_empty());
+        for dir in ["projects/tools/bin", ".local/bin"] {
             std::fs::create_dir_all(home.join(dir)).expect(dir);
         }
         for (target, expected) in [
             (
-                home.join("tools/bin"),
-                read_only_binds_in(&home, &["tools/bin"]),
+                home.join("projects/tools/bin"),
+                read_only_binds_in(&home, &["projects/tools/bin"]),
             ),
             (home.join(".local/bin"), Vec::new()),
             (PathBuf::from("/usr/bin"), Vec::new()),
         ] {
             std::os::unix::fs::symlink(&target, home.join("bin")).expect("symlink");
-            assert_eq!(home_command_dir_flags(&home, &[]), expected, "{target:?}");
+            assert_eq!(
+                sandbox_home(&home).command_dir_flags(&[]),
+                expected,
+                "{target:?}"
+            );
             std::fs::remove_file(home.join("bin")).expect("remove symlink");
         }
     }
@@ -1056,12 +1191,14 @@ mod tests {
         let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
         let go_bin = home.join("go/bin");
         std::fs::create_dir_all(&go_bin).expect("go/bin");
+        let tools_bin = home.join("tools/bin");
+        std::fs::create_dir(home.join("tools")).expect("tools");
         let info = SandboxInfo {
             shared: SharedDirs {
                 scratch: Some(go_bin.clone()),
                 read_only: Vec::new(),
             },
-            host_path: vec![go_bin.clone()],
+            host_path: vec![go_bin.clone(), tools_bin.clone()],
             ..bwrap_info(Vec::new())
         };
         let argv = argv_of(&info.bwrap_command(
@@ -1083,6 +1220,97 @@ mod tests {
             .position(|w| w == ["--ro-bind", go_bin.as_str(), go_bin.as_str()])
             .expect("go/bin is bound read-only");
         assert!(read_only > last_writable, "{argv:?}");
+        let tools_bin = tools_bin.to_string_lossy().into_owned();
+        let empty_mount = argv
+            .windows(4)
+            .position(|w| {
+                w == [
+                    "--tmpfs",
+                    tools_bin.as_str(),
+                    "--remount-ro",
+                    tools_bin.as_str(),
+                ]
+            })
+            .expect("missing tools/bin gets an empty read-only mount");
+        assert!(empty_mount > last_writable, "{argv:?}");
+    }
+
+    fn empty_read_only_mounts_in(home: &Path, dirs: &[&str]) -> Vec<PathBuf> {
+        dirs.iter()
+            .flat_map(|dir| {
+                let dir = home.join(dir);
+                [
+                    PathBuf::from("--tmpfs"),
+                    dir.clone(),
+                    PathBuf::from("--remount-ro"),
+                    dir,
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn missing_host_path_dirs_under_writable_entries_get_empty_read_only_mounts() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        for dir in ["go", "projects", "src", "tools/bin", ".local"] {
+            std::fs::create_dir_all(home.join(dir)).expect(dir);
+        }
+        std::fs::write(home.join("notes.txt"), b"").expect("notes.txt");
+        let symlink = |target: &Path, name: &str| {
+            std::os::unix::fs::symlink(target, home.join(name)).expect(name);
+        };
+        symlink(elsewhere.path(), "away");
+        symlink(&home.join("src"), "alias");
+        symlink(&home.join("go/nowhere"), "go/dangling");
+        let host_path = [
+            "go/bin",
+            "go/bin/nested",
+            "projects/tool/bin",
+            "alias/bin",
+            "tools/bin/nested",
+            "go/new/../bin",
+            "go/dangling/bin",
+            ".local/bin",
+            "absent/bin",
+            "notes.txt/bin",
+            "away/bin",
+            "go/bin",
+        ]
+        .map(|dir| home.join(dir));
+        let host_path = [&host_path[..], &[elsewhere.path().join("bin")]].concat();
+        let expected = [
+            read_only_binds_in(&home, &["tools/bin"]),
+            empty_read_only_mounts_in(&home, &["go/bin", "projects/tool/bin", "src/bin"]),
+        ]
+        .concat();
+        assert_eq!(sandbox_home(&home).command_dir_flags(&host_path), expected);
+    }
+
+    #[test]
+    fn bin_dirs_directly_under_visible_entries_stay_read_only() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        for dir in [
+            "go/bin",
+            "tools/bin",
+            "projects/app/bin",
+            "projects/lib/bin",
+            ".cargo/bin",
+            "docs",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).expect(dir);
+        }
+        let symlink = |target: &str, name: &str| {
+            std::os::unix::fs::symlink(home.join(target), home.join(name)).expect(name);
+        };
+        symlink("projects/lib", "lib");
+        symlink(".cargo", "cargo");
+        assert_eq!(
+            sandbox_home(&home).command_dir_flags(&[home.join("go/bin")]),
+            read_only_binds_in(&home, &["go/bin", "projects/lib/bin", "tools/bin"])
+        );
     }
 
     #[test]
@@ -1095,7 +1323,9 @@ mod tests {
             Some("/usr/.."),
             Some("relative"),
         ] {
-            let flags = default_bwrap_flags_for(home.map(str::to_string), SandboxAccess::Default);
+            let sandbox_home = SandboxHome::read(home.map(str::to_string));
+            assert!(sandbox_home.is_none(), "HOME={home:?} must be unusable");
+            let flags = default_bwrap_flags_for(sandbox_home.as_ref(), SandboxAccess::Default);
             assert!(
                 writable_binds(&flags).is_empty(),
                 "HOME={home:?} must leave nothing of the host writable: {flags:?}"
