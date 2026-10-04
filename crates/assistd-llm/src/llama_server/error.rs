@@ -21,4 +21,8 @@ pub enum LlamaServerError {
 
     #[error("llama-server did not report {model} loaded within {timeout:?}")]
     LoadTimeout { model: String, timeout: Duration },
+
+    /// The supervised llama-server was not serving, so nothing was sent.
+    #[error("llama-server is not ready; request not sent")]
+    NotReady,
 }

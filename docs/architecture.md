@@ -118,7 +118,10 @@ supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a
 stale server or squatter on the port is never trusted), then `LlamaChatClient`
-streams chat completions over `POST /v1/chat/completions`.
+streams chat completions over `POST /v1/chat/completions`. Chat and
+control-plane requests are sent only while the supervisor is `Ready` with
+a live child, so nothing reaches the port between a crash and the next
+verified start.
 
 If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the
 supervisor restarts it with exponential backoff and the in-flight
@@ -225,7 +228,10 @@ second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
 store. The `recall` tool embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
-over conversation chunks from earlier sessions.
+over conversation chunks from earlier sessions. Like chat requests,
+embedding requests are sent only while the embedding server's
+supervisor is `Ready` with a live child; a row refused in the
+meantime stays unindexed until `assistd memory reindex` picks it up.
 
 ### Voice (`assistd-voice`)
 

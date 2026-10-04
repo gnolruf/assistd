@@ -7,11 +7,12 @@ use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rustix::io::Errno;
-use rustix::process::{Pid, test_kill_process};
+use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -19,15 +20,21 @@ use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
+use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::{
     AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceError,
     PresenceManager, PresenceState, ToolRegistry, VoiceOutputController,
 };
 use assistd_ipc::{Event, Request};
-use assistd_llm::{EchoBackend, LlmBackend, LlmEvent, LlmResult, StepOutcome, ToolResultPayload};
+use assistd_llm::chat::conversation::Summarizer;
+use assistd_llm::{
+    EchoBackend, LlamaChatClient, LlamaServerError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
+    LlmResult, ReadyState, StepOutcome, Thinking, ToolResultPayload,
+};
 use assistd_tools::Attachment;
 
 use common::FakeLlama;
@@ -367,6 +374,133 @@ async fn sleep_cancelled_mid_teardown_can_still_wake() {
     manager.sleep().await.unwrap();
 }
 
+fn presence_probed_client(
+    fake: &FakeLlama,
+    port: u16,
+    manager: &Arc<PresenceManager>,
+) -> LlamaChatClient {
+    let probe: Arc<dyn LlmHealthProbe> = Arc::new(PresenceLlmHealthProbe::new(Arc::clone(manager)));
+    let chat = ChatConfig {
+        request_timeout_secs: nz64(2),
+        ..ChatConfig::default()
+    };
+    LlamaChatClient::new(
+        &chat,
+        &model_spec(fake, port),
+        &TimeoutsConfig::default(),
+        Some(probe),
+    )
+    .expect("build chat client")
+}
+
+/// Take and release the llama-server slot in a tight loop until `stop` flips.
+async fn contend_for_llama_slot(manager: Arc<PresenceManager>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        let _ = manager.llama_pid().await;
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Run a summary, a one-shot completion and an agent step, asserting each succeeds.
+async fn complete_each_kind_of_request(client: &LlamaChatClient, round: usize) {
+    let summary = client.summarize("user: hi".into(), 16, 64).await;
+    assert!(summary.is_ok(), "summary {round}: {summary:?}");
+    let oneshot = client
+        .complete_oneshot("title?".into(), Thinking::Disabled)
+        .await;
+    assert!(oneshot.is_ok(), "one-shot {round}: {oneshot:?}");
+    client
+        .push_user(format!("question {round}"), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let step = client.step(Vec::new(), tx).await;
+    assert!(
+        matches!(step, Ok(StepOutcome::Final)),
+        "step {round}: {step:?}"
+    );
+}
+
+fn kill_child(pid: u32) {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .expect("valid pid");
+    kill_process(pid, Signal::KILL).expect("SIGKILL the llama-server child");
+}
+
+/// Bind `port` as soon as the killed child has released it.
+async fn squat_on(port: u16) -> TcpListener {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+            return listener;
+        }
+        assert!(Instant::now() < deadline, "port {port} was never released");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_supervisor_restarting(manager: &PresenceManager) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !matches!(
+        manager.llama_health().await.map(|health| health.state),
+        Some(ReadyState::Starting | ReadyState::BackingOff { .. })
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "supervisor never noticed the crash"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn nothing_reaches_a_listener_squatting_on_a_crashed_servers_port() {
+    let fake = FakeLlama::new("normal");
+    init_tracing();
+    let port = grab_port().await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let client = presence_probed_client(&fake, port, &manager);
+
+    fake.set_mode("bind-fail");
+    kill_child(manager.llama_pid().await.expect("child running"));
+    let squatter = squat_on(port).await;
+    wait_for_supervisor_restarting(&manager).await;
+    assert_eq!(manager.state(), PresenceState::Active);
+
+    client
+        .push_user("private context".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let step = client.step(Vec::new(), tx).await;
+    assert!(
+        matches!(step, Err(LlmError::ServerRestarting(_))),
+        "{step:?}"
+    );
+    let drowse = manager.drowse().await;
+    assert!(
+        matches!(
+            drowse,
+            Err(PresenceError::Unload {
+                source: LlamaServerError::NotReady,
+                ..
+            })
+        ),
+        "{drowse:?}"
+    );
+    assert!(
+        timeout(Duration::from_millis(300), squatter.accept())
+            .await
+            .is_err(),
+        "a request was sent to the listener squatting on the port"
+    );
+
+    drop(squatter);
+    manager.sleep().await.unwrap();
+}
+
 /// A daemon socket served over `AppState` for the duration of a test.
 struct Daemon {
     sock_path: PathBuf,
@@ -589,5 +723,44 @@ async fn concurrent_queries_during_wake_all_complete() {
     );
 
     daemon.stop().await;
+    manager.sleep().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_wait_out_a_contended_llama_slot_instead_of_failing() {
+    let fake = FakeLlama::new("normal");
+    init_tracing();
+    let port = grab_port().await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let client = presence_probed_client(&fake, port, &manager);
+    let stop = Arc::new(AtomicBool::new(false));
+    let contenders: Vec<_> = (0..2)
+        .map(|_| {
+            tokio::spawn(contend_for_llama_slot(
+                Arc::clone(&manager),
+                Arc::clone(&stop),
+            ))
+        })
+        .collect();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut contended_snapshots = 0;
+    let mut requests = 0;
+    while contended_snapshots < 3 || requests < 50 {
+        assert!(
+            Instant::now() < deadline,
+            "slot seen contended {contended_snapshots} times in {requests} requests"
+        );
+        if manager.llama_pid_blocking().is_none() {
+            contended_snapshots += 1;
+        }
+        complete_each_kind_of_request(&client, requests).await;
+        requests += 1;
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for contender in contenders {
+        contender.await.unwrap();
+    }
     manager.sleep().await.unwrap();
 }

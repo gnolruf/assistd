@@ -126,9 +126,9 @@ async fn start(
     stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
     let presence = start_presence(&config, &stages.llm).await?;
-    let vision_revalidator = probe_vision(&config, &presence).await?;
     let health_probe: Arc<dyn LlmHealthProbe> =
         Arc::new(PresenceLlmHealthProbe::new(presence.clone()));
+    let vision_revalidator = probe_vision(&config, &presence, &health_probe).await?;
 
     let voice = voice_init::init(&config, &presence).await;
 
@@ -249,10 +249,13 @@ async fn start_presence(
 async fn probe_vision(
     config: &Config,
     presence: &PresenceManager,
+    health_probe: &Arc<dyn LlmHealthProbe>,
 ) -> Result<Arc<VisionRevalidator>> {
-    let control =
-        LlamaServerControl::new(SocketAddr::new(config.model.host, config.model.port.get()))
-            .context("failed to construct llama-server control client for vision probe")?;
+    let control = LlamaServerControl::new(
+        SocketAddr::new(config.model.host, config.model.port.get()),
+        Some(Arc::clone(health_probe)),
+    )
+    .context("failed to construct llama-server control client for vision probe")?;
     let revalidator = VisionRevalidator::new(control, config.model.name.clone(), presence).await;
     if revalidator.gate().supported() {
         info!("vision: enabled (model has mmproj)");

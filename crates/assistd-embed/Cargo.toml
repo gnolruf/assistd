@@ -19,6 +19,7 @@ assistd-memory = { workspace = true }
 assistd-utils = { workspace = true, features = ["child-server"] }
 
 [dev-dependencies]
+assistd-utils = { workspace = true, features = ["child-server", "test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [lints]

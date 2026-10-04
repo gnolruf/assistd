@@ -15,7 +15,7 @@ mod supervisor;
 
 pub use error::ChildServerError;
 pub use llama_env::remove_llama_env;
-pub use service::{ChildServer, ReadyState};
+pub use service::{ChildServer, ChildServerStatus, ReadyState};
 
 /// Describes one supervised server: how to spawn it and where it listens.
 pub trait ChildServerSpec: Send + Sync + 'static {

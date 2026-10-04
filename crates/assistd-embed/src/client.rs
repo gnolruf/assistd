@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use assistd_utils::child_server::ChildServerStatus;
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -35,15 +36,18 @@ pub struct LlamaEmbedder {
     base_url: String,
     model: String,
     dim: usize,
+    server: Option<ChildServerStatus>,
 }
 
 impl LlamaEmbedder {
     /// Probe the server once to learn the vector dimension; `request_timeout` applies to
-    /// the probe and every later request. Errors if the probe fails or returns no vector.
+    /// the probe and every later request. With `server`, a request made while it is not
+    /// serving fails with [`EmbedError::NotReady`] without being sent.
     pub async fn new(
         addr: SocketAddr,
         model: String,
         request_timeout: Duration,
+        server: Option<ChildServerStatus>,
     ) -> Result<Self, EmbedError> {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -51,28 +55,67 @@ impl LlamaEmbedder {
             .timeout(request_timeout)
             .build()
             .map_err(EmbedError::Client)?;
-        let base_url = format!("http://{addr}");
-
-        let dim = embed_raw(&client, &base_url, &model, &["x"])
+        let mut embedder = Self {
+            client,
+            base_url: format!("http://{addr}"),
+            model,
+            dim: 0,
+            server,
+        };
+        embedder.dim = embedder
+            .post_embeddings(&["x"])
             .await?
             .first()
             .map_or(0, Vec::len);
-        if dim == 0 {
+        if embedder.dim == 0 {
             return Err(EmbedError::DimProbeEmpty);
         }
         tracing::info!(
             target: "assistd::embed",
-            model = %model,
-            dim,
+            model = %embedder.model,
+            dim = embedder.dim,
             "embedder ready"
         );
+        Ok(embedder)
+    }
 
-        Ok(Self {
-            client,
-            base_url,
-            model,
-            dim,
-        })
+    fn require_serving(&self) -> Result<(), EmbedError> {
+        match &self.server {
+            Some(server) if !server.is_serving() => {
+                tracing::warn!(
+                    target: "assistd::embed",
+                    "embed server is not ready; request not sent"
+                );
+                Err(EmbedError::NotReady)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    async fn post_embeddings(&self, input: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.require_serving()?;
+        let url = format!("{}/v1/embeddings", self.base_url);
+        let body = EmbedRequest {
+            input,
+            model: &self.model,
+        };
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| EmbedError::Request { url, source })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(EmbedError::Status {
+                status,
+                body: body.chars().take(200).collect(),
+            });
+        }
+        let parsed: EmbedResponse = response.json().await.map_err(EmbedError::Decode)?;
+        order_by_index(parsed.data, input.len())
     }
 }
 
@@ -92,7 +135,7 @@ impl Embedder for LlamaEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        embed_raw(&self.client, &self.base_url, &self.model, texts)
+        self.post_embeddings(texts)
             .await?
             .into_iter()
             .map(|raw| {
@@ -115,32 +158,6 @@ impl Embedder for LlamaEmbedder {
     fn dim(&self) -> usize {
         self.dim
     }
-}
-
-async fn embed_raw(
-    client: &reqwest::Client,
-    base_url: &str,
-    model: &str,
-    input: &[&str],
-) -> Result<Vec<Vec<f32>>, EmbedError> {
-    let url = format!("{base_url}/v1/embeddings");
-    let body = EmbedRequest { input, model };
-    let response = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|source| EmbedError::Request { url, source })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(EmbedError::Status {
-            status,
-            body: body.chars().take(200).collect(),
-        });
-    }
-    let parsed: EmbedResponse = response.json().await.map_err(EmbedError::Decode)?;
-    order_by_index(parsed.data, input.len())
 }
 
 /// Place each entry at its `index`, since the server may return entries in any order.
