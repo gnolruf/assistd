@@ -1,0 +1,63 @@
+name: Bug report
+description: Something assistd does wrong or fails to do.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the bug lets the model or another local user get around a safety check (sandbox, confirmation, write allowlist, socket permissions), stop here and [report it privately](https://github.com/gnolruf/assistd/security/advisories/new) instead.
+
+        Title the issue with the symptom, e.g. "Chat TUI panics on a link containing a line break".
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The wrong behaviour, stated as a symptom. Bullet points are fine.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest command, prompt or config that triggers it.
+      placeholder: |
+        1. assistd daemon
+        2. assistd query "..."
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `assistd --version`, or the commit hash for a source build.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - AUR (assistd)
+        - AUR (assistd-git)
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Distro, window manager or compositor, and GPU if the bug involves the LLM or voice.
+      placeholder: Arch Linux, sway 1.11, RTX 4070
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `journalctl --user -u assistd`. Remove anything private.
+      render: shell
