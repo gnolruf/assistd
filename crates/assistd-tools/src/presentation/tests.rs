@@ -447,6 +447,28 @@ fn spilling_past_the_file_cap_keeps_only_the_newest_spills() {
     assert_eq!(sorted_file_names(dir.path()), expected);
 }
 
+#[test]
+fn is_spill_file_name_accepts_only_stem_dash_counter_dot_txt() {
+    let cases = [
+        ("cmd-1.txt", true),
+        ("mcp-files-12.txt", true),
+        ("cmd-007.txt", true),
+        ("cmd-18446744073709551615.txt", true),
+        ("cmd-18446744073709551616.txt", false),
+        ("notes.txt", false),
+        ("cmd1.txt", false),
+        ("cmd-.txt", false),
+        ("-3.txt", false),
+        ("cmd-+1.txt", false),
+        ("cmd-x.txt", false),
+        ("cmd-1.md", false),
+        ("cmd-1.txt.bak", false),
+    ];
+    for (name, expected) in cases {
+        assert_eq!(is_spill_file_name(name), expected, "{name}");
+    }
+}
+
 /// Age decides across stems whose counters are unrelated, and files not
 /// named like spills are never touched.
 #[test]

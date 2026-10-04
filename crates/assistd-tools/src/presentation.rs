@@ -480,6 +480,12 @@ fn evicted_spills(
     older.split_off(kept)
 }
 
+/// Whether `file_name` names a spill file: `<stem>-<n>.txt` with a
+/// non-empty stem and `n` ASCII digits that fit in a `u64`.
+pub fn is_spill_file_name(file_name: &str) -> bool {
+    spill_sequence(file_name).is_some()
+}
+
 /// The counter `n` of a spill file named `<stem>-<n>.txt`.
 fn spill_sequence(file_name: &str) -> Option<u64> {
     let (stem, sequence) = file_name.strip_suffix(".txt")?.rsplit_once('-')?;
