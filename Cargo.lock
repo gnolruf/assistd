@@ -200,7 +200,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
 name = "assistd-cli"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-utils",
  "serde",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-config",
  "assistd-embed",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-embed"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-config",
  "assistd-memory",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-ipc"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-utils",
  "base64 0.23.1",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-llm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-config",
  "assistd-core",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-mcp"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-tools",
  "assistd-utils",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-memory"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-tools"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-config",
  "assistd-embed",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-utils"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "parking_lot",
  "reqwest",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-voice"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "assistd-config",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "assistd-wm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "assistd-utils",
  "async-trait",
