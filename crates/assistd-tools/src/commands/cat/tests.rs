@@ -1,7 +1,9 @@
+use std::time::Duration;
+
 use tempfile::{TempDir, tempdir};
 
 use super::*;
-use crate::commands::FILE_READ_MAX;
+use crate::commands::{FILE_READ_MAX, hold_fifo_open, make_fifo};
 use crate::fixtures::PNG_BYTES;
 
 async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
@@ -150,6 +152,38 @@ async fn cat_refuses_a_device_file() {
         String::from_utf8_lossy(&out.stderr),
         "[error] cat: /dev/null: not a regular file (device, pipe, or socket). Check: ls -l /dev/null\n"
     );
+}
+
+async fn assert_cat_refuses_fifo_promptly(fifo: &str) {
+    for args in [vec![fifo], vec!["-b", fifo]] {
+        let out = tokio::time::timeout(Duration::from_secs(5), run_cat(&args, None))
+            .await
+            .unwrap_or_else(|_| panic!("cat {args:?} blocked on a FIFO"));
+        assert_eq!(out.exit_code, 1, "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "[error] cat: {fifo}: not a regular file (device, pipe, or socket). \
+                 Check: ls -l {fifo}\n"
+            ),
+            "{args:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cat_refuses_a_fifo_with_no_writer() {
+    let dir = tempdir().unwrap();
+    let fifo = make_fifo(dir.path());
+    assert_cat_refuses_fifo_promptly(&fifo).await;
+}
+
+#[tokio::test]
+async fn cat_refuses_a_fifo_held_open_by_a_writer() {
+    let dir = tempdir().unwrap();
+    let fifo = make_fifo(dir.path());
+    let _ends = hold_fifo_open(&fifo);
+    assert_cat_refuses_fifo_promptly(&fifo).await;
 }
 
 fn oversized_file() -> (TempDir, String) {

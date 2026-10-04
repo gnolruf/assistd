@@ -1,9 +1,11 @@
 //! Helpers shared across the workspace: backoff and restart accounting,
-//! path and text helpers, XDG lookups, and the supervised child-server stack.
+//! path, file and text helpers, XDG lookups, and the supervised child-server
+//! stack.
 
 pub mod backoff;
 #[cfg(feature = "child-server")]
 pub mod child_server;
+pub mod fs;
 #[cfg(feature = "process")]
 pub mod log_lines;
 pub mod path;
