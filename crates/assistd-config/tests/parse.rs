@@ -167,6 +167,16 @@ fn relative_overflow_dir_is_rejected() {
 }
 
 #[test]
+fn relative_scratch_dir_is_rejected() {
+    let cfg: Config =
+        toml::from_str("[tools.scratch]\ndir = \"scratch\"\n").expect("config must parse");
+    let err = cfg
+        .validate()
+        .expect_err("a relative scratch dir must not validate");
+    assert!(err.to_string().contains("tools.scratch.dir"), "{err}");
+}
+
+#[test]
 fn relative_writable_paths_are_rejected() {
     for entry in [".", "docs", "~alice/notes", "./tmp"] {
         let cfg: Config = toml::from_str(&format!(

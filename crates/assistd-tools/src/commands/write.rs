@@ -8,10 +8,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{Approval, ConfirmationGate, ConfirmationRequest};
-
-/// Writes below this directory run without the user's confirmation.
-const SCRATCH_DIR: &str = "/tmp";
+use crate::policy::{Approval, ConfirmationGate, ConfirmationRequest, SandboxInfo};
 
 /// Characters of the content shown when asking to confirm a write.
 const PREVIEW_MAX_CHARS: usize = 4096;
@@ -74,19 +71,26 @@ impl WritePolicyCfg {
 }
 
 /// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an
-/// absolute, allowlisted PATH, asking first unless it is under `/tmp`.
+/// absolute, allowlisted PATH, asking first unless it is under the
+/// sandbox's shared scratch directory.
 /// Policy refusals exit 126.
 #[derive(Debug)]
 pub struct WriteCommand {
     cfg: Arc<WritePolicyCfg>,
     gate: Arc<dyn ConfirmationGate>,
+    sandbox: Arc<SandboxInfo>,
 }
 
 impl WriteCommand {
     /// A `write` command confined to `cfg`'s allowlist, asking `gate`
-    /// before writing outside `/tmp`.
-    pub fn new(cfg: Arc<WritePolicyCfg>, gate: Arc<dyn ConfirmationGate>) -> Self {
-        Self { cfg, gate }
+    /// before writing outside `sandbox`'s shared scratch directory, and
+    /// noting a file `sandbox` hides from `bash`.
+    pub fn new(
+        cfg: Arc<WritePolicyCfg>,
+        gate: Arc<dyn ConfirmationGate>,
+        sandbox: Arc<SandboxInfo>,
+    ) -> Self {
+        Self { cfg, gate, sandbox }
     }
 
     /// A command whose allowlist is `/`, permitting any absolute path
@@ -96,11 +100,12 @@ impl WriteCommand {
         Self::new(
             Arc::new(WritePolicyCfg::new(vec![PathBuf::from("/")]).expect("non-empty allowlist")),
             Arc::new(crate::policy::AlwaysAllowGate),
+            SandboxInfo::none(),
         )
     }
 
     async fn confirmed(&self, target: &Path, content: &[u8]) -> bool {
-        if target.starts_with(SCRATCH_DIR) {
+        if self.scratch().is_some_and(|dir| target.starts_with(dir)) {
             return true;
         }
         let approval = self
@@ -108,11 +113,25 @@ impl WriteCommand {
             .confirm(ConfirmationRequest {
                 tool: "write".to_string(),
                 script: confirmation_script(target, content),
-                matched_pattern: format!("writes a file outside {SCRATCH_DIR}"),
+                matched_pattern: "writes a file outside the scratch directory".to_string(),
                 always_allow: Vec::new(),
             })
             .await;
         approval != Approval::Deny
+    }
+
+    fn scratch(&self) -> Option<&Path> {
+        self.sandbox.shared.scratch.as_deref()
+    }
+
+    fn declined_recovery(&self) -> String {
+        match self.scratch() {
+            Some(scratch) => format!(
+                "a path under {}, or ask the user to make this change",
+                scratch.display()
+            ),
+            None => "asking the user to make this change".to_string(),
+        }
     }
 }
 
@@ -127,20 +146,24 @@ impl Command for WriteCommand {
     }
 
     fn help(&self) -> String {
-        "usage: write PATH [CONTENT...]\n\
+        let sharing_hint = self.sandbox.sharing_hint();
+        format!(
+            "usage: write PATH [CONTENT...]\n\
          \n\
          Write bytes to PATH. Two shapes:\n  \
-           `echo \"hi\" | write /tmp/x`   - stdin is the file content (pipeline form)\n  \
-           `write /tmp/x hello world`   - args beyond PATH are joined by spaces and written\n\
+           `echo \"hi\" | write PATH`   - stdin is the file content (pipeline form)\n  \
+           `write PATH hello world`   - args beyond PATH are joined by spaces and written\n\
          \n\
          PATH must be absolute (relative paths are rejected) and must fall \
          under one of the prefixes in `[tools.write] writable_paths`. \
          Symlinks, and hidden (dot) entries at any depth below a prefix, are \
-         refused. Writes outside /tmp ask the user first. \
+         refused. Writes outside the shared scratch directory ask the user first. A file under /tmp \
+         or /run is not visible to `bash` scripts, which get empty ones of \
+         their own; for a file they must see, use {sharing_hint}. \
          Tilde expansion is supported. Exit 126 on policy denial or a \
          declined confirmation, 1 on write failure (permissions, \
          no-such-dir, etc.).\n"
-            .to_string()
+        )
     }
 
     async fn run(&self, input: CommandInput) -> CommandOutput {
@@ -160,7 +183,7 @@ impl Command for WriteCommand {
             Err(e) => {
                 return CommandOutput::failed(
                     POLICY_DENIED_EXIT,
-                    e.error_line(&raw_path).into_bytes(),
+                    e.error_line(&raw_path, self.scratch()).into_bytes(),
                 );
             }
         };
@@ -172,14 +195,23 @@ impl Command for WriteCommand {
                     "write",
                     format_args!("{raw_path}: write cancelled by user"),
                     Hint::Try,
-                    "a path under /tmp, or ask the user to make this change",
+                    self.declined_recovery(),
                 )
                 .into_bytes(),
             );
         }
 
+        let hidden_by = self.sandbox.private_dir_hiding(&write_target);
         match write_without_symlinks(write_target, content).await {
-            Ok(()) => CommandOutput::ok(Vec::new()),
+            Ok(()) => CommandOutput {
+                stderr: hidden_by
+                    .map(|dir| {
+                        hidden_from_bash_note(&raw_path, &dir, &self.sandbox.sharing_hint())
+                            .into_bytes()
+                    })
+                    .unwrap_or_default(),
+                ..CommandOutput::default()
+            },
             Err(e) => CommandOutput::failed(1, io_error_nav("write", &raw_path, &e).into_bytes()),
         }
     }
@@ -197,7 +229,15 @@ enum PathResolveError {
 }
 
 impl PathResolveError {
-    fn error_line(&self, raw_path: &str) -> String {
+    fn error_line(&self, raw_path: &str, scratch: Option<&Path>) -> String {
+        if let (Self::NotAllowlisted, Some(scratch)) = (self, scratch) {
+            return error_line(
+                "write",
+                format_args!("{raw_path}: path not in writable allowlist"),
+                Hint::Try,
+                format_args!("a path under {}", scratch.display()),
+            );
+        }
         let (what, hint, recovery) = match self {
             Self::Relative => (
                 format!("{raw_path}: relative paths not permitted"),
@@ -295,6 +335,15 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
 fn has_hidden_component(path: &Path) -> bool {
     path.components()
         .any(|component| component.as_os_str().as_encoded_bytes().starts_with(b"."))
+}
+
+fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> String {
+    format!(
+        "[note] write: {raw_path} is written, but bash scripts cannot see it: the sandbox \
+         gives each bash call its own empty {}. {}: {sharing_hint}\n",
+        dir.display(),
+        Hint::Use,
+    )
 }
 
 fn confirmation_script(target: &Path, content: &[u8]) -> String {

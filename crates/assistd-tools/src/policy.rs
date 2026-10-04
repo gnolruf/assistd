@@ -29,7 +29,7 @@ pub use confirm::{
 pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
 pub use sandbox::{
     LaunchError, Protected, ResolvedSandboxMode, SandboxAccess, SandboxError, SandboxInfo,
-    SandboxRequest, ToolSandbox, ToolsDisabled, probe_sandbox,
+    SandboxRequest, SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses. A command runs
@@ -45,6 +45,9 @@ pub struct BashPolicyCfg {
     pub allowlist: Arc<Allowlist>,
     /// Directories a command may not name without confirmation.
     pub protected: Vec<PathBuf>,
+    /// The sandbox's shared scratch directory, where a redirection may
+    /// write without confirmation.
+    pub scratch: Option<PathBuf>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -59,6 +62,7 @@ impl Default for BashPolicyCfg {
                 SandboxInfo::none().search_path(),
             )),
             protected: Vec::new(),
+            scratch: None,
         }
     }
 }
@@ -70,6 +74,7 @@ impl BashPolicyCfg {
             patterns: &self.destructive_patterns,
             allowlist: &self.allowlist,
             protected: &self.protected,
+            scratch: self.scratch.as_deref(),
         }
     }
 }

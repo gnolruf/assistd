@@ -19,7 +19,7 @@ use assistd_tools::{
     APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
     ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps, Protected,
     RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest,
-    Tool, ToolSandbox, VisionGate,
+    SharedDirs, Tool, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -32,6 +32,7 @@ use assistd_utils::path::expand_tilde_from_env;
 pub mod agent;
 pub mod presence;
 pub mod recovery;
+mod scratch;
 pub mod socket;
 pub mod state;
 
@@ -45,7 +46,7 @@ pub use assistd_config::{
     BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config, ConfigError,
     ContinuousListenConfig, DaemonConfig, McpConfig, McpServerConfig, ModelConfig, PresenceConfig,
     ScreenshotBackend, SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig,
-    ToolsOutputConfig, ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
+    ToolsOutputConfig, ToolsScratchConfig, ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig,
 };
 
 pub use assistd_ipc as ipc;
@@ -66,7 +67,8 @@ pub use state::{
     Subsystems, history_entries,
 };
 
-/// Mode for the spill directory and any parents created for it.
+/// Mode for the spill and scratch directories and any parents created for
+/// them.
 const OVERFLOW_DIR_MODE: u32 = 0o700;
 
 /// Why [`build_tools`] could not assemble the tool registry.
@@ -81,6 +83,13 @@ pub enum BuildToolsError {
 
     #[error("failed to create tools.output.overflow_dir {}: {source}", path.display())]
     CreateOverflowDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to create tools.scratch.dir {}: {source}", path.display())]
+    CreateScratchDir {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -202,11 +211,12 @@ impl SeenLoad {
 }
 
 /// The sandbox the model's tools run in under `config`, keeping the
-/// directory of `config_path` read-only, or why the model gets no tools.
+/// directory of `config_path` read-only and sharing the scratch (created
+/// here) and spill directories, or why the model gets no tools.
 ///
 /// # Errors
-/// [`BuildToolsError`] when the config directory cannot be resolved or a
-/// required `bwrap` is missing.
+/// [`BuildToolsError`] when the config directory cannot be resolved, the
+/// scratch directory cannot be created, or a required `bwrap` is missing.
 pub fn probe_tool_sandbox(
     config: &Config,
     config_path: &Path,
@@ -218,6 +228,10 @@ pub fn probe_tool_sandbox(
         Protected {
             dirs: vec![config_dir],
             sockets: vec![assistd_ipc::socket_path()],
+        },
+        SharedDirs {
+            scratch: Some(scratch::prepare(&config.tools.scratch)?),
+            read_only: vec![config.tools.output.overflow_dir.clone()],
         },
     )?)
 }
@@ -261,15 +275,21 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         sandbox.search_path(),
         config_dir.join(APPROVALS_FILE),
     )?;
+    let scratch_dir = sandbox.shared.scratch.clone();
     let bash_cfg = Arc::new(BashPolicyCfg {
         timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
         denylist: config.tools.bash.denylist.clone(),
         destructive_patterns: parse_destructive_patterns(&config.tools.bash.destructive_patterns),
         allowlist: Arc::new(allowlist),
         protected: protected_dirs.clone(),
+        scratch: scratch_dir.clone(),
     });
+    let writable_paths = resolve_writable_paths(&config.tools.write.writable_paths)
+        .into_iter()
+        .chain(scratch_dir.clone())
+        .collect();
     let write_cfg = Arc::new(
-        WritePolicyCfg::new(resolve_writable_paths(&config.tools.write.writable_paths))
+        WritePolicyCfg::new(writable_paths)
             .ok_or(BuildToolsError::NoWritablePaths)?
             .protecting(protected_dirs),
     );
@@ -285,12 +305,12 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         window_manager,
     });
 
+    let run = RunTool::new(Arc::new(commands), &config.tools.output, overflow_dir);
     let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(
-        Arc::new(commands),
-        &config.tools.output,
-        overflow_dir,
-    ));
+    tools.register(match &scratch_dir {
+        Some(scratch_dir) => run.with_scratch_dir(scratch_dir),
+        None => run,
+    });
     tools.register(RememberTool::new(memory_ops, embed_tx));
     tools.register(RecallTool::new(
         embedder.clone(),
@@ -342,7 +362,11 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     commands.register(SortCommand);
     commands.register(UniqCommand);
     commands.register(EchoCommand);
-    commands.register(WriteCommand::new(write_cfg, confirmation_gate.clone()));
+    commands.register(WriteCommand::new(
+        write_cfg,
+        confirmation_gate.clone(),
+        sandbox.clone(),
+    ));
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new(ApprovalGate::new(

@@ -190,7 +190,7 @@ intercept the dangerous paths: a `bash` script runs without asking only
 when every program it can run is on `[tools.bash] allowed_programs` and
 nothing in it matches a destructive pattern; otherwise the user confirms,
 and can "always allow" the programs it named. A redirection that writes
-outside `/tmp` also needs confirmation. It then runs in the bubblewrap
+outside `/tmp` and `tools.scratch.dir` also needs confirmation. It then runs in the bubblewrap
 sandbox; tools never run unsandboxed, so when `bwrap` is missing (or
 `tools.bash.sandbox = "none"`) the model is offered no tools at all and
 clients are told why. `wm open`
@@ -202,7 +202,7 @@ barring abstract sockets such as the X server's; the launch is refused
 when either protection is unavailable, and left running once it survives
 a startup probe; `write` restricts targets to a
 configured allowlist, refuses dot entries at any depth below it, and asks
-before writing outside `/tmp`; `web` asks before fetching from a host not
+before writing outside `tools.scratch.dir`; `web` asks before fetching from a host not
 yet approved and follows redirects only to the same or an approved host;
 `see` and `screenshot` refuse with an error when the loaded model has no
 vision projector. "Always allow" for a web host or an MCP tool is saved
@@ -333,7 +333,14 @@ A walk through `assistd query "what files changed this week?"`:
    read-only root with writable entries
    of `$HOME` other than dotfiles and symlinks, fresh `/tmp`, `/dev`,
    `/proc` and `/run`, unshared pid/ipc/uts/network namespaces, and
-   an environment cleared down to locale and terminal variables. The sandboxed `git` runs, returns
+   an environment cleared down to locale and terminal variables. The
+   one exception is `tools.scratch.dir`, bound writable at its own
+   path so `bash` and the in-process commands share files there (entries
+   older than `tools.scratch.retention_days` are pruned at startup), with
+   the spill directory bound read-only beside it. A script that names
+   any other path in one of the sandbox's tmpfs mounts gets a `[note]`
+   line on stderr (and a daemon warning) pointing at the scratch
+   directory, as does a `write` that puts a file there. The sandboxed `git` runs, returns
    stdout. If stdout exceeds the `[tools.output]` line or byte cap,
    `RunTool::invoke` cuts it to that head and spills the full text to
    `tools.output.overflow_dir` (default `$XDG_RUNTIME_DIR/assistd/output`,

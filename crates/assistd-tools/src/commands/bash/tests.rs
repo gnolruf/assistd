@@ -328,3 +328,19 @@ async fn stdin_larger_than_a_pipe_buffer_arrives_whole() {
     assert_eq!(out.exit_code, 0);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1048576");
 }
+
+#[test]
+fn private_dir_note_follows_the_script_stderr_on_its_own_line() {
+    let failed = CommandOutput::failed(1, b"cat: /tmp/x: No such file or directory".to_vec());
+    let out = with_private_dir_note(failed, "/tmp, /run", "a path under /shared");
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    let (script_line, note) = stderr.split_once('\n').expect("two lines");
+    assert_eq!(script_line, "cat: /tmp/x: No such file or directory");
+    assert!(
+        note.starts_with(
+            "[note] bash: the sandbox gives each bash call its own empty /tmp, /run: "
+        )
+    );
+    assert!(note.ends_with("Use: a path under /shared\n"));
+    assert_eq!(out.exit_code, 1);
+}

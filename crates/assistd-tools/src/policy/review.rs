@@ -1,7 +1,7 @@
 //! Command review: whether a script or argv may run without the user's
 //! confirmation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fmt, iter, mem};
 
 use super::allowlist::{Allowlist, Verdict};
@@ -115,7 +115,7 @@ const INPUT_PLACEHOLDER: &str = "{}";
 const FIND_EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// Files a redirection may write without confirmation, besides `/dev/fd/N`
-/// and files under `/tmp`.
+/// and files under `/tmp` or the scratch directory.
 const HARMLESS_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
 /// A destructive command: a name followed by arguments that must all be
@@ -288,6 +288,9 @@ pub struct Rules<'a> {
     pub allowlist: &'a Allowlist,
     /// Directories a command may not name without confirmation.
     pub protected: &'a [PathBuf],
+    /// The sandbox's shared scratch directory, where a redirection may
+    /// write without confirmation, as it may under `/tmp`.
+    pub scratch: Option<&'a Path>,
 }
 
 /// Why `script` needs confirmation, if it does: it matches a destructive
@@ -384,6 +387,7 @@ struct Matcher<'a> {
     allowlist: &'a Allowlist,
     /// Every spelling of the protected directories.
     protected: Vec<String>,
+    scratch: Option<&'a str>,
 }
 
 impl<'a> Matcher<'a> {
@@ -399,6 +403,7 @@ impl<'a> Matcher<'a> {
             patterns: rules.patterns,
             allowlist: rules.allowlist,
             protected,
+            scratch: rules.scratch.and_then(Path::to_str),
         }
     }
 
@@ -428,7 +433,7 @@ impl<'a> Matcher<'a> {
                 return;
             }
             self.protected_words(cmd, out);
-            writes_outside_tmp(cmd, out);
+            writes_outside_scratch(cmd, self.scratch, out);
             self.command(cmd, index, &script, depth, out);
         }
     }
@@ -739,38 +744,43 @@ fn spellings(dir: &str, home: Option<&str>) -> impl Iterator<Item = String> {
 }
 
 /// Record a redirection in `cmd` that writes a file other than
-/// [`HARMLESS_TARGETS`], `/dev/fd/N`, or one under `/tmp`.
-fn writes_outside_tmp(cmd: &SimpleCommand, out: &mut Findings<'_>) {
+/// [`HARMLESS_TARGETS`], `/dev/fd/N`, or one under `/tmp` or `scratch`.
+fn writes_outside_scratch(cmd: &SimpleCommand, scratch: Option<&str>, out: &mut Findings<'_>) {
     if let Some(Redirect { operator, target }) = cmd
         .redirects
         .iter()
-        .find(|redirect| redirect.writes() && !is_harmless_target(&redirect.target))
+        .find(|redirect| redirect.writes() && !is_harmless_target(&redirect.target, scratch))
     {
         out.unverifiable(|| format!("`{operator}` writes to `{}`, outside /tmp", target.text));
     }
 }
 
 /// A literal redirection target that is a standard stream, `/dev/null`, or
-/// a path under `/tmp` with no `..` a symlink could lead out through.
-fn is_harmless_target(target: &Word) -> bool {
+/// a path under `/tmp` or `scratch` with no `..` a symlink could lead out
+/// through.
+fn is_harmless_target(target: &Word, scratch: Option<&str>) -> bool {
     let path = target.text.as_str();
     !target.dynamic
         && (HARMLESS_TARGETS.contains(&path)
             || path
                 .strip_prefix("/dev/fd/")
                 .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
-            || stays_in_tmp(path))
+            || stays_under(path, "/tmp")
+            || scratch.is_some_and(|scratch| stays_under(path, scratch)))
 }
 
-fn stays_in_tmp(path: &str) -> bool {
-    let Some(relative) = path.strip_prefix('/') else {
+fn stays_under(path: &str, dir: &str) -> bool {
+    if !path.starts_with('/') {
         return false;
-    };
-    let components: Vec<&str> = relative
-        .split('/')
+    }
+    let path: Vec<&str> = path_components(path).collect();
+    let dir: Vec<&str> = path_components(dir).collect();
+    path.len() > dir.len() && path.starts_with(&dir) && !path.contains(&"..")
+}
+
+fn path_components(path: &str) -> impl Iterator<Item = &str> {
+    path.split('/')
         .filter(|component| !matches!(*component, "" | "."))
-        .collect();
-    matches!(components.as_slice(), ["tmp", _, ..]) && !components.contains(&"..")
 }
 
 /// Keywords, builtins, and functions defined before command `index`,

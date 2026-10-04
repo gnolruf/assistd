@@ -1,9 +1,11 @@
 //! `bash SCRIPT`: a real `bash -c` subprocess behind the subprocess policy
 //! (denylist, allowlist, destructive-pattern confirmation, sandbox, timeout).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::warn;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{SPAWN_FAILED_EXIT, supervise};
@@ -50,11 +52,12 @@ impl Command for BashCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "escape hatch: run a bash -c <script> subprocess (policy-gated)"
+        "escape hatch: sandboxed bash -c <script> (policy-gated, private /tmp)"
     }
 
     fn help(&self) -> String {
         let timeout_secs = self.policy.cfg.timeout.as_secs();
+        let sharing_hint = self.policy.sandbox.sharing_hint();
         format!(
             "usage: bash [-c] \"<script>\"\n\
              \n\
@@ -66,7 +69,13 @@ impl Command for BashCommand {
              Stdin is forwarded to the script's stdin. Stdout/stderr/exit-code \
              are captured. Exit 137 on timeout ({timeout_secs}s default), 127 \
              if the spawn itself failed, 126 if the script is blocked by \
-             policy (denylist match or user-cancelled confirmation).\n"
+             policy (denylist match or user-cancelled confirmation).\n\
+             \n\
+             The script runs sandboxed: /tmp, /run and any other tmpfs the \
+             sandbox mounts are empty and private to each call, so files the other commands put there (including \
+             `Full output:` spill files) are not visible, and files the \
+             script puts there are gone when it exits. For a file both need, \
+             use {sharing_hint}.\n"
         )
     }
 
@@ -95,7 +104,8 @@ impl Command for BashCommand {
             self.policy
                 .sandbox
                 .command(SandboxAccess::Default, "bash", ["-c", script.as_str()]);
-        supervise(
+        let private_dirs = display_list(&self.policy.sandbox.private_dirs_named(&cmd, &script));
+        let out = supervise(
             "bash",
             cmd,
             input.stdin.as_deref().unwrap_or_default(),
@@ -113,8 +123,36 @@ impl Command for BashCommand {
                 )
                 .into_bytes(),
             )
-        })
+        });
+        if private_dirs.is_empty() {
+            return out;
+        }
+        warn!(
+            target: "assistd::policy",
+            dirs = %private_dirs,
+            "bash script names a directory that is empty and private inside the sandbox"
+        );
+        with_private_dir_note(out, &private_dirs, &self.policy.sandbox.sharing_hint())
     }
+}
+
+fn with_private_dir_note(mut out: CommandOutput, dirs: &str, sharing_hint: &str) -> CommandOutput {
+    if out.stderr.last().is_some_and(|last| *last != b'\n') {
+        out.stderr.push(b'\n');
+    }
+    let note = format!(
+        "[note] bash: the sandbox gives each bash call its own empty {dirs}: files other \
+         commands put there are not visible, and files a script puts there are gone when it \
+         exits. {}: {sharing_hint}\n",
+        Hint::Use,
+    );
+    out.stderr.extend_from_slice(note.as_bytes());
+    out
+}
+
+fn display_list(dirs: &[PathBuf]) -> String {
+    let dirs: Vec<_> = dirs.iter().map(|dir| dir.to_string_lossy()).collect();
+    dirs.join(", ")
 }
 
 /// The script words without a leading `-c`, which the model writes out of

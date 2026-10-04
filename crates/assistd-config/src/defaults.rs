@@ -95,6 +95,7 @@ pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: NonZeroU64 = nz64(2048);
 
 pub const DEFAULT_TOOLS_MAX_LINES: NonZeroU32 = nz32(200);
 pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(50);
+pub const DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS: u32 = 30;
 pub const DEFAULT_BASH_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
 pub const DEFAULT_MEMORY_ENABLED: bool = true;
@@ -139,6 +140,15 @@ pub fn default_tools_overflow_dir() -> PathBuf {
         .or_else(xdg::cache_home)
         .unwrap_or_else(|| PathBuf::from(".cache"));
     base.join("assistd").join("output")
+}
+
+/// `$XDG_RUNTIME_DIR/assistd/scratch`, or `$XDG_CACHE_HOME/assistd/scratch`,
+/// or `$HOME/.cache/assistd/scratch`.
+pub fn default_tools_scratch_dir() -> PathBuf {
+    let base = xdg::runtime_dir()
+        .or_else(xdg::cache_home)
+        .unwrap_or_else(|| PathBuf::from(".cache"));
+    base.join("assistd").join("scratch")
 }
 
 /// Process basenames whose GPU use never triggers sleep.
@@ -273,5 +283,5 @@ pub fn default_bash_destructive_patterns() -> Vec<String> {
 
 /// Path prefixes the `write` command may create files under.
 pub fn default_writable_paths() -> Vec<String> {
-    vec!["~".into(), "/tmp".into()]
+    vec!["~".into()]
 }
