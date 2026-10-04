@@ -67,8 +67,6 @@ jobs:
           [[ "$cargo_version" == "${TAG#v}" ]] \
             || { echo "::error::$TAG has workspace version '$cargo_version'"; exit 1; }
 
-      # The PKGBUILD comes from the branch the workflow runs on, so
-      # packaging fixes can ship as a pkgrel bump without a new tag.
       - name: Stamp pkgver and pkgrel
         run: |
           useradd --create-home builder
