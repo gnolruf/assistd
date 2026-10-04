@@ -7,9 +7,10 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,8 +22,8 @@ use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::StatusKind;
 use assistd_llm::{
-    ChatClientError, LlamaChatClient, LlmBackend, LlmError, LlmEvent, StepOutcome, Thinking,
-    ToolCall, ToolResultPayload,
+    ChatClientError, HealthWaitError, LlamaChatClient, LlmBackend, LlmError, LlmEvent,
+    LlmHealthProbe, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
 };
 
 const MAX_REQUEST_HEADER_BYTES: usize = 128 * 1024;
@@ -324,6 +325,39 @@ struct ClientCfg {
     timeouts: TimeoutsConfig,
 }
 
+/// Health probe reporting whatever supervisor state and child pid the test sets.
+#[derive(Debug)]
+struct ScriptedProbe {
+    snapshot: StdMutex<(Option<ReadyState>, Option<u32>)>,
+}
+
+impl ScriptedProbe {
+    fn serving() -> Arc<Self> {
+        Arc::new(Self {
+            snapshot: StdMutex::new((Some(ReadyState::Ready), Some(4242))),
+        })
+    }
+
+    fn set(&self, state: Option<ReadyState>, pid: Option<u32>) {
+        *self.snapshot.lock().unwrap() = (state, pid);
+    }
+}
+
+#[async_trait]
+impl LlmHealthProbe for ScriptedProbe {
+    fn pid(&self) -> Option<u32> {
+        self.snapshot.lock().unwrap().1
+    }
+
+    fn state(&self) -> Option<ReadyState> {
+        self.snapshot.lock().unwrap().0
+    }
+
+    async fn wait_for_ready(&self, _timeout: Duration) -> Result<(), HealthWaitError> {
+        Err(HealthWaitError::Timeout)
+    }
+}
+
 fn chat_spec(port: u16) -> ClientCfg {
     ClientCfg {
         chat: ChatConfig {
@@ -358,6 +392,11 @@ fn delta(text: &str) -> LlmEvent {
 
 fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
     LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None).unwrap()
+}
+
+fn build_probed_client(cfg: &ClientCfg, probe: &Arc<ScriptedProbe>) -> LlamaChatClient {
+    let health: Arc<dyn LlmHealthProbe> = probe.clone();
+    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, Some(health)).unwrap()
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
@@ -1437,5 +1476,118 @@ async fn reasoning_rides_along_with_its_tool_call_across_user_turns() {
         calling(&captured[2]),
         calling(&captured[1]),
         "a new user turn must not rewrite the previous turn's messages"
+    );
+}
+
+#[tokio::test]
+async fn requests_are_sent_only_while_the_supervised_server_is_serving() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::Deltas(vec!["answer".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+    let probe = ScriptedProbe::serving();
+    let client = build_probed_client(&chat_spec(port), &probe);
+    client
+        .push_user("private question".into(), Vec::new())
+        .await
+        .unwrap();
+
+    let not_serving = [
+        ("starting", Some(ReadyState::Starting), Some(7)),
+        (
+            "backing off",
+            Some(ReadyState::BackingOff { attempt: 2 }),
+            None,
+        ),
+        ("degraded", Some(ReadyState::Degraded), None),
+        ("ready with its child gone", Some(ReadyState::Ready), None),
+        ("no service attached", None, None),
+    ];
+    for (label, state, pid) in not_serving {
+        probe.set(state, pid);
+        let (tx, _rx) = mpsc::channel(32);
+        let step = client.step(Vec::new(), tx).await;
+        assert!(
+            matches!(step, Err(LlmError::ServerRestarting(_))),
+            "{label}: {step:?}"
+        );
+        let oneshot = client
+            .complete_oneshot("title?".into(), Thinking::Disabled)
+            .await;
+        assert!(
+            matches!(oneshot, Err(LlmError::ServerRestarting(_))),
+            "{label}: {oneshot:?}"
+        );
+        assert!(
+            script.captured().await.is_empty(),
+            "{label}: a request reached the server"
+        );
+    }
+
+    probe.set(Some(ReadyState::Ready), Some(4242));
+    let (tx, _rx) = mpsc::channel(32);
+    let outcome = client.step(Vec::new(), tx).await.unwrap();
+    assert!(matches!(outcome, StepOutcome::Final), "{outcome:?}");
+    let captured = script.captured().await;
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].body["messages"],
+        json!([
+            {"role": "system", "content": "test system prompt"},
+            {"role": "user", "content": "private question"},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn history_is_not_sent_for_summarizing_while_the_server_is_not_serving() {
+    let script = Script::new();
+    let long_reply: String = "long ".repeat(30);
+    script
+        .push_stream(StreamResponse::Deltas(vec![long_reply.clone()]))
+        .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec![long_reply]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let mut spec = chat_spec(port);
+    spec.chat.max_history_tokens = nz32(60);
+    spec.chat.summary_target_tokens = nz32(15);
+    spec.chat.preserve_recent_turns = nz32(1);
+    let probe = ScriptedProbe::serving();
+    let client = build_probed_client(&spec, &probe);
+    for i in 0..2 {
+        let (tx, mut rx) = mpsc::channel(32);
+        client
+            .generate(format!("turn {i} with padding"), tx)
+            .await
+            .unwrap();
+        drain(&mut rx).await;
+    }
+    let sent_while_serving = script.captured().await.len();
+
+    probe.set(Some(ReadyState::BackingOff { attempt: 1 }), None);
+    let (tx, mut rx) = mpsc::channel(32);
+    let err = client
+        .generate("turn 2 with padding".into(), tx)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LlmError::ServerRestarting(_)), "{err:?}");
+    let compacting = drain(&mut rx).await.iter().any(|ev| {
+        matches!(
+            ev,
+            LlmEvent::Status {
+                event: StatusKind::CompactingHistory,
+                ..
+            }
+        )
+    });
+    assert!(compacting, "the turn must have been over budget");
+    assert_eq!(
+        script.captured().await.len(),
+        sent_while_serving,
+        "neither a summary nor a completion may be sent"
     );
 }

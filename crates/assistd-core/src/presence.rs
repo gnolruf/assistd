@@ -129,7 +129,7 @@ impl PresenceManager {
         timeouts: TimeoutsConfig,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let control = LlamaServerControl::new(SocketAddr::new(model.host, model.port.get()))
+        let control = LlamaServerControl::new(SocketAddr::new(model.host, model.port.get()), None)
             .map_err(PresenceError::Control)?;
 
         let current_inner_shutdown: InnerShutdownSlot = Arc::new(StdMutex::new(None));
@@ -446,6 +446,18 @@ impl PresenceManager {
     }
 
     async fn unload_model(&self) -> Result<(), PresenceError> {
+        let serving = self
+            .llama
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(ChildServer::is_serving);
+        if !serving {
+            return Err(PresenceError::Unload {
+                model: self.model.name.clone(),
+                source: LlamaServerError::NotReady,
+            });
+        }
         let secs = self.timeouts.presence_drowse_secs;
         let unload = self.control.unload_model(&self.model.name);
         match timeout(Duration::from_secs(secs), unload).await {
@@ -494,13 +506,11 @@ impl PresenceManager {
     }
 
     async fn reload_model(&self) -> Result<(), PresenceError> {
-        let ready_rx = self
-            .llama
-            .lock()
-            .await
-            .as_ref()
-            .map(ChildServer::subscribe_ready)
-            .ok_or(PresenceError::ServiceMissing)?;
+        let ready_rx = {
+            let slot = self.llama.lock().await;
+            let service = slot.as_ref().ok_or(PresenceError::ServiceMissing)?;
+            self.serving_ready_rx(service)?
+        };
         self.load_model_and_wait(ready_rx).await
     }
 
@@ -519,7 +529,11 @@ impl PresenceManager {
                 }
             };
 
-        match self.load_model_and_wait(service.subscribe_ready()).await {
+        let loaded = match self.serving_ready_rx(&service) {
+            Ok(ready_rx) => self.load_model_and_wait(ready_rx).await,
+            Err(e) => Err(e),
+        };
+        match loaded {
             Ok(()) => {
                 *self.llama.lock().await = Some(service);
                 Ok(())
@@ -536,6 +550,20 @@ impl PresenceManager {
                 Err(e)
             }
         }
+    }
+
+    /// `service`'s readiness feed, or a load error when its child is not serving.
+    fn serving_ready_rx(
+        &self,
+        service: &ChildServer,
+    ) -> Result<watch::Receiver<ReadyState>, PresenceError> {
+        if service.is_serving() {
+            return Ok(service.subscribe_ready());
+        }
+        Err(PresenceError::Load {
+            model: self.model.name.clone(),
+            source: LlamaServerError::NotReady,
+        })
     }
 
     async fn load_model_and_wait(
@@ -595,7 +623,7 @@ impl PresenceManager {
             ..ModelConfig::default()
         };
         let control =
-            LlamaServerControl::new(SocketAddr::new(model.host, 1)).expect("dummy control");
+            LlamaServerControl::new(SocketAddr::new(model.host, 1), None).expect("dummy control");
         let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
             state: StdMutex::new(state),

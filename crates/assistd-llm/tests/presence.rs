@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rustix::io::Errno;
-use rustix::process::{Pid, test_kill_process};
+use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -19,15 +19,20 @@ use tokio::net::unix::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{ModelConfig, TimeoutsConfig};
+use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
+use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::{
     AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceError,
     PresenceManager, PresenceState, ToolRegistry, VoiceOutputController,
 };
 use assistd_ipc::{Event, Request};
-use assistd_llm::{EchoBackend, LlmBackend, LlmEvent, LlmResult, StepOutcome, ToolResultPayload};
+use assistd_llm::{
+    EchoBackend, LlamaChatClient, LlamaServerError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
+    LlmResult, ReadyState, StepOutcome, ToolResultPayload,
+};
 use assistd_tools::Attachment;
 
 use common::FakeLlama;
@@ -364,6 +369,98 @@ async fn sleep_cancelled_mid_teardown_can_still_wake() {
     assert_ne!(new_pid, pid);
     assert!(pid_alive(new_pid));
 
+    manager.sleep().await.unwrap();
+}
+
+fn kill_child(pid: u32) {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .expect("valid pid");
+    kill_process(pid, Signal::KILL).expect("SIGKILL the llama-server child");
+}
+
+/// Bind `port` as soon as the killed child has released it.
+async fn squat_on(port: u16) -> TcpListener {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+            return listener;
+        }
+        assert!(Instant::now() < deadline, "port {port} was never released");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_supervisor_restarting(manager: &PresenceManager) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !matches!(
+        manager.llama_state_blocking(),
+        Some(ReadyState::Starting | ReadyState::BackingOff { .. })
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "supervisor never noticed the crash"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn nothing_reaches_a_listener_squatting_on_a_crashed_servers_port() {
+    let fake = FakeLlama::new("normal");
+    init_tracing();
+    let port = grab_port().await;
+    let (manager, _shutdown) = new_active_manager(&fake, port).await;
+    let probe: Arc<dyn LlmHealthProbe> =
+        Arc::new(PresenceLlmHealthProbe::new(Arc::clone(&manager)));
+    let chat = ChatConfig {
+        request_timeout_secs: nz64(2),
+        ..ChatConfig::default()
+    };
+    let client = LlamaChatClient::new(
+        &chat,
+        &model_spec(&fake, port),
+        &TimeoutsConfig::default(),
+        Some(probe),
+    )
+    .expect("build chat client");
+
+    fake.set_mode("bind-fail");
+    kill_child(manager.llama_pid().await.expect("child running"));
+    let squatter = squat_on(port).await;
+    wait_for_supervisor_restarting(&manager).await;
+    assert_eq!(manager.state(), PresenceState::Active);
+
+    client
+        .push_user("private context".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let step = client.step(Vec::new(), tx).await;
+    assert!(
+        matches!(step, Err(LlmError::ServerRestarting(_))),
+        "{step:?}"
+    );
+    let drowse = manager.drowse().await;
+    assert!(
+        matches!(
+            drowse,
+            Err(PresenceError::Unload {
+                source: LlamaServerError::NotReady,
+                ..
+            })
+        ),
+        "{drowse:?}"
+    );
+    assert!(
+        timeout(Duration::from_millis(300), squatter.accept())
+            .await
+            .is_err(),
+        "a request was sent to the listener squatting on the port"
+    );
+
+    drop(squatter);
     manager.sleep().await.unwrap();
 }
 

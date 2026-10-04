@@ -17,4 +17,8 @@ pub enum ChatClientError {
 
     #[error("summarization failed: {0}")]
     Summarize(String),
+
+    /// The supervised llama-server was not serving, so nothing was sent.
+    #[error("llama-server is not ready; request not sent")]
+    NotReady,
 }

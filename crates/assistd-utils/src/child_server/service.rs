@@ -89,6 +89,12 @@ impl ChildServer {
         matches!(*self.ready_rx.borrow(), ReadyState::Ready)
     }
 
+    /// Whether the supervisor is [`ReadyState::Ready`] and its child is alive,
+    /// so the listener that passed the readiness check is still the child's.
+    pub fn is_serving(&self) -> bool {
+        self.is_ready() && self.pid().is_some()
+    }
+
     /// Snapshot of the current [`ReadyState`].
     pub fn state(&self) -> ReadyState {
         *self.ready_rx.borrow()

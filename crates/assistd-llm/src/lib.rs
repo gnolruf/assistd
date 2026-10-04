@@ -49,6 +49,12 @@ pub trait LlmHealthProbe: fmt::Debug + Send + Sync {
     /// when no service is attached (presence asleep / not yet woken).
     fn state(&self) -> Option<ReadyState>;
 
+    /// Whether the supervisor is `Ready` with a live child, so the listener
+    /// that passed the readiness check is still the child's.
+    fn is_serving(&self) -> bool {
+        self.state() == Some(ReadyState::Ready) && self.pid().is_some()
+    }
+
     /// Block until the supervisor reports `ReadyState::Ready` or `timeout`
     /// elapses; fails fast with [`HealthWaitError::Degraded`].
     async fn wait_for_ready(&self, timeout: Duration) -> Result<(), HealthWaitError>;

@@ -46,14 +46,17 @@ pub struct LlamaChatClient {
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     conv: Mutex<Conversation>,
-    /// When set, a failure coinciding with a supervisor restart becomes
+    /// When set, no request is sent unless the probe reports a serving
+    /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
 impl LlamaChatClient {
     /// Build a client for the server at `model.host:model.port`. Pass
-    /// `health: None` when no supervisor is attached.
+    /// `health: None` when no supervisor is attached. With a probe, a request
+    /// made while its child is not serving fails with
+    /// [`LlmError::ServerRestarting`] without being sent.
     pub fn new(
         chat: &ChatConfig,
         model: &ModelConfig,
@@ -154,6 +157,15 @@ impl LlamaChatClient {
         pid_changed || state_unhealthy
     }
 
+    /// True when no supervisor is attached or its child is serving.
+    fn may_send_request(&self) -> bool {
+        let serving = self.health.as_ref().is_none_or(|probe| probe.is_serving());
+        if !serving {
+            warn!(target: "assistd::chat", "llama-server is not ready; request not sent");
+        }
+        serving
+    }
+
     async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
         let pid_at_request = self.health.as_ref().and_then(|h| h.pid());
         debug!(
@@ -226,6 +238,12 @@ impl LlamaChatClient {
         first_byte_by: Instant,
         pid_at_request: Option<u32>,
     ) -> Result<reqwest::Response, StreamOutcome> {
+        if !self.may_send_request() {
+            return Err(StreamOutcome::ServerRestart {
+                accum: Box::default(),
+                pre_emit: true,
+            });
+        }
         let url = format!("{}/v1/chat/completions", self.base_url);
         let send = self
             .client
@@ -558,6 +576,9 @@ impl Summarizer for LlamaChatClient {
         _target_tokens: u32,
         max_tokens: u32,
     ) -> Result<String, ChatClientError> {
+        if !self.may_send_request() {
+            return Err(ChatClientError::NotReady);
+        }
         let url = format!("{}/v1/chat/completions", self.base_url);
         let payload = wire::ChatRequest {
             model: self.model.name.as_str(),

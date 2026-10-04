@@ -2,6 +2,7 @@
 //! model weights without restarting the process, and query what is loaded.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use serde_json::Value;
 use tracing::debug;
 
 use super::error::LlamaServerError;
+use crate::LlmHealthProbe;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -20,11 +22,17 @@ pub struct LlamaServerControl {
     client: reqwest::Client,
     addr: SocketAddr,
     base_url: String,
+    health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
 impl LlamaServerControl {
-    /// Build a control client for `http://{addr}`.
-    pub fn new(addr: SocketAddr) -> Result<Self, LlamaServerError> {
+    /// Build a control client for `http://{addr}`. With `health`, a call made
+    /// while its child is not serving fails with [`LlamaServerError::NotReady`]
+    /// without being sent.
+    pub fn new(
+        addr: SocketAddr,
+        health: Option<Arc<dyn LlmHealthProbe>>,
+    ) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(DEFAULT_TIMEOUT)
@@ -33,6 +41,7 @@ impl LlamaServerControl {
             client,
             addr,
             base_url: format!("http://{addr}"),
+            health,
         })
     }
 
@@ -98,7 +107,15 @@ impl LlamaServerControl {
         }
     }
 
+    fn require_serving(&self) -> Result<(), LlamaServerError> {
+        match &self.health {
+            Some(probe) if !probe.is_serving() => Err(LlamaServerError::NotReady),
+            _ => Ok(()),
+        }
+    }
+
     async fn fetch_models(&self) -> Result<ModelsResponse, LlamaServerError> {
+        self.require_serving()?;
         let url = format!("{}/models", self.base_url);
         let resp = self.client.get(&url).send().await?;
         let status = resp.status();
@@ -109,6 +126,7 @@ impl LlamaServerControl {
     }
 
     async fn fetch_props(&self, base_url: &str) -> Result<Value, LlamaServerError> {
+        self.require_serving()?;
         let resp = self
             .client
             .get(format!("{base_url}/props"))
@@ -127,6 +145,7 @@ impl LlamaServerControl {
         path: &'static str,
         model: &str,
     ) -> Result<(), LlamaServerError> {
+        self.require_serving()?;
         let url = format!("{}{}", self.base_url, path);
         let body = ModelActionRequest { model };
         debug!(target: "assistd::llama_server", "POST {url} model={model}");
@@ -222,9 +241,31 @@ fn control_http_error(
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv6Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use async_trait::async_trait;
+    use tokio::net::TcpListener;
 
     use super::*;
+    use crate::{HealthWaitError, ReadyState};
+
+    #[derive(Debug)]
+    struct RestartingProbe;
+
+    #[async_trait]
+    impl LlmHealthProbe for RestartingProbe {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+
+        fn state(&self) -> Option<ReadyState> {
+            Some(ReadyState::BackingOff { attempt: 1 })
+        }
+
+        async fn wait_for_ready(&self, _timeout: Duration) -> Result<(), HealthWaitError> {
+            Err(HealthWaitError::Timeout)
+        }
+    }
 
     fn parse(body: &str) -> ModelsResponse {
         serde_json::from_str(body).unwrap()
@@ -284,10 +325,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn calls_are_not_sent_while_the_server_is_not_serving() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let control = LlamaServerControl::new(
+            listener.local_addr().unwrap(),
+            Some(Arc::new(RestartingProbe)),
+        )
+        .unwrap();
+
+        let results = [
+            control.load_model("m").await,
+            control.unload_model("m").await,
+            control.model_is_loaded("m").await.map(drop),
+            control.props().await.map(drop),
+        ];
+        for result in results {
+            assert!(
+                matches!(result, Err(LlamaServerError::NotReady)),
+                "{result:?}"
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "a control request reached the listener"
+        );
+    }
+
     #[test]
     fn new_brackets_ipv6_hosts_in_base_url() {
         let control =
-            LlamaServerControl::new(SocketAddr::from((Ipv6Addr::LOCALHOST, 8385))).unwrap();
+            LlamaServerControl::new(SocketAddr::from((Ipv6Addr::LOCALHOST, 8385)), None).unwrap();
         assert_eq!(control.base_url, "http://[::1]:8385");
     }
 }

@@ -118,7 +118,10 @@ supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a
 stale server or squatter on the port is never trusted), then `LlamaChatClient`
-streams chat completions over `POST /v1/chat/completions`.
+streams chat completions over `POST /v1/chat/completions`. Chat and
+control-plane requests are sent only while the supervisor is `Ready` with
+a live child, so nothing reaches the port between a crash and the next
+verified start.
 
 If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the
 supervisor restarts it with exponential backoff and the in-flight
