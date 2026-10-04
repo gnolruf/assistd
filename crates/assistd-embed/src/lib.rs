@@ -45,13 +45,15 @@ pub trait Embedder: fmt::Debug + Send + Sync + 'static {
 }
 
 /// Embed `texts` in one [`Embedder::embed_batch`] call, returning one result per input.
-/// If the batch fails, each text is retried alone so a bad input fails only itself.
+/// If the batch fails, each text is retried alone so a bad input fails only itself;
+/// a batch refused with [`EmbedError::NotReady`] fails every input without a retry.
 pub async fn embed_each(
     embedder: &dyn Embedder,
     texts: &[&str],
 ) -> Vec<Result<Vec<f32>, EmbedError>> {
     match embedder.embed_batch(texts).await {
         Ok(vectors) => vectors.into_iter().map(Ok).collect(),
+        Err(EmbedError::NotReady) => texts.iter().map(|_| Err(EmbedError::NotReady)).collect(),
         Err(err) if texts.len() > 1 => {
             tracing::debug!(
                 target: "assistd::embed",

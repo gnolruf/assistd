@@ -1,6 +1,9 @@
 use std::collections::HashSet;
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::{self, Write};
 use std::net::IpAddr;
 use std::ops::RangeInclusive;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use assistd_utils::path::tilde_remainder;
@@ -21,6 +24,10 @@ use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
 use crate::tray::{TrayConfig, TrayPopupConfig};
 use crate::voice::{SynthesisConfig, VoiceConfig};
+
+const CONFIG_DIR_MODE: u32 = 0o700;
+const CONFIG_FILE_MODE: u32 = 0o600;
+const GROUP_OR_WORLD_READABLE: u32 = 0o044;
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -71,9 +78,10 @@ impl Config {
     }
 
     /// Loads and deserializes a config from the given TOML file. Keys the
-    /// schema doesn't know are skipped, with a warning logged for each.
+    /// schema doesn't know are skipped, with a warning logged for each; a
+    /// warning is also logged if other users can read a file that sets MCP env.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        let content = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
         })?;
@@ -91,6 +99,7 @@ impl Config {
                 path.display()
             );
         }
+        config.warn_if_credentials_exposed(path);
         Ok(config)
     }
 
@@ -103,16 +112,11 @@ impl Config {
         Ok(unknown)
     }
 
-    /// Writes the default config to `path`. Errors if the file already exists.
+    /// Writes the default config to `path` as an owner-only file, creating
+    /// missing parent directories owner-only. Errors if the file already exists.
     pub fn write_default(path: &Path) -> Result<(), ConfigError> {
-        if path.exists() {
-            return Err(ConfigError::AlreadyExists(path.to_path_buf()));
-        }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ConfigError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+            create_private_dir_all(parent)?;
         }
 
         let toml_string = toml::to_string_pretty(&Config::default())?;
@@ -122,12 +126,58 @@ impl Config {
              {toml_string}"
         );
 
-        std::fs::write(path, content).map_err(|source| ConfigError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+        create_private_file(path)?
+            .write_all(content.as_bytes())
+            .map_err(|source| ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            })
     }
+
+    fn exposes_mcp_env(&self, mode: u32) -> bool {
+        mode & GROUP_OR_WORLD_READABLE != 0
+            && self.mcp.servers.iter().any(|server| !server.env.is_empty())
+    }
+
+    fn warn_if_credentials_exposed(&self, path: &Path) {
+        let exposed = fs::metadata(path)
+            .is_ok_and(|metadata| self.exposes_mcp_env(metadata.permissions().mode()));
+        if exposed {
+            tracing::warn!(
+                target: "assistd::config",
+                "{} is readable by other users and sets mcp.servers[].env; \
+                 run `chmod 600 {}` to keep those values private",
+                path.display(),
+                path.display()
+            );
+        }
+    }
+}
+
+fn create_private_dir_all(dir: &Path) -> Result<(), ConfigError> {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(CONFIG_DIR_MODE)
+        .create(dir)
+        .map_err(|source| ConfigError::CreateDir {
+            path: dir.to_path_buf(),
+            source,
+        })
+}
+
+fn create_private_file(path: &Path) -> Result<File, ConfigError> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(CONFIG_FILE_MODE)
+        .open(path)
+        .map_err(|source| match source.kind() {
+            io::ErrorKind::AlreadyExists => ConfigError::AlreadyExists(path.to_path_buf()),
+            _ => ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            },
+        })
 }
 
 /// Walks `raw` alongside `known`, the serialized parsed config, which holds
@@ -409,3 +459,6 @@ fn is_mcp_server_name(name: &str) -> bool {
 fn is_tool_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
+
+#[cfg(test)]
+mod tests;

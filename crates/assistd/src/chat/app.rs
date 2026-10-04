@@ -123,14 +123,37 @@ impl std::fmt::Debug for ChatEvent {
     }
 }
 
+/// How much of the script the last drawn frame of the confirmation modal
+/// showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScriptVisibility {
+    /// Some rows were collapsed into a count, or no frame has been drawn.
+    Partial,
+    Whole,
+}
+
+/// The answers the confirmation modal accepts right now. Denial is
+/// accepted in every state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfirmOffer {
+    /// The arm delay has not passed since the last unaccepted key.
+    Arming,
+    /// The last frame did not show the whole script, so only denial counts.
+    ScriptHidden,
+    /// Approval is accepted; `always` when an always-allow rule is offered.
+    Approval { always: bool },
+}
+
 /// Command-confirmation prompt shown while the daemon's agent loop blocks
 /// on the answer.
 pub(super) struct ConfirmationModal {
     pub request: ConfirmationRequest,
     /// Echoed back in the `Request::ConfirmResponse`.
     confirm_id: String,
-    /// When the modal opened or last received a key it did not accept.
+    /// When the modal opened, last received a key it did not accept, or
+    /// last changed how much of the script it showed.
     quiet_since: Instant,
+    script_visibility: ScriptVisibility,
 }
 
 impl ConfirmationModal {
@@ -139,13 +162,30 @@ impl ConfirmationModal {
             request,
             confirm_id,
             quiet_since: Instant::now(),
+            script_visibility: ScriptVisibility::Partial,
         }
     }
 
-    /// Whether the modal has gone long enough without a keystroke to
-    /// accept approval. Denial is accepted at any time.
-    pub(super) fn armed(&self) -> bool {
-        self.quiet_since.elapsed() >= CONFIRM_ARM_DELAY
+    /// Approval needs the whole script on screen and the arm delay passed.
+    pub(super) fn offer(&self) -> ConfirmOffer {
+        if self.script_visibility == ScriptVisibility::Partial {
+            ConfirmOffer::ScriptHidden
+        } else if self.quiet_since.elapsed() < CONFIRM_ARM_DELAY {
+            ConfirmOffer::Arming
+        } else {
+            ConfirmOffer::Approval {
+                always: !self.request.always_allow.is_empty(),
+            }
+        }
+    }
+
+    /// Record how much of the script a frame just drew; a change restarts
+    /// the arm delay so newly revealed rows get read before approval.
+    pub(super) fn record_script_visibility(&mut self, visibility: ScriptVisibility) {
+        if self.script_visibility != visibility {
+            self.script_visibility = visibility;
+            self.restart_arm_delay();
+        }
     }
 
     fn restart_arm_delay(&mut self) {

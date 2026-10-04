@@ -6,6 +6,7 @@ use std::io;
 use std::path::Path;
 
 use assistd_utils::text::human_size;
+use tokio::io::AsyncReadExt;
 
 /// MIME types llama.cpp's vision adapters accept; `infer::is_image` alone also passes GIF, BMP,
 /// TIFF and HEIC.
@@ -97,34 +98,20 @@ impl std::error::Error for LoadImageError {
 /// is checked from metadata, before any read.
 pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
     let display_path = || path.display().to_string();
-    let meta = tokio::fs::metadata(path)
-        .await
-        .map_err(|source| LoadImageError::Io {
-            path: display_path(),
-            source,
-        })?;
-    if !meta.is_file() {
-        return Err(LoadImageError::Io {
-            path: display_path(),
-            source: io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a regular file (device, pipe, or socket)",
-            ),
-        });
-    }
-    if meta.len() > MAX_IMAGE_BYTES {
+    let io_error = |source: io::Error| LoadImageError::Io {
+        path: display_path(),
+        source,
+    };
+    let (mut file, size) = open_regular(path).await.map_err(io_error)?;
+    if size > MAX_IMAGE_BYTES {
         return Err(LoadImageError::TooLarge {
             path: display_path(),
-            size: meta.len(),
+            size,
             max: MAX_IMAGE_BYTES,
         });
     }
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|source| LoadImageError::Io {
-            path: display_path(),
-            source,
-        })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await.map_err(io_error)?;
     let Some(detected) = infer::get(&bytes) else {
         return Err(LoadImageError::Unrecognized {
             path: display_path(),
@@ -149,10 +136,22 @@ pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
     })
 }
 
+async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {
+    let path = path.to_owned();
+    let (file, size) = tokio::task::spawn_blocking(move || assistd_utils::fs::open_regular(&path))
+        .await
+        .map_err(io::Error::other)??;
+    Ok((tokio::fs::File::from_std(file), size))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
+    use rustix::fs::Mode;
     use tempfile::tempdir;
+
+    use super::*;
 
     /// Minimal GIF89a: an image to `infer`, but outside [`SUPPORTED_MIMES`].
     const GIF_BYTES: &[u8] = &[
@@ -214,5 +213,36 @@ mod tests {
             other => panic!("expected TooLarge, got {other:?}"),
         }
         assert!(err.user_message().starts_with("image too large:"));
+    }
+
+    #[tokio::test]
+    async fn fifo_is_refused_without_blocking() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe.png");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::from_raw_mode(0o600)).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(5), load_image(&fifo))
+            .await
+            .expect("loading a FIFO must not block")
+            .unwrap_err();
+        assert_eq!(
+            err.user_message(),
+            format!(
+                "{}: not a regular file (device, pipe, or socket)",
+                fifo.display()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_is_not_a_regular_file() {
+        let dir = tempdir().unwrap();
+        let err = load_image(dir.path()).await.unwrap_err();
+        assert_eq!(
+            err.user_message(),
+            format!(
+                "{}: not a regular file (device, pipe, or socket)",
+                dir.path().display()
+            )
+        );
     }
 }

@@ -7,13 +7,14 @@ rust-version.workspace = true
 
 [features]
 default = []
-process = ["dep:tokio", "dep:rustix"]
+process = ["dep:tokio"]
 child-server = ["process", "dep:tracing", "dep:reqwest", "dep:thiserror", "dep:parking_lot"]
 tracing-init = ["dep:tracing-subscriber"]
+test-support = ["child-server"]
 
 [dependencies]
 tokio = { workspace = true, optional = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
-rustix = { workspace = true, optional = true }
+rustix = { workspace = true }
 tracing = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }

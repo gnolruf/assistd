@@ -1,10 +1,13 @@
 //! Fixtures shared by the command tests.
 
+use std::os::fd::OwnedFd;
+use std::path::Path;
 use std::sync::Arc;
 
 use assistd_wm::NoWindowManager;
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use rustix::fs::{Mode, OFlags};
 
 use super::{
     BashCommand, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand, ScreenshotCommand,
@@ -49,6 +52,20 @@ pub(crate) fn test_patterns(patterns: &[&str]) -> Vec<DestructivePattern> {
                 .unwrap_or_else(|| panic!("invalid pattern {p:?}"))
         })
         .collect()
+}
+
+/// Path of a new FIFO named `pipe` in `dir`.
+pub(crate) fn make_fifo(dir: &Path) -> String {
+    let fifo = dir.join("pipe");
+    rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::from_raw_mode(0o600)).unwrap();
+    fifo.to_string_lossy().into_owned()
+}
+
+/// Both ends of `fifo`, so a blocking open of it succeeds and a read waits.
+pub(crate) fn hold_fifo_open(fifo: &str) -> (OwnedFd, OwnedFd) {
+    let reader = rustix::fs::open(fifo, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty()).unwrap();
+    let writer = rustix::fs::open(fifo, OFlags::WRONLY, Mode::empty()).unwrap();
+    (reader, writer)
 }
 
 /// Confirmation gate that answers every prompt the same way and records

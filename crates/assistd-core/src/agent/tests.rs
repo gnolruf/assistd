@@ -5,7 +5,7 @@ use parking_lot::Mutex as StdMutex;
 use tokio::sync::Notify;
 
 use assistd_config::ToolsOutputConfig;
-use assistd_llm::{LlmResult, ReadyState};
+use assistd_llm::{HealthSnapshot, LlmResult};
 use assistd_tools::commands::EchoCommand;
 use assistd_tools::{CommandRegistry, RunTool, Tool, ToolError};
 
@@ -772,11 +772,7 @@ impl MockProbe {
 
 #[async_trait]
 impl LlmHealthProbe for MockProbe {
-    fn pid(&self) -> Option<u32> {
-        None
-    }
-
-    fn state(&self) -> Option<ReadyState> {
+    async fn snapshot(&self) -> Option<HealthSnapshot> {
         None
     }
 

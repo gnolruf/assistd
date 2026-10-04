@@ -46,14 +46,17 @@ pub struct LlamaChatClient {
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     conv: Mutex<Conversation>,
-    /// When set, a failure coinciding with a supervisor restart becomes
+    /// When set, no request is sent unless the probe reports a serving
+    /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
 }
 
 impl LlamaChatClient {
     /// Build a client for the server at `model.host:model.port`. Pass
-    /// `health: None` when no supervisor is attached.
+    /// `health: None` when no supervisor is attached. With a probe, a request
+    /// made while its child is not serving fails with
+    /// [`LlmError::ServerRestarting`] without being sent.
     pub fn new(
         chat: &ChatConfig,
         model: &ModelConfig,
@@ -113,13 +116,13 @@ impl LlamaChatClient {
     /// Classify a failed request: a restart-coincident failure becomes
     /// [`StreamOutcome::ServerRestart`]; anything else keeps whatever
     /// was already streamed or propagates `err` if nothing was.
-    fn fail(
+    async fn fail(
         &self,
         accum: StreamAccum,
         err: ChatClientError,
         pid_at_request: Option<u32>,
     ) -> StreamOutcome {
-        if self.looks_like_server_crash(pid_at_request) {
+        if self.looks_like_server_crash(pid_at_request).await {
             let pre_emit = !accum.has_output();
             return StreamOutcome::ServerRestart {
                 accum: Box::new(accum),
@@ -139,23 +142,44 @@ impl LlamaChatClient {
         }
     }
 
-    fn looks_like_server_crash(&self, pid_at_request: Option<u32>) -> bool {
+    async fn looks_like_server_crash(&self, pid_at_request: Option<u32>) -> bool {
         let Some(probe) = self.health.as_ref() else {
             return false;
         };
-        let current_pid = probe.pid();
-        let current_state = probe.state();
+        let current = probe.snapshot().await;
+        let current_pid = current.and_then(|snapshot| snapshot.pid);
         let pid_changed = match (pid_at_request, current_pid) {
             (Some(_), None) => true,
             (Some(a), Some(b)) => a != b,
             _ => false,
         };
-        let state_unhealthy = !matches!(current_state, Some(ReadyState::Ready) | None);
+        let state_unhealthy = current.is_some_and(|snapshot| snapshot.state != ReadyState::Ready);
         pid_changed || state_unhealthy
     }
 
+    /// The pid of the serving child a request is sent to, `None` when no
+    /// supervisor is attached. Fails with [`ChatClientError::NotReady`] when
+    /// the supervised child is not serving.
+    async fn serving_pid(&self) -> Result<Option<u32>, ChatClientError> {
+        let Some(probe) = self.health.as_ref() else {
+            return Ok(None);
+        };
+        match probe.snapshot().await {
+            Some(snapshot) if snapshot.is_serving() => Ok(snapshot.pid),
+            _ => {
+                warn!(target: "assistd::chat", "llama-server is not ready; request not sent");
+                Err(ChatClientError::NotReady)
+            }
+        }
+    }
+
     async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
-        let pid_at_request = self.health.as_ref().and_then(|h| h.pid());
+        let Ok(pid_at_request) = self.serving_pid().await else {
+            return StreamOutcome::ServerRestart {
+                accum: Box::default(),
+                pre_emit: true,
+            };
+        };
         debug!(
             target: "assistd::voice::latency",
             stage = "llm_request_sent",
@@ -237,21 +261,23 @@ impl LlamaChatClient {
         let mut response = match timeout_at(first_byte_by, send).await {
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
-                return Err(self.fail(
-                    StreamAccum::default(),
-                    ChatClientError::Http(e),
-                    pid_at_request,
-                ));
+                return Err(self
+                    .fail(
+                        StreamAccum::default(),
+                        ChatClientError::Http(e),
+                        pid_at_request,
+                    )
+                    .await);
             }
             Err(_) => {
                 let err = ChatClientError::Sse(format!(
                     "no response headers within {}s",
                     self.request_timeout().as_secs()
                 ));
-                return Err(self.fail(StreamAccum::default(), err, pid_at_request));
+                return Err(self.fail(StreamAccum::default(), err, pid_at_request).await);
             }
         };
-        if self.looks_like_server_crash(pid_at_request) {
+        if self.looks_like_server_crash(pid_at_request).await {
             return Err(StreamOutcome::ServerRestart {
                 accum: Box::default(),
                 pre_emit: true,
@@ -264,7 +290,7 @@ impl LlamaChatClient {
                 status: status.as_u16(),
                 body,
             };
-            return Err(self.fail(StreamAccum::default(), err, pid_at_request));
+            return Err(self.fail(StreamAccum::default(), err, pid_at_request).await);
         }
         Ok(response)
     }
@@ -293,7 +319,9 @@ impl LlamaChatClient {
                 Ok(Ok(Some(chunk))) => chunk,
                 Ok(Ok(None)) => return Ok(false),
                 Ok(Err(e)) => {
-                    return Err(self.fail(take(accum), ChatClientError::Http(e), pid_at_request));
+                    return Err(self
+                        .fail(take(accum), ChatClientError::Http(e), pid_at_request)
+                        .await);
                 }
                 Err(_) => {
                     warn!(
@@ -308,7 +336,7 @@ impl LlamaChatClient {
                         "no bytes received for {}s",
                         deadline.as_secs()
                     ));
-                    return Err(self.fail(take(accum), err, pid_at_request));
+                    return Err(self.fail(take(accum), err, pid_at_request).await);
                 }
             };
             saw_bytes = true;
@@ -321,7 +349,7 @@ impl LlamaChatClient {
                     }
                     Ok(Some(SseEvent::Done)) => return Ok(true),
                     Ok(None) => break,
-                    Err(e) => return Err(self.fail(take(accum), e, pid_at_request)),
+                    Err(e) => return Err(self.fail(take(accum), e, pid_at_request).await),
                 }
             }
         }
@@ -337,7 +365,11 @@ impl LlamaChatClient {
     ) -> Result<(), StreamOutcome> {
         let parsed: wire::ChatCompletionChunk = match serde_json::from_str(payload) {
             Ok(parsed) => parsed,
-            Err(e) => return Err(self.fail(take(accum), ChatClientError::Json(e), pid_at_request)),
+            Err(e) => {
+                return Err(self
+                    .fail(take(accum), ChatClientError::Json(e), pid_at_request)
+                    .await);
+            }
         };
         if let Some(usage) = parsed.usage {
             accum.prompt_tokens = Some(usage.prompt_tokens);
@@ -558,6 +590,7 @@ impl Summarizer for LlamaChatClient {
         _target_tokens: u32,
         max_tokens: u32,
     ) -> Result<String, ChatClientError> {
+        self.serving_pid().await?;
         let url = format!("{}/v1/chat/completions", self.base_url);
         let payload = wire::ChatRequest {
             model: self.model.name.as_str(),

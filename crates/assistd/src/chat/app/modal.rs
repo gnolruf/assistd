@@ -5,7 +5,7 @@ use assistd_tools::{Approval, ConfirmationRequest};
 use crossterm::event::{KeyCode, KeyEvent};
 use uuid::Uuid;
 
-use super::{App, BranchPickerModal, ConfirmationModal};
+use super::{App, BranchPickerModal, ConfirmOffer, ConfirmationModal};
 
 impl App {
     /// Show a command-confirmation prompt. A second prompt arriving while
@@ -54,19 +54,17 @@ impl App {
     }
 
     pub(super) fn on_confirmation_key(&mut self, ev: KeyEvent) {
-        let armed = self.modal.as_ref().is_some_and(ConfirmationModal::armed);
-        let offers_always = self
-            .modal
-            .as_ref()
-            .is_some_and(|m| !m.request.always_allow.is_empty());
-        match ev.code {
-            KeyCode::Char('y' | 'Y') if armed => {
+        let Some(offer) = self.modal.as_ref().map(ConfirmationModal::offer) else {
+            return;
+        };
+        match (ev.code, offer) {
+            (KeyCode::Char('y' | 'Y'), ConfirmOffer::Approval { .. }) => {
                 self.resolve_modal(Approval::Once);
             }
-            KeyCode::Char('a' | 'A') if armed && offers_always => {
+            (KeyCode::Char('a' | 'A'), ConfirmOffer::Approval { always: true }) => {
                 self.resolve_modal(Approval::Always);
             }
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+            (KeyCode::Char('n' | 'N') | KeyCode::Esc, _) => {
                 self.resolve_modal(Approval::Deny);
             }
             _ => {

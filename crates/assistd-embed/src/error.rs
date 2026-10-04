@@ -6,6 +6,10 @@ pub enum EmbedError {
     #[error("embedder disabled")]
     Disabled,
 
+    /// The supervised embed server was not serving, so nothing was sent.
+    #[error("embed server is not ready; request not sent")]
+    NotReady,
+
     #[error("build embed reqwest client: {0}")]
     Client(#[source] reqwest::Error),
 

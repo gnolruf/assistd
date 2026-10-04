@@ -25,6 +25,7 @@ use assistd_tools::{
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
         TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
     },
+    presentation::is_spill_file_name,
     probe_sandbox,
 };
 use assistd_utils::path::expand_tilde_from_env;
@@ -413,13 +414,7 @@ fn clear_overflow_dir(overflow_dir: &Path) -> Result<(), BuildToolsError> {
 }
 
 fn is_spill_entry(entry: &DirEntry) -> bool {
-    let named_like_spill = entry.file_name().to_str().is_some_and(|name| {
-        name.strip_suffix(".txt")
-            .and_then(|stem| stem.rsplit_once('-'))
-            .is_some_and(|(prefix, n)| {
-                !prefix.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
-            })
-    });
+    let named_like_spill = entry.file_name().to_str().is_some_and(is_spill_file_name);
     named_like_spill && entry.file_type().is_ok_and(|kind| !kind.is_dir())
 }
 
@@ -577,9 +572,7 @@ mod tests {
         for spill in ["cmd-1.txt", "mcp-files-12.txt"] {
             std::fs::write(dir.join(spill), b"stale").unwrap();
         }
-        for kept in ["notes.txt", "cmd-.txt", "-3.txt", "cmd-1.md", "cmd-x.txt"] {
-            std::fs::write(dir.join(kept), b"user data").unwrap();
-        }
+        std::fs::write(dir.join("notes.txt"), b"user data").unwrap();
         std::os::unix::fs::symlink("/etc/passwd", dir.join("cmd-2.txt")).unwrap();
         std::fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
 
@@ -590,17 +583,7 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(
-            left,
-            [
-                "-3.txt",
-                "cmd-.txt",
-                "cmd-1.md",
-                "cmd-x.txt",
-                "keep-1.txt",
-                "notes.txt"
-            ]
-        );
+        assert_eq!(left, ["keep-1.txt", "notes.txt"]);
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, OVERFLOW_DIR_MODE);
     }

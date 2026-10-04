@@ -156,8 +156,10 @@ fn last_lines(text: &[u8], count: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use std::ops::RangeInclusive;
+    use std::time::Duration;
 
     use super::*;
+    use crate::commands::{hold_fifo_open, make_fifo};
 
     async fn run(cmd: &dyn Command, args: &[&str], stdin: &[u8]) -> CommandOutput {
         cmd.run(CommandInput {
@@ -251,6 +253,35 @@ mod tests {
             String::from_utf8_lossy(&out.stderr),
             "[error] head: file not found: /nope/missing.txt. Use: ls /nope to see what is there\n"
         );
+    }
+
+    async fn assert_head_refuses_fifo_promptly(fifo: &str) {
+        let out = tokio::time::timeout(Duration::from_secs(5), run(&HeadCommand, &[fifo], b""))
+            .await
+            .expect("head blocked on a FIFO");
+        assert_eq!(out.exit_code, 1);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!(
+                "[error] head: {fifo}: not a regular file (device, pipe, or socket). \
+                 Check: ls -l {fifo}\n"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn fifo_with_no_writer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = make_fifo(dir.path());
+        assert_head_refuses_fifo_promptly(&fifo).await;
+    }
+
+    #[tokio::test]
+    async fn fifo_held_open_by_a_writer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = make_fifo(dir.path());
+        let _ends = hold_fifo_open(&fifo);
+        assert_head_refuses_fifo_promptly(&fifo).await;
     }
 
     #[tokio::test]

@@ -78,7 +78,7 @@ the vocabulary established here.
 | `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
-| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, XDG dirs, tilde expansion, `human_size`, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, and the `ChildServer` supervisor. | none                                                                             |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, XDG dirs, tilde expansion, `human_size`, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | `utils`                                                                          |
 
@@ -118,7 +118,10 @@ supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a
 stale server or squatter on the port is never trusted), then `LlamaChatClient`
-streams chat completions over `POST /v1/chat/completions`.
+streams chat completions over `POST /v1/chat/completions`. Chat and
+control-plane requests are sent only while the supervisor is `Ready` with
+a live child, so nothing reaches the port between a crash and the next
+verified start.
 
 If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the
 supervisor restarts it with exponential backoff and the in-flight
@@ -225,7 +228,10 @@ second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
 store. The `recall` tool embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
-over conversation chunks from earlier sessions.
+over conversation chunks from earlier sessions. Like chat requests,
+embedding requests are sent only while the embedding server's
+supervisor is `Ready` with a live child; a row refused in the
+meantime stays unindexed until `assistd memory reindex` picks it up.
 
 ### Voice (`assistd-voice`)
 
@@ -344,7 +350,8 @@ A walk through `assistd query "what files changed this week?"`:
    stdout. If stdout exceeds the `[tools.output]` line or byte cap,
    `RunTool::invoke` cuts it to that head and spills the full text to
    `tools.output.overflow_dir` (default `$XDG_RUNTIME_DIR/assistd/output`,
-   owner-only, with earlier spill files removed at every daemon start); it then base64-encodes any image
+   owner-only, with earlier spill files removed at every daemon start and only the newest 64
+   files or 128 MiB kept while it runs); it then base64-encodes any image
    attachments and returns the JSON result.
 
 7. **Loop back.** Result emitted as `Event::ToolResult`, pushed back
