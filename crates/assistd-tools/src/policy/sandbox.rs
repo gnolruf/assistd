@@ -274,10 +274,11 @@ impl SandboxInfo {
         cmd
     }
 
-    /// Flag order is load-bearing: the profile, then the `access` binds
-    /// (after `--tmpfs /run`), then the shared directories, then the
-    /// read-only mounts over `home`'s command directories and the
-    /// protections, then the operator's `extra_args` so they win.
+    /// Flag order is load-bearing: the profile, then the self-binds that
+    /// pin command directories' ancestors, then the `access` binds (after
+    /// `--tmpfs /run`) or shared directories, then the read-only mounts over
+    /// `home`'s command directories and the protections, then the
+    /// operator's `extra_args` so they win.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
@@ -291,6 +292,10 @@ impl SandboxInfo {
         S: AsRef<OsStr>,
     {
         let home = SandboxHome::read(home);
+        let command_dirs = home
+            .as_ref()
+            .map(|home| home.command_dirs(&self.host_path, &self.protected.dirs))
+            .unwrap_or_default();
         let mut cmd = ProcCommand::new(bwrap);
         cmd.env_clear().envs(kept_env(std::env::vars_os(), access));
         cmd.args(
@@ -298,6 +303,7 @@ impl SandboxInfo {
                 .iter()
                 .map(OsStr::new),
         );
+        cmd.args(command_dirs.rename_guard_flags());
         if let SandboxAccess::Session {
             restricted,
             display,
@@ -307,10 +313,7 @@ impl SandboxInfo {
         } else {
             cmd.args(shared_flags(&self.shared));
         }
-        cmd.args(
-            home.iter()
-                .flat_map(|home| home.command_dir_flags(&self.host_path)),
-        );
+        cmd.args(command_dirs.lock_flags());
         let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         cmd.args(protection_flags(&self.protected, &writable));
         cmd.args(self.extra_args.iter().map(OsStr::new));
@@ -441,24 +444,51 @@ impl SandboxHome {
         home.into_iter().chain(entries).map(String::from).collect()
     }
 
-    /// Read-only mounts over the directories under visible entries that host
-    /// shells look programs up in: binds over the existing ones, then empty
-    /// mounts over the missing `host_path` ones a command could create.
-    fn command_dir_flags(&self, host_path: &[PathBuf]) -> Vec<PathBuf> {
+    /// The directories under visible entries that host shells look programs
+    /// up in, and the ancestors that keep them in place; ancestors inside a
+    /// `protected` directory are left out.
+    fn command_dirs(&self, host_path: &[PathBuf], protected: &[PathBuf]) -> CommandDirs {
         let existing = self.existing_command_dirs(host_path);
         let placeholders = self.command_dir_placeholders(host_path, &existing);
-        let binds = existing
-            .into_iter()
-            .flat_map(|dir| [PathBuf::from("--ro-bind"), dir.clone(), dir]);
-        let empty_mounts = placeholders.into_iter().flat_map(|dir| {
-            [
-                PathBuf::from("--tmpfs"),
-                dir.clone(),
-                PathBuf::from("--remount-ro"),
-                dir,
-            ]
-        });
-        binds.chain(empty_mounts).collect()
+        let real_protected: Vec<PathBuf> = protected
+            .iter()
+            .filter_map(|dir| std::fs::canonicalize(dir).ok())
+            .collect();
+        let locked = [&existing[..], &placeholders[..]].concat();
+        let mut rename_guards: Vec<PathBuf> = locked
+            .iter()
+            .flat_map(|dir| self.ancestors_below_entry(dir))
+            .filter(|ancestor| {
+                !locked
+                    .iter()
+                    .chain(&real_protected)
+                    .any(|outer| ancestor.starts_with(outer))
+            })
+            .collect();
+        rename_guards.sort();
+        rename_guards.dedup();
+        CommandDirs {
+            existing,
+            placeholders,
+            rename_guards,
+        }
+    }
+
+    /// The ancestors of `dir` strictly between it and its top-level entry.
+    fn ancestors_below_entry(&self, dir: &Path) -> Vec<PathBuf> {
+        let Some(entry) = dir
+            .strip_prefix(&self.real)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .map(|entry| self.real.join(entry))
+        else {
+            return Vec::new();
+        };
+        dir.ancestors()
+            .skip(1)
+            .take_while(|ancestor| ancestor.starts_with(&entry) && *ancestor != entry)
+            .map(Path::to_path_buf)
+            .collect()
     }
 
     /// The existing directories of `host_path`, `~/bin` and every
@@ -479,8 +509,8 @@ impl SandboxHome {
         dirs
     }
 
-    /// The missing `host_path` directories a command could create, except
-    /// those under one of `existing` or under one another.
+    /// The first missing components of the `host_path` directories a command
+    /// could create, except those under one of `existing` or one another.
     fn command_dir_placeholders(
         &self,
         host_path: &[PathBuf],
@@ -505,9 +535,10 @@ impl SandboxHome {
             .collect()
     }
 
-    /// Where missing `dir` would be created: its nearest existing ancestor,
-    /// symlinks resolved, joined with the rest. `None` unless that ancestor
-    /// is a directory this process may create in, inside a writable entry.
+    /// The first directory missing `dir` would need created, under its
+    /// nearest existing ancestor with symlinks resolved. `None` unless that
+    /// ancestor is a directory this process may create in, inside a writable
+    /// entry.
     fn placeholder_for(&self, dir: &Path) -> Option<PathBuf> {
         let (existing, real_existing) = dir
             .ancestors()
@@ -520,7 +551,7 @@ impl SandboxHome {
             && is_absent(&first_missing)
             && self.is_in_writable_entry(&real_existing)
             && can_create_in(&real_existing);
-        creatable.then(|| real_existing.join(missing))
+        creatable.then_some(first_missing)
     }
 
     fn is_in_writable_entry(&self, real_path: &Path) -> bool {
@@ -532,6 +563,45 @@ impl SandboxHome {
                 self.writable_entries()
                     .any(|writable| Path::new(writable).file_name() == Some(entry.as_os_str()))
             })
+    }
+}
+
+/// Directories host shells look programs up in, kept read-only inside the
+/// sandbox, with all paths resolved through symlinks.
+#[derive(Debug, Default)]
+struct CommandDirs {
+    existing: Vec<PathBuf>,
+    /// Missing directories a command could create, mounted empty instead.
+    placeholders: Vec<PathBuf>,
+    /// Ancestors bound onto themselves, parent first, so that a command
+    /// cannot rename them and rebuild the directory beneath.
+    rename_guards: Vec<PathBuf>,
+}
+
+impl CommandDirs {
+    fn rename_guard_flags(&self) -> Vec<PathBuf> {
+        self.rename_guards
+            .iter()
+            .flat_map(|dir| [PathBuf::from("--bind"), dir.clone(), dir.clone()])
+            .collect()
+    }
+
+    /// Read-only binds over the existing directories, then empty read-only
+    /// mounts over the placeholders.
+    fn lock_flags(&self) -> Vec<PathBuf> {
+        let binds = self
+            .existing
+            .iter()
+            .flat_map(|dir| [PathBuf::from("--ro-bind"), dir.clone(), dir.clone()]);
+        let empty_mounts = self.placeholders.iter().flat_map(|dir| {
+            [
+                PathBuf::from("--tmpfs"),
+                dir.clone(),
+                PathBuf::from("--remount-ro"),
+                dir.clone(),
+            ]
+        });
+        binds.chain(empty_mounts).collect()
     }
 }
 
@@ -1123,6 +1193,10 @@ mod tests {
         SandboxHome::read(Some(dir.to_string_lossy().into_owned())).expect("usable home")
     }
 
+    fn lock_flags_for(home: &Path, host_path: &[PathBuf]) -> Vec<PathBuf> {
+        sandbox_home(home).command_dirs(host_path, &[]).lock_flags()
+    }
+
     fn read_only_binds_in(home: &Path, dirs: &[&str]) -> Vec<PathBuf> {
         dirs.iter()
             .flat_map(|dir| {
@@ -1150,11 +1224,11 @@ mod tests {
             home.join("go/bin"),
         ];
         assert_eq!(
-            sandbox_home(&home).command_dir_flags(&host_path),
+            lock_flags_for(&home, &host_path),
             read_only_binds_in(&home, &["bin", "go/bin", "projects/tools/bin"])
         );
         assert_eq!(
-            sandbox_home(&home).command_dir_flags(std::slice::from_ref(&home)),
+            lock_flags_for(&home, std::slice::from_ref(&home)),
             read_only_binds_in(&home, &["", "bin", "go/bin"])
         );
     }
@@ -1163,7 +1237,7 @@ mod tests {
     fn home_bin_stays_read_only_off_the_host_path_and_through_a_symlink() {
         let home_dir = tempfile::tempdir().expect("tempdir");
         let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
-        assert!(sandbox_home(&home).command_dir_flags(&[]).is_empty());
+        assert!(lock_flags_for(&home, &[]).is_empty());
         for dir in ["projects/tools/bin", ".local/bin"] {
             std::fs::create_dir_all(home.join(dir)).expect(dir);
         }
@@ -1176,11 +1250,7 @@ mod tests {
             (PathBuf::from("/usr/bin"), Vec::new()),
         ] {
             std::os::unix::fs::symlink(&target, home.join("bin")).expect("symlink");
-            assert_eq!(
-                sandbox_home(&home).command_dir_flags(&[]),
-                expected,
-                "{target:?}"
-            );
+            assert_eq!(lock_flags_for(&home, &[]), expected, "{target:?}");
             std::fs::remove_file(home.join("bin")).expect("remove symlink");
         }
     }
@@ -1282,10 +1352,106 @@ mod tests {
         let host_path = [&host_path[..], &[elsewhere.path().join("bin")]].concat();
         let expected = [
             read_only_binds_in(&home, &["tools/bin"]),
-            empty_read_only_mounts_in(&home, &["go/bin", "projects/tool/bin", "src/bin"]),
+            empty_read_only_mounts_in(&home, &["go/bin", "projects/tool", "src/bin"]),
         ]
         .concat();
-        assert_eq!(sandbox_home(&home).command_dir_flags(&host_path), expected);
+        assert_eq!(lock_flags_for(&home, &host_path), expected);
+    }
+
+    fn paths_in(home: &Path, dirs: &[&str]) -> Vec<PathBuf> {
+        dirs.iter().map(|dir| home.join(dir)).collect()
+    }
+
+    #[test]
+    fn rename_guards_pin_every_ancestor_between_an_entry_and_a_locked_dir() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        for dir in [
+            "projects/tools/bin",
+            "projects/a/b/bin",
+            "projects/lib/sub/bin",
+            "projects/.venv/bin",
+            "go/bin",
+            "work/conf/x/bin",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).expect(dir);
+        }
+        let host_path = paths_in(
+            &home,
+            &[
+                "projects/tools/bin",
+                "projects/a/b/bin",
+                "projects/a/b/bin",
+                "projects/a/c/bin",
+                "projects/new/x/bin",
+                "projects/lib",
+                "projects/lib/sub/bin",
+                "projects/.venv/bin",
+                "go/bin",
+                "work/conf/x/bin",
+            ],
+        );
+        let dirs = sandbox_home(&home).command_dirs(&host_path, &[home.join("work/conf")]);
+        assert_eq!(
+            dirs.rename_guards,
+            paths_in(
+                &home,
+                &[
+                    "projects/.venv",
+                    "projects/a",
+                    "projects/a/b",
+                    "projects/tools"
+                ]
+            )
+        );
+        assert_eq!(
+            dirs.placeholders,
+            paths_in(&home, &["projects/a/c", "projects/new"])
+        );
+    }
+
+    #[test]
+    fn rename_guards_follow_the_entry_binds_and_precede_every_read_only_mount() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        for dir in [
+            "projects/tools/bin",
+            "projects/tools/conf",
+            "projects/tools/scratch",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).expect(dir);
+        }
+        let path_of = |dir: &str| home.join(dir).to_string_lossy().into_owned();
+        let info = SandboxInfo {
+            protected: Protected {
+                dirs: vec![home.join("projects/tools/conf")],
+                sockets: Vec::new(),
+            },
+            shared: SharedDirs {
+                scratch: Some(home.join("projects/tools/scratch")),
+                read_only: Vec::new(),
+            },
+            host_path: vec![home.join("projects/tools/bin")],
+            ..bwrap_info(Vec::new())
+        };
+        let argv = argv_of(&info.bwrap_command(
+            Path::new("/usr/bin/bwrap"),
+            Some(path_of("")),
+            SandboxAccess::Default,
+            "true",
+            [""; 0],
+        ));
+        let position_of = |flag: &str, dir: &str| {
+            let dir = path_of(dir);
+            argv.windows(3)
+                .position(|w| w == [flag, dir.as_str(), dir.as_str()])
+                .unwrap_or_else(|| panic!("{flag} {dir} in {argv:?}"))
+        };
+        let guard = position_of("--bind", "projects/tools");
+        assert!(position_of("--bind", "projects") < guard, "{argv:?}");
+        assert!(guard < position_of("--bind-try", "projects/tools/scratch"));
+        assert!(guard < position_of("--ro-bind", "projects/tools/bin"));
+        assert!(guard < position_of("--ro-bind", "projects/tools/conf"));
     }
 
     #[test]
@@ -1308,7 +1474,7 @@ mod tests {
         symlink("projects/lib", "lib");
         symlink(".cargo", "cargo");
         assert_eq!(
-            sandbox_home(&home).command_dir_flags(&[home.join("go/bin")]),
+            lock_flags_for(&home, &[home.join("go/bin")]),
             read_only_binds_in(&home, &["go/bin", "projects/lib/bin", "tools/bin"])
         );
     }
