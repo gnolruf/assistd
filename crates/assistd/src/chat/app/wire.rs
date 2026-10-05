@@ -8,7 +8,8 @@ use assistd_tools::ConfirmationRequest;
 use serde_json::Value;
 
 use super::{
-    ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, QueuedTranscription, WireStream,
+    ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
+    WireStream,
 };
 
 impl App {
@@ -19,9 +20,42 @@ impl App {
                 self.output.push_error(&format!("[wire error] {message}"));
                 self.fail_stream(stream, Instant::now());
             }
+            ChatEvent::Bus(event) => self.on_bus_event(event),
             ChatEvent::AttachLoaded(payload) => self.on_attach_loaded(*payload),
             ChatEvent::AttachFailed { path, message } => self.on_attach_failed(&path, &message),
         }
+    }
+
+    /// Record a query id so the bus copy of its events is ignored.
+    pub(super) fn remember_own_turn(&mut self, id: &str) {
+        if self.own_turn_ids.len() == OWN_TURN_MEMORY {
+            self.own_turn_ids.pop_front();
+        }
+        self.own_turn_ids.push_back(id.to_string());
+    }
+
+    /// Route a bus event: titles go to the status stream, and turns this
+    /// chat did not start are drawn like its own replies. A `Done` or
+    /// `Error` counts only when it closes the turn on screen, since every
+    /// client's one-shot requests end with one.
+    fn on_bus_event(&mut self, ev: Event) {
+        if matches!(ev, Event::SessionTitle { .. }) {
+            self.on_wire_event(WireStream::Status, ev);
+            return;
+        }
+        let id = ev.id();
+        if self.own_turn_ids.iter().any(|own| own == id) {
+            return;
+        }
+        let closes_shown_turn = self.active_reply.as_ref().is_some_and(|r| r.id == id)
+            || self
+                .queued_transcription
+                .as_ref()
+                .is_some_and(|q| q.id == id);
+        if matches!(ev, Event::Done { .. } | Event::Error { .. }) && !closes_shown_turn {
+            return;
+        }
+        self.on_wire_event(WireStream::Reply, ev);
     }
 
     fn on_wire_event(&mut self, stream: WireStream, ev: Event) {

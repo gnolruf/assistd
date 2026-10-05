@@ -127,10 +127,10 @@ The current time is 14:32 PDT.
 assistd chat
 ```
 
-The TUI is a long-lived client onto the running daemon. It
-auto-spawns the daemon under `setsid` if no socket is reachable, so
-step 3 is technically optional — running the daemon explicitly just
-front-loads the cold-start cost.
+The TUI is a long-lived client onto the running daemon; it exits
+with a hint if no daemon is listening (pass `--wait` to wait for one
+instead). Only one chat may be open at a time, since every chat
+drives the daemon's single conversation.
 
 That's it. If something hangs, run `assistd daemon` directly so its
 tracing output is visible; if the model never finishes downloading,

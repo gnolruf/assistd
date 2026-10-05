@@ -48,24 +48,12 @@ pub(crate) struct DaemonArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
-    /// Defer the global PTT hotkey to a connected client (e.g. the
-    /// chat TUI). Set automatically when the daemon is auto-spawned by
-    /// `assistd chat`.
-    #[arg(long, default_value_t = false)]
-    pub client_mode: bool,
 }
 
 /// Run the daemon until shutdown.
 pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
     assistd_core::install_panic_hook();
-
-    if args.client_mode {
-        match rustix::process::setsid() {
-            Ok(_) => info!("detached: became session leader"),
-            Err(e) => tracing::warn!("setsid() failed (continuing): {e}"),
-        }
-    }
 
     let config_path = match args.config {
         Some(p) => p,
@@ -97,7 +85,7 @@ pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     let started = tokio::select! {
         biased;
         _ = startup_shutdown_rx.wait_for(|v| *v) => None,
-        started = start(config, &config_path, args.client_mode, &stages) => Some(started?),
+        started = start(config, &config_path, &stages) => Some(started?),
     };
     let Some((state, subsystems)) = started else {
         stages.cancel_all();
@@ -125,7 +113,6 @@ pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
 async fn start(
     config: Config,
     config_path: &Path,
-    client_mode: bool,
     stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
     let presence = start_presence(&config, &stages.llm).await?;
@@ -135,12 +122,7 @@ async fn start(
 
     let voice = voice_init::init(&config, &presence).await;
 
-    let hotkey_handle = if client_mode {
-        info!("hotkey: deferred to client (--client-mode)");
-        None
-    } else {
-        spawn_hotkeys(&config, &presence, &voice, stages.intake.subscribe())
-    };
+    let hotkey_handle = spawn_hotkeys(&config, &presence, &voice, stages.intake.subscribe());
     let gpu_monitor_handle =
         gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
     let idle_monitor_handle =
@@ -277,7 +259,7 @@ fn spawn_hotkeys(
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     let voice_proxy: Arc<dyn assistd_voice::VoiceInput> =
-        Arc::new(IpcVoiceProxy::new(Arc::new(IpcClient::new()), None));
+        Arc::new(IpcVoiceProxy::new(Arc::new(IpcClient::new())));
     hotkey::spawn_listener(
         &config.presence,
         &config.voice,

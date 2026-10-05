@@ -109,9 +109,13 @@ fn spawn_listen_query(handlers: &mut JoinSet<()>, state: &Arc<AppState>, text: S
     handlers.spawn(run_listen_query(state.clone(), id, text).instrument(span));
 }
 
-/// Run one utterance as a query turn, publishing its events on the
-/// daemon's broadcast bus.
+/// Run one utterance as a query turn, publishing its transcript and
+/// events on the daemon's broadcast bus.
 async fn run_listen_query(state: Arc<AppState>, id: String, text: String) {
+    state.runtime.publish(&Event::Transcription {
+        id: id.clone(),
+        text: text.clone(),
+    });
     let (tx, mut rx) = mpsc::channel::<Event>(32);
     let forward = async {
         while let Some(ev) = rx.recv().await {

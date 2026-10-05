@@ -29,6 +29,7 @@ impl App {
     pub(super) fn spawn_query(&mut self, text: String, attachments: Vec<Attachment>) {
         let (writer_tx, writer_rx) = mpsc::channel::<Request>(QUERY_WRITER_CAPACITY);
         let id = Uuid::new_v4().to_string();
+        self.remember_own_turn(&id);
         self.active_reply = Some(ActiveReply {
             id: id.clone(),
             writer: Some(writer_tx),

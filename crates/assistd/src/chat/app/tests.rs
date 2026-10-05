@@ -251,6 +251,48 @@ fn a_transcript_is_dropped_when_its_turn_never_runs() {
     );
 }
 
+#[test]
+fn bus_turn_from_another_client_renders_with_its_transcript() {
+    let (mut app, _rx) = test_app();
+    app.on_chat_event(ChatEvent::Bus(transcription_for("ptt", "spoken question")));
+    app.on_chat_event(ChatEvent::Bus(delta_for("ptt", "spoken answer")));
+    assert!(app.generating);
+    let lines = rendered(&mut app);
+    assert!(line_index(&lines, "spoken question") < line_index(&lines, "spoken answer"));
+
+    app.on_chat_event(ChatEvent::Bus(Event::Done { id: "ptt".into() }));
+    assert!(!app.generating);
+}
+
+#[test]
+fn bus_copies_of_this_chats_query_are_ignored() {
+    let (mut app, _rx) = test_app();
+    app.remember_own_turn("typed");
+    start_typed_turn(&mut app, "typed", "typed question");
+    app.on_chat_event(reply(delta_for("typed", "answer")));
+    app.on_chat_event(ChatEvent::Bus(delta_for("typed", "echo")));
+    app.on_chat_event(ChatEvent::Bus(Event::Done { id: "typed".into() }));
+
+    assert!(app.generating, "only the dialog's own Done ends the reply");
+    let lines = rendered(&mut app);
+    assert!(
+        !lines.iter().any(|l| l.contains("echo")),
+        "the bus copy must not be drawn twice: {lines:#?}",
+    );
+}
+
+#[test]
+fn bus_terminal_events_of_unseen_requests_are_ignored() {
+    let (mut app, _rx) = test_app();
+    app.on_chat_event(ChatEvent::Bus(Event::Done { id: "poll".into() }));
+    app.on_chat_event(ChatEvent::Bus(Event::Error {
+        id: "wake".into(),
+        message: "already active".into(),
+    }));
+    assert!(app.active_reply.is_none());
+    assert_eq!(app.notice(), None);
+}
+
 #[tokio::test]
 async fn query_driver_outlives_its_writer_channel() {
     let dir = tempfile::tempdir().unwrap();

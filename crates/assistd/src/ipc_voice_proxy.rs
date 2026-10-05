@@ -7,25 +7,22 @@ use std::sync::Arc;
 use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
 use assistd_voice::{VoiceInput, VoiceInputError};
 use async_trait::async_trait;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use uuid::Uuid;
 
-/// Push-to-talk over the daemon socket. `event_sink`, when `Some`,
-/// receives every event the daemon emits on the PTT connection.
+/// Push-to-talk over the daemon socket.
 #[derive(Debug)]
 pub(crate) struct IpcVoiceProxy {
     ipc: Arc<IpcClient>,
-    event_sink: Option<mpsc::Sender<Event>>,
     state: watch::Sender<VoiceCaptureState>,
     state_rx: watch::Receiver<VoiceCaptureState>,
 }
 
 impl IpcVoiceProxy {
-    pub(crate) fn new(ipc: Arc<IpcClient>, event_sink: Option<mpsc::Sender<Event>>) -> Self {
+    pub(crate) fn new(ipc: Arc<IpcClient>) -> Self {
         let (state, state_rx) = watch::channel(VoiceCaptureState::Idle);
         Self {
             ipc,
-            event_sink,
             state,
             state_rx,
         }
@@ -33,12 +30,6 @@ impl IpcVoiceProxy {
 
     fn set_state(&self, state: VoiceCaptureState) {
         let _ = self.state.send(state);
-    }
-
-    async fn forward(&self, ev: Event) {
-        if let Some(sink) = self.event_sink.as_ref() {
-            let _ = sink.send(ev).await;
-        }
     }
 }
 
@@ -52,9 +43,7 @@ impl VoiceInput for IpcVoiceProxy {
         let mut stream = self.ipc.one_shot(req).await?;
 
         while let Some(ev) = stream.next_event().await? {
-            let terminal = ev.is_terminal();
-            self.forward(ev).await;
-            if terminal {
+            if ev.is_terminal() {
                 break;
             }
         }
@@ -69,16 +58,11 @@ impl VoiceInput for IpcVoiceProxy {
         let mut stream = self.ipc.one_shot(req).await?;
         let mut transcript = String::new();
         while let Some(ev) = stream.next_event().await? {
-            if let Event::Transcription { text, .. } = &ev {
-                transcript = text.clone();
-            }
-            if let Event::VoiceState { state, .. } = &ev {
-                self.set_state(*state);
-            }
-            let terminal = ev.is_terminal();
-            self.forward(ev).await;
-            if terminal {
-                break;
+            match ev {
+                Event::Transcription { text, .. } => transcript = text,
+                Event::VoiceState { state, .. } => self.set_state(state),
+                ev if ev.is_terminal() => break,
+                _ => {}
             }
         }
         self.set_state(VoiceCaptureState::Idle);

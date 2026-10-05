@@ -14,9 +14,9 @@ mod chat;
 mod client;
 #[cfg(feature = "daemon")]
 mod daemon;
-#[cfg(any(feature = "daemon", feature = "chat"))]
+#[cfg(feature = "daemon")]
 mod hotkey;
-#[cfg(any(feature = "daemon", feature = "chat"))]
+#[cfg(feature = "daemon")]
 mod ipc_voice_proxy;
 #[cfg(feature = "tray")]
 mod tray;

@@ -1,15 +1,16 @@
 //! `assistd chat`: a terminal window onto the running daemon. Owns
-//! rendering, key handling, the local hotkey grab, resource probes and
-//! attachment staging; every service lives in the daemon.
+//! rendering, key handling, resource probes and attachment staging; every
+//! service lives in the daemon. One chat may be open per user, since every
+//! chat drives the daemon's one session.
 
-use std::fs::OpenOptions;
-use std::io;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::{Config, SleepConfig};
@@ -40,21 +41,26 @@ mod markdown;
 mod output;
 mod throughput;
 mod ui;
-mod voice;
 mod vram;
 
 const CHAT_CHANNEL_CAPACITY: usize = 64;
-const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const RESUME_RECENCY_SECS: u64 = 10;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const TITLE_RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const INSTANCE_LOCK_FILE: &str = "chat.lock";
+const INSTANCE_LOCK_MODE: u32 = 0o600;
 
 #[derive(Args)]
 pub(crate) struct ChatArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
+    /// Wait for the daemon's socket instead of exiting when no daemon is
+    /// listening yet (e.g. when launched at login beside the daemon)
+    #[arg(long)]
+    pub wait: bool,
 }
 
 struct TuiContext {
@@ -66,7 +72,38 @@ struct TuiContext {
     model_name: String,
     sleep_cfg: SleepConfig,
     vision_enabled: bool,
-    startup_error: Option<String>,
+}
+
+/// Exclusive hold on the per-user chat lock beside the daemon socket,
+/// released when dropped or when the process exits.
+struct InstanceLock {
+    _file: File,
+}
+
+impl InstanceLock {
+    /// Fails when another `assistd chat` holds the lock.
+    fn acquire(socket_path: &Path) -> Result<Self> {
+        let lock_path = socket_path.with_file_name(INSTANCE_LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(INSTANCE_LOCK_MODE)
+            .open(&lock_path)
+            .with_context(|| format!("opening chat lock {}", lock_path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => anyhow::bail!(
+                "another `assistd chat` is already open (lock held at {}); only one chat may \
+                 run at a time",
+                lock_path.display()
+            ),
+            Err(TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("locking {}", lock_path.display()))
+            }
+        }
+    }
 }
 
 /// Restores the terminal on drop.
@@ -138,8 +175,17 @@ impl Drop for StderrRedirect {
     }
 }
 
-/// Run the TUI, auto-spawning the daemon when nothing is listening.
+/// Run the TUI against the running daemon. Fails before touching the
+/// terminal when no daemon is listening or another chat is open.
 pub(crate) async fn run(args: ChatArgs) -> Result<()> {
+    let ipc = Arc::new(IpcClient::new());
+    if args.wait {
+        wait_for_daemon(&ipc).await?;
+    } else {
+        require_daemon(&ipc).await?;
+    }
+    let _instance_lock = InstanceLock::acquire(ipc.socket_path())?;
+
     let _stderr_redirect = StderrRedirect::to_log()?;
 
     let _log_guard = init_file_tracing()?;
@@ -157,28 +203,19 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let (shutdown_tx, _) = watch::channel(false);
     let _signal_handler = AbortOnDropHandle::new(install_signal_handler(shutdown_tx.clone()));
 
-    let ipc = Arc::new(IpcClient::new());
-    let startup_error = ensure_daemon(&ipc, args.config.as_deref()).await.err();
-    let (vision_enabled, model_name) =
-        resolve_capabilities(&ipc, &config, startup_error.is_none()).await;
+    let (vision_enabled, model_name) = resolve_capabilities(&ipc, &config).await;
 
     let (resource_rx, resource_probe) = vram::spawn_probe(shutdown_tx.subscribe());
     let _resource_probe = AbortOnDropHandle::new(resource_probe);
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
-    let voice_pipeline = voice::spawn_pipeline(
-        &config,
-        ipc.clone(),
-        chat_tx.clone(),
-        shutdown_tx.subscribe(),
-    );
 
     let _polling_handle = AbortOnDropHandle::new(spawn_status_polling(
         ipc.clone(),
         chat_tx.clone(),
         shutdown_tx.subscribe(),
     ));
-    let _title_handle = AbortOnDropHandle::new(spawn_title_subscription(
+    let _bus_handle = AbortOnDropHandle::new(spawn_bus_subscription(
         ipc.clone(),
         chat_tx.clone(),
         shutdown_tx.subscribe(),
@@ -193,45 +230,52 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         model_name,
         sleep_cfg: config.sleep.clone(),
         vision_enabled,
-        startup_error,
     })
     .await;
 
     let _ = shutdown_tx.send(true);
-    voice_pipeline.shutdown().await;
     info!("assistd chat stopped");
     run_result
 }
 
-/// Spawn the daemon and wait for its socket when nothing is listening.
-/// `Err` is the message shown in the output pane.
-async fn ensure_daemon(ipc: &IpcClient, config: Option<&Path>) -> Result<(), String> {
+/// Fails with start-up instructions when nothing is listening on the
+/// daemon socket.
+async fn require_daemon(ipc: &IpcClient) -> Result<()> {
     if UnixStream::connect(ipc.socket_path()).await.is_ok() {
         return Ok(());
     }
-    info!(
-        "daemon not reachable at {}; auto-spawning",
+    anyhow::bail!(
+        "no assistd daemon is listening at {}. Start it with `systemctl --user start assistd` \
+         or `assistd daemon`; if it is already starting, wait for the model to load (see \
+         `journalctl --user -u assistd`) and retry",
         ipc.socket_path().display()
-    );
-    spawn_daemon_detached(config).map_err(|e| {
-        format!("could not auto-start daemon: {e}; run `assistd daemon` manually then retry")
-    })?;
-    wait_for_socket(ipc.socket_path(), DAEMON_STARTUP_TIMEOUT)
-        .await
-        .map_err(|e| format!("daemon spawned but socket never became ready: {e}"))
+    )
+}
+
+/// Poll the daemon socket until something accepts, noting once on stderr
+/// that the chat is waiting.
+async fn wait_for_daemon(ipc: &IpcClient) -> Result<()> {
+    if UnixStream::connect(ipc.socket_path()).await.is_ok() {
+        return Ok(());
+    }
+    writeln!(
+        io::stderr(),
+        "waiting for the assistd daemon at {} (Ctrl-C to give up)",
+        ipc.socket_path().display()
+    )?;
+    while UnixStream::connect(ipc.socket_path()).await.is_err() {
+        tokio::time::sleep(DAEMON_WAIT_POLL_INTERVAL).await;
+    }
+    Ok(())
 }
 
 /// Vision support and the display model name: the daemon's when it
 /// answers, else the configured model's basename.
-async fn resolve_capabilities(ipc: &IpcClient, config: &Config, daemon_up: bool) -> (bool, String) {
-    let (vision_enabled, daemon_model_name) = if daemon_up {
-        get_capabilities(ipc).await.unwrap_or_else(|e| {
-            info!("get_capabilities failed: {e:#}");
-            (false, String::new())
-        })
-    } else {
+async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> (bool, String) {
+    let (vision_enabled, daemon_model_name) = get_capabilities(ipc).await.unwrap_or_else(|e| {
+        info!("get_capabilities failed: {e:#}");
         (false, String::new())
-    };
+    });
     let model_name = if daemon_model_name.is_empty() {
         config
             .model
@@ -254,7 +298,6 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         model_name,
         sleep_cfg,
         vision_enabled,
-        startup_error,
     } = ctx;
 
     let _guard = TerminalGuard::enter()?;
@@ -263,14 +306,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
     let mut app = App::new(ipc, chat_tx, model_name, sleep_cfg, vision_enabled, picker);
-    match startup_error {
-        Some(err) => {
-            app.output.push_error(&format!("daemon startup: {err}"));
-            app.output
-                .push_error("once the daemon is reachable, retry your query");
-        }
-        None => app.spawn_resume_or_new(RESUME_RECENCY_SECS),
-    }
+    app.spawn_resume_or_new(RESUME_RECENCY_SECS);
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
@@ -373,42 +409,6 @@ fn drain_queued(
     }
 }
 
-fn spawn_daemon_detached(config: Option<&Path>) -> Result<()> {
-    let exe = std::env::current_exe().context("std::env::current_exe()")?;
-    let mut cmd = Command::new(&exe);
-    cmd.arg("daemon").arg("--client-mode");
-    if let Some(p) = config {
-        cmd.arg("--config").arg(p);
-    }
-
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("could not spawn daemon binary at {}", exe.display()))?;
-    info!("spawned daemon pid {}", child.id());
-    drop(child);
-    Ok(())
-}
-
-async fn wait_for_socket(path: &Path, deadline: Duration) -> Result<()> {
-    let start = Instant::now();
-    loop {
-        if UnixStream::connect(path).await.is_ok() {
-            return Ok(());
-        }
-        if start.elapsed() >= deadline {
-            anyhow::bail!(
-                "timed out after {:?} waiting for daemon socket at {}",
-                deadline,
-                path.display()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 async fn get_capabilities(ipc: &IpcClient) -> Result<(bool, String)> {
     let req = Request::GetCapabilities {
         id: Uuid::new_v4().to_string(),
@@ -489,9 +489,10 @@ async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Reque
     }
 }
 
-/// Session titles arrive on the daemon's broadcast bus after the turn that
-/// produced them has closed. Reconnects on a fixed delay.
-fn spawn_title_subscription(
+/// Follow the daemon's broadcast bus for session titles and for turns this
+/// chat did not start (push-to-talk, continuous listening, other clients).
+/// Reconnects on a fixed delay.
+fn spawn_bus_subscription(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
     mut shutdown: watch::Receiver<bool>,
@@ -500,10 +501,10 @@ fn spawn_title_subscription(
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
-                () = pump_titles(&ipc, &chat_tx) => {
+                () = pump_bus(&ipc, &chat_tx) => {
                     tokio::select! {
                         _ = shutdown.changed() => break,
-                        () = tokio::time::sleep(TITLE_RECONNECT_DELAY) => {}
+                        () = tokio::time::sleep(BUS_RECONNECT_DELAY) => {}
                     }
                 }
             }
@@ -511,29 +512,31 @@ fn spawn_title_subscription(
     })
 }
 
-async fn pump_titles(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
+async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
     let req = Request::Subscribe {
         id: Uuid::new_v4().to_string(),
         filter: SubscribeFilter {
-            kinds: vec![EventKind::SessionTitle],
+            kinds: vec![
+                EventKind::SessionTitle,
+                EventKind::Transcription,
+                EventKind::Delta,
+                EventKind::ReasoningDelta,
+                EventKind::ToolCall,
+                EventKind::ToolResult,
+                EventKind::Done,
+                EventKind::Error,
+            ],
         },
     };
     let mut stream = match ipc.one_shot(req).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!("session-title subscribe failed: {e}");
+            tracing::debug!("bus subscribe failed: {e}");
             return;
         }
     };
     while let Ok(Some(ev)) = stream.next_event().await {
-        if chat_tx
-            .send(ChatEvent::Wire {
-                stream: WireStream::Status,
-                event: ev,
-            })
-            .await
-            .is_err()
-        {
+        if chat_tx.send(ChatEvent::Bus(ev)).await.is_err() {
             return;
         }
     }
@@ -575,3 +578,6 @@ fn init_file_tracing() -> Result<WorkerGuard> {
 
     Ok(guard)
 }
+
+#[cfg(test)]
+mod tests;

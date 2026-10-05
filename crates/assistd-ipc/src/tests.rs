@@ -382,7 +382,7 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 text: "hello world".into(),
             },
             r#"{"type":"transcription","id":"r","text":"hello world"}"#,
-            None,
+            Some(EventKind::Transcription),
         ),
         (
             Event::ListenState {
