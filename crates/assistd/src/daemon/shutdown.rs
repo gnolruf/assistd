@@ -68,9 +68,10 @@ pub(super) struct DaemonShutdown {
 }
 
 impl DaemonShutdown {
-    /// Tear down after the socket has drained: finish intake tasks and
-    /// persistence, then stop each subsystem before the ones it depends on.
+    /// Tear down after the socket has stopped: stop intake, finish intake
+    /// tasks and persistence, then stop each subsystem before its dependencies.
     pub(super) async fn shutdown(self, stages: &ShutdownStages) {
+        stages.intake.send_replace(true);
         join_intake_tasks(self.intake_tasks).await;
         drain_persistence(&self.persistence_tracker).await;
 
