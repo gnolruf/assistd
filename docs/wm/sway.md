@@ -77,16 +77,15 @@ cost:
 exec assistd daemon
 ```
 
-If you'd rather let `assistd chat` auto-spawn the daemon on first use
-(it runs `assistd daemon --client-mode` under `setsid`), skip this
-line. The trade-off is a slightly slower first launch.
+`assistd chat` and `assistd tray` never start the daemon themselves,
+so keep this line (or enable the systemd user unit) to use them.
 
 ## System tray icon
 
 `assistd tray` publishes a StatusNotifierItem over DBus and reflects
 daemon state at a glance: idle, listening, generating, sleeping, or
-offline. It is a passive client — it never auto-spawns the daemon, so
-keep the `exec assistd daemon` line above as well.
+offline. Like every client, it needs the daemon from the section
+above.
 
 ```sway
 # Launch the tray at session start. Reconnects automatically if the
@@ -149,7 +148,8 @@ one key.
 # Spawn the TUI inside a tagged terminal at session start. The
 # `--app-id` value ("assistd-tui") is what the criteria below match
 # against. Substitute your terminal's flag from the table above.
-exec foot --app-id assistd-tui assistd chat
+# `--wait` holds the TUI until the daemon has loaded and opened its socket.
+exec foot --app-id assistd-tui assistd chat --wait
 
 # Move the TUI window straight to the scratchpad on map, and give it
 # a comfortable floating geometry. `floating enable` is implied by
@@ -220,8 +220,8 @@ launched.
 ## Troubleshooting
 
 - **`bindsym` fires but nothing happens.** The daemon isn't running.
-  Either `exec assistd daemon` from the Sway config or open the TUI
-  once to auto-spawn it.
+  Add `exec assistd daemon` to the Sway config or enable the systemd
+  user unit.
 - **Scratchpad criteria never match.** Run `swaymsg -t get_tree | jq
   '.. | select(.app_id?)'` and confirm the TUI's `app_id`. Some
   terminals fall back to `class` under XWayland; switch the criteria

@@ -89,6 +89,7 @@ pub enum EventKind {
     Done,
     Error,
     LastDelta,
+    Transcription,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -672,8 +673,8 @@ impl Event {
             Event::Done { .. } => EventKind::Done,
             Event::Error { .. } => EventKind::Error,
             Event::LastDelta { .. } => EventKind::LastDelta,
-            Event::Transcription { .. }
-            | Event::VoiceOutputState { .. }
+            Event::Transcription { .. } => EventKind::Transcription,
+            Event::VoiceOutputState { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }

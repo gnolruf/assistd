@@ -1,6 +1,7 @@
 //! Chat application state and reducer. The `on_*` methods mutate state
 //! only; I/O lives in the `spawn_*` methods and the attach loader.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,10 @@ const NOTICE_HOLD: Duration = Duration::from_secs(3);
 /// this long with no keystroke, so typing aimed at the input line cannot
 /// approve unseen.
 const CONFIRM_ARM_DELAY: Duration = Duration::from_millis(750);
+
+/// Query ids remembered so their copies on the broadcast bus are ignored;
+/// the daemon runs one turn at a time, so a few suffice.
+const OWN_TURN_MEMORY: usize = 8;
 
 /// An image staged by `/attach` for the next submission.
 pub(super) struct PendingAttachment {
@@ -68,7 +73,7 @@ pub(super) struct AttachLoadedPayload {
 /// slice of `App` state its terminal event may retire.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WireStream {
-    /// A query dialog or push-to-talk turn; owns the assistant message,
+    /// A query dialog or a turn seen on the bus; owns the assistant message,
     /// [`App::generating`] and the query writer.
     Reply,
     /// A branch command; owns the in-flight branch op and its rows.
@@ -87,6 +92,8 @@ pub(super) enum ChatEvent {
         stream: WireStream,
         message: String,
     },
+    /// An event from the daemon's broadcast bus subscription.
+    Bus(Event),
     AttachLoaded(Box<AttachLoadedPayload>),
     AttachFailed {
         path: String,
@@ -107,6 +114,7 @@ impl std::fmt::Debug for ChatEvent {
                 .field("stream", stream)
                 .field("message", message)
                 .finish(),
+            ChatEvent::Bus(event) => f.debug_tuple("Bus").field(event).finish(),
             ChatEvent::AttachLoaded(p) => f
                 .debug_struct("AttachLoaded")
                 .field("name", &p.name)
@@ -221,6 +229,8 @@ pub(super) struct App {
     ipc: Arc<IpcClient>,
     /// The reply turn that owns the output pane; `None` between turns.
     active_reply: Option<ActiveReply>,
+    /// Ids of the latest queries this chat sent, newest last.
+    own_turn_ids: VecDeque<String>,
     /// An utterance transcribed while another turn owned the pane, held
     /// back so it is drawn above its own answer.
     queued_transcription: Option<QueuedTranscription>,
@@ -245,11 +255,11 @@ pub(super) struct App {
 }
 
 /// The reply turn that owns the output pane. The daemon serialises turns,
-/// so a push-to-talk turn started mid-query is handed the pane afterwards.
+/// so a turn another client started mid-query is handed the pane afterwards.
 struct ActiveReply {
     id: String,
-    /// Answers `ConfirmRequest`; `None` for a push-to-talk turn, whose
-    /// connection belongs to the voice proxy.
+    /// Answers `ConfirmRequest`; `None` for a turn seen on the bus, whose
+    /// connection belongs to another client.
     writer: Option<mpsc::Sender<Request>>,
 }
 
@@ -327,6 +337,7 @@ impl App {
             picker,
             ipc,
             active_reply: None,
+            own_turn_ids: VecDeque::with_capacity(OWN_TURN_MEMORY),
             queued_transcription: None,
             in_flight_branch_op: None,
             branches_buffer: Vec::new(),
