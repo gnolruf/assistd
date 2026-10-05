@@ -2,9 +2,10 @@
 //! rendering, key handling, the local hotkey grab, resource probes and
 //! attachment staging; every service lives in the daemon.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io;
 use std::ops::ControlFlow;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -110,9 +111,36 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Points fd 2 at a log file, restoring the original stderr on drop so
+/// errors returned after the TUI exits still reach the terminal.
+struct StderrRedirect {
+    original: OwnedFd,
+}
+
+impl StderrRedirect {
+    fn to_log() -> Result<Self> {
+        let path = log_dir()?.join("chat-stderr.log");
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening stderr log {}", path.display()))?;
+        let original = rustix::io::dup(io::stderr().as_fd()).context("dup stderr")?;
+        rustix::stdio::dup2_stderr(&file)
+            .with_context(|| format!("dup2 stderr → {}", path.display()))?;
+        Ok(Self { original })
+    }
+}
+
+impl Drop for StderrRedirect {
+    fn drop(&mut self) {
+        let _ = rustix::stdio::dup2_stderr(&self.original);
+    }
+}
+
 /// Run the TUI, auto-spawning the daemon when nothing is listening.
 pub(crate) async fn run(args: ChatArgs) -> Result<()> {
-    let _stderr_redirect = redirect_stderr_to_log()?;
+    let _stderr_redirect = StderrRedirect::to_log()?;
 
     let _log_guard = init_file_tracing()?;
 
@@ -546,16 +574,4 @@ fn init_file_tracing() -> Result<WorkerGuard> {
         .init();
 
     Ok(guard)
-}
-
-fn redirect_stderr_to_log() -> Result<File> {
-    let path = log_dir()?.join("chat-stderr.log");
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("opening stderr log {}", path.display()))?;
-    rustix::stdio::dup2_stderr(&file)
-        .with_context(|| format!("dup2 stderr → {}", path.display()))?;
-    Ok(file)
 }
