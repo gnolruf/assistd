@@ -313,6 +313,31 @@ async fn dispatch_query_backend_error_emits_error_event() {
 }
 
 #[tokio::test]
+async fn dispatch_query_failed_step_ends_with_error_only() {
+    let endless_truncations = (0..16).map(|_| StepOutcome::Truncated).collect();
+    let state = StateParts {
+        backend: ToolCallBackend::new("Cut off mid-", "", endless_truncations),
+        ..StateParts::default()
+    }
+    .build();
+    let (res, events) = dispatch(&state, query("q-fail", "go")).await;
+
+    let err = res.unwrap_err();
+    assert!(
+        matches!(&err, DispatchError::Llm(LlmError::OutputLimit(_))),
+        "{err:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Done { .. })),
+        "{events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(Event::Error { id, .. }) if id == "q-fail"),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_query_refuses_images_without_vision() {
     let request = Request::Query {
         id: "q-img".into(),

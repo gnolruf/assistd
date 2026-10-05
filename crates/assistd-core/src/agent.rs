@@ -541,13 +541,14 @@ async fn abandon_replay(turn: &Turn, wait_err: HealthWaitError) -> String {
     final_msg.to_string()
 }
 
+/// Show the failure inline without sending `Done`; the caller's error
+/// becomes the turn's only terminal event.
 async fn fail_turn(tx: &mpsc::Sender<LlmEvent>, message: &str) {
     let _ = tx
         .send(LlmEvent::Delta {
             text: format!("\n[agent error: {message}]\n"),
         })
         .await;
-    let _ = tx.send(LlmEvent::Done).await;
 }
 
 fn status_event(

@@ -160,6 +160,15 @@ fn status_kinds(events: &[LlmEvent]) -> Vec<StatusKind> {
         .collect()
 }
 
+/// A failed turn ends on its inline error note and never sends `Done`.
+fn assert_failed_without_done(events: &[LlmEvent]) {
+    assert!(!events.contains(&LlmEvent::Done), "{events:?}");
+    assert!(
+        matches!(events.last(), Some(LlmEvent::Delta { text }) if text.contains("[agent error:")),
+        "{events:?}"
+    );
+}
+
 fn ok_then_done() -> [LlmEvent; 2] {
     [LlmEvent::Delta { text: "ok".into() }, LlmEvent::Done]
 }
@@ -360,7 +369,7 @@ async fn truncations_past_the_retry_limit_fail_the_turn() {
         status_kinds(&events),
         [StatusKind::OutputTruncated; TRUNCATION_RETRY_LIMIT as usize]
     );
-    assert_eq!(events.last(), Some(&LlmEvent::Done));
+    assert_failed_without_done(&events);
 }
 
 #[tokio::test]
@@ -882,7 +891,7 @@ async fn replay_does_not_loop_on_repeated_server_restarting() {
         status_kinds(&events),
         [StatusKind::Restarting, StatusKind::Replaying]
     );
-    assert_eq!(events.last(), Some(&LlmEvent::Done));
+    assert_failed_without_done(&events);
     assert_eq!(backend.step_calls.load(Ordering::SeqCst), 2);
 }
 
@@ -910,6 +919,6 @@ async fn replay_abandons_on_degraded_supervisor() {
         status_kinds(&events),
         [StatusKind::Restarting, StatusKind::Degraded]
     );
-    assert_eq!(events.last(), Some(&LlmEvent::Done));
+    assert_failed_without_done(&events);
     assert_eq!(backend.step_calls.load(Ordering::SeqCst), 1);
 }
