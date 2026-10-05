@@ -99,6 +99,9 @@ pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     };
 
     let serve_result = assistd_core::socket::serve(state, socket_shutdown).await;
+    if let Err(e) = &serve_result {
+        tracing::error!("socket server failed: {e}; shutting down");
+    }
 
     subsystems.shutdown(&stages).await;
 
