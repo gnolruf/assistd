@@ -27,7 +27,6 @@ pub use capture::{AudioCaptureError, DeviceValidationError};
 pub struct MicVoiceInput {
     transcriber: Arc<dyn Transcriber>,
     mic_device: Option<String>,
-    max_recording_secs: u32,
     state_tx: watch::Sender<VoiceCaptureState>,
     /// Bumped per press so a stale transition from an aborted press
     /// cannot clobber the state of a newer one.
@@ -48,25 +47,16 @@ impl MicVoiceInput {
         let transcriber = WhisperTranscriberBuilder::from_config(&config.transcription)
             .build()
             .await?;
-        Ok(Self::new(
-            Arc::new(transcriber),
-            config.mic_device.clone(),
-            config.max_recording_secs.get(),
-        ))
+        Ok(Self::new(Arc::new(transcriber), config.mic_device.clone()))
     }
 
     /// `mic_device` selects the cpal input device by name, `None` for
-    /// the system default. `max_recording_secs` caps each session.
-    pub fn new(
-        transcriber: Arc<dyn Transcriber>,
-        mic_device: Option<String>,
-        max_recording_secs: u32,
-    ) -> Self {
+    /// the system default.
+    pub fn new(transcriber: Arc<dyn Transcriber>, mic_device: Option<String>) -> Self {
         let (state_tx, _) = watch::channel(VoiceCaptureState::Idle);
         Self {
             transcriber,
             mic_device,
-            max_recording_secs,
             state_tx,
             active_session_id: Arc::new(AtomicU64::new(0)),
             ptt: Arc::new(Mutex::new(PttState {
@@ -123,7 +113,7 @@ impl VoiceInput for MicVoiceInput {
 
         let session_id = self.active_session_id.fetch_add(1, Ordering::SeqCst) + 1;
 
-        let session = capture::start(self.mic_device.as_deref(), self.max_recording_secs);
+        let session = capture::start(self.mic_device.as_deref());
         ptt.session = Some(session);
 
         if let Some(transcriber_state) = self.transcriber.subscribe_state() {

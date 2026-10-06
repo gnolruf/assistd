@@ -22,6 +22,12 @@ pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 /// Native rate assumed when sizing the push-to-talk ring before the device is opened.
 const ASSUMED_NATIVE_RATE: usize = 48_000;
 
+/// Seconds of native audio the push-to-talk ring holds while the consumer catches up.
+const RING_SECS: usize = 2;
+
+/// Push-to-talk recording length past which audio is dropped; guards a stuck key.
+const MAX_RECORDING_SECS: usize = 120;
+
 /// Errors produced during cpal audio capture.
 #[derive(Debug, Error)]
 pub enum AudioCaptureError {
@@ -178,7 +184,7 @@ pub fn open_producer_stream(
 
 /// Spawn a blocking worker that records until stopped and returns the
 /// 16 kHz mono i16 PCM.
-pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSession {
+pub fn start(device_hint: Option<&str>) -> CaptureSession {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let overrun = Arc::new(AtomicU64::new(0));
     let device_hint_owned = device_hint.map(str::to_string);
@@ -186,12 +192,7 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
     let worker_stop = Arc::clone(&stop_flag);
     let worker_overrun = Arc::clone(&overrun);
     let handle = tokio::task::spawn_blocking(move || {
-        capture_ptt(
-            device_hint_owned.as_deref(),
-            max_recording_secs,
-            &worker_stop,
-            worker_overrun,
-        )
+        capture_ptt(device_hint_owned.as_deref(), &worker_stop, worker_overrun)
     });
 
     CaptureSession {
@@ -203,20 +204,17 @@ pub fn start(device_hint: Option<&str>, max_recording_secs: u32) -> CaptureSessi
 
 fn capture_ptt(
     device_hint: Option<&str>,
-    max_recording_secs: u32,
     stop_flag: &AtomicBool,
     overrun: Arc<AtomicU64>,
 ) -> Result<Vec<i16>, AudioCaptureError> {
-    let ring_capacity = ASSUMED_NATIVE_RATE
-        .saturating_mul((max_recording_secs as usize).saturating_add(1))
-        .max(ASSUMED_NATIVE_RATE * 2);
+    let ring_capacity = ASSUMED_NATIVE_RATE * RING_SECS;
     let ProducerStream {
         consumer,
         native_rate,
         stream,
     } = open_producer_stream(device_hint, ring_capacity, overrun)?;
 
-    let max_pcm_samples = (TARGET_SAMPLE_RATE as usize).saturating_mul(max_recording_secs as usize);
+    let max_pcm_samples = TARGET_SAMPLE_RATE as usize * MAX_RECORDING_SECS;
     let pcm = consumer::drain_to_pcm(consumer, native_rate, max_pcm_samples, stop_flag)?;
     drop(stream);
     Ok(pcm)

@@ -62,11 +62,7 @@ async fn init_input(
     let is_gpu = primary.is_gpu();
     let transcriber = with_cpu_fallback(config, presence, Arc::new(primary), is_gpu);
 
-    let mic = MicVoiceInput::new(
-        transcriber.clone(),
-        config.voice.mic_device.clone(),
-        config.voice.max_recording_secs.get(),
-    );
+    let mic = MicVoiceInput::new(transcriber.clone(), config.voice.mic_device.clone());
     let listener: Arc<dyn ContinuousListener> = if config.voice.continuous.enabled {
         info!(
             "voice.continuous: enabled (hotkey={:?}, start_on_launch={})",
