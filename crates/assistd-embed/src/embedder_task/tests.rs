@@ -202,3 +202,21 @@ async fn worker_embeds_queued_jobs_before_honouring_shutdown() {
     harness.expect_chunk_writes(&[0, 1, 2]).await;
     assert_eq!(harness.shut_down().await.concat(), vec!["t0", "t1", "t2"]);
 }
+
+#[test]
+fn drop_limiter_warns_once_per_interval_and_reports_held_back_drops() {
+    let mut limiter = DropWarnLimiter::new();
+    let start = Instant::now();
+
+    assert_eq!(limiter.record_drop(start), Some(0));
+    assert_eq!(limiter.record_drop(start + Duration::from_secs(1)), None);
+    assert_eq!(limiter.record_drop(start + Duration::from_secs(2)), None);
+    assert_eq!(
+        limiter.record_drop(start + QUEUE_FULL_WARN_INTERVAL),
+        Some(2)
+    );
+    assert_eq!(
+        limiter.record_drop(start + QUEUE_FULL_WARN_INTERVAL + Duration::from_secs(1)),
+        None
+    );
+}

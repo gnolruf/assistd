@@ -302,6 +302,25 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
 }
 
 #[tokio::test]
+async fn count_missing_counts_unindexed_and_other_model_rows() {
+    let (handle, store, _guard) = fresh().await;
+    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
+
+    insert_chunk_with_vec(&handle, &store, conv_id, 0, &unit_vec(0.0), "new").await;
+    insert_chunk_with_vec(&handle, &store, conv_id, 1, &unit_vec(0.5), "old").await;
+    handle
+        .store_chunk(conv_id, 2, "naked-chunk".into(), None)
+        .await
+        .unwrap();
+    let indexed_mem = save_memory(&handle, "indexed", "v1").await;
+    embed_memory(&store, indexed_mem, &unit_vec(0.0), "new").await;
+    save_memory(&handle, "bare", "v2").await;
+
+    assert_eq!(store.count_missing("new").await.unwrap(), (2, 1));
+    assert_eq!(store.count_missing("old").await.unwrap(), (2, 2));
+}
+
+#[tokio::test]
 async fn count_stale_aggregates_across_chunks_and_memories() {
     let (handle, store, _guard) = fresh().await;
     let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
