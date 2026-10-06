@@ -4,7 +4,7 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use assistd_embed::{EmbedJob, Embedder};
+use assistd_embed::{EmbedJob, Embedder, enqueue_embed_job};
 use assistd_memory::{EmbeddingHit, MemoryHit, SemanticStore, SessionId};
 use async_trait::async_trait;
 use regex::Regex;
@@ -38,17 +38,7 @@ impl RememberTool {
     }
 
     fn queue_embedding(&self, memory_id: i64, text: String) {
-        if self
-            .embed_tx
-            .try_send(EmbedJob::Memory { memory_id, text })
-            .is_err()
-        {
-            tracing::debug!(
-                target: "assistd::embed",
-                memory_id,
-                "embed queue full or closed; remembered without semantic index entry"
-            );
-        }
+        enqueue_embed_job(&self.embed_tx, EmbedJob::Memory { memory_id, text });
     }
 }
 
@@ -469,6 +459,9 @@ mod tests {
         }
         async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>), MemoryError> {
             Ok((0, Vec::new()))
+        }
+        async fn count_missing(&self, _current: &str) -> Result<(i64, i64), MemoryError> {
+            Ok((0, 0))
         }
         async fn memories_missing_embedding(
             &self,

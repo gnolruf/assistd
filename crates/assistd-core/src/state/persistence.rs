@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, warn};
+use tracing::warn;
 
-use assistd_embed::EmbedJob;
+use assistd_embed::{EmbedJob, enqueue_embed_job};
 use assistd_memory::{
     BranchId, ChunkingConfig, PersistedMessage, PersistedRole, SessionId, SqliteHandle, TurnId,
     chunk_message,
@@ -141,21 +141,13 @@ async fn store_and_queue_chunks(
             )
             .await
         {
-            Ok(chunk_id) => {
-                if embed_tx
-                    .try_send(EmbedJob::Chunk {
-                        chunk_id,
-                        text: chunk,
-                    })
-                    .is_err()
-                {
-                    debug!(
-                        target: "assistd::embed",
-                        chunk_id,
-                        "embed queue full or closed; dropping job"
-                    );
-                }
-            }
+            Ok(chunk_id) => enqueue_embed_job(
+                embed_tx,
+                EmbedJob::Chunk {
+                    chunk_id,
+                    text: chunk,
+                },
+            ),
             Err(e) => warn!(
                 target: "assistd::memory",
                 conversation_id = row_id,

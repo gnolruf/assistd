@@ -12,7 +12,7 @@ mod error;
 pub mod server;
 
 pub use client::LlamaEmbedder;
-pub use embedder_task::{EmbedJob, spawn_embedder_task};
+pub use embedder_task::{EmbedJob, enqueue_embed_job, spawn_embedder_task};
 pub use error::EmbedError;
 pub use server::EmbedServerSpec;
 

@@ -62,6 +62,9 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Count of rows embedded under a model other than `current`, plus those model names sorted.
     async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)>;
 
+    /// Rows with no embedding under `current`, as `(chunks, memories)`.
+    async fn count_missing(&self, current: &str) -> Result<(i64, i64)>;
+
     /// Memories with no embedding under `current`, as `(id, value)`.
     async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
 
@@ -115,6 +118,9 @@ impl SemanticStore for NoSemanticStore {
     }
     async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>)> {
         Ok((0, Vec::new()))
+    }
+    async fn count_missing(&self, _current: &str) -> Result<(i64, i64)> {
+        Ok((0, 0))
     }
     async fn memories_missing_embedding(&self, _current: &str) -> Result<Vec<(i64, String)>> {
         Ok(Vec::new())
@@ -384,6 +390,35 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .map_err(MemoryError::sqlite("count_stale"))
+    }
+
+    async fn count_missing(&self, current: &str) -> Result<(i64, i64)> {
+        let current = current.to_string();
+        self.handle
+            .conn()
+            .call(move |c| -> rusqlite::Result<_> {
+                let chunks: i64 = c.query_row(
+                    "SELECT count(*)
+                     FROM conversation_chunks cc
+                     LEFT JOIN embeddings e
+                       ON e.conversation_chunk_id = cc.id AND e.model = ?1
+                     WHERE e.id IS NULL",
+                    rusqlite::params![current],
+                    |r| r.get(0),
+                )?;
+                let memories: i64 = c.query_row(
+                    "SELECT count(*)
+                     FROM memories m
+                     LEFT JOIN memory_embeddings e
+                       ON e.memory_id = m.id AND e.model = ?1
+                     WHERE e.id IS NULL",
+                    rusqlite::params![current],
+                    |r| r.get(0),
+                )?;
+                Ok((chunks, memories))
+            })
+            .await
+            .map_err(MemoryError::sqlite("count_missing"))
     }
 
     async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>> {
