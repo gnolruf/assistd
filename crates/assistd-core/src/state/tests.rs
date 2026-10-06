@@ -1315,6 +1315,45 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
     );
 }
 
+#[tokio::test]
+async fn client_departure_still_publishes_done_to_the_bus() {
+    let entered = Arc::new(Notify::new());
+    let backend = ToolCallBackend::new(
+        "Working.",
+        "done.",
+        vec![StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c1".into(),
+            name: "hang".into(),
+            arguments: serde_json::json!({}),
+        }])],
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(HangingTool {
+        entered: entered.clone(),
+        dropped: Arc::new(AtomicBool::new(false)),
+    });
+    let (state, _conv, _session, _branch) = branch_state_with(backend, Arc::new(tools)).await;
+    let mut bus = state
+        .runtime
+        .subscribe_events(assistd_ipc::SubscribeFilter::default());
+
+    let (tx, rx) = mpsc::channel::<Event>(16);
+    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), tx));
+    entered.notified().await;
+    drop(rx);
+
+    tokio::time::timeout(Duration::from_secs(5), turn)
+        .await
+        .expect("turn did not end after its client left")
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while bus.recv().await.expect("bus open") != done("q") {}
+    })
+    .await
+    .expect("Done never reached the bus after the client left");
+}
+
 fn window(class: Option<&str>, title: Option<&str>, ws: Option<&str>) -> FocusedWindowContext {
     FocusedWindowContext {
         id: None,

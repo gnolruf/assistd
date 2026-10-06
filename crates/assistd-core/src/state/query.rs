@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{OwnedMutexGuard, broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -487,7 +488,8 @@ impl AppState {
 
     /// Forward the turn's events to `tx` and the speech worker until the
     /// agent finishes. A client that leaves cancels the turn; the events it
-    /// winds down with are still persisted. Returns whether `Done` was sent.
+    /// winds down with are still persisted and published to the bus. Returns
+    /// whether `Done` was emitted.
     async fn drive_event_loop(
         &self,
         id: String,
@@ -525,13 +527,25 @@ impl AppState {
             else {
                 continue;
             };
-            if client_connected && tx.send(wire_event).await.is_err() {
+            if !self.send_or_publish(tx, wire_event).await && client_connected {
                 client_connected = false;
                 cancel_for_departed_client(cancel, &translator.id);
             }
             speech.speak(sentences).await;
         }
         translator.done_emitted
+    }
+
+    /// Send `event` to the requester, or publish it straight to the bus
+    /// once the requester has gone. Returns whether the requester got it.
+    async fn send_or_publish(&self, tx: &mpsc::Sender<Event>, event: Event) -> bool {
+        match tx.send(event).await {
+            Ok(()) => true,
+            Err(SendError(event)) => {
+                self.runtime.publish(&event);
+                false
+            }
+        }
     }
 
     /// End the persisted turn, wait for speech, and report the agent's
@@ -564,17 +578,19 @@ impl AppState {
         match agent_result {
             Ok(Ok(())) => {
                 if !done_emitted {
-                    let _ = tx.send(Event::Done { id }).await;
+                    self.send_or_publish(tx, Event::Done { id }).await;
                 }
                 Ok(())
             }
             Ok(Err(e)) => {
-                send_error(tx, id, format!("llm backend error: {e}")).await;
+                let message = format!("llm backend error: {e}");
+                self.send_or_publish(tx, Event::Error { id, message }).await;
                 Err(e.into())
             }
             Err(join_err) => {
                 let e = DispatchError::AgentPanicked(join_err);
-                send_error(tx, id, e.to_string()).await;
+                let message = e.to_string();
+                self.send_or_publish(tx, Event::Error { id, message }).await;
                 Err(e)
             }
         }
