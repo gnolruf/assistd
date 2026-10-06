@@ -9,9 +9,8 @@ use crate::defaults::{
     DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS, DEFAULT_PIPER_ENABLED,
     DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
     DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE,
-    DEFAULT_VOICE_HOTKEY, DEFAULT_VOICE_MAX_RECORDING_SECS, DEFAULT_WHISPER_BEAMS,
-    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
-    DEFAULT_WHISPER_VAD_MODEL,
+    DEFAULT_VOICE_HOTKEY, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
+    DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
 };
 
 /// Voice input and output settings.
@@ -25,8 +24,6 @@ pub struct VoiceConfig {
     /// Push-to-talk hold hotkey (e.g. `"Super+Space"`). Empty disables it;
     /// the PTT IPC commands still work.
     pub hotkey: String,
-    /// Max PTT recording length in seconds; audio past it is dropped.
-    pub max_recording_secs: NonZeroU32,
     pub transcription: TranscriptionConfig,
     pub continuous: ContinuousListenConfig,
     pub synthesis: SynthesisConfig,
@@ -38,7 +35,6 @@ impl Default for VoiceConfig {
             enabled: false,
             mic_device: None,
             hotkey: DEFAULT_VOICE_HOTKEY.to_string(),
-            max_recording_secs: DEFAULT_VOICE_MAX_RECORDING_SECS,
             transcription: TranscriptionConfig::default(),
             continuous: ContinuousListenConfig::default(),
             synthesis: SynthesisConfig::default(),

@@ -33,7 +33,6 @@ request_timeout_secs = 120  # wait for the first token
 enabled = false
 # mic_device = "hw:0,0"
 hotkey = "Super+Space"  # hold to talk; empty disables
-# max_recording_secs = 60
 
 [voice.transcription]
 # model = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin"

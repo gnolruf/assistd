@@ -104,7 +104,7 @@ impl UtteranceVad {
             tuning,
             phase: Phase::Silent,
             preroll: VecDeque::with_capacity(tuning.preroll_frames as usize),
-            utterance: Vec::with_capacity((tuning.max_utterance_frames as usize) * FRAME_SAMPLES),
+            utterance: Vec::new(),
             utterance_frames: 0,
         }
     }

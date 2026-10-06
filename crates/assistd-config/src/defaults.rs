@@ -51,7 +51,6 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local deskto
      prefer calling a tool over guessing. Answer precisely and in a conversational tone.";
 
 pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
-pub const DEFAULT_VOICE_MAX_RECORDING_SECS: NonZeroU32 = nz32(60);
 
 pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
 pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
