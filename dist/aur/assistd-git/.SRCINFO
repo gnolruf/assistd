@@ -24,11 +24,7 @@ pkgbase = assistd-git
 	optdepends = hyprland: Wayland focused-window screenshot via hyprctl
 	optdepends = bubblewrap: sandboxed bash command tool
 	optdepends = pipewire-pulse: PulseAudio routing for audio playback (otherwise raw ALSA)
-	optdepends = libxkbcommon: tray-popup GUI (dlopened at runtime)
-	optdepends = libxcb: tray-popup GUI on X11 (dlopened at runtime)
-	optdepends = wayland: tray-popup GUI on Wayland (dlopened at runtime)
-	optdepends = libglvnd: tray-popup GUI OpenGL renderer (dlopened at runtime)
-	optdepends = fontconfig: tray-popup GUI text rendering (dlopened at runtime)
+	optdepends = notification-daemon: desktop notifications from the tray
 	provides = assistd=1.0.0.r246.g9199320
 	conflicts = assistd
 	options = !lto

@@ -90,6 +90,7 @@ pub enum EventKind {
     Error,
     LastDelta,
     Transcription,
+    ChatFocus,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -210,6 +211,13 @@ pub enum Request {
     ResumeOrNew { id: String, recency_secs: u64 },
     /// Start a new session, saved with its first message. Emits `BranchSwitched`, then `Done`.
     NewSession { id: String },
+    /// Report whether the chat has keyboard focus; the daemon keys the chat by the sender's PID.
+    /// Emits `Done`.
+    ChatState { id: String, focused: bool },
+    /// The chat is exiting. Emits `Done`.
+    ChatClosed { id: String },
+    /// Report whether a live chat has keyboard focus. Emits `ChatFocus`, then `Done`.
+    GetChatFocus { id: String },
     /// Forward broadcast events matching `filter`, tagged with their turn's `id`, until the
     /// client disconnects; no `Done`, and `ToolResult` attachments are stripped.
     Subscribe {
@@ -275,6 +283,9 @@ impl Request {
             | Request::Undo { id }
             | Request::ResumeOrNew { id, .. }
             | Request::NewSession { id }
+            | Request::ChatState { id, .. }
+            | Request::ChatClosed { id }
+            | Request::GetChatFocus { id }
             | Request::Subscribe { id, .. } => id,
         }
     }
@@ -312,6 +323,9 @@ impl Request {
             Request::Undo { .. } => "undo",
             Request::ResumeOrNew { .. } => "resume_or_new",
             Request::NewSession { .. } => "new_session",
+            Request::ChatState { .. } => "chat_state",
+            Request::ChatClosed { .. } => "chat_closed",
+            Request::GetChatFocus { .. } => "get_chat_focus",
             Request::Subscribe { .. } => "subscribe",
         }
     }
@@ -495,9 +509,11 @@ pub enum Event {
     ListenState { id: String, active: bool },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
+    /// Whether a live chat has keyboard focus; broadcast when it changes.
+    ChatFocus { id: String, focused: bool },
     /// TTS playback for a turn started (`true`) or drained (`false`).
     SpeakingState { id: String, speaking: bool },
-    /// Session display title; may arrive after the triggering turn's `Done`.
+    /// The session's display title, sent after each successful turn; may arrive after its `Done`.
     SessionTitle {
         id: String,
         session_id: String,
@@ -638,6 +654,7 @@ impl Event {
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
             | Event::SpeakingState { id, .. }
+            | Event::ChatFocus { id, .. }
             | Event::SessionTitle { id, .. }
             | Event::SemanticHit { id, .. }
             | Event::MemoryValue { id, .. }
@@ -674,6 +691,7 @@ impl Event {
             Event::Error { .. } => EventKind::Error,
             Event::LastDelta { .. } => EventKind::LastDelta,
             Event::Transcription { .. } => EventKind::Transcription,
+            Event::ChatFocus { .. } => EventKind::ChatFocus,
             Event::VoiceOutputState { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }

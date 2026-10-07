@@ -36,6 +36,7 @@ use uuid::Uuid;
 use self::app::{App, ChatEvent, WireStream};
 
 mod app;
+mod focus;
 mod input;
 mod markdown;
 mod output;
@@ -65,6 +66,7 @@ pub(crate) struct ChatArgs {
 
 struct TuiContext {
     ipc: Arc<IpcClient>,
+    focus_tx: watch::Sender<bool>,
     chat_tx: mpsc::Sender<ChatEvent>,
     chat_rx: mpsc::Receiver<ChatEvent>,
     resource_rx: watch::Receiver<vram::ResourceState>,
@@ -117,7 +119,8 @@ impl TerminalGuard {
         if let Err(e) = execute!(
             io::stdout(),
             terminal::EnterAlternateScreen,
-            event::EnableMouseCapture
+            event::EnableMouseCapture,
+            event::EnableFocusChange
         ) {
             let _ = terminal::disable_raw_mode();
             return Err(e).context("EnterAlternateScreen");
@@ -134,6 +137,7 @@ impl TerminalGuard {
         terminal::disable_raw_mode()?;
         execute!(
             io::stdout(),
+            event::DisableFocusChange,
             event::DisableMouseCapture,
             terminal::LeaveAlternateScreen,
             cursor::Show,
@@ -221,8 +225,16 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         shutdown_tx.subscribe(),
     ));
 
+    let (focus_tx, focus_rx) = watch::channel(true);
+    let focus_reporter = AbortOnDropHandle::new(focus::spawn_reporter(
+        ipc.clone(),
+        focus_rx,
+        shutdown_tx.subscribe(),
+    ));
+
     let run_result = run_tui(TuiContext {
         ipc: ipc.clone(),
+        focus_tx,
         chat_tx,
         chat_rx,
         resource_rx,
@@ -234,6 +246,8 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     .await;
 
     let _ = shutdown_tx.send(true);
+    drop(focus_reporter);
+    focus::report_closed(&ipc).await;
     info!("assistd chat stopped");
     run_result
 }
@@ -291,6 +305,7 @@ async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> (bool, String
 async fn run_tui(ctx: TuiContext) -> Result<()> {
     let TuiContext {
         ipc,
+        focus_tx,
         chat_tx,
         mut chat_rx,
         mut resource_rx,
@@ -316,7 +331,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     while !app.should_quit() {
         tokio::select! {
             maybe_ev = events.next() => {
-                if apply_terminal_event(&mut app, maybe_ev).is_break() {
+                if apply_terminal_event(&mut app, &focus_tx, maybe_ev).is_break() {
                     break;
                 }
             }
@@ -374,11 +389,20 @@ fn probe_graphics() -> Option<Picker> {
 }
 
 /// Breaks when the terminal event stream ends or fails.
-fn apply_terminal_event(app: &mut App, maybe_ev: Option<io::Result<TermEvent>>) -> ControlFlow<()> {
+fn apply_terminal_event(
+    app: &mut App,
+    focus: &watch::Sender<bool>,
+    maybe_ev: Option<io::Result<TermEvent>>,
+) -> ControlFlow<()> {
     match maybe_ev {
-        Some(Ok(TermEvent::Key(k))) => app.on_key(k),
-        Some(Ok(TermEvent::Mouse(m))) => app.on_mouse(m),
-        Some(Ok(_)) => {}
+        Some(Ok(ev)) => {
+            focus::track(focus, &ev);
+            match ev {
+                TermEvent::Key(k) => app.on_key(k),
+                TermEvent::Mouse(m) => app.on_mouse(m),
+                _ => {}
+            }
+        }
         Some(Err(e)) => {
             tracing::error!("terminal event error: {e}");
             return ControlFlow::Break(());

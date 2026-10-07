@@ -97,10 +97,10 @@ client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
 holds a passive `Request::Subscribe` connection, translates the
 broadcast events into icon state (config error → disconnected →
 generating → listening → presence), and provides a Sleep / Wake menu that issues
-`Request::SetPresence` on isolated one-shot connections. The `tray`
-feature itself pulls in only `assistd-ipc` + `assistd-config`; the
-optional `tray-popup` feature adds `assistd-wm`, `eframe` and `winit`
-for the floating reply popup. The `chat` feature, by contrast, enables
+`Request::SetPresence` on isolated one-shot connections. It also shows
+each turn as a freedesktop desktop notification over `zbus`, held back
+while the chat reports keyboard focus (`Request::ChatState`). The `tray`
+feature pulls in only `assistd-ipc` + `assistd-config`. The `chat` feature, by contrast, enables
 the whole `daemon` feature on purpose: when no daemon is listening, the
 TUI starts one by re-executing its own binary as `assistd daemon`.
 

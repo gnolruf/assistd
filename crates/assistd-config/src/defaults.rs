@@ -113,17 +113,12 @@ pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 pub const DEFAULT_MCP_ENABLED: bool = false;
 pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
-pub const DEFAULT_TRAY_POPUP_ENABLED: bool = true;
-pub const DEFAULT_TRAY_POPUP_WIDTH: u32 = 360;
-pub const DEFAULT_TRAY_POPUP_HEIGHT: u32 = 120;
-pub const DEFAULT_TRAY_POPUP_OFFSET_X: i32 = -10;
-pub const DEFAULT_TRAY_POPUP_OFFSET_Y: i32 = 10;
-pub const DEFAULT_TRAY_POPUP_AUTO_HIDE_MS: u64 = 3000;
-/// Popup `WM_CLASS` / `app_id`; not configurable because placement matches on it.
-pub const DEFAULT_TRAY_POPUP_APP_ID: &str = "dev.assistd.popup";
-pub const DEFAULT_TRAY_POPUP_WAKE_TOOL_CALL: bool = true;
-pub const DEFAULT_TRAY_POPUP_WAKE_DELTA: bool = true;
-pub const DEFAULT_TRAY_POPUP_WAKE_ERROR: bool = true;
+pub const DEFAULT_TRAY_NOTIFICATIONS_ENABLED: bool = true;
+pub const DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
+pub const DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
+pub const DEFAULT_TRAY_NOTIFICATIONS_WAKE_TOOL_CALL: bool = true;
+pub const DEFAULT_TRAY_NOTIFICATIONS_WAKE_DELTA: bool = true;
+pub const DEFAULT_TRAY_NOTIFICATIONS_WAKE_ERROR: bool = true;
 
 /// `$XDG_DATA_HOME/assistd/memory.db`, or
 /// `$HOME/.local/share/assistd/memory.db`.

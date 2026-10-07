@@ -27,6 +27,15 @@ use crate::recovery::{Component, spawn_supervised};
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
 const SENTENCE_PREVIEW_CHARS: usize = 60;
 
+/// How a turn's prompt reached the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOrigin {
+    /// Text from a client: the chat, `assistd query`, or another tool.
+    Typed,
+    /// A push-to-talk or continuous-listening transcription.
+    Voice,
+}
+
 struct QueryGuards {
     _request: RequestGuard,
     _stream: LlmStreamGuard,
@@ -218,10 +227,12 @@ impl AppState {
         id: String,
         text: String,
         wire_attachments: Vec<ImageAttachment>,
+        origin: TurnOrigin,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let cancel = self.runtime.turn_cancellation();
-        self.run_query(id, text, wire_attachments, tx, cancel).await
+        self.run_query(id, text, wire_attachments, origin, tx, cancel)
+            .await
     }
 
     /// [`Self::handle_query`] for a turn whose cancellation token was
@@ -231,6 +242,7 @@ impl AppState {
         id: String,
         text: String,
         wire_attachments: Vec<ImageAttachment>,
+        origin: TurnOrigin,
         tx: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(), DispatchError> {
@@ -252,7 +264,9 @@ impl AppState {
         self.require_vision_for(&id, &attachments, &tx).await?;
 
         let (current_session, turn_id) = self.open_persistence_turn(&text).await;
-        self.assemble_transient_context(&text).await;
+        let chat_focused = self.refresh_chat_focus(&id);
+        self.assemble_transient_context(&text, origin, chat_focused)
+            .await;
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
@@ -271,7 +285,7 @@ impl AppState {
         drop(agent_guard);
 
         if done_emitted && matches!(&agent_result, Ok(Ok(()))) {
-            self.clone().spawn_session_title_generation(
+            self.clone().spawn_session_title_broadcast(
                 id.clone(),
                 current_session,
                 &title_user_text,
@@ -391,7 +405,7 @@ impl AppState {
         }
     }
 
-    async fn assemble_transient_context(&self, text: &str) {
+    async fn assemble_transient_context(&self, text: &str, origin: TurnOrigin, chat_focused: bool) {
         let semantic = if self.memory.embedding_cfg.enabled && self.memory.embedding_cfg.auto_inject
         {
             match self.build_semantic_context(text).await {
@@ -409,7 +423,8 @@ impl AppState {
             None
         };
         let window = self.build_window_context().await;
-        if let Some(block) = combine_context_blocks(semantic, window)
+        let brief = self.brief_reply_note(origin, chat_focused);
+        if let Some(block) = combine_context_blocks([semantic, window, brief])
             && let Err(e) = self.subsystems.llm.set_transient_context(block).await
         {
             debug!(

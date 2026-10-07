@@ -20,7 +20,7 @@ mod hotkey;
 mod ipc_voice_proxy;
 #[cfg(feature = "tray")]
 mod tray;
-#[cfg(any(feature = "daemon", feature = "tray-popup"))]
+#[cfg(feature = "daemon")]
 mod wm_backend;
 
 /// How long exit waits on `spawn_blocking` work (e.g. a Whisper model

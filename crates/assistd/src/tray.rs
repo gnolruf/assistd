@@ -15,8 +15,7 @@ use tokio::task::JoinHandle;
 use menu::TrayItem;
 
 mod menu;
-#[cfg(feature = "tray-popup")]
-pub(crate) mod popup;
+mod notifications;
 mod state;
 mod subscribe;
 
@@ -53,18 +52,14 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
 
     let ipc = IpcClient::new();
 
-    #[cfg(feature = "tray-popup")]
-    let popup_handle = match &config {
-        Ok(cfg) => popup::spawn_popup(cfg, ipc.clone()).await?,
-        Err(_) => None,
-    };
-    #[cfg(feature = "tray-popup")]
-    let popup_sink = popup_handle.as_ref().map(|h| h.sink.clone());
-    #[cfg(not(feature = "tray-popup"))]
-    let popup_sink: Option<()> = None;
+    let notifications = config
+        .as_ref()
+        .ok()
+        .and_then(|cfg| notifications::spawn_notifications(cfg, ipc.clone()));
+    let notification_sink = notifications.as_ref().map(|n| n.sink.clone());
 
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
-    let activate_cb = build_activate_callback(popup_sink.as_ref());
+    let activate_cb = build_activate_callback(notification_sink.as_ref());
     let item = TrayItem::new(actions_tx, activate_cb, config_error);
 
     let handle = item
@@ -76,10 +71,9 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
 
     let subscribe_handle = handle.clone();
     let subscribe_ipc = ipc.clone();
-    let subscribe_task =
-        tokio::spawn(
-            async move { subscribe::run(subscribe_handle, subscribe_ipc, popup_sink).await },
-        );
+    let subscribe_task = tokio::spawn(async move {
+        subscribe::run(subscribe_handle, subscribe_ipc, notification_sink).await;
+    });
 
     let action_task = tokio::spawn(menu::run_actions(actions_rx, ipc));
 
@@ -88,9 +82,8 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
     handle.shutdown().await;
     subscribe_task.abort();
     let _ = subscribe_task.await;
-    #[cfg(feature = "tray-popup")]
-    if let Some(p) = popup_handle {
-        p.shutdown().await;
+    if let Some(n) = notifications {
+        n.shutdown().await;
     }
     Ok(())
 }
@@ -101,18 +94,11 @@ fn load_config(path: &Path) -> Result<Config, ConfigError> {
     Ok(config)
 }
 
-#[cfg(feature = "tray-popup")]
-fn build_activate_callback(sink: Option<&popup::PopupSink>) -> Option<menu::ActivateCallback> {
+fn build_activate_callback(
+    sink: Option<&notifications::NotificationSink>,
+) -> Option<menu::ActivateCallback> {
     let sink = sink?.clone();
-    Some(Box::new(move || {
-        let tx = sink.show_sender();
-        let _ = tx.send(popup::DriverInput::Show);
-    }))
-}
-
-#[cfg(not(feature = "tray-popup"))]
-fn build_activate_callback(_sink: &Option<()>) -> Option<menu::ActivateCallback> {
-    None
+    Some(Box::new(move || sink.tray_activated()))
 }
 
 async fn wait_for_shutdown(action_task: JoinHandle<Result<()>>) {

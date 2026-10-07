@@ -6,35 +6,23 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use assistd_utils::backoff::backoff_delay;
-use tokio::sync::{Mutex, Notify, RwLock, broadcast, watch};
+use tokio::sync::{Mutex, Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 
-use crate::criteria::format_place_floating_pixels;
 use crate::snapshot::{self, Snapshot, WindowChangeKind};
 use crate::{
-    FocusedWindowContext, PlacementAnchor, PlacementCriteria, Rect, TransportError, WM_IPC_TIMEOUT,
-    Window, WindowEvent, WindowId, WmError, WmResult, WorkspaceInfo,
+    FocusedWindowContext, TransportError, WM_IPC_TIMEOUT, Window, WindowId, WmError, WmResult,
+    WorkspaceInfo,
 };
-
-/// Window events buffered per subscriber. A lagged subscriber falls
-/// back to polling, so a small buffer is fine.
-const WINDOW_EVENTS_CAPACITY: usize = 32;
-
-/// How long `find_window_rect_by_criteria` waits for a matching
-/// `WindowEvent::Opened` after its first tree poll misses.
-const WINDOW_EVENT_WAIT: Duration = Duration::from_millis(500);
 
 /// Labels for the IPC calls the shared machinery makes, reported as the
 /// `op` of [`WmError::Ipc`].
 pub(crate) struct OpLabels {
     pub run_command: &'static str,
     pub get_tree: &'static str,
-    pub get_tree_window_rect: &'static str,
     pub get_workspaces: &'static str,
-    pub get_workspaces_focused_rect: &'static str,
 }
 
 /// The focus-relevant identity of a tree node.
@@ -47,19 +35,10 @@ pub(crate) struct NodeIdentity {
 
 /// A compositor event projected onto what the shared machinery acts on.
 pub(crate) enum IpcEvent {
-    /// `focus` updates the snapshot; `event` is broadcast to subscribers.
-    Window {
-        focus: Option<(WindowChangeKind, NodeIdentity)>,
-        event: Option<WindowEvent>,
-    },
+    /// A focus, title, or close change to apply to the snapshot.
+    WindowChanged(WindowChangeKind, NodeIdentity),
     WorkspaceFocused(Option<String>),
     Ignored,
-}
-
-/// One workspace from a `GET_WORKSPACES` reply.
-pub(crate) struct Workspace {
-    pub info: WorkspaceInfo,
-    pub rect: Rect,
 }
 
 /// What differs between the i3 and Sway IPC client crates.
@@ -94,7 +73,7 @@ pub(crate) trait IpcProtocol: Send + Sync + Sized + 'static {
 
     fn get_workspaces(
         cmd: &mut Self::Cmd,
-    ) -> impl Future<Output = Result<Vec<Workspace>, TransportError>> + Send;
+    ) -> impl Future<Output = Result<Vec<WorkspaceInfo>, TransportError>> + Send;
 
     /// Tiled children, then floating children.
     fn children(node: &Self::Node) -> impl Iterator<Item = &Self::Node>;
@@ -102,10 +81,6 @@ pub(crate) trait IpcProtocol: Send + Sync + Sized + 'static {
     fn is_focused(node: &Self::Node) -> bool;
 
     fn identity(node: &Self::Node) -> NodeIdentity;
-
-    /// `node`'s rect when it is a window matching `criteria`; does not
-    /// descend into children.
-    fn window_rect(node: &Self::Node, criteria: &PlacementCriteria) -> Option<Rect>;
 
     fn collect_windows(tree: &Self::Node) -> Vec<Window>;
 }
@@ -118,7 +93,6 @@ pub(crate) struct IpcBackend<P: IpcProtocol> {
     connected: AtomicBool,
     snapshot: RwLock<Snapshot>,
     reconnect: Notify,
-    window_events: broadcast::Sender<WindowEvent>,
 }
 
 impl<P: IpcProtocol> fmt::Debug for IpcBackend<P> {
@@ -144,14 +118,12 @@ impl<P: IpcProtocol> IpcBackend<P> {
             );
             Snapshot::default()
         });
-        let (window_events, _) = broadcast::channel(WINDOW_EVENTS_CAPACITY);
         let backend = Arc::new(Self {
             protocol,
             cmd: Mutex::new(Some(cmd)),
             connected: AtomicBool::new(true),
             snapshot: RwLock::new(initial),
             reconnect: Notify::new(),
-            window_events,
         });
         let supervisor_task = tokio::spawn(supervise(backend.clone(), events, shutdown));
         Ok((backend, supervisor_task))
@@ -196,16 +168,6 @@ impl<P: IpcProtocol> IpcBackend<P> {
         .map_err(|e| WmError::Rejected(format!("{payload}: {e}")))
     }
 
-    pub(crate) async fn workspaces(&self, op_label: &'static str) -> WmResult<Vec<Workspace>> {
-        self.with_conn(op_label, async |conn| P::get_workspaces(conn).await)
-            .await
-    }
-
-    async fn tree(&self, op_label: &'static str) -> WmResult<P::Node> {
-        self.with_conn(op_label, async |conn| P::get_tree(conn).await)
-            .await
-    }
-
     pub(crate) async fn focused_window(&self) -> Option<WindowId> {
         snapshot::read_focused_id(&self.snapshot).await
     }
@@ -215,103 +177,17 @@ impl<P: IpcProtocol> IpcBackend<P> {
     }
 
     pub(crate) async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        let tree = self.tree(P::OPS.get_tree).await?;
+        let tree = self
+            .with_conn(P::OPS.get_tree, async |conn| P::get_tree(conn).await)
+            .await?;
         Ok(P::collect_windows(&tree))
     }
 
     pub(crate) async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        Ok(self
-            .workspaces(P::OPS.get_workspaces)
-            .await?
-            .into_iter()
-            .map(|workspace| workspace.info)
-            .collect())
-    }
-
-    pub(crate) async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        self.workspaces(P::OPS.get_workspaces_focused_rect)
-            .await?
-            .into_iter()
-            .find(|workspace| workspace.info.focused)
-            .map(|workspace| workspace.rect)
-            .ok_or_else(|| WmError::Rejected("no focused workspace".into()))
-    }
-
-    /// Float and place the window matching `criteria`, sized from its
-    /// actual rect when found, since DPI scaling can change its size.
-    pub(crate) async fn place_floating(
-        &self,
-        criteria: &PlacementCriteria,
-        anchor: PlacementAnchor,
-    ) -> WmResult<()> {
-        let workspace = self.focused_workspace_rect().await?;
-        let effective = match self.find_window_rect_by_criteria(criteria).await {
-            Ok(actual) => {
-                tracing::info!(
-                    target: "tray",
-                    "popup: actual window rect = {}x{} (configured {}x{}); placing accordingly",
-                    actual.width, actual.height, anchor.width, anchor.height
-                );
-                PlacementAnchor {
-                    width: actual.width,
-                    height: actual.height,
-                    ..anchor
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "tray",
-                    "popup: could not query window rect ({e}); falling back to configured size"
-                );
-                anchor
-            }
-        };
-        self.run_command(&format_place_floating_pixels(
-            criteria, effective, workspace,
-        ))
-        .await
-    }
-
-    /// Current rect of the window matching `criteria`. Subscribes before
-    /// the first tree poll so a `window::new` in between is not missed.
-    async fn find_window_rect_by_criteria(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
-        let mut events = self.window_events.subscribe();
-
-        if let Ok(rect) = self.find_window_rect_once(criteria).await {
-            return Ok(rect);
-        }
-
-        let waited = tokio::time::timeout(WINDOW_EVENT_WAIT, async {
-            loop {
-                match events.recv().await {
-                    Ok(event) => {
-                        if event.matches_opened(criteria).is_some() {
-                            return true;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return false,
-                    Err(broadcast::error::RecvError::Lagged(_)) => return false,
-                }
-            }
+        self.with_conn(P::OPS.get_workspaces, async |conn| {
+            P::get_workspaces(conn).await
         })
         .await
-        .unwrap_or(false);
-
-        let result = self.find_window_rect_once(criteria).await;
-        if waited && result.is_ok() {
-            tracing::debug!(
-                target: "tray",
-                "popup: window appeared via {} window::new event",
-                P::NAME
-            );
-        }
-        result
-    }
-
-    async fn find_window_rect_once(&self, criteria: &PlacementCriteria) -> WmResult<Rect> {
-        let tree = self.tree(P::OPS.get_tree_window_rect).await?;
-        find_map_node::<P, _>(&tree, &|node| P::window_rect(node, criteria))
-            .ok_or_else(|| WmError::Rejected(format!("no window matches {criteria:?}")))
     }
 
     /// Drive one event stream. Returns `true` when the caller should
@@ -345,13 +221,8 @@ impl<P: IpcProtocol> IpcBackend<P> {
 
     async fn apply_event(&self, event: IpcEvent) {
         match event {
-            IpcEvent::Window { focus, event } => {
-                if let Some((kind, NodeIdentity { id, class, title })) = focus {
-                    snapshot::apply_window_event(&self.snapshot, kind, id, class, title).await;
-                }
-                if let Some(event) = event {
-                    let _ = self.window_events.send(event);
-                }
+            IpcEvent::WindowChanged(kind, NodeIdentity { id, class, title }) => {
+                snapshot::apply_window_event(&self.snapshot, kind, id, class, title).await;
             }
             IpcEvent::WorkspaceFocused(name) => {
                 snapshot::apply_workspace_focus(&self.snapshot, name).await;
@@ -424,8 +295,8 @@ async fn seed_snapshot<P: IpcProtocol>(cmd: &mut P::Cmd) -> WmResult<Snapshot> {
     let active_workspace = match P::get_workspaces(cmd).await {
         Ok(workspaces) => workspaces
             .into_iter()
-            .find(|workspace| workspace.info.focused)
-            .map(|workspace| workspace.info.name),
+            .find(|workspace| workspace.focused)
+            .map(|workspace| workspace.name),
         Err(e) => {
             tracing::warn!("{} GET_WORKSPACES on seed failed: {e:#}", P::NAME);
             None

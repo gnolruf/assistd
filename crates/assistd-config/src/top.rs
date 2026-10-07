@@ -22,7 +22,7 @@ use crate::presence::PresenceConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
-use crate::tray::{TrayConfig, TrayPopupConfig};
+use crate::tray::{TrayConfig, TrayNotificationsConfig};
 use crate::voice::{SynthesisConfig, VoiceConfig};
 
 const CONFIG_DIR_MODE: u32 = 0o700;
@@ -62,7 +62,7 @@ impl Config {
         validate_memory(&mut errors, &self.memory);
         validate_embedding(&mut errors, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
-        validate_tray_popup(&mut errors, &self.tray.popup);
+        validate_tray_notifications(&mut errors, &self.tray.notifications);
         if errors.is_empty() {
             Ok(())
         } else {
@@ -404,18 +404,9 @@ fn validate_mcp(errors: &mut Vec<String>, mcp: &McpConfig) {
     }
 }
 
-fn validate_tray_popup(errors: &mut Vec<String>, popup: &TrayPopupConfig) {
-    if !popup.enabled {
-        return;
-    }
-    if !(100..=1200).contains(&popup.width) {
-        errors.push("tray.popup.width must be in the range 100..=1200".into());
-    }
-    if !(60..=800).contains(&popup.height) {
-        errors.push("tray.popup.height must be in the range 60..=800".into());
-    }
-    if !(500..=60_000).contains(&popup.auto_hide_ms) {
-        errors.push("tray.popup.auto_hide_ms must be in the range 500..=60000".into());
+fn validate_tray_notifications(errors: &mut Vec<String>, notifications: &TrayNotificationsConfig) {
+    if notifications.enabled && !(500..=60_000).contains(&notifications.auto_hide_ms) {
+        errors.push("tray.notifications.auto_hide_ms must be in the range 500..=60000".into());
     }
 }
 

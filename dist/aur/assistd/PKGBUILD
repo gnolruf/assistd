@@ -26,11 +26,7 @@ optdepends=(
   'hyprland: Wayland focused-window screenshot via hyprctl'
   'bubblewrap: sandboxed bash command tool'
   'pipewire-pulse: PulseAudio routing for audio playback (otherwise raw ALSA)'
-  'libxkbcommon: tray-popup GUI (dlopened at runtime)'
-  'libxcb: tray-popup GUI on X11 (dlopened at runtime)'
-  'wayland: tray-popup GUI on Wayland (dlopened at runtime)'
-  'libglvnd: tray-popup GUI OpenGL renderer (dlopened at runtime)'
-  'fontconfig: tray-popup GUI text rendering (dlopened at runtime)'
+  'notification-daemon: desktop notifications from the tray'
 )
 makedepends=(
   'rust'

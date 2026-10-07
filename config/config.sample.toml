@@ -176,17 +176,13 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # env = { API_TOKEN = "..." }  # only PATH, HOME, locale and a few basics are inherited
 # request_timeout_secs = 30
 
-# [tray.popup]
-# Floating activity window shown by `assistd tray`.
+# [tray.notifications]
+# Desktop notifications from `assistd tray`; none while the chat is focused.
 # enabled = true
-# anchor = "top_right"  # top_left | top_right | bottom_left | bottom_right | center
-# offset_x = -10
-# offset_y = 10
-# width = 360
-# height = 120
 # auto_hide_ms = 3000
+# brief_when_away = true  # short replies to voice turns while the chat is unfocused
 #
-# [tray.popup.wake_on]
+# [tray.notifications.wake_on]
 # tool_call = true
 # delta = true
 # error = true

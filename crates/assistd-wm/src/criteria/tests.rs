@@ -4,25 +4,6 @@ fn id(raw: u64) -> WindowId {
     WindowId::new(raw).expect("test ids are non-zero")
 }
 
-fn anchor_360x120(corner: AnchorCorner, offset_x: i32, offset_y: i32) -> PlacementAnchor {
-    PlacementAnchor {
-        corner,
-        offset_x,
-        offset_y,
-        width: 360,
-        height: 120,
-    }
-}
-
-fn workspace_1920_1055() -> Rect {
-    Rect {
-        x: 0,
-        y: 0,
-        width: 1920,
-        height: 1055,
-    }
-}
-
 #[test]
 fn escape_for_criteria_handles_quotes_and_backslashes() {
     assert_eq!(escape_for_criteria("Firefox"), "Firefox");
@@ -95,69 +76,5 @@ fn layout_payload_emits_bare_form() {
         (Layout::SplitV, "layout splitv"),
     ] {
         assert_eq!(format_layout(layout), expected);
-    }
-}
-
-#[test]
-fn format_criteria_clause_per_variant_with_escaping() {
-    for (criteria, expected) in [
-        (
-            PlacementCriteria::AppId("dev.assistd.popup".into()),
-            r#"[app_id="dev.assistd.popup"]"#,
-        ),
-        (
-            PlacementCriteria::Class("Firefox".into()),
-            r#"[class="Firefox"]"#,
-        ),
-        (
-            PlacementCriteria::Title("Inbox".into()),
-            r#"[title="^Inbox$"]"#,
-        ),
-        (PlacementCriteria::ConId(id(42)), r#"[con_id="42"]"#),
-        (
-            PlacementCriteria::AppId(r#"a"b"#.into()),
-            r#"[app_id="a\"b"]"#,
-        ),
-        (PlacementCriteria::Class(r"a\b".into()), r#"[class="a\\b"]"#),
-    ] {
-        assert_eq!(format_criteria_clause(&criteria), expected, "{criteria:?}");
-    }
-}
-
-#[test]
-fn place_floating_pixels_chains_commands_under_one_criteria() {
-    let payload = format_place_floating_pixels(
-        &PlacementCriteria::Title("dev.assistd.popup".into()),
-        anchor_360x120(AnchorCorner::BottomRight, -10, -30),
-        workspace_1920_1055(),
-    );
-    assert_eq!(
-        payload,
-        concat!(
-            r#"[title="^dev.assistd.popup$"] floating enable, "#,
-            r#"[title="^dev.assistd.popup$"] resize set 360 120, "#,
-            r#"[title="^dev.assistd.popup$"] move position 1550 px 905 px, "#,
-            r#"[title="^dev.assistd.popup$"] sticky enable"#,
-        )
-    );
-}
-
-#[test]
-fn compute_target_position_per_corner() {
-    for (corner, offset_x, offset_y, expected) in [
-        (AnchorCorner::TopLeft, 10, 10, (10, 10)),
-        (AnchorCorner::TopRight, -10, 10, (1550, 10)),
-        (AnchorCorner::BottomLeft, 10, -10, (10, 925)),
-        (AnchorCorner::BottomRight, -10, -30, (1550, 905)),
-        (AnchorCorner::Center, 0, 0, (780, 467)),
-    ] {
-        assert_eq!(
-            compute_target_position(
-                anchor_360x120(corner, offset_x, offset_y),
-                workspace_1920_1055()
-            ),
-            expected,
-            "{corner:?} ({offset_x}, {offset_y})"
-        );
     }
 }

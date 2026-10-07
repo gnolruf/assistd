@@ -87,6 +87,7 @@ impl App {
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. }) => self.on_session_event(session),
             Event::SpeakingState { .. }
+            | Event::ChatFocus { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }

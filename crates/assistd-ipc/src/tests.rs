@@ -40,6 +40,21 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
             r#"{"type":"set_presence","id":"r","target":"drowsy"}"#,
         ),
         (
+            Request::ChatState {
+                id: id(),
+                focused: false,
+            },
+            r#"{"type":"chat_state","id":"r","focused":false}"#,
+        ),
+        (
+            Request::ChatClosed { id: id() },
+            r#"{"type":"chat_closed","id":"r"}"#,
+        ),
+        (
+            Request::GetChatFocus { id: id() },
+            r#"{"type":"get_chat_focus","id":"r"}"#,
+        ),
+        (
             Request::GetPresence { id: id() },
             r#"{"type":"get_presence","id":"r"}"#,
         ),
@@ -408,6 +423,14 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
             r#"{"type":"speaking_state","id":"r","speaking":true}"#,
             Some(EventKind::SpeakingState),
         ),
+        (
+            Event::ChatFocus {
+                id: id(),
+                focused: true,
+            },
+            r#"{"type":"chat_focus","id":"r","focused":true}"#,
+            Some(EventKind::ChatFocus),
+        ),
     ]
 }
 
@@ -695,6 +718,7 @@ fn subscribe_filter_default_matches_all() {
         EventKind::Done,
         EventKind::Error,
         EventKind::LastDelta,
+        EventKind::ChatFocus,
     ] {
         assert!(filter.matches(kind), "default filter should match {kind:?}");
     }
