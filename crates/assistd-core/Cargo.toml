@@ -17,7 +17,7 @@ assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }
 assistd-memory = { workspace = true }
 assistd-tools = { workspace = true }
-assistd-utils = { workspace = true, features = ["child-server"] }
+assistd-utils = { workspace = true }
 assistd-voice = { workspace = true }
 assistd-wm    = { workspace = true }
 async-trait = { workspace = true }

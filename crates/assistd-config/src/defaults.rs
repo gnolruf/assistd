@@ -4,8 +4,6 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
-use assistd_utils::xdg;
-
 /// Builds a `NonZero` from a literal; a zero fails at compile time.
 pub const fn nz16(v: u16) -> NonZeroU16 {
     match NonZeroU16::new(v) {
@@ -129,15 +127,15 @@ pub const DEFAULT_TRAY_NOTIFICATIONS_WAKE_ERROR: bool = true;
 /// `$XDG_DATA_HOME/assistd/memory.db`, or
 /// `$HOME/.local/share/assistd/memory.db`.
 pub fn default_memory_db_path() -> PathBuf {
-    let data_dir = xdg::data_home().unwrap_or_else(|| PathBuf::from(".local/share"));
+    let data_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".local/share"));
     data_dir.join("assistd").join("memory.db")
 }
 
 /// `$XDG_RUNTIME_DIR/assistd/output`, or `$XDG_CACHE_HOME/assistd/output`, or
 /// `$HOME/.cache/assistd/output`.
 pub fn default_tools_overflow_dir() -> PathBuf {
-    let base = xdg::runtime_dir()
-        .or_else(xdg::cache_home)
+    let base = dirs::runtime_dir()
+        .or_else(dirs::cache_dir)
         .unwrap_or_else(|| PathBuf::from(".cache"));
     base.join("assistd").join("output")
 }
@@ -145,8 +143,8 @@ pub fn default_tools_overflow_dir() -> PathBuf {
 /// `$XDG_RUNTIME_DIR/assistd/scratch`, or `$XDG_CACHE_HOME/assistd/scratch`,
 /// or `$HOME/.cache/assistd/scratch`.
 pub fn default_tools_scratch_dir() -> PathBuf {
-    let base = xdg::runtime_dir()
-        .or_else(xdg::cache_home)
+    let base = dirs::runtime_dir()
+        .or_else(dirs::cache_dir)
         .unwrap_or_else(|| PathBuf::from(".cache"));
     base.join("assistd").join("scratch")
 }

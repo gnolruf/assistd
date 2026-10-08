@@ -63,10 +63,8 @@ fn resolve_compositor(configured: CompositorType) -> CompositorType {
     }
 }
 
+#[cfg(any(feature = "i3", feature = "sway"))]
 async fn connect(compositor: CompositorType, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
-    #[cfg(not(any(feature = "i3", feature = "sway")))]
-    drop(shutdown_rx);
-
     match compositor {
         #[cfg(feature = "i3")]
         CompositorType::I3 => match I3Backend::start(shutdown_rx).await {
@@ -102,29 +100,39 @@ async fn connect(compositor: CompositorType, shutdown_rx: watch::Receiver<bool>)
                 WmBackend::disconnected()
             }
         },
-        #[cfg(not(feature = "i3"))]
+        other => without_backend(other),
+    }
+}
+
+#[cfg(not(any(feature = "i3", feature = "sway")))]
+fn connect(
+    compositor: CompositorType,
+    _shutdown_rx: watch::Receiver<bool>,
+) -> std::future::Ready<WmBackend> {
+    std::future::ready(without_backend(compositor))
+}
+
+fn without_backend(compositor: CompositorType) -> WmBackend {
+    match compositor {
         CompositorType::I3 => {
             tracing::warn!(
                 target: "assistd::wm",
                 "i3 backend not compiled into this build (feature `i3`); window operations disabled"
             );
-            WmBackend::disconnected()
         }
-        #[cfg(not(feature = "sway"))]
         CompositorType::Sway => {
             tracing::warn!(
                 target: "assistd::wm",
                 "sway backend not compiled into this build (feature `sway`); window operations disabled"
             );
-            WmBackend::disconnected()
         }
         CompositorType::Hyprland => {
             tracing::info!(
                 target: "assistd::wm",
                 "no hyprland backend; window operations disabled"
             );
-            WmBackend::disconnected()
         }
-        CompositorType::Auto => WmBackend::disconnected(),
+        CompositorType::Auto => {}
     }
+    WmBackend::disconnected()
 }

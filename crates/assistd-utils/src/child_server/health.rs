@@ -7,7 +7,7 @@ use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use super::error::ChildServerError;
-use crate::procfs::is_listening_in_group;
+use super::ownership::is_listening_in_group;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);

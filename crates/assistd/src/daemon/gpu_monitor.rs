@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
-use assistd_utils::procfs::proc_stat_field;
 use nvml_wrapper::{Nvml, enums::device::UsedGpuMemory};
+use procfs::process::{Process, Stat};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -264,15 +264,16 @@ fn descends_from(pid: u32, root: u32, parent_of: impl Fn(u32) -> Option<u32>) ->
     .any(|ancestor| ancestor == root)
 }
 
-/// Parent PID from `/proc/<pid>/stat`, parsed after the parenthesised comm.
 fn read_parent_pid(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    proc_stat_field(&stat, 1)?.parse().ok()
+    u32::try_from(read_stat(pid)?.ppid).ok()
 }
 
 fn read_comm(pid: u32) -> String {
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map_or_else(|_| format!("<pid {pid}>"), |s| s.trim().to_string())
+    read_stat(pid).map_or_else(|| format!("<pid {pid}>"), |stat| stat.comm)
+}
+
+fn read_stat(pid: u32) -> Option<Stat> {
+    Process::new(i32::try_from(pid).ok()?).ok()?.stat().ok()
 }
 
 #[cfg(test)]

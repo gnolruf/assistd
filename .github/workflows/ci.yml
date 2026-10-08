@@ -70,6 +70,11 @@ jobs:
             --features assistd-llm/test-support,assistd-voice/test-support \
             -- -D warnings
 
+      - name: Clippy (no optional features)
+        run: |
+          cargo clippy -p assistd-cli --all-targets --locked \
+            --no-default-features -- -D warnings
+
       - name: Rustdoc (deny warnings)
         env:
           RUSTDOCFLAGS: -D warnings
@@ -90,9 +95,6 @@ jobs:
 
       - name: Release build (default features)
         run: cargo build --release -p assistd-cli --locked
-
-      - name: Release build (client-only)
-        run: cargo build --release -p assistd-cli --no-default-features --features client --locked
 
       - name: Upload release binary
         uses: actions/upload-artifact@v7

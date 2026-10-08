@@ -8,11 +8,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "client")]
 pub mod attachment;
-#[cfg(feature = "client")]
 pub mod client;
-#[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 
 /// An image on a [`Request::Query`]: `mime` is PNG, JPEG or WebP; `data_base64` is standard
@@ -713,10 +710,7 @@ impl Event {
 /// The per-user daemon socket: `$XDG_RUNTIME_DIR/assistd.sock`, else
 /// `/tmp/assistd-<euid>/assistd.sock`, whose directory the daemon creates owner-only.
 pub fn socket_path() -> PathBuf {
-    socket_path_for(
-        assistd_utils::xdg::runtime_dir(),
-        rustix::process::geteuid().as_raw(),
-    )
+    socket_path_for(dirs::runtime_dir(), rustix::process::geteuid().as_raw())
 }
 
 fn socket_path_for(runtime_dir: Option<PathBuf>, euid: u32) -> PathBuf {
