@@ -10,94 +10,66 @@ name = "assistd"
 path = "src/main.rs"
 
 [features]
-default = ["daemon", "client", "chat", "tray", "i3", "sway", "wayland"]
-daemon = [
-    "dep:assistd-config",
-    "dep:assistd-core",
-    "dep:assistd-embed",
-    "dep:assistd-llm",
-    "dep:assistd-mcp",
-    "dep:assistd-memory",
-    "dep:assistd-tools",
-    "dep:assistd-voice",
-    "dep:assistd-wm",
-    "assistd-utils/child-server",
-    "assistd-utils/process",
-    "assistd-utils/tracing-init",
-    "dep:async-trait",
-    "dep:tracing",
-    "dep:tracing-subscriber",
-    "dep:global-hotkey",
-    "dep:nvml-wrapper",
-    "dep:rustix",
-    "dep:uuid",
-]
+default = ["chat", "tray", "i3", "sway", "wayland"]
 cuda = ["assistd-voice/cuda"]
-i3 = ["assistd-wm?/i3"]
-sway = ["assistd-wm?/sway"]
-wayland = ["assistd-wm?/wayland"]
-client = ["dep:uuid"]
+i3 = ["assistd-wm/i3"]
+sway = ["assistd-wm/sway"]
+wayland = ["assistd-wm/wayland"]
 chat = [
-    "daemon",
     "dep:ratatui",
     "dep:crossterm",
     "dep:futures-util",
     "dep:tracing-appender",
     "dep:textwrap",
     "dep:pulldown-cmark",
-    "dep:async-trait",
-    "dep:rustix",
     "dep:shlex",
     "dep:ratatui-image",
     "dep:image",
 ]
 tray = [
-    "client",
-    "assistd-utils/tracing-init",
-    "dep:assistd-config",
     "dep:ksni",
     "dep:zbus",
     "dep:futures-util",
-    "dep:tracing",
-    "dep:tracing-subscriber",
 ]
 
 [dependencies]
-assistd-ipc   = { workspace = true, features = ["client"] }
-assistd-utils = { workspace = true }
+dirs = { workspace = true }
+assistd-config = { workspace = true }
+assistd-core   = { workspace = true }
+assistd-embed  = { workspace = true }
+assistd-ipc    = { workspace = true }
+assistd-llm    = { workspace = true }
+assistd-mcp    = { workspace = true }
+assistd-memory = { workspace = true }
+assistd-tools  = { workspace = true }
+assistd-utils  = { workspace = true }
+assistd-voice  = { workspace = true }
+assistd-wm     = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true }
+global-hotkey = { workspace = true }
+nvml-wrapper = { workspace = true }
+procfs = { workspace = true }
+rustix = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 
-assistd-core   = { workspace = true, optional = true }
-assistd-embed  = { workspace = true, optional = true }
-assistd-llm    = { workspace = true, optional = true }
-assistd-mcp    = { workspace = true, optional = true }
-assistd-memory = { workspace = true, optional = true }
-assistd-tools  = { workspace = true, optional = true }
-assistd-voice  = { workspace = true, optional = true }
-assistd-wm     = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true }
-global-hotkey = { workspace = true, optional = true }
-nvml-wrapper = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
 ratatui          = { workspace = true, optional = true }
 crossterm        = { workspace = true, optional = true }
 futures-util     = { workspace = true, optional = true }
 tracing-appender = { workspace = true, optional = true }
 textwrap         = { workspace = true, optional = true }
 pulldown-cmark   = { workspace = true, optional = true }
-async-trait      = { workspace = true, optional = true }
-rustix           = { workspace = true, optional = true }
 shlex            = { workspace = true, optional = true }
 ratatui-image    = { workspace = true, optional = true }
 image            = { workspace = true, optional = true }
 ksni             = { workspace = true, optional = true }
 zbus             = { workspace = true, optional = true }
-assistd-config   = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

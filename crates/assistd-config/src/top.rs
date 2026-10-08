@@ -7,7 +7,6 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use assistd_utils::path::tilde_remainder;
-use assistd_utils::xdg;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatConfig;
@@ -71,10 +70,10 @@ impl Config {
         }
     }
 
-    /// `$XDG_CONFIG_HOME/assistd/config.toml`, or
-    /// `$HOME/.config/assistd/config.toml`. Errors if `$HOME` is needed but unset.
+    /// `$XDG_CONFIG_HOME/assistd/config.toml`, or `~/.config/assistd/config.toml`.
+    /// Errors when no home directory can be found.
     pub fn default_path() -> Result<PathBuf, ConfigError> {
-        let config_dir = xdg::config_home().ok_or(ConfigError::HomeNotSet)?;
+        let config_dir = dirs::config_dir().ok_or(ConfigError::NoConfigDir)?;
         Ok(config_dir.join("assistd/config.toml"))
     }
 

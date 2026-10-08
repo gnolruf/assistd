@@ -69,16 +69,16 @@ the vocabulary established here.
 
 | Crate            | Purpose                                                                                              | Depends on                                                                       |
 |------------------|------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | `ipc` always; every other `assistd-*` crate via the `daemon` feature             |
+| `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable.                    | `utils`                                                                          |
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, presence machine, socket server, `build_tools()` factory.       | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `voice`, `wm`, `utils`       |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
-| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils` (default features only, so client-only builds stay small)                |
+| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
-| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, XDG dirs, tilde expansion, `human_size`, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, and the `ChildServer` supervisor. | none                                                                             |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | `utils`                                                                          |
 
@@ -99,10 +99,9 @@ broadcast events into icon state (config error → disconnected →
 generating → listening → presence), and provides a Sleep / Wake menu that issues
 `Request::SetPresence` on isolated one-shot connections. It also shows
 each turn as a freedesktop desktop notification over `zbus`, held back
-while the chat reports keyboard focus (`Request::ChatState`). The `tray`
-feature pulls in only `assistd-ipc` + `assistd-config`. The `chat` feature, by contrast, enables
-the whole `daemon` feature on purpose: when no daemon is listening, the
-TUI starts one by re-executing its own binary as `assistd daemon`.
+while the chat reports keyboard focus (`Request::ChatState`). The binary
+always includes the daemon and the IPC client subcommands; `tray` and
+`chat` are optional features layered on top, never built standalone.
 
 ## Subsystem walk-throughs
 

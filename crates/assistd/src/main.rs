@@ -5,22 +5,16 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-#[cfg(feature = "client")]
 use client::{listen, memory, presence, ptt, query, voice_ctl};
 
 #[cfg(feature = "chat")]
 mod chat;
-#[cfg(feature = "client")]
 mod client;
-#[cfg(feature = "daemon")]
 mod daemon;
-#[cfg(feature = "daemon")]
 mod hotkey;
-#[cfg(feature = "daemon")]
 mod ipc_voice_proxy;
 #[cfg(feature = "tray")]
 mod tray;
-#[cfg(feature = "daemon")]
 mod wm_backend;
 
 /// How long exit waits on `spawn_blocking` work (e.g. a Whisper model
@@ -41,72 +35,56 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the assistd daemon
-    #[cfg(feature = "daemon")]
     Daemon(daemon::DaemonArgs),
 
     /// Write a default config file to ~/.config/assistd/config.toml
-    #[cfg(feature = "daemon")]
     InitConfig,
 
     /// Send a one-shot query to a running assistd daemon
-    #[cfg(feature = "client")]
     Query(query::QueryArgs),
 
     /// Drive a running daemon to Sleeping (stop llama-server, free all VRAM)
-    #[cfg(feature = "client")]
     Sleep,
 
     /// Drive a running daemon to Drowsy (unload model weights, keep server alive)
-    #[cfg(feature = "client")]
     Drowse,
 
     /// Drive a running daemon to Active (block until wake completes)
-    #[cfg(feature = "client")]
     Wake,
 
     /// Advance the daemon one step along Active → Drowsy → Sleeping → Active
-    #[cfg(feature = "client")]
     Cycle,
 
     /// Begin a push-to-talk recording on the running daemon (for i3
     /// `bindsym`; release handled by `ptt-stop` on the matching
     /// `bindsym --release` line).
-    #[cfg(feature = "client")]
     PttStart,
 
     /// End the push-to-talk recording, transcribe, and dispatch as a query
-    #[cfg(feature = "client")]
     PttStop,
 
     /// Enable hands-free continuous listening on the daemon
-    #[cfg(feature = "client")]
     ListenStart,
 
     /// Disable hands-free continuous listening
-    #[cfg(feature = "client")]
     ListenStop,
 
     /// Toggle hands-free continuous listening on/off
-    #[cfg(feature = "client")]
     ListenToggle,
 
     /// Report whether continuous listening is currently active
-    #[cfg(feature = "client")]
     ListenState,
 
     /// Toggle TTS playback on/off mid-session (off cancels current
     /// utterance; on resumes for the next sentence delivered).
-    #[cfg(feature = "client")]
     VoiceToggle,
 
     /// Abort the current TTS response: stops playback, drops any
     /// pending sentences for the active query. Does not start
     /// recording.
-    #[cfg(feature = "client")]
     VoiceSkip,
 
     /// Report whether TTS is currently enabled at runtime.
-    #[cfg(feature = "client")]
     VoiceState,
 
     /// Open an interactive chat TUI
@@ -121,7 +99,6 @@ enum Commands {
     /// Inspect or mutate persistent memory: search conversation
     /// history, save / load / list / forget / delete key-value
     /// memories.
-    #[cfg(feature = "client")]
     Memory(memory::MemoryArgs),
 }
 
@@ -135,43 +112,26 @@ fn main() -> Result<()> {
 
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        #[cfg(feature = "daemon")]
         Commands::Daemon(args) => daemon::run(args).await,
-        #[cfg(feature = "daemon")]
         Commands::InitConfig => daemon::init_config(),
-        #[cfg(feature = "client")]
         Commands::Query(args) => query::run(args).await,
-        #[cfg(feature = "client")]
         Commands::Sleep => presence::run(presence::PresenceAction::Sleep).await,
-        #[cfg(feature = "client")]
         Commands::Drowse => presence::run(presence::PresenceAction::Drowse).await,
-        #[cfg(feature = "client")]
         Commands::Wake => presence::run(presence::PresenceAction::Wake).await,
-        #[cfg(feature = "client")]
         Commands::Cycle => presence::run(presence::PresenceAction::Cycle).await,
-        #[cfg(feature = "client")]
         Commands::PttStart => ptt::run(ptt::PttAction::Start).await,
-        #[cfg(feature = "client")]
         Commands::PttStop => ptt::run(ptt::PttAction::Stop).await,
-        #[cfg(feature = "client")]
         Commands::ListenStart => listen::run(listen::ListenAction::Start).await,
-        #[cfg(feature = "client")]
         Commands::ListenStop => listen::run(listen::ListenAction::Stop).await,
-        #[cfg(feature = "client")]
         Commands::ListenToggle => listen::run(listen::ListenAction::Toggle).await,
-        #[cfg(feature = "client")]
         Commands::ListenState => listen::run(listen::ListenAction::State).await,
-        #[cfg(feature = "client")]
         Commands::VoiceToggle => voice_ctl::run(voice_ctl::VoiceCtlAction::Toggle).await,
-        #[cfg(feature = "client")]
         Commands::VoiceSkip => voice_ctl::run(voice_ctl::VoiceCtlAction::Skip).await,
-        #[cfg(feature = "client")]
         Commands::VoiceState => voice_ctl::run(voice_ctl::VoiceCtlAction::State).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
-        #[cfg(feature = "client")]
         Commands::Memory(args) => memory::run(args).await,
     }
 }

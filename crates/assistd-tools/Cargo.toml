@@ -15,7 +15,7 @@ test-support = []
 assistd-config = { workspace = true }
 assistd-embed = { workspace = true }
 assistd-memory = { workspace = true }
-assistd-ipc = { workspace = true, features = ["client"] }
+assistd-ipc = { workspace = true }
 assistd-wm = { workspace = true }
 assistd-utils = { workspace = true }
 async-trait = { workspace = true }

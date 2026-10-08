@@ -5,8 +5,8 @@ use thiserror::Error;
 /// Errors produced while loading, writing, or validating configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("HOME environment variable not set")]
-    HomeNotSet,
+    #[error("no config directory: neither XDG_CONFIG_HOME nor a home directory is available")]
+    NoConfigDir,
 
     #[error("failed to read config file {path}: {source}")]
     Read {

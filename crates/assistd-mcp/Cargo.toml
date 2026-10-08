@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 assistd-tools = { workspace = true }
-assistd-utils = { workspace = true, features = ["process"] }
+assistd-utils = { workspace = true }
 async-trait = { workspace = true }
 rmcp = { workspace = true }
 rustix = { workspace = true }

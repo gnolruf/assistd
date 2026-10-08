@@ -584,8 +584,7 @@ fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {
 }
 
 fn log_dir() -> Result<PathBuf> {
-    let dir = assistd_utils::xdg::state_home()
-        .map_or_else(std::env::temp_dir, |state| state.join("assistd"));
+    let dir = dirs::state_dir().map_or_else(std::env::temp_dir, |state| state.join("assistd"));
     std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
     Ok(dir)
 }

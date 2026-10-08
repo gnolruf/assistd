@@ -9,6 +9,7 @@ use tokio::process::Command;
 mod error;
 mod health;
 mod llama_env;
+mod ownership;
 mod process;
 mod service;
 mod supervisor;

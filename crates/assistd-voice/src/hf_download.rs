@@ -30,7 +30,7 @@ pub enum DownloadError {
         source: io::Error,
     },
 
-    #[error("no model cache directory: neither XDG_CACHE_HOME nor HOME is set")]
+    #[error("no model cache directory: neither XDG_CACHE_HOME nor a home directory is available")]
     NoCacheDir,
 }
 
@@ -54,9 +54,9 @@ pub fn parse_hf_id(id: &str) -> Result<(String, String), DownloadError> {
 }
 
 /// `$XDG_CACHE_HOME/assistd/<subdir>/`, falling back to
-/// `$HOME/.cache/assistd/<subdir>/`. Errors when neither variable is set.
+/// `~/.cache/assistd/<subdir>/`. Errors when no home directory can be found.
 pub fn default_cache_dir(subdir: &str) -> Result<PathBuf, DownloadError> {
-    let base = assistd_utils::xdg::cache_home().ok_or(DownloadError::NoCacheDir)?;
+    let base = dirs::cache_dir().ok_or(DownloadError::NoCacheDir)?;
     Ok(base.join("assistd").join(subdir))
 }
 

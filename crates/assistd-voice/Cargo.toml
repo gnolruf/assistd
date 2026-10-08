@@ -34,11 +34,12 @@ name = "voice_latency_bench"
 required-features = ["whisper", "tts"]
 
 [dependencies]
+dirs = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "process"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-assistd-ipc = { workspace = true, features = ["client"] }
+assistd-ipc = { workspace = true }
 # Required unconditionally because `sentence` (built in every feature combination)
 # consumes the `CodeBlockMode` enum.
 assistd-config = { workspace = true }
@@ -64,7 +65,6 @@ which = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-assistd-utils = { workspace = true, features = ["tracing-init"] }
 assistd-llm = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }

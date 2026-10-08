@@ -109,16 +109,16 @@ and data-flow walkthrough.
 
 | Crate            | Responsibility                                                                                                                  |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `assistd`        | Binary (`assistd` on `$PATH`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. Feature-gated into `daemon` / `client` / `chat` so client-only builds stay small. |
+| `assistd`        | Binary (`assistd` on `$PATH`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`, `wayland`) are optional features. |
 | `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
 | `assistd-core`   | Daemon glue. Owns `AppState`, the per-turn `Agent` loop, the Unix-socket server, the presence state machine, and the `build_tools()` factory that wires every subsystem together. |
 | `assistd-embed`  | Embedding HTTP client + background job queue. Pulls chunks off an mpsc, batches them to the embedding `llama-server`, writes vectors into `assistd-memory`'s semantic store. |
-| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light so client-only builds don't pull in the daemon graph; depends only on `assistd-utils`. |
+| `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light; depends only on `assistd-utils`. |
 | `assistd-llm`    | `LlmBackend` trait, `LlamaChatClient` (HTTP/SSE to `llama-server`), the router-mode launch spec run by the shared child-server supervisor, the HTTP control plane, and vision-capability detection. |
 | `assistd-mcp`    | MCP client for stdio servers on top of `rmcp`: process spawning, restart on the next call with backoff, and `McpToolAdapter` which exposes discovered tools through the `Tool` trait under `mcp__<server>__<tool>`. |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore` (K/V facts), `ConversationStore` (transcripts with branching/undo), `SemanticStore` (embedding-indexed chunks). Uses `tokio-rusqlite` + `rusqlite_migration`. |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
-| `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, XDG base-dir lookup, tilde expansion, `human_size`, capped child-output line forwarding, `/proc` listener ownership, the `ProcessGroup` kill-on-drop guard, and the `ChildServer` supervisor (spawn, `/health` poll, restart, degrade) that both llama-servers run under. Heavy pieces are feature-gated (`process`, `child-server`, `tracing-init`). No internal deps. |
+| `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, tilde expansion, `human_size`, capped child-output line forwarding, the `ProcessGroup` kill-on-drop guard, and the `ChildServer` supervisor (spawn, `/health` poll checked against `/proc` listener ownership, restart, degrade) that both llama-servers run under. No internal deps. |
 | `assistd-voice`  | `VoiceInput` (Whisper STT via `whisper-rs`, push-to-talk and VAD continuous modes), `VoiceOutput` (Piper TTS streamed sentence-by-sentence), adaptive `SpeakDecision`. Feature-gated (`whisper`, `mic`, `listen`, `tts`, `cuda`). |
 | `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback, and restricted Wayland sockets (`wp-security-context-v1`) for sandboxed launches. Backs both the system-prompt active-window injection and the `wm` command. Feature-gated per compositor. |
 
@@ -127,9 +127,7 @@ crates higher up. If you find yourself wanting `assistd-memory` to
 call into `assistd-core`, you're holding it wrong — invert the
 dependency or move the type. `assistd-utils` has no internal deps and
 is the only one `assistd-config` and `assistd-ipc` may take; they're
-the foundation everything else builds on (and `assistd-ipc` is
-shipped to client-only builds, so it must use `assistd-utils` with
-default features only).
+the foundation everything else builds on.
 
 **Shared logic goes in `assistd-utils`.** When the same function or
 type would otherwise be written in two crates, put it in

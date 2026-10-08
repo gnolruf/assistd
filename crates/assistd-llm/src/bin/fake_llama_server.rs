@@ -10,7 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -406,10 +406,7 @@ async fn load_response(
     (
         "HTTP/1.1 200 OK",
         "application/json",
-        format!(
-            "{{\"model\":\"{}\",\"status\":\"loaded\"}}",
-            escape_json(&model)
-        ),
+        json!({ "model": model, "status": "loaded" }).to_string(),
     )
 }
 
@@ -424,10 +421,7 @@ async fn unload_response(
     (
         "HTTP/1.1 200 OK",
         "application/json",
-        format!(
-            "{{\"model\":\"{}\",\"status\":\"unloaded\"}}",
-            escape_json(&model)
-        ),
+        json!({ "model": model, "status": "unloaded" }).to_string(),
     )
 }
 
@@ -435,40 +429,31 @@ async fn list_models_response(
     state: &Arc<Mutex<ServerState>>,
 ) -> (&'static str, &'static str, String) {
     let server = state.lock().await;
-    let body = match &server.loaded_model {
-        Some(name) => format!(
-            "{{\"data\":[{{\"id\":\"{}\",\"status\":{{\"value\":\"loaded\",\"args\":[]}}}}]}}",
-            escape_json(name)
-        ),
-        None => "{\"data\":[]}".to_string(),
-    };
-    ("HTTP/1.1 200 OK", "application/json", body)
+    let data: Vec<Value> = server
+        .loaded_model
+        .iter()
+        .map(|name| json!({ "id": name, "status": { "value": "loaded", "args": [] } }))
+        .collect();
+    (
+        "HTTP/1.1 200 OK",
+        "application/json",
+        json!({ "data": data }).to_string(),
+    )
 }
 
 async fn counters_response(
     state: &Arc<Mutex<ServerState>>,
 ) -> (&'static str, &'static str, String) {
     let server = state.lock().await;
-    let pid = std::process::id();
-    let loaded = match &server.loaded_model {
-        Some(name) => format!("\"{}\"", escape_json(name)),
-        None => "null".to_string(),
-    };
-    let last_prompt = match &server.last_prompt {
-        Some(prompt) => format!("\"{}\"", escape_json(prompt)),
-        None => "null".to_string(),
-    };
-    let body = format!(
-        "{{\"pid\":{},\"load_count\":{},\"unload_count\":{},\"loaded_model\":{},\
-         \"chat_completions_count\":{},\"last_prompt\":{}}}",
-        pid,
-        server.load_count,
-        server.unload_count,
-        loaded,
-        server.chat_completions_count,
-        last_prompt
-    );
-    ("HTTP/1.1 200 OK", "application/json", body)
+    let body = json!({
+        "pid": std::process::id(),
+        "load_count": server.load_count,
+        "unload_count": server.unload_count,
+        "loaded_model": server.loaded_model,
+        "chat_completions_count": server.chat_completions_count,
+        "last_prompt": server.last_prompt,
+    });
+    ("HTTP/1.1 200 OK", "application/json", body.to_string())
 }
 
 async fn queue_script_response(
@@ -481,10 +466,7 @@ async fn queue_script_response(
             return (
                 "HTTP/1.1 400 Bad Request",
                 "application/json",
-                format!(
-                    "{{\"error\":\"invalid json: {}\"}}",
-                    escape_json(&e.to_string())
-                ),
+                json!({ "error": format!("invalid json: {e}") }).to_string(),
             );
         }
     };
@@ -618,25 +600,8 @@ async fn write_final_chunk(sock: &mut TcpStream) -> io::Result<()> {
 /// The `"model": "..."` string from a flat JSON body, found by text search;
 /// empty when absent.
 fn extract_model_field(body: &str) -> String {
-    let key = "\"model\"";
-    let Some(start) = body.find(key) else {
-        return String::new();
-    };
-    let after_key = &body[start + key.len()..];
-    let Some(colon) = after_key.find(':') else {
-        return String::new();
-    };
-    let after_colon = &after_key[colon + 1..];
-    let Some(quote_start) = after_colon.find('"') else {
-        return String::new();
-    };
-    let value_start = &after_colon[quote_start + 1..];
-    let Some(quote_end) = value_start.find('"') else {
-        return String::new();
-    };
-    value_start[..quote_end].to_string()
-}
-
-fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|request| request.get("model")?.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
