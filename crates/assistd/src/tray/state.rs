@@ -2,7 +2,8 @@
 
 use std::collections::HashSet;
 
-use assistd_ipc::{Event, PresenceState};
+use assistd_config::TrayIconsConfig;
+use assistd_ipc::{Event, PresenceState, VoiceCaptureState};
 
 /// What the tray icon should currently display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +14,7 @@ pub(super) enum TrayState {
     Disconnected,
     /// At least one query turn is in flight.
     Generating,
-    /// Continuous listening is on.
+    /// Continuous listening is on, or a push-to-talk capture is underway.
     Listening,
     /// Daemon is awake and idle.
     Active,
@@ -26,6 +27,7 @@ pub(super) struct TrayTracker {
     config_error: Option<String>,
     presence: PresenceState,
     listening: bool,
+    ptt_capture: VoiceCaptureState,
     in_flight: HashSet<String>,
     connected: bool,
 }
@@ -44,6 +46,7 @@ impl TrayTracker {
             config_error,
             presence: PresenceState::Active,
             listening: false,
+            ptt_capture: VoiceCaptureState::Idle,
             in_flight: HashSet::new(),
             connected: false,
         }
@@ -60,7 +63,7 @@ impl TrayTracker {
         if !self.in_flight.is_empty() {
             return TrayState::Generating;
         }
-        if self.listening {
+        if self.listening || self.ptt_capture != VoiceCaptureState::Idle {
             return TrayState::Listening;
         }
         match self.presence {
@@ -95,6 +98,7 @@ impl TrayTracker {
         self.connected = false;
         self.in_flight.clear();
         self.listening = false;
+        self.ptt_capture = VoiceCaptureState::Idle;
         before != self.current()
     }
 
@@ -114,22 +118,24 @@ impl TrayTracker {
             Event::ListenState { active, .. } => {
                 self.listening = *active;
             }
+            Event::VoiceState { state, .. } => {
+                self.ptt_capture = *state;
+            }
             _ => {}
         }
         before != self.current()
     }
 }
 
-/// freedesktop icon-theme names present in every major theme, so no
-/// image assets ship.
-pub(super) fn icon_name_for(state: TrayState) -> &'static str {
+/// The configured icon for `state`; a config error always shows `dialog-error`.
+pub(super) fn icon_name_for(state: TrayState, icons: &TrayIconsConfig) -> &str {
     match state {
         TrayState::ConfigError => "dialog-error",
-        TrayState::Disconnected => "network-offline",
-        TrayState::Generating => "system-run",
-        TrayState::Listening => "audio-input-microphone",
-        TrayState::Active => "user-available",
-        TrayState::Sleeping => "user-offline",
+        TrayState::Disconnected => &icons.disconnected,
+        TrayState::Generating => &icons.generating,
+        TrayState::Listening => &icons.listening,
+        TrayState::Active => &icons.active,
+        TrayState::Sleeping => &icons.sleeping,
     }
 }
 

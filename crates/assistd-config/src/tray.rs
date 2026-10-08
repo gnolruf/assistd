@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
+    DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED, DEFAULT_TRAY_ICON_GENERATING,
+    DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
     DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS, DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY,
     DEFAULT_TRAY_NOTIFICATIONS_ENABLED, DEFAULT_TRAY_NOTIFICATIONS_WAKE_DELTA,
     DEFAULT_TRAY_NOTIFICATIONS_WAKE_ERROR, DEFAULT_TRAY_NOTIFICATIONS_WAKE_TOOL_CALL,
@@ -10,7 +12,38 @@ use crate::defaults::{
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TrayConfig {
+    pub icons: TrayIconsConfig,
     pub notifications: TrayNotificationsConfig,
+}
+
+/// freedesktop icon-theme names the tray icon shows per state; none may be
+/// empty. Custom artwork under `~/.local/share/icons/<theme>/` is found by
+/// its file name without the extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrayIconsConfig {
+    /// The daemon is awake and idle.
+    pub active: String,
+    /// The daemon is drowsy or asleep.
+    pub sleeping: String,
+    /// Continuous listening is on.
+    pub listening: String,
+    /// A turn is in flight.
+    pub generating: String,
+    /// The daemon socket is unreachable.
+    pub disconnected: String,
+}
+
+impl Default for TrayIconsConfig {
+    fn default() -> Self {
+        Self {
+            active: DEFAULT_TRAY_ICON_ACTIVE.into(),
+            sleeping: DEFAULT_TRAY_ICON_SLEEPING.into(),
+            listening: DEFAULT_TRAY_ICON_LISTENING.into(),
+            generating: DEFAULT_TRAY_ICON_GENERATING.into(),
+            disconnected: DEFAULT_TRAY_ICON_DISCONNECTED.into(),
+        }
+    }
 }
 
 /// Desktop notifications showing a turn's activity, tool calls and reply.

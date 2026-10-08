@@ -22,7 +22,7 @@ use crate::presence::PresenceConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
-use crate::tray::{TrayConfig, TrayNotificationsConfig};
+use crate::tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig};
 use crate::voice::{SynthesisConfig, VoiceConfig};
 
 const CONFIG_DIR_MODE: u32 = 0o700;
@@ -62,6 +62,7 @@ impl Config {
         validate_memory(&mut errors, &self.memory);
         validate_embedding(&mut errors, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
+        validate_tray_icons(&mut errors, &self.tray.icons);
         validate_tray_notifications(&mut errors, &self.tray.notifications);
         if errors.is_empty() {
             Ok(())
@@ -400,6 +401,21 @@ fn validate_mcp(errors: &mut Vec<String>, mcp: &McpConfig) {
                  with no '__' and no trailing '_' (becomes the `<name>` in the \
                  LLM-visible tool name `mcp__<name>__<tool>`)"
             ));
+        }
+    }
+}
+
+fn validate_tray_icons(errors: &mut Vec<String>, icons: &TrayIconsConfig) {
+    let named = [
+        ("active", &icons.active),
+        ("sleeping", &icons.sleeping),
+        ("listening", &icons.listening),
+        ("generating", &icons.generating),
+        ("disconnected", &icons.disconnected),
+    ];
+    for (key, name) in named {
+        if name.trim().is_empty() {
+            errors.push(format!("tray.icons.{key} must not be empty"));
         }
     }
 }

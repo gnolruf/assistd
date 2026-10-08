@@ -2,6 +2,7 @@
 //! freezes), so they only queue a [`MenuAction`] for [`run_actions`].
 
 use anyhow::Result;
+use assistd_config::TrayIconsConfig;
 use assistd_ipc::{Event, IpcClient, PresenceState, Request};
 use ksni::{
     Category, Status, ToolTip, Tray,
@@ -25,6 +26,7 @@ pub(super) type ActivateCallback = Box<dyn Fn() + Send + Sync>;
 
 pub(super) struct TrayItem {
     tracker: TrayTracker,
+    icons: TrayIconsConfig,
     actions: UnboundedSender<MenuAction>,
     on_activate: Option<ActivateCallback>,
 }
@@ -33,10 +35,12 @@ impl TrayItem {
     pub(super) fn new(
         actions: UnboundedSender<MenuAction>,
         on_activate: Option<ActivateCallback>,
+        icons: TrayIconsConfig,
         config_error: Option<String>,
     ) -> Self {
         Self {
             tracker: TrayTracker::new(config_error),
+            icons,
             actions,
             on_activate,
         }
@@ -82,7 +86,7 @@ impl Tray for TrayItem {
     }
 
     fn icon_name(&self) -> String {
-        icon_name_for(self.tracker.current()).to_string()
+        icon_name_for(self.tracker.current(), &self.icons).to_string()
     }
 
     fn tool_tip(&self) -> ToolTip {

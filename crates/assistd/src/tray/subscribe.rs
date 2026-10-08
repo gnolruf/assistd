@@ -76,6 +76,7 @@ fn subscribe_filter() -> SubscribeFilter {
             EventKind::Error,
             EventKind::Presence,
             EventKind::ListenState,
+            EventKind::VoiceState,
             EventKind::SpeakingState,
             EventKind::ChatFocus,
             EventKind::SessionTitle,

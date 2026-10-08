@@ -38,7 +38,7 @@ pub use tools::{
     ToolsScratchConfig, ToolsScreenshotConfig, ToolsWriteConfig,
 };
 pub use top::Config;
-pub use tray::{TrayConfig, TrayNotificationsConfig, TrayNotificationsWakeConfig};
+pub use tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig, TrayNotificationsWakeConfig};
 pub use voice::{
     CodeBlockMode, ContinuousListenConfig, SynthesisConfig, TranscriptionConfig, VoiceConfig,
 };

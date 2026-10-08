@@ -176,6 +176,14 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # env = { API_TOKEN = "..." }  # only PATH, HOME, locale and a few basics are inherited
 # request_timeout_secs = 30
 
+# [tray.icons]
+# Icon-theme names for the tray icon; custom icons go in ~/.local/share/icons/<theme>/.
+# active = "user-available"
+# sleeping = "user-offline"          # drowsy or asleep
+# listening = "audio-input-microphone"
+# generating = "system-run"
+# disconnected = "network-offline"
+
 # [tray.notifications]
 # Desktop notifications from `assistd tray`; none while the chat is focused.
 # enabled = true

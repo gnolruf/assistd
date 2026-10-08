@@ -60,7 +60,11 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
 
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
     let activate_cb = build_activate_callback(notification_sink.as_ref());
-    let item = TrayItem::new(actions_tx, activate_cb, config_error);
+    let icons = config
+        .as_ref()
+        .map(|cfg| cfg.tray.icons.clone())
+        .unwrap_or_default();
+    let item = TrayItem::new(actions_tx, activate_cb, icons, config_error);
 
     let handle = item
         .assume_sni_available(true)
