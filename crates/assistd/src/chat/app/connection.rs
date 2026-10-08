@@ -2,7 +2,7 @@
 //! Each runs as an app task and reports a failure before its terminal
 //! event as a [`ChatEvent::WireError`] on its stream.
 
-use assistd_ipc::{ImageAttachment, IpcClient, Request};
+use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, Request};
 use assistd_tools::Attachment;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -20,6 +20,17 @@ impl App {
         self.tasks.spawn(async move {
             if let Err(message) = pump_one_shot(&ipc, req, stream, label, &chat_tx).await {
                 let _ = chat_tx.send(ChatEvent::WireError { stream, message }).await;
+            }
+        });
+    }
+
+    /// Re-read the daemon's capabilities in the background.
+    pub(super) fn spawn_capabilities_refresh(&mut self) {
+        let ipc = self.ipc.clone();
+        let chat_tx = self.chat_tx.clone();
+        self.tasks.spawn(async move {
+            if let Err(e) = forward_capabilities(&ipc, &chat_tx).await {
+                tracing::debug!("capabilities refresh failed: {e:#}");
             }
         });
     }
@@ -85,6 +96,31 @@ async fn pump_one_shot(
             Err(e) => return Err(format!("{label} read: {e}")),
         }
     }
+}
+
+/// Forward only the `Capabilities` event of a `GetCapabilities` reply;
+/// the startup failures it also reports are not news mid-session.
+async fn forward_capabilities(
+    ipc: &IpcClient,
+    chat_tx: &mpsc::Sender<ChatEvent>,
+) -> Result<(), IpcClientError> {
+    let req = Request::GetCapabilities {
+        id: Uuid::new_v4().to_string(),
+    };
+    let mut events = ipc.one_shot(req).await?;
+    while let Some(event) = events.next_event().await? {
+        if matches!(event, Event::Capabilities { .. }) {
+            let _ = chat_tx
+                .send(ChatEvent::Wire {
+                    stream: WireStream::Status,
+                    event,
+                })
+                .await;
+        } else if event.is_terminal() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Forward the dialog's events to the reducer and `writer_rx`'s requests

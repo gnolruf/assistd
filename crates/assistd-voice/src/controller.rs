@@ -1,10 +1,11 @@
-//! Runtime control over a [`VoiceOutput`]: a mute switch, a skip epoch that
-//! in-flight speech workers compare against to drop stale sentences, and a
-//! speaking signal that other subsystems watch to gate the mic.
+//! Runtime control over a [`VoiceOutput`] that may still be starting: a
+//! mute switch, a skip epoch that in-flight speech workers compare against
+//! to drop stale sentences, and a speaking signal that gates the mic.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use tokio::sync::watch;
 
 use crate::VoiceOutput;
@@ -20,10 +21,11 @@ pub enum SpeakDecision {
     DropForSkip,
 }
 
-/// Mute switch, skip epoch, and speaking signal over an `Arc<dyn VoiceOutput>`.
+/// Mute switch, skip epoch, and speaking signal over an `Arc<dyn VoiceOutput>`
+/// that may still be starting.
 #[derive(Debug)]
 pub struct VoiceOutputController {
-    inner: Arc<dyn VoiceOutput>,
+    output: ReadinessCell<Arc<dyn VoiceOutput>>,
     enabled: AtomicBool,
     skip_epoch: AtomicU64,
     active_speakers: AtomicUsize,
@@ -31,11 +33,21 @@ pub struct VoiceOutputController {
 }
 
 impl VoiceOutputController {
-    /// Wraps `inner`, muted unless `initially_enabled`, at epoch zero.
-    pub fn new(inner: Arc<dyn VoiceOutput>, initially_enabled: bool) -> Arc<Self> {
+    /// A controller whose output is still starting, muted unless
+    /// `initially_enabled`, at epoch zero.
+    pub fn new(initially_enabled: bool) -> Arc<Self> {
+        Self::with_output(Readiness::Starting, initially_enabled)
+    }
+
+    /// A controller over `output`, already up.
+    pub fn ready(output: Arc<dyn VoiceOutput>, initially_enabled: bool) -> Arc<Self> {
+        Self::with_output(Readiness::Ready(output), initially_enabled)
+    }
+
+    fn with_output(output: Readiness<Arc<dyn VoiceOutput>>, initially_enabled: bool) -> Arc<Self> {
         let (speaking_tx, _) = watch::channel(false);
         Arc::new(Self {
-            inner,
+            output: ReadinessCell::new(output),
             enabled: AtomicBool::new(initially_enabled),
             skip_epoch: AtomicU64::new(0),
             active_speakers: AtomicUsize::new(0),
@@ -59,7 +71,7 @@ impl VoiceOutputController {
     pub async fn set_enabled(&self, on: bool) {
         let prev = self.enabled.swap(on, Ordering::SeqCst);
         if prev && !on {
-            self.inner.cancel().await;
+            self.cancel_queued().await;
         }
     }
 
@@ -67,7 +79,7 @@ impl VoiceOutputController {
     /// switch unchanged.
     pub async fn skip(&self) {
         self.skip_epoch.fetch_add(1, Ordering::SeqCst);
-        self.inner.cancel().await;
+        self.cancel_queued().await;
     }
 
     /// Push-to-talk barge-in; identical to [`skip`](Self::skip).
@@ -108,9 +120,20 @@ impl VoiceOutputController {
         self.speaking_tx.subscribe()
     }
 
-    /// The wrapped output.
-    pub fn inner(&self) -> &Arc<dyn VoiceOutput> {
-        &self.inner
+    /// Record how far the output's startup has got.
+    pub fn set_output(&self, output: Readiness<Arc<dyn VoiceOutput>>) {
+        self.output.set(output);
+    }
+
+    /// The output, or why there is none to speak through.
+    pub fn output(&self) -> Result<Arc<dyn VoiceOutput>, NotReady> {
+        self.output.get()
+    }
+
+    async fn cancel_queued(&self) {
+        if let Ok(output) = self.output() {
+            output.cancel().await;
+        }
     }
 
     fn end_speaking(&self) {

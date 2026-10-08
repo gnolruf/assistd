@@ -29,12 +29,16 @@ pub mod piper;
 
 pub mod controller;
 pub mod error;
+#[cfg(feature = "listen")]
+pub mod manager;
 pub mod sentence;
 
 pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
 pub use error::{VoiceInputError, VoiceOutputError};
 #[cfg(feature = "listen")]
 pub use listen::{ContinuousListener, ListenError, MicContinuousListener, NoContinuousListener};
+#[cfg(feature = "listen")]
+pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
 #[cfg(feature = "mic")]
 pub use mic::{
     AudioCaptureError, DeviceValidationError, MicVoiceInput, capture::validate as mic_validate,

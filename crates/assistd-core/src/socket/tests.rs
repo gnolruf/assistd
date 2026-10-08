@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::oneshot;
 
 use super::*;
-use crate::{Config, PresenceManager, PresenceState};
+use crate::{Config, PresenceManager, PresenceState, PresenceTarget};
 
 #[test]
 fn fd_exhaustion_predicate_matches_only_emfile_and_enfile() {
@@ -52,11 +52,9 @@ fn state_with(
     Arc::new(AppState::new(
         config,
         backend,
-        PresenceManager::stub(PresenceState::Active),
+        PresenceManager::stub(PresenceTarget::Active),
         tools,
-        Arc::new(assistd_voice::NoVoiceInput::new()),
-        Arc::new(assistd_voice::NoContinuousListener::new()),
-        assistd_voice::VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
+        assistd_voice::VoiceManager::new(true),
     ))
 }
 
@@ -870,11 +868,9 @@ fn gated_tool_state() -> Arc<AppState> {
         Arc::new(GatedToolBackend {
             stepped: AtomicBool::new(false),
         }),
-        PresenceManager::stub(PresenceState::Active),
+        PresenceManager::stub(PresenceTarget::Active),
         Arc::new(tools),
-        Arc::new(assistd_voice::NoVoiceInput::new()),
-        Arc::new(assistd_voice::NoContinuousListener::new()),
-        assistd_voice::VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
+        assistd_voice::VoiceManager::new(true),
     ))
 }
 

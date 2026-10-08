@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use assistd_ipc::{Event, Role, StatusKind, StatusSeverity};
+use assistd_ipc::{ComponentReadiness, Event, PresenceState, Role, StatusKind, StatusSeverity};
 use assistd_tools::ConfirmationRequest;
 use serde_json::Value;
 
@@ -79,6 +79,7 @@ impl App {
             | Event::VoiceState { .. }
             | Event::ListenState { .. }
             | Event::VoiceOutputState { .. }
+            | Event::VoiceReadiness { .. }
             | Event::Capabilities { .. }
             | Event::Status { .. }) => self.on_state_event(state),
             session @ (Event::BranchInfo { .. }
@@ -167,10 +168,15 @@ impl App {
     /// Daemon and model state shown in the status bar.
     fn on_state_event(&mut self, ev: Event) {
         match ev {
-            Event::Presence { state, .. } => self.presence_state = Some(state),
+            Event::Presence { state, .. } => self.on_presence(state),
             Event::VoiceState { state, .. } => self.listening = state,
             Event::ListenState { active, .. } => self.listen_active = active,
             Event::VoiceOutputState { enabled, .. } => self.voice_output_enabled = enabled,
+            Event::VoiceReadiness {
+                capture, speech, ..
+            } => {
+                self.voice_starting = [capture, speech].contains(&ComponentReadiness::Starting);
+            }
             Event::Capabilities {
                 vision, model_name, ..
             } => {
@@ -206,6 +212,19 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Re-read capabilities when the model comes up, since vision support
+    /// is only known once it has loaded.
+    fn on_presence(&mut self, state: PresenceState) {
+        let came_up = state == PresenceState::Active
+            && self
+                .presence_state
+                .is_some_and(|prior| prior != PresenceState::Active);
+        self.presence_state = Some(state);
+        if came_up {
+            self.spawn_capabilities_refresh();
         }
     }
 

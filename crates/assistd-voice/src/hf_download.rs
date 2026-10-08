@@ -2,10 +2,15 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::Response;
+use reqwest::{Client, Response};
 use tokio::io::AsyncWriteExt;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest wait for the next chunk before a download counts as stalled.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Errors from resolving or downloading a HuggingFace file.
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +80,8 @@ pub async fn ensure_cached(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, Dow
 
 /// Download `file` from `repo` to `dest` unless it already exists. The
 /// download lands in a `.part` sibling and is renamed on success, so a
-/// crash never leaves a partial file at `dest`.
+/// crash never leaves a partial file at `dest`. Fails when connecting or
+/// any read stalls past its timeout.
 pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), DownloadError> {
     if dest.exists() {
         tracing::debug!(
@@ -99,7 +105,11 @@ pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), Down
         "downloading"
     );
 
-    let response = fetch(&url).await?;
+    let client = download_client(READ_TIMEOUT).map_err(|source| DownloadError::Request {
+        url: url.clone(),
+        source,
+    })?;
+    let response = fetch(&client, &url).await?;
     let part = part_path(dest);
     stream_to_file(response, &url, &part).await?;
     tokio::fs::rename(&part, dest)
@@ -113,8 +123,17 @@ pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), Down
     Ok(())
 }
 
-async fn fetch(url: &str) -> Result<Response, DownloadError> {
-    let response = reqwest::get(url)
+fn download_client(read_timeout: Duration) -> reqwest::Result<Client> {
+    Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(read_timeout)
+        .build()
+}
+
+async fn fetch(client: &Client, url: &str) -> Result<Response, DownloadError> {
+    let response = client
+        .get(url)
+        .send()
         .await
         .map_err(|source| DownloadError::Request {
             url: url.to_string(),
@@ -211,6 +230,37 @@ mod tests {
                 "{id}: {err:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stalled_download_fails_instead_of_hanging() {
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/model.bin", server.local_addr().unwrap());
+        let stalled_server = tokio::spawn(async move {
+            let (mut conn, _) = server.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut conn, &mut request).await;
+            conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\npartial")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("model.bin.part");
+        let client = download_client(Duration::from_millis(200)).unwrap();
+        let download = async {
+            let response = fetch(&client, &url).await?;
+            stream_to_file(response, &url, &part).await
+        };
+        let result = tokio::time::timeout(Duration::from_secs(10), download)
+            .await
+            .expect("download hung past its read timeout");
+        assert!(
+            matches!(result, Err(DownloadError::Request { .. })),
+            "{result:?}"
+        );
+        stalled_server.abort();
     }
 
     #[test]

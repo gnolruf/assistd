@@ -28,7 +28,7 @@ impl VoiceOutput for RecordingOutput {
 #[tokio::test]
 async fn set_enabled_false_cancels_inner_once() {
     let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::new(inner.clone(), true);
+    let ctrl = VoiceOutputController::ready(inner.clone(), true);
     ctrl.set_enabled(false).await;
     assert!(!ctrl.enabled());
     assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
@@ -39,7 +39,7 @@ async fn set_enabled_false_cancels_inner_once() {
 #[tokio::test]
 async fn set_enabled_true_does_not_cancel_or_bump_epoch() {
     let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::new(inner.clone(), false);
+    let ctrl = VoiceOutputController::ready(inner.clone(), false);
     ctrl.set_enabled(true).await;
     assert!(ctrl.enabled());
     assert_eq!(inner.cancels.load(Ordering::SeqCst), 0);
@@ -49,7 +49,7 @@ async fn set_enabled_true_does_not_cancel_or_bump_epoch() {
 #[tokio::test]
 async fn skip_advances_epoch_and_cancels() {
     let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::new(inner.clone(), true);
+    let ctrl = VoiceOutputController::ready(inner.clone(), true);
     let before = ctrl.current_epoch();
     ctrl.skip().await;
     assert_eq!(ctrl.current_epoch(), before + 1);
@@ -59,7 +59,7 @@ async fn skip_advances_epoch_and_cancels() {
 #[tokio::test]
 async fn interrupt_is_alias_of_skip() {
     let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::new(inner.clone(), true);
+    let ctrl = VoiceOutputController::ready(inner.clone(), true);
     ctrl.interrupt().await;
     assert_eq!(ctrl.current_epoch(), 1);
     assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
@@ -74,7 +74,7 @@ async fn should_speak_decision() {
         (false, false, false, SpeakDecision::DropSilent),
         (false, false, true, SpeakDecision::DropForSkip),
     ] {
-        let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), enabled);
+        let ctrl = VoiceOutputController::ready(Arc::new(NoVoiceOutput), enabled);
         if skip_before_start {
             ctrl.skip().await;
         }
@@ -93,7 +93,7 @@ async fn should_speak_decision() {
 #[tokio::test]
 async fn toggle_off_then_on_resumes_speak_decision() {
     let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::new(inner.clone(), true);
+    let ctrl = VoiceOutputController::ready(inner.clone(), true);
     let start = ctrl.current_epoch();
     ctrl.set_enabled(false).await;
     assert_eq!(ctrl.should_speak(start), SpeakDecision::DropSilent);
@@ -104,7 +104,7 @@ async fn toggle_off_then_on_resumes_speak_decision() {
 
 #[tokio::test]
 async fn speaking_is_raised_while_any_guard_is_alive() {
-    let ctrl = VoiceOutputController::new(Arc::new(NoVoiceOutput), true);
+    let ctrl = VoiceOutputController::ready(Arc::new(NoVoiceOutput), true);
     let mut speaking = ctrl.subscribe_speaking();
     assert!(!ctrl.is_speaking());
     assert!(!*speaking.borrow_and_update());
@@ -122,4 +122,17 @@ async fn speaking_is_raised_while_any_guard_is_alive() {
     drop(second);
     assert!(!ctrl.is_speaking());
     assert!(!*speaking.borrow_and_update());
+}
+
+#[tokio::test]
+async fn output_starts_unready_and_skip_still_advances_the_epoch() {
+    let ctrl = VoiceOutputController::new(true);
+    assert!(ctrl.output().is_err());
+    ctrl.skip().await;
+    assert_eq!(ctrl.current_epoch(), 1);
+
+    let inner = Arc::new(RecordingOutput::default());
+    ctrl.set_output(Readiness::Ready(inner.clone()));
+    ctrl.skip().await;
+    assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
 }

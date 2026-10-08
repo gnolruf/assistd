@@ -12,7 +12,6 @@ use tokio_util::task::TaskTracker;
 use tracing::info;
 
 use super::embed_init::EmbeddingSubsystem;
-use super::listen_dispatcher::ListenDispatcherHandles;
 use super::mcp_init::McpSubsystem;
 use super::memory_init::MemorySubsystem;
 use super::wm_init::WindowSubsystem;
@@ -96,7 +95,8 @@ pub(super) struct IntakeTasks {
     pub(super) hotkey: Option<JoinHandle<()>>,
     pub(super) gpu_monitor: Option<JoinHandle<()>>,
     pub(super) idle_monitor: Option<JoinHandle<()>>,
-    pub(super) listen: Option<ListenDispatcherHandles>,
+    /// Also runs the listen dispatcher once voice is up.
+    pub(super) warmup: JoinHandle<()>,
 }
 
 pub(super) fn spawn_signal_handler(shutdown_tx: &watch::Sender<bool>) {
@@ -137,12 +137,9 @@ async fn join_intake_tasks(tasks: IntakeTasks) {
     for handle in [tasks.hotkey, tasks.gpu_monitor, tasks.idle_monitor]
         .into_iter()
         .flatten()
+        .chain([tasks.warmup])
     {
         let _ = handle.await;
-    }
-    if let Some(listen) = tasks.listen {
-        let _ = listen.forwarder.await;
-        let _ = listen.presence_gate.await;
     }
 }
 

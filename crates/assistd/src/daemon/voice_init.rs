@@ -1,48 +1,38 @@
-//! Voice subsystem wiring for the daemon.
+//! Voice startup for the daemon: brings up Piper and Whisper behind a
+//! [`VoiceManager`] that already serves requests.
 
 use std::sync::Arc;
 
 use assistd_core::{
-    Config, ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager,
-    VoiceInput, VoiceOutput,
+    Config, ContinuousListener, NoContinuousListener, PresenceManager, VoiceCapture, VoiceManager,
+    VoiceOutput,
 };
+use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, QueueConfig,
-    QueuedTranscriber, Transcriber, VoiceOutputController, WhisperTranscriberBuilder,
-    build_cpu_fallback,
+    QueuedTranscriber, Transcriber, WhisperTranscriberBuilder, build_cpu_fallback,
 };
 use tokio::sync::watch;
 use tracing::info;
 
 use super::voice_probe::PresenceGpuProbe;
 
-pub(super) struct VoiceSubsystem {
-    pub input: Arc<dyn VoiceInput>,
-    pub listener: Arc<dyn ContinuousListener>,
-    pub output: Arc<VoiceOutputController>,
+/// Start speech output, then capture, recording on `voice` whether each
+/// came up or why it is unavailable.
+pub(super) async fn init(voice: &VoiceManager, config: &Config, presence: &Arc<PresenceManager>) {
+    voice.speech().set_output(init_output(config).await);
+    let speaking = voice.speech().subscribe_speaking();
+    voice.set_capture(init_capture(config, presence, speaking).await);
 }
 
-/// Every handle degrades to a no-op when its feature is disabled or
-/// fails to initialise.
-pub(super) async fn init(config: &Config, presence: &Arc<PresenceManager>) -> VoiceSubsystem {
-    let output_inner = init_output(config).await;
-    let output = VoiceOutputController::new(output_inner, config.voice.synthesis.enabled);
-    let (input, listener) = init_input(config, presence, output.subscribe_speaking()).await;
-    VoiceSubsystem {
-        input,
-        listener,
-        output,
-    }
-}
-
-async fn init_input(
+async fn init_capture(
     config: &Config,
     presence: &Arc<PresenceManager>,
     output_speaking: watch::Receiver<bool>,
-) -> (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) {
+) -> Readiness<VoiceCapture> {
     if !config.voice.enabled {
         info!("voice: disabled in config (voice.enabled = false)");
-        return disabled_input();
+        return Readiness::Unavailable("disabled in config (voice.enabled = false)".into());
     }
 
     info!(
@@ -56,7 +46,7 @@ async fn init_input(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("voice input failed to initialize: {e:#}; PTT commands will error");
-            return disabled_input();
+            return Readiness::Unavailable(format!("Whisper failed to initialize: {e:#}").into());
         }
     };
     let is_gpu = primary.is_gpu();
@@ -78,7 +68,10 @@ async fn init_input(
         info!("voice.continuous: disabled in config");
         Arc::new(NoContinuousListener::new())
     };
-    (Arc::new(mic), listener)
+    Readiness::Ready(VoiceCapture {
+        input: Arc::new(mic),
+        listener,
+    })
 }
 
 /// With the gate off and no echo cancellation, spoken replies come back
@@ -93,13 +86,6 @@ fn warn_if_ungated_playback(config: &Config) {
          echo-cancelled mic source the daemon will answer its own speech \
          (see docs/voice/echo-cancellation.md)"
     );
-}
-
-fn disabled_input() -> (Arc<dyn VoiceInput>, Arc<dyn ContinuousListener>) {
-    (
-        Arc::new(NoVoiceInput::new()),
-        Arc::new(NoContinuousListener::new()),
-    )
 }
 
 /// Wrap a GPU transcriber so it falls back to CPU while the GPU is busy;
@@ -145,10 +131,12 @@ fn with_cpu_fallback(
     ))
 }
 
-async fn init_output(config: &Config) -> Arc<dyn VoiceOutput> {
+async fn init_output(config: &Config) -> Readiness<Arc<dyn VoiceOutput>> {
     if !config.voice.synthesis.enabled {
         info!("voice.synthesis: disabled in config (voice.synthesis.enabled = false)");
-        return Arc::new(NoVoiceOutput) as Arc<dyn VoiceOutput>;
+        return Readiness::Unavailable(
+            "disabled in config (voice.synthesis.enabled = false)".into(),
+        );
     }
     info!(
         "voice.synthesis: starting Piper ({})",
@@ -157,11 +145,11 @@ async fn init_output(config: &Config) -> Arc<dyn VoiceOutput> {
     match PiperVoiceOutput::start(config.voice.synthesis.clone()).await {
         Ok(p) => {
             info!("voice.synthesis: Piper ready");
-            Arc::new(p) as Arc<dyn VoiceOutput>
+            Readiness::Ready(Arc::new(p))
         }
         Err(e) => {
             tracing::warn!("voice.synthesis failed to initialize: {e:#}; speech output disabled");
-            Arc::new(NoVoiceOutput) as Arc<dyn VoiceOutput>
+            Readiness::Unavailable(format!("Piper failed to start: {e:#}").into())
         }
     }
 }

@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, VoiceCaptureState};
-use assistd_voice::VoiceInputError;
+use assistd_voice::VoiceCapture;
 
 use super::query::{TurnOrigin, finish_interrupted_before_start};
 use super::runtime::PttCapture;
@@ -21,8 +21,9 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        self.subsystems.voice_output.interrupt().await;
-        if self.subsystems.listener.is_active() {
+        self.subsystems.voice.speech().interrupt().await;
+        let capture = self.ready_capture(&id, "ptt_start", &tx).await?;
+        if capture.listener.is_active() {
             send_error(
                 &tx,
                 id,
@@ -31,7 +32,7 @@ impl AppState {
             .await;
             return Ok(());
         }
-        match self.subsystems.voice.start_recording().await {
+        match capture.input.start_recording().await {
             Ok(()) => {
                 let capture = PttCapture {
                     warmup: self.spawn_presence_warmup(),
@@ -92,7 +93,7 @@ impl AppState {
                     })
                     .await;
                 send_error(&tx, id, format!("ptt_stop failed: {e}")).await;
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -125,7 +126,8 @@ impl AppState {
         &self,
         warmup: Option<JoinHandle<()>>,
         cancel: &CancellationToken,
-    ) -> Result<String, VoiceInputError> {
+    ) -> Result<String, DispatchError> {
+        let capture = self.subsystems.voice.capture()?;
         let warmed_or_cancelled = async {
             if let Some(warmup) = warmup {
                 tokio::select! {
@@ -135,11 +137,9 @@ impl AppState {
                 }
             }
         };
-        let (transcription, ()) = tokio::join!(
-            self.subsystems.voice.stop_and_transcribe(),
-            warmed_or_cancelled
-        );
-        transcription
+        let (transcription, ()) =
+            tokio::join!(capture.input.stop_and_transcribe(), warmed_or_cancelled);
+        Ok(transcription?)
     }
 
     fn spawn_presence_warmup(&self) -> JoinHandle<()> {
@@ -165,7 +165,8 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        if self.subsystems.voice.state() != VoiceCaptureState::Idle {
+        let capture = self.ready_capture(&id, "listen_start", &tx).await?;
+        if capture.input.state() != VoiceCaptureState::Idle {
             send_error(
                 &tx,
                 id,
@@ -174,7 +175,7 @@ impl AppState {
             .await;
             return Ok(());
         }
-        match self.subsystems.listener.start().await {
+        match capture.listener.start().await {
             Ok(()) => {
                 let _ = tx
                     .send(Event::ListenState {
@@ -197,7 +198,11 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        match self.subsystems.listener.stop().await {
+        let stopped = match self.subsystems.voice.capture() {
+            Ok(capture) => capture.listener.stop().await,
+            Err(_) => Ok(()),
+        };
+        match stopped {
             Ok(()) => {
                 let _ = tx
                     .send(Event::ListenState {
@@ -220,7 +225,7 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        if self.subsystems.listener.is_active() {
+        if self.subsystems.voice.listening() {
             self.handle_listen_stop(id, tx).await
         } else {
             self.handle_listen_start(id, tx).await
@@ -232,7 +237,7 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) {
-        let active = self.subsystems.listener.is_active();
+        let active = self.subsystems.voice.listening();
         let _ = tx
             .send(Event::ListenState {
                 id: id.clone(),
@@ -243,8 +248,9 @@ impl AppState {
     }
 
     pub(super) async fn handle_voice_toggle(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        let new_state = !self.subsystems.voice_output.enabled();
-        self.subsystems.voice_output.set_enabled(new_state).await;
+        let speech = self.subsystems.voice.speech();
+        let new_state = !speech.enabled();
+        speech.set_enabled(new_state).await;
         let _ = tx
             .send(Event::VoiceOutputState {
                 id: id.clone(),
@@ -255,11 +261,12 @@ impl AppState {
     }
 
     pub(super) async fn handle_voice_skip(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        self.subsystems.voice_output.skip().await;
+        let speech = self.subsystems.voice.speech();
+        speech.skip().await;
         let _ = tx
             .send(Event::VoiceOutputState {
                 id: id.clone(),
-                enabled: self.subsystems.voice_output.enabled(),
+                enabled: speech.enabled(),
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
@@ -273,7 +280,7 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) {
         self.runtime.interrupt_turns();
-        self.subsystems.voice_output.skip().await;
+        self.subsystems.voice.speech().skip().await;
         let _ = tx.send(Event::Done { id }).await;
     }
 
@@ -282,12 +289,31 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) {
+        let voice = &self.subsystems.voice;
         let _ = tx
             .send(Event::VoiceOutputState {
                 id: id.clone(),
-                enabled: self.subsystems.voice_output.enabled(),
+                enabled: voice.speech().enabled(),
             })
             .await;
+        let _ = tx.send(voice.readiness_event(id.clone())).await;
         let _ = tx.send(Event::Done { id }).await;
+    }
+
+    /// The capture handles, or an error event on `tx` saying why `request`
+    /// cannot use them.
+    async fn ready_capture(
+        &self,
+        id: &str,
+        request: &str,
+        tx: &mpsc::Sender<Event>,
+    ) -> Result<VoiceCapture, DispatchError> {
+        match self.subsystems.voice.capture() {
+            Ok(capture) => Ok(capture),
+            Err(e) => {
+                send_error(tx, id.to_string(), format!("{request} failed: {e}")).await;
+                Err(e.into())
+            }
+        }
     }
 }

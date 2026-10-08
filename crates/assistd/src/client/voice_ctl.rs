@@ -28,12 +28,19 @@ impl VoiceCtlAction {
 pub(crate) async fn run(action: VoiceCtlAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
-        if let Event::VoiceOutputState { enabled, .. } = event {
-            writeln!(
+        match event {
+            Event::VoiceOutputState { enabled, .. } => writeln!(
                 io::stdout(),
                 "voice-output: {}",
                 if *enabled { "on" } else { "off" }
-            )?;
+            )?,
+            Event::VoiceReadiness {
+                capture, speech, ..
+            } => {
+                writeln!(io::stdout(), "voice-input: {capture}")?;
+                writeln!(io::stdout(), "speech: {speech}")?;
+            }
+            _ => {}
         }
         Ok(())
     })

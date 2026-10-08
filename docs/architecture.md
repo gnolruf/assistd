@@ -78,7 +78,7 @@ the vocabulary established here.
 | `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
-| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, and the `ChildServer` supervisor. | none                                                                             |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | `utils`                                                                          |
 
@@ -107,9 +107,13 @@ always includes the daemon and the IPC client subcommands; `tray` and
 
 ### LLM lifecycle (`assistd-llm` ↔ llama-server)
 
-The daemon spawns `llama-server` as a child process at startup, with
-the bind address, context length and GPU layer count taken from
-`[model]` in the config, plus any `custom_args` (parsed and checked at
+The daemon opens its socket first and then spawns `llama-server` as a
+child process in the background, reporting `PresenceState::Waking` until
+the model has loaded (queries wait for it; requests that need no model
+are served at once). Voice initialises after the model, so a stalled
+Whisper or Piper download never holds up the socket. The server takes
+its bind address, context length and GPU layer count from `[model]` in
+the config, plus any `custom_args` (parsed and checked at
 config load, never run through a shell). Inherited `LLAMA_ARG_*` and
 `LLAMA_API_KEY` variables are stripped, so the checked command line is
 the server's only source of options. `assistd-utils`'s `ChildServer`
@@ -132,7 +136,8 @@ Vision support is detected dynamically: `probe_capabilities_routed()` calls
 `GET /props` on the running server to learn whether the model has a
 vision projector. The `VisionGate` flips on if so, allowing the `see`
 and `screenshot` commands to attach images to the next turn. A
-`VisionRevalidator` re-probes at the start of the first query after
+`VisionRevalidator` probes once the model first loads, then re-probes at
+the start of the first query after
 the weights may have been reloaded (any presence transition, or a
 supervisor restart of the child), and again after any failed probe,
 so the gate tracks what is actually loaded without probing on every
@@ -233,6 +238,15 @@ supervisor is `Ready` with a live child; a row refused in the
 meantime stays unindexed until `assistd memory reindex` picks it up.
 
 ### Voice (`assistd-voice`)
+
+`VoiceManager` owns voice for the daemon's lifetime. Capture (push-to-talk
+input and the continuous listener) and speech output each start as
+`Readiness::Starting` and become `Ready` or `Unavailable(reason)` once the
+background warmup brings up Whisper and Piper, so voice requests during
+startup or after a failed load are refused with the reason. `GetVoiceState`
+reports both as an `Event::VoiceReadiness`, which is also broadcast once
+voice startup finishes; the chat shows `voice: starting` and the tray
+tooltip shows each component's state.
 
 Push-to-talk: the daemon receives `Request::PttStart` from a client
 or compositor binding, opens the configured microphone via cpal, and

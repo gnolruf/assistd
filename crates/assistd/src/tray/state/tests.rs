@@ -215,3 +215,25 @@ fn configured_icons_replace_the_defaults_except_for_config_errors() {
         "dialog-error"
     );
 }
+
+#[test]
+fn voice_summary_follows_readiness_until_disconnect() {
+    let mut tracker = TrayTracker::default();
+    tracker.set_connected();
+    assert_eq!(tracker.voice_summary(), None, "not reported yet");
+
+    tracker.ingest(&Event::VoiceReadiness {
+        id: "v".into(),
+        capture: ComponentReadiness::Starting,
+        speech: ComponentReadiness::Unavailable {
+            reason: "disabled in config".into(),
+        },
+    });
+    assert_eq!(
+        tracker.voice_summary().as_deref(),
+        Some("voice input: starting · speech: unavailable (disabled in config)")
+    );
+
+    tracker.set_disconnected();
+    assert_eq!(tracker.voice_summary(), None);
+}

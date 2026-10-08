@@ -390,8 +390,8 @@ fn spinner_char_cycles() {
     assert_ne!(c0, c1);
 }
 
-#[test]
-fn presence_event_updates_state() {
+#[tokio::test]
+async fn presence_event_updates_state() {
     let (mut app, _rx) = test_app();
     assert_eq!(app.presence_state, None);
     app.on_chat_event(status(Event::Presence {
@@ -404,6 +404,25 @@ fn presence_event_updates_state() {
         state: PresenceState::Active,
     }));
     assert_eq!(app.presence_state, Some(PresenceState::Active));
+}
+
+#[tokio::test]
+async fn capabilities_are_refetched_only_when_the_model_comes_up() {
+    let (mut app, _rx) = test_app();
+    let presence = |state| {
+        status(Event::Presence {
+            id: "p".into(),
+            state,
+        })
+    };
+    app.on_chat_event(presence(PresenceState::Active));
+    assert!(app.tasks.is_empty(), "first report is not a transition");
+    app.on_chat_event(presence(PresenceState::Active));
+    assert!(app.tasks.is_empty(), "still active");
+    app.on_chat_event(presence(PresenceState::Waking));
+    assert!(app.tasks.is_empty(), "not up yet");
+    app.on_chat_event(presence(PresenceState::Active));
+    assert_eq!(app.tasks.len(), 1, "came up from waking");
 }
 
 fn draw(app: &mut App, width: u16, height: u16) {

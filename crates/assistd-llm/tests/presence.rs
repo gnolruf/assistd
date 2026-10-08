@@ -26,8 +26,7 @@ use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::{
-    AppState, Config, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceError,
-    PresenceManager, PresenceState, ToolRegistry, VoiceOutputController,
+    AppState, Config, PresenceError, PresenceManager, PresenceState, ToolRegistry, VoiceManager,
 };
 use assistd_ipc::{Event, Request};
 use assistd_llm::chat::conversation::Summarizer;
@@ -516,9 +515,7 @@ impl Daemon {
             backend,
             Arc::clone(manager),
             Arc::new(ToolRegistry::default()),
-            Arc::new(NoVoiceInput::new()),
-            Arc::new(NoContinuousListener::new()),
-            VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
+            VoiceManager::new(true),
         ));
         let dir = tempfile::tempdir().unwrap();
         let sock_path = dir.path().join("assistd.sock");
@@ -763,4 +760,49 @@ async fn requests_wait_out_a_contended_llama_slot_instead_of_failing() {
         contender.await.unwrap();
     }
     manager.sleep().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_aborts_a_background_wake_and_sleep_still_runs() {
+    init_tracing();
+    let port = grab_port().await;
+    let fake = FakeLlama::new("never-ready");
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let manager = PresenceManager::new_sleeping(
+        model_spec(&fake, port),
+        TimeoutsConfig::default(),
+        shutdown_rx,
+    )
+    .expect("control client");
+    assert_eq!(manager.state(), PresenceState::Sleeping);
+
+    let mut states = manager.subscribe();
+    let wake = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.wake().await }
+    });
+    states
+        .wait_for(|s| *s == PresenceState::Waking)
+        .await
+        .expect("presence dropped");
+
+    shutdown_tx.send_replace(true);
+    let woke = timeout(Duration::from_secs(10), wake)
+        .await
+        .expect("wake ignored the daemon shutdown")
+        .expect("wake task panicked");
+    assert!(
+        woke.is_err(),
+        "an aborted cold start must not report Active"
+    );
+
+    timeout(Duration::from_secs(10), manager.sleep())
+        .await
+        .expect("sleep hung after the aborted wake")
+        .expect("sleep after the aborted wake");
+    assert_eq!(manager.state(), PresenceState::Sleeping);
+    assert!(
+        wait_for_port_closed(port, Duration::from_secs(10)).await,
+        "the aborted cold start left llama-server running"
+    );
 }

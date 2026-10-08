@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::{
-    Component, ContinuousListener, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput,
+    Component, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput, VoiceManager,
     VoiceOutputController, spawn_supervised,
 };
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
@@ -82,8 +82,7 @@ impl Binding {
         match self {
             Binding::Presence => subsystems.presence.is_some(),
             Binding::Voice => true,
-            Binding::Listen => subsystems.listener.is_some(),
-            Binding::Toggle | Binding::Skip => subsystems.voice_output.is_some(),
+            Binding::Listen | Binding::Toggle | Binding::Skip => subsystems.voice.is_some(),
         }
     }
 }
@@ -104,9 +103,8 @@ pub(crate) fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result
 /// its hotkey unregistered.
 pub(crate) struct Subsystems {
     pub presence: Option<Arc<PresenceManager>>,
-    pub voice: Arc<dyn VoiceInput>,
-    pub listener: Option<Arc<dyn ContinuousListener>>,
-    pub voice_output: Option<Arc<VoiceOutputController>>,
+    pub ptt: Arc<dyn VoiceInput>,
+    pub voice: Option<Arc<VoiceManager>>,
 }
 
 /// Spawn the hotkey listener. `None` when no hotkey is configured, the
@@ -267,30 +265,30 @@ fn on_hotkey(
             let (started_tx, started_rx) = oneshot::channel();
             *ptt_started = Some(started_rx);
             handlers.spawn(begin_push_to_talk(
-                subsystems.voice.clone(),
-                subsystems.voice_output.clone(),
+                subsystems.ptt.clone(),
+                subsystems
+                    .voice
+                    .as_ref()
+                    .map(|voice| voice.speech().clone()),
                 started_tx,
             ));
         }
         Binding::Voice => {
-            handlers.spawn(end_push_to_talk(
-                subsystems.voice.clone(),
-                ptt_started.take(),
-            ));
+            handlers.spawn(end_push_to_talk(subsystems.ptt.clone(), ptt_started.take()));
         }
         Binding::Listen if pressed => {
-            if let Some(listener) = subsystems.listener.clone() {
-                handlers.spawn(toggle_listening(listener));
+            if let Some(voice) = subsystems.voice.clone() {
+                handlers.spawn(toggle_listening(voice));
             }
         }
         Binding::Toggle if pressed => {
-            if let Some(ctrl) = subsystems.voice_output.clone() {
-                handlers.spawn(toggle_voice_output(ctrl));
+            if let Some(voice) = &subsystems.voice {
+                handlers.spawn(toggle_voice_output(voice.speech().clone()));
             }
         }
         Binding::Skip if pressed => {
-            if let Some(ctrl) = subsystems.voice_output.clone() {
-                handlers.spawn(skip_voice_output(ctrl));
+            if let Some(voice) = &subsystems.voice {
+                handlers.spawn(skip_voice_output(voice.speech().clone()));
             }
         }
         Binding::Presence | Binding::Listen | Binding::Toggle | Binding::Skip => {}
@@ -355,7 +353,14 @@ async fn end_push_to_talk(
     }
 }
 
-async fn toggle_listening(listener: Arc<dyn ContinuousListener>) {
+async fn toggle_listening(voice: Arc<VoiceManager>) {
+    let listener = match voice.capture() {
+        Ok(capture) => capture.listener,
+        Err(e) => {
+            warn!(target: "assistd::hotkey", "continuous-listen toggle failed: {e}");
+            return;
+        }
+    };
     let result = if listener.is_active() {
         listener.stop().await.map(|()| false)
     } else {
@@ -530,9 +535,8 @@ mod tests {
         let voice = Arc::new(CallOrderVoice::default());
         let subsystems = Subsystems {
             presence: None,
-            voice: voice.clone(),
-            listener: None,
-            voice_output: None,
+            ptt: voice.clone(),
+            voice: None,
         };
         let mut handlers = JoinSet::new();
         let mut ptt_started = None;

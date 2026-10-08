@@ -15,7 +15,9 @@ use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{PersistedMessage, SessionId, TurnId};
 use assistd_tools::{Attachment, inherit_confirm_router};
-use assistd_voice::{SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutputController};
+use assistd_voice::{
+    SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
+};
 
 use super::context::combine_context_blocks;
 use super::wire::decode_wire_attachments;
@@ -273,8 +275,9 @@ impl AppState {
         let agent_task = self.spawn_agent_task(text, attachments, llm_tx, cancel.clone());
 
         let (speech, speech_rx) = self.speech_pipeline();
-        self.subsystems.voice_output.skip().await;
-        let start_epoch = self.subsystems.voice_output.current_epoch();
+        let voice_output = self.subsystems.voice.speech();
+        voice_output.skip().await;
+        let start_epoch = voice_output.current_epoch();
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
         let done_emitted = self
@@ -491,7 +494,7 @@ impl AppState {
             "speech_worker",
             Component::Voice,
             run_speech_worker(
-                self.subsystems.voice_output.clone(),
+                self.subsystems.voice.speech().clone(),
                 self.runtime.events_bus().clone(),
                 id,
                 start_epoch,
@@ -659,6 +662,9 @@ async fn run_speech_worker(
     while let Some(sentence) = speech_rx.recv().await {
         match voice_output.should_speak(start_epoch) {
             SpeakDecision::Speak => {
+                let Ok(output) = voice_output.output() else {
+                    continue;
+                };
                 if speaking.is_none() {
                     let _ = events_bus.send(Event::SpeakingState {
                         id: id.clone(),
@@ -666,12 +672,14 @@ async fn run_speech_worker(
                     });
                     speaking = Some(voice_output.begin_speaking());
                 }
-                speak_sentence(&voice_output, sentence, start_epoch).await;
+                speak_sentence(&voice_output, output.as_ref(), sentence, start_epoch).await;
             }
             SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {}
         }
     }
-    if let Err(e) = voice_output.inner().wait_idle().await {
+    if let Ok(output) = voice_output.output()
+        && let Err(e) = output.wait_idle().await
+    {
         debug!(
             target: "assistd::voice",
             error = %e,
@@ -688,9 +696,14 @@ async fn run_speech_worker(
 
 /// Speak one sentence, then cancel playback if a skip landed meanwhile,
 /// since `speak()` may append audio after the skip cleared the queue.
-async fn speak_sentence(voice_output: &VoiceOutputController, sentence: String, start_epoch: u64) {
+async fn speak_sentence(
+    voice_output: &VoiceOutputController,
+    output: &dyn VoiceOutput,
+    sentence: String,
+    start_epoch: u64,
+) {
     let preview: String = sentence.chars().take(SENTENCE_PREVIEW_CHARS).collect();
-    if let Err(e) = voice_output.inner().speak(sentence).await {
+    if let Err(e) = output.speak(sentence).await {
         warn!(
             target: "assistd::voice",
             error = %e,
@@ -702,7 +715,7 @@ async fn speak_sentence(voice_output: &VoiceOutputController, sentence: String, 
         voice_output.should_speak(start_epoch),
         SpeakDecision::DropForSkip
     ) {
-        voice_output.inner().cancel().await;
+        output.cancel().await;
     }
 }
 

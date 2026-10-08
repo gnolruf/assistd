@@ -17,10 +17,7 @@ use tokio::task::JoinHandle;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, Config, ModelConfig, TimeoutsConfig};
-use assistd_core::{
-    AppState, NoContinuousListener, NoVoiceInput, NoVoiceOutput, PresenceManager, PresenceState,
-    ToolRegistry, VoiceOutputController,
-};
+use assistd_core::{AppState, PresenceManager, PresenceState, ToolRegistry, VoiceManager};
 use assistd_ipc::{Event, Request};
 use assistd_llm::{LlamaChatClient, LlmBackend};
 
@@ -95,9 +92,7 @@ async fn build_running_daemon(
         Arc::new(client) as Arc<dyn LlmBackend>,
         manager.clone(),
         Arc::new(ToolRegistry::default()),
-        Arc::new(NoVoiceInput::new()),
-        Arc::new(NoContinuousListener::new()),
-        VoiceOutputController::new(Arc::new(NoVoiceOutput), true),
+        VoiceManager::new(true),
     ));
 
     let dir = tempfile::tempdir().unwrap();
