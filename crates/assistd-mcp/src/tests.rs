@@ -132,60 +132,91 @@ async fn adapter_cuts_long_results_and_spills_the_rest() {
     );
 }
 
+fn text_envelope_of(output: &str) -> Value {
+    json!({
+        "type": "text",
+        "output": output,
+        "exit_code": 0,
+        "duration_ms": 42,
+        "truncated": false,
+    })
+}
+
 #[test]
-fn text_and_empty_results_render_as_text_envelopes() {
-    let text = |output: &str| {
-        json!({
-            "type": "text",
-            "output": output,
-            "exit_code": 0,
-            "duration_ms": 42,
-            "truncated": false,
-        })
-    };
+fn text_only_results_join_every_block() {
     let cases = [
         (
             json!({"content": [{"type": "text", "text": "hello"}, {"type": "text", "text": "x"}]}),
-            text("hello"),
+            "hello\nx",
         ),
         (
             json!({"content": [{"type": "text", "text": "no such file"}], "isError": true}),
-            text("[mcp tool error] no such file"),
+            "[mcp tool error] no such file",
         ),
-        (json!({"content": []}), text("")),
+        (json!({"content": []}), ""),
+        (
+            json!({"content": [], "structuredContent": {"temp": 21}}),
+            r#"{"temp":21}"#,
+        ),
+        (
+            json!({"content": [{"type": "text", "text": "21"}], "structuredContent": {"temp": 21}}),
+            "21",
+        ),
     ];
     for (result, expected) in cases {
         assert_eq!(
             tool_result_to_json(call_result(result), 42, &unlimited()),
-            expected
+            text_envelope_of(expected)
         );
     }
 }
 
 #[test]
-fn image_and_other_results_render_as_their_own_envelopes() {
-    let image = call_result(json!({
-        "content": [{"type": "image", "mimeType": "image/png", "data": "3q2+7w=="}]
+fn mixed_results_keep_every_block_and_collect_images() {
+    let result = call_result(json!({
+        "content": [
+            {"type": "text", "text": "took screenshot"},
+            {"type": "image", "mimeType": "image/png", "data": "3q2+7w=="},
+            {"type": "resource_link", "uri": "file:///a.txt", "name": "a.txt"},
+            {"type": "image", "mimeType": "image/jpeg", "data": "AAAA"},
+        ]
     }));
+    let envelope = tool_result_to_json(result, 42, &unlimited());
+    let output = envelope["output"].as_str().unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    let [text, png, link, jpeg] = lines.as_slice() else {
+        panic!("expected four sections: {output}");
+    };
+    assert_eq!(*text, "took screenshot");
+    assert_eq!(*png, "(image: image/png)");
     assert_eq!(
-        tool_result_to_json(image, 42, &unlimited()),
-        json!({
-            "type": "image",
-            "output": "(image: image/png)",
-            "exit_code": 0,
-            "duration_ms": 42,
-            "truncated": false,
-            "attachments": [{"type": "image", "mime": "image/png", "data": "3q2+7w=="}],
-        })
+        serde_json::from_str::<Value>(link).unwrap()["uri"],
+        "file:///a.txt"
     );
+    assert_eq!(*jpeg, "(image: image/jpeg)");
+    assert_eq!(
+        envelope["attachments"],
+        json!([
+            {"type": "image", "mime": "image/png", "data": "3q2+7w=="},
+            {"type": "image", "mime": "image/jpeg", "data": "AAAA"},
+        ])
+    );
+}
 
-    let link = call_result(json!({
-        "content": [{"type": "resource_link", "uri": "file:///a.txt", "name": "a.txt"}]
+#[test]
+fn error_flag_applies_when_the_first_block_is_not_text() {
+    let result = call_result(json!({
+        "content": [
+            {"type": "image", "mimeType": "image/png", "data": "AAAA"},
+            {"type": "text", "text": "page crashed"},
+        ],
+        "isError": true,
     }));
-    let envelope = tool_result_to_json(link, 42, &unlimited());
-    assert_eq!(envelope["type"], "json");
-    assert_eq!(envelope["value"]["uri"], "file:///a.txt");
-    assert_eq!(envelope["output"], envelope["value"].to_string());
+    let envelope = tool_result_to_json(result, 42, &unlimited());
+    assert_eq!(
+        envelope["output"],
+        "[mcp tool error] (image: image/png)\npage crashed"
+    );
 }
 
 #[tokio::test]
