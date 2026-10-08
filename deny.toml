@@ -52,6 +52,13 @@ allow = [
 name = "epaint_default_fonts"
 allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 
+[[licenses.exceptions]]
+# option-ext (via dirs → dirs-sys) is MPL-2.0: file-level copyleft that
+# only binds modifications to its own source files. We use it unmodified,
+# so it doesn't constrain the Apache-2.0 code we distribute.
+name = "option-ext"
+allow = ["MPL-2.0"]
+
 # ---------------------------------------------------------------------------
 # Bans / multiple-version check.
 # ---------------------------------------------------------------------------
