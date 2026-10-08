@@ -31,8 +31,9 @@ fn every_section_may_be_declared_empty() {
 [embedding]
 [mcp]
 [tray]
-[tray.popup]
-[tray.popup.wake_on]
+[tray.icons]
+[tray.notifications]
+[tray.notifications.wake_on]
 ";
     let cfg: Config = toml::from_str(toml_src).expect("empty sections must parse");
     assert_eq!(cfg, Config::default());
@@ -43,6 +44,13 @@ fn deleted_sections_are_ignored_and_reported() {
     let (cfg, unknown) = parse_reporting_unknown_keys("[remote]\nport = 8384\n\n[timeouts]\n");
     assert_eq!(cfg, Config::default());
     assert_eq!(unknown, ["remote", "timeouts"]);
+}
+
+#[test]
+fn replaced_tray_popup_section_is_reported() {
+    let (cfg, unknown) = parse_reporting_unknown_keys("[tray.popup]\nanchor = \"bottom_right\"\n");
+    assert_eq!(cfg, Config::default());
+    assert_eq!(unknown, ["tray.popup"]);
 }
 
 #[test]
@@ -259,4 +267,16 @@ fn parse_reporting_unknown_keys(toml_src: &str) -> (Config, Vec<String>) {
     let raw: toml::Table = toml::from_str(toml_src).expect("config must be valid TOML");
     let unknown = cfg.unknown_keys(&raw).expect("config must serialize");
     (cfg, unknown)
+}
+
+#[test]
+fn empty_tray_icon_names_are_rejected() {
+    let cfg: Config = toml::from_str("[tray.icons]\nactive = \"\"\ngenerating = \" \"\n")
+        .expect("config must parse");
+    let message = cfg
+        .validate()
+        .expect_err("empty icon names must not validate")
+        .to_string();
+    assert!(message.contains("tray.icons.active"), "{message}");
+    assert!(message.contains("tray.icons.generating"), "{message}");
 }

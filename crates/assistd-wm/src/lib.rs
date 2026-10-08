@@ -343,93 +343,6 @@ pub fn is_terminal_class(class: &str) -> bool {
         .any(|known| known.eq_ignore_ascii_case(class))
 }
 
-/// How the compositor matches the window to act on. Becomes the
-/// `[key="value"]` prefix on the IPC command.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PlacementCriteria {
-    /// Wayland `app_id`; i3 rewrites this to a title match.
-    AppId(String),
-    /// X11 `WM_CLASS`.
-    Class(String),
-    /// Exact `_NET_WM_NAME` / `WM_NAME`.
-    Title(String),
-    ConId(WindowId),
-}
-
-/// Corner of the focused output a placed window anchors to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AnchorCorner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-    Center,
-}
-
-/// Rectangle in global screen coordinates and logical pixels, with
-/// `(x, y)` the top-left corner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Compositor window lifecycle event.
-#[derive(Debug, Clone)]
-pub enum WindowEvent {
-    /// A window was mapped (i3/sway `window::new`).
-    Opened {
-        id: WindowId,
-        title: Option<String>,
-        class: Option<String>,
-        app_id: Option<String>,
-    },
-    /// A window's title changed.
-    TitleChanged {
-        id: WindowId,
-        new_title: Option<String>,
-    },
-    /// A window was unmapped or destroyed.
-    Closed { id: WindowId },
-}
-
-impl WindowEvent {
-    /// The window id if this is an `Opened` event matching `criteria`.
-    pub fn matches_opened(&self, criteria: &PlacementCriteria) -> Option<WindowId> {
-        let Self::Opened {
-            id,
-            title,
-            class,
-            app_id,
-        } = self
-        else {
-            return None;
-        };
-        let matched = match criteria {
-            PlacementCriteria::Title(want) => title.as_deref() == Some(want.as_str()),
-            PlacementCriteria::Class(want) => class.as_deref() == Some(want.as_str()),
-            PlacementCriteria::AppId(want) => app_id.as_deref() == Some(want.as_str()),
-            PlacementCriteria::ConId(want) => id == want,
-        };
-        matched.then_some(*id)
-    }
-}
-
-/// Where to place a floating window: a corner anchor, offsets from
-/// it, and the target size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlacementAnchor {
-    pub corner: AnchorCorner,
-    /// Positive shifts right, negative left.
-    pub offset_x: i32,
-    /// Positive shifts down, negative up.
-    pub offset_y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
 /// Async interface to a window manager. Each method is one IPC call; one
 /// that times out returns [`WmError::Timeout`] and triggers reconnection.
 #[async_trait]
@@ -470,27 +383,6 @@ pub trait WindowManager: fmt::Debug + Send + Sync + 'static {
     /// cannot.
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
         Err(WmError::Unsupported("output enumeration"))
-    }
-
-    /// Pixel rect of the workspace focused on the active output.
-    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        Err(WmError::Unsupported("focused workspace rect"))
-    }
-
-    /// Scale factor of the focused output; `1.0` when it cannot be
-    /// determined.
-    async fn focused_output_scale(&self) -> WmResult<f64> {
-        Ok(1.0)
-    }
-
-    /// Float, resize, and move the matched window in one IPC payload.
-    /// Criteria matching no window still return `Ok(())`.
-    async fn place_floating(
-        &self,
-        _criteria: &PlacementCriteria,
-        _anchor: PlacementAnchor,
-    ) -> WmResult<()> {
-        Err(WmError::Unsupported("floating placement"))
     }
 
     /// Whether the backend is connected to a compositor.
@@ -537,19 +429,6 @@ impl WindowManager for NoWindowManager {
     }
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
         Err(WmError::Disconnected)
-    }
-    async fn place_floating(
-        &self,
-        _criteria: &PlacementCriteria,
-        _anchor: PlacementAnchor,
-    ) -> WmResult<()> {
-        Err(WmError::Disconnected)
-    }
-    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        Err(WmError::Disconnected)
-    }
-    async fn focused_output_scale(&self) -> WmResult<f64> {
-        Ok(1.0)
     }
     fn is_connected(&self) -> bool {
         false

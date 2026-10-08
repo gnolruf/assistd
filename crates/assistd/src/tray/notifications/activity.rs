@@ -1,28 +1,32 @@
-//! Popup data model and per-turn coalescing.
+//! Notification data model and per-turn coalescing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use assistd_ipc::Event;
 use serde_json::Value;
 
-const FOOTER_ARGS_MAX_CHARS: usize = 80;
-/// The popup renders only the last `BODY_CHARS` codepoints of the reply,
-/// sized to its default 360x120 geometry.
+const TOOL_ARGS_MAX_CHARS: usize = 80;
+/// Tool calls kept per turn, oldest dropped first.
+const MAX_TOOL_CALLS: usize = 3;
+/// Only the last `BODY_CHARS` codepoints of the reply are shown;
+/// notification daemons cut longer text in their own ways.
 const BODY_CHARS: usize = 300;
 
-/// Everything the popup window renders, as one snapshot.
+/// Everything a notification shows, as one snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct PopupState {
+pub(crate) struct ActivityView {
     pub body: String,
-    pub footer: Option<ToolCallLine>,
-    pub activity: PopupActivity,
-    pub visible: bool,
+    /// Oldest first.
+    pub tool_calls: Vec<ToolCallLine>,
+    pub error: Option<String>,
+    /// The latest session title the daemon broadcast.
+    pub title: Option<String>,
+    pub activity: Activity,
 }
 
-/// Coarse activity classification rendered as a one-line status above
-/// the popup body.
+/// What the displayed turn, or the daemon, is doing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) enum PopupActivity {
+pub(crate) enum Activity {
     #[default]
     Idle,
     Streaming,
@@ -31,6 +35,8 @@ pub(crate) enum PopupActivity {
         name: String,
     },
     Listening,
+    Done,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +45,7 @@ enum TurnActivity {
     Thinking,
     RunningTool(String),
     Finished,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,34 +57,55 @@ pub(crate) struct ToolCallLine {
 #[derive(Debug, Clone, Default)]
 struct TurnState {
     body: String,
-    footer: Option<ToolCallLine>,
+    tool_calls: VecDeque<ToolCallLine>,
+    error: Option<String>,
     activity: Option<TurnActivity>,
 }
 
-/// Tracks every signal the popup cares about and produces a
-/// [`PopupState`] snapshot on demand.
+impl TurnState {
+    /// Reply text after tool calls replaces them and the narration before them.
+    fn start_streaming(&mut self) {
+        if !self.tool_calls.is_empty() && self.activity != Some(TurnActivity::Streaming) {
+            self.tool_calls.clear();
+            self.body.clear();
+        }
+        self.activity = Some(TurnActivity::Streaming);
+    }
+}
+
+/// Tracks every signal the notifications care about and produces an
+/// [`ActivityView`] snapshot on demand.
 #[derive(Debug, Default)]
-pub(super) struct PopupTracker {
+pub(super) struct ActivityTracker {
     turns: HashMap<String, TurnState>,
     in_flight: HashSet<String>,
     displayed: Option<String>,
+    session_title: Option<String>,
     listening: bool,
     speaking: HashSet<String>,
 }
 
-impl PopupTracker {
-    pub(super) fn snapshot(&self) -> PopupState {
+impl ActivityTracker {
+    pub(super) fn snapshot(&self) -> ActivityView {
         let displayed_id = self.displayed.as_deref();
         let displayed = displayed_id.and_then(|id| self.turns.get(id));
         let displayed_in_flight = displayed_id.is_some_and(|id| self.in_flight.contains(id));
-        PopupState {
+        ActivityView {
             body: displayed
                 .map(|t| truncate_chars_from_end(&t.body, BODY_CHARS))
                 .unwrap_or_default(),
-            footer: displayed.and_then(|t| t.footer.clone()),
+            tool_calls: displayed
+                .map(|t| t.tool_calls.iter().cloned().collect())
+                .unwrap_or_default(),
+            error: displayed.and_then(|t| t.error.clone()),
+            title: self.session_title.clone(),
             activity: self.activity(displayed, displayed_in_flight),
-            visible: false,
         }
+    }
+
+    /// The turn the snapshot shows.
+    pub(super) fn current_turn(&self) -> Option<&str> {
+        self.displayed.as_deref()
     }
 
     pub(super) fn is_busy(&self) -> bool {
@@ -96,62 +124,66 @@ impl PopupTracker {
         self.turns.clear();
         self.in_flight.clear();
         self.displayed = None;
+        self.session_title = None;
         self.listening = false;
         self.speaking.clear();
     }
 
-    fn activity(&self, displayed: Option<&TurnState>, in_flight: bool) -> PopupActivity {
-        if let Some(turn) = displayed
-            && in_flight
-        {
-            return match turn.activity.as_ref() {
-                Some(TurnActivity::Streaming) => PopupActivity::Streaming,
-                Some(TurnActivity::Thinking) => PopupActivity::Thinking,
+    fn activity(&self, displayed: Option<&TurnState>, in_flight: bool) -> Activity {
+        let turn_activity = displayed.and_then(|turn| turn.activity.as_ref());
+        if in_flight {
+            return match turn_activity {
+                Some(TurnActivity::Streaming) => Activity::Streaming,
                 Some(TurnActivity::RunningTool(name)) => {
-                    PopupActivity::RunningTool { name: name.clone() }
+                    Activity::RunningTool { name: name.clone() }
                 }
-                Some(TurnActivity::Finished) | None => PopupActivity::Thinking,
+                Some(TurnActivity::Thinking | TurnActivity::Finished | TurnActivity::Failed)
+                | None => Activity::Thinking,
             };
         }
         if self.listening {
-            return PopupActivity::Listening;
+            return Activity::Listening;
         }
-        PopupActivity::Idle
+        match turn_activity {
+            Some(TurnActivity::Failed) => Activity::Failed,
+            Some(_) => Activity::Done,
+            None => Activity::Idle,
+        }
     }
 
-    /// Apply `ev` and return the new snapshot. The body comes only from
-    /// `LastDelta`, which carries the whole reply; `Delta` never appends.
-    pub(super) fn ingest(&mut self, ev: &Event) -> PopupState {
+    /// Apply `ev`. The body comes only from `LastDelta`, which carries
+    /// the whole reply; `Delta` never appends.
+    pub(super) fn ingest(&mut self, ev: &Event) {
         match ev {
-            Event::Delta { id, .. } => {
-                self.activate_turn(id).activity = Some(TurnActivity::Streaming);
-            }
+            Event::Delta { id, .. } => self.activate_turn(id).start_streaming(),
             Event::LastDelta { id, text } => {
                 let turn = self.activate_turn(id);
+                turn.start_streaming();
                 turn.body.clone_from(text);
-                turn.activity = Some(TurnActivity::Streaming);
             }
             Event::ReasoningDelta { id, .. } => {
                 self.activate_turn(id).activity = Some(TurnActivity::Thinking);
             }
             Event::ToolCall { id, name, args } => {
                 let turn = self.activate_turn(id);
-                turn.footer = Some(ToolCallLine {
+                if turn.tool_calls.len() == MAX_TOOL_CALLS {
+                    turn.tool_calls.pop_front();
+                }
+                turn.tool_calls.push_back(ToolCallLine {
                     name: name.clone(),
-                    args_summary: summarize_args(args, FOOTER_ARGS_MAX_CHARS),
+                    args_summary: summarize_args(args, TOOL_ARGS_MAX_CHARS),
                 });
                 turn.activity = Some(TurnActivity::RunningTool(name.clone()));
             }
             Event::ToolResult { id, .. } => {
                 self.activate_turn(id).activity = Some(TurnActivity::Thinking);
             }
-            Event::Done { id } | Event::Error { id, .. } => {
-                self.in_flight.remove(id);
-                if self.displayed.as_deref() != Some(id.as_str()) {
-                    self.turns.remove(id);
-                } else if let Some(turn) = self.turns.get_mut(id) {
-                    turn.activity = Some(TurnActivity::Finished);
-                }
+            Event::Done { id } => self.finish_turn(id, TurnActivity::Finished, None),
+            Event::Error { id, message } => {
+                self.finish_turn(id, TurnActivity::Failed, Some(message.clone()));
+            }
+            Event::SessionTitle { title, .. } => {
+                self.session_title = Some(title.clone());
             }
             Event::ListenState { active, .. } => {
                 self.listening = *active;
@@ -165,7 +197,16 @@ impl PopupTracker {
             }
             _ => {}
         }
-        self.snapshot()
+    }
+
+    fn finish_turn(&mut self, id: &str, outcome: TurnActivity, error: Option<String>) {
+        self.in_flight.remove(id);
+        if self.displayed.as_deref() != Some(id) {
+            self.turns.remove(id);
+        } else if let Some(turn) = self.turns.get_mut(id) {
+            turn.activity = Some(outcome);
+            turn.error = error;
+        }
     }
 
     fn activate_turn(&mut self, id: &str) -> &mut TurnState {
@@ -339,7 +380,7 @@ mod tests {
 
     #[test]
     fn tracker_body_comes_only_from_last_delta() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         t.ingest(&delta("a", "hello"));
         assert_eq!(t.snapshot().body, "", "Delta must not populate the body");
         t.ingest(&last_delta("a", "A"));
@@ -355,7 +396,7 @@ mod tests {
 
     #[test]
     fn tracker_keeps_displayed_turn_after_done() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         t.ingest(&last_delta("a", "the reply"));
         t.ingest(&done("a"));
         let s = t.snapshot();
@@ -364,7 +405,7 @@ mod tests {
 
     #[test]
     fn tracker_switches_to_new_turn_and_drops_old() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         t.ingest(&last_delta("a", "turn a body"));
         t.ingest(&done("a"));
         t.ingest(&last_delta("b", "turn b body"));
@@ -373,28 +414,99 @@ mod tests {
     }
 
     #[test]
-    fn tracker_renders_tool_call_footer_with_args_summary() {
-        let mut t = PopupTracker::default();
-        t.ingest(&tool_call("a", "bash", json!({"command": "ls /tmp"})));
+    fn tracker_keeps_the_last_tool_calls_with_args_summaries() {
+        let mut t = ActivityTracker::default();
+        for n in 0..4 {
+            t.ingest(&tool_call(
+                "a",
+                "bash",
+                json!({"command": format!("ls /tmp/{n}")}),
+            ));
+        }
         let s = t.snapshot();
+        let summaries: Vec<_> = s
+            .tool_calls
+            .iter()
+            .map(|c| c.args_summary.as_str())
+            .collect();
         assert_eq!(
-            s.footer,
-            Some(ToolCallLine {
-                name: "bash".into(),
-                args_summary: "command=\"ls /tmp\"".into(),
-            })
+            summaries,
+            [
+                "command=\"ls /tmp/1\"",
+                "command=\"ls /tmp/2\"",
+                "command=\"ls /tmp/3\""
+            ]
         );
         assert_eq!(
             s.activity,
-            PopupActivity::RunningTool {
+            Activity::RunningTool {
                 name: "bash".into()
             }
         );
     }
 
     #[test]
+    fn reply_text_after_tool_calls_replaces_them() {
+        let mut t = ActivityTracker::default();
+        t.ingest(&last_delta("a", "let me look"));
+        t.ingest(&tool_call("a", "bash", json!({"command": "ls"})));
+        t.ingest(&Event::ToolResult {
+            id: "a".into(),
+            name: "bash".into(),
+            result: json!({}),
+        });
+        let before = t.snapshot();
+        assert_eq!(before.body, "let me look");
+        assert_eq!(before.tool_calls.len(), 1);
+
+        t.ingest(&delta("a", "Found"));
+        let s = t.snapshot();
+        assert!(s.tool_calls.is_empty());
+        assert_eq!(s.body, "");
+        t.ingest(&last_delta("a", "Found it"));
+        t.ingest(&delta("a", " it"));
+        assert_eq!(t.snapshot().body, "Found it");
+    }
+
+    #[test]
+    fn session_title_outlives_the_turn_it_arrived_with() {
+        let mut t = ActivityTracker::default();
+        t.ingest(&last_delta("a", "reply"));
+        assert_eq!(t.snapshot().title, None);
+        t.ingest(&done("a"));
+        t.ingest(&Event::SessionTitle {
+            id: "a".into(),
+            session_id: "s".into(),
+            title: "Cats And Dogs".into(),
+        });
+        t.ingest(&delta("b", "x"));
+        t.ingest(&tool_call("b", "bash", json!({})));
+        assert_eq!(t.snapshot().title.as_deref(), Some("Cats And Dogs"));
+        t.set_disconnected();
+        assert_eq!(t.snapshot().title, None);
+    }
+
+    #[test]
+    fn finished_turn_reports_done_or_failed_with_its_error() {
+        let mut t = ActivityTracker::default();
+        t.ingest(&last_delta("a", "reply"));
+        t.ingest(&done("a"));
+        assert_eq!(t.snapshot().activity, Activity::Done);
+
+        t.ingest(&delta("b", "x"));
+        t.ingest(&Event::Error {
+            id: "b".into(),
+            message: "boom".into(),
+        });
+        let s = t.snapshot();
+        assert_eq!(s.activity, Activity::Failed);
+        assert_eq!(s.error.as_deref(), Some("boom"));
+        assert_eq!(t.current_turn(), Some("b"));
+    }
+
+    #[test]
     fn tracker_truncates_body_to_the_last_body_chars() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         let long = "a".repeat(BODY_CHARS) + &"b".repeat(BODY_CHARS);
         t.ingest(&last_delta("a", &long));
         assert_eq!(t.snapshot().body, format!("…{}", "b".repeat(BODY_CHARS)));
@@ -402,7 +514,7 @@ mod tests {
 
     #[test]
     fn tracker_ignores_unrelated_event_kinds() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         let before = t.snapshot();
         t.ingest(&Event::Capabilities {
             id: "a".into(),
@@ -415,19 +527,19 @@ mod tests {
 
     #[test]
     fn tool_result_marks_displayed_turn_as_thinking() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         t.ingest(&tool_call("a", "bash", json!({"command": "sleep 30"})));
         t.ingest(&Event::ToolResult {
             id: "a".into(),
             name: "bash".into(),
             result: json!({"ok": true}),
         });
-        assert_eq!(t.snapshot().activity, PopupActivity::Thinking);
+        assert_eq!(t.snapshot().activity, Activity::Thinking);
     }
 
     #[test]
     fn tracker_marks_busy_while_turn_in_flight() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         assert!(!t.is_busy());
         t.ingest(&delta("a", "hi"));
         assert!(t.is_busy());
@@ -437,33 +549,33 @@ mod tests {
 
     #[test]
     fn tracker_tracks_listen_state_and_surfaces_listening_activity() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         assert!(!t.is_listening());
-        assert_eq!(t.snapshot().activity, PopupActivity::Idle);
+        assert_eq!(t.snapshot().activity, Activity::Idle);
 
         t.ingest(&Event::ListenState {
             id: "x".into(),
             active: true,
         });
         assert!(t.is_listening());
-        assert_eq!(t.snapshot().activity, PopupActivity::Listening);
+        assert_eq!(t.snapshot().activity, Activity::Listening);
 
         t.ingest(&delta("a", "hi"));
-        assert_eq!(t.snapshot().activity, PopupActivity::Streaming);
+        assert_eq!(t.snapshot().activity, Activity::Streaming);
         t.ingest(&done("a"));
-        assert_eq!(t.snapshot().activity, PopupActivity::Listening);
+        assert_eq!(t.snapshot().activity, Activity::Listening);
 
         t.ingest(&Event::ListenState {
             id: "x".into(),
             active: false,
         });
         assert!(!t.is_listening());
-        assert_eq!(t.snapshot().activity, PopupActivity::Idle);
+        assert_eq!(t.snapshot().activity, Activity::Done);
     }
 
     #[test]
     fn tracker_tracks_speaking_state_per_turn() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         assert!(!t.is_speaking());
 
         t.ingest(&Event::SpeakingState {
@@ -493,7 +605,7 @@ mod tests {
 
     #[test]
     fn tracker_disconnect_clears_all_state() {
-        let mut t = PopupTracker::default();
+        let mut t = ActivityTracker::default();
         t.ingest(&last_delta("a", "x"));
         t.ingest(&tool_call("a", "bash", json!({"command": "ls"})));
         t.ingest(&Event::ListenState {
@@ -505,7 +617,7 @@ mod tests {
             speaking: true,
         });
         t.set_disconnected();
-        assert_eq!(t.snapshot(), PopupState::default());
+        assert_eq!(t.snapshot(), ActivityView::default());
         assert!(!t.is_busy());
         assert!(!t.is_listening());
         assert!(!t.is_speaking());

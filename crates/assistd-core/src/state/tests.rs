@@ -6,7 +6,8 @@ use tokio::sync::{Notify, watch};
 
 use assistd_config::ToolsOutputConfig;
 use assistd_ipc::{
-    Component, ImageAttachment, PresenceState, StatusKind, StatusSeverity, VoiceCaptureState,
+    Component, EventKind, ImageAttachment, PresenceState, StatusKind, StatusSeverity,
+    SubscribeFilter, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, FailedBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
@@ -98,7 +99,7 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> (Result<(), DispatchEr
         }
         out
     };
-    tokio::join!(state.clone().dispatch(req, tx), collect)
+    tokio::join!(state.clone().dispatch(req, None, tx), collect)
 }
 
 fn query(id: &str, text: &str) -> Request {
@@ -481,9 +482,7 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
         ..StateParts::default()
     }
     .build();
-    let mut bus = state
-        .runtime
-        .subscribe_events(assistd_ipc::SubscribeFilter::default());
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter::default());
 
     let (res, _) = dispatch(&state, query("req-title", "tell me about cats")).await;
     res.unwrap();
@@ -504,6 +503,42 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
         *backend.thinking.lock(),
         Some(assistd_llm::Thinking::Disabled),
         "title generation must not spend its budget on reasoning"
+    );
+}
+
+#[tokio::test]
+async fn completed_turn_rebroadcasts_an_existing_session_title() {
+    let backend = Arc::new(TitlingBackend {
+        thinking: StdMutex::new(None),
+    });
+    let (state, conv, session, _) =
+        branch_state_with(backend.clone(), Arc::new(ToolRegistry::default())).await;
+    conv.set_session_title(&session, "Existing Title")
+        .await
+        .unwrap();
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+        kinds: vec![EventKind::SessionTitle],
+    });
+
+    let (res, _) = dispatch(&state, query("req-again", "and dogs?")).await;
+    res.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), bus.recv())
+        .await
+        .expect("SessionTitle should reach the bus after the turn")
+        .expect("bus open");
+    assert_eq!(
+        event,
+        Event::SessionTitle {
+            id: "req-again".into(),
+            session_id: session.0.clone(),
+            title: "Existing Title".into(),
+        }
+    );
+    assert_eq!(
+        *backend.thinking.lock(),
+        None,
+        "a titled session must not ask the LLM again"
     );
 }
 
@@ -1274,7 +1309,7 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
     let (state, conv, _session, branch) = branch_state_with(backend, Arc::new(tools)).await;
 
     let (tx, rx) = mpsc::channel::<Event>(16);
-    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), tx));
+    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), None, tx));
     entered.notified().await;
     drop(rx);
 
@@ -1333,12 +1368,10 @@ async fn client_departure_still_publishes_done_to_the_bus() {
         dropped: Arc::new(AtomicBool::new(false)),
     });
     let (state, _conv, _session, _branch) = branch_state_with(backend, Arc::new(tools)).await;
-    let mut bus = state
-        .runtime
-        .subscribe_events(assistd_ipc::SubscribeFilter::default());
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter::default());
 
     let (tx, rx) = mpsc::channel::<Event>(16);
-    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), tx));
+    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), None, tx));
     entered.notified().await;
     drop(rx);
 
@@ -1465,7 +1498,7 @@ fn combine_context_blocks_joins_whichever_blocks_exist() {
     for (semantic, window, expected) in cases {
         let label = format!("{semantic:?} + {window:?}");
         assert_eq!(
-            combine_context_blocks(semantic, window),
+            combine_context_blocks([semantic, window]),
             expected,
             "{label}"
         );
@@ -1909,4 +1942,58 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
         .collect();
     assert_eq!(ids, ["call-a", "call-b"]);
     assert!(rows[4].tool_calls.is_none());
+}
+
+#[tokio::test]
+async fn chat_focus_requests_answer_and_broadcast_changes() {
+    let state = default_state();
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+        kinds: vec![EventKind::ChatFocus],
+    });
+    let chat_focus = |focused| Event::ChatFocus {
+        id: "c".into(),
+        focused,
+    };
+
+    let (_, events) = dispatch(
+        &state,
+        Request::ChatState {
+            id: "c".into(),
+            focused: true,
+        },
+    )
+    .await;
+    assert_eq!(events, [done("c")]);
+    assert_eq!(bus.recv().await.unwrap(), chat_focus(true));
+
+    let (_, events) = dispatch(&state, Request::GetChatFocus { id: "c".into() }).await;
+    assert_eq!(events, [chat_focus(true), done("c")]);
+
+    let (_, events) = dispatch(&state, Request::ChatClosed { id: "c".into() }).await;
+    assert_eq!(events, [done("c")]);
+    assert_eq!(bus.recv().await.unwrap(), chat_focus(false));
+}
+
+#[test]
+fn brief_reply_note_only_for_voice_turns_away_from_the_chat() {
+    for (origin, chat_focused, brief_when_away, expected) in [
+        (TurnOrigin::Voice, false, true, true),
+        (TurnOrigin::Voice, true, true, false),
+        (TurnOrigin::Voice, false, false, false),
+        (TurnOrigin::Typed, false, true, false),
+        (TurnOrigin::Typed, true, true, false),
+    ] {
+        let mut config = Config::default();
+        config.tray.notifications.brief_when_away = brief_when_away;
+        let state = StateParts {
+            config,
+            ..StateParts::default()
+        }
+        .build();
+        assert_eq!(
+            state.brief_reply_note(origin, chat_focused).is_some(),
+            expected,
+            "{origin:?} focused={chat_focused} brief_when_away={brief_when_away}"
+        );
+    }
 }

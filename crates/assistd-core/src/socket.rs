@@ -342,6 +342,11 @@ fn peer_is_daemon_user(stream: &UnixStream) -> bool {
     }
 }
 
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    let pid = stream.peer_cred().ok()?.pid()?;
+    u32::try_from(pid).ok()
+}
+
 fn spawn_connection(
     connections: &mut JoinSet<()>,
     stream: UnixStream,
@@ -381,6 +386,7 @@ async fn handle_connection(
     state: Arc<AppState>,
     mut drain: watch::Receiver<bool>,
 ) -> Result<(), SocketError> {
+    let peer_pid = peer_pid(&stream);
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let Some(req) = read_initial_request(&mut reader, &mut write_half).await? else {
@@ -398,7 +404,7 @@ async fn handle_connection(
         CONFIRM_ROUTER
             .scope(
                 router_for_dispatch,
-                Box::pin(dispatch_state.dispatch(req, tx)),
+                Box::pin(dispatch_state.dispatch(req, peer_pid, tx)),
             )
             .await
     };

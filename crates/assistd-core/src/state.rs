@@ -22,6 +22,7 @@ use crate::{Config, PresenceError, PresenceManager};
 
 pub(crate) mod branches;
 pub(crate) mod capabilities;
+pub(crate) mod chat_focus;
 pub(crate) mod context;
 pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
@@ -36,6 +37,7 @@ pub(crate) mod wire;
 
 pub use self::branches::history_entries;
 pub use self::memory_stack::MemoryStack;
+pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, ConversationContext, RuntimeState};
 pub use self::subsystems::{McpStartupFailure, Subsystems};
 
@@ -105,22 +107,24 @@ impl AppState {
         }
     }
 
-    /// Route one request to its handler, streaming events back on `tx`.
-    /// No events are sent after this returns. Every request except
-    /// `Subscribe` is bounded by the dispatch envelope timeout.
+    /// Route one request from the client running as `peer_pid` to its
+    /// handler, streaming events back on `tx`. No events are sent after
+    /// this returns. Every request except `Subscribe` is bounded by the
+    /// dispatch envelope timeout.
     pub async fn dispatch(
         self: Arc<Self>,
         req: Request,
+        peer_pid: Option<u32>,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         if Self::outlives_dispatch_envelope(&req) {
-            return self.dispatch_inner(req, tx).await;
+            return self.dispatch_inner(req, peer_pid, tx).await;
         }
         let envelope = Duration::from_secs(self.config.timeouts.dispatch_envelope_secs);
         let req_id = req.id().to_string();
         let req_kind = req.kind();
         let tx_for_timeout = tx.clone();
-        let inner = self.clone().dispatch_inner(req, tx);
+        let inner = self.clone().dispatch_inner(req, peer_pid, tx);
         match tokio::time::timeout(envelope, inner).await {
             Ok(result) => result,
             Err(_) => {
@@ -157,6 +161,7 @@ impl AppState {
     async fn dispatch_inner(
         self: Arc<Self>,
         req: Request,
+        peer_pid: Option<u32>,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         match req {
@@ -164,7 +169,11 @@ impl AppState {
                 id,
                 text,
                 attachments,
-            } => return self.handle_query(id, text, attachments, tx).await,
+            } => {
+                return self
+                    .handle_query(id, text, attachments, TurnOrigin::Typed, tx)
+                    .await;
+            }
             Request::SetPresence { id, target } => {
                 return self.handle_set_presence(id, target, tx).await;
             }
@@ -211,6 +220,11 @@ impl AppState {
                 self.handle_resume_or_new(id, recency_secs, tx).await;
             }
             Request::NewSession { id } => self.handle_new_session(id, tx).await,
+            Request::ChatState { id, focused } => {
+                self.handle_chat_state(id, focused, peer_pid, tx).await;
+            }
+            Request::ChatClosed { id } => self.handle_chat_closed(id, peer_pid, tx).await,
+            Request::GetChatFocus { id } => self.handle_get_chat_focus(id, tx).await,
             Request::Subscribe { id, filter } => self.handle_subscribe(id, filter, tx).await,
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 send_error(

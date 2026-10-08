@@ -16,12 +16,11 @@ use tokio_i3ipc::{
 };
 
 use crate::criteria::{format_focus, format_layout, format_move_to_workspace, format_resize_width};
-use crate::ipc_backend::{IpcBackend, IpcEvent, IpcProtocol, NodeIdentity, OpLabels, Workspace};
+use crate::ipc_backend::{IpcBackend, IpcEvent, IpcProtocol, NodeIdentity, OpLabels};
 use crate::snapshot::WindowChangeKind;
 use crate::{
-    FocusedWindowContext, Layout, PlacementAnchor, PlacementCriteria, Rect, ResizeDir,
-    TransportError, Window, WindowEvent, WindowId, WindowManager, WmError, WmResult, WorkspaceId,
-    WorkspaceInfo,
+    FocusedWindowContext, Layout, ResizeDir, TransportError, Window, WindowId, WindowManager,
+    WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
 /// [`WindowManager`] over a single i3 IPC command socket.
@@ -54,27 +53,6 @@ impl I3Backend {
             backend: Arc::new(Self { ipc }),
             supervisor_task,
         })
-    }
-
-    /// Scale factor derived from the focused output's physical size in
-    /// `xrandr`, using winit's DPI quantisation. `None` when no
-    /// workspace is focused or `xrandr` doesn't list the output.
-    async fn focused_output_randr_scale(&self) -> Option<f64> {
-        let output_name = self.focused_output_name().await.ok().flatten()?;
-        let xrandr = query_command_output("xrandr", "--query").await?;
-        let (pixels, mm) = parse_xrandr_output_size(&xrandr, &output_name)?;
-        Some(calc_randr_scale(pixels, mm))
-    }
-
-    /// Output hosting the focused workspace; `Ok(None)` when none is.
-    async fn focused_output_name(&self) -> WmResult<Option<String>> {
-        Ok(self
-            .ipc
-            .workspaces("i3 GET_WORKSPACES (focused output name)")
-            .await?
-            .into_iter()
-            .find(|workspace| workspace.info.focused)
-            .map(|workspace| workspace.info.output))
     }
 }
 
@@ -121,37 +99,6 @@ impl WindowManager for I3Backend {
         self.ipc.run_command(&format_layout(layout)).await
     }
 
-    async fn focused_workspace_rect(&self) -> WmResult<Rect> {
-        self.ipc.focused_workspace_rect().await
-    }
-
-    /// First of `WINIT_X11_SCALE_FACTOR`, `Xft.dpi`, and the `xrandr`
-    /// physical size that yields a scale; otherwise `1.0`.
-    async fn focused_output_scale(&self) -> WmResult<f64> {
-        if let Some(scale) = env_scale("WINIT_X11_SCALE_FACTOR") {
-            return Ok(scale);
-        }
-        if let Some(xrdb) = query_command_output("xrdb", "-query").await
-            && let Some(scale) = parse_xft_dpi_scale(&xrdb)
-        {
-            return Ok(scale);
-        }
-        if let Some(scale) = self.focused_output_randr_scale().await {
-            return Ok(scale);
-        }
-        Ok(1.0)
-    }
-
-    async fn place_floating(
-        &self,
-        criteria: &PlacementCriteria,
-        anchor: PlacementAnchor,
-    ) -> WmResult<()> {
-        self.ipc
-            .place_floating(&translate_criteria_for_i3(criteria), anchor)
-            .await
-    }
-
     fn is_connected(&self) -> bool {
         self.ipc.is_connected()
     }
@@ -168,9 +115,7 @@ impl IpcProtocol for I3Ipc {
     const OPS: OpLabels = OpLabels {
         run_command: "i3 RUN_COMMAND",
         get_tree: "i3 GET_TREE",
-        get_tree_window_rect: "i3 GET_TREE (window rect)",
         get_workspaces: "i3 GET_WORKSPACES",
-        get_workspaces_focused_rect: "i3 GET_WORKSPACES (focused rect)",
     };
 
     async fn connect(&self) -> WmResult<(I3, Self::Events)> {
@@ -206,19 +151,16 @@ impl IpcProtocol for I3Ipc {
         Ok(cmd.get_tree().await?)
     }
 
-    async fn get_workspaces(cmd: &mut I3) -> Result<Vec<Workspace>, TransportError> {
+    async fn get_workspaces(cmd: &mut I3) -> Result<Vec<WorkspaceInfo>, TransportError> {
         Ok(cmd
             .get_workspaces()
             .await?
             .into_iter()
-            .map(|workspace| Workspace {
-                rect: rect_from_i3(&workspace.rect),
-                info: WorkspaceInfo {
-                    num: workspace.num,
-                    name: workspace.name,
-                    focused: workspace.focused,
-                    output: workspace.output,
-                },
+            .map(|workspace| WorkspaceInfo {
+                num: workspace.num,
+                name: workspace.name,
+                focused: workspace.focused,
+                output: workspace.output,
             })
             .collect())
     }
@@ -242,10 +184,6 @@ impl IpcProtocol for I3Ipc {
         }
     }
 
-    fn window_rect(node: &reply::Node, criteria: &PlacementCriteria) -> Option<Rect> {
-        (node.window.is_some() && node_matches(node, criteria)).then(|| rect_from_i3(&node.rect))
-    }
-
     fn collect_windows(tree: &reply::Node) -> Vec<Window> {
         let mut windows = Vec::new();
         collect_windows(tree, None, &mut windows);
@@ -255,10 +193,7 @@ impl IpcProtocol for I3Ipc {
 
 fn ipc_event(event: Event) -> IpcEvent {
     match event {
-        Event::Window(window) => IpcEvent::Window {
-            focus: focus_change(&window),
-            event: window_event_from_i3(&window),
-        },
+        Event::Window(window) => focus_change(&window).unwrap_or(IpcEvent::Ignored),
         Event::Workspace(data) if matches!(data.change, WorkspaceChange::Focus) => {
             IpcEvent::WorkspaceFocused(data.current.and_then(|node| node.name))
         }
@@ -266,149 +201,17 @@ fn ipc_event(event: Event) -> IpcEvent {
     }
 }
 
-fn focus_change(window: &WindowData) -> Option<(WindowChangeKind, NodeIdentity)> {
+fn focus_change(window: &WindowData) -> Option<IpcEvent> {
     let kind = match window.change {
         WindowChange::Focus => WindowChangeKind::Focus,
         WindowChange::Title => WindowChangeKind::Title,
         WindowChange::Close => WindowChangeKind::Close,
         _ => return None,
     };
-    Some((kind, I3Ipc::identity(&window.container)))
-}
-
-fn window_event_from_i3(window: &WindowData) -> Option<WindowEvent> {
-    let container = &window.container;
-    let id = WindowId::new(container.id as u64)?;
-    match window.change {
-        WindowChange::New => {
-            let props = container.window_properties.as_ref();
-            let class = props.and_then(|props| props.class.clone());
-            Some(WindowEvent::Opened {
-                id,
-                title: container.name.clone(),
-                class,
-                app_id: None,
-            })
-        }
-        WindowChange::Title => Some(WindowEvent::TitleChanged {
-            id,
-            new_title: container.name.clone(),
-        }),
-        WindowChange::Close => Some(WindowEvent::Closed { id }),
-        _ => None,
-    }
-}
-
-/// i3 has no `app_id` criterion and egui-winit leaves `WM_CLASS` empty
-/// on X11, so `AppId` is matched as a window title.
-fn translate_criteria_for_i3(criteria: &PlacementCriteria) -> PlacementCriteria {
-    match criteria {
-        PlacementCriteria::AppId(app_id) => PlacementCriteria::Title(app_id.clone()),
-        other => other.clone(),
-    }
-}
-
-/// `AppId` (rewritten to `Title` first) and `ConId` never match here.
-fn node_matches(node: &reply::Node, criteria: &PlacementCriteria) -> bool {
-    let props = node.window_properties.as_ref();
-    match criteria {
-        PlacementCriteria::Title(want) => node
-            .name
-            .as_deref()
-            .or_else(|| props.and_then(|props| props.title.as_deref()))
-            .is_some_and(|title| title == want),
-        PlacementCriteria::Class(want) => props
-            .and_then(|props| props.class.as_deref())
-            .is_some_and(|class| class == want),
-        _ => false,
-    }
-}
-
-fn env_scale(name: &str) -> Option<f64> {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|scale| scale.is_finite() && *scale > 0.0)
-}
-
-/// Stdout of `program arg`, or `None` if it fails to run or exits non-zero.
-async fn query_command_output(program: &'static str, arg: &'static str) -> Option<String> {
-    tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new(program).arg(arg).output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        String::from_utf8(output.stdout).ok()
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-/// `Xft.dpi / 96`, clamped to `>= 1.0`.
-fn parse_xft_dpi_scale(xrdb_output: &str) -> Option<f64> {
-    xrdb_output
-        .lines()
-        .find_map(|line| line.strip_prefix("Xft.dpi:"))
-        .and_then(|rest| rest.trim().parse::<f64>().ok())
-        .filter(|dpi| dpi.is_finite() && *dpi > 0.0)
-        .map(|dpi| (dpi / 96.0).max(1.0))
-}
-
-/// Pixel size and physical size in millimetres of a connected output,
-/// from its `<name> connected WxH+X+Y ... <W>mm x <H>mm` line.
-fn parse_xrandr_output_size(
-    xrandr_output: &str,
-    output_name: &str,
-) -> Option<((u32, u32), (u64, u64))> {
-    let prefix = format!("{output_name} connected");
-    let line = xrandr_output
-        .lines()
-        .find(|line| line.starts_with(&prefix))?;
-
-    let pixels = line.split_whitespace().find_map(parse_geometry_size)?;
-
-    let tokens: Vec<&str> = line.split_whitespace().collect();
-    let mm = tokens.windows(3).rev().find_map(|triple| {
-        match (
-            triple[0].strip_suffix("mm"),
-            triple[1],
-            triple[2].strip_suffix("mm"),
-        ) {
-            (Some(width_mm), "x", Some(height_mm)) => {
-                let width: u64 = width_mm.parse().ok()?;
-                let height: u64 = height_mm.parse().ok()?;
-                Some((width, height))
-            }
-            _ => None,
-        }
-    })?;
-    Some((pixels, mm))
-}
-
-/// `(width, height)` from a `WIDTHxHEIGHT+X+Y` token. The `+X+Y` is
-/// required so a mode-list entry like `2560x1440` doesn't match.
-fn parse_geometry_size(token: &str) -> Option<(u32, u32)> {
-    let plus = token.find('+')?;
-    let (width, height) = token[..plus].split_once('x')?;
-    Some((width.parse().ok()?, height.parse().ok()?))
-}
-
-/// Winit's X11 RandR DPI formula, quantised to 1/12 steps. `1.0` for
-/// zero-sized inputs or absurd results.
-fn calc_randr_scale(pixels: (u32, u32), mm: (u64, u64)) -> f64 {
-    let (px_w, px_h) = (f64::from(pixels.0), f64::from(pixels.1));
-    let (mm_w, mm_h) = (mm.0 as f64, mm.1 as f64);
-    if mm_w == 0.0 || mm_h == 0.0 {
-        return 1.0;
-    }
-    let ppmm = ((px_w * px_h) / (mm_w * mm_h)).sqrt();
-    let factor = ((ppmm * (12.0 * 25.4 / 96.0)).round() / 12.0).max(1.0);
-    if factor.is_finite() && factor <= 20.0 {
-        factor
-    } else {
-        1.0
-    }
+    Some(IpcEvent::WindowChanged(
+        kind,
+        I3Ipc::identity(&window.container),
+    ))
 }
 
 fn collect_windows(node: &reply::Node, parent_workspace: Option<&str>, out: &mut Vec<Window>) {
@@ -435,114 +238,5 @@ fn collect_windows(node: &reply::Node, parent_workspace: Option<&str>, out: &mut
 
     for child in I3Ipc::children(node) {
         collect_windows(child, workspace, out);
-    }
-}
-
-/// i3 geometry as a [`Rect`]: negative sizes become zero and coordinates saturate.
-fn rect_from_i3(rect: &reply::Rect) -> Rect {
-    Rect {
-        x: saturating_i32(rect.x),
-        y: saturating_i32(rect.y),
-        width: u32::try_from(rect.width.max(0)).unwrap_or(u32::MAX),
-        height: u32::try_from(rect.height.max(0)).unwrap_or(u32::MAX),
-    }
-}
-
-fn saturating_i32(value: isize) -> i32 {
-    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn translate_criteria_rewrites_only_app_id_to_title() {
-        let con = PlacementCriteria::ConId(WindowId::new(42).unwrap());
-        for (input, expected) in [
-            (
-                PlacementCriteria::AppId("dev.assistd.popup".into()),
-                PlacementCriteria::Title("dev.assistd.popup".into()),
-            ),
-            (
-                PlacementCriteria::Class("Firefox".into()),
-                PlacementCriteria::Class("Firefox".into()),
-            ),
-            (
-                PlacementCriteria::Title("Inbox".into()),
-                PlacementCriteria::Title("Inbox".into()),
-            ),
-            (con.clone(), con),
-        ] {
-            assert_eq!(translate_criteria_for_i3(&input), expected, "{input:?}");
-        }
-    }
-
-    #[test]
-    fn xft_dpi_scale_from_xrdb_output() {
-        for (xrdb, expected) in [
-            (
-                "*color0:\t#000000\nXft.dpi:\t144\nXft.antialias:\t1\n",
-                Some(1.5),
-            ),
-            ("Xft.dpi:\t72\n", Some(1.0)),
-            ("", None),
-            ("Xft.antialias:\t1\n", None),
-            ("Xft.dpi:\tnope\n", None),
-            ("Xft.dpi:\t-50\n", None),
-            ("Xft.dpi:\t0\n", None),
-        ] {
-            assert_eq!(parse_xft_dpi_scale(xrdb), expected, "{xrdb:?}");
-        }
-    }
-
-    #[test]
-    fn xrandr_output_size_for_connected_outputs_only() {
-        let full = "\
-Screen 0: minimum 8 x 8, current 2560 x 1440, maximum 32767 x 32767
-HDMI-0 disconnected primary (normal left inverted right x axis y axis)
-DP-0 connected 2560x1440+0+0 (normal left inverted right x axis y axis) 587mm x 330mm
-   2560x1440     59.95*+ 280.00   120.00
-";
-        for (xrandr, output, expected) in [
-            (full, "DP-0", Some(((2560, 1440), (587, 330)))),
-            (full, "HDMI-0", None),
-            (full, "DP-1", None),
-            (
-                "DP-0 connected 2560x1440+0+0 (normal left inverted right)\n",
-                "DP-0",
-                None,
-            ),
-        ] {
-            assert_eq!(
-                parse_xrandr_output_size(xrandr, output),
-                expected,
-                "{output} in {xrandr:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn randr_scale_matches_winit_quantization() {
-        for (pixels, mm, expected) in [
-            ((2560, 1440), (587, 330), 14.0 / 12.0),
-            ((1024, 768), (400, 300), 1.0),
-            ((1920, 1080), (0, 0), 1.0),
-            ((1920, 1080), (500, 0), 1.0),
-        ] {
-            let scale = calc_randr_scale(pixels, mm);
-            assert!(
-                (scale - expected).abs() < f64::EPSILON,
-                "{pixels:?} on {mm:?}mm: got {scale}, expected {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_geometry_size_requires_position_suffix() {
-        assert_eq!(parse_geometry_size("2560x1440+0+0"), Some((2560, 1440)));
-        assert_eq!(parse_geometry_size("1920x1080+100+200"), Some((1920, 1080)));
-        assert_eq!(parse_geometry_size("2560x1440"), None);
-        assert_eq!(parse_geometry_size("notageometry"), None);
     }
 }

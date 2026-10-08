@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 
 use super::*;
@@ -19,9 +21,7 @@ impl IpcProtocol for FakeProtocol {
     const OPS: OpLabels = OpLabels {
         run_command: "fake RUN_COMMAND",
         get_tree: "fake GET_TREE",
-        get_tree_window_rect: "fake GET_TREE (window rect)",
         get_workspaces: "fake GET_WORKSPACES",
-        get_workspaces_focused_rect: "fake GET_WORKSPACES (focused rect)",
     };
 
     async fn connect(&self) -> WmResult<((), FakeEvents)> {
@@ -46,7 +46,7 @@ impl IpcProtocol for FakeProtocol {
         Ok(())
     }
 
-    async fn get_workspaces((): &mut ()) -> Result<Vec<Workspace>, TransportError> {
+    async fn get_workspaces((): &mut ()) -> Result<Vec<WorkspaceInfo>, TransportError> {
         Ok(Vec::new())
     }
 
@@ -60,10 +60,6 @@ impl IpcProtocol for FakeProtocol {
 
     fn identity((): &()) -> NodeIdentity {
         NodeIdentity::default()
-    }
-
-    fn window_rect((): &(), _: &PlacementCriteria) -> Option<Rect> {
-        None
     }
 
     fn collect_windows((): &()) -> Vec<Window> {

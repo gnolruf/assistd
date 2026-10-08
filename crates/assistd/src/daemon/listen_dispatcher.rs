@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assistd_core::{
-    AppState, Component, ContinuousListener, PresenceManager, PresenceState, drain_join_set,
-    spawn_supervised,
+    AppState, Component, ContinuousListener, PresenceManager, PresenceState, TurnOrigin,
+    drain_join_set, spawn_supervised,
 };
 use assistd_ipc::Event;
 use tokio::sync::broadcast::error::RecvError;
@@ -123,7 +123,11 @@ async fn run_listen_query(state: Arc<AppState>, id: String, text: String) {
         }
     };
     let query = async {
-        if let Err(e) = state.clone().handle_query(id, text, Vec::new(), tx).await {
+        if let Err(e) = state
+            .clone()
+            .handle_query(id, text, Vec::new(), TurnOrigin::Voice, tx)
+            .await
+        {
             warn!(
                 target: "assistd::listen",
                 "listen-triggered query failed: {e:#}"

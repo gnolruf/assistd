@@ -40,6 +40,13 @@ fn listen(active: bool) -> Event {
     }
 }
 
+fn ptt(state: VoiceCaptureState) -> Event {
+    Event::VoiceState {
+        id: "p".into(),
+        state,
+    }
+}
+
 #[test]
 fn disconnected_outranks_daemon_activity() {
     let mut t = TrayTracker::default();
@@ -132,6 +139,27 @@ fn disconnect_clears_in_flight_and_listening() {
 }
 
 #[test]
+fn push_to_talk_shows_listening_until_transcription_ends() {
+    let mut t = TrayTracker::default();
+    t.set_connected();
+    assert!(t.ingest(&ptt(VoiceCaptureState::Recording)));
+    assert_eq!(t.current(), TrayState::Listening);
+    assert!(!t.ingest(&ptt(VoiceCaptureState::Transcribing)));
+    assert!(t.ingest(&ptt(VoiceCaptureState::Idle)));
+    assert_eq!(t.current(), TrayState::Active);
+}
+
+#[test]
+fn disconnect_ends_a_push_to_talk_capture() {
+    let mut t = TrayTracker::default();
+    t.set_connected();
+    t.ingest(&ptt(VoiceCaptureState::Recording));
+    t.set_disconnected();
+    t.set_connected();
+    assert_eq!(t.current(), TrayState::Active);
+}
+
+#[test]
 fn ingest_returns_change_flag() {
     let mut t = TrayTracker::default();
     t.set_connected();
@@ -158,7 +186,8 @@ fn unrelated_events_do_not_change_state() {
 }
 
 #[test]
-fn every_state_maps_to_a_distinct_icon() {
+fn every_state_maps_to_a_distinct_default_icon() {
+    let icons = TrayIconsConfig::default();
     let names: Vec<_> = [
         TrayState::ConfigError,
         TrayState::Disconnected,
@@ -168,8 +197,21 @@ fn every_state_maps_to_a_distinct_icon() {
         TrayState::Sleeping,
     ]
     .into_iter()
-    .map(icon_name_for)
+    .map(|state| icon_name_for(state, &icons))
     .collect();
     let unique: HashSet<_> = names.iter().collect();
     assert_eq!(unique.len(), names.len(), "{names:?}");
+}
+
+#[test]
+fn configured_icons_replace_the_defaults_except_for_config_errors() {
+    let icons = TrayIconsConfig {
+        generating: "my-busy-icon".into(),
+        ..TrayIconsConfig::default()
+    };
+    assert_eq!(icon_name_for(TrayState::Generating, &icons), "my-busy-icon");
+    assert_eq!(
+        icon_name_for(TrayState::ConfigError, &icons),
+        "dialog-error"
+    );
 }

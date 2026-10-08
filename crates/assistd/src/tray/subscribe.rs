@@ -9,28 +9,21 @@ use ksni::Handle;
 use uuid::Uuid;
 
 use super::menu::TrayItem;
-#[cfg(feature = "tray-popup")]
-use super::popup::PopupSink;
-
-#[cfg(feature = "tray-popup")]
-pub(super) type OptionalPopup = Option<PopupSink>;
-#[cfg(not(feature = "tray-popup"))]
-pub type OptionalPopup = Option<()>;
-
-#[cfg(feature = "tray-popup")]
-type PopupSinkRef = PopupSink;
-#[cfg(not(feature = "tray-popup"))]
-type PopupSinkRef = ();
+use super::notifications::NotificationSink;
 
 enum ExitReason {
     ServiceShutdown,
     DaemonClosed,
 }
 
-pub(super) async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: OptionalPopup) {
+pub(super) async fn run(
+    handle: Handle<TrayItem>,
+    ipc: IpcClient,
+    notifications: Option<NotificationSink>,
+) {
     let mut attempt: u32 = 0;
     loop {
-        match try_once(&handle, &ipc, popup.as_ref()).await {
+        match try_once(&handle, &ipc, notifications.as_ref()).await {
             Ok(ExitReason::ServiceShutdown) => return,
             Ok(ExitReason::DaemonClosed) => {
                 tracing::info!(target: "tray", "daemon closed the subscribe connection");
@@ -43,7 +36,9 @@ pub(super) async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: Optiona
         if push(&handle, TrayItem::set_disconnected).await.is_none() {
             return;
         }
-        disconnect_popup(popup.as_ref());
+        if let Some(sink) = &notifications {
+            sink.set_disconnected();
+        }
         tokio::time::sleep(backoff_delay(attempt)).await;
         attempt = attempt.saturating_add(1);
     }
@@ -52,7 +47,7 @@ pub(super) async fn run(handle: Handle<TrayItem>, ipc: IpcClient, popup: Optiona
 async fn try_once(
     handle: &Handle<TrayItem>,
     ipc: &IpcClient,
-    popup: Option<&PopupSinkRef>,
+    notifications: Option<&NotificationSink>,
 ) -> Result<ExitReason, IpcClientError> {
     let req = Request::Subscribe {
         id: Uuid::new_v4().to_string(),
@@ -64,9 +59,9 @@ async fn try_once(
         return Ok(ExitReason::ServiceShutdown);
     }
 
-    seed_initial_state(handle, ipc, popup).await;
+    seed_initial_state(handle, ipc, notifications).await;
 
-    pump_events(handle, stream, popup).await
+    pump_events(handle, stream, notifications).await
 }
 
 fn subscribe_filter() -> SubscribeFilter {
@@ -81,7 +76,10 @@ fn subscribe_filter() -> SubscribeFilter {
             EventKind::Error,
             EventKind::Presence,
             EventKind::ListenState,
+            EventKind::VoiceState,
             EventKind::SpeakingState,
+            EventKind::ChatFocus,
+            EventKind::SessionTitle,
         ],
     }
 }
@@ -89,7 +87,7 @@ fn subscribe_filter() -> SubscribeFilter {
 async fn pump_events(
     handle: &Handle<TrayItem>,
     mut stream: IpcEventStream,
-    popup: Option<&PopupSinkRef>,
+    notifications: Option<&NotificationSink>,
 ) -> Result<ExitReason, IpcClientError> {
     loop {
         match stream.next_event().await? {
@@ -97,7 +95,7 @@ async fn pump_events(
                 if push(handle, |item| item.ingest(&ev)).await.is_none() {
                     return Ok(ExitReason::ServiceShutdown);
                 }
-                forward_to_popup(popup, &ev);
+                forward(notifications, &ev);
             }
             None => return Ok(ExitReason::DaemonClosed),
         }
@@ -107,7 +105,7 @@ async fn pump_events(
 async fn seed_initial_state(
     handle: &Handle<TrayItem>,
     ipc: &IpcClient,
-    popup: Option<&PopupSinkRef>,
+    notifications: Option<&NotificationSink>,
 ) {
     let presence_req = Request::GetPresence {
         id: Uuid::new_v4().to_string(),
@@ -115,21 +113,27 @@ async fn seed_initial_state(
     let listen_req = Request::GetListenState {
         id: Uuid::new_v4().to_string(),
     };
-    let (presence_res, listen_res) =
-        tokio::join!(ipc.one_shot(presence_req), ipc.one_shot(listen_req));
+    let chat_focus_req = Request::GetChatFocus {
+        id: Uuid::new_v4().to_string(),
+    };
+    let (presence_res, listen_res, chat_focus_res) = tokio::join!(
+        ipc.one_shot(presence_req),
+        ipc.one_shot(listen_req),
+        ipc.one_shot(chat_focus_req)
+    );
 
-    if let Ok(stream) = presence_res {
-        consume_until_terminal(handle, stream, popup).await;
-    }
-    if let Ok(stream) = listen_res {
-        consume_until_terminal(handle, stream, popup).await;
+    for stream in [presence_res, listen_res, chat_focus_res]
+        .into_iter()
+        .flatten()
+    {
+        consume_until_terminal(handle, stream, notifications).await;
     }
 }
 
 async fn consume_until_terminal(
     handle: &Handle<TrayItem>,
     mut stream: IpcEventStream,
-    popup: Option<&PopupSinkRef>,
+    notifications: Option<&NotificationSink>,
 ) {
     loop {
         match stream.next_event().await {
@@ -138,7 +142,7 @@ async fn consume_until_terminal(
                 if push(handle, |item| item.ingest(&ev)).await.is_none() {
                     return;
                 }
-                forward_to_popup(popup, &ev);
+                forward(notifications, &ev);
                 if terminal {
                     return;
                 }
@@ -155,22 +159,8 @@ where
     handle.update(update).await
 }
 
-#[cfg(feature = "tray-popup")]
-fn forward_to_popup(popup: Option<&PopupSink>, ev: &Event) {
-    if let Some(p) = popup {
-        p.ingest(ev);
+fn forward(notifications: Option<&NotificationSink>, ev: &Event) {
+    if let Some(sink) = notifications {
+        sink.ingest(ev);
     }
 }
-
-#[cfg(not(feature = "tray-popup"))]
-fn forward_to_popup(_popup: Option<&()>, _ev: &Event) {}
-
-#[cfg(feature = "tray-popup")]
-fn disconnect_popup(popup: Option<&PopupSink>) {
-    if let Some(p) = popup {
-        p.set_disconnected();
-    }
-}
-
-#[cfg(not(feature = "tray-popup"))]
-fn disconnect_popup(_popup: Option<&()>) {}

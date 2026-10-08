@@ -131,10 +131,10 @@ impl AppState {
         let _ = tx.send(Event::Done { id }).await;
     }
 
-    /// If `session` has no title yet, ask the LLM for one in the
-    /// background, persist it, and broadcast [`Event::SessionTitle`].
-    /// Failures are logged and retried on the session's next turn.
-    pub(super) fn spawn_session_title_generation(
+    /// Broadcast `session`'s title as [`Event::SessionTitle`] for turn `id`,
+    /// in the background. An untitled session first gets one from the LLM;
+    /// failures are logged and retried on the session's next turn.
+    pub(super) fn spawn_session_title_broadcast(
         self: Arc<Self>,
         id: String,
         session: Arc<SessionId>,
@@ -142,22 +142,9 @@ impl AppState {
     ) {
         let trimmed: String = user_text.chars().take(MAX_TITLE_PROMPT_CHARS).collect();
         self.runtime.persistence_tracker.clone().spawn(async move {
-            let Some(title) = self.generate_title_if_untitled(&session, &trimmed).await else {
+            let Some(title) = self.session_title_for_turn(&session, &trimmed).await else {
                 return;
             };
-            if let Err(e) = self
-                .memory
-                .conversations
-                .set_session_title(&session, &title)
-                .await
-            {
-                warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "set_session_title failed"
-                );
-                return;
-            }
             let _ = self.runtime.events_bus().send(Event::SessionTitle {
                 id,
                 session_id: session.0.clone(),
@@ -166,25 +153,41 @@ impl AppState {
         });
     }
 
-    /// Ask the LLM for a title when `session` has none. `None` when it
-    /// already has one or any step fails.
-    async fn generate_title_if_untitled(
-        &self,
-        session: &SessionId,
-        user_text: &str,
-    ) -> Option<String> {
+    /// `session`'s stored title, else a newly generated and saved one.
+    /// `None` when any step fails.
+    async fn session_title_for_turn(&self, session: &SessionId, user_text: &str) -> Option<String> {
         match self.memory.conversations.get_session_title(session).await {
-            Ok(Some(_)) => return None,
+            Ok(Some(title)) => return Some(title),
             Ok(None) => {}
             Err(e) => {
                 debug!(
                     target: "assistd::memory",
                     error = %e,
-                    "get_session_title failed; skipping title generation"
+                    "get_session_title failed; skipping the session title"
                 );
                 return None;
             }
         }
+        let title = self.generate_title(user_text).await?;
+        if let Err(e) = self
+            .memory
+            .conversations
+            .set_session_title(session, &title)
+            .await
+        {
+            warn!(
+                target: "assistd::memory",
+                error = %e,
+                "set_session_title failed"
+            );
+            return None;
+        }
+        Some(title)
+    }
+
+    /// Ask the LLM for a title summarising `user_text`. `None` when the
+    /// call fails or yields no usable text.
+    async fn generate_title(&self, user_text: &str) -> Option<String> {
         let prompt = format!(
             "Summarize this conversation in 4 to 6 words for use as a UI title. \
                 Reply with only the title — no quotes, no punctuation, no leading verbs \

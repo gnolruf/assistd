@@ -13,6 +13,8 @@ use tokio_util::task::TaskTracker;
 use assistd_ipc::{Event, EventKind, SubscribeFilter};
 use assistd_memory::{BranchId, SessionId};
 
+use super::chat_focus::ChatFocusSlot;
+
 const EVENTS_BUS_CAPACITY: usize = 256;
 
 /// The active session and, once its first message is saved, the branch
@@ -98,6 +100,8 @@ pub struct RuntimeState {
     /// Completion signal of the most recently queued persistence write,
     /// which the next write awaits so `seq` follows emission order.
     pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
+    /// The chat's last focus report.
+    pub(in crate::state) chat_focus: ChatFocusSlot,
     events_bus: broadcast::Sender<Event>,
     /// Filters of the live [`BusSubscription`]s.
     bus_interest: Arc<StdMutex<Vec<SubscribeFilter>>>,
@@ -114,6 +118,7 @@ impl RuntimeState {
             ptt_capture: Arc::new(Mutex::new(None)),
             interrupt: StdMutex::new(CancellationToken::new()),
             persist_chain: StdMutex::new(None),
+            chat_focus: ChatFocusSlot::default(),
             events_bus,
             bus_interest: Arc::default(),
         }

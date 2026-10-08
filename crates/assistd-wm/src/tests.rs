@@ -4,20 +4,9 @@ fn id(raw: u64) -> WindowId {
     WindowId::new(raw).expect("test ids are non-zero")
 }
 
-fn anchor() -> PlacementAnchor {
-    PlacementAnchor {
-        corner: AnchorCorner::TopRight,
-        offset_x: -10,
-        offset_y: 10,
-        width: 360,
-        height: 120,
-    }
-}
-
 #[tokio::test]
 async fn no_window_manager_reports_disconnected_for_every_operation() {
     let wm = NoWindowManager;
-    let criteria = PlacementCriteria::AppId("dev.assistd.popup".into());
     let results = [
         ("focus", wm.focus(&id(1)).await),
         (
@@ -32,14 +21,6 @@ async fn no_window_manager_reports_disconnected_for_every_operation() {
         ),
         ("set_layout", wm.set_layout(Layout::Tabbed).await),
         ("list_outputs", wm.list_outputs().await.map(drop)),
-        (
-            "place_floating",
-            wm.place_floating(&criteria, anchor()).await,
-        ),
-        (
-            "focused_workspace_rect",
-            wm.focused_workspace_rect().await.map(drop),
-        ),
     ];
     for (op, result) in results {
         assert!(
@@ -92,15 +73,6 @@ impl WindowManager for MinimalWm {
 }
 
 #[tokio::test]
-async fn default_place_floating_reports_unsupported() {
-    let err = MinimalWm
-        .place_floating(&PlacementCriteria::AppId("x".into()), anchor())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, WmError::Unsupported("floating placement")));
-}
-
-#[tokio::test]
 async fn default_list_outputs_reports_unsupported() {
     let err = MinimalWm.list_outputs().await.unwrap_err();
     assert!(matches!(err, WmError::Unsupported("output enumeration")));
@@ -137,69 +109,6 @@ fn window_id_round_trips_positive_decimal_only() {
     for bad in ["0", "Firefox", "-1", "0x2a", ""] {
         assert_eq!(bad.parse::<WindowId>(), Err(ParseWindowIdError), "{bad:?}");
     }
-}
-
-#[test]
-fn window_event_matches_opened_by_each_criterion() {
-    let titled = WindowEvent::Opened {
-        id: id(7),
-        title: Some("dev.assistd.popup".into()),
-        class: None,
-        app_id: None,
-    };
-    let firefox = WindowEvent::Opened {
-        id: id(11),
-        title: None,
-        class: Some("Firefox".into()),
-        app_id: Some("org.mozilla.firefox".into()),
-    };
-    for (event, criteria, expected) in [
-        (
-            &titled,
-            PlacementCriteria::Title("dev.assistd.popup".into()),
-            Some(id(7)),
-        ),
-        (&titled, PlacementCriteria::Title("other".into()), None),
-        (
-            &titled,
-            PlacementCriteria::Class("dev.assistd.popup".into()),
-            None,
-        ),
-        (
-            &firefox,
-            PlacementCriteria::Class("Firefox".into()),
-            Some(id(11)),
-        ),
-        (
-            &firefox,
-            PlacementCriteria::AppId("org.mozilla.firefox".into()),
-            Some(id(11)),
-        ),
-        (&firefox, PlacementCriteria::ConId(id(11)), Some(id(11))),
-        (&firefox, PlacementCriteria::ConId(id(99)), None),
-    ] {
-        assert_eq!(
-            event.matches_opened(&criteria),
-            expected,
-            "{event:?} vs {criteria:?}"
-        );
-    }
-}
-
-#[test]
-fn window_event_non_opened_variants_never_match() {
-    assert_eq!(
-        WindowEvent::Closed { id: id(3) }.matches_opened(&PlacementCriteria::ConId(id(3))),
-        None
-    );
-    assert_eq!(
-        WindowEvent::TitleChanged {
-            id: id(3),
-            new_title: Some("x".into())
-        }
-        .matches_opened(&PlacementCriteria::Title("x".into())),
-        None
-    );
 }
 
 #[test]
