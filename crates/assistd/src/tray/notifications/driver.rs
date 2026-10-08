@@ -14,10 +14,10 @@ use uuid::Uuid;
 use super::activity::ActivityTracker;
 use super::render::Notification;
 
-/// Also the update throttle: changes are flushed at most once a tick.
+/// Idle-check period and update throttle: changes flush at most once a tick.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Messages consumed by [`drive_notifications`].
+/// Daemon events, user actions and service signals the driver reacts to.
 #[derive(Debug)]
 pub(crate) enum DriverInput {
     Event(Box<Event>),
@@ -209,8 +209,8 @@ impl Driver {
         self.close();
     }
 
-    /// The single check every `Show` passes: never while the chat is
-    /// focused or its focus is still unknown.
+    /// Show the notification unless the chat is focused or its focus is
+    /// still unknown.
     fn open(&mut self) {
         if self.chat_focused != Some(false) {
             return;

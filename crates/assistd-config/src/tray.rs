@@ -56,7 +56,7 @@ pub struct TrayNotificationsConfig {
     /// each event and paused while a turn is in flight.
     pub auto_hide_ms: u64,
     /// Ask for a short plain-text reply to a voice turn while the chat is
-    /// unfocused or closed. Read by the daemon.
+    /// unfocused or closed.
     pub brief_when_away: bool,
     /// Events that raise a notification; tray-icon left-click always does.
     pub wake_on: TrayNotificationsWakeConfig,

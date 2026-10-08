@@ -106,7 +106,6 @@ fn status_line_for(activity: &Activity) -> &'static str {
     }
 }
 
-/// Escape the three characters the notification markup subset parses.
 fn escape_markup(raw: &str) -> String {
     raw.replace('&', "&amp;")
         .replace('<', "&lt;")
