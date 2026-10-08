@@ -138,46 +138,53 @@ fn declined_envelope(tool_name: &str) -> Value {
     })
 }
 
-/// Render the first content block of `result` as the tool-result
-/// envelope. Text and JSON bodies are cut by `truncator`, an `isError`
-/// text is prefixed, and an image goes into `attachments[]` as is.
+/// Render every content block of `result` as one tool-result envelope.
+/// Blocks are joined by newlines (non-text ones as JSON) and cut by
+/// `truncator`; images also go into `attachments[]` as is. Without
+/// content, `structuredContent` is the body. An `isError` result is
+/// prefixed as a whole.
 fn tool_result_to_json(
     result: CallToolResult,
     duration_ms: u128,
     truncator: &TextTruncator,
 ) -> Value {
-    match result.content.into_iter().next() {
-        None => text_envelope("text", truncator.truncate(String::new()), duration_ms),
-        Some(ContentBlock::Text(text)) => {
-            let text = match result.is_error {
-                Some(true) => format!("[mcp tool error] {}", text.text),
-                _ => text.text,
-            };
-            text_envelope("text", truncator.truncate(text), duration_ms)
-        }
-        Some(ContentBlock::Image(image)) => json!({
-            "type": "image",
-            "output": format!("(image: {})", image.mime_type),
-            "exit_code": 0,
-            "duration_ms": duration_ms,
-            "truncated": false,
-            "attachments": [
-                {"type": "image", "mime": image.mime_type, "data": image.data}
-            ],
-        }),
-        Some(other) => {
-            let value = serde_json::to_value(other).unwrap_or_default();
-            let mut envelope =
-                text_envelope("json", truncator.truncate(value.to_string()), duration_ms);
-            envelope["value"] = value;
-            envelope
-        }
+    let (sections, attachments): (Vec<String>, Vec<Option<Value>>) =
+        result.content.into_iter().map(render_block).unzip();
+    let body = match result.structured_content {
+        Some(structured) if sections.is_empty() => structured.to_string(),
+        _ => sections.join("\n"),
+    };
+    let body = match result.is_error {
+        Some(true) => format!("[mcp tool error] {body}"),
+        _ => body,
+    };
+    let mut envelope = text_envelope(truncator.truncate(body), duration_ms);
+    let attachments: Vec<Value> = attachments.into_iter().flatten().collect();
+    if !attachments.is_empty() {
+        envelope["attachments"] = Value::Array(attachments);
+    }
+    envelope
+}
+
+/// The text one content block contributes to the output, plus its
+/// attachment if it is an image.
+fn render_block(block: ContentBlock) -> (String, Option<Value>) {
+    match block {
+        ContentBlock::Text(text) => (text.text, None),
+        ContentBlock::Image(image) => (
+            format!("(image: {})", image.mime_type),
+            Some(json!({"type": "image", "mime": image.mime_type, "data": image.data})),
+        ),
+        other => (
+            serde_json::to_value(other).unwrap_or_default().to_string(),
+            None,
+        ),
     }
 }
 
-fn text_envelope(kind: &str, cut: TruncatedText, duration_ms: u128) -> Value {
+fn text_envelope(cut: TruncatedText, duration_ms: u128) -> Value {
     let mut envelope = json!({
-        "type": kind,
+        "type": "text",
         "output": cut.text,
         "exit_code": 0,
         "duration_ms": duration_ms,
