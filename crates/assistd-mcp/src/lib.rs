@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
-use assistd_tools::{ApprovalGate, ConfirmationRequest, MCP_TOOL_NAME_PREFIX, Tool, ToolError};
+use assistd_tools::{
+    ApprovalGate, ConfirmationRequest, MCP_TOOL_NAME_PREFIX, Tool, ToolError, VisionGate,
+};
 use async_trait::async_trait;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
@@ -32,7 +34,8 @@ pub trait McpClient: fmt::Debug + Send + Sync + 'static {
 
 /// Exposes one MCP tool as a [`Tool`] under `registry_name`; the
 /// server-native name stays in `tool.name`. Each call asks the user
-/// first until the tool is approved for good.
+/// first until the tool is approved for good; image results are dropped
+/// while `vision` reports no support.
 #[derive(Debug)]
 struct McpToolAdapter {
     client: Arc<dyn McpClient>,
@@ -40,6 +43,7 @@ struct McpToolAdapter {
     registry_name: String,
     truncator: Arc<TextTruncator>,
     approvals: ApprovalGate,
+    vision: Arc<VisionGate>,
 }
 
 impl McpToolAdapter {
@@ -81,7 +85,12 @@ impl Tool for McpToolAdapter {
         let outcome = self.client.invoke(&self.tool.name, args).await;
         let duration_ms = start.elapsed().as_millis();
         match outcome {
-            Ok(result) => Ok(tool_result_to_json(result, duration_ms, &self.truncator)),
+            Ok(result) => Ok(tool_result_to_json(
+                result,
+                duration_ms,
+                &self.truncator,
+                self.vision.supported(),
+            )),
             Err(err) => Ok(error_envelope(&self.registry_name, &err, duration_ms)),
         }
     }
@@ -90,12 +99,14 @@ impl Tool for McpToolAdapter {
 /// [`Tool`] entries for every tool `client` exposes, named
 /// `mcp__<server_name>__<tool>`. Results past `output`'s caps are cut, with
 /// the overflow spilled as `mcp-<server_name>-<n>.txt`. Each call asks
-/// first unless `approvals` holds the tool.
+/// first unless `approvals` holds the tool. Image results are replaced by a
+/// text note whenever `vision` reports the model cannot take images.
 pub async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     server_name: &str,
     output: PresentSpec,
     approvals: &ApprovalGate,
+    vision: &Arc<VisionGate>,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let tools = client.list_tools().await?;
     let truncator = Arc::new(TextTruncator::new(output, format!("mcp-{server_name}")));
@@ -108,6 +119,7 @@ pub async fn adapt_client_as_tools(
                 tool,
                 truncator: truncator.clone(),
                 approvals: approvals.clone(),
+                vision: vision.clone(),
             }) as Box<dyn Tool>
         })
         .collect())
@@ -140,16 +152,20 @@ fn declined_envelope(tool_name: &str) -> Value {
 
 /// Render every content block of `result` as one tool-result envelope.
 /// Blocks are joined by newlines (non-text ones as JSON) and cut by
-/// `truncator`; images also go into `attachments[]` as is. Without
-/// content, `structuredContent` is the body. An `isError` result is
-/// prefixed as a whole.
+/// `truncator`; with `vision`, images also go into `attachments[]` as is,
+/// and without it they become a note only. Without content,
+/// `structuredContent` is the body. An `isError` result is prefixed as a whole.
 fn tool_result_to_json(
     result: CallToolResult,
     duration_ms: u128,
     truncator: &TextTruncator,
+    vision: bool,
 ) -> Value {
-    let (sections, attachments): (Vec<String>, Vec<Option<Value>>) =
-        result.content.into_iter().map(render_block).unzip();
+    let (sections, attachments): (Vec<String>, Vec<Option<Value>>) = result
+        .content
+        .into_iter()
+        .map(|block| render_block(block, vision))
+        .unzip();
     let body = match result.structured_content {
         Some(structured) if sections.is_empty() => structured.to_string(),
         _ => sections.join("\n"),
@@ -167,10 +183,14 @@ fn tool_result_to_json(
 }
 
 /// The text one content block contributes to the output, plus its
-/// attachment if it is an image.
-fn render_block(block: ContentBlock) -> (String, Option<Value>) {
+/// attachment if it is an image and `vision` is on.
+fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Value>) {
     match block {
         ContentBlock::Text(text) => (text.text, None),
+        ContentBlock::Image(image) if !vision => (
+            format!("(image omitted: {}; model has no vision)", image.mime_type),
+            None,
+        ),
         ContentBlock::Image(image) => (
             format!("(image: {})", image.mime_type),
             Some(json!({"type": "image", "mime": image.mime_type, "data": image.data})),

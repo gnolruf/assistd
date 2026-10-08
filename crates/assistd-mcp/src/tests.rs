@@ -12,7 +12,7 @@ async fn adapt_allowing(
     output: PresentSpec,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    adapt_client_as_tools(client, "web", output, &approvals).await
+    adapt_client_as_tools(client, "web", output, &approvals, &VisionGate::new(true)).await
 }
 
 fn mcp_tool(name: &str, description: &str) -> rmcp::model::Tool {
@@ -165,7 +165,7 @@ fn text_only_results_join_every_block() {
     ];
     for (result, expected) in cases {
         assert_eq!(
-            tool_result_to_json(call_result(result), 42, &unlimited()),
+            tool_result_to_json(call_result(result), 42, &unlimited(), true),
             text_envelope_of(expected)
         );
     }
@@ -181,7 +181,7 @@ fn mixed_results_keep_every_block_and_collect_images() {
             {"type": "image", "mimeType": "image/jpeg", "data": "AAAA"},
         ]
     }));
-    let envelope = tool_result_to_json(result, 42, &unlimited());
+    let envelope = tool_result_to_json(result, 42, &unlimited(), true);
     let output = envelope["output"].as_str().unwrap();
     let lines: Vec<&str> = output.lines().collect();
     let [text, png, link, jpeg] = lines.as_slice() else {
@@ -204,6 +204,60 @@ fn mixed_results_keep_every_block_and_collect_images() {
 }
 
 #[test]
+fn images_become_notes_without_vision() {
+    let result = call_result(json!({
+        "content": [
+            {"type": "text", "text": "took screenshot"},
+            {"type": "image", "mimeType": "image/png", "data": "3q2+7w=="},
+        ]
+    }));
+    assert_eq!(
+        tool_result_to_json(result, 42, &unlimited(), false),
+        text_envelope_of("took screenshot\n(image omitted: image/png; model has no vision)")
+    );
+}
+
+/// Returns one PNG image for every call.
+#[derive(Debug)]
+struct ImageClient;
+
+#[async_trait]
+impl McpClient for ImageClient {
+    async fn list_tools(&self) -> Result<Vec<rmcp::model::Tool>, McpError> {
+        Ok(vec![mcp_tool("snap", "take a screenshot")])
+    }
+
+    async fn invoke(&self, _name: &str, _arguments: Value) -> Result<CallToolResult, McpError> {
+        Ok(call_result(json!({
+            "content": [{"type": "image", "mimeType": "image/png", "data": "AAAA"}]
+        })))
+    }
+}
+
+#[tokio::test]
+async fn adapter_follows_the_vision_gate_on_every_call() {
+    let vision = VisionGate::new(false);
+    let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
+    let tools = adapt_client_as_tools(
+        Arc::new(ImageClient),
+        "shots",
+        PresentSpec::default(),
+        &approvals,
+        &vision,
+    )
+    .await
+    .unwrap();
+    let without = tools[0].invoke(json!({})).await.unwrap();
+    assert!(without.get("attachments").is_none());
+    vision.set(true);
+    let with = tools[0].invoke(json!({})).await.unwrap();
+    assert_eq!(
+        with["attachments"],
+        json!([{"type": "image", "mime": "image/png", "data": "AAAA"}])
+    );
+}
+
+#[test]
 fn error_flag_applies_when_the_first_block_is_not_text() {
     let result = call_result(json!({
         "content": [
@@ -212,7 +266,7 @@ fn error_flag_applies_when_the_first_block_is_not_text() {
         ],
         "isError": true,
     }));
-    let envelope = tool_result_to_json(result, 42, &unlimited());
+    let envelope = tool_result_to_json(result, 42, &unlimited(), true);
     assert_eq!(
         envelope["output"],
         "[mcp tool error] (image: image/png)\npage crashed"
@@ -294,6 +348,7 @@ async fn gated_tool(
         "files",
         PresentSpec::default(),
         &ApprovalGate::new(gate, approvals),
+        &VisionGate::new(true),
     )
     .await
     .unwrap();

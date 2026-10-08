@@ -7,7 +7,7 @@ use std::time::Duration;
 use assistd_core::{Config, McpServerConfig, McpStartupFailure};
 use assistd_mcp::{McpServer, StdioConfig, adapt_client_as_tools};
 use assistd_tools::presentation::PresentSpec;
-use assistd_tools::{ApprovalGate, Tool};
+use assistd_tools::{ApprovalGate, Tool, VisionGate};
 use tracing::info;
 
 #[derive(Default)]
@@ -26,9 +26,14 @@ impl McpSubsystem {
 }
 
 /// Start every configured MCP server, whose tools ask before each call
-/// unless `approvals` holds them. A server that fails to start or to
-/// list its tools is recorded in `startup_failures` and skipped.
-pub(super) async fn init(config: &Config, approvals: &ApprovalGate) -> McpSubsystem {
+/// unless `approvals` holds them and whose image results follow `vision`.
+/// A server that fails to start or to list its tools is recorded in
+/// `startup_failures` and skipped.
+pub(super) async fn init(
+    config: &Config,
+    approvals: &ApprovalGate,
+    vision: &Arc<VisionGate>,
+) -> McpSubsystem {
     let mut subsystem = McpSubsystem::default();
     if !config.mcp.enabled {
         info!("mcp: disabled in config (mcp.enabled = false)");
@@ -38,7 +43,7 @@ pub(super) async fn init(config: &Config, approvals: &ApprovalGate) -> McpSubsys
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let output = PresentSpec::from_config(&config.tools.output, overflow_dir);
     for server in &config.mcp.servers {
-        match start_server(server, output.clone(), approvals).await {
+        match start_server(server, output.clone(), approvals, vision).await {
             Ok((server, tools)) => {
                 subsystem.tools.extend(tools);
                 subsystem.servers.push(server);
@@ -55,6 +60,7 @@ async fn start_server(
     server: &McpServerConfig,
     output: PresentSpec,
     approvals: &ApprovalGate,
+    vision: &Arc<VisionGate>,
 ) -> Result<(Arc<McpServer>, Vec<Box<dyn Tool>>), McpStartupFailure> {
     let name = server.name.clone();
     let started = match McpServer::start(name.clone(), stdio_config(server)).await {
@@ -69,7 +75,7 @@ async fn start_server(
         }
     };
 
-    match adapt_client_as_tools(started.clone(), &name, output, approvals).await {
+    match adapt_client_as_tools(started.clone(), &name, output, approvals, vision).await {
         Ok(tools) => {
             info!("mcp: {name} ready ({} tools)", tools.len());
             Ok((started, tools))

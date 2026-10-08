@@ -9,7 +9,7 @@ use assistd_mcp::{
     McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools, mcp_error_line,
 };
 use assistd_tools::presentation::PresentSpec;
-use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool};
+use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool, VisionGate};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
@@ -33,9 +33,15 @@ async fn start_fake() -> Arc<McpServer> {
 /// [`adapt_client_as_tools`] with every call allowed.
 async fn adapt_allowing(server: &Arc<McpServer>) -> Vec<Box<dyn Tool>> {
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    adapt_client_as_tools(server.clone(), "fake", PresentSpec::default(), &approvals)
-        .await
-        .expect("discovery should succeed")
+    adapt_client_as_tools(
+        server.clone(),
+        "fake",
+        PresentSpec::default(),
+        &approvals,
+        &VisionGate::new(true),
+    )
+    .await
+    .expect("discovery should succeed")
 }
 
 fn find<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {

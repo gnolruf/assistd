@@ -57,7 +57,7 @@ pub(super) async fn init(
         gate.clone(),
         Arc::new(assistd_core::mcp_tool_approvals(config_path)?),
     );
-    let mut mcp = mcp_init::init(config, &mcp_approvals).await;
+    let mut mcp = mcp_init::init(config, &mcp_approvals, &deps.vision_gate).await;
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let registry = assistd_core::build_tools(BuildToolsDeps {
         config,
