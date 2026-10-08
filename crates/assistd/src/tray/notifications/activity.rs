@@ -19,7 +19,7 @@ pub(crate) struct ActivityView {
     /// Oldest first.
     pub tool_calls: Vec<ToolCallLine>,
     pub error: Option<String>,
-    /// The session title sent after the turn finished.
+    /// The latest session title the daemon broadcast.
     pub title: Option<String>,
     pub activity: Activity,
 }
@@ -59,8 +59,18 @@ struct TurnState {
     body: String,
     tool_calls: VecDeque<ToolCallLine>,
     error: Option<String>,
-    title: Option<String>,
     activity: Option<TurnActivity>,
+}
+
+impl TurnState {
+    /// Reply text after tool calls replaces them and the narration before them.
+    fn start_streaming(&mut self) {
+        if !self.tool_calls.is_empty() && self.activity != Some(TurnActivity::Streaming) {
+            self.tool_calls.clear();
+            self.body.clear();
+        }
+        self.activity = Some(TurnActivity::Streaming);
+    }
 }
 
 /// Tracks every signal the notifications care about and produces an
@@ -70,6 +80,7 @@ pub(super) struct ActivityTracker {
     turns: HashMap<String, TurnState>,
     in_flight: HashSet<String>,
     displayed: Option<String>,
+    session_title: Option<String>,
     listening: bool,
     speaking: HashSet<String>,
 }
@@ -87,7 +98,7 @@ impl ActivityTracker {
                 .map(|t| t.tool_calls.iter().cloned().collect())
                 .unwrap_or_default(),
             error: displayed.and_then(|t| t.error.clone()),
-            title: displayed.and_then(|t| t.title.clone()),
+            title: self.session_title.clone(),
             activity: self.activity(displayed, displayed_in_flight),
         }
     }
@@ -113,6 +124,7 @@ impl ActivityTracker {
         self.turns.clear();
         self.in_flight.clear();
         self.displayed = None;
+        self.session_title = None;
         self.listening = false;
         self.speaking.clear();
     }
@@ -143,13 +155,11 @@ impl ActivityTracker {
     /// the whole reply; `Delta` never appends.
     pub(super) fn ingest(&mut self, ev: &Event) {
         match ev {
-            Event::Delta { id, .. } => {
-                self.activate_turn(id).activity = Some(TurnActivity::Streaming);
-            }
+            Event::Delta { id, .. } => self.activate_turn(id).start_streaming(),
             Event::LastDelta { id, text } => {
                 let turn = self.activate_turn(id);
+                turn.start_streaming();
                 turn.body.clone_from(text);
-                turn.activity = Some(TurnActivity::Streaming);
             }
             Event::ReasoningDelta { id, .. } => {
                 self.activate_turn(id).activity = Some(TurnActivity::Thinking);
@@ -172,10 +182,8 @@ impl ActivityTracker {
             Event::Error { id, message } => {
                 self.finish_turn(id, TurnActivity::Failed, Some(message.clone()));
             }
-            Event::SessionTitle { id, title, .. } => {
-                if let Some(turn) = self.turns.get_mut(id) {
-                    turn.title = Some(title.clone());
-                }
+            Event::SessionTitle { title, .. } => {
+                self.session_title = Some(title.clone());
             }
             Event::ListenState { active, .. } => {
                 self.listening = *active;
@@ -438,22 +446,44 @@ mod tests {
     }
 
     #[test]
-    fn session_title_attaches_to_its_turn_only() {
+    fn reply_text_after_tool_calls_replaces_them() {
+        let mut t = ActivityTracker::default();
+        t.ingest(&last_delta("a", "let me look"));
+        t.ingest(&tool_call("a", "bash", json!({"command": "ls"})));
+        t.ingest(&Event::ToolResult {
+            id: "a".into(),
+            name: "bash".into(),
+            result: json!({}),
+        });
+        let before = t.snapshot();
+        assert_eq!(before.body, "let me look");
+        assert_eq!(before.tool_calls.len(), 1);
+
+        t.ingest(&delta("a", "Found"));
+        let s = t.snapshot();
+        assert!(s.tool_calls.is_empty());
+        assert_eq!(s.body, "");
+        t.ingest(&last_delta("a", "Found it"));
+        t.ingest(&delta("a", " it"));
+        assert_eq!(t.snapshot().body, "Found it");
+    }
+
+    #[test]
+    fn session_title_outlives_the_turn_it_arrived_with() {
         let mut t = ActivityTracker::default();
         t.ingest(&last_delta("a", "reply"));
-        t.ingest(&done("a"));
-        t.ingest(&Event::SessionTitle {
-            id: "gone".into(),
-            session_id: "s".into(),
-            title: "Elsewhere".into(),
-        });
         assert_eq!(t.snapshot().title, None);
+        t.ingest(&done("a"));
         t.ingest(&Event::SessionTitle {
             id: "a".into(),
             session_id: "s".into(),
             title: "Cats And Dogs".into(),
         });
+        t.ingest(&delta("b", "x"));
+        t.ingest(&tool_call("b", "bash", json!({})));
         assert_eq!(t.snapshot().title.as_deref(), Some("Cats And Dogs"));
+        t.set_disconnected();
+        assert_eq!(t.snapshot().title, None);
     }
 
     #[test]

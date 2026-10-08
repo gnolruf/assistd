@@ -1,6 +1,7 @@
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use super::super::activity::Activity;
 use super::*;
 
 struct Harness {
@@ -84,8 +85,20 @@ fn nothing_shows_until_the_chat_focus_is_known() {
     h.expect_nothing();
 
     h.event(chat_focus(false));
+    h.event(last_delta("a", "hi"));
     h.apply(DriverInput::Wake);
     h.expect_show();
+}
+
+#[test]
+fn a_thinking_turn_shows_before_any_reply() {
+    let mut h = Harness::away();
+    h.event(Event::ReasoningDelta {
+        id: "a".into(),
+        text: "hmm".into(),
+    });
+    h.apply(DriverInput::Wake);
+    assert_eq!(h.expect_show().view.activity, Activity::Thinking);
 }
 
 #[test]
@@ -102,6 +115,7 @@ fn a_focused_chat_blocks_every_show() {
 #[test]
 fn gaining_focus_closes_the_notification_and_drops_pending_updates() {
     let mut h = Harness::away();
+    h.event(last_delta("a", "first"));
     h.apply(DriverInput::Wake);
     h.expect_show();
     h.event(last_delta("a", "pending"));
@@ -123,6 +137,7 @@ fn losing_focus_mid_turn_shows_the_current_state() {
 #[test]
 fn updates_are_flushed_once_per_tick_with_the_latest_state() {
     let mut h = Harness::away();
+    h.event(last_delta("a", "start"));
     h.apply(DriverInput::Wake);
     h.expect_show();
     for n in 0..10 {
@@ -235,6 +250,7 @@ fn listening_uses_the_longer_idle_timeout() {
 #[test]
 fn disconnect_closes_and_forgets_the_chat_focus() {
     let mut h = Harness::away();
+    h.event(last_delta("a", "hi"));
     h.apply(DriverInput::Wake);
     h.expect_show();
     h.apply(DriverInput::Disconnected);

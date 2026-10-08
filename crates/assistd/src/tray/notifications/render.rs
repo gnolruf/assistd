@@ -66,19 +66,12 @@ fn icon_for(activity: &Activity) -> &'static str {
     }
 }
 
-/// A finished turn shows its session title, and nothing until it arrives.
+/// The session title once one arrives, `assistd` until then.
 fn summary_for(view: &ActivityView) -> String {
-    match &view.activity {
-        Activity::Idle => "assistd".into(),
-        Activity::Streaming => "Replying…".into(),
-        Activity::Thinking => "Thinking…".into(),
-        Activity::RunningTool { name } => format!("Running {name}…"),
-        Activity::Listening => "Listening…".into(),
-        Activity::Done => view.title.clone().unwrap_or_default(),
-        Activity::Failed => "Error".into(),
-    }
+    view.title.clone().unwrap_or_else(|| "assistd".into())
 }
 
+/// The turn's tool calls, reply and error, else a line naming the activity.
 fn body_for(view: &ActivityView, markup: bool) -> String {
     let text = |raw: &str| {
         if markup {
@@ -97,11 +90,20 @@ fn body_for(view: &ActivityView, markup: bool) -> String {
     });
     let reply = (!view.body.is_empty()).then(|| text(&view.body));
     let error = view.error.as_deref().map(text);
-    tool_lines
-        .chain(reply)
-        .chain(error)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let lines: Vec<_> = tool_lines.chain(reply).chain(error).collect();
+    if lines.is_empty() {
+        status_line_for(&view.activity).into()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn status_line_for(activity: &Activity) -> &'static str {
+    match activity {
+        Activity::Thinking | Activity::Streaming | Activity::RunningTool { .. } => "Thinking…",
+        Activity::Listening => "Listening…",
+        Activity::Idle | Activity::Done | Activity::Failed => "",
+    }
 }
 
 /// Escape the three characters the notification markup subset parses.
@@ -141,37 +143,52 @@ mod tests {
     }
 
     #[test]
-    fn summary_names_the_activity() {
+    fn summary_is_the_session_title_whatever_the_activity() {
+        for activity in [
+            Activity::Idle,
+            Activity::Streaming,
+            Activity::Thinking,
+            Activity::RunningTool {
+                name: "bash".into(),
+            },
+            Activity::Listening,
+            Activity::Done,
+            Activity::Failed,
+        ] {
+            let untitled = ActivityView {
+                activity: activity.clone(),
+                ..ActivityView::default()
+            };
+            assert_eq!(render(&busy(untitled), PLAIN).summary, "assistd");
+            let titled = ActivityView {
+                title: Some("Cats And Dogs".into()),
+                activity,
+                ..ActivityView::default()
+            };
+            assert_eq!(render(&busy(titled), PLAIN).summary, "Cats And Dogs");
+        }
+    }
+
+    #[test]
+    fn empty_body_names_the_activity() {
         for (activity, expected) in [
-            (Activity::Idle, "assistd"),
-            (Activity::Streaming, "Replying…"),
             (Activity::Thinking, "Thinking…"),
-            (
-                Activity::RunningTool {
-                    name: "bash".into(),
-                },
-                "Running bash…",
-            ),
+            (Activity::Streaming, "Thinking…"),
             (Activity::Listening, "Listening…"),
             (Activity::Done, ""),
-            (Activity::Failed, "Error"),
         ] {
             let view = ActivityView {
                 activity,
                 ..ActivityView::default()
             };
-            assert_eq!(render(&busy(view), MARKUP).summary, expected);
+            assert_eq!(render(&busy(view), PLAIN).body, expected);
         }
-    }
-
-    #[test]
-    fn finished_turn_takes_its_session_title() {
-        let view = ActivityView {
-            title: Some("Cats And Dogs".into()),
-            activity: Activity::Done,
+        let replying = ActivityView {
+            body: "hi".into(),
+            activity: Activity::Streaming,
             ..ActivityView::default()
         };
-        assert_eq!(render(&busy(view), PLAIN).summary, "Cats And Dogs");
+        assert_eq!(render(&busy(replying), PLAIN).body, "hi");
     }
 
     #[test]
