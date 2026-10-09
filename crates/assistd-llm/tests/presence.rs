@@ -69,10 +69,14 @@ async fn new_active_manager(
     port: u16,
 ) -> (Arc<PresenceManager>, watch::Sender<bool>) {
     let (tx, rx) = watch::channel(false);
-    let manager =
-        PresenceManager::new_active(model_spec(fake, port), TimeoutsConfig::default(), rx)
-            .await
-            .expect("cold-start wake failed");
+    let manager = PresenceManager::new_active(
+        model_spec(fake, port),
+        TimeoutsConfig::default(),
+        fake.api_key().clone(),
+        rx,
+    )
+    .await
+    .expect("cold-start wake failed");
     (manager, tx)
 }
 
@@ -231,9 +235,14 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
         presence_sleep_secs: 1,
         ..TimeoutsConfig::default()
     };
-    let manager = PresenceManager::new_active(model_spec(&fake, port), timeouts, shutdown_rx)
-        .await
-        .expect("cold-start wake failed");
+    let manager = PresenceManager::new_active(
+        model_spec(&fake, port),
+        timeouts,
+        fake.api_key().clone(),
+        shutdown_rx,
+    )
+    .await
+    .expect("cold-start wake failed");
     let pid = manager.llama_pid().await.expect("child running");
 
     let err = manager
@@ -317,6 +326,7 @@ fn presence_probed_client(
         &chat,
         &model_spec(fake, port),
         &TimeoutsConfig::default(),
+        Some(fake.api_key()),
         Some(probe),
     )
     .expect("build chat client")
@@ -701,6 +711,7 @@ async fn shutdown_aborts_a_background_wake_and_sleep_still_runs() {
     let manager = PresenceManager::new_sleeping(
         model_spec(&fake, port),
         TimeoutsConfig::default(),
+        fake.api_key().clone(),
         shutdown_rx,
     )
     .expect("control client");

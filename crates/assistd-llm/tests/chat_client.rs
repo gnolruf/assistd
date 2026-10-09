@@ -388,12 +388,12 @@ fn delta(text: &str) -> LlmEvent {
 }
 
 fn build_client(cfg: &ClientCfg) -> LlamaChatClient {
-    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None).unwrap()
+    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None, None).unwrap()
 }
 
 fn build_probed_client(cfg: &ClientCfg, probe: &Arc<ScriptedProbe>) -> LlamaChatClient {
     let health: Arc<dyn LlmHealthProbe> = probe.clone();
-    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, Some(health)).unwrap()
+    LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None, Some(health)).unwrap()
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {

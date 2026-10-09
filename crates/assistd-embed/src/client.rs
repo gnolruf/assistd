@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use assistd_utils::child_server::ChildServerStatus;
+use assistd_utils::child_server::{ApiKey, ChildServerStatus};
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -41,16 +41,23 @@ pub struct LlamaEmbedder {
 
 impl LlamaEmbedder {
     /// Probe the server once to learn the vector dimension; `request_timeout` applies to
-    /// the probe and every later request. With `server`, a request made while it is not
-    /// serving fails with [`EmbedError::NotReady`] without being sent.
+    /// the probe and every later request, and `api_key`, when set, is sent with each. With
+    /// `server`, a request made while it is not serving fails with [`EmbedError::NotReady`]
+    /// without being sent.
     pub async fn new(
         addr: SocketAddr,
         model: String,
         request_timeout: Duration,
+        api_key: Option<&ApiKey>,
         server: Option<ChildServerStatus>,
     ) -> Result<Self, EmbedError> {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .default_headers(
+                api_key
+                    .map(ApiKey::authorization_headers)
+                    .unwrap_or_default(),
+            )
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(request_timeout)
             .build()

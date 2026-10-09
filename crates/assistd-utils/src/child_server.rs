@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
+mod api_key;
 mod error;
 mod health;
 mod llama_env;
@@ -14,6 +15,7 @@ mod process;
 mod service;
 mod supervisor;
 
+pub use api_key::ApiKey;
 pub use error::ChildServerError;
 pub use llama_env::remove_llama_env;
 pub use service::{ChildServer, ChildServerStatus, ReadyState};

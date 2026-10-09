@@ -55,9 +55,12 @@ async fn answer_every_request_with_ok(listener: TcpListener) {
 
 async fn start_service(fake: &FakeLlama, port: u16) -> (ChildServer, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let service = ChildServer::start(LlamaServerSpec::new(model_spec(fake, port)), shutdown_rx)
-        .await
-        .expect("service should start");
+    let service = ChildServer::start(
+        LlamaServerSpec::new(model_spec(fake, port), fake.api_key().clone()),
+        shutdown_rx,
+    )
+    .await
+    .expect("service should start");
     (service, shutdown_tx)
 }
 
@@ -137,8 +140,11 @@ async fn health_from_a_squatter_on_the_port_is_not_ready() {
         let _ = flip_tx.send(true);
     });
 
-    let result =
-        ChildServer::start(LlamaServerSpec::new(model_spec(&fake, port)), shutdown_rx).await;
+    let result = ChildServer::start(
+        LlamaServerSpec::new(model_spec(&fake, port), fake.api_key().clone()),
+        shutdown_rx,
+    )
+    .await;
     squatter_task.abort();
 
     let err = result.expect_err("a 200 from a foreign listener must not count as ready");

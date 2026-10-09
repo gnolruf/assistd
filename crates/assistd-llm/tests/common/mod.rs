@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use assistd_utils::child_server::ApiKey;
 use tempfile::TempDir;
 
 const FAKE_BIN: &str = env!("CARGO_BIN_EXE_fake_llama_server");
@@ -11,6 +12,7 @@ const FAKE_BIN: &str = env!("CARGO_BIN_EXE_fake_llama_server");
 /// running in parallel. Keep it alive for as long as anything may spawn it.
 pub(crate) struct FakeLlama {
     dir: TempDir,
+    api_key: ApiKey,
 }
 
 impl FakeLlama {
@@ -19,7 +21,8 @@ impl FakeLlama {
         let dir = tempfile::tempdir().expect("fake llama tempdir");
         std::os::unix::fs::symlink(FAKE_BIN, dir.path().join("llama-server"))
             .expect("symlink fake_llama_server");
-        let fake = Self { dir };
+        let api_key = ApiKey::generate().expect("fake llama api key");
+        let fake = Self { dir, api_key };
         fake.set_mode(mode);
         fake
     }
@@ -27,6 +30,11 @@ impl FakeLlama {
     /// Path to use as `ModelConfig::server_binary`.
     pub(crate) fn binary_path(&self) -> PathBuf {
         self.dir.path().join("llama-server")
+    }
+
+    /// A key for the specs and clients a test points at this fake.
+    pub(crate) fn api_key(&self) -> &ApiKey {
+        &self.api_key
     }
 
     /// Select the mode for subsequent spawns; running children are unaffected.

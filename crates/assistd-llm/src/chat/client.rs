@@ -10,6 +10,7 @@ use std::time::Duration;
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
+use assistd_utils::child_server::ApiKey;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -53,18 +54,24 @@ pub struct LlamaChatClient {
 }
 
 impl LlamaChatClient {
-    /// Build a client for the server at `model.host:model.port`. Pass
-    /// `health: None` when no supervisor is attached. With a probe, a request
-    /// made while its child is not serving fails with
-    /// [`LlmError::ServerRestarting`] without being sent.
+    /// Build a client for the server at `model.host:model.port`, sending
+    /// `api_key` with every request when set. Pass `health: None` when no
+    /// supervisor is attached. With a probe, a request made while its child
+    /// is not serving fails with [`LlmError::ServerRestarting`] without being sent.
     pub fn new(
         chat: &ChatConfig,
         model: &ModelConfig,
         timeouts: &TimeoutsConfig,
+        api_key: Option<&ApiKey>,
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, ChatClientError> {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .default_headers(
+                api_key
+                    .map(ApiKey::authorization_headers)
+                    .unwrap_or_default(),
+            )
             .connect_timeout(Duration::from_secs(10))
             .build()?;
         let base_url = format!("http://{}", SocketAddr::new(model.host, model.port.get()));

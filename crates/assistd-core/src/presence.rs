@@ -21,7 +21,7 @@ use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec,
     LlmHealthProbe, ReadyState,
 };
-use assistd_utils::child_server::{ChildServer, ChildServerError};
+use assistd_utils::child_server::{ApiKey, ChildServer, ChildServerError};
 
 use crate::recovery::spawn_supervised;
 
@@ -103,6 +103,7 @@ pub struct PresenceManager {
     transition: AsyncMutex<()>,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
+    api_key: ApiKey,
     control: LlamaServerControl,
     /// `Some` iff state is `Active` or `Drowsy`.
     llama: AsyncMutex<Option<ChildServer>>,
@@ -128,9 +129,10 @@ impl PresenceManager {
     pub async fn new_active(
         model: ModelConfig,
         timeouts: TimeoutsConfig,
+        api_key: ApiKey,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let manager = Self::new_sleeping(model, timeouts, daemon_shutdown)?;
+        let manager = Self::new_sleeping(model, timeouts, api_key, daemon_shutdown)?;
         manager
             .wake()
             .await
@@ -138,15 +140,21 @@ impl PresenceManager {
         Ok(manager)
     }
 
-    /// Create a manager in `Sleeping` with no llama-server started.
-    /// Flipping `daemon_shutdown` cancels any wake in flight.
+    /// Create a manager in `Sleeping` with no llama-server started. Every
+    /// server it starts accepts only `api_key`. Flipping `daemon_shutdown`
+    /// cancels any wake in flight.
     pub fn new_sleeping(
         model: ModelConfig,
         timeouts: TimeoutsConfig,
+        api_key: ApiKey,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let control = LlamaServerControl::new(SocketAddr::new(model.host, model.port.get()), None)
-            .map_err(PresenceError::Control)?;
+        let control = LlamaServerControl::new(
+            SocketAddr::new(model.host, model.port.get()),
+            Some(&api_key),
+            None,
+        )
+        .map_err(PresenceError::Control)?;
 
         let current_inner_shutdown: InnerShutdownSlot = Arc::new(StdMutex::new(None));
         spawn_shutdown_forwarder(daemon_shutdown.clone(), Arc::clone(&current_inner_shutdown));
@@ -158,6 +166,7 @@ impl PresenceManager {
             transition: AsyncMutex::new(()),
             model,
             timeouts,
+            api_key,
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown,
@@ -542,15 +551,15 @@ impl PresenceManager {
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
 
-        let service =
-            match ChildServer::start(LlamaServerSpec::new(self.model.clone()), inner_rx).await {
-                Ok(service) => service,
-                Err(e) => {
-                    *self.current_inner_shutdown.lock() = None;
-                    warn!(target: "assistd::presence", "wake cold-start failed: {e}");
-                    return Err(PresenceError::ColdStart(e));
-                }
-            };
+        let spec = LlamaServerSpec::new(self.model.clone(), self.api_key.clone());
+        let service = match ChildServer::start(spec, inner_rx).await {
+            Ok(service) => service,
+            Err(e) => {
+                *self.current_inner_shutdown.lock() = None;
+                warn!(target: "assistd::presence", "wake cold-start failed: {e}");
+                return Err(PresenceError::ColdStart(e));
+            }
+        };
 
         let loaded = match self.serving_ready_rx(&service) {
             Ok(ready_rx) => self.load_model_and_wait(ready_rx).await,
@@ -645,14 +654,16 @@ impl PresenceManager {
             ready_timeout_secs: nz64(1),
             ..ModelConfig::default()
         };
-        let control =
-            LlamaServerControl::new(SocketAddr::new(model.host, 1), None).expect("dummy control");
+        let api_key = ApiKey::generate().expect("stub api key");
+        let control = LlamaServerControl::new(SocketAddr::new(model.host, 1), None, None)
+            .expect("dummy control");
         let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
             settled: StdMutex::new(state),
             transition: AsyncMutex::new(()),
             model,
             timeouts: TimeoutsConfig::default(),
+            api_key,
             control,
             llama: AsyncMutex::new(None),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),

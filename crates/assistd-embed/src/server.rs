@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use assistd_config::EmbeddingConfig;
-use assistd_utils::child_server::{ChildServerSpec, remove_llama_env};
+use assistd_utils::child_server::{ApiKey, ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
 /// Launch parameters for the supervised embedding llama-server. With
@@ -12,11 +12,13 @@ use tokio::process::Command;
 #[derive(Debug)]
 pub struct EmbedServerSpec {
     cfg: EmbeddingConfig,
+    api_key: ApiKey,
 }
 
 impl EmbedServerSpec {
-    pub fn new(cfg: EmbeddingConfig) -> Self {
-        Self { cfg }
+    /// A spec whose server accepts only requests bearing `api_key`.
+    pub fn new(cfg: EmbeddingConfig, api_key: ApiKey) -> Self {
+        Self { cfg, api_key }
     }
 }
 
@@ -28,7 +30,7 @@ impl ChildServerSpec for EmbedServerSpec {
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.cfg.server_binary);
         cmd.args(self.cfg.custom_args.as_slice());
-        push_managed_args(&mut cmd, &self.cfg);
+        push_managed_args(&mut cmd, &self.cfg, &self.api_key);
         remove_llama_env(&mut cmd);
         if self.cfg.gpu_layers == 0 {
             cmd.env("CUDA_VISIBLE_DEVICES", "");
@@ -45,8 +47,11 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 }
 
-fn push_managed_args(cmd: &mut Command, cfg: &EmbeddingConfig) {
+fn push_managed_args(cmd: &mut Command, cfg: &EmbeddingConfig, api_key: &ApiKey) {
     cmd.arg("--embedding")
+        .arg("--no-slots")
+        .arg("--api-key-file")
+        .arg(api_key.file_path())
         .arg("--pooling")
         .arg("mean")
         .arg("--hf-repo")

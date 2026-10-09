@@ -58,7 +58,7 @@ pub enum CustomArgsError {
     #[error("`{0}` is set by assistd or relied on by its client")]
     Managed(String),
 
-    #[error("`{0}` exposes files, tools or state through the unauthenticated server")]
+    #[error("`{0}` exposes files, tools or state through the server's HTTP API")]
     Exposing(String),
 }
 

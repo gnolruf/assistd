@@ -16,6 +16,7 @@ use assistd_core::{
 use assistd_ipc::IpcClient;
 use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
 use assistd_memory::HistoryRow;
+use assistd_utils::child_server::ApiKey;
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use tokio::sync::watch;
@@ -117,14 +118,16 @@ async fn start(
     config_path: &Path,
     stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
+    let api_key = ApiKey::generate().context("failed to write the model servers' API key")?;
     let presence = PresenceManager::new_sleeping(
         config.model.clone(),
         config.timeouts.clone(),
+        api_key.clone(),
         stages.llm.subscribe(),
     )?;
     let health_probe: Arc<dyn LlmHealthProbe> =
         Arc::new(PresenceLlmHealthProbe::new(presence.clone()));
-    let vision_revalidator = build_vision_revalidator(&config, &presence, &health_probe)?;
+    let vision_revalidator = build_vision_revalidator(&config, &api_key, &presence, &health_probe)?;
     let voice = VoiceManager::new(config.voice.synthesis.enabled);
 
     let hotkey_handle = spawn_hotkeys(&config, &presence, &voice, stages.intake.subscribe());
@@ -134,7 +137,8 @@ async fn start(
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
     let mut memory = memory_init::init(&config, &stages.memory_writer).await;
-    let (embed, embed_startup) = embed_init::prepare(&config, memory.sqlite_handle.as_ref());
+    let (embed, embed_startup) =
+        embed_init::prepare(&config, &api_key, memory.sqlite_handle.as_ref());
     let window = wm_init::init(&config, &stages.tools).await;
 
     let conversation_ctx = Arc::new(ConversationContext::from_arc(
@@ -154,7 +158,7 @@ async fn start(
         },
     )?;
 
-    let chat = build_chat_backend(&config, health_probe)?;
+    let chat = build_chat_backend(&config, &api_key, health_probe)?;
     let resumed_history = std::mem::take(&mut memory.resumed_history);
     replay_history(chat.as_ref(), &resumed_history).await;
 
@@ -260,11 +264,13 @@ pub(crate) fn init_config() -> Result<()> {
 /// closed until the model first loads.
 fn build_vision_revalidator(
     config: &Config,
+    api_key: &ApiKey,
     presence: &PresenceManager,
     health_probe: &Arc<dyn LlmHealthProbe>,
 ) -> Result<Arc<VisionRevalidator>> {
     let control = LlamaServerControl::new(
         SocketAddr::new(config.model.host, config.model.port.get()),
+        Some(api_key),
         Some(Arc::clone(health_probe)),
     )
     .context("failed to construct llama-server control client for vision probe")?;
@@ -299,12 +305,14 @@ fn spawn_hotkeys(
 
 fn build_chat_backend(
     config: &Config,
+    api_key: &ApiKey,
     health_probe: Arc<dyn LlmHealthProbe>,
 ) -> Result<Arc<dyn LlmBackend>> {
     let chat = LlamaChatClient::new(
         &config.chat,
         &config.model,
         &config.timeouts,
+        Some(api_key),
         Some(health_probe),
     )?;
     Ok(Arc::new(chat))
