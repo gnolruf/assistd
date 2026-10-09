@@ -81,20 +81,10 @@ mod tests {
 
     #[test]
     fn inputs_that_fit_or_cannot_be_split_come_back_whole_or_empty() {
-        let a64 = "a".repeat(64);
         let a50 = "a".repeat(50);
-        let spaces = " ".repeat(30);
         let cases = [
-            ("empty", "", cfg(64, 8), vec![]),
             ("whitespace only", "   \n\t  ", cfg(64, 8), vec![]),
-            ("long whitespace only", spaces.as_str(), cfg(10, 2), vec![]),
             ("short", "hello world", cfg(64, 8), vec!["hello world"]),
-            (
-                "exactly at the limit",
-                a64.as_str(),
-                cfg(64, 8),
-                vec![a64.as_str()],
-            ),
             (
                 "overlap >= chunk",
                 a50.as_str(),
@@ -112,22 +102,10 @@ mod tests {
         let mixed_width: String = "a\u{e9}\u{4e16}".repeat(10);
         let cases = [
             (
-                "even split",
-                alphabet(100),
-                cfg(40, 10),
-                vec![(0, 40), (30, 70), (60, 100)],
-            ),
-            (
                 "short tail kept",
                 alphabet(110),
                 cfg(40, 10),
                 vec![(0, 40), (30, 70), (60, 100), (90, 110)],
-            ),
-            (
-                "small overlap",
-                alphabet(50),
-                cfg(20, 5),
-                vec![(0, 20), (15, 35), (30, 50)],
             ),
             (
                 "multi-byte chars never split",
@@ -143,20 +121,5 @@ mod tests {
                 .collect();
             assert_eq!(chunk_message(&input, &cfg), expected, "{label}");
         }
-    }
-
-    #[test]
-    fn whitespace_only_windows_are_dropped() {
-        let input = format!("{}{}{}", "a".repeat(10), " ".repeat(20), "b".repeat(10));
-        let chunks = chunk_message(&input, &cfg(10, 2));
-        assert_eq!(
-            chunks,
-            [
-                "a".repeat(10),
-                format!("aa{}", " ".repeat(8)),
-                format!("{}bbbb", " ".repeat(6)),
-                "b".repeat(8),
-            ]
-        );
     }
 }

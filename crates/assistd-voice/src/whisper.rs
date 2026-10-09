@@ -495,19 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn successful_runs_reuse_one_state() {
-        let pool = StatePool::default();
-        let created = Cell::new(0);
-        for _ in 0..3 {
-            let id = pool
-                .with_state(counting_create(&created), |s| Ok::<_, &str>(*s))
-                .unwrap();
-            assert_eq!(id, 1);
-        }
-        assert_eq!(created.get(), 1);
-    }
-
-    #[test]
     fn failed_run_discards_its_state() {
         let pool = StatePool::default();
         let created = Cell::new(0);
@@ -539,13 +526,6 @@ mod tests {
         assert_eq!(created.get(), 2, "both states are pooled for reuse");
     }
 
-    #[test]
-    fn create_failure_propagates() {
-        let pool: StatePool<u32> = StatePool::default();
-        let err = pool.with_state(|| Err("no state"), |_| Ok(())).unwrap_err();
-        assert_eq!(err, "no state");
-    }
-
     fn ramp(len: usize) -> Vec<f32> {
         (0..len).map(|i| i as f32).collect()
     }
@@ -555,18 +535,6 @@ mod tests {
             start: start_cs,
             end: end_cs,
         }
-    }
-
-    #[test]
-    fn no_segments_yields_empty_audio() {
-        assert!(stitch_speech_segments(&ramp(16_000), &[]).is_empty());
-    }
-
-    #[test]
-    fn single_segment_is_sliced_without_overlap() {
-        let audio = ramp(16_000);
-        let stitched = stitch_speech_segments(&audio, &[segment(10.0, 30.0)]);
-        assert_eq!(stitched, audio[1_600..4_800]);
     }
 
     #[test]

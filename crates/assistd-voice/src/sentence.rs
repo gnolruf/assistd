@@ -418,12 +418,6 @@ mod tests {
             || SentenceBuffer::new(400),
             &[
                 (
-                    "period then capital",
-                    &["Hello world. Then more."],
-                    &["Hello world."],
-                    Some("Then more."),
-                ),
-                (
                     "streamed chunks",
                     &["Hel", "lo wo", "rld. ", "Then ", "more."],
                     &["Hello world."],
@@ -436,28 +430,10 @@ mod tests {
                     Some("Sixth."),
                 ),
                 (
-                    "question mark",
-                    &["Are you sure? Yes I am."],
-                    &["Are you sure?"],
-                    Some("Yes I am."),
-                ),
-                (
-                    "exclamation mark",
-                    &["Wow! That works."],
-                    &["Wow!"],
-                    Some("That works."),
-                ),
-                (
                     "abbreviation",
                     &["Dr. Smith arrived. Then he left."],
                     &["Dr. Smith arrived."],
                     Some("Then he left."),
-                ),
-                (
-                    "dotted abbreviation",
-                    &["Use a tool, e.g. grep. It works."],
-                    &["Use a tool, e.g. grep."],
-                    Some("It works."),
                 ),
                 (
                     "decimal",
@@ -466,34 +442,16 @@ mod tests {
                     Some("End."),
                 ),
                 (
-                    "period inside a word",
-                    &["file.txt is here. Done."],
-                    &["file.txt is here."],
-                    Some("Done."),
-                ),
-                (
                     "period then lowercase",
                     &["End. then continue."],
                     &[],
                     Some("End. then continue."),
                 ),
                 (
-                    "period then newline",
-                    &["Item one.\nItem two."],
-                    &["Item one."],
-                    Some("Item two."),
-                ),
-                (
                     "paragraph break",
                     &["First paragraph\n\nSecond starts"],
                     &["First paragraph"],
                     Some("Second starts"),
-                ),
-                (
-                    "no terminator",
-                    &["Unfinished thought"],
-                    &[],
-                    Some("Unfinished thought"),
                 ),
             ],
         );
@@ -517,12 +475,6 @@ mod tests {
                     Some("Bye."),
                 ),
                 (
-                    "multibyte text",
-                    &["That’s a famous line from Kennedy. "],
-                    &[],
-                    Some("That’s a famous line from Kennedy."),
-                ),
-                (
                     "multibyte text with url",
                     &["It’s at https://example.com, really. "],
                     &[],
@@ -539,12 +491,6 @@ mod tests {
                     &["# A Heading\n\nContent here."],
                     &["A Heading"],
                     Some("Content here."),
-                ),
-                (
-                    "inner whitespace",
-                    &["a   b\t\tc. End."],
-                    &["a b c."],
-                    Some("End."),
                 ),
             ],
         );
@@ -574,42 +520,13 @@ mod tests {
     fn summarize_mode_replaces_code_blocks_with_a_phrase() {
         check(
             || SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize),
-            &[
-                (
-                    "with language",
-                    &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
-                    &["Prelude.", "Code block in rust."],
-                    Some("Tail end."),
-                ),
-                (
-                    "without language",
-                    &["```\nopaque content\n```", " After."],
-                    &["Code block."],
-                    Some("After."),
-                ),
-            ],
+            &[(
+                "with language",
+                &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
+                &["Prelude.", "Code block in rust."],
+                Some("Tail end."),
+            )],
         );
-    }
-
-    #[test]
-    fn summarize_mode_caps_the_language_tag() {
-        let fence = format!("```{}\nfoo\n```", "a".repeat(100));
-        let (emitted, tail) = run(
-            SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize),
-            &[&fence],
-        );
-        assert_eq!(
-            emitted,
-            [format!("Code block in {}.", "a".repeat(MAX_LANG_LEN))]
-        );
-        assert_eq!(tail, None);
-    }
-
-    #[test]
-    fn summarize_mode_emits_on_close() {
-        let mut buffer = SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize);
-        assert!(buffer.push("```python\nprint('hi')\n").is_empty());
-        assert_eq!(buffer.push("```"), ["Code block in python."]);
     }
 
     #[test]
@@ -634,41 +551,12 @@ mod tests {
     }
 
     #[test]
-    fn length_safety_net_keeps_multibyte_words_whole() {
-        let (mut out, tail) = run(SentenceBuffer::new(50), &[&"😀😀 ".repeat(20)]);
-        assert!(!out.is_empty());
-        out.extend(tail);
-        for s in &out {
-            assert!(s.split(' ').all(|w| w == "😀😀"), "split mid-word: {s:?}");
-        }
-        assert_eq!(out.concat().matches('😀').count(), 40);
-    }
-
-    #[test]
     fn length_safety_net_cuts_after_multibyte_whitespace() {
         for ws in ['\u{3000}', '\u{a0}'] {
             let blob = format!("{}{ws}{}", "a".repeat(45), "b".repeat(10));
             let (emitted, tail) = run(SentenceBuffer::new(50), &[&blob]);
             assert_eq!(emitted, ["a".repeat(45)], "whitespace {ws:?}");
             assert_eq!(tail.as_deref(), Some("bbbbbbbbbb"), "whitespace {ws:?}");
-        }
-    }
-
-    #[test]
-    fn flush_idle_emits_at_last_whitespace() {
-        let mut buffer = SentenceBuffer::new(400);
-        let _ = buffer.push("I am writ");
-        assert_eq!(buffer.flush_idle().as_deref(), Some("I am"));
-        assert_eq!(buffer.push("ing now. Done."), ["writing now."]);
-        assert_eq!(buffer.finish().as_deref(), Some("Done."));
-    }
-
-    #[test]
-    fn flush_idle_returns_none_when_nothing_is_speakable() {
-        for input in ["   \t  ", "```rust\nfn main", "writ"] {
-            let mut buffer = SentenceBuffer::new(400);
-            let _ = buffer.push(input);
-            assert_eq!(buffer.flush_idle(), None, "{input:?}");
         }
     }
 

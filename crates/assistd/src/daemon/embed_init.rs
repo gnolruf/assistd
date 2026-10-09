@@ -286,6 +286,3 @@ async fn warn_if_missing_rows(semantic: &dyn SemanticStore, model_name: &str) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

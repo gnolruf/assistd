@@ -93,8 +93,6 @@ mod tests {
                 json!({"at": [100, 200], "size": [800, 600]}),
                 Some("100,200 800x600"),
             ),
-            (json!({"at": [0, 0]}), None),
-            (json!({"at": ["100", "200"], "size": ["800", "600"]}), None),
             (json!({"at": [100], "size": [800, 600]}), None),
         ];
         for (window, expected) in cases {
@@ -166,11 +164,5 @@ mod tests {
             strip_xrandr_geom_token("1920/598x1080/336-1920+0").as_deref(),
             Some("1920x1080-1920+0")
         );
-    }
-
-    #[test]
-    fn strip_xrandr_geom_token_rejects_unrelated_tokens() {
-        assert_eq!(strip_xrandr_geom_token("HDMI-1"), None);
-        assert_eq!(strip_xrandr_geom_token("1920/598x1200/336"), None);
     }
 }

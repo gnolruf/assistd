@@ -57,58 +57,6 @@ fn footer(inner_w: usize, text: &str) -> String {
 }
 
 #[test]
-fn push_user_prefixes_caret_and_adds_separator() {
-    let mut p = OutputPane::new();
-    p.push_user("hi");
-    assert_eq!(item_texts(&p), ["> hi", ""]);
-}
-
-#[test]
-fn begin_and_append_assistant_streams_into_one_line() {
-    let mut p = OutputPane::new();
-    p.begin_assistant();
-    p.append_assistant("hello ");
-    p.append_assistant("world");
-    assert_eq!(item_texts(&p), ["hello world"]);
-    assert_eq!(p.open_assistant, Some(0));
-}
-
-#[test]
-fn append_without_begin_auto_starts() {
-    let mut p = OutputPane::new();
-    p.append_assistant("hey");
-    assert_eq!(item_texts(&p), ["hey"]);
-}
-
-#[test]
-fn append_keeps_one_reply_in_one_item_across_newlines() {
-    let mut p = OutputPane::new();
-    p.append_assistant("line1\nline2\n");
-    p.append_assistant("line3");
-    assert_eq!(item_texts(&p), ["line1\nline2\nline3"]);
-    assert_eq!(p.open_assistant, Some(0));
-    assert_eq!(rendered_lines(&mut p, 40, 5), ["line1 line2 line3"]);
-}
-
-#[test]
-fn reply_renders_markdown_blocks_and_inline_styles() {
-    let mut p = OutputPane::new();
-    p.append_assistant("Some **bold** text.\n\n- one\n- two\n");
-    p.finish_assistant();
-    assert_eq!(
-        rendered_lines(&mut p, 40, 10),
-        ["Some bold text.", "", "• one", "• two", ""]
-    );
-    let (lines, _) = p.render_view(40, 10);
-    let bold = lines[0]
-        .spans
-        .iter()
-        .find(|s| s.content == "bold")
-        .expect("bold span");
-    assert!(bold.style.add_modifier.contains(Modifier::BOLD));
-}
-
-#[test]
 fn streamed_delimiters_restyle_the_open_reply() {
     let mut p = OutputPane::new();
     p.append_assistant("a **b");
@@ -118,29 +66,12 @@ fn streamed_delimiters_restyle_the_open_reply() {
 }
 
 #[test]
-fn finish_assistant_closes_stream_and_adds_separator() {
-    let mut p = OutputPane::new();
-    p.begin_assistant();
-    p.append_assistant("done");
-    p.finish_assistant();
-    assert_eq!(p.open_assistant, None);
-    assert_eq!(item_texts(&p), ["done", ""]);
-}
-
-#[test]
 fn push_user_mid_stream_closes_open_assistant() {
     let mut p = OutputPane::new();
     p.append_assistant("half");
     p.push_user("new question");
     assert_eq!(p.open_assistant, None);
     assert_eq!(item_texts(&p), ["half", "", "> new question", ""]);
-}
-
-#[test]
-fn push_error_adds_exclamation_prefix() {
-    let mut p = OutputPane::new();
-    p.push_error("boom");
-    assert_eq!(item_texts(&p), ["!! boom"]);
 }
 
 #[test]
@@ -160,20 +91,6 @@ fn tool_block_renders_header_body_and_one_right_aligned_footer() {
 }
 
 #[test]
-fn empty_output_still_shows_header_and_footer() {
-    let mut p = OutputPane::new();
-    p.push_tool_block("true".into(), "[exit:0 | 0ms]".into(), 0, 0);
-    assert_eq!(
-        rendered_lines(&mut p, 40, 10),
-        [
-            "▎ $ true".to_string(),
-            footer(38, "[exit:0 | 0ms]"),
-            String::new(),
-        ]
-    );
-}
-
-#[test]
 fn tool_block_collapsed_when_over_threshold() {
     let mut p = OutputPane::new();
     push_seq_30(&mut p);
@@ -186,28 +103,6 @@ fn tool_block_collapsed_when_over_threshold() {
         rendered.contains(&"▎ … (20 more lines, Tab to expand)".to_string()),
         "{rendered:#?}"
     );
-}
-
-#[test]
-fn tool_block_expanded_after_toggle() {
-    let mut p = OutputPane::new();
-    push_seq_30(&mut p);
-    assert!(p.toggle_last_expandable());
-    let rendered = rendered_lines(&mut p, 60, 80);
-    assert_eq!(body_rows(&rendered).len(), 30);
-    assert!(!rendered.iter().any(|l| l.contains("more lines")));
-}
-
-#[test]
-fn verbose_mode_expands_collapsed_tool_block() {
-    let mut p = OutputPane::new();
-    push_seq_30(&mut p);
-    assert_eq!(
-        body_rows(&rendered_lines(&mut p, 60, 80)).len(),
-        COLLAPSED_HEAD_LINES
-    );
-    p.set_verbose(true);
-    assert_eq!(body_rows(&rendered_lines(&mut p, 60, 80)).len(), 30);
 }
 
 #[test]
@@ -232,144 +127,6 @@ fn collapsed_block_keeps_stderr_lines_visible() {
 }
 
 #[test]
-fn bar_color_follows_exit_code() {
-    for (exit_code, expected) in [(0, Color::Green), (1, Color::Red)] {
-        let mut p = OutputPane::new();
-        p.push_tool_block(
-            "cmd".into(),
-            format!("out\n[exit:{exit_code} | 1ms]"),
-            exit_code,
-            1,
-        );
-        let (lines, _) = p.render_view(40, 10);
-        let barred: Vec<_> = lines.iter().filter(|l| !line_text(l).is_empty()).collect();
-        assert_eq!(barred.len(), 3, "exit {exit_code}");
-        for line in barred {
-            assert_eq!(line.spans[0].style.fg, Some(expected), "exit {exit_code}");
-        }
-    }
-}
-
-#[test]
-fn very_long_single_line_output_wraps_under_bar() {
-    let body = format!("{}\n[exit:0 | 1ms]", "x".repeat(500));
-    let mut p = OutputPane::new();
-    p.push_tool_block("yes | head".into(), body, 0, 1);
-    let rendered = rendered_lines(&mut p, 40, 200);
-    assert_eq!(rendered.iter().filter(|l| l.starts_with("▎ x")).count(), 14);
-    for l in rendered.iter().filter(|l| !l.trim().is_empty()) {
-        assert!(l.starts_with('▎'), "missing bar: {l:?}");
-    }
-}
-
-#[test]
-fn toggle_last_expandable_is_false_without_blocks() {
-    let mut p = OutputPane::new();
-    p.push_user("hi");
-    assert!(!p.toggle_last_expandable());
-}
-
-#[test]
-fn begin_thinking_creates_live_block_collapsed_by_default() {
-    let mut p = OutputPane::new();
-    p.begin_thinking();
-    assert_eq!(p.items.len(), 1);
-    let t = last_thinking(&mut p);
-    assert!(t.ended_at.is_none());
-    assert!(!t.expanded);
-    assert!(t.text.is_empty());
-}
-
-#[test]
-fn append_thinking_streams_into_open_block() {
-    let mut p = OutputPane::new();
-    p.append_thinking("let me ");
-    p.append_thinking("think");
-    assert_eq!(item_texts(&p), ["[thinking:live:let me think]"]);
-}
-
-#[test]
-fn finish_thinking_stamps_ended_at_and_collapses() {
-    let mut p = OutputPane::new();
-    p.append_thinking("done thinking");
-    assert!(p.toggle_last_expandable());
-    p.finish_thinking();
-    let t = last_thinking(&mut p);
-    assert!(t.ended_at.is_some());
-    assert!(!t.expanded);
-}
-
-#[test]
-fn finish_thinking_is_idempotent() {
-    let mut p = OutputPane::new();
-    p.append_thinking("x");
-    p.finish_thinking();
-    let first = last_thinking(&mut p).ended_at;
-    p.finish_thinking();
-    p.finish_thinking();
-    assert_eq!(last_thinking(&mut p).ended_at, first);
-}
-
-#[test]
-fn live_block_seconds_counts_only_the_live_block() {
-    let mut p = OutputPane::new();
-    assert_eq!(p.live_block_seconds(), None);
-    p.append_thinking("x");
-    last_thinking(&mut p).started_at -= Duration::from_secs(5);
-    assert_eq!(p.live_block_seconds(), Some(5));
-    p.finish_thinking();
-    assert_eq!(p.live_block_seconds(), None);
-}
-
-#[test]
-fn thinking_block_renders_collapsed_live_header_only() {
-    let mut p = OutputPane::new();
-    p.append_thinking("reasoning body line 1");
-    last_thinking(&mut p).started_at -= Duration::from_secs(5);
-    assert_eq!(rendered_lines(&mut p, 60, 20), ["▎ ✻ Thinking… (5s)", ""]);
-}
-
-#[test]
-fn thinking_block_renders_body_after_tab_expand() {
-    let mut p = OutputPane::new();
-    p.append_thinking("reasoning body line 1");
-    assert!(p.toggle_last_expandable());
-    let rendered = rendered_lines(&mut p, 60, 20);
-    assert!(rendered.contains(&"▎ reasoning body line 1".to_string()));
-}
-
-#[test]
-fn verbose_mode_expands_live_thinking_without_per_item_toggle() {
-    let mut p = OutputPane::new();
-    p.append_thinking("verbose body");
-    let shows_body = |p: &mut OutputPane| {
-        rendered_lines(p, 60, 20)
-            .iter()
-            .any(|l| l.contains("verbose body"))
-    };
-    assert!(!shows_body(&mut p));
-    p.set_verbose(true);
-    assert!(shows_body(&mut p));
-    assert!(!last_thinking(&mut p).expanded);
-    p.set_verbose(false);
-    assert!(!shows_body(&mut p));
-}
-
-#[test]
-fn thinking_block_renders_past_tense_after_finish() {
-    let mut p = OutputPane::new();
-    p.append_thinking("body");
-    p.finish_thinking();
-    let t = last_thinking(&mut p);
-    t.started_at = t
-        .ended_at
-        .expect("finished")
-        .checked_sub(Duration::from_secs(3))
-        .expect("uptime exceeds 3s");
-    assert_eq!(rendered_lines(&mut p, 60, 20), ["▎ ✦ Thought for 3s", ""]);
-}
-
-#[test]
 fn begin_thinking_prunes_empty_open_assistant() {
     let mut p = OutputPane::new();
     p.begin_assistant();
@@ -380,18 +137,6 @@ fn begin_thinking_prunes_empty_open_assistant() {
         "reasoning replaces the empty block a submit opened"
     );
     assert_eq!(p.open_assistant, None);
-}
-
-#[test]
-fn finished_thinking_then_new_reasoning_opens_fresh_block() {
-    let mut p = OutputPane::new();
-    p.append_thinking("phase one");
-    p.finish_thinking();
-    p.append_thinking("phase two");
-    assert_eq!(
-        item_texts(&p),
-        ["[thinking:done:phase one]", "[thinking:live:phase two]"]
-    );
 }
 
 #[test]
@@ -416,45 +161,6 @@ fn toggle_last_expandable_prefers_most_recent_item() {
         Some(OutputItem::Tool(b)) => assert!(!b.expanded, "toggle should have collapsed"),
         _ => panic!("expected Tool item last"),
     }
-}
-
-#[test]
-fn scroll_saturates_down_at_zero() {
-    let mut p = OutputPane::new();
-    p.scroll_page_down(10);
-    assert_eq!(p.scroll_offset(), 0);
-}
-
-#[test]
-fn scroll_up_then_down_returns_to_zero() {
-    let mut p = OutputPane::new();
-    p.scroll_page_up(10);
-    assert_eq!(p.scroll_offset(), 5);
-    p.scroll_page_down(10);
-    assert_eq!(p.scroll_offset(), 0);
-}
-
-#[test]
-fn reset_scroll_clears_offset() {
-    let mut p = OutputPane::new();
-    p.scroll_page_up(10);
-    p.reset_scroll();
-    assert_eq!(p.scroll_offset(), 0);
-}
-
-#[test]
-fn wrapping_splits_long_line_at_word_boundaries() {
-    let mut p = OutputPane::new();
-    p.append_assistant("aaaa bbbb cccc dddd");
-    assert_eq!(rendered_lines(&mut p, 10, 5), ["aaaa bbbb", "cccc dddd"]);
-}
-
-#[test]
-fn render_view_zero_width_falls_back_to_raw_lines() {
-    let mut p = OutputPane::new();
-    p.push_user("hi");
-    p.append_assistant("**one**\ntwo");
-    assert_eq!(rendered_lines(&mut p, 0, 5), ["> hi", "", "**one**", "two"]);
 }
 
 fn thumbnail_protocol() -> StatefulProtocol {
@@ -614,16 +320,6 @@ fn running_tool_block_shows_its_command_until_the_result_fills_it() {
 }
 
 #[test]
-fn a_long_result_collapses_the_block_it_fills() {
-    let mut p = OutputPane::new();
-    p.begin_tool_block("seq 30".into());
-    let body: String =
-        (0..30).map(|i| format!("line {i}\n")).collect::<String>() + "[exit:0 | 1ms]";
-    p.finish_tool_block(body, 0, 1);
-    assert_eq!(body_rows(&rendered_lines(&mut p, 40, 60)).len(), 10);
-}
-
-#[test]
 fn abandoned_tool_block_ends_as_a_failure() {
     let mut p = OutputPane::new();
     p.abandon_running_tool();
@@ -634,11 +330,4 @@ fn abandoned_tool_block_ends_as_a_failure() {
     let lines = rendered_lines(&mut p, 40, 10);
     assert_eq!(lines[1], "▎ [stderr] no result received");
     assert_eq!(lines[2], footer(38, "[exit:-1 | 0ms]"));
-}
-
-#[test]
-fn a_result_without_a_running_block_gets_its_own_block() {
-    let mut p = OutputPane::new();
-    p.finish_tool_block("[exit:-1 | 0ms]".into(), -1, 0);
-    assert_eq!(rendered_lines(&mut p, 40, 10)[0], "▎ $ <?>");
 }

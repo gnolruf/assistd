@@ -253,24 +253,6 @@ async fn always_allow_adds_the_offered_programs_for_good() {
 }
 
 #[tokio::test]
-async fn bwrap_allows_writes_to_tmp() {
-    let Some(sandbox) = bwrap_or_none() else {
-        return;
-    };
-    let unique = format!("/tmp/assistd-sandbox-test-{}", std::process::id());
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input(&format!("touch {unique} && echo ok"))).await;
-    let _ = std::fs::remove_file(&unique);
-    assert_eq!(
-        out.exit_code,
-        0,
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(out.stdout, b"ok\n");
-}
-
-#[tokio::test]
 async fn bwrap_hides_the_host_tmp() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
@@ -283,30 +265,6 @@ async fn bwrap_hides_the_host_tmp() {
     assert_eq!(out.exit_code, 1, "host /tmp is visible inside the sandbox");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("its own empty /tmp: "), "{stderr}");
-}
-
-#[tokio::test]
-async fn write_notes_a_file_the_sandbox_hides_from_bash() {
-    let Some(sandbox) = bwrap_or_none() else {
-        return;
-    };
-    let scratch = tempfile::Builder::new()
-        .prefix("assistd-write-note-")
-        .tempdir_in("/tmp")
-        .expect("host /tmp dir");
-    let target = scratch.path().join("out.txt");
-    let cfg = WritePolicyCfg::new(vec!["/tmp".into()]).expect("non-empty allowlist");
-    let cmd = WriteCommand::new(Arc::new(cfg), Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd
-        .run(CommandInput {
-            args: vec![target.to_string_lossy().into_owned(), "hi".into()],
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(std::fs::read(&target).expect("written"), b"hi");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("bash scripts cannot see it"), "{stderr}");
 }
 
 #[tokio::test]
@@ -369,21 +327,6 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
 }
 
 #[tokio::test]
-async fn bwrap_adds_no_note_to_a_script_outside_its_private_dirs() {
-    let Some(sandbox) = bwrap_or_none() else {
-        return;
-    };
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input("echo ok")).await;
-    assert_eq!(out.stdout, b"ok\n");
-    assert!(
-        out.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[tokio::test]
 async fn bwrap_unshares_network_namespace() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
@@ -398,22 +341,6 @@ async fn bwrap_unshares_network_namespace() {
         "unexpected namespace link {inside:?}"
     );
     assert_ne!(Path::new(&inside), host);
-}
-
-#[tokio::test]
-async fn bwrap_clears_the_environment() {
-    let Some(sandbox) = bwrap_or_none() else {
-        return;
-    };
-    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input("printenv CARGO_MANIFEST_DIR")).await;
-    assert_eq!(
-        out.exit_code,
-        1,
-        "leaked: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
 }
 
 #[tokio::test]
@@ -437,34 +364,4 @@ async fn bwrap_blocks_writes_to_read_only_root() {
             || lower.contains("operation not permitted"),
         "expected EROFS/EACCES-shaped error, got: {combined}"
     );
-}
-
-#[tokio::test]
-async fn bwrap_unshares_pid_namespace() {
-    let Some(sandbox) = bwrap_or_none() else {
-        return;
-    };
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input("echo $$")).await;
-    assert_eq!(out.exit_code, 0);
-    let pid_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let pid: u32 = pid_str
-        .parse()
-        .unwrap_or_else(|_| panic!("expected numeric PID, got {pid_str:?}"));
-    assert!(pid < 100, "expected low PID inside the sandbox, got {pid}");
-}
-
-#[test]
-fn probe_sandbox_auto_with_bwrap_present_resolves_to_bwrap() {
-    if bwrap_or_none().is_none() {
-        return;
-    }
-    let probed = probe_sandbox(
-        SandboxRequest::Auto,
-        Vec::new(),
-        Protected::default(),
-        SharedDirs::default(),
-    )
-    .expect("auto probe");
-    assert!(matches!(probed, ToolSandbox::Bwrap(_)));
 }

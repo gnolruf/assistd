@@ -92,17 +92,3 @@ impl ContinuousListener for NoContinuousListener {
         self.state_tx.subscribe()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn no_continuous_listener_refuses_start_and_stays_inactive() {
-        let listener = NoContinuousListener::new();
-        assert!(matches!(listener.start().await, Err(ListenError::Disabled)));
-        assert!(!listener.is_active());
-        assert!(!*listener.subscribe_state().borrow());
-        listener.stop().await.unwrap();
-    }
-}

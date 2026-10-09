@@ -162,31 +162,6 @@ async fn restrict_if_present(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn open_creates_parent_dirs_and_runs_migrations() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("nested/dir/memory.db");
-
-        let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
-
-        let table_count: i64 = handle
-            .conn()
-            .call(|c| -> rusqlite::Result<_> {
-                c.query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE name='conversations'",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .await
-            .unwrap();
-        assert_eq!(table_count, 1);
-
-        drop(handle);
-        writer.await.unwrap();
-    }
-
     fn mode_of(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }

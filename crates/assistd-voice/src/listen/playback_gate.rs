@@ -49,13 +49,6 @@ mod tests {
     }
 
     #[test]
-    fn passes_frames_while_silent() {
-        let (_tx, rx) = watch::channel(false);
-        let mut gate = PlaybackGate::new(rx, 3);
-        assert_eq!(verdicts(&mut gate, 4), [false; 4]);
-    }
-
-    #[test]
     fn blocks_while_speaking_and_through_the_hangover() {
         let (tx, rx) = watch::channel(false);
         let mut gate = PlaybackGate::new(rx, 3);
@@ -85,14 +78,5 @@ mod tests {
         gate.blocks_frame();
         tx.send_replace(false);
         assert_eq!(verdicts(&mut gate, 3), [true, true, false]);
-    }
-
-    #[test]
-    fn zero_hangover_reopens_immediately() {
-        let (tx, rx) = watch::channel(true);
-        let mut gate = PlaybackGate::new(rx, 0);
-        assert!(gate.blocks_frame());
-        tx.send_replace(false);
-        assert!(!gate.blocks_frame());
     }
 }

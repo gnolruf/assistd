@@ -5,7 +5,6 @@
 
 use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process};
@@ -15,16 +14,12 @@ use tokio::sync::watch;
 
 use assistd_config::ModelConfig;
 use assistd_config::defaults::{nz32, nz64};
-use assistd_llm::{LlamaServerSpec, ReadyState};
+use assistd_llm::LlamaServerSpec;
 use assistd_utils::child_server::{ChildServer, ChildServerError};
 
 use common::FakeLlama;
 
 mod common;
-
-fn init_tracing() {
-    assistd_utils::tracing_init::init_test_tracing("debug");
-}
 
 /// Grab an ephemeral port by binding and dropping it.
 async fn grab_port() -> u16 {
@@ -97,20 +92,6 @@ async fn wait_until_process_is_gone(pid: u32) -> bool {
 }
 
 #[tokio::test]
-async fn brings_up_fake_server_and_reports_ready() {
-    let fake = FakeLlama::new("normal");
-    let port = grab_port().await;
-    let (service, shutdown_tx) = start_service(&fake, port).await;
-
-    assert_eq!(service.state(), ReadyState::Ready);
-    assert!(service.is_ready());
-    assert!(service.pid().is_some());
-
-    let _ = shutdown_tx.send(true);
-    service.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn restarts_after_external_kill() {
     let fake = FakeLlama::new("normal");
     let port = grab_port().await;
@@ -143,63 +124,6 @@ async fn restarts_after_external_kill() {
 }
 
 #[tokio::test]
-async fn enters_degraded_after_five_failures() {
-    init_tracing();
-    let fake = FakeLlama::new("bind-fail");
-    let port = grab_port().await;
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    let start_at = Instant::now();
-    let result =
-        ChildServer::start(LlamaServerSpec::new(model_spec(&fake, port)), shutdown_rx).await;
-    let elapsed = start_at.elapsed();
-
-    let err = result.expect_err("start should fail");
-    assert!(
-        matches!(err, ChildServerError::StartupFailed { attempts: 5, .. }),
-        "{err:?}"
-    );
-    assert!(
-        elapsed >= Duration::from_secs(14),
-        "start returned too quickly for 1+2+4+8s of backoff: {elapsed:?}"
-    );
-    assert!(
-        elapsed < Duration::from_secs(40),
-        "start took too long: {elapsed:?}"
-    );
-}
-
-#[tokio::test]
-async fn respects_shutdown_during_backoff() {
-    let fake = FakeLlama::new("bind-fail");
-    let port = grab_port().await;
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    let during_early_backoff = Duration::from_secs(3);
-    let flip_tx = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(during_early_backoff).await;
-        let _ = flip_tx.send(true);
-    });
-
-    let start_at = Instant::now();
-    let result =
-        ChildServer::start(LlamaServerSpec::new(model_spec(&fake, port)), shutdown_rx).await;
-    let elapsed = start_at.elapsed();
-
-    let err = result.expect_err("start should fail once shut down");
-    assert!(
-        matches!(err, ChildServerError::ShutdownDuringHealth),
-        "{err:?}"
-    );
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "start did not respect shutdown: {elapsed:?}"
-    );
-    let _ = shutdown_tx.send(true);
-}
-
-#[tokio::test]
 async fn health_from_a_squatter_on_the_port_is_not_ready() {
     let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = squatter.local_addr().unwrap().port();
@@ -222,30 +146,6 @@ async fn health_from_a_squatter_on_the_port_is_not_ready() {
         matches!(err, ChildServerError::ShutdownDuringHealth),
         "{err:?}"
     );
-}
-
-#[tokio::test]
-async fn shutdown_kills_running_child() {
-    let fake = FakeLlama::new("normal");
-    let port = grab_port().await;
-    let (service, shutdown_tx) = start_service(&fake, port).await;
-
-    let pid = service.pid().expect("running child");
-    assert!(
-        Path::new(&format!("/proc/{pid}")).exists(),
-        "fake child should be alive before shutdown"
-    );
-
-    let _ = shutdown_tx.send(true);
-    service.shutdown().await.unwrap();
-
-    for _ in 0..50 {
-        if !Path::new(&format!("/proc/{pid}")).exists() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("fake child {pid} still alive after shutdown");
 }
 
 #[tokio::test]

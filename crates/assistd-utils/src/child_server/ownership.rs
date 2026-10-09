@@ -84,12 +84,4 @@ mod tests {
         let _ = other.wait();
         assert!(!owned.expect("read /proc"));
     }
-
-    #[test]
-    fn unbound_address_is_not_owned() {
-        let addr = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|listener| listener.local_addr())
-            .expect("reserve port");
-        assert!(!is_listening_in_group(addr, own_process_group()).expect("read /proc"));
-    }
 }

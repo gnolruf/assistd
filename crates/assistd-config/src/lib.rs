@@ -9,7 +9,6 @@ pub mod daemon;
 pub mod defaults;
 pub mod embedding;
 pub mod errors;
-pub mod fixtures;
 pub mod mcp;
 pub mod memory;
 pub mod model;

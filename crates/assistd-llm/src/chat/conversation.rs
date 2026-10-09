@@ -171,12 +171,6 @@ impl Conversation {
         self.transient_note.take()
     }
 
-    /// The context block waiting for the next user turn, if any.
-    #[cfg(test)]
-    pub fn pending_context(&self) -> Option<&str> {
-        self.pending_context.as_deref()
-    }
-
     /// Appends a plain-text user turn.
     pub fn push_user(&mut self, content: String) {
         self.push_user_with_attachments(content, Vec::new());

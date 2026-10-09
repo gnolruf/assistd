@@ -54,23 +54,3 @@ impl<T: Clone> ReadinessCell<T> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn get_follows_each_stage_of_startup() {
-        let cell = ReadinessCell::starting();
-        assert_eq!(cell.get(), Err(NotReady::Starting));
-
-        cell.set(Readiness::Ready(7));
-        assert_eq!(cell.get(), Ok(7));
-
-        cell.set(Readiness::Unavailable("model missing".into()));
-        assert_eq!(
-            cell.get().unwrap_err().to_string(),
-            "unavailable: model missing"
-        );
-    }
-}

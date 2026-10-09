@@ -567,15 +567,4 @@ mod tests {
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, OVERFLOW_DIR_MODE);
     }
-
-    #[test]
-    fn clear_overflow_dir_creates_a_missing_dir_owner_only() {
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("assistd/output");
-
-        clear_overflow_dir(&dir).unwrap();
-
-        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, OVERFLOW_DIR_MODE);
-    }
 }

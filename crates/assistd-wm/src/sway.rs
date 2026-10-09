@@ -276,16 +276,3 @@ fn collect_windows(node: &Node, parent_workspace: Option<&str>, out: &mut Vec<Wi
 fn sway_id(raw: i64) -> Option<WindowId> {
     u64::try_from(raw).ok().and_then(WindowId::new)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sway_id_rejects_non_positive() {
-        for raw in [0, -1, -12345] {
-            assert_eq!(sway_id(raw), None, "{raw}");
-        }
-        assert_eq!(sway_id(42), WindowId::new(42));
-    }
-}

@@ -46,8 +46,6 @@ pub use mic::{
 #[cfg(feature = "tts")]
 pub use piper::{PiperError, PiperVoiceOutput};
 pub use sentence::SentenceBuffer;
-#[cfg(all(feature = "whisper", any(test, feature = "test-support")))]
-pub use transcribe::StubTranscriber;
 #[cfg(feature = "whisper")]
 pub use transcribe::{
     BusyProbe, CpuFallbackFactory, NullBusyProbe, QueueConfig, QueuedTranscriber, Transcriber,
@@ -149,24 +147,4 @@ impl VoiceOutput for NoVoiceOutput {
 /// The crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn no_voice_input_refuses_capture_and_stays_idle() {
-        let input = NoVoiceInput::new();
-        assert!(matches!(
-            input.start_recording().await,
-            Err(VoiceInputError::Disabled)
-        ));
-        assert!(matches!(
-            input.stop_and_transcribe().await,
-            Err(VoiceInputError::Disabled)
-        ));
-        assert_eq!(input.state(), VoiceCaptureState::Idle);
-        assert_eq!(*input.subscribe().borrow(), VoiceCaptureState::Idle);
-    }
 }

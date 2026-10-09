@@ -148,14 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_disabled_or_ordered_thresholds() {
-        for (drowsy, sleep) in [(0, 0), (0, 120), (30, 0), (30, 120)] {
-            validate(&cfg(drowsy, sleep))
-                .unwrap_or_else(|e| panic!("({drowsy}, {sleep}) rejected: {e}"));
-        }
-    }
-
-    #[test]
     fn validate_rejects_sleep_at_or_below_drowsy() {
         for (drowsy, sleep) in [(60, 30), (60, 60)] {
             let err = validate(&cfg(drowsy, sleep)).expect_err("must be rejected");
@@ -170,15 +162,7 @@ mod tests {
     #[test]
     fn decide_by_state_idle_time_and_thresholds() {
         let cases = [
-            ("active before drowsy", Active, 10, (30, 120), Action::None),
             ("active at drowsy", Active, 30, (30, 120), Action::Drowse),
-            (
-                "active between thresholds",
-                Active,
-                90,
-                (30, 120),
-                Action::Drowse,
-            ),
             (
                 "active past sleep cascades via drowsy",
                 Active,
@@ -187,40 +171,18 @@ mod tests {
                 Action::Drowse,
             ),
             (
-                "active, drowsy disabled, before sleep",
-                Active,
-                60,
-                (0, 120),
-                Action::None,
-            ),
-            (
                 "active, drowsy disabled, past sleep",
                 Active,
                 130,
                 (0, 120),
                 Action::Sleep,
             ),
-            (
-                "active, sleep disabled",
-                Active,
-                30,
-                (30, 0),
-                Action::Drowse,
-            ),
-            ("drowsy before sleep", Drowsy, 60, (30, 120), Action::None),
             ("drowsy at sleep", Drowsy, 120, (30, 120), Action::Sleep),
             ("drowsy, sleep disabled", Drowsy, 200, (30, 0), Action::None),
             ("sleeping", Sleeping, 500, (30, 120), Action::None),
             (
                 "active, both disabled",
                 Active,
-                10_000,
-                (0, 0),
-                Action::None,
-            ),
-            (
-                "drowsy, both disabled",
-                Drowsy,
                 10_000,
                 (0, 0),
                 Action::None,

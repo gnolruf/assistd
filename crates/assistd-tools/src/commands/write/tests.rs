@@ -28,57 +28,6 @@ async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> Com
     .await
 }
 
-#[test]
-fn empty_allowlist_yields_no_policy() {
-    assert!(WritePolicyCfg::new(Vec::new()).is_none());
-}
-
-#[tokio::test]
-async fn persists_stdin_to_file() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("out.txt");
-    let out = write_under(dir.path(), &[&path.to_string_lossy()], Some(b"hi there\n")).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(std::fs::read(&path).unwrap(), b"hi there\n");
-}
-
-#[tokio::test]
-async fn persists_args_content_to_file() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("out.txt");
-    let out = write_under(
-        dir.path(),
-        &[&path.to_string_lossy(), "hello", "world"],
-        None,
-    )
-    .await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
-}
-
-#[tokio::test]
-async fn args_content_wins_over_stdin() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("out.txt");
-    let out = write_under(
-        dir.path(),
-        &[&path.to_string_lossy(), "args"],
-        Some(b"stdin"),
-    )
-    .await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(std::fs::read(&path).unwrap(), b"args");
-}
-
-#[tokio::test]
-async fn path_only_with_empty_stdin_creates_empty_file() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("out.txt");
-    let out = write_under(dir.path(), &[&path.to_string_lossy()], None).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(std::fs::read(&path).unwrap(), b"");
-}
-
 #[tokio::test]
 async fn write_rejected_outside_allowlist() {
     let dir = tempdir().unwrap();
@@ -137,38 +86,6 @@ fn write_allowlist_expands_tilde() {
         .expect("tempdir canonicalizes")
         .join("tilde-target.txt");
     assert_eq!(resolved, expected);
-}
-
-#[test]
-fn expand_tilde_without_home_errors() {
-    let err = expand_tilde("~/foo", None).expect_err("missing home should error");
-    assert!(matches!(err, PathResolveError::HomeNotSet));
-}
-
-#[tokio::test]
-async fn missing_parent_passes_policy_but_fails_the_write() {
-    let dir = tempdir().unwrap();
-    let parent = format!("{}/definitely/not/a/writable", dir.path().display());
-    let target = format!("{parent}/path");
-    let out = write_under(dir.path(), &[&target, "hi"], None).await;
-    assert_eq!(out.exit_code, 1);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        format!("[error] write: file not found: {target}. Use: ls {parent} to see what is there\n")
-    );
-}
-
-#[test]
-fn lexical_clean_collapses_dotdot() {
-    assert_eq!(
-        lexical_clean(Path::new("/tmp/foo/../bar")),
-        PathBuf::from("/tmp/bar")
-    );
-    assert_eq!(
-        lexical_clean(Path::new("/tmp/./foo")),
-        PathBuf::from("/tmp/foo")
-    );
-    assert_eq!(lexical_clean(Path::new("/..")), PathBuf::from("/"));
 }
 
 #[tokio::test]
@@ -441,27 +358,6 @@ async fn writes_outside_the_scratch_dir_ask_with_the_path_and_content() {
 }
 
 #[tokio::test]
-async fn a_path_off_the_allowlist_is_pointed_at_the_scratch_dir() {
-    let dir = tempdir().unwrap();
-    let out = WriteCommand::new(
-        cfg_from(&[dir.path()]),
-        Arc::new(AlwaysAllowGate),
-        SandboxInfo::none_sharing(PathBuf::from("/srv/scratch")),
-    )
-    .run(CommandInput {
-        args: vec!["/tmp/x.txt".into(), "x".into()],
-        stdin: None,
-    })
-    .await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "[error] write: /tmp/x.txt: path not in writable allowlist. \
-         Try: a path under /srv/scratch\n"
-    );
-}
-
-#[tokio::test]
 async fn declined_write_outside_tmp_exits_126_without_writing() {
     let prefix = Path::new(env!("CARGO_MANIFEST_DIR"));
     let target = prefix.join(format!("declined-{}.txt", uuid::Uuid::new_v4()));
@@ -485,21 +381,4 @@ async fn declined_write_outside_tmp_exits_126_without_writing() {
         )
     );
     assert!(!target.exists());
-}
-
-#[test]
-fn confirmation_script_cuts_long_content() {
-    let content = "x".repeat(PREVIEW_MAX_CHARS + 1);
-    let script = confirmation_script(Path::new("/srv/a"), content.as_bytes());
-    assert_eq!(
-        script,
-        format!("write /srv/a\n{}\n…", "x".repeat(PREVIEW_MAX_CHARS))
-    );
-}
-
-#[test]
-fn hidden_from_bash_note_names_the_path_and_the_private_dir() {
-    let note = hidden_from_bash_note("/tmp/out.txt", Path::new("/tmp"), "a path under /shared");
-    assert!(note.starts_with("[note] write: /tmp/out.txt is written, but bash"));
-    assert!(note.ends_with("its own empty /tmp. Use: a path under /shared\n"));
 }

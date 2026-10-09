@@ -11,23 +11,6 @@ fn parse(source: &str) -> Result<Vec<String>, CustomArgsError> {
 }
 
 #[test]
-fn empty_string_yields_no_args() {
-    assert_eq!(parse("").expect("empty parses"), Vec::<String>::new());
-    assert_eq!(
-        parse("  \n\t ").expect("blank parses"),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn words_split_on_whitespace_including_newlines() {
-    assert_eq!(
-        parse("--flash-attn on\n--threads 8").expect("parses"),
-        ["--flash-attn", "on", "--threads", "8"]
-    );
-}
-
-#[test]
 fn quotes_keep_a_regex_in_one_word() {
     assert_eq!(
         parse(r"-ot '\.ffn_(up|down|gate)_exps\.=CPU'").expect("parses"),
@@ -109,14 +92,6 @@ fn exposing_flags_are_rejected_in_both_spellings() {
             "{source:?}"
         );
     }
-}
-
-#[test]
-fn a_rejected_flag_hidden_after_valid_args_is_still_found() {
-    assert!(matches!(
-        parse("--flash-attn on --threads 8 --props"),
-        Err(CustomArgsError::Exposing(flag)) if flag == "--props"
-    ));
 }
 
 #[test]

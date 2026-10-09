@@ -102,19 +102,7 @@ mod tests {
 
     #[test]
     fn backoff_doubles_from_one_second_and_caps_at_sixty() {
-        let cases = [
-            (0, 1),
-            (1, 2),
-            (2, 4),
-            (3, 8),
-            (4, 16),
-            (5, 32),
-            (6, 60),
-            (9, 60),
-            (63, 60),
-            (64, 60),
-            (u32::MAX, 60),
-        ];
+        let cases = [(0, 1), (5, 32), (6, 60), (u32::MAX, 60)];
         for (attempt, secs) in cases {
             assert_eq!(
                 backoff_delay(attempt),

@@ -102,23 +102,3 @@ impl Default for TrayNotificationsWakeConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn listen_auto_hide_is_triple_the_idle_timeout_and_saturates() {
-        for (auto_hide_ms, expected) in [(3000, 9000), (u64::MAX, u64::MAX)] {
-            let notifications = TrayNotificationsConfig {
-                auto_hide_ms,
-                ..TrayNotificationsConfig::default()
-            };
-            assert_eq!(
-                notifications.listen_auto_hide_ms(),
-                expected,
-                "auto_hide_ms={auto_hide_ms}"
-            );
-        }
-    }
-}

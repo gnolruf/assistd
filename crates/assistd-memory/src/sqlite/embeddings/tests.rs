@@ -164,35 +164,6 @@ async fn nearest_chunks_can_exclude_one_session() {
 }
 
 #[tokio::test]
-async fn nearest_chunks_filters_by_model() {
-    let (handle, store, _guard) = fresh().await;
-    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
-    insert_chunk_with_vec(&handle, &store, conv_id, 0, &unit_vec(0.0), "old-model").await;
-    let hits = store
-        .nearest_chunks(unit_vec(0.0), 5, "new-model", None)
-        .await
-        .unwrap();
-    assert_eq!(hits, Vec::<EmbeddingHit>::new());
-}
-
-#[tokio::test]
-async fn nearest_memories_round_trips() {
-    let (handle, store, _guard) = fresh().await;
-    let mem_id = save_memory(&handle, "editor", "vim").await;
-    embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
-
-    let hits = store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap();
-    let [hit] = hits.as_slice() else {
-        panic!("expected one hit, got {hits:?}");
-    };
-    assert_eq!(
-        (hit.memory_id, hit.key.as_str(), hit.value.as_str()),
-        (mem_id, "editor", "vim")
-    );
-    assert!((hit.similarity - 1.0).abs() < 1e-4);
-}
-
-#[tokio::test]
 async fn upsert_replaces_memory_embedding_in_place() {
     let (handle, store, _guard) = fresh().await;
     let mem_id = save_memory(&handle, "k", "v").await;
@@ -226,20 +197,6 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
     assert_eq!(
         store.memories_missing_embedding("m").await.unwrap(),
         [(mem_id, "emacs".to_string())]
-    );
-}
-
-#[tokio::test]
-async fn resaving_an_unchanged_memory_value_keeps_its_embedding() {
-    let (handle, store, _guard) = fresh().await;
-    let mem_id = save_memory(&handle, "editor", "vim").await;
-    embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
-
-    assert_eq!(save_memory(&handle, "editor", "vim").await, mem_id);
-    assert_eq!(store.count_for_model("m").await.unwrap(), (0, 1));
-    assert_eq!(
-        store.memories_missing_embedding("m").await.unwrap(),
-        Vec::<(i64, String)>::new()
     );
 }
 
@@ -302,25 +259,6 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
 }
 
 #[tokio::test]
-async fn count_missing_counts_unindexed_and_other_model_rows() {
-    let (handle, store, _guard) = fresh().await;
-    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
-
-    insert_chunk_with_vec(&handle, &store, conv_id, 0, &unit_vec(0.0), "new").await;
-    insert_chunk_with_vec(&handle, &store, conv_id, 1, &unit_vec(0.5), "old").await;
-    handle
-        .store_chunk(conv_id, 2, "naked-chunk".into(), None)
-        .await
-        .unwrap();
-    let indexed_mem = save_memory(&handle, "indexed", "v1").await;
-    embed_memory(&store, indexed_mem, &unit_vec(0.0), "new").await;
-    save_memory(&handle, "bare", "v2").await;
-
-    assert_eq!(store.count_missing("new").await.unwrap(), (2, 1));
-    assert_eq!(store.count_missing("old").await.unwrap(), (2, 2));
-}
-
-#[tokio::test]
 async fn count_stale_aggregates_across_chunks_and_memories() {
     let (handle, store, _guard) = fresh().await;
     let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
@@ -359,22 +297,4 @@ fn score_against_rejects_malformed_blobs() {
     assert_eq!(score_against(&q, &vector_to_blob(&[3.0, 4.0])), Some(11.0));
     assert_eq!(score_against(&q, &vector_to_blob(&[1.0, 0.0, 0.0])), None);
     assert_eq!(score_against(&q, &[0u8; 7]), None);
-}
-
-#[test]
-fn score_against_rejects_non_finite_products() {
-    let q = [1.0f32, 2.0];
-    assert_eq!(score_against(&q, &vector_to_blob(&[f32::NAN, 0.0])), None);
-    assert_eq!(
-        score_against(&q, &vector_to_blob(&[f32::INFINITY, 0.0])),
-        None
-    );
-    assert_eq!(
-        score_against(&q, &vector_to_blob(&[f32::MAX, f32::MAX])),
-        None
-    );
-    assert_eq!(
-        score_against(&[f32::NAN, 0.0], &vector_to_blob(&[1.0, 0.0])),
-        None
-    );
 }

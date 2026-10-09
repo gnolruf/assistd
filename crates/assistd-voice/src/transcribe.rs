@@ -3,8 +3,6 @@
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(any(test, feature = "test-support"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -241,61 +239,54 @@ impl Transcriber for QueuedTranscriber {
     }
 }
 
-/// Test transcriber returning a fixed string and counting calls.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug)]
-pub struct StubTranscriber {
-    text: String,
-    gpu: bool,
-    calls: AtomicUsize,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl StubTranscriber {
-    /// A CPU-backed stub returning `text`.
-    pub fn with_text(text: impl Into<String>) -> Arc<Self> {
-        Self::build(text, false)
-    }
-
-    /// A stub that reports itself as GPU-backed.
-    pub fn on_gpu(text: impl Into<String>) -> Arc<Self> {
-        Self::build(text, true)
-    }
-
-    fn build(text: impl Into<String>, gpu: bool) -> Arc<Self> {
-        Arc::new(Self {
-            text: text.into(),
-            gpu,
-            calls: AtomicUsize::new(0),
-        })
-    }
-
-    /// Number of `transcribe` calls so far.
-    pub fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[async_trait]
-impl Transcriber for StubTranscriber {
-    async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.text.clone())
-    }
-
-    fn is_gpu(&self) -> bool {
-        self.gpu
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct StubTranscriber {
+        text: String,
+        gpu: bool,
+        calls: AtomicUsize,
+    }
+
+    impl StubTranscriber {
+        fn with_text(text: impl Into<String>) -> Arc<Self> {
+            Self::build(text, false)
+        }
+
+        fn on_gpu(text: impl Into<String>) -> Arc<Self> {
+            Self::build(text, true)
+        }
+
+        fn build(text: impl Into<String>, gpu: bool) -> Arc<Self> {
+            Arc::new(Self {
+                text: text.into(),
+                gpu,
+                calls: AtomicUsize::new(0),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Transcriber for StubTranscriber {
+        async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.text.clone())
+        }
+
+        fn is_gpu(&self) -> bool {
+            self.gpu
+        }
+    }
 
     #[derive(Debug)]
     struct ScriptedProbe {

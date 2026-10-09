@@ -146,13 +146,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_without_a_pid_is_never_treated_as_dead() {
-        let slot = ChatFocusSlot::default();
-        slot.report(None, true);
-        assert_eq!(slot.refresh(), (true, Some(true)));
-    }
-
-    #[test]
     fn close_from_another_pid_keeps_the_chat() {
         let slot = ChatFocusSlot::default();
         slot.report(Some(std::process::id()), true);

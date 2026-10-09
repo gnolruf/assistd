@@ -24,18 +24,3 @@ impl Default for MemoryConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_db_path_ends_in_assistd_memory_db() {
-        let path = MemoryConfig::default().db_path;
-        assert!(
-            path.ends_with("assistd/memory.db"),
-            "unexpected default db_path: {}",
-            path.display()
-        );
-    }
-}

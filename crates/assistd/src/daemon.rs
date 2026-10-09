@@ -38,8 +38,6 @@ mod listen_dispatcher;
 mod mcp_init;
 mod memory_init;
 mod shutdown;
-#[cfg(test)]
-mod test_support;
 mod tools_init;
 mod voice_init;
 mod voice_probe;

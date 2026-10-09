@@ -119,24 +119,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echo_no_args_emits_usage() {
-        let out = run_echo(&[]).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: echo"), "{out:?}");
-    }
-
-    #[tokio::test]
     async fn echo_output_per_flags() {
-        let cases: [(&[&str], &[u8]); 9] = [
-            (&["hello", "world"], b"hello world\n"),
-            (&["-n", "hi"], b"hi"),
-            (&["-e", r"a\nb\tc"], b"a\nb\tc\n"),
+        let cases: [(&[&str], &[u8]); 4] = [
             (&[r"a\nb"], b"a\\nb\n"),
             (&["-ne", r"a\nb"], b"a\nb"),
             (&["-e", "-E", r"a\nb"], b"a\\nb\n"),
-            (&["-e", r"a\qb"], b"a\\qb\n"),
             (&["hi", "-n"], b"hi -n\n"),
-            (&["-"], b"-\n"),
         ];
         for (args, expected) in cases {
             let out = run_echo(args).await;

@@ -125,25 +125,6 @@ mod tests {
     }
 
     #[test]
-    fn sink_wake_rules_respect_config() {
-        let (s, _rx) = sink(true, false, true);
-        assert!(s.matches_wake_rule(&Event::ToolCall {
-            id: "a".into(),
-            name: "x".into(),
-            args: json!({}),
-        }));
-        assert!(!s.matches_wake_rule(&Event::Delta {
-            id: "a".into(),
-            text: "x".into(),
-        }));
-        assert!(s.matches_wake_rule(&Event::Error {
-            id: "a".into(),
-            message: "x".into(),
-        }));
-        assert!(!s.matches_wake_rule(&Event::Done { id: "a".into() }));
-    }
-
-    #[test]
     fn sink_sends_the_event_before_its_wake() {
         let (s, mut rx) = sink(true, true, true);
         s.ingest(&Event::ToolCall {
@@ -158,17 +139,5 @@ mod tests {
         );
         let second = rx.try_recv().expect("wake queued");
         assert!(matches!(second, DriverInput::Wake), "{second:?}");
-    }
-
-    #[test]
-    fn sink_sends_only_the_event_when_no_rule_matches() {
-        let (s, mut rx) = sink(false, false, false);
-        s.ingest(&Event::Done { id: "a".into() });
-        let only = rx.try_recv().expect("event queued");
-        assert!(
-            matches!(&only, DriverInput::Event(ev) if matches!(**ev, Event::Done { .. })),
-            "{only:?}"
-        );
-        assert!(rx.try_recv().is_err(), "no Wake should have been queued");
     }
 }

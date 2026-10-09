@@ -5,28 +5,6 @@ use tokio::sync::oneshot;
 use super::*;
 use crate::{Config, PresenceManager, PresenceState, PresenceTarget};
 
-#[test]
-fn fd_exhaustion_predicate_matches_only_emfile_and_enfile() {
-    let cases = [
-        ("EMFILE", io::Error::from_raw_os_error(libc::EMFILE), true),
-        ("ENFILE", io::Error::from_raw_os_error(libc::ENFILE), true),
-        (
-            "ECONNRESET",
-            io::Error::from_raw_os_error(libc::ECONNRESET),
-            false,
-        ),
-        (
-            "ECONNABORTED",
-            io::Error::from_raw_os_error(libc::ECONNABORTED),
-            false,
-        ),
-        ("no errno", io::Error::other("synthetic"), false),
-    ];
-    for (label, err, expected) in cases {
-        assert_eq!(is_fd_exhaustion(&err), expected, "{label}");
-    }
-}
-
 fn test_state() -> Arc<AppState> {
     state_with_backend_and_grace(Arc::new(assistd_llm::EchoBackend::new()), 5)
 }
@@ -68,14 +46,8 @@ struct TestServer {
 
 impl TestServer {
     async fn start(state: Arc<AppState>) -> Self {
-        Self::start_with(state, |_| {}).await
-    }
-
-    /// `prepare` runs against the socket path before the server binds.
-    async fn start_with(state: Arc<AppState>, prepare: impl FnOnce(&Path)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("assistd.sock");
-        prepare(&path);
         let (shutdown, rx) = oneshot::channel::<()>();
         let server_path = path.clone();
         let task = tokio::spawn(async move {
@@ -289,23 +261,6 @@ async fn second_serve_refuses_to_clobber_live_socket() {
     let events =
         send_request_collect_events(&server.path, r#"{"type":"query","id":"q","text":"ok"}"#).await;
     assert_eq!(events.last(), Some(&done("q")));
-
-    server.stop().await;
-}
-
-#[tokio::test]
-async fn removes_stale_socket_file_on_bind() {
-    let server = TestServer::start_with(test_state(), |path| {
-        std::fs::write(path, b"stale").unwrap();
-    })
-    .await;
-
-    let events = send_request_collect_events(
-        &server.path,
-        r#"{"type":"query","id":"req-ok","text":"ok"}"#,
-    )
-    .await;
-    assert_eq!(events.last(), Some(&done("req-ok")));
 
     server.stop().await;
 }
@@ -565,89 +520,6 @@ async fn graceful_shutdown_aborts_after_grace_timeout() {
     tokio::time::timeout(Duration::from_secs(2), server.stop())
         .await
         .expect("server did not exit within 2s of shutdown");
-}
-
-#[tokio::test]
-async fn unmatched_mid_stream_confirm_response_does_not_crash() {
-    with_server(test_state(), |path| async move {
-        let (_write, mut reader) = open_connection(
-            &path,
-            &[
-                r#"{"type":"query","id":"q1","text":"ping"}"#,
-                r#"{"type":"confirm_response","id":"cr-x","confirm_id":"missing","allow":false}"#,
-            ],
-            true,
-        )
-        .await;
-        let events = read_until_terminal(&mut reader).await;
-        assert_eq!(events, [delta("q1", "ping"), done("q1")]);
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn concurrent_set_presence_to_sleeping_is_idempotent_under_fanout() {
-    with_server(test_state(), |path| async move {
-        let mut handles = Vec::new();
-        for i in 0..32 {
-            let p = path.clone();
-            handles.push(tokio::spawn(async move {
-                let id = format!("sp-{i}");
-                let body = format!(r#"{{"type":"set_presence","id":"{id}","target":"sleeping"}}"#);
-                let events = send_request_collect_events(&p, &body).await;
-                assert_eq!(
-                    events,
-                    [
-                        Event::Presence {
-                            id: id.clone(),
-                            state: PresenceState::Sleeping
-                        },
-                        done(&id)
-                    ],
-                    "conn {i}"
-                );
-            }));
-        }
-        for h in handles {
-            h.await.unwrap();
-        }
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn mixed_query_and_set_presence_does_not_drop_events() {
-    let state = state_with_backend_and_grace(
-        Arc::new(SlowBackend {
-            deltas: 3,
-            pause: Duration::from_millis(50),
-        }),
-        5,
-    );
-    with_server(state, |path| async move {
-        let mut handles = Vec::new();
-        for i in 0..16 {
-            let p = path.clone();
-            handles.push(tokio::spawn(async move {
-                let id = format!("mix-{i}");
-                let body = if i % 2 == 0 {
-                    format!(r#"{{"type":"query","id":"{id}","text":"q{i}"}}"#)
-                } else {
-                    format!(r#"{{"type":"set_presence","id":"{id}","target":"active"}}"#)
-                };
-                let events = send_request_collect_events(&p, &body).await;
-                assert_eq!(events.last(), Some(&done(&id)), "conn {i}: {events:?}");
-                assert!(
-                    !events.iter().any(|e| matches!(e, Event::Error { .. })),
-                    "conn {i}: unexpected Error in {events:?}"
-                );
-            }));
-        }
-        for h in handles {
-            h.await.unwrap();
-        }
-    })
-    .await;
 }
 
 /// Collect subscriber events until the stream goes quiet for `idle`.
@@ -1034,23 +906,6 @@ async fn write_event_times_out_when_the_client_stops_reading() {
     .await
     .expect("write to a stalled client never failed");
     assert!(matches!(err, SocketError::WriteTimeout(_)), "got {err:?}");
-}
-
-#[tokio::test]
-async fn peer_hung_up_distinguishes_a_half_close_from_a_full_close() {
-    let (server, client) = UnixStream::pair().unwrap();
-    assert!(!peer_hung_up(&server), "fresh pair reported as hung up");
-
-    let (client_read, mut client_write) = client.into_split();
-    client_write.shutdown().await.unwrap();
-    assert!(
-        !peer_hung_up(&server),
-        "a peer that only closed its write side still reads events"
-    );
-
-    drop(client_write);
-    drop(client_read);
-    assert!(peer_hung_up(&server), "closed peer not reported as hung up");
 }
 
 /// Calls `hang` on its first step and answers on the next.

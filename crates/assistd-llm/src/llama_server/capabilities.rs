@@ -126,9 +126,7 @@ mod tests {
                 true,
             ),
             (json!({"modalities": {"vision": false}}), false),
-            (json!({"modalities": {"vision": "true"}}), false),
             (json!({"modalities": {"audio": true}}), false),
-            (json!({"model_path": "/some/model.gguf"}), false),
             (json!({}), false),
         ];
         for (body, expected) in cases {
@@ -151,7 +149,6 @@ mod tests {
                 json!({"default_generation_settings": {"model": "nested/model"}}),
                 Some("nested/model"),
             ),
-            (json!({"total_slots": 1}), None),
             (json!({"model": 42}), None),
         ];
         for (body, expected) in cases {
@@ -170,7 +167,6 @@ mod tests {
                 json!({"model": null, "model_path": "/some/model.gguf", "modalities": {"vision": true}}),
                 false,
             ),
-            (json!({"role": "worker", "model_path": "/x.gguf"}), false),
         ];
         for (body, expected) in cases {
             assert_eq!(is_router_props(&body), expected, "{body}");

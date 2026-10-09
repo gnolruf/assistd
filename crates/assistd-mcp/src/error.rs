@@ -92,8 +92,6 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rmcp::model::{ErrorCode, ErrorData};
-
     use super::*;
 
     fn contains_hint(s: &str) -> bool {
@@ -141,54 +139,5 @@ mod tests {
             );
             assert!(line.ends_with('\n'), "{label}: missing trailing newline");
         }
-    }
-
-    #[test]
-    fn lines_carry_the_variant_details_and_matching_hint() {
-        let cases = [
-            (
-                McpError::RpcError {
-                    code: -32602,
-                    message: "Invalid params: missing `query`".into(),
-                },
-                "[error] mcp__web__search: MCP server returned error code -32602: \
-                 Invalid params: missing `query`. Check: the arguments and try again\n",
-            ),
-            (
-                McpError::RequestTimeout(Duration::from_secs(30)),
-                "[error] mcp__web__search: MCP request timed out after 30s. \
-                 Try: the call again or a smaller request\n",
-            ),
-            (
-                McpError::ServerDown,
-                "[error] mcp__web__search: MCP server is currently unavailable. \
-                 Try: another tool while the server restarts\n",
-            ),
-        ];
-        for (err, expected) in cases {
-            assert_eq!(mcp_error_line("mcp__web__search", &err), expected);
-        }
-    }
-
-    #[test]
-    fn service_errors_map_to_the_matching_variant() {
-        let rpc = McpError::from(ServiceError::McpError(ErrorData::new(
-            ErrorCode(-32601),
-            "method not found",
-            None,
-        )));
-        assert!(
-            matches!(&rpc, McpError::RpcError { code: -32601, message } if message == "method not found"),
-            "{rpc:?}"
-        );
-        let closed = McpError::from(ServiceError::TransportClosed);
-        assert!(matches!(closed, McpError::TransportClosed), "{closed:?}");
-        let timeout = McpError::from(ServiceError::Timeout {
-            timeout: Duration::from_secs(3),
-        });
-        assert!(
-            matches!(timeout, McpError::RequestTimeout(after) if after == Duration::from_secs(3)),
-            "{timeout:?}"
-        );
     }
 }

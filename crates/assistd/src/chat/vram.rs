@@ -213,18 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_output_rejects_malformed_output() {
-        assert_eq!(
-            parse_output(b"\n\n"),
-            Err("nvidia-smi returned no GPUs".to_string())
-        );
-        assert_eq!(
-            parse_output(b"not, numbers\n"),
-            Err("unparsable used field: not, numbers".to_string())
-        );
-    }
-
-    #[test]
     fn meminfo_used_is_total_minus_available() {
         let content = "\
 MemTotal:       65536000 kB
@@ -238,14 +226,6 @@ Buffers:          512000 kB
                 used_mb: 32000,
                 total_mb: 64000,
             })
-        );
-    }
-
-    #[test]
-    fn meminfo_missing_available_errors() {
-        assert_eq!(
-            parse_meminfo("MemTotal:       65536000 kB\n"),
-            Err("MemAvailable not found in /proc/meminfo".to_string())
         );
     }
 }

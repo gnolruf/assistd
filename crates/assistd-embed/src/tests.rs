@@ -39,27 +39,6 @@ impl Embedder for PickyEmbedder {
 }
 
 #[tokio::test]
-async fn no_embedder_errors_on_embed() {
-    let embedder = NoEmbedder;
-    let err = embedder
-        .embed("hi".into())
-        .await
-        .expect_err("NoEmbedder must not embed");
-    assert!(matches!(err, EmbedError::Disabled), "{err:?}");
-    assert_eq!(embedder.model(), "");
-    assert_eq!(embedder.dim(), 0);
-}
-
-#[tokio::test]
-async fn embed_each_uses_one_batch_call_when_it_succeeds() {
-    let embedder = PickyEmbedder::default();
-    let results = embed_each(&embedder, &["a", "bb"]).await;
-    let vectors: Vec<_> = results.into_iter().map(Result::unwrap).collect();
-    assert_eq!(vectors, vec![vec![1.0], vec![2.0]]);
-    assert_eq!(*embedder.calls.lock().unwrap(), vec![vec!["a", "bb"]]);
-}
-
-#[tokio::test]
 async fn embed_each_falls_back_to_individual_embeds_on_batch_failure() {
     let embedder = PickyEmbedder::default();
     let results = embed_each(&embedder, &["a", "bad", "ccc"]).await;

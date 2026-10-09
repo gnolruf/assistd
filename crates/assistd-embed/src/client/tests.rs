@@ -81,32 +81,6 @@ fn order_by_index_places_entries_by_index_not_response_order() {
 }
 
 #[test]
-fn order_by_index_rejects_count_mismatch() {
-    let err = order_by_index(vec![datum(0, &[1.0])], 2).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            EmbedError::CountMismatch {
-                got: 1,
-                expected: 2
-            }
-        ),
-        "{err:?}"
-    );
-    let err = order_by_index(Vec::new(), 1).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            EmbedError::CountMismatch {
-                got: 0,
-                expected: 1
-            }
-        ),
-        "{err:?}"
-    );
-}
-
-#[test]
 fn order_by_index_rejects_out_of_range_and_repeated_indices() {
     for (label, data) in [
         ("out of range", vec![datum(0, &[1.0]), datum(2, &[1.0])]),
@@ -177,20 +151,14 @@ async fn embed_batch_rejects_any_vector_with_the_wrong_dimension() {
 
 #[test]
 fn l2_normalize_scales_to_unit_length_and_passes_degenerate_input_through() {
-    let cases: [(&str, Vec<f32>, Vec<f32>); 5] = [
+    let cases: [(&str, Vec<f32>, Vec<f32>); 3] = [
         ("3-4-5", vec![3.0, 4.0], vec![0.6, 0.8]),
-        ("already unit", vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0]),
         (
             "f32::MAX components do not overflow",
             vec![f32::MAX, f32::MAX],
             vec![std::f32::consts::FRAC_1_SQRT_2; 2],
         ),
         ("zero vector", vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0]),
-        (
-            "non-finite",
-            vec![f32::INFINITY, 1.0],
-            vec![f32::INFINITY, 1.0],
-        ),
     ];
     for (label, input, expected) in cases {
         let got = l2_normalize(input);

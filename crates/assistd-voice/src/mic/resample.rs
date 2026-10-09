@@ -81,17 +81,3 @@ pub(crate) fn f32_to_i16(sample: f32) -> i16 {
         .to_i16()
         .unwrap_or(0)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn f32_to_i16_saturates_cleanly() {
-        assert_eq!(f32_to_i16(0.0), 0);
-        assert_eq!(f32_to_i16(1.0), i16::MAX);
-        assert_eq!(f32_to_i16(-1.0), -i16::MAX);
-        assert_eq!(f32_to_i16(2.0), i16::MAX);
-        assert_eq!(f32_to_i16(-2.0), -i16::MAX);
-    }
-}

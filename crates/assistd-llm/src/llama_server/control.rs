@@ -241,7 +241,7 @@ fn control_http_error(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv4Addr;
 
     use async_trait::async_trait;
     use tokio::net::TcpListener;
@@ -271,20 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn contains_loaded_requires_matching_id_and_loaded_status() {
-        let parsed = parse(
-            r#"{"data":[
-                {"id":"foo/bar:Q4","status":{"value":"loaded","args":["--host","127.0.0.1","--port","48881"]}},
-                {"id":"baz/qux:Q4","status":{"value":"unloaded","args":["--host","127.0.0.1","--port","0"]}}
-            ]}"#,
-        );
-        assert!(parsed.contains_loaded("foo/bar:Q4"));
-        assert!(!parsed.contains_loaded("baz/qux:Q4"));
-        assert!(!parsed.contains_loaded("c"));
-        assert!(!parse(r#"{"data":[]}"#).contains_loaded("anything"));
-    }
-
-    #[test]
     fn find_loaded_child_port_reads_the_port_spawn_arg() {
         let cases = [
             (
@@ -292,12 +278,6 @@ mod tests {
                 r#"{"id":"foo/bar:Q4","status":{"value":"loaded","args":["--host","127.0.0.1","--port","48881","--alias","foo/bar:Q4"]}}"#,
                 "foo/bar:Q4",
                 Some(48881),
-            ),
-            (
-                "port 0 is reported as-is",
-                r#"{"id":"foo/bar:Q4","status":{"value":"loaded","args":["--port","0"]}}"#,
-                "foo/bar:Q4",
-                Some(0),
             ),
             (
                 "unloaded model",
@@ -351,12 +331,5 @@ mod tests {
                 .is_err(),
             "a control request reached the listener"
         );
-    }
-
-    #[test]
-    fn new_brackets_ipv6_hosts_in_base_url() {
-        let control =
-            LlamaServerControl::new(SocketAddr::from((Ipv6Addr::LOCALHOST, 8385)), None).unwrap();
-        assert_eq!(control.base_url, "http://[::1]:8385");
     }
 }

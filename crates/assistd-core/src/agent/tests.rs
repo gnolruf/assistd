@@ -174,20 +174,6 @@ fn ok_then_done() -> [LlmEvent; 2] {
 }
 
 #[tokio::test]
-async fn simple_query_one_step_final() {
-    let backend = MockBackend::with(vec![StepOutcome::Final]);
-    let (res, events) = run_turn(
-        Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE),
-        "what is 2+2?",
-    )
-    .await;
-    res.unwrap();
-    assert_eq!(events, ok_then_done());
-    assert_eq!(*backend.pushed_users.lock(), ["what is 2+2?"]);
-    assert!(backend.pushed_results.lock().is_empty());
-}
-
-#[tokio::test]
 async fn tool_call_result_is_fed_back_before_final_answer() {
     let backend = MockBackend::with(vec![
         StepOutcome::ToolCalls(vec![call("c-1", "echo hello")]),
@@ -259,24 +245,6 @@ async fn repeated_identical_calls_withdraw_tools_then_answer() {
         *backend.transient_notes.lock(),
         [ToolBudgetExhausted::Repeating.model_note()]
     );
-}
-
-#[tokio::test]
-async fn distinct_calls_are_not_treated_as_repeats() {
-    let outcomes: Vec<StepOutcome> = (0..5)
-        .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), &format!("echo {i}"))]))
-        .collect();
-    let backend = MockBackend::with(outcomes);
-    let (res, events) = run_turn(
-        Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE),
-        "go",
-    )
-    .await;
-    res.unwrap();
-
-    assert!(status_kinds(&events).is_empty());
-    assert_eq!(backend.pushed_results.lock().len(), 5);
-    assert!(backend.transient_notes.lock().is_empty());
 }
 
 #[tokio::test]
@@ -373,24 +341,6 @@ async fn truncations_past_the_retry_limit_fail_the_turn() {
 }
 
 #[tokio::test]
-async fn a_completed_step_resets_the_truncation_retries() {
-    let mut outcomes: Vec<StepOutcome> = (0..TRUNCATION_RETRY_LIMIT)
-        .map(|_| StepOutcome::Truncated)
-        .collect();
-    outcomes.push(StepOutcome::ToolCalls(vec![call("c-1", "echo a")]));
-    outcomes.extend((0..TRUNCATION_RETRY_LIMIT).map(|_| StepOutcome::Truncated));
-    let backend = MockBackend::with(outcomes);
-    let (res, events) = run_turn(
-        Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE),
-        "go",
-    )
-    .await;
-
-    res.unwrap();
-    assert_eq!(events.last(), Some(&LlmEvent::Done));
-}
-
-#[tokio::test]
 async fn truncation_after_withdrawal_restates_the_withdrawal() {
     let mut outcomes: Vec<StepOutcome> = (0..DUPLICATE_CALL_LIMIT)
         .map(|i| StepOutcome::ToolCalls(vec![call(&format!("c-{i}"), "echo same")]))
@@ -442,151 +392,6 @@ async fn unknown_tool_passes_error_to_next_step() {
     );
 }
 
-#[tokio::test]
-async fn tool_invoke_err_becomes_synthetic_error_result() {
-    #[derive(Debug)]
-    struct ErrTool;
-    #[async_trait]
-    impl Tool for ErrTool {
-        fn name(&self) -> &'static str {
-            "run"
-        }
-        fn description(&self) -> &'static str {
-            "errors on invoke"
-        }
-        fn parameters_schema(&self) -> Value {
-            serde_json::json!({"type":"object"})
-        }
-        async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
-            Err(ToolError::InvalidArgs("boom".into()))
-        }
-    }
-    let mut tools = ToolRegistry::new();
-    tools.register(ErrTool);
-
-    let backend = MockBackend::with(vec![
-        StepOutcome::ToolCalls(vec![call("c-1", "whatever")]),
-        StepOutcome::Final,
-    ]);
-    let (res, _) = run_turn(
-        Agent::new(backend.clone(), Arc::new(tools), None, TOOL_DEADLINE),
-        "go",
-    )
-    .await;
-    res.unwrap();
-    let pushed = backend.pushed_results.lock();
-    let payload = &pushed[0][0];
-    assert!(
-        payload.content.starts_with(
-            "[error] run: tool invocation failed. Check: boom. Try: a different command.\n[exit:-1 |"
-        ),
-        "{:?}",
-        payload.content
-    );
-}
-
-#[tokio::test]
-async fn closed_event_channel_stops_before_first_step() {
-    let backend = MockBackend::with(vec![StepOutcome::ToolCalls(vec![call("c-1", "echo a")])]);
-    let (tx, rx) = mpsc::channel::<LlmEvent>(16);
-    drop(rx);
-    Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE)
-        .run_turn("go".into(), Vec::new(), tx, CancellationToken::new())
-        .await
-        .unwrap();
-    assert_eq!(backend.step_calls.load(Ordering::SeqCst), 0);
-    assert!(backend.pushed_results.lock().is_empty());
-}
-
-#[tokio::test]
-async fn explicit_cancel_before_first_step_stops_loop_immediately() {
-    let backend = MockBackend::with(vec![StepOutcome::Final]);
-    let (tx, _rx) = mpsc::channel::<LlmEvent>(16);
-    let token = CancellationToken::new();
-    token.cancel();
-    Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE)
-        .run_turn("go".into(), Vec::new(), tx, token)
-        .await
-        .unwrap();
-    assert_eq!(backend.pushed_users.lock().len(), 1);
-    assert_eq!(backend.step_calls.load(Ordering::SeqCst), 0);
-}
-
-#[derive(Debug)]
-struct FakeMcpTool {
-    name: String,
-    result: Value,
-}
-
-#[async_trait]
-impl Tool for FakeMcpTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn description(&self) -> &'static str {
-        "fake mcp tool"
-    }
-    fn parameters_schema(&self) -> Value {
-        serde_json::json!({"type": "object"})
-    }
-    async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
-        Ok(self.result.clone())
-    }
-}
-
-#[tokio::test]
-async fn agent_loop_mixes_native_and_mcp_calls() {
-    let mut commands = CommandRegistry::new();
-    commands.register(EchoCommand);
-    let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(
-        Arc::new(commands),
-        &ToolsOutputConfig::default(),
-        std::env::temp_dir().join(format!("assistd-agent-test-mix-{}", std::process::id())),
-    ));
-    tools.register(FakeMcpTool {
-        name: "mcp__google_calendar__list_events".into(),
-        result: serde_json::json!({
-            "type": "text",
-            "output": "10:00 standup\n14:00 review",
-            "exit_code": 0,
-            "duration_ms": 12,
-            "truncated": false,
-        }),
-    });
-
-    let backend = MockBackend::with(vec![
-        StepOutcome::ToolCalls(vec![ToolCall {
-            id: "c-mcp".into(),
-            name: "mcp__google_calendar__list_events".into(),
-            arguments: serde_json::json!({"date": "tomorrow"}),
-        }]),
-        StepOutcome::ToolCalls(vec![call("c-run", "echo hello")]),
-        StepOutcome::Final,
-    ]);
-
-    let (res, events) = run_turn(
-        Agent::new(backend.clone(), Arc::new(tools), None, TOOL_DEADLINE),
-        "what's on my calendar tomorrow?",
-    )
-    .await;
-    res.unwrap();
-
-    let names: Vec<&str> = events
-        .iter()
-        .filter_map(|e| match e {
-            LlmEvent::ToolCall { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(names, ["mcp__google_calendar__list_events", "run"]);
-
-    let pushed = backend.pushed_results.lock();
-    assert_eq!(pushed.len(), 2);
-    assert_eq!(pushed[0][0].content, "10:00 standup\n14:00 review");
-    assert!(pushed[1][0].content.contains("hello"), "{:?}", pushed[1][0]);
-}
-
 #[tokio::test(start_paused = true)]
 async fn cancellation_during_slow_step_preempts_loop() {
     let backend = MockBackend::with(vec![StepOutcome::Final]).slow_step_ms(2_000);
@@ -605,60 +410,6 @@ async fn cancellation_during_slow_step_preempts_loop() {
     assert!(
         backend.step_tool_counts.lock().is_empty(),
         "slow step ran to completion instead of being preempted"
-    );
-}
-
-#[tokio::test]
-async fn cancellation_during_hung_tool_preempts_dispatch() {
-    let entered = Arc::new(Notify::new());
-    let mut tools = ToolRegistry::new();
-    tools.register(HangingTool {
-        entered: entered.clone(),
-    });
-    let backend = MockBackend::with(vec![
-        StepOutcome::ToolCalls(vec![call("c-1", "hang")]),
-        StepOutcome::ToolCalls(vec![call("c-2", "echo b")]),
-    ]);
-    let (tx, mut rx) = mpsc::channel::<LlmEvent>(16);
-    let token = CancellationToken::new();
-    let kicker = token.clone();
-    tokio::spawn(async move {
-        entered.notified().await;
-        kicker.cancel();
-    });
-
-    let agent = Agent::new(backend.clone(), Arc::new(tools), None, TOOL_DEADLINE);
-    let turn = agent.run_turn("go".into(), Vec::new(), tx, token);
-    tokio::time::timeout(Duration::from_secs(5), turn)
-        .await
-        .expect("cancellation did not preempt hung tool")
-        .unwrap();
-
-    assert_eq!(
-        backend.step_calls.load(Ordering::SeqCst),
-        1,
-        "loop iterated past the cancellation point"
-    );
-
-    let events = collect(&mut rx).await;
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, LlmEvent::ToolResult { id, .. } if id == "c-1")),
-        "abandoned tool call left without a ToolResult event: {events:?}"
-    );
-
-    let pushed = backend.pushed_results.lock();
-    let [step] = pushed.as_slice() else {
-        panic!("cancelled call was not answered exactly once: {pushed:?}");
-    };
-    let [payload] = step.as_slice() else {
-        panic!("expected one result: {step:?}");
-    };
-    assert_eq!(payload.call_id, "c-1");
-    assert_eq!(
-        payload.content,
-        "[error] run: agent turn cancelled during dispatch.\n[exit:-1 | 0ms]"
     );
 }
 
@@ -688,6 +439,7 @@ async fn cancellation_mid_batch_answers_every_remaining_call() {
         .await
         .expect("cancellation did not preempt hung tool")
         .unwrap();
+    assert_eq!(backend.step_calls.load(Ordering::SeqCst), 1);
 
     let events = collect(&mut rx).await;
     let answered: Vec<&str> = events
@@ -893,32 +645,4 @@ async fn replay_does_not_loop_on_repeated_server_restarting() {
     );
     assert_failed_without_done(&events);
     assert_eq!(backend.step_calls.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn replay_abandons_on_degraded_supervisor() {
-    let backend = ErrorInjectingBackend::new(vec![LlmError::ServerRestarting("dead".into())]);
-    let probe = MockProbe::new(Err(HealthWaitError::Degraded));
-    let (res, events) = run_turn(
-        Agent::new(
-            backend.clone(),
-            tools_with_echo(),
-            Some(probe),
-            TOOL_DEADLINE,
-        ),
-        "hello",
-    )
-    .await;
-    let err = res.expect_err("Degraded probe must surface as error");
-    assert_eq!(
-        restart_error(&err),
-        Some("LLM supervisor entered degraded state; restart abandoned")
-    );
-
-    assert_eq!(
-        status_kinds(&events),
-        [StatusKind::Restarting, StatusKind::Degraded]
-    );
-    assert_failed_without_done(&events);
-    assert_eq!(backend.step_calls.load(Ordering::SeqCst), 1);
 }

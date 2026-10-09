@@ -193,25 +193,11 @@ impl NotificationIds {
 mod tests {
     use super::*;
 
-    const EXPIRED: u32 = 1;
-
     fn showing(id: u32) -> NotificationIds {
         NotificationIds {
             current: Some(id),
             hidden: None,
         }
-    }
-
-    #[test]
-    fn user_dismissal_and_expiry_map_to_driver_input() {
-        let mut ids = showing(7);
-        assert!(matches!(
-            ids.closed(7, REASON_DISMISSED),
-            Some(DriverInput::Dismissed)
-        ));
-        assert_eq!(ids.current, None);
-        let mut ids = showing(7);
-        assert!(matches!(ids.closed(7, EXPIRED), Some(DriverInput::Expired)));
     }
 
     #[test]

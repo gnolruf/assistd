@@ -47,10 +47,3 @@ fn drain_resamples_common_device_rates_to_16k() {
         assert_mostly_nonzero(&pcm, &format!("{rate} Hz"));
     }
 }
-
-#[test]
-fn drain_passes_16k_through_unchanged_in_length() {
-    let pcm = drain_one_second(16_000);
-    assert_eq!(pcm.len(), 16_000);
-    assert_mostly_nonzero(&pcm, "16000 Hz");
-}

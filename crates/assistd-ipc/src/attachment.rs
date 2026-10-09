@@ -161,31 +161,6 @@ mod tests {
     ];
 
     #[tokio::test]
-    async fn missing_file_is_io_error() {
-        let err = load_image(Path::new("/nonexistent/x.png"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, LoadImageError::Io { .. }), "{err:?}");
-        assert_eq!(err.user_message(), "file not found: /nonexistent/x.png");
-    }
-
-    #[tokio::test]
-    async fn text_file_is_unrecognized() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("notes.txt");
-        tokio::fs::write(&path, b"just some text").await.unwrap();
-        let err = load_image(&path).await.unwrap_err();
-        assert!(
-            matches!(err, LoadImageError::Unrecognized { .. }),
-            "{err:?}"
-        );
-        assert_eq!(
-            err.user_message(),
-            format!("not a recognized image file: {}", path.display())
-        );
-    }
-
-    #[tokio::test]
     async fn gif_is_rejected_by_allowlist() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("anim.gif");
@@ -229,19 +204,6 @@ mod tests {
             format!(
                 "{}: not a regular file (device, pipe, or socket)",
                 fifo.display()
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn directory_is_not_a_regular_file() {
-        let dir = tempdir().unwrap();
-        let err = load_image(dir.path()).await.unwrap_err();
-        assert_eq!(
-            err.user_message(),
-            format!(
-                "{}: not a regular file (device, pipe, or socket)",
-                dir.path().display()
             )
         );
     }

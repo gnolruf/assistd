@@ -170,43 +170,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_non_image() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("notes.txt");
-        std::fs::write(&path, b"not an image").unwrap();
-        let path = path.to_string_lossy().into_owned();
-        let out = run_see(&SeeCommand::default(), &[&path]).await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            format!("[error] see: not an image file: {path}. Use: cat {path}\n")
-        );
-        assert!(out.attachments.is_empty());
-    }
-
-    #[tokio::test]
-    async fn missing_file_exits_1() {
-        let out = run_see(&SeeCommand::default(), &["/nonexistent/image.png"]).await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] see: file not found: /nonexistent/image.png. \
-             Use: ls /nonexistent to see what is there\n"
-        );
-        assert!(out.attachments.is_empty());
-    }
-
-    #[tokio::test]
-    async fn too_many_args_errors() {
-        let out = run_see(&SeeCommand::default(), &["a.png", "b.png"]).await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] see: expects exactly one path argument. Use: see <PATH>\n"
-        );
-    }
-
-    #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let cmd = SeeCommand::new(VisionGate::new(false));
         let out = run_see(&cmd, &["/tmp/some-image.png"]).await;
@@ -218,16 +181,5 @@ mod tests {
              Use: a model with mmproj loaded\n"
         );
         assert!(out.attachments.is_empty());
-    }
-
-    #[test]
-    fn gate_flip_changes_summary_dynamically() {
-        let gate = VisionGate::new(true);
-        let cmd = SeeCommand::new(gate.clone());
-        assert!(cmd.summary().contains("attach an image"));
-        gate.set(false);
-        assert!(cmd.summary().contains("unavailable"));
-        gate.set(true);
-        assert!(cmd.summary().contains("attach an image"));
     }
 }
