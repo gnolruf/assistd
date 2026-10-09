@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::connection::SqliteHandle;
+use super::store::like_prefix_pattern;
 use super::writer::{WriteOp, dispatch_write};
 use crate::{MemoryError, Result};
 
@@ -541,9 +542,9 @@ impl ConversationStore for SqliteConversationStore {
                         .query_row(
                             "SELECT b.session_id, b.id
                              FROM branches b JOIN sessions s ON s.id = b.session_id
-                             WHERE b.name = ?1 AND b.session_id LIKE ?2
+                             WHERE b.name = ?1 AND b.session_id LIKE ?2 ESCAPE '\\'
                              ORDER BY s.started_at DESC LIMIT 1",
-                            rusqlite::params![name, format!("{prefix}%")],
+                            rusqlite::params![name, like_prefix_pattern(&prefix)],
                             branch_ref,
                         )
                         .optional();

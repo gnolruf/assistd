@@ -121,8 +121,8 @@ impl MemoryStore for SqliteMemoryStore {
     }
 }
 
-/// A `LIKE` pattern (escape char `\`) matching keys that start with `prefix` literally.
-fn like_prefix_pattern(prefix: &str) -> String {
+/// A `LIKE` pattern (escape char `\`) matching values that start with `prefix` literally.
+pub(super) fn like_prefix_pattern(prefix: &str) -> String {
     let escaped = prefix
         .replace('\\', "\\\\")
         .replace('%', "\\%")
