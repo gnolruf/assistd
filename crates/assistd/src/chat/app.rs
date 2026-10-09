@@ -224,6 +224,8 @@ pub(super) struct App {
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     pub listen_active: bool,
+    /// Voice capture or speech output is still starting in the daemon.
+    pub voice_starting: bool,
     pub pending_attachments: Vec<PendingAttachment>,
     picker: Option<Picker>,
     ipc: Arc<IpcClient>,
@@ -333,6 +335,7 @@ impl App {
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             listen_active: false,
+            voice_starting: false,
             pending_attachments: Vec::new(),
             picker,
             ipc,
@@ -381,7 +384,7 @@ impl App {
             PresenceState::Drowsy => {
                 (self.sleep_cfg.idle_to_drowsy_mins + self.sleep_cfg.idle_to_sleep_mins) * 60
             }
-            PresenceState::Sleeping => return None,
+            PresenceState::Sleeping | PresenceState::Waking => return None,
         };
         if next_threshold_secs == 0 {
             return None;

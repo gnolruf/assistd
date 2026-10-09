@@ -1,5 +1,5 @@
-//! Daemon entrypoint: bring up every subsystem, serve the IPC socket,
-//! tear down in order.
+//! Daemon entrypoint: bring up the subsystems, serve the IPC socket while
+//! the model and voice load in the background, tear down in order.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, Config, ContinuousListener, ConversationContext, MemoryStack, PresenceManager,
-    RuntimeState, Subsystems, VisionRevalidator,
+    AppState, Config, ConversationContext, MemoryStack, PresenceManager, RuntimeState, Subsystems,
+    VisionRevalidator, VoiceManager,
 };
 use assistd_ipc::IpcClient;
 use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
@@ -24,11 +24,10 @@ use tracing::info;
 use crate::hotkey;
 use crate::ipc_voice_proxy::IpcVoiceProxy;
 use embed_init::EmbeddingSubsystem;
-use listen_dispatcher::ListenDispatcherHandles;
 use memory_init::MemorySubsystem;
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 use tools_init::ToolDeps;
-use voice_init::VoiceSubsystem;
+use warmup::Warmup;
 
 mod embed_init;
 mod gpu_monitor;
@@ -40,6 +39,7 @@ mod shutdown;
 mod tools_init;
 mod voice_init;
 mod voice_probe;
+mod warmup;
 mod wm_init;
 
 /// Command-line arguments for the `daemon` subcommand.
@@ -115,12 +115,15 @@ async fn start(
     config_path: &Path,
     stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
-    let presence = start_presence(&config, &stages.llm).await?;
+    let presence = PresenceManager::new_sleeping(
+        config.model.clone(),
+        config.timeouts.clone(),
+        stages.llm.subscribe(),
+    )?;
     let health_probe: Arc<dyn LlmHealthProbe> =
         Arc::new(PresenceLlmHealthProbe::new(presence.clone()));
-    let vision_revalidator = probe_vision(&config, &presence, &health_probe).await?;
-
-    let voice = voice_init::init(&config, &presence).await;
+    let vision_revalidator = build_vision_revalidator(&config, &presence, &health_probe)?;
+    let voice = VoiceManager::new(config.voice.synthesis.enabled);
 
     let hotkey_handle = spawn_hotkeys(&config, &presence, &voice, stages.intake.subscribe());
     let gpu_monitor_handle =
@@ -160,18 +163,11 @@ async fn start(
     let resumed_history = std::mem::take(&mut memory.resumed_history);
     replay_history(chat.as_ref(), &resumed_history).await;
 
-    let subsystems = Subsystems::new(
-        chat,
-        presence.clone(),
-        tools.registry,
-        voice.input.clone(),
-        voice.listener.clone(),
-        voice.output,
-    )
-    .with_window_manager(window.manager.clone())
-    .with_vision_revalidator(vision_revalidator)
-    .with_mcp_startup_failures(tools.mcp.startup_failures.clone())
-    .with_tools_disabled(tools.disabled);
+    let subsystems = Subsystems::new(chat, presence.clone(), tools.registry, voice.clone())
+        .with_window_manager(window.manager.clone())
+        .with_vision_revalidator(vision_revalidator.clone())
+        .with_mcp_startup_failures(tools.mcp.startup_failures.clone())
+        .with_tools_disabled(tools.disabled);
     let memory_stack = build_memory_stack(&config, &memory, &embed);
 
     let state = Arc::new(AppState {
@@ -181,8 +177,13 @@ async fn start(
         runtime: RuntimeState::new().with_conversation_ctx(conversation_ctx),
     });
     let persistence_tracker = state.runtime.persistence_tracker_handle();
-    let listen_handles =
-        spawn_listen_dispatcher(&state, &voice.listener, &presence, &stages.intake);
+    let warmup_handle = warmup::spawn(
+        Warmup {
+            state: state.clone(),
+            vision: vision_revalidator,
+        },
+        stages.intake.subscribe(),
+    );
 
     Ok((
         state,
@@ -197,7 +198,7 @@ async fn start(
                 hotkey: hotkey_handle,
                 gpu_monitor: gpu_monitor_handle,
                 idle_monitor: idle_monitor_handle,
-                listen: listen_handles,
+                warmup: warmup_handle,
             },
         },
     ))
@@ -212,26 +213,9 @@ pub(crate) fn init_config() -> Result<()> {
     Ok(())
 }
 
-async fn start_presence(
-    config: &Config,
-    llm_shutdown: &watch::Sender<bool>,
-) -> Result<Arc<PresenceManager>> {
-    let presence = PresenceManager::new_active(
-        config.model.clone(),
-        config.timeouts.clone(),
-        llm_shutdown.subscribe(),
-    )
-    .await?;
-    info!(
-        "presence: Active (llama-server ready on {})",
-        SocketAddr::new(config.model.host, config.model.port.get())
-    );
-    Ok(presence)
-}
-
-/// Probe llama-server for vision support once and build the revalidator
-/// whose gate it seeds.
-async fn probe_vision(
+/// The revalidator that keeps the vision gate in step with the model,
+/// closed until the model first loads.
+fn build_vision_revalidator(
     config: &Config,
     presence: &PresenceManager,
     health_probe: &Arc<dyn LlmHealthProbe>,
@@ -241,13 +225,11 @@ async fn probe_vision(
         Some(Arc::clone(health_probe)),
     )
     .context("failed to construct llama-server control client for vision probe")?;
-    let revalidator = VisionRevalidator::new(control, config.model.name.clone(), presence).await;
-    if revalidator.gate().supported() {
-        info!("vision: enabled (model has mmproj)");
-    } else {
-        tracing::warn!("Vision not available: mmproj not loaded.");
-    }
-    Ok(revalidator)
+    Ok(VisionRevalidator::new(
+        control,
+        config.model.name.clone(),
+        presence,
+    ))
 }
 
 /// The daemon's own hotkeys route push-to-talk through its IPC socket,
@@ -255,7 +237,7 @@ async fn probe_vision(
 fn spawn_hotkeys(
     config: &Config,
     presence: &Arc<PresenceManager>,
-    voice: &VoiceSubsystem,
+    voice: &Arc<VoiceManager>,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     let voice_proxy: Arc<dyn assistd_voice::VoiceInput> =
@@ -265,9 +247,8 @@ fn spawn_hotkeys(
         &config.voice,
         hotkey::Subsystems {
             presence: Some(presence.clone()),
-            voice: voice_proxy,
-            listener: Some(voice.listener.clone()),
-            voice_output: Some(voice.output.clone()),
+            ptt: voice_proxy,
+            voice: Some(voice.clone()),
         },
         shutdown,
     )
@@ -301,24 +282,6 @@ fn build_memory_stack(
         Some(handle) => stack.with_chunks(handle),
         None => stack,
     }
-}
-
-fn spawn_listen_dispatcher(
-    state: &Arc<AppState>,
-    listener: &Arc<dyn ContinuousListener>,
-    presence: &Arc<PresenceManager>,
-    intake_shutdown: &watch::Sender<bool>,
-) -> Option<ListenDispatcherHandles> {
-    let voice = &state.config.voice;
-    (voice.enabled && voice.continuous.enabled).then(|| {
-        listen_dispatcher::spawn_dispatcher(
-            state.clone(),
-            listener.clone(),
-            presence.clone(),
-            voice.continuous.start_on_launch,
-            intake_shutdown.subscribe(),
-        )
-    })
 }
 
 async fn replay_history(chat: &dyn LlmBackend, rows: &[HistoryRow]) {

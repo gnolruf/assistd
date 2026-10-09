@@ -51,13 +51,13 @@ pub use assistd_config::{
 };
 
 pub use assistd_ipc as ipc;
-pub use assistd_ipc::{PresenceState, VoiceCaptureState};
+pub use assistd_ipc::{PresenceState, PresenceTarget, VoiceCaptureState};
 
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
 
 pub use assistd_voice::{
-    ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput, SpeakDecision,
-    VoiceInput, VoiceOutput, VoiceOutputController,
+    CaptureUnavailable, ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput,
+    SpeakDecision, VoiceCapture, VoiceInput, VoiceManager, VoiceOutput, VoiceOutputController,
 };
 
 pub use assistd_wm::{NoWindowManager, WindowManager};
@@ -149,26 +149,22 @@ pub struct VisionRevalidator {
 }
 
 impl VisionRevalidator {
-    /// Probe `model_name` through `control` to seed the gate, then track
-    /// `presence` for later loads.
-    pub async fn new(
+    /// Track `presence` for loads of `model_name`, probed through `control`.
+    /// The gate starts closed until the first revalidation reaches the model.
+    pub fn new(
         control: LlamaServerControl,
         model_name: String,
         presence: &PresenceManager,
     ) -> Arc<Self> {
-        let mut seen = SeenLoad {
-            presence: presence.subscribe(),
-            llama_pid: presence.llama_pid().await,
-            probed: false,
-        };
-        let initial = probe_capabilities_routed(&control, &model_name).await;
-        let gate = VisionGate::new(initial.vision_supported);
-        seen.probed = initial.model_id.is_some();
         Arc::new(Self {
-            gate,
+            gate: VisionGate::new(false),
             control,
             model_name,
-            seen: Mutex::new(seen),
+            seen: Mutex::new(SeenLoad {
+                presence: presence.subscribe(),
+                llama_pid: None,
+                probed: false,
+            }),
         })
     }
 

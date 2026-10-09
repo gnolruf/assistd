@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use assistd_ipc::{Event, PresenceState, Request};
+use assistd_ipc::{Event, PresenceState, PresenceTarget, Request};
 use uuid::Uuid;
 
 use super::run_one_shot;
@@ -21,15 +21,15 @@ impl PresenceAction {
         match self {
             PresenceAction::Sleep => Request::SetPresence {
                 id,
-                target: PresenceState::Sleeping,
+                target: PresenceTarget::Sleeping,
             },
             PresenceAction::Drowse => Request::SetPresence {
                 id,
-                target: PresenceState::Drowsy,
+                target: PresenceTarget::Drowsy,
             },
             PresenceAction::Wake => Request::SetPresence {
                 id,
-                target: PresenceState::Active,
+                target: PresenceTarget::Active,
             },
             PresenceAction::Cycle => Request::Cycle { id },
         }
@@ -52,5 +52,6 @@ fn presence_label(state: PresenceState) -> &'static str {
         PresenceState::Active => "active",
         PresenceState::Drowsy => "drowsy",
         PresenceState::Sleeping => "sleeping",
+        PresenceState::Waking => "waking",
     }
 }

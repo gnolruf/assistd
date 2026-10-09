@@ -1,7 +1,7 @@
 //! Keyboard and mouse input: scrolling, toggles, the slash-command popup
 //! and the F2 presence cycle.
 
-use assistd_core::PresenceState;
+use assistd_core::{PresenceState, PresenceTarget};
 use assistd_ipc::Request;
 use assistd_tools::Approval;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -109,8 +109,8 @@ impl App {
     fn on_cycle_key(&mut self) {
         let target = self
             .presence_state
-            .map_or(PresenceState::Active, PresenceState::next);
-        self.set_notice(&format!("cycling → {}", presence_label(target)));
+            .map_or(PresenceTarget::Active, PresenceState::next);
+        self.set_notice(&format!("cycling → {}", presence_label(target.into())));
         let req = Request::Cycle {
             id: Uuid::new_v4().to_string(),
         };
@@ -159,5 +159,6 @@ fn presence_label(s: PresenceState) -> &'static str {
         PresenceState::Active => "active",
         PresenceState::Drowsy => "drowsy",
         PresenceState::Sleeping => "sleeping",
+        PresenceState::Waking => "waking",
     }
 }

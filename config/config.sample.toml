@@ -179,7 +179,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # [tray.icons]
 # Icon-theme names for the tray icon; custom icons go in ~/.local/share/icons/<theme>/.
 # active = "user-available"
-# sleeping = "user-offline"          # drowsy or asleep
+# sleeping = "user-offline"          # drowsy, asleep, or loading
 # listening = "audio-input-microphone"
 # generating = "system-run"
 # disconnected = "network-offline"

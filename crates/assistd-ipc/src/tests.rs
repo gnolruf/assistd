@@ -35,7 +35,7 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
         (
             Request::SetPresence {
                 id: id(),
-                target: PresenceState::Drowsy,
+                target: PresenceTarget::Drowsy,
             },
             r#"{"type":"set_presence","id":"r","target":"drowsy"}"#,
         ),
@@ -416,6 +416,17 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
             None,
         ),
         (
+            Event::VoiceReadiness {
+                id: id(),
+                capture: ComponentReadiness::Unavailable {
+                    reason: "no mic".into(),
+                },
+                speech: ComponentReadiness::Starting,
+            },
+            r#"{"type":"voice_readiness","id":"r","capture":{"state":"unavailable","reason":"no mic"},"speech":{"state":"starting"}}"#,
+            Some(EventKind::VoiceReadiness),
+        ),
+        (
             Event::SpeakingState {
                 id: id(),
                 speaking: true,
@@ -685,9 +696,24 @@ fn image_attachment_round_trips_through_base64() {
 
 #[test]
 fn presence_state_next_cycles() {
-    assert_eq!(PresenceState::Active.next(), PresenceState::Drowsy);
-    assert_eq!(PresenceState::Drowsy.next(), PresenceState::Sleeping);
-    assert_eq!(PresenceState::Sleeping.next(), PresenceState::Active);
+    assert_eq!(PresenceState::Active.next(), PresenceTarget::Drowsy);
+    assert_eq!(PresenceState::Drowsy.next(), PresenceTarget::Sleeping);
+    assert_eq!(PresenceState::Sleeping.next(), PresenceTarget::Active);
+    assert_eq!(PresenceState::Waking.next(), PresenceTarget::Active);
+}
+
+#[test]
+fn presence_target_converts_to_the_same_wire_state() {
+    for target in [
+        PresenceTarget::Active,
+        PresenceTarget::Drowsy,
+        PresenceTarget::Sleeping,
+    ] {
+        assert_eq!(
+            serde_json::to_value(target).unwrap(),
+            serde_json::to_value(PresenceState::from(target)).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -719,6 +745,7 @@ fn subscribe_filter_default_matches_all() {
         EventKind::Error,
         EventKind::LastDelta,
         EventKind::ChatFocus,
+        EventKind::VoiceReadiness,
     ] {
         assert!(filter.matches(kind), "default filter should match {kind:?}");
     }
@@ -734,4 +761,17 @@ fn subscribe_filter_matches_listed_only() {
     assert!(!filter.matches(EventKind::Delta));
     assert!(!filter.matches(EventKind::ToolCall));
     assert!(!filter.matches(EventKind::Done));
+}
+
+#[test]
+fn component_readiness_reads_as_a_status_word() {
+    assert_eq!(ComponentReadiness::Starting.to_string(), "starting");
+    assert_eq!(ComponentReadiness::Ready.to_string(), "ready");
+    assert_eq!(
+        ComponentReadiness::Unavailable {
+            reason: "disabled in config".into()
+        }
+        .to_string(),
+        "unavailable (disabled in config)"
+    );
 }

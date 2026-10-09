@@ -6,8 +6,8 @@ use tokio::sync::{Notify, watch};
 
 use assistd_config::ToolsOutputConfig;
 use assistd_ipc::{
-    Component, EventKind, ImageAttachment, PresenceState, StatusKind, StatusSeverity,
-    SubscribeFilter, VoiceCaptureState,
+    Component, ComponentReadiness, EventKind, ImageAttachment, PresenceState, PresenceTarget,
+    StatusKind, StatusSeverity, SubscribeFilter, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, FailedBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
@@ -17,7 +17,10 @@ use assistd_memory::{
     SqliteConversationStore, SqliteHandle,
 };
 use assistd_tools::{CommandRegistry, RunTool, ToolError, ToolsDisabled, commands::EchoCommand};
-use assistd_voice::{ListenError, VoiceInputError, VoiceOutputError};
+use assistd_voice::{
+    ContinuousListener, ListenError, VoiceCapture, VoiceInput, VoiceInputError, VoiceManager,
+    VoiceOutputController, VoiceOutputError,
+};
 use assistd_wm::FocusedWindowContext;
 
 use super::*;
@@ -50,7 +53,7 @@ fn clean_generated_title_keeps_first_line_without_decoration() {
 struct StateParts {
     config: Config,
     backend: Arc<dyn LlmBackend>,
-    presence: PresenceState,
+    presence: PresenceTarget,
     tools: Arc<ToolRegistry>,
     voice: Arc<dyn VoiceInput>,
     listener: Arc<dyn ContinuousListener>,
@@ -62,7 +65,7 @@ impl Default for StateParts {
         Self {
             config: Config::default(),
             backend: Arc::new(EchoBackend::new()),
-            presence: PresenceState::Active,
+            presence: PresenceTarget::Active,
             tools: Arc::new(ToolRegistry::default()),
             voice: Arc::new(assistd_voice::NoVoiceInput::new()),
             listener: Arc::new(assistd_voice::NoContinuousListener::new()),
@@ -78,9 +81,14 @@ impl StateParts {
             self.backend,
             PresenceManager::stub(self.presence),
             self.tools,
-            self.voice,
-            self.listener,
-            VoiceOutputController::new(self.speech, true),
+            VoiceManager::ready(
+                VoiceCapture {
+                    input: self.voice,
+                    listener: self.listener,
+                },
+                self.speech,
+                true,
+            ),
         ))
     }
 }
@@ -163,61 +171,69 @@ async fn simple_requests_emit_expected_events() {
     };
     let cases = [
         (
-            PresenceState::Drowsy,
+            PresenceTarget::Drowsy,
             Request::GetPresence { id: "gp".into() },
             vec![presence("gp", PresenceState::Drowsy), done("gp")],
             PresenceState::Drowsy,
         ),
         (
-            PresenceState::Active,
+            PresenceTarget::Active,
             Request::SetPresence {
                 id: "sp".into(),
-                target: PresenceState::Sleeping,
+                target: PresenceTarget::Sleeping,
             },
             vec![presence("sp", PresenceState::Sleeping), done("sp")],
             PresenceState::Sleeping,
         ),
         (
-            PresenceState::Active,
+            PresenceTarget::Active,
             Request::SetPresence {
                 id: "sp".into(),
-                target: PresenceState::Active,
+                target: PresenceTarget::Active,
             },
             vec![presence("sp", PresenceState::Active), done("sp")],
             PresenceState::Active,
         ),
         (
-            PresenceState::Drowsy,
+            PresenceTarget::Drowsy,
             Request::Cycle { id: "cy".into() },
             vec![presence("cy", PresenceState::Sleeping), done("cy")],
             PresenceState::Sleeping,
         ),
         (
-            PresenceState::Active,
+            PresenceTarget::Active,
             Request::VoiceToggle { id: "vt".into() },
             vec![voice_output("vt", false), done("vt")],
             PresenceState::Active,
         ),
         (
-            PresenceState::Active,
+            PresenceTarget::Active,
             Request::VoiceSkip { id: "vs".into() },
             vec![voice_output("vs", true), done("vs")],
             PresenceState::Active,
         ),
         (
-            PresenceState::Active,
+            PresenceTarget::Active,
             Request::GetVoiceState { id: "gv".into() },
-            vec![voice_output("gv", true), done("gv")],
+            vec![
+                voice_output("gv", true),
+                Event::VoiceReadiness {
+                    id: "gv".into(),
+                    capture: ComponentReadiness::Ready,
+                    speech: ComponentReadiness::Ready,
+                },
+                done("gv"),
+            ],
             PresenceState::Active,
         ),
         (
-            PresenceState::Active,
+            PresenceTarget::Active,
             Request::InterruptTurn { id: "it".into() },
             vec![done("it")],
             PresenceState::Active,
         ),
         (
-            PresenceState::Active,
+            PresenceTarget::Active,
             Request::ConfirmResponse {
                 id: "cr".into(),
                 confirm_id: "x".into(),
@@ -808,6 +824,44 @@ async fn listen_requests_drive_the_listener() {
 }
 
 #[tokio::test]
+async fn voice_requests_before_capture_is_up_say_it_is_starting() {
+    let state = Arc::new(AppState::new(
+        Config::default(),
+        Arc::new(EchoBackend::new()),
+        PresenceManager::stub(PresenceTarget::Active),
+        Arc::new(ToolRegistry::default()),
+        VoiceManager::new(true),
+    ));
+
+    let (res, events) = dispatch(&state, Request::PttStart { id: "p".into() }).await;
+    assert!(
+        matches!(res, Err(DispatchError::VoiceUnavailable(_))),
+        "{res:?}"
+    );
+    assert_eq!(
+        events,
+        [error(
+            "p",
+            "ptt_start failed: voice capture is still starting"
+        )]
+    );
+
+    let (res, events) = dispatch(&state, Request::ListenToggle { id: "l".into() }).await;
+    assert!(res.is_err());
+    assert_eq!(
+        events,
+        [error(
+            "l",
+            "listen_start failed: voice capture is still starting"
+        )]
+    );
+
+    let (res, events) = dispatch(&state, Request::ListenStop { id: "s".into() }).await;
+    res.unwrap();
+    assert_eq!(events, [listen_state("s", false), done("s")]);
+}
+
+#[tokio::test]
 async fn dispatch_listen_start_error_propagates() {
     let state = StateParts {
         listener: MockListener::new(false, true),
@@ -824,7 +878,8 @@ async fn dispatch_listen_start_error_propagates() {
         events,
         [error(
             "l3",
-            "listen_start failed: continuous listening is not enabled in this build"
+            "listen_start failed: continuous listening is disabled in config \
+             (voice.continuous.enabled = false)"
         )]
     );
 }
@@ -887,7 +942,7 @@ async fn dispatch_query_speaks_sentences_in_order_and_drains() {
         ..StateParts::default()
     }
     .build();
-    recorder.watch_speaking(&state.subsystems.voice_output);
+    recorder.watch_speaking(state.subsystems.voice.speech());
     let (res, _) = dispatch(&state, query("ord", "First. Second. Third. End.")).await;
     res.unwrap();
 
@@ -903,7 +958,7 @@ async fn dispatch_query_speaks_sentences_in_order_and_drains() {
         "every sentence is spoken with the speaking signal raised"
     );
     assert!(
-        !state.subsystems.voice_output.is_speaking(),
+        !state.subsystems.voice.speech().is_speaking(),
         "speaking signal drops once playback drains"
     );
 }
@@ -1532,11 +1587,9 @@ async fn branch_state_with(
     let config = Config::default();
     let subsystems = Subsystems::new(
         backend,
-        PresenceManager::stub(PresenceState::Active),
+        PresenceManager::stub(PresenceTarget::Active),
         tools,
-        Arc::new(assistd_voice::NoVoiceInput::new()),
-        Arc::new(assistd_voice::NoContinuousListener::new()),
-        VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
+        assistd_voice::VoiceManager::new(true),
     );
     let memory = MemoryStack::disabled(config.embedding.clone()).with_conversations(conv.clone());
     let runtime = RuntimeState::new().with_conversation_ctx(ctx);

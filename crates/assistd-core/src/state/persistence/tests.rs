@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 
 use assistd_config::Config;
-use assistd_ipc::PresenceState;
+use assistd_ipc::PresenceTarget;
 use assistd_llm::EchoBackend;
 use assistd_memory::{
     BranchId, BranchInfo, ConversationStore, HistoryRow, ResumeCandidate, SessionId, TurnSummary,
@@ -10,7 +10,6 @@ use assistd_memory::{
 use assistd_tools::ToolRegistry;
 
 use super::*;
-use crate::VoiceOutputController;
 use crate::presence::PresenceManager;
 use crate::state::memory_stack::MemoryStack;
 use crate::state::runtime::{ConversationContext, RuntimeState};
@@ -118,11 +117,9 @@ fn state_with_store(store: Arc<dyn ConversationStore>) -> Arc<AppState> {
     Arc::new(AppState {
         subsystems: Subsystems::new(
             Arc::new(EchoBackend::new()),
-            PresenceManager::stub(PresenceState::Active),
+            PresenceManager::stub(PresenceTarget::Active),
             Arc::new(ToolRegistry::default()),
-            Arc::new(assistd_voice::NoVoiceInput::new()),
-            Arc::new(assistd_voice::NoContinuousListener::new()),
-            VoiceOutputController::new(Arc::new(assistd_voice::NoVoiceOutput), true),
+            assistd_voice::VoiceManager::new(true),
         ),
         memory,
         runtime: RuntimeState::new().with_conversation_ctx(Arc::new(ConversationContext::new(

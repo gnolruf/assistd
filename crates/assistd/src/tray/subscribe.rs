@@ -80,6 +80,7 @@ fn subscribe_filter() -> SubscribeFilter {
             EventKind::SpeakingState,
             EventKind::ChatFocus,
             EventKind::SessionTitle,
+            EventKind::VoiceReadiness,
         ],
     }
 }
@@ -116,13 +117,17 @@ async fn seed_initial_state(
     let chat_focus_req = Request::GetChatFocus {
         id: Uuid::new_v4().to_string(),
     };
-    let (presence_res, listen_res, chat_focus_res) = tokio::join!(
+    let voice_req = Request::GetVoiceState {
+        id: Uuid::new_v4().to_string(),
+    };
+    let (presence_res, listen_res, chat_focus_res, voice_res) = tokio::join!(
         ipc.one_shot(presence_req),
         ipc.one_shot(listen_req),
-        ipc.one_shot(chat_focus_req)
+        ipc.one_shot(chat_focus_req),
+        ipc.one_shot(voice_req)
     );
 
-    for stream in [presence_res, listen_res, chat_focus_res]
+    for stream in [presence_res, listen_res, chat_focus_res, voice_res]
         .into_iter()
         .flatten()
     {

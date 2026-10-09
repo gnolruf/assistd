@@ -18,8 +18,8 @@ pub use mic::MicContinuousListener;
 /// Errors surfaced by [`ContinuousListener`] implementations.
 #[derive(Debug, Error)]
 pub enum ListenError {
-    /// This build or configuration has no continuous listening.
-    #[error("continuous listening is not enabled in this build")]
+    /// Continuous listening is turned off in config.
+    #[error("continuous listening is disabled in config (voice.continuous.enabled = false)")]
     Disabled,
 }
 
@@ -44,7 +44,8 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     fn subscribe_state(&self) -> watch::Receiver<bool>;
 }
 
-/// Placeholder [`ContinuousListener`] that never delivers transcripts.
+/// [`ContinuousListener`] for when continuous listening is off in config:
+/// refuses to start and never delivers transcripts.
 #[derive(Debug)]
 pub struct NoContinuousListener {
     state_tx: watch::Sender<bool>,

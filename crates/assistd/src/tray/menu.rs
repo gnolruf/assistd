@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use assistd_config::TrayIconsConfig;
-use assistd_ipc::{Event, IpcClient, PresenceState, Request};
+use assistd_ipc::{Event, IpcClient, PresenceState, PresenceTarget, Request};
 use ksni::{
     Category, Status, ToolTip, Tray,
     menu::{MenuItem, StandardItem},
@@ -16,7 +16,7 @@ use super::state::{TrayTracker, icon_name_for, tooltip_for};
 #[derive(Debug, Clone, Copy)]
 pub(super) enum MenuAction {
     /// Issue `SetPresence(target)` to the daemon.
-    SetPresence(PresenceState),
+    SetPresence(PresenceTarget),
     /// Tear down the tray and exit cleanly.
     Quit,
 }
@@ -94,7 +94,12 @@ impl Tray for TrayItem {
             icon_name: String::new(),
             icon_pixmap: Vec::new(),
             title: tooltip_for(self.tracker.current()).into(),
-            description: self.tracker.config_error().unwrap_or_default().into(),
+            description: self
+                .tracker
+                .config_error()
+                .map(str::to_string)
+                .or_else(|| self.tracker.voice_summary())
+                .unwrap_or_default(),
         }
     }
 
@@ -126,16 +131,19 @@ impl Tray for TrayItem {
 }
 
 fn toggle_label_for(presence: PresenceState) -> &'static str {
-    match presence {
-        PresenceState::Sleeping => "Wake",
-        PresenceState::Active | PresenceState::Drowsy => "Sleep",
+    match toggle_target(presence) {
+        PresenceTarget::Active => "Wake",
+        PresenceTarget::Drowsy | PresenceTarget::Sleeping => "Sleep",
     }
 }
 
-fn toggle_target(presence: PresenceState) -> PresenceState {
+/// A wake in progress toggles to `Sleeping`, which waits for the load.
+fn toggle_target(presence: PresenceState) -> PresenceTarget {
     match presence {
-        PresenceState::Sleeping => PresenceState::Active,
-        PresenceState::Active | PresenceState::Drowsy => PresenceState::Sleeping,
+        PresenceState::Sleeping => PresenceTarget::Active,
+        PresenceState::Active | PresenceState::Drowsy | PresenceState::Waking => {
+            PresenceTarget::Sleeping
+        }
     }
 }
 
@@ -157,7 +165,7 @@ pub(super) async fn run_actions(
     Ok(())
 }
 
-async fn send_set_presence(ipc: &IpcClient, target: PresenceState) -> Result<()> {
+async fn send_set_presence(ipc: &IpcClient, target: PresenceTarget) -> Result<()> {
     let req = Request::SetPresence {
         id: Uuid::new_v4().to_string(),
         target,
@@ -182,9 +190,10 @@ mod tests {
     #[test]
     fn toggle_label_and_target_invert_presence() {
         for (presence, label, target) in [
-            (PresenceState::Active, "Sleep", PresenceState::Sleeping),
-            (PresenceState::Drowsy, "Sleep", PresenceState::Sleeping),
-            (PresenceState::Sleeping, "Wake", PresenceState::Active),
+            (PresenceState::Active, "Sleep", PresenceTarget::Sleeping),
+            (PresenceState::Drowsy, "Sleep", PresenceTarget::Sleeping),
+            (PresenceState::Sleeping, "Wake", PresenceTarget::Active),
+            (PresenceState::Waking, "Sleep", PresenceTarget::Sleeping),
         ] {
             assert_eq!(toggle_label_for(presence), label, "{presence:?}");
             assert_eq!(toggle_target(presence), target, "{presence:?}");

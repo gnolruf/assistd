@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use assistd_llm::LlmBackend;
 use assistd_tools::{ToolRegistry, ToolsDisabled};
-use assistd_voice::{ContinuousListener, VoiceInput, VoiceOutputController};
+use assistd_voice::VoiceManager;
 use assistd_wm::{NoWindowManager, WindowManager};
 
 use crate::{PresenceManager, VisionRevalidator};
@@ -23,9 +23,7 @@ pub struct Subsystems {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
     pub tools: Arc<ToolRegistry>,
-    pub voice: Arc<dyn VoiceInput>,
-    pub listener: Arc<dyn ContinuousListener>,
-    pub voice_output: Arc<VoiceOutputController>,
+    pub voice: Arc<VoiceManager>,
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub mcp_startup_failures: Vec<McpStartupFailure>,
@@ -39,17 +37,13 @@ impl Subsystems {
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
         tools: Arc<ToolRegistry>,
-        voice: Arc<dyn VoiceInput>,
-        listener: Arc<dyn ContinuousListener>,
-        voice_output: Arc<VoiceOutputController>,
+        voice: Arc<VoiceManager>,
     ) -> Self {
         Self {
             llm,
             presence,
             tools,
             voice,
-            listener,
-            voice_output,
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
             mcp_startup_failures: Vec::new(),

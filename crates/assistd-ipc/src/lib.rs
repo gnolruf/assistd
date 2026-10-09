@@ -45,15 +45,37 @@ pub enum PresenceState {
     Drowsy,
     /// llama-server stopped.
     Sleeping,
+    /// llama-server starting or loading the model; queries wait for it.
+    Waking,
 }
 
 impl PresenceState {
-    /// Next state in the manual-cycle order: Active → Drowsy → Sleeping → Active.
-    pub fn next(self) -> Self {
+    /// Next state in the manual-cycle order: Active → Drowsy → Sleeping →
+    /// Active. A wake in progress continues to Active.
+    pub fn next(self) -> PresenceTarget {
         match self {
-            PresenceState::Active => PresenceState::Drowsy,
-            PresenceState::Drowsy => PresenceState::Sleeping,
-            PresenceState::Sleeping => PresenceState::Active,
+            PresenceState::Active => PresenceTarget::Drowsy,
+            PresenceState::Drowsy => PresenceTarget::Sleeping,
+            PresenceState::Sleeping | PresenceState::Waking => PresenceTarget::Active,
+        }
+    }
+}
+
+/// A presence state the daemon can be driven to and settle in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceTarget {
+    Active,
+    Drowsy,
+    Sleeping,
+}
+
+impl From<PresenceTarget> for PresenceState {
+    fn from(target: PresenceTarget) -> Self {
+        match target {
+            PresenceTarget::Active => PresenceState::Active,
+            PresenceTarget::Drowsy => PresenceState::Drowsy,
+            PresenceTarget::Sleeping => PresenceState::Sleeping,
         }
     }
 }
@@ -67,6 +89,28 @@ pub enum VoiceCaptureState {
     Queued,
     Recording,
     Transcribing,
+}
+
+/// How far one voice component's startup has got.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ComponentReadiness {
+    Starting,
+    Ready,
+    /// Disabled in config or failed to start.
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl fmt::Display for ComponentReadiness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ComponentReadiness::Starting => f.write_str("starting"),
+            ComponentReadiness::Ready => f.write_str("ready"),
+            ComponentReadiness::Unavailable { reason } => write!(f, "unavailable ({reason})"),
+        }
+    }
 }
 
 /// Kinds of [`Event`] carried on the daemon-wide broadcast bus, selectable by a
@@ -88,6 +132,7 @@ pub enum EventKind {
     LastDelta,
     Transcription,
     ChatFocus,
+    VoiceReadiness,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -119,7 +164,7 @@ pub enum Request {
         attachments: Vec<ImageAttachment>,
     },
     /// Drive the daemon to `target`. Emits `Presence`, then `Done`.
-    SetPresence { id: String, target: PresenceState },
+    SetPresence { id: String, target: PresenceTarget },
     /// Report the presence state. Emits `Presence`, then `Done`.
     GetPresence { id: String },
     /// Atomically advance one step along `Active → Drowsy → Sleeping → Active`.
@@ -143,7 +188,8 @@ pub enum Request {
     VoiceSkip { id: String },
     /// Cancel the in-flight turn and queued TTS audio; idempotent. Emits `Done`.
     InterruptTurn { id: String },
-    /// Report whether TTS is enabled. Emits `VoiceOutputState`, then `Done`.
+    /// Report whether TTS is enabled and how far voice startup has got.
+    /// Emits `VoiceOutputState`, `VoiceReadiness`, then `Done`.
     GetVoiceState { id: String },
     /// Store `value` under `key`, overwriting. Emits `Done`.
     MemorySave {
@@ -506,6 +552,13 @@ pub enum Event {
     ListenState { id: String, active: bool },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
+    /// How far voice capture (push-to-talk and listening) and speech output
+    /// have started; broadcast when voice startup finishes.
+    VoiceReadiness {
+        id: String,
+        capture: ComponentReadiness,
+        speech: ComponentReadiness,
+    },
     /// Whether a live chat has keyboard focus; broadcast when it changes.
     ChatFocus { id: String, focused: bool },
     /// TTS playback for a turn started (`true`) or drained (`false`).
@@ -650,6 +703,7 @@ impl Event {
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
+            | Event::VoiceReadiness { id, .. }
             | Event::SpeakingState { id, .. }
             | Event::ChatFocus { id, .. }
             | Event::SessionTitle { id, .. }
@@ -689,6 +743,7 @@ impl Event {
             Event::LastDelta { .. } => EventKind::LastDelta,
             Event::Transcription { .. } => EventKind::Transcription,
             Event::ChatFocus { .. } => EventKind::ChatFocus,
+            Event::VoiceReadiness { .. } => EventKind::VoiceReadiness,
             Event::VoiceOutputState { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }

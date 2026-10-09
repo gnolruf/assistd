@@ -477,6 +477,15 @@ fn status_indicators(app: &App) -> Vec<Span<'static>> {
     if let Some((color, label)) = voice_indicator(app.listening) {
         push_indicator(&mut spans, app.spinner_char().to_string(), color, label);
     }
+    if app.voice_starting {
+        spans.push(Span::styled(" │ ", reversed));
+        spans.push(Span::styled(
+            "voice: starting",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::REVERSED),
+        ));
+    }
     push_toggle(&mut spans, "vision", app.vision_enabled);
     push_toggle(&mut spans, "verbose", app.verbose);
     let pending_count = app.pending_attachments.len();
@@ -592,6 +601,7 @@ fn presence_dot(s: Option<PresenceState>) -> Option<(Color, &'static str)> {
         PresenceState::Active => Some((Color::Green, "active")),
         PresenceState::Drowsy => Some((Color::Yellow, "drowsy")),
         PresenceState::Sleeping => Some((Color::Red, "sleeping")),
+        PresenceState::Waking => Some((Color::Blue, "waking")),
     }
 }
 

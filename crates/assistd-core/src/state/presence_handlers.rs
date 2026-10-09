@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Event, PresenceState};
+use assistd_ipc::{Event, PresenceTarget};
 
 use super::{AppState, DispatchError, send_error};
 
@@ -12,7 +12,7 @@ impl AppState {
     pub(super) async fn handle_set_presence(
         self: Arc<Self>,
         id: String,
-        target: PresenceState,
+        target: PresenceTarget,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         match self.subsystems.presence.set_presence(target).await {
@@ -54,7 +54,7 @@ impl AppState {
                 let _ = tx
                     .send(Event::Presence {
                         id: id.clone(),
-                        state: new_state,
+                        state: new_state.into(),
                     })
                     .await;
                 let _ = tx.send(Event::Done { id }).await;

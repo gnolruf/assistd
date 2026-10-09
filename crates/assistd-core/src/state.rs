@@ -14,9 +14,7 @@ use assistd_ipc::{Event, Request, Role};
 use assistd_llm::{LlmBackend, LlmError};
 use assistd_memory::{MemoryError, PersistedRole};
 use assistd_tools::ToolRegistry;
-use assistd_voice::{
-    ContinuousListener, ListenError, VoiceInput, VoiceInputError, VoiceOutputController,
-};
+use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError, VoiceManager};
 
 use crate::{Config, PresenceError, PresenceManager};
 
@@ -70,6 +68,9 @@ pub enum DispatchError {
     Embed(#[from] EmbedError),
 
     #[error(transparent)]
+    VoiceUnavailable(#[from] CaptureUnavailable),
+
+    #[error(transparent)]
     VoiceInput(#[from] VoiceInputError),
 
     #[error(transparent)]
@@ -92,11 +93,9 @@ impl AppState {
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
         tools: Arc<ToolRegistry>,
-        voice: Arc<dyn VoiceInput>,
-        listener: Arc<dyn ContinuousListener>,
-        voice_output: Arc<VoiceOutputController>,
+        voice: Arc<VoiceManager>,
     ) -> Self {
-        let subsystems = Subsystems::new(llm, presence, tools, voice, listener, voice_output);
+        let subsystems = Subsystems::new(llm, presence, tools, voice);
         let memory = MemoryStack::disabled(config.embedding.clone());
         let runtime = RuntimeState::new();
         Self {

@@ -16,7 +16,7 @@ use tracing::{Instrument, debug, info, warn};
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{ModelConfig, TimeoutsConfig};
-use assistd_ipc::{Component, Event, PresenceState, StatusKind, StatusSeverity};
+use assistd_ipc::{Component, Event, PresenceState, PresenceTarget, StatusKind, StatusSeverity};
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec,
     LlmHealthProbe, ReadyState,
@@ -98,7 +98,8 @@ pub enum PresenceError {
 /// `sleep`.
 #[derive(Debug)]
 pub struct PresenceManager {
-    state: StdMutex<PresenceState>,
+    /// The state the last transition left; `state_tx` overlays `Waking`.
+    settled: StdMutex<PresenceTarget>,
     transition: AsyncMutex<()>,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
@@ -116,7 +117,7 @@ pub struct PresenceManager {
     /// Writer-preferring, so queued requests cannot starve a transition.
     inflight: Arc<RwLock<()>>,
     /// `Some(started_at)` while a `wake` is executing.
-    wake_started: Arc<StdMutex<Option<Instant>>>,
+    wake_started: StdMutex<Option<Instant>>,
     /// LLM streams in flight, which can be fewer than live request guards.
     stream_count_tx: watch::Sender<usize>,
 }
@@ -129,6 +130,21 @@ impl PresenceManager {
         timeouts: TimeoutsConfig,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
+        let manager = Self::new_sleeping(model, timeouts, daemon_shutdown)?;
+        manager
+            .wake()
+            .await
+            .map_err(|e| PresenceError::InitialWake(Box::new(e)))?;
+        Ok(manager)
+    }
+
+    /// Create a manager in `Sleeping` with no llama-server started.
+    /// Flipping `daemon_shutdown` cancels any wake in flight.
+    pub fn new_sleeping(
+        model: ModelConfig,
+        timeouts: TimeoutsConfig,
+        daemon_shutdown: watch::Receiver<bool>,
+    ) -> Result<Arc<Self>, PresenceError> {
         let control = LlamaServerControl::new(SocketAddr::new(model.host, model.port.get()), None)
             .map_err(PresenceError::Control)?;
 
@@ -137,8 +153,8 @@ impl PresenceManager {
 
         let (state_tx, _) = watch::channel(PresenceState::Sleeping);
         let (stream_count_tx, _) = watch::channel(0usize);
-        let manager = Arc::new(Self {
-            state: StdMutex::new(PresenceState::Sleeping),
+        Ok(Arc::new(Self {
+            settled: StdMutex::new(PresenceTarget::Sleeping),
             transition: AsyncMutex::new(()),
             model,
             timeouts,
@@ -149,29 +165,27 @@ impl PresenceManager {
             _daemon_shutdown_keepalive: daemon_shutdown,
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
-            wake_started: Arc::new(StdMutex::new(None)),
+            wake_started: StdMutex::new(None),
             stream_count_tx,
-        });
-
-        manager
-            .wake()
-            .await
-            .map_err(|e| PresenceError::InitialWake(Box::new(e)))?;
-        Ok(manager)
+        }))
     }
 
-    /// The current presence state.
+    /// The current presence state, `Waking` while a wake runs.
     pub fn state(&self) -> PresenceState {
-        *self.state.lock()
+        *self.state_tx.borrow()
+    }
+
+    fn settled(&self) -> PresenceTarget {
+        *self.settled.lock()
     }
 
     fn mark_activity(&self) {
         *self.last_activity.lock() = Instant::now();
     }
 
-    fn publish_state(&self, state: PresenceState) {
-        *self.state.lock() = state;
-        self.state_tx.send_replace(state);
+    fn publish_state(&self, state: PresenceTarget) {
+        *self.settled.lock() = state;
+        self.state_tx.send_replace(state.into());
     }
 
     /// Time since the last user-initiated interaction.
@@ -354,18 +368,18 @@ impl PresenceManager {
 
     /// Drive the manager to `target`.
     #[tracing::instrument(skip(self), fields(from = ?self.state()))]
-    pub async fn set_presence(&self, target: PresenceState) -> Result<(), PresenceError> {
+    pub async fn set_presence(&self, target: PresenceTarget) -> Result<(), PresenceError> {
         self.mark_activity();
         match target {
-            PresenceState::Active => self.wake().await,
-            PresenceState::Drowsy => self.drowse().await,
-            PresenceState::Sleeping => self.sleep().await,
+            PresenceTarget::Active => self.wake().await,
+            PresenceTarget::Drowsy => self.drowse().await,
+            PresenceTarget::Sleeping => self.sleep().await,
         }
     }
 
     /// Advance one step along `Active → Drowsy → Sleeping → Active`. Of two
     /// racing calls targeting the same state, the loser is a no-op.
-    pub async fn cycle(&self) -> Result<PresenceState, PresenceError> {
+    pub async fn cycle(&self) -> Result<PresenceTarget, PresenceError> {
         self.mark_activity();
         let target = self.state().next();
         self.set_presence(target).await?;
@@ -376,8 +390,8 @@ impl PresenceManager {
     /// every outstanding [`RequestGuard`] to drop first.
     pub async fn sleep(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
-        let prior = self.state();
-        if prior == PresenceState::Sleeping {
+        let prior = self.settled();
+        if prior == PresenceTarget::Sleeping {
             debug!(target: "assistd::presence", "sleep: already Sleeping, no-op");
             return Ok(());
         }
@@ -391,7 +405,7 @@ impl PresenceManager {
         info!(
             target: "assistd::presence",
             prior = ?prior,
-            new = ?PresenceState::Sleeping,
+            new = ?PresenceTarget::Sleeping,
             duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned {prior:?} → Sleeping"
         );
@@ -402,7 +416,7 @@ impl PresenceManager {
         let mut slot = self.llama.lock().await;
         let service = slot.take();
         self.signal_inner_shutdown();
-        self.publish_state(PresenceState::Sleeping);
+        self.publish_state(PresenceTarget::Sleeping);
         service
     }
 
@@ -436,11 +450,11 @@ impl PresenceManager {
     /// Waits for every outstanding [`RequestGuard`] to drop first.
     pub async fn drowse(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
-        let prior = self.state();
+        let prior = self.settled();
         match prior {
-            PresenceState::Drowsy => return Ok(()),
-            PresenceState::Sleeping => return Err(PresenceError::DrowseFromSleeping),
-            PresenceState::Active => {}
+            PresenceTarget::Drowsy => return Ok(()),
+            PresenceTarget::Sleeping => return Err(PresenceError::DrowseFromSleeping),
+            PresenceTarget::Active => {}
         }
 
         let _inflight = self.inflight.write().await;
@@ -448,11 +462,11 @@ impl PresenceManager {
         let started = Instant::now();
         self.unload_model().await?;
 
-        self.publish_state(PresenceState::Drowsy);
+        self.publish_state(PresenceTarget::Drowsy);
         info!(
             target: "assistd::presence",
             prior = ?prior,
-            new = ?PresenceState::Drowsy,
+            new = ?PresenceTarget::Drowsy,
             duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned Active → Drowsy"
         );
@@ -485,28 +499,29 @@ impl PresenceManager {
         }
     }
 
-    /// `Sleeping|Drowsy → Active`. Idempotent from `Active`.
+    /// `Sleeping|Drowsy → Active`, reporting `Waking` meanwhile.
+    /// Idempotent from `Active`.
     pub async fn wake(&self) -> Result<(), PresenceError> {
         let _guard = self.transition.lock().await;
-        let prior = self.state();
-        if prior == PresenceState::Active {
+        let prior = self.settled();
+        if prior == PresenceTarget::Active {
             return Ok(());
         }
 
-        let _wake_marker = WakeMarker::new(Arc::clone(&self.wake_started));
+        let _wake_marker = WakeMarker::new(self);
 
         let started = Instant::now();
         match prior {
-            PresenceState::Drowsy => self.reload_model().await?,
-            PresenceState::Sleeping => self.cold_start().await?,
-            PresenceState::Active => unreachable!("short-circuited above"),
+            PresenceTarget::Drowsy => self.reload_model().await?,
+            PresenceTarget::Sleeping => self.cold_start().await?,
+            PresenceTarget::Active => unreachable!("short-circuited above"),
         }
 
-        self.publish_state(PresenceState::Active);
+        self.publish_state(PresenceTarget::Active);
         info!(
             target: "assistd::presence",
             prior = ?prior,
-            new = ?PresenceState::Active,
+            new = ?PresenceTarget::Active,
             duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "transitioned {prior:?} → Active"
         );
@@ -617,9 +632,9 @@ impl PresenceManager {
 impl PresenceManager {
     /// Manager in a fixed state with no llama child. Transitions that hit
     /// the network (`drowse`, cold-start `wake`) error.
-    pub(crate) fn stub(state: PresenceState) -> Arc<Self> {
+    pub(crate) fn stub(state: PresenceTarget) -> Arc<Self> {
         let (_tx, rx) = watch::channel(false);
-        let (state_tx, _) = watch::channel(state);
+        let (state_tx, _) = watch::channel(state.into());
         let model = ModelConfig {
             name: "stub/model".into(),
             context_length: nz32(1024),
@@ -634,7 +649,7 @@ impl PresenceManager {
             LlamaServerControl::new(SocketAddr::new(model.host, 1), None).expect("dummy control");
         let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
-            state: StdMutex::new(state),
+            settled: StdMutex::new(state),
             transition: AsyncMutex::new(()),
             model,
             timeouts: TimeoutsConfig::default(),
@@ -645,12 +660,12 @@ impl PresenceManager {
             _daemon_shutdown_keepalive: rx,
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
-            wake_started: Arc::new(StdMutex::new(None)),
+            wake_started: StdMutex::new(None),
             stream_count_tx,
         })
     }
 
-    pub(crate) fn set_state_for_test(&self, state: PresenceState) {
+    pub(crate) fn set_state_for_test(&self, state: PresenceTarget) {
         self.publish_state(state);
     }
 }
@@ -699,21 +714,29 @@ impl LlmHealthProbe for PresenceLlmHealthProbe {
     }
 }
 
-/// Sets `wake_started` while held and clears it on every return path.
-struct WakeMarker {
-    slot: Arc<StdMutex<Option<Instant>>>,
+/// Sets `wake_started` and reports `Waking` while held; on every return
+/// path clears the mark and reports the settled state again.
+struct WakeMarker<'a> {
+    manager: &'a PresenceManager,
 }
 
-impl WakeMarker {
-    fn new(slot: Arc<StdMutex<Option<Instant>>>) -> Self {
-        *slot.lock() = Some(Instant::now());
-        Self { slot }
+impl<'a> WakeMarker<'a> {
+    fn new(manager: &'a PresenceManager) -> Self {
+        *manager.wake_started.lock() = Some(Instant::now());
+        manager.state_tx.send_replace(PresenceState::Waking);
+        Self { manager }
     }
 }
 
-impl Drop for WakeMarker {
+impl Drop for WakeMarker<'_> {
     fn drop(&mut self) {
-        *self.slot.lock() = None;
+        *self.manager.wake_started.lock() = None;
+        let settled = PresenceState::from(self.manager.settled());
+        self.manager.state_tx.send_if_modified(|state| {
+            let changed = *state != settled;
+            *state = settled;
+            changed
+        });
     }
 }
 

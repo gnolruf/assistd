@@ -144,12 +144,9 @@ async fn run_presence_gate(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut rx = presence.subscribe();
-    if start_on_launch {
-        let initial = *rx.borrow();
-        start_unless_sleeping(listener.as_ref(), initial).await;
-    }
-
-    let mut paused_by_gate = false;
+    let initial = *rx.borrow_and_update();
+    let mut paused_by_gate =
+        start_on_launch && start_unless_asleep(listener.as_ref(), initial).await;
 
     loop {
         tokio::select! {
@@ -158,39 +155,8 @@ async fn run_presence_gate(
                     return;
                 }
                 let new_state = *rx.borrow_and_update();
-                match new_state {
-                    PresenceState::Sleeping => {
-                        if listener.is_active() {
-                            if let Err(e) = listener.stop().await {
-                                warn!(
-                                    target: "assistd::listen",
-                                    "pausing on sleep failed: {e:#}"
-                                );
-                            } else {
-                                paused_by_gate = true;
-                                info!(
-                                    target: "assistd::listen",
-                                    "paused: presence → sleeping"
-                                );
-                            }
-                        }
-                    }
-                    PresenceState::Active | PresenceState::Drowsy => {
-                        if paused_by_gate && !listener.is_active() {
-                            match listener.start().await {
-                                Ok(()) => info!(
-                                    target: "assistd::listen",
-                                    "resumed: presence → {new_state:?}"
-                                ),
-                                Err(e) => warn!(
-                                    target: "assistd::listen",
-                                    "auto-resume failed: {e:#}"
-                                ),
-                            }
-                            paused_by_gate = false;
-                        }
-                    }
-                }
+                paused_by_gate =
+                    follow_presence(listener.as_ref(), new_state, paused_by_gate).await;
             }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
@@ -201,16 +167,68 @@ async fn run_presence_gate(
     }
 }
 
-async fn start_unless_sleeping(listener: &dyn ContinuousListener, initial: PresenceState) {
-    if initial == PresenceState::Sleeping {
-        info!(
-            target: "assistd::listen",
-            "start_on_launch deferred: presence is {initial:?}"
-        );
-    } else if let Err(e) = listener.start().await {
-        warn!(target: "assistd::listen", "start_on_launch failed: {e:#}");
-    } else {
-        info!(target: "assistd::listen", "continuous listening auto-started");
+/// Pause the listener when the daemon sleeps and resume it once the model
+/// is back, returning whether the gate still holds it paused.
+async fn follow_presence(
+    listener: &dyn ContinuousListener,
+    state: PresenceState,
+    paused_by_gate: bool,
+) -> bool {
+    match state {
+        PresenceState::Sleeping => paused_by_gate || pause_for_sleep(listener).await,
+        PresenceState::Waking => paused_by_gate,
+        PresenceState::Active | PresenceState::Drowsy => {
+            if paused_by_gate && !listener.is_active() {
+                resume_after_sleep(listener, state).await;
+                return false;
+            }
+            paused_by_gate
+        }
+    }
+}
+
+/// Stop an active listener, returning whether it was stopped.
+async fn pause_for_sleep(listener: &dyn ContinuousListener) -> bool {
+    if !listener.is_active() {
+        return false;
+    }
+    match listener.stop().await {
+        Ok(()) => {
+            info!(target: "assistd::listen", "paused: presence → sleeping");
+            true
+        }
+        Err(e) => {
+            warn!(target: "assistd::listen", "pausing on sleep failed: {e:#}");
+            false
+        }
+    }
+}
+
+async fn resume_after_sleep(listener: &dyn ContinuousListener, state: PresenceState) {
+    match listener.start().await {
+        Ok(()) => info!(target: "assistd::listen", "resumed: presence → {state:?}"),
+        Err(e) => warn!(target: "assistd::listen", "auto-resume failed: {e:#}"),
+    }
+}
+
+/// Start listening unless the model is asleep or still loading, returning
+/// whether the start was deferred until it is back.
+async fn start_unless_asleep(listener: &dyn ContinuousListener, initial: PresenceState) -> bool {
+    match initial {
+        PresenceState::Sleeping | PresenceState::Waking => {
+            info!(
+                target: "assistd::listen",
+                "start_on_launch deferred: presence is {initial:?}"
+            );
+            true
+        }
+        PresenceState::Active | PresenceState::Drowsy => {
+            match listener.start().await {
+                Ok(()) => info!(target: "assistd::listen", "continuous listening auto-started"),
+                Err(e) => warn!(target: "assistd::listen", "start_on_launch failed: {e:#}"),
+            }
+            false
+        }
     }
 }
 
@@ -221,4 +239,86 @@ fn short_id() -> String {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{ts:x}-{n:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use assistd_voice::ListenError;
+    use async_trait::async_trait;
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct FakeListener {
+        active: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ContinuousListener for FakeListener {
+        async fn start(&self) -> Result<(), ListenError> {
+            self.active.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), ListenError> {
+            self.active.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_active(&self) -> bool {
+            self.active.load(Ordering::SeqCst)
+        }
+
+        fn subscribe_utterances(&self) -> broadcast::Receiver<String> {
+            broadcast::channel(1).1
+        }
+
+        fn subscribe_state(&self) -> watch::Receiver<bool> {
+            watch::channel(false).1
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_start_waits_for_the_model_to_load() {
+        let listener = FakeListener::default();
+        assert!(start_unless_asleep(&listener, PresenceState::Waking).await);
+        assert!(!listener.is_active());
+
+        assert!(follow_presence(&listener, PresenceState::Waking, true).await);
+        assert!(!listener.is_active(), "still loading");
+
+        assert!(!follow_presence(&listener, PresenceState::Active, true).await);
+        assert!(listener.is_active(), "started once the model is up");
+    }
+
+    #[tokio::test]
+    async fn launch_start_runs_at_once_when_the_model_is_up() {
+        let listener = FakeListener::default();
+        assert!(!start_unless_asleep(&listener, PresenceState::Active).await);
+        assert!(listener.is_active());
+    }
+
+    #[tokio::test]
+    async fn sleep_pauses_until_the_next_wake_finishes() {
+        let listener = FakeListener::default();
+        listener.start().await.unwrap();
+
+        assert!(follow_presence(&listener, PresenceState::Sleeping, false).await);
+        assert!(!listener.is_active());
+        assert!(follow_presence(&listener, PresenceState::Waking, true).await);
+        assert!(!listener.is_active());
+        assert!(!follow_presence(&listener, PresenceState::Active, true).await);
+        assert!(listener.is_active());
+    }
+
+    #[tokio::test]
+    async fn listening_the_user_stopped_stays_stopped() {
+        let listener = FakeListener::default();
+        assert!(!follow_presence(&listener, PresenceState::Sleeping, false).await);
+        assert!(!follow_presence(&listener, PresenceState::Active, false).await);
+        assert!(!listener.is_active());
+    }
 }
