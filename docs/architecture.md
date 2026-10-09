@@ -121,7 +121,11 @@ its bind address, context length and GPU layer count from `[model]` in
 the config, plus any `custom_args` (parsed and checked at
 config load, never run through a shell). Inherited `LLAMA_ARG_*` and
 `LLAMA_API_KEY` variables are stripped, so the checked command line is
-the server's only source of options. `assistd-utils`'s `ChildServer`
+the server's only source of options. Each daemon launch generates a
+random API key, written to a mode-0600 file under `$XDG_RUNTIME_DIR` and
+passed as `--api-key-file` to both llama-servers (with `--no-slots`), so
+other local processes cannot load, unload or query models; every client
+sends it as a bearer token. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a

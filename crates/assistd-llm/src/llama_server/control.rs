@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_utils::child_server::ApiKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::debug;
@@ -26,15 +27,21 @@ pub struct LlamaServerControl {
 }
 
 impl LlamaServerControl {
-    /// Build a control client for `http://{addr}`. With `health`, a call made
-    /// while its child is not serving fails with [`LlamaServerError::NotReady`]
-    /// without being sent.
+    /// Build a control client for `http://{addr}`, sending `api_key` with
+    /// every request when set. With `health`, a call made while its child is
+    /// not serving fails with [`LlamaServerError::NotReady`] without being sent.
     pub fn new(
         addr: SocketAddr,
+        api_key: Option<&ApiKey>,
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, LlamaServerError> {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .default_headers(
+                api_key
+                    .map(ApiKey::authorization_headers)
+                    .unwrap_or_default(),
+            )
             .timeout(DEFAULT_TIMEOUT)
             .build()?;
         Ok(Self {
@@ -309,6 +316,7 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let control = LlamaServerControl::new(
             listener.local_addr().unwrap(),
+            None,
             Some(Arc::new(RestartingProbe)),
         )
         .unwrap();

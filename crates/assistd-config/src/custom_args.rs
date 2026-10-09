@@ -31,11 +31,13 @@ const SHARED_MANAGED_FLAGS: &[&str] = &[
     "--api-prefix",
     "--api-key",
     "--api-key-file",
+    "--slots",
+    "--no-slots",
     "--ssl-key-file",
     "--ssl-cert-file",
 ];
 
-/// Flags that let anything able to reach the unauthenticated port read files,
+/// Flags that let anything holding the server's key read files,
 /// run tools, change server state, or send model data off the machine.
 const EXPOSING_FLAGS: &[&str] = &[
     "--tools",

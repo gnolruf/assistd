@@ -7,7 +7,7 @@ use tokio::process::Command;
 
 /// `LLAMA_ARG_<FLAG>` sets any server flag.
 const LLAMA_ARG_PREFIX: &[u8] = b"LLAMA_ARG_";
-/// Sets `--api-key`, which assistd's clients never send.
+/// Sets `--api-key`, adding a key alongside the one assistd generates.
 const LLAMA_API_KEY: &str = "LLAMA_API_KEY";
 
 /// Stops `cmd` inheriting any llama.cpp setting from this process's environment.

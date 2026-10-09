@@ -10,7 +10,7 @@ use assistd_embed::{
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, WriteOp};
-use assistd_utils::child_server::ChildServer;
+use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -29,6 +29,7 @@ pub(super) struct EmbeddingHandles {
 /// Jobs queued before it is up wait in `embed_rx`.
 pub(super) struct EmbeddingStartup {
     config: assistd_config::EmbeddingConfig,
+    api_key: ApiKey,
     embed_rx: mpsc::Receiver<EmbedJob>,
     writer_tx: Arc<mpsc::Sender<WriteOp>>,
 }
@@ -111,6 +112,7 @@ impl EmbeddingService {
 /// what starting its server needs.
 pub(super) fn prepare(
     config: &Config,
+    api_key: &ApiKey,
     sqlite_handle: Option<&Arc<SqliteHandle>>,
 ) -> (EmbeddingHandles, Option<EmbeddingStartup>) {
     if !config.embedding.enabled {
@@ -130,6 +132,7 @@ pub(super) fn prepare(
     };
     let startup = EmbeddingStartup {
         config: config.embedding.clone(),
+        api_key: api_key.clone(),
         embed_rx,
         writer_tx,
     };
@@ -164,7 +167,7 @@ fn spawn_startup(
         if model_settled.wait_for(|settled| *settled).await.is_err() {
             return None;
         }
-        let running = match start_server(&startup.config, stages.server).await {
+        let running = match start_server(&startup.config, &startup.api_key, stages.server).await {
             Ok((server, embedder)) => {
                 info!(
                     "embedding: ready (model={}, dim={}, port={})",
@@ -227,9 +230,11 @@ struct StartFailure {
 
 async fn start_server(
     config: &assistd_config::EmbeddingConfig,
+    api_key: &ApiKey,
     server_shutdown: watch::Receiver<bool>,
 ) -> Result<(ChildServer, Arc<dyn Embedder>), StartFailure> {
-    let server = ChildServer::start(EmbedServerSpec::new(config.clone()), server_shutdown)
+    let spec = EmbedServerSpec::new(config.clone(), api_key.clone());
+    let server = ChildServer::start(spec, server_shutdown)
         .await
         .map_err(|e| StartFailure {
             reason: format!("server failed to start: {e:#}"),
@@ -239,6 +244,7 @@ async fn start_server(
         SocketAddr::new(config.host, config.port.get()),
         config.model.clone(),
         assistd_embed::REQUEST_TIMEOUT,
+        Some(api_key),
         Some(server.status()),
     )
     .await

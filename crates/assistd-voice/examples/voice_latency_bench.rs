@@ -137,7 +137,7 @@ impl LlmSettings {
     }
 
     fn client(&self) -> Result<Arc<dyn LlmBackend>> {
-        let client = LlamaChatClient::new(&self.chat, &self.model, &self.timeouts, None)
+        let client = LlamaChatClient::new(&self.chat, &self.model, &self.timeouts, None, None)
             .context("building LLM client")?;
         Ok(Arc::new(client))
     }

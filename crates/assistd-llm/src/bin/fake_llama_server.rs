@@ -41,13 +41,31 @@ struct Args {
     host: String,
     port: u16,
     mode: Mode,
+    api_key: Option<String>,
 }
 
 #[derive(Default)]
 struct ServerState {
+    api_key: Option<String>,
     loaded_model: Option<String>,
     load_count: u32,
     unload_count: u32,
+}
+
+impl ServerState {
+    /// Whether a request with headers `head` may proceed: always without a
+    /// key, else only with `Authorization: Bearer <key>`.
+    fn authorizes(&self, head: &str) -> bool {
+        let Some(key) = &self.api_key else {
+            return true;
+        };
+        let expected = format!("Bearer {key}");
+        head.lines()
+            .filter_map(|line| line.split_once(':'))
+            .any(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("authorization") && value.trim() == expected
+            })
+    }
 }
 
 fn parse_mode(s: &str) -> Option<Mode> {
@@ -72,14 +90,15 @@ fn mode_beside(program: &str) -> Option<Mode> {
     Some(parse_mode(text.trim()).expect("invalid mode file"))
 }
 
-/// Parses `--host <addr> --port <port> --mode <mode>`, skipping the other
-/// flags a router-mode spawn passes.
+/// Parses `--host <addr> --port <port> --mode <mode> --api-key-file <path>`,
+/// skipping the other flags a router-mode spawn passes.
 fn parse_args() -> Args {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 0;
     let argv: Vec<String> = env::args().collect();
     let program = argv.first().cloned().unwrap_or_default();
     let mut mode = mode_beside(&program).unwrap_or(Mode::Normal);
+    let mut api_key = None;
 
     let mut i = 1;
     while i < argv.len() {
@@ -96,6 +115,10 @@ fn parse_args() -> Args {
                 mode = parse_mode(&argv[i + 1]).expect("invalid --mode");
                 i += 2;
             }
+            "--api-key-file" => {
+                api_key = Some(read_api_key(&argv[i + 1]));
+                i += 2;
+            }
             "--jinja" => i += 1,
             "-ngl" | "-c" => i += 2,
             _ => i += 1,
@@ -106,7 +129,15 @@ fn parse_args() -> Args {
         host,
         port,
         mode,
+        api_key,
     }
+}
+
+fn read_api_key(path: &str) -> String {
+    std::fs::read_to_string(path)
+        .expect("--api-key-file must be readable")
+        .trim()
+        .to_string()
 }
 
 /// Spawn a `sleep` that ignores SIGTERM and record its pid in `orphan.pid`
@@ -154,7 +185,10 @@ async fn main() -> ExitCode {
         args.mode
     );
 
-    let state = Arc::new(Mutex::new(ServerState::default()));
+    let state = Arc::new(Mutex::new(ServerState {
+        api_key: args.api_key,
+        ..ServerState::default()
+    }));
 
     if let Mode::SlowTerm(secs) = args.mode {
         let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
@@ -192,7 +226,8 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
     }
 }
 
-/// Serves one request:
+/// Serves one request. With `--api-key-file`, every route but `/health` and
+/// `/debug/counters` answers 401 unless the request bears the key.
 /// - `GET /health`: 200 `{"status":"ok"}`, or 503 in never-ready mode.
 /// - `POST /models/load`, `POST /models/unload`: 200; counts the hit and
 ///   updates the load state.
@@ -207,6 +242,10 @@ async fn serve_connection(
     let (head, body) = read_request(&mut sock).await?;
     let (method, path) = parse_request_line(&head);
 
+    let public = matches!(path.as_str(), "/health" | "/debug/counters");
+    if !public && !state.lock().await.authorizes(&head) {
+        return write_one_shot(&mut sock, unauthorized_response()).await;
+    }
     if (method.as_str(), path.as_str()) == ("POST", "/v1/chat/completions") {
         return serve_chat_completion(&mut sock, &body).await;
     }
@@ -303,6 +342,14 @@ fn parse_request_line(head: &str) -> (String, String) {
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
     (method, path)
+}
+
+fn unauthorized_response() -> (&'static str, &'static str, String) {
+    (
+        "HTTP/1.1 401 Unauthorized",
+        "application/json",
+        json!({ "error": { "message": "Invalid API Key", "code": 401 } }).to_string(),
+    )
 }
 
 fn health_response(mode: &Mode) -> (&'static str, &'static str, String) {

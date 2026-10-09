@@ -64,7 +64,7 @@ async fn serve(responses: Vec<Value>) -> (SocketAddr, JoinHandle<Vec<Value>>) {
 }
 
 async fn embedder_at(addr: SocketAddr) -> LlamaEmbedder {
-    LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None)
+    LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, None)
         .await
         .expect("probe succeeds")
 }
@@ -192,7 +192,7 @@ async fn nothing_is_sent_while_the_embed_server_is_not_serving() {
         let (ready_tx, status) = ChildServerStatus::scripted(state, pid);
         let _supervisor = supervisor_running.then_some(ready_tx);
         let result =
-            LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), Some(status)).await;
+            LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, Some(status)).await;
         assert!(
             matches!(result, Err(EmbedError::NotReady)),
             "{label}: {result:?}"
@@ -214,7 +214,7 @@ async fn embeds_are_refused_while_the_server_restarts_and_resume_once_it_serves(
     ])
     .await;
     let (ready_tx, status) = ChildServerStatus::scripted(ReadyState::Ready, Some(7));
-    let embedder = LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), Some(status))
+    let embedder = LlamaEmbedder::new(addr, "m".into(), Duration::from_secs(5), None, Some(status))
         .await
         .expect("probe succeeds while serving");
 
