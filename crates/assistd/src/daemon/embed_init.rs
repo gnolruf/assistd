@@ -202,8 +202,6 @@ fn spawn_startup(
     })
 }
 
-/// Offer `embedder` to requests and start the worker on the jobs queued
-/// since startup.
 fn serve_embedder(
     state: &AppState,
     embedder: Arc<dyn Embedder>,

@@ -9,7 +9,6 @@ use assistd_ipc::{ComponentReadiness, Event, StartupComponent};
 
 use super::AppState;
 
-/// Request id on `Readiness` events the daemon broadcasts unprompted.
 const STARTUP_EVENT_ID: &str = "startup";
 
 impl AppState {

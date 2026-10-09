@@ -31,7 +31,6 @@ impl EmbedderHandle {
         self.embedder.get().map_err(EmbedError::Unavailable)
     }
 
-    /// The embedder, or why there is none.
     pub fn readiness(&self) -> Result<Arc<dyn Embedder>, NotReady> {
         self.embedder.get()
     }

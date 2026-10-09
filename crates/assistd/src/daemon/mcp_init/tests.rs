@@ -20,8 +20,6 @@ fn config_with_server(command: &str) -> Config {
     config
 }
 
-/// The state and background start for `config`, with the MCP statuses
-/// installed on the state.
 fn prepared(config: Config, approvals_dir: &tempfile::TempDir) -> (Arc<AppState>, McpStartup) {
     let approvals = ApprovalGate::new(
         Arc::new(IpcConfirmationGate),

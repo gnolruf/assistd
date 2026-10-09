@@ -11,9 +11,9 @@ use assistd_utils::readiness::NotReady;
 use super::AppState;
 
 impl AppState {
-    /// Report disabled tools and MCP servers that failed to start, then the model name
-    /// and whether llama-server supports vision, probed live rather than
-    /// read from the vision gate.
+    /// Report disabled tools, MCP servers that failed to start, the model
+    /// name, and whether llama-server supports vision, probed live rather
+    /// than read from the vision gate.
     pub(super) async fn handle_get_capabilities(
         self: Arc<Self>,
         id: String,

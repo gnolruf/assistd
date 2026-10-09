@@ -203,14 +203,12 @@ async fn start(
     ))
 }
 
-/// What starts after the socket opens.
 struct BackgroundStarts {
     vision: Arc<VisionRevalidator>,
     embed: Option<EmbeddingStartup>,
     mcp: Option<McpStartup>,
 }
 
-/// The background starts, each joined at shutdown.
 struct BackgroundServices {
     warmup: JoinHandle<()>,
     embed: EmbeddingService,

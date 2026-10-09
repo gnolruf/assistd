@@ -164,7 +164,6 @@ impl StartupReadiness {
         self.components.iter()
     }
 
-    /// Components still starting.
     pub fn starting(&self) -> impl Iterator<Item = &StartupComponent> {
         self.components
             .iter()

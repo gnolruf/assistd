@@ -511,7 +511,6 @@ fn push_indicator(spans: &mut Vec<Span<'static>>, glyph: String, color: Color, l
     spans.push(Span::styled(format!(" {label}"), reversed_style()));
 }
 
-/// Name the daemon subsystems still starting, if any.
 fn push_starting(spans: &mut Vec<Span<'static>>, app: &App) {
     let starting: Vec<String> = app.startup.starting().map(ToString::to_string).collect();
     if starting.is_empty() {

@@ -252,8 +252,6 @@ async fn voice_output_requests_emit_expected_events() {
     .await;
 }
 
-/// Dispatch each request on a fresh state starting in its presence, and
-/// check the events it emits and the presence it leaves.
 async fn assert_request_events(cases: Vec<(PresenceTarget, Request, Vec<Event>, PresenceState)>) {
     for (initial, req, expected, presence_after) in cases {
         let kind = req.kind();
@@ -294,8 +292,6 @@ async fn capabilities_report_disabled_tools_before_the_model() {
     );
 }
 
-/// A default state whose embedder is still starting and whose MCP servers
-/// `fs` and `git` are starting and unavailable.
 fn state_mid_startup() -> Arc<AppState> {
     let mut state = Arc::into_inner(default_state()).expect("sole owner");
     state.memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Starting));
