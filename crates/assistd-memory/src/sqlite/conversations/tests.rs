@@ -226,6 +226,8 @@ async fn resolve_branch_prefers_given_session_or_qualified_prefix() {
         .await
         .unwrap();
     assert_eq!(qualified, Some((s2, b2)));
+    let wildcard = store.resolve_branch("%/main", None).await.unwrap();
+    assert_eq!(wildcard, None);
 }
 
 #[tokio::test]
