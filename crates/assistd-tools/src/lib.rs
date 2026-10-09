@@ -2,11 +2,13 @@
 //! [`RunTool`], which runs shell-style chains of byte-oriented [`Command`]s.
 
 use std::fmt;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 pub mod attachment;
+mod catalog;
 pub mod chain;
 pub mod command;
 pub mod commands;
@@ -19,6 +21,7 @@ pub mod run;
 pub mod vision;
 
 pub use attachment::{LoadImageError, load_image_attachment};
+pub use catalog::ToolCatalog;
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
@@ -66,10 +69,10 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     async fn invoke(&self, args: Value) -> Result<Value, ToolError>;
 }
 
-/// Lookup table of registered tools.
-#[derive(Debug, Default)]
+/// Lookup table of registered tools; cloning shares the tools.
+#[derive(Debug, Default, Clone)]
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -80,12 +83,12 @@ impl ToolRegistry {
 
     /// Register a tool by value.
     pub fn register<T: Tool>(&mut self, tool: T) {
-        self.tools.push(Box::new(tool));
+        self.tools.push(Arc::new(tool));
     }
 
     /// Register an already-boxed tool.
     pub fn register_boxed(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(tool);
+        self.tools.push(Arc::from(tool));
     }
 
     /// Look up a registered tool by its `name()`.

@@ -34,12 +34,9 @@ pub(crate) async fn run(action: VoiceCtlAction) -> Result<()> {
                 "voice-output: {}",
                 if *enabled { "on" } else { "off" }
             )?,
-            Event::VoiceReadiness {
-                capture, speech, ..
-            } => {
-                writeln!(io::stdout(), "voice-input: {capture}")?;
-                writeln!(io::stdout(), "speech: {speech}")?;
-            }
+            Event::Readiness {
+                component, state, ..
+            } => writeln!(io::stdout(), "{component}: {state}")?,
             _ => {}
         }
         Ok(())

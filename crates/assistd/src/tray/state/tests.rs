@@ -1,3 +1,5 @@
+use assistd_ipc::{ComponentReadiness, StartupComponent};
+
 use super::*;
 
 fn delta(id: &str) -> Event {
@@ -217,23 +219,36 @@ fn configured_icons_replace_the_defaults_except_for_config_errors() {
 }
 
 #[test]
-fn voice_summary_follows_readiness_until_disconnect() {
+fn startup_summary_lists_each_subsystem_until_disconnect() {
     let mut tracker = TrayTracker::default();
     tracker.set_connected();
-    assert_eq!(tracker.voice_summary(), None, "not reported yet");
+    assert_eq!(tracker.startup_summary(), None, "not reported yet");
 
-    tracker.ingest(&Event::VoiceReadiness {
-        id: "v".into(),
-        capture: ComponentReadiness::Starting,
-        speech: ComponentReadiness::Unavailable {
-            reason: "disabled in config".into(),
-        },
-    });
+    for (component, state) in [
+        (StartupComponent::VoiceInput, ComponentReadiness::Ready),
+        (StartupComponent::Embedding, ComponentReadiness::Starting),
+        (
+            StartupComponent::Mcp {
+                server: "fs".into(),
+            },
+            ComponentReadiness::Unavailable {
+                reason: "failed to start".into(),
+            },
+        ),
+    ] {
+        tracker.ingest(&Event::Readiness {
+            id: "startup".into(),
+            component,
+            state,
+        });
+    }
     assert_eq!(
-        tracker.voice_summary().as_deref(),
-        Some("voice input: starting · speech: unavailable (disabled in config)")
+        tracker.startup_summary().as_deref(),
+        Some(
+            "voice input: ready\nsemantic memory: starting\nMCP fs: unavailable (failed to start)"
+        )
     );
 
     tracker.set_disconnected();
-    assert_eq!(tracker.voice_summary(), None);
+    assert_eq!(tracker.startup_summary(), None);
 }

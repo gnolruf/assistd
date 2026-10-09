@@ -466,7 +466,7 @@ impl AppState {
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
         let llm = self.subsystems.llm.clone();
-        let tools = self.subsystems.tools.clone();
+        let tools = self.subsystems.tools.snapshot();
         let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
             self.subsystems.presence.clone(),
         )));

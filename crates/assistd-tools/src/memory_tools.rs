@@ -4,7 +4,7 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use assistd_embed::{EmbedJob, Embedder, enqueue_embed_job};
+use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
 use assistd_memory::{EmbeddingHit, MemoryHit, SemanticStore, SessionId};
 use async_trait::async_trait;
 use regex::Regex;
@@ -117,36 +117,27 @@ impl Tool for RememberTool {
 /// `<key>: <value>` lines.
 #[derive(Debug)]
 pub struct RecallTool {
-    embedder: Arc<dyn Embedder>,
+    embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
-    /// Only vectors from this model are matched.
-    embedding_model: String,
 }
 
 impl RecallTool {
-    /// A tool ranking memories in `semantic` by `embedder` vectors; an empty
-    /// `embedding_model` means embedding is disabled.
-    pub fn new(
-        embedder: Arc<dyn Embedder>,
-        semantic: Arc<dyn SemanticStore>,
-        embedding_model: String,
-    ) -> Self {
-        Self {
-            embedder,
-            semantic,
-            embedding_model,
-        }
+    /// A tool ranking memories in `semantic` by vectors from `embedder`,
+    /// matching only vectors from the same model.
+    pub fn new(embedder: Arc<EmbedderHandle>, semantic: Arc<dyn SemanticStore>) -> Self {
+        Self { embedder, semantic }
     }
 
-    /// Memories nearest `query`; empty when embedding is disabled or fails.
-    async fn nearest_memories(&self, query: String) -> Result<Vec<MemoryHit>, ToolError> {
-        if self.embedding_model.is_empty() {
-            return Ok(Vec::new());
-        }
-        match self.embedder.embed(query).await {
+    /// Memories nearest `query`; empty when the embed fails.
+    async fn nearest_memories(
+        &self,
+        embedder: &dyn Embedder,
+        query: String,
+    ) -> Result<Vec<MemoryHit>, ToolError> {
+        match embedder.embed(query).await {
             Ok(query_vec) => Ok(self
                 .semantic
-                .nearest_memories(query_vec, RECALL_LIMIT, &self.embedding_model)
+                .nearest_memories(query_vec, RECALL_LIMIT, embedder.model())
                 .await?),
             Err(e) => {
                 tracing::debug!(
@@ -197,8 +188,14 @@ impl Tool for RecallTool {
     async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
         let query = required_str(&args, "query")?.to_string();
-
-        let hits = self.nearest_memories(query).await?;
+        let embedder = match self.embedder.get() {
+            Ok(embedder) => embedder,
+            Err(e) => {
+                let note = format!("(saved memories cannot be searched: {e})");
+                return Ok(tool_result(&note, start.elapsed().as_millis()));
+            }
+        };
+        let hits = self.nearest_memories(embedder.as_ref(), query).await?;
         let output = format_memories(&hits);
 
         let duration_ms = start.elapsed().as_millis();
@@ -216,26 +213,22 @@ impl Tool for RecallTool {
 /// progress because its dialogue is already in the model's context.
 #[derive(Debug)]
 pub struct ReminisceTool {
-    embedder: Arc<dyn Embedder>,
+    embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
-    embedding_model: String,
     current_session: watch::Receiver<Arc<SessionId>>,
 }
 
 impl ReminisceTool {
-    /// A tool ranking past messages in `semantic` by `embedder` vectors,
-    /// skipping the session `current_session` names at call time. An empty
-    /// `embedding_model` means embedding is disabled.
+    /// A tool ranking past messages in `semantic` by vectors from
+    /// `embedder`, skipping the session `current_session` names at call time.
     pub fn new(
-        embedder: Arc<dyn Embedder>,
+        embedder: Arc<EmbedderHandle>,
         semantic: Arc<dyn SemanticStore>,
-        embedding_model: String,
         current_session: watch::Receiver<Arc<SessionId>>,
     ) -> Self {
         Self {
             embedder,
             semantic,
-            embedding_model,
             current_session,
         }
     }
@@ -289,13 +282,14 @@ impl Tool for ReminisceTool {
         let limit = reminisce_limit(&args)?;
         tracing::Span::current().record("limit", limit);
 
-        if self.embedding_model.is_empty() {
-            return Ok(tool_result(
-                "(no past conversations indexed)",
-                start.elapsed().as_millis(),
-            ));
-        }
-        let query_vec = match self.embedder.embed(query).await {
+        let embedder = match self.embedder.get() {
+            Ok(embedder) => embedder,
+            Err(e) => {
+                let note = format!("(past conversations cannot be searched: {e})");
+                return Ok(tool_result(&note, start.elapsed().as_millis()));
+            }
+        };
+        let query_vec = match embedder.embed(query).await {
             Ok(query_vec) => query_vec,
             Err(e) => {
                 tracing::debug!(
@@ -312,7 +306,7 @@ impl Tool for ReminisceTool {
         let current = self.current_session.borrow().clone();
         let hits = self
             .semantic
-            .nearest_chunks(query_vec, limit, &self.embedding_model, Some(&current))
+            .nearest_chunks(query_vec, limit, embedder.model(), Some(&current))
             .await?;
 
         let output = format_chunks(&hits);
@@ -388,6 +382,7 @@ mod tests {
         ConversationStore, MemoryError, MemoryStore, NoConversationStore, NoMemoryStore,
         NoSemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
     };
+    use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
     use tokio::task::JoinHandle;
 
@@ -404,8 +399,14 @@ mod tests {
         mpsc::channel::<EmbedJob>(8)
     }
 
-    fn no_embedder() -> Arc<dyn Embedder> {
-        Arc::new(NoEmbedder)
+    fn ready(embedder: Arc<dyn Embedder>) -> Arc<EmbedderHandle> {
+        Arc::new(EmbedderHandle::new(Readiness::Ready(embedder)))
+    }
+
+    fn no_embedder() -> Arc<EmbedderHandle> {
+        Arc::new(EmbedderHandle::new(Readiness::Unavailable(
+            "disabled in config".into(),
+        )))
     }
 
     fn no_semantic() -> Arc<dyn SemanticStore> {
@@ -500,12 +501,7 @@ mod tests {
         let spy = Arc::new(ExclusionSpy::default());
         let first = Arc::new(SessionId::new());
         let (session_tx, session_rx) = watch::channel(first.clone());
-        let tool = ReminisceTool::new(
-            Arc::new(FixedEmbedder),
-            spy.clone(),
-            "m".to_string(),
-            session_rx,
-        );
+        let tool = ReminisceTool::new(ready(Arc::new(FixedEmbedder)), spy.clone(), session_rx);
 
         tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
             .await
@@ -643,15 +639,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_with_disabled_embedder_returns_no_memories() {
-        let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
-        let result = tool
+    async fn search_tools_say_why_embedding_is_unavailable() {
+        let recall = RecallTool::new(no_embedder(), no_semantic());
+        let result = recall
             .invoke(json!({"query": "what editor do I prefer"}))
             .await
             .unwrap();
-        assert_eq!(result["output"], "(no memories)");
+        assert_eq!(
+            result["output"],
+            "(saved memories cannot be searched: embedding is unavailable: disabled in config)"
+        );
         assert_eq!(result["exit_code"], 0);
-        assert_eq!(result["truncated"], false);
+
+        let starting = Arc::new(EmbedderHandle::new(Readiness::Starting));
+        let reminisce = ReminisceTool::new(
+            starting,
+            no_semantic(),
+            watch::channel(Arc::new(SessionId::new())).1,
+        );
+        let result = reminisce
+            .invoke(json!({"query": "the rust daemon", "limit": 3}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result["output"],
+            "(past conversations cannot be searched: embedding is still starting)"
+        );
     }
 
     /// With embedding configured, a failed embed and an empty result
@@ -659,10 +672,10 @@ mod tests {
     #[tokio::test]
     async fn recall_without_hits_returns_no_memories() {
         for (case, embedder) in [
-            ("embed fails", no_embedder()),
-            ("no hits", Arc::new(FixedEmbedder) as Arc<dyn Embedder>),
+            ("embed fails", Arc::new(NoEmbedder) as Arc<dyn Embedder>),
+            ("no hits", Arc::new(FixedEmbedder)),
         ] {
-            let tool = RecallTool::new(embedder, no_semantic(), "m".into());
+            let tool = RecallTool::new(ready(embedder), no_semantic());
             let result = tool.invoke(json!({"query": "anything"})).await.unwrap();
             assert_eq!(result["output"], "(no memories)", "{case}");
         }
@@ -670,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn recall_rejects_missing_query() {
-        let tool = RecallTool::new(no_embedder(), no_semantic(), String::new());
+        let tool = RecallTool::new(no_embedder(), no_semantic());
         let err = tool.invoke(json!({})).await.unwrap_err();
         assert_eq!(invalid_args(err), "`query` (string) is required");
     }
@@ -681,11 +694,10 @@ mod tests {
     fn schemas_satisfy_strict_mode() {
         let tools: [Box<dyn Tool>; 3] = [
             Box::new(RememberTool::new(no_ops(), closed_embed_tx())),
-            Box::new(RecallTool::new(no_embedder(), no_semantic(), String::new())),
+            Box::new(RecallTool::new(no_embedder(), no_semantic())),
             Box::new(ReminisceTool::new(
                 no_embedder(),
                 no_semantic(),
-                String::new(),
                 watch::channel(Arc::new(SessionId::new())).1,
             )),
         ];

@@ -296,7 +296,15 @@ impl AppState {
                 enabled: voice.speech().enabled(),
             })
             .await;
-        let _ = tx.send(voice.readiness_event(id.clone())).await;
+        for (component, state) in voice.readiness() {
+            let _ = tx
+                .send(Event::Readiness {
+                    id: id.clone(),
+                    component,
+                    state,
+                })
+                .await;
+        }
         let _ = tx.send(Event::Done { id }).await;
     }
 

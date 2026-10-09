@@ -12,14 +12,14 @@ use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
 
-use assistd_embed::{EmbedJob, Embedder};
+use assistd_embed::{EmbedJob, EmbedderHandle};
 use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
     ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps, Protected,
     RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest,
-    SharedDirs, Tool, ToolSandbox, VisionGate,
+    SharedDirs, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -64,7 +64,7 @@ pub use assistd_wm::{NoWindowManager, WindowManager};
 
 pub use presence::{PresenceError, PresenceManager, RequestGuard};
 pub use state::{
-    AppState, ConversationContext, DispatchError, McpStartupFailure, MemoryStack, RuntimeState,
+    AppState, ConversationContext, DispatchError, McpServerStatus, MemoryStack, RuntimeState,
     Subsystems, TurnOrigin, history_entries,
 };
 
@@ -125,14 +125,12 @@ pub struct BuildToolsDeps<'a> {
     pub confirmation_gate: Arc<dyn ConfirmationGate>,
     pub vision_gate: Arc<VisionGate>,
     pub memory_ops: Arc<MemoryOps>,
-    pub embedder: Arc<dyn Embedder>,
+    pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
-    pub embedding_model: String,
     /// The active session, which `reminisce` excludes from its results.
     pub current_session: watch::Receiver<Arc<SessionId>>,
     pub window_manager: Arc<dyn WindowManager>,
-    pub mcp_tools: Vec<Box<dyn Tool>>,
 }
 
 /// Keeps a [`VisionGate`] in step with the model llama-server has loaded.
@@ -243,8 +241,8 @@ pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsErr
     Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)
 }
 
-/// Assemble the tool registry: the built-in commands behind `run`, the
-/// memory tools, and `mcp_tools`. Removes earlier spill files from
+/// Assemble the tool registry: the built-in commands behind `run` and the
+/// memory tools. Removes earlier spill files from
 /// [`BuildToolsDeps::overflow_dir`].
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
     let BuildToolsDeps {
@@ -258,10 +256,8 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         embedder,
         semantic,
         embed_tx,
-        embedding_model,
         current_session,
         window_manager,
-        mcp_tools,
     } = deps;
 
     clear_overflow_dir(&overflow_dir)?;
@@ -309,20 +305,8 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         None => run,
     });
     tools.register(RememberTool::new(memory_ops, embed_tx));
-    tools.register(RecallTool::new(
-        embedder.clone(),
-        semantic.clone(),
-        embedding_model.clone(),
-    ));
-    tools.register(ReminisceTool::new(
-        embedder,
-        semantic,
-        embedding_model,
-        current_session,
-    ));
-    for tool in mcp_tools {
-        tools.register_boxed(tool);
-    }
+    tools.register(RecallTool::new(embedder.clone(), semantic.clone()));
+    tools.register(ReminisceTool::new(embedder, semantic, current_session));
     Ok(Arc::new(tools))
 }
 

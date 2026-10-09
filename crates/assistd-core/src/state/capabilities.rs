@@ -6,13 +6,14 @@ use tokio::sync::mpsc;
 
 use assistd_ipc::{Component, Event, StatusKind, StatusSeverity};
 use assistd_llm::VisionState;
+use assistd_utils::readiness::NotReady;
 
 use super::AppState;
 
 impl AppState {
-    /// Report disabled tools and MCP startup failures, then the model name
-    /// and whether llama-server supports vision, probed live rather than
-    /// read from the vision gate.
+    /// Report disabled tools, MCP servers that failed to start, the model
+    /// name, and whether llama-server supports vision, probed live rather
+    /// than read from the vision gate.
     pub(super) async fn handle_get_capabilities(
         self: Arc<Self>,
         id: String,
@@ -29,17 +30,17 @@ impl AppState {
                 })
                 .await;
         }
-        for failure in &self.subsystems.mcp_startup_failures {
+        for server in &self.subsystems.mcp_servers {
+            let Err(NotReady::Unavailable(reason)) = server.readiness() else {
+                continue;
+            };
             let _ = tx
                 .send(Event::Status {
                     id: id.clone(),
                     severity: StatusSeverity::Warning,
                     component: Component::Mcp,
                     event: StatusKind::StartupFailed,
-                    message: format!(
-                        "MCP server '{}' is not available: {}",
-                        failure.server_name, failure.reason
-                    ),
+                    message: format!("MCP server '{}' is not available: {reason}", server.name()),
                 })
                 .await;
         }

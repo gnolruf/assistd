@@ -1,3 +1,4 @@
+use assistd_utils::readiness::NotReady;
 use thiserror::Error;
 
 /// Failures producing an embedding vector.
@@ -5,6 +6,10 @@ use thiserror::Error;
 pub enum EmbedError {
     #[error("embedder disabled")]
     Disabled,
+
+    /// The embedder is still starting or failed to start.
+    #[error("embedding is {0}")]
+    Unavailable(NotReady),
 
     /// The supervised embed server was not serving, so nothing was sent.
     #[error("embed server is not ready; request not sent")]

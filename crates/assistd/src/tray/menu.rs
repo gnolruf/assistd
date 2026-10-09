@@ -98,7 +98,7 @@ impl Tray for TrayItem {
                 .tracker
                 .config_error()
                 .map(str::to_string)
-                .or_else(|| self.tracker.voice_summary())
+                .or_else(|| self.tracker.startup_summary())
                 .unwrap_or_default(),
         }
     }

@@ -13,12 +13,13 @@ use tracing::{error, info, warn};
 
 use super::{listen_dispatcher, voice_init};
 
-const VOICE_STARTUP_EVENT_ID: &str = "voice-startup";
-
 /// What warmup brings up behind the managers `state` already serves.
 pub(super) struct Warmup {
     pub state: Arc<AppState>,
     pub vision: Arc<VisionRevalidator>,
+    /// Flipped once the first model load has finished, whether or not it
+    /// succeeded.
+    pub model_settled: watch::Sender<bool>,
 }
 
 /// Run warmup until it finishes or `shutdown` flips. The model load runs
@@ -28,7 +29,11 @@ pub(super) fn spawn(warmup: Warmup, shutdown: watch::Receiver<bool>) -> JoinHand
 }
 
 async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
-    let Warmup { state, vision } = warmup;
+    let Warmup {
+        state,
+        vision,
+        model_settled,
+    } = warmup;
     let presence = state.subsystems.presence.clone();
     let model_addr = SocketAddr::new(state.config.model.host, state.config.model.port.get());
     let model_load = spawn_supervised(
@@ -39,14 +44,15 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
     if until_shutdown(&mut shutdown, model_load).await.is_none() {
         return;
     }
+    model_settled.send_replace(true);
     let voice = &state.subsystems.voice;
     let init_voice = Box::pin(voice_init::init(voice, &state.config, &presence));
     if until_shutdown(&mut shutdown, init_voice).await.is_none() {
         return;
     }
-    state
-        .runtime
-        .publish(&voice.readiness_event(VOICE_STARTUP_EVENT_ID.into()));
+    for (component, readiness) in voice.readiness() {
+        state.publish_readiness(component, readiness);
+    }
     if let Ok(capture) = voice.capture() {
         run_listen_dispatcher(&state, capture.listener, presence, shutdown).await;
     }

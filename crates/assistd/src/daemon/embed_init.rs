@@ -1,144 +1,259 @@
-//! Embedding subsystem wiring for the daemon.
+//! Embedding subsystem wiring for the daemon: handles requests use from
+//! startup, and the embedding server that comes up behind them afterwards.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use assistd_core::Config;
+use assistd_core::{AppState, Config};
 use assistd_embed::{
-    EmbedJob, EmbedServerSpec, Embedder, LlamaEmbedder, NoEmbedder, spawn_embedder_task,
+    EmbedJob, EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
 };
-use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore};
+use assistd_ipc::{ComponentReadiness, StartupComponent};
+use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, WriteOp};
 use assistd_utils::child_server::ChildServer;
+use assistd_utils::readiness::Readiness;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
-pub(super) struct EmbeddingSubsystem {
-    pub embedder: Arc<dyn Embedder>,
+const EMBED_QUEUE_CAPACITY: usize = 256;
+
+/// The handles the daemon serves from startup.
+pub(super) struct EmbeddingHandles {
+    pub embedder: Arc<EmbedderHandle>,
     pub semantic_store: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
-    pub service_handle: Option<ChildServer>,
-    pub task_handle: Option<JoinHandle<()>>,
-    pub model_name: String,
 }
 
-impl EmbeddingSubsystem {
-    fn disabled(service_handle: Option<ChildServer>) -> Self {
-        let (tx, rx) = mpsc::channel(1);
-        drop(rx);
-        Self {
-            embedder: Arc::new(NoEmbedder),
-            semantic_store: Arc::new(NoSemanticStore),
-            embed_tx: tx,
-            service_handle,
-            task_handle: None,
-            model_name: String::new(),
+/// What starting the embedding server in the background still needs.
+/// Jobs queued before it is up wait in `embed_rx`.
+pub(super) struct EmbeddingStartup {
+    config: assistd_config::EmbeddingConfig,
+    embed_rx: mpsc::Receiver<EmbedJob>,
+    writer_tx: Arc<mpsc::Sender<WriteOp>>,
+}
+
+/// The shutdown signals the embedding server and worker stop on.
+pub(super) struct EmbeddingStages {
+    pub worker: watch::Receiver<bool>,
+    pub server: watch::Receiver<bool>,
+}
+
+/// The background start, joined at shutdown for what it brought up.
+pub(super) struct EmbeddingService {
+    startup: Option<JoinHandle<Option<RunningEmbedding>>>,
+}
+
+/// The server and, when its client probe passed, the worker embedding
+/// queued jobs.
+struct RunningEmbedding {
+    server: ChildServer,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl EmbeddingStartup {
+    /// Start the server once `model_settled` flips, then fill the embedder
+    /// handle and start the worker. Gives up when `model_settled` closes.
+    pub(super) fn spawn(
+        self,
+        state: Arc<AppState>,
+        model_settled: watch::Receiver<bool>,
+        stages: EmbeddingStages,
+    ) -> EmbeddingService {
+        let startup = spawn_startup(self, state, model_settled, stages);
+        EmbeddingService {
+            startup: Some(startup),
         }
     }
+}
 
-    /// Drain queued jobs while the embed server is still up, then stop the
-    /// server. The memory writer must still be running.
+impl EmbeddingService {
+    pub(super) fn disabled() -> Self {
+        Self { startup: None }
+    }
+
+    /// Drain queued jobs while the server is still up, then stop it. A
+    /// start still under way is cancelled. The memory writer must still
+    /// be running.
     pub(super) async fn shutdown(
         self,
         worker_shutdown: &watch::Sender<bool>,
         server_shutdown: &watch::Sender<bool>,
     ) {
         worker_shutdown.send_replace(true);
-        if let Some(h) = self.task_handle {
-            let _ = h.await;
+        let Some(startup) = self.startup else {
+            return;
+        };
+        if !startup.is_finished() {
+            server_shutdown.send_replace(true);
+        }
+        let running = match startup.await {
+            Ok(running) => running,
+            Err(e) => {
+                tracing::error!("embedding startup task failed: {e}");
+                None
+            }
+        };
+        let Some(RunningEmbedding { server, worker }) = running else {
+            return;
+        };
+        if let Some(worker) = worker {
+            let _ = worker.await;
         }
         server_shutdown.send_replace(true);
-        if let Some(service) = self.service_handle
-            && let Err(e) = service.shutdown().await
-        {
+        if let Err(e) = server.shutdown().await {
             tracing::warn!("embed-server shutdown error: {e:#}");
         }
     }
 }
 
-/// Degrades to a no-op subsystem when disabled, when the embed server
-/// fails to start, or when the client probe fails.
-pub(super) async fn init(
+/// The handles requests use from startup and, when embedding is enabled,
+/// what starting its server needs.
+pub(super) fn prepare(
     config: &Config,
     sqlite_handle: Option<&Arc<SqliteHandle>>,
-    worker_shutdown: &watch::Sender<bool>,
-    server_shutdown: &watch::Sender<bool>,
-) -> EmbeddingSubsystem {
+) -> (EmbeddingHandles, Option<EmbeddingStartup>) {
     if !config.embedding.enabled {
         info!("embedding: disabled in config (embedding.enabled = false)");
-        return EmbeddingSubsystem::disabled(None);
+        return (disabled_handles(), None);
     }
-
-    let service = match ChildServer::start(
-        EmbedServerSpec::new(config.embedding.clone()),
-        server_shutdown.subscribe(),
-    )
-    .await
-    {
-        Ok(service) => service,
-        Err(e) => {
-            tracing::warn!("embedding: failed to start ({e:#}); semantic search disabled this run");
-            return EmbeddingSubsystem::disabled(None);
-        }
-    };
-
-    let client = match LlamaEmbedder::new(
-        SocketAddr::new(config.embedding.host, config.embedding.port.get()),
-        config.embedding.model.clone(),
-        assistd_embed::REQUEST_TIMEOUT,
-        Some(service.status()),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "embedding: client probe failed ({e:#}); semantic search disabled this run"
-            );
-            return EmbeddingSubsystem::disabled(Some(service));
-        }
-    };
-
-    let model_name = config.embedding.model.clone();
-    let embedder: Arc<dyn Embedder> = Arc::new(client);
     let semantic_store: Arc<dyn SemanticStore> = match sqlite_handle {
         Some(h) => Arc::new(SqliteSemanticStore::new(h.clone())),
         None => Arc::new(NoSemanticStore),
     };
-    let writer_tx = sqlite_handle.map_or_else(
-        || {
-            let (tx, rx) = mpsc::channel(1);
-            drop(rx);
-            Arc::new(tx)
-        },
-        |h| h.writer_tx(),
-    );
-    let (embed_tx, embed_rx) = mpsc::channel(256);
-    let task = spawn_embedder_task(
-        embedder.clone(),
-        writer_tx,
-        embed_rx,
-        worker_shutdown.subscribe(),
-    );
-
-    info!(
-        "embedding: ready (model={}, dim={}, port={})",
-        embedder.model(),
-        embedder.dim(),
-        config.embedding.port,
-    );
-
-    warn_if_stale_rows(semantic_store.as_ref(), &model_name).await;
-    warn_if_missing_rows(semantic_store.as_ref(), &model_name).await;
-
-    EmbeddingSubsystem {
-        embedder,
+    let writer_tx = sqlite_handle.map_or_else(closed_writer, |h| h.writer_tx());
+    let (embed_tx, embed_rx) = mpsc::channel(EMBED_QUEUE_CAPACITY);
+    let handles = EmbeddingHandles {
+        embedder: Arc::new(EmbedderHandle::new(Readiness::Starting)),
         semantic_store,
         embed_tx,
-        service_handle: Some(service),
-        task_handle: Some(task),
-        model_name,
+    };
+    let startup = EmbeddingStartup {
+        config: config.embedding.clone(),
+        embed_rx,
+        writer_tx,
+    };
+    (handles, Some(startup))
+}
+
+fn disabled_handles() -> EmbeddingHandles {
+    let (embed_tx, embed_rx) = mpsc::channel(1);
+    drop(embed_rx);
+    EmbeddingHandles {
+        embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(
+            "disabled in config (embedding.enabled = false)".into(),
+        ))),
+        semantic_store: Arc::new(NoSemanticStore),
+        embed_tx,
     }
+}
+
+fn closed_writer() -> Arc<mpsc::Sender<WriteOp>> {
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    Arc::new(tx)
+}
+
+fn spawn_startup(
+    startup: EmbeddingStartup,
+    state: Arc<AppState>,
+    mut model_settled: watch::Receiver<bool>,
+    stages: EmbeddingStages,
+) -> JoinHandle<Option<RunningEmbedding>> {
+    tokio::spawn(async move {
+        if model_settled.wait_for(|settled| *settled).await.is_err() {
+            return None;
+        }
+        let running = match start_server(&startup.config, stages.server).await {
+            Ok((server, embedder)) => {
+                info!(
+                    "embedding: ready (model={}, dim={}, port={})",
+                    embedder.model(),
+                    embedder.dim(),
+                    startup.config.port,
+                );
+                let worker = serve_embedder(&state, embedder.clone(), startup, stages.worker);
+                report_unindexed_rows(state.memory.semantic.as_ref(), embedder.model()).await;
+                Some(RunningEmbedding {
+                    server,
+                    worker: Some(worker),
+                })
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    "embedding: {}; semantic search disabled this run",
+                    failure.reason
+                );
+                state
+                    .memory
+                    .embedder
+                    .set(Readiness::Unavailable(failure.reason.into()));
+                failure.server.map(|server| RunningEmbedding {
+                    server,
+                    worker: None,
+                })
+            }
+        };
+        state.publish_readiness(
+            StartupComponent::Embedding,
+            ComponentReadiness::from(state.memory.embedder.readiness()),
+        );
+        running
+    })
+}
+
+fn serve_embedder(
+    state: &AppState,
+    embedder: Arc<dyn Embedder>,
+    startup: EmbeddingStartup,
+    worker_shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    let worker = spawn_embedder_task(
+        embedder.clone(),
+        startup.writer_tx,
+        startup.embed_rx,
+        worker_shutdown,
+    );
+    state.memory.embedder.set(Readiness::Ready(embedder));
+    worker
+}
+
+/// Why the embedder did not come up, with the server when it started
+/// but its client probe failed.
+struct StartFailure {
+    reason: String,
+    server: Option<ChildServer>,
+}
+
+async fn start_server(
+    config: &assistd_config::EmbeddingConfig,
+    server_shutdown: watch::Receiver<bool>,
+) -> Result<(ChildServer, Arc<dyn Embedder>), StartFailure> {
+    let server = ChildServer::start(EmbedServerSpec::new(config.clone()), server_shutdown)
+        .await
+        .map_err(|e| StartFailure {
+            reason: format!("server failed to start: {e:#}"),
+            server: None,
+        })?;
+    match LlamaEmbedder::new(
+        SocketAddr::new(config.host, config.port.get()),
+        config.model.clone(),
+        assistd_embed::REQUEST_TIMEOUT,
+        Some(server.status()),
+    )
+    .await
+    {
+        Ok(client) => Ok((server, Arc::new(client))),
+        Err(e) => Err(StartFailure {
+            reason: format!("client probe failed: {e:#}"),
+            server: Some(server),
+        }),
+    }
+}
+
+async fn report_unindexed_rows(semantic: &dyn SemanticStore, model_name: &str) {
+    warn_if_stale_rows(semantic, model_name).await;
+    warn_if_missing_rows(semantic, model_name).await;
 }
 
 async fn warn_if_stale_rows(semantic: &dyn SemanticStore, model_name: &str) {
@@ -171,3 +286,6 @@ async fn warn_if_missing_rows(semantic: &dyn SemanticStore, model_name: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

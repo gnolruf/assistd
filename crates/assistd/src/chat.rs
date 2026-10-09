@@ -485,6 +485,9 @@ async fn poll_status(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
         Request::GetListenState {
             id: Uuid::new_v4().to_string(),
         },
+        Request::GetReadiness {
+            id: Uuid::new_v4().to_string(),
+        },
     ];
     for req in requests {
         poll_one(ipc, chat_tx, req).await;

@@ -4,17 +4,41 @@
 use std::sync::Arc;
 
 use assistd_llm::LlmBackend;
-use assistd_tools::{ToolRegistry, ToolsDisabled};
+use assistd_tools::{ToolCatalog, ToolRegistry, ToolsDisabled};
+use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use assistd_voice::VoiceManager;
 use assistd_wm::{NoWindowManager, WindowManager};
 
 use crate::{PresenceManager, VisionRevalidator};
 
-/// One MCP server that failed to start during daemon boot.
-#[derive(Debug, Clone)]
-pub struct McpStartupFailure {
-    pub server_name: String,
-    pub reason: String,
+/// A configured MCP server and how far its startup has got.
+#[derive(Debug)]
+pub struct McpServerStatus {
+    name: String,
+    readiness: ReadinessCell<()>,
+}
+
+impl McpServerStatus {
+    pub fn starting(name: String) -> Self {
+        Self {
+            name,
+            readiness: ReadinessCell::starting(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Record how far the server's startup has got.
+    pub fn set(&self, readiness: Readiness<()>) {
+        self.readiness.set(readiness);
+    }
+
+    /// `Ok` once the server's tools are offered, else why they are not.
+    pub fn readiness(&self) -> Result<(), NotReady> {
+        self.readiness.get()
+    }
 }
 
 /// Handles to the long-lived daemon subsystems.
@@ -22,17 +46,17 @@ pub struct McpStartupFailure {
 pub struct Subsystems {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
-    pub tools: Arc<ToolRegistry>,
+    pub tools: Arc<ToolCatalog>,
     pub voice: Arc<VoiceManager>,
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
-    pub mcp_startup_failures: Vec<McpStartupFailure>,
+    pub mcp_servers: Vec<McpServerStatus>,
     pub tools_disabled: Option<ToolsDisabled>,
 }
 
 impl Subsystems {
     /// Bundle the required subsystems, with no window manager, no vision
-    /// revalidator, and no MCP startup failures.
+    /// revalidator, and no MCP servers.
     pub fn new(
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
@@ -42,11 +66,11 @@ impl Subsystems {
         Self {
             llm,
             presence,
-            tools,
+            tools: Arc::new(ToolCatalog::new(tools)),
             voice,
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
-            mcp_startup_failures: Vec::new(),
+            mcp_servers: Vec::new(),
             tools_disabled: None,
         }
     }
@@ -63,9 +87,9 @@ impl Subsystems {
         self
     }
 
-    /// Record the MCP servers that failed to start.
-    pub fn with_mcp_startup_failures(mut self, failures: Vec<McpStartupFailure>) -> Self {
-        self.mcp_startup_failures = failures;
+    /// Track the configured MCP servers' startup.
+    pub fn with_mcp_servers(mut self, servers: Vec<McpServerStatus>) -> Self {
+        self.mcp_servers = servers;
         self
     }
 

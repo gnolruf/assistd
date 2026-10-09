@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use assistd_ipc::{ComponentReadiness, Event, PresenceState, Role, StatusKind, StatusSeverity};
+use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity};
 use assistd_tools::ConfirmationRequest;
 use serde_json::Value;
 
@@ -79,7 +79,7 @@ impl App {
             | Event::VoiceState { .. }
             | Event::ListenState { .. }
             | Event::VoiceOutputState { .. }
-            | Event::VoiceReadiness { .. }
+            | Event::Readiness { .. }
             | Event::Capabilities { .. }
             | Event::Status { .. }) => self.on_state_event(state),
             session @ (Event::BranchInfo { .. }
@@ -172,11 +172,9 @@ impl App {
             Event::VoiceState { state, .. } => self.listening = state,
             Event::ListenState { active, .. } => self.listen_active = active,
             Event::VoiceOutputState { enabled, .. } => self.voice_output_enabled = enabled,
-            Event::VoiceReadiness {
-                capture, speech, ..
-            } => {
-                self.voice_starting = [capture, speech].contains(&ComponentReadiness::Starting);
-            }
+            Event::Readiness {
+                component, state, ..
+            } => self.startup.record(component, state),
             Event::Capabilities {
                 vision, model_name, ..
             } => {

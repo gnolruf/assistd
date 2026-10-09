@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use assistd_config::TrayIconsConfig;
-use assistd_ipc::{ComponentReadiness, Event, PresenceState, VoiceCaptureState};
+use assistd_ipc::{Event, PresenceState, StartupReadiness, VoiceCaptureState};
 
 /// What the tray icon should currently display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +29,7 @@ pub(super) struct TrayTracker {
     presence: PresenceState,
     listening: bool,
     ptt_capture: VoiceCaptureState,
-    /// Capture then speech readiness; `None` until the daemon reports it.
-    voice: Option<(ComponentReadiness, ComponentReadiness)>,
+    startup: StartupReadiness,
     in_flight: HashSet<String>,
     connected: bool,
 }
@@ -50,7 +49,7 @@ impl TrayTracker {
             presence: PresenceState::Active,
             listening: false,
             ptt_capture: VoiceCaptureState::Idle,
-            voice: None,
+            startup: StartupReadiness::default(),
             in_flight: HashSet::new(),
             connected: false,
         }
@@ -90,10 +89,15 @@ impl TrayTracker {
         self.config_error.as_deref()
     }
 
-    /// How far voice capture and speech have started, once known.
-    pub(super) fn voice_summary(&self) -> Option<String> {
-        let (capture, speech) = self.voice.as_ref()?;
-        Some(format!("voice input: {capture} · speech: {speech}"))
+    /// One line per background subsystem with how far it has started;
+    /// `None` until the daemon reports any.
+    pub(super) fn startup_summary(&self) -> Option<String> {
+        let lines: Vec<String> = self
+            .startup
+            .iter()
+            .map(|(component, state)| format!("{component}: {state}"))
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 
     /// Returns `true` when the resolved [`TrayState`] changed.
@@ -111,7 +115,7 @@ impl TrayTracker {
         self.in_flight.clear();
         self.listening = false;
         self.ptt_capture = VoiceCaptureState::Idle;
-        self.voice = None;
+        self.startup = StartupReadiness::default();
         before != self.current()
     }
 
@@ -134,10 +138,10 @@ impl TrayTracker {
             Event::VoiceState { state, .. } => {
                 self.ptt_capture = *state;
             }
-            Event::VoiceReadiness {
-                capture, speech, ..
+            Event::Readiness {
+                component, state, ..
             } => {
-                self.voice = Some((capture.clone(), speech.clone()));
+                self.startup.record(component.clone(), state.clone());
             }
             _ => {}
         }
