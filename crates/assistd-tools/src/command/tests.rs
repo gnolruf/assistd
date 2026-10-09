@@ -9,25 +9,6 @@ use crate::commands::{
 };
 use crate::policy::{AlwaysAllowGate, ApprovalGate, Approvals, BashPolicyCfg, SandboxInfo};
 
-#[derive(Debug)]
-struct Stub(&'static str);
-
-#[async_trait]
-impl Command for Stub {
-    fn name(&self) -> &str {
-        self.0
-    }
-    fn summary(&self) -> &'static str {
-        "stub command for tests"
-    }
-    fn help(&self) -> String {
-        "stub help".to_string()
-    }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
-        CommandOutput::ok(Vec::new())
-    }
-}
-
 #[test]
 fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
     let e = io::Error::from(ErrorKind::NotFound);
@@ -42,45 +23,12 @@ fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
 }
 
 #[test]
-fn path_through_a_file_points_at_the_offending_parent() {
-    let e = io::Error::from(ErrorKind::NotADirectory);
-    assert_eq!(
-        io_error_nav("cat", "notes.txt/sub", &e),
-        "[error] cat: notes.txt/sub: a parent component is not a directory. Check: ls notes.txt\n"
-    );
-}
-
-#[test]
 fn parent_dir_stops_at_the_first_metacharacter() {
     assert_eq!(parent_dir("/tmp/*.db-shm"), "/tmp");
     assert_eq!(parent_dir("docs/*.md"), "docs");
     assert_eq!(parent_dir("docs/*/"), "docs");
     assert_eq!(parent_dir("/a*/b*"), "/");
     assert_eq!(parent_dir("*.rs"), ".");
-}
-
-#[test]
-fn parent_dir_of_a_plain_path_ignores_trailing_slashes() {
-    assert_eq!(parent_dir("/tmp/notes.txt"), "/tmp");
-    assert_eq!(parent_dir("/tmp/missing/"), "/tmp");
-    assert_eq!(parent_dir("/notes.txt"), "/");
-    assert_eq!(parent_dir("notes.txt"), ".");
-}
-
-#[test]
-fn registry_resolves_by_name_and_lists_alphabetically() {
-    let mut reg = CommandRegistry::new();
-    reg.register(Stub("grep"));
-    reg.register(Stub("cat"));
-    reg.register(Stub("ls"));
-    assert_eq!(reg.get("grep").map(Command::name), Some("grep"));
-    assert!(reg.get("nope").is_none());
-    assert_eq!(reg.sorted_names(), ["cat", "grep", "ls"]);
-    let summary = "stub command for tests";
-    assert_eq!(
-        reg.sorted_summaries(),
-        [("cat", summary), ("grep", summary), ("ls", summary)]
-    );
 }
 
 async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {

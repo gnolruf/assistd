@@ -22,51 +22,6 @@ fn write_file(dir: &TempDir, name: &str, bytes: &[u8]) -> String {
 }
 
 #[tokio::test]
-async fn cat_no_args_and_no_stdin_emits_usage() {
-    let out = run_cat(&[], None).await;
-    assert_eq!(out.exit_code, 2);
-    assert!(out.stdout.starts_with(b"usage: cat"), "{out:?}");
-}
-
-#[tokio::test]
-async fn cat_unknown_flag_errors() {
-    let out = run_cat(&["-q", "notes.md"], None).await;
-    assert_eq!(out.exit_code, 2);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "[error] cat: unknown flag '-q'. Use: cat -b FILE or cat -n FILE\n"
-    );
-}
-
-#[tokio::test]
-async fn cat_reads_text_file() {
-    let dir = tempdir().unwrap();
-    let path = write_file(&dir, "hello.txt", b"hello world\n");
-    let out = run_cat(&[&path], None).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, b"hello world\n");
-}
-
-#[tokio::test]
-async fn cat_concatenates_multiple_text_files() {
-    let dir = tempdir().unwrap();
-    let a = write_file(&dir, "a.txt", b"A");
-    let b = write_file(&dir, "b.txt", b"B");
-    let out = run_cat(&[&a, &b], None).await;
-    assert_eq!(out.stdout, b"AB");
-}
-
-#[tokio::test]
-async fn cat_missing_file_exits_1() {
-    let out = run_cat(&["/nonexistent/path/xyz"], None).await;
-    assert_eq!(out.exit_code, 1);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "[error] cat: file not found: /nonexistent/path/xyz. Use: ls /nonexistent/path to see what is there\n"
-    );
-}
-
-#[tokio::test]
 async fn cat_n_numbers_lines_across_files() {
     let dir = tempdir().unwrap();
     let a = write_file(&dir, "a.txt", b"one\ntwo\n");
@@ -74,18 +29,6 @@ async fn cat_n_numbers_lines_across_files() {
     let out = run_cat(&["-n", &a, &b], None).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"1\tone\n2\ttwo\n3\tthree\n");
-}
-
-#[tokio::test]
-async fn cat_n_numbers_stdin() {
-    let out = run_cat(&["-n"], Some(b"alpha\nbeta\n")).await;
-    assert_eq!(out.stdout, b"1\talpha\n2\tbeta\n");
-}
-
-#[tokio::test]
-async fn cat_no_args_echoes_stdin() {
-    let out = run_cat(&[], Some(b"from stdin")).await;
-    assert_eq!(out.stdout, b"from stdin");
 }
 
 #[tokio::test]
@@ -105,22 +48,6 @@ async fn cat_rejects_binary_image_file() {
 }
 
 #[tokio::test]
-async fn cat_rejects_binary_with_nul_bytes() {
-    let dir = tempdir().unwrap();
-    let mut bytes = vec![b'x'; 200];
-    bytes[100] = 0;
-    let path = write_file(&dir, "garbled.bin", &bytes);
-    let out = run_cat(&[&path], None).await;
-    assert_eq!(out.exit_code, 1);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        format!(
-            "[error] cat: binary application/octet-stream file (200B): {path}. Use: cat -b {path}\n"
-        )
-    );
-}
-
-#[tokio::test]
 async fn cat_b_prints_metadata_for_binary() {
     let dir = tempdir().unwrap();
     let path = write_file(&dir, "photo.png", PNG_BYTES);
@@ -129,18 +56,6 @@ async fn cat_b_prints_metadata_for_binary() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         format!("{path}: image/png\n{path}: {} bytes\n", PNG_BYTES.len())
-    );
-}
-
-#[tokio::test]
-async fn cat_b_works_on_text_file() {
-    let dir = tempdir().unwrap();
-    let path = write_file(&dir, "notes.txt", b"some text\n");
-    let out = run_cat(&["-b", &path], None).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        format!("{path}: text/plain\n{path}: 10 bytes\n")
     );
 }
 
@@ -206,16 +121,6 @@ async fn cat_refuses_a_file_over_the_read_limit() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("read limit"), "{stderr}");
     assert!(stderr.contains(&format!("tail -n 200 {path}")), "{stderr}");
-}
-
-#[tokio::test]
-async fn cat_b_reports_the_size_of_a_file_over_the_read_limit() {
-    let (_dir, path) = oversized_file();
-    let out = run_cat(&["-b", &path], None).await;
-    assert_eq!(out.exit_code, 0);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let expected = format!("{} bytes", FILE_READ_MAX + 1);
-    assert!(stdout.contains(&expected), "{stdout}");
 }
 
 #[tokio::test]

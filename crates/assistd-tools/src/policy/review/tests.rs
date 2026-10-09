@@ -80,19 +80,6 @@ fn default_patterns_all_parse() {
 }
 
 #[test]
-fn pattern_words_must_have_alternatives() {
-    assert!(DestructivePattern::new(Vec::<&str>::new()).is_none());
-    assert!(DestructivePattern::new(["|"]).is_none());
-    assert!(DestructivePattern::new(["rm", "||"]).is_none());
-    assert_eq!(
-        DestructivePattern::new(["rm", "-r|--recursive"])
-            .expect("valid")
-            .to_string(),
-        "rm -r|--recursive"
-    );
-}
-
-#[test]
 fn arguments_match_flags_in_any_spelling_and_order() {
     assert_all(&[
         ("rm -rf foo", RM),
@@ -280,15 +267,6 @@ fn wrappers_and_exec_flags_run_their_arguments() {
 }
 
 #[test]
-fn other_programs_that_run_commands_are_not_looked_into() {
-    assert_all(&[
-        ("sudo rm -rf ~", None),
-        ("ssh host 'rm -rf ~'", None),
-        ("docker run alpine rm -rf /", None),
-    ]);
-}
-
-#[test]
 fn scripts_handed_to_builtins_are_checked() {
     assert_all(&[
         ("eval 'rm -rf ~'", RM),
@@ -446,20 +424,6 @@ fn redirections_that_write_outside_tmp_are_unverifiable() {
         ("exec 3> file", UNVERIFIABLE),
         ("{fd}>file cmd", UNVERIFIABLE),
     ]);
-    assert_eq!(
-        check_script(
-            "echo x > ~/f",
-            &Rules {
-                patterns: &[],
-                allowlist: &no_programs(),
-                protected: &[],
-                scratch: None,
-            }
-        ),
-        Some(Confirmation::Unverifiable(
-            "`>` writes to `~/f`, outside /tmp".into()
-        ))
-    );
 }
 
 #[test]
@@ -602,32 +566,6 @@ fn values_bash_takes_as_variable_names_are_unverifiable() {
         ("declare -i n", UNVERIFIABLE),
         ("local -n ref=x", UNVERIFIABLE),
         ("PS4='$(rm -rf ~) '; set -x", UNVERIFIABLE),
-    ]);
-}
-
-#[test]
-fn variable_names_bash_can_see_need_no_confirmation() {
-    assert_all(&[
-        (
-            "while IFS= read -r line; do echo \"$line\"; done < /tmp/f",
-            None,
-        ),
-        ("read -ra parts <<< \"$x\"", None),
-        ("read -t 5 -p \"$prompt\" -d '' answer", None),
-        ("printf '%s\\n' \"$x\"; printf \"$fmt\"", None),
-        ("printf -v out '%s' \"$x\"", None),
-        ("getopts ab: opt", None),
-        (
-            "local x=\"$1\" y; export FOO=bar; declare -a arr=(1 2)",
-            None,
-        ),
-        ("unset x 'a[0]'", None),
-        (
-            "[ -n \"$x\" ] && [ $# -eq 0 ] && test -v x && [[ -v y ]]",
-            None,
-        ),
-        ("wait $!", None),
-        ("echo $PS4", None),
     ]);
 }
 

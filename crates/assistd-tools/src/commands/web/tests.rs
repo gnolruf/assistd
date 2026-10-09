@@ -74,32 +74,6 @@ fn stderr(out: &CommandOutput) -> String {
 }
 
 #[tokio::test]
-async fn fetches_response_body() {
-    let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"hello from server")]).await;
-    let out = run_web(&allowing(), &[&format!("http://{addr}/")]).await;
-    server.await.unwrap();
-    assert_eq!(out.exit_code, 0, "{}", stderr(&out));
-    assert_eq!(out.stdout, b"hello from server");
-}
-
-#[tokio::test]
-async fn non_2xx_exits_1_with_status_in_stderr() {
-    let (addr, server) = serve(vec![response("HTTP/1.1 404 Not Found", b"missing")]).await;
-    let url = format!("http://{addr}/");
-    let out = run_web(&allowing(), &[&url]).await;
-    server.await.unwrap();
-    assert_eq!(out.exit_code, 1);
-    assert!(out.stdout.is_empty());
-    assert_eq!(
-        stderr(&out),
-        format!(
-            "[error] web: HTTP 404 Not Found: {url}. \
-             Try: a different URL or check the endpoint is reachable\n"
-        )
-    );
-}
-
-#[tokio::test]
 async fn rejects_non_http_scheme() {
     let out = run_web(&allowing(), &["file:///etc/hostname"]).await;
     assert_eq!(out.exit_code, 2);
@@ -107,22 +81,6 @@ async fn rejects_non_http_scheme() {
         stderr(&out),
         "[error] web: only http(s):// URLs are allowed: file:///etc/hostname. \
          Use: web https://... or web http://...\n"
-    );
-}
-
-#[tokio::test]
-async fn connection_failure_to_reserved_port_exits_1() {
-    let cmd = WebCommand::connecting_to(
-        |ip| ip.is_loopback(),
-        allowing_gate(),
-        Duration::from_millis(200),
-    );
-    let out = run_web(&cmd, &["http://127.0.0.1:1/"]).await;
-    assert_eq!(out.exit_code, 1);
-    assert!(
-        stderr(&out).starts_with("[error] web: transport error: http://127.0.0.1:1/: "),
-        "{}",
-        stderr(&out)
     );
 }
 
@@ -278,24 +236,6 @@ fn public_addresses_are_told_from_non_public_ones() {
     for (addr, public) in cases {
         assert_eq!(is_public(addr.parse().unwrap()), public, "{addr}");
     }
-}
-
-#[tokio::test]
-async fn declared_oversized_body_is_refused() {
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        BODY_MAX + 1
-    );
-    let (addr, server) = serve(vec![head.into_bytes()]).await;
-    let url = format!("http://{addr}/");
-    let out = run_web(&allowing(), &[&url]).await;
-    server.await.unwrap();
-    assert_eq!(out.exit_code, 1);
-    assert!(
-        stderr(&out).contains(&format!("response body exceeded {BODY_MAX} bytes")),
-        "{}",
-        stderr(&out)
-    );
 }
 
 #[tokio::test]

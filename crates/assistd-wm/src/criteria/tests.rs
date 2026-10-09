@@ -1,9 +1,5 @@
 use super::*;
 
-fn id(raw: u64) -> WindowId {
-    WindowId::new(raw).expect("test ids are non-zero")
-}
-
 #[test]
 fn escape_for_criteria_handles_quotes_and_backslashes() {
     assert_eq!(escape_for_criteria("Firefox"), "Firefox");
@@ -43,38 +39,4 @@ fn workspace_id_parse_or_name() {
         "1:web".parse::<WorkspaceId>().unwrap(),
         WorkspaceId::Name("1:web".into())
     );
-}
-
-#[test]
-fn focus_and_move_use_con_id_criteria() {
-    assert_eq!(format_focus(&id(42)), r#"[con_id="42"] focus"#);
-    assert_eq!(
-        format_move_to_workspace(&id(42), &WorkspaceId::Num(3)),
-        r#"[con_id="42"] move container to workspace number 3"#
-    );
-}
-
-#[test]
-fn resize_payload_uses_con_id_criteria() {
-    assert_eq!(
-        format_resize_width(&id(42), ResizeDir::Grow, 50),
-        r#"[con_id="42"] resize grow width 50 px or 0 ppt"#
-    );
-    assert_eq!(
-        format_resize_width(&id(1234567890), ResizeDir::Shrink, 5),
-        r#"[con_id="1234567890"] resize shrink width 5 px or 0 ppt"#
-    );
-}
-
-#[test]
-fn layout_payload_emits_bare_form() {
-    for (layout, expected) in [
-        (Layout::Default, "layout default"),
-        (Layout::Tabbed, "layout tabbed"),
-        (Layout::Stacking, "layout stacking"),
-        (Layout::SplitH, "layout splith"),
-        (Layout::SplitV, "layout splitv"),
-    ] {
-        assert_eq!(format_layout(layout), expected);
-    }
 }

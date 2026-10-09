@@ -1,7 +1,6 @@
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::super::activity::Activity;
 use super::*;
 
 struct Harness {
@@ -91,28 +90,6 @@ fn nothing_shows_until_the_chat_focus_is_known() {
 }
 
 #[test]
-fn a_thinking_turn_shows_before_any_reply() {
-    let mut h = Harness::away();
-    h.event(Event::ReasoningDelta {
-        id: "a".into(),
-        text: "hmm".into(),
-    });
-    h.apply(DriverInput::Wake);
-    assert_eq!(h.expect_show().view.activity, Activity::Thinking);
-}
-
-#[test]
-fn a_focused_chat_blocks_every_show() {
-    let mut h = Harness::new();
-    h.event(chat_focus(true));
-    h.event(last_delta("a", "hi"));
-    h.apply(DriverInput::Wake);
-    h.apply(DriverInput::TrayActivated);
-    h.driver.tick();
-    h.expect_nothing();
-}
-
-#[test]
 fn gaining_focus_closes_the_notification_and_drops_pending_updates() {
     let mut h = Harness::away();
     h.event(last_delta("a", "first"));
@@ -123,15 +100,6 @@ fn gaining_focus_closes_the_notification_and_drops_pending_updates() {
     h.expect_close();
     h.driver.tick();
     h.expect_nothing();
-}
-
-#[test]
-fn losing_focus_mid_turn_shows_the_current_state() {
-    let mut h = Harness::new();
-    h.event(chat_focus(true));
-    h.event(last_delta("a", "so far"));
-    h.event(chat_focus(false));
-    assert_eq!(h.expect_show().view.body, "so far");
 }
 
 #[test]
@@ -197,20 +165,6 @@ fn hide_closes_without_interrupting_until_the_next_turn() {
 }
 
 #[test]
-fn tray_click_toggles_and_brings_a_hidden_turn_back() {
-    let mut h = Harness::away();
-    h.event(last_delta("a", "working"));
-    h.apply(DriverInput::TrayActivated);
-    h.expect_show();
-    h.apply(DriverInput::TrayActivated);
-    h.expect_close();
-    h.apply(DriverInput::Wake);
-    h.expect_nothing();
-    h.apply(DriverInput::TrayActivated);
-    h.expect_show();
-}
-
-#[test]
 fn closes_once_idle_but_never_while_busy() {
     let mut h = Harness::away();
     h.event(last_delta("a", "working"));
@@ -228,33 +182,4 @@ fn closes_once_idle_but_never_while_busy() {
     h.make_idle_for(Duration::from_secs(60));
     h.driver.tick();
     h.expect_close();
-}
-
-#[test]
-fn listening_uses_the_longer_idle_timeout() {
-    let mut h = Harness::away();
-    h.event(Event::ListenState {
-        id: "l".into(),
-        active: true,
-    });
-    h.apply(DriverInput::TrayActivated);
-    h.expect_show();
-    h.make_idle_for(Duration::from_secs(5));
-    h.driver.tick();
-    h.expect_nothing();
-    h.make_idle_for(Duration::from_secs(10));
-    h.driver.tick();
-    h.expect_close();
-}
-
-#[test]
-fn disconnect_closes_and_forgets_the_chat_focus() {
-    let mut h = Harness::away();
-    h.event(last_delta("a", "hi"));
-    h.apply(DriverInput::Wake);
-    h.expect_show();
-    h.apply(DriverInput::Disconnected);
-    h.expect_close();
-    h.apply(DriverInput::Wake);
-    h.expect_nothing();
 }

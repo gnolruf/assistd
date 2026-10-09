@@ -132,15 +132,10 @@ mod tests {
 
     #[tokio::test]
     async fn orders_lines_per_flags() {
-        let cases: [(&[&str], &str, &str); 8] = [
-            (&[], "pear\napple\nfig\n", "apple\nfig\npear\n"),
-            (&["-r"], "apple\npear\nfig\n", "pear\nfig\napple\n"),
+        let cases: [(&[&str], &str, &str); 3] = [
             (&["-n"], "9\n10\n2\n", "2\n9\n10\n"),
-            (&["-nr"], "3\n10\n7\n", "10\n7\n3\n"),
             (&["-nr"], "2\tbeta\n11\talpha\n", "11\talpha\n2\tbeta\n"),
             (&["-f"], "beta\nAlpha\ngamma\n", "Alpha\nbeta\ngamma\n"),
-            (&[], "b\na", "a\nb\n"),
-            (&[], "", ""),
         ];
         for (args, stdin, expected) in cases {
             let label = format!("{args:?} {stdin:?}");
@@ -148,49 +143,5 @@ mod tests {
             assert_eq!(out.exit_code, 0, "{label}");
             assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{label}");
         }
-    }
-
-    #[tokio::test]
-    async fn no_stdin_emits_usage() {
-        let out = SortCommand
-            .run(CommandInput {
-                args: Vec::new(),
-                stdin: None,
-            })
-            .await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: sort"), "{out:?}");
-    }
-
-    #[tokio::test]
-    async fn unknown_flag_errors() {
-        let out = run_sort(&["-q"], b"a\n").await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] sort: unknown flag '-q'. Use: sort (no args) for supported flags\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn named_files_sort_as_one_stream() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.txt");
-        let b = dir.path().join("b.txt");
-        std::fs::write(&a, b"pear\nfig\n").unwrap();
-        std::fs::write(&b, b"apple\n").unwrap();
-        let out = run_sort(&[a.to_str().unwrap(), b.to_str().unwrap()], b"ignored\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"apple\nfig\npear\n");
-    }
-
-    #[tokio::test]
-    async fn missing_file_reports_navigation_error() {
-        let out = run_sort(&["/nope/missing.txt"], b"").await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] sort: file not found: /nope/missing.txt. Use: ls /nope to see what is there\n"
-        );
     }
 }

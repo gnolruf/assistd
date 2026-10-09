@@ -56,6 +56,18 @@ Guidelines for AI agents (and humans) working in this repository.
   verbs without an object (`handle`, `process`, `do_work`), no
   single-letter names outside short closures and loop indices, no
   abbreviations the codebase doesn't already use.
+- **Test only what would hurt to break.** Don't add tests by
+  default. A test is worth adding when it pins behaviour that is
+  easy to get wrong and expensive to lose: a security or
+  confirmation boundary, a parser or wire format, an invariant the
+  type system can't hold, or a bug that actually shipped. Skip
+  tests that restate the implementation, exercise std or a
+  dependency, check getters, defaults, `Display` strings or log
+  text, or enumerate edge cases nobody has hit. One test that
+  covers the behaviour beats five that each poke one branch. Don't
+  add test-only helpers, modules, constructors, or features to
+  production code to make something testable; if it can't be
+  tested through its real interface, don't test it.
 - **Keep test modules from swamping the file.** When a
   `#[cfg(test)]` module grows past the production code it tests,
   move it to a sibling file (`foo/tests.rs` via
@@ -85,8 +97,9 @@ update — must pass these in order. Run them from the workspace root.
 3. **Docs and deps.** `RUSTDOCFLAGS="-D warnings" cargo doc
    --workspace --no-deps`; public docs must not link to private
    items. If you touched a `Cargo.toml`, also run `cargo machete`.
-4. **Targeted tests.** Run the test suite for whichever crate(s)
-   you touched: `cargo test -p assistd-<crate>`. For test fixes
+4. **Targeted tests.** Run the existing test suite for whichever
+   crate(s) you touched: `cargo test -p assistd-<crate>`. Running
+   tests is required; writing new ones is not. For test fixes
    specifically, also run the originally failing test in isolation
    with `--nocapture` to confirm the fix is real, not flaky timing.
 5. **Full suite.** `cargo test --workspace`. Some crates have

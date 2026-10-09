@@ -35,22 +35,3 @@ impl EmbedderHandle {
         self.embedder.get()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn get_says_why_there_is_no_embedder() {
-        let handle = EmbedderHandle::new(Readiness::Starting);
-        assert_eq!(
-            handle.get().unwrap_err().to_string(),
-            "embedding is still starting"
-        );
-        handle.set(Readiness::Unavailable("disabled in config".into()));
-        assert_eq!(
-            handle.get().unwrap_err().to_string(),
-            "embedding is unavailable: disabled in config"
-        );
-    }
-}

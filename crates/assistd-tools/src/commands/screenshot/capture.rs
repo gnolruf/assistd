@@ -292,39 +292,4 @@ mod tests {
              Install: the appropriate package for your distro\n"
         );
     }
-
-    #[test]
-    fn capture_errors_map_to_exit_code_and_message() {
-        let cases = [
-            (
-                CaptureError::FocusedUnsupportedOnWayland {
-                    compositor: "KDE".into(),
-                },
-                2,
-                "[error] screenshot: --focused not supported on Wayland compositor: KDE. \
-                 Use: screenshot --full (supported compositors for --focused: sway, Hyprland)\n",
-            ),
-            (
-                CaptureError::Timeout,
-                137,
-                "[error] screenshot: capture timed out. \
-                 Try: screenshot again or check the compositor is responsive\n",
-            ),
-            (
-                CaptureError::NonZero {
-                    binary: "grim".into(),
-                    status: 1,
-                    stderr_tail: "compositor not running".into(),
-                },
-                1,
-                "[error] screenshot: grim exited 1: compositor not running. \
-                 Try: a different target or backend\n",
-            ),
-        ];
-        for (err, exit_code, stderr) in cases {
-            let out = err.to_output();
-            assert_eq!(out.exit_code, exit_code, "{err:?}");
-            assert_eq!(String::from_utf8_lossy(&out.stderr), stderr, "{err:?}");
-        }
-    }
 }

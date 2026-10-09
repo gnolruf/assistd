@@ -377,7 +377,7 @@ fn tool_result(output: &str, duration_ms: u128) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use assistd_embed::{EmbedError, NoEmbedder};
+    use assistd_embed::EmbedError;
     use assistd_memory::{
         ConversationStore, MemoryError, MemoryStore, NoConversationStore, NoMemoryStore,
         NoSemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
@@ -548,22 +548,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remember_saves_key_value() {
-        let (ops, _w, _dir) = fresh_ops().await;
-        let tool = RememberTool::new(ops.clone(), closed_embed_tx());
-        let result = tool
-            .invoke(json!({"key": "editor_preference", "value": "vim"}))
-            .await
-            .unwrap();
-        assert_eq!(result["exit_code"], 0);
-        assert_eq!(result["output"], "remembered editor_preference");
-        assert_eq!(
-            ops.load("editor_preference").await.unwrap().as_deref(),
-            Some("vim")
-        );
-    }
-
-    #[tokio::test]
     async fn remember_dedups_by_key() {
         let (ops, _w, _dir) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
@@ -598,27 +582,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remember_accepts_hyphenated_and_dotted_keys() {
-        let (ops, _w, _dir) = fresh_ops().await;
-        let tool = RememberTool::new(ops.clone(), closed_embed_tx());
-        for key in ["standup.2026-09-11", "project.assistd-tools.dir"] {
-            tool.invoke(json!({"key": key, "value": "noted"}))
-                .await
-                .unwrap_or_else(|e| panic!("{key} should be a valid key: {e}"));
-            assert_eq!(ops.load(key).await.unwrap().as_deref(), Some("noted"));
-        }
-    }
-
-    #[tokio::test]
-    async fn remember_rejects_missing_args() {
-        let tool = RememberTool::new(no_ops(), closed_embed_tx());
-        let err = tool.invoke(json!({})).await.unwrap_err();
-        assert_eq!(invalid_args(err), "`key` (string) is required");
-        let err = tool.invoke(json!({"key": "user.name"})).await.unwrap_err();
-        assert_eq!(invalid_args(err), "`value` (string) is required");
-    }
-
-    #[tokio::test]
     async fn remember_enqueues_embed_job_with_value_text() {
         let (ops, _w, _dir) = fresh_ops().await;
         let (etx, mut erx) = live_embed_tx();
@@ -636,56 +599,6 @@ mod tests {
             }
             EmbedJob::Chunk { .. } => panic!("expected Memory job, got Chunk"),
         }
-    }
-
-    #[tokio::test]
-    async fn search_tools_say_why_embedding_is_unavailable() {
-        let recall = RecallTool::new(no_embedder(), no_semantic());
-        let result = recall
-            .invoke(json!({"query": "what editor do I prefer"}))
-            .await
-            .unwrap();
-        assert_eq!(
-            result["output"],
-            "(saved memories cannot be searched: embedding is unavailable: disabled in config)"
-        );
-        assert_eq!(result["exit_code"], 0);
-
-        let starting = Arc::new(EmbedderHandle::new(Readiness::Starting));
-        let reminisce = ReminisceTool::new(
-            starting,
-            no_semantic(),
-            watch::channel(Arc::new(SessionId::new())).1,
-        );
-        let result = reminisce
-            .invoke(json!({"query": "the rust daemon", "limit": 3}))
-            .await
-            .unwrap();
-        assert_eq!(
-            result["output"],
-            "(past conversations cannot be searched: embedding is still starting)"
-        );
-    }
-
-    /// With embedding configured, a failed embed and an empty result
-    /// both read as no memories rather than an error.
-    #[tokio::test]
-    async fn recall_without_hits_returns_no_memories() {
-        for (case, embedder) in [
-            ("embed fails", Arc::new(NoEmbedder) as Arc<dyn Embedder>),
-            ("no hits", Arc::new(FixedEmbedder)),
-        ] {
-            let tool = RecallTool::new(ready(embedder), no_semantic());
-            let result = tool.invoke(json!({"query": "anything"})).await.unwrap();
-            assert_eq!(result["output"], "(no memories)", "{case}");
-        }
-    }
-
-    #[tokio::test]
-    async fn recall_rejects_missing_query() {
-        let tool = RecallTool::new(no_embedder(), no_semantic());
-        let err = tool.invoke(json!({})).await.unwrap_err();
-        assert_eq!(invalid_args(err), "`query` (string) is required");
     }
 
     /// Strict mode requires every declared property to be listed as

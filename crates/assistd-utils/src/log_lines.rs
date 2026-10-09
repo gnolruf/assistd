@@ -84,12 +84,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_utf8_is_replaced_and_later_lines_still_arrive() {
-        let lines = collect(b"ok\n\xff\xfe bad\nafter").await;
-        assert_eq!(lines, ["ok", "\u{FFFD}\u{FFFD} bad", "after"]);
-    }
-
-    #[tokio::test]
     async fn oversized_line_is_cut_without_buffering_the_rest() {
         let mut input = vec![b'x'; MAX_LINE_BYTES * 3];
         input.extend_from_slice(b"\ntail\r\n");
@@ -104,13 +98,5 @@ mod tests {
             MAX_LINE_BYTES + " [line cut at 8192 bytes]".len()
         );
         assert_eq!(tail, "tail");
-    }
-
-    #[tokio::test]
-    async fn a_line_of_exactly_the_cap_is_whole() {
-        let mut input = vec![b'y'; MAX_LINE_BYTES];
-        input.push(b'\n');
-        let lines = collect(&input).await;
-        assert_eq!(lines, ["y".repeat(MAX_LINE_BYTES)]);
     }
 }

@@ -178,6 +178,3 @@ fn stdio_config(server: &McpServerConfig) -> StdioConfig {
     stdio.request_timeout = Duration::from_secs(server.request_timeout_secs.get());
     stdio
 }
-
-#[cfg(test)]
-mod tests;

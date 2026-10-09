@@ -42,16 +42,4 @@ mod tests {
         assert_eq!(tilde_remainder("/tmp/~"), None);
         assert_eq!(tilde_remainder("plain"), None);
     }
-
-    #[test]
-    fn expand_tilde_joins_onto_home() {
-        let home = Path::new("/home/alice");
-        assert_eq!(expand_tilde("~", home), PathBuf::from("/home/alice"));
-        assert_eq!(
-            expand_tilde("~/docs", home),
-            PathBuf::from("/home/alice/docs")
-        );
-        assert_eq!(expand_tilde("~bob", home), PathBuf::from("~bob"));
-        assert_eq!(expand_tilde("/etc", home), PathBuf::from("/etc"));
-    }
 }

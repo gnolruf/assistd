@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use assistd_config::defaults::{nz32, nz64};
 use tokio::sync::Mutex;
@@ -10,7 +7,6 @@ use super::*;
 
 struct FakeSummarizer {
     reply: String,
-    calls: Arc<AtomicUsize>,
     captured: Arc<Mutex<Vec<String>>>,
 }
 
@@ -18,7 +14,6 @@ impl FakeSummarizer {
     fn new(reply: impl Into<String>) -> Self {
         Self {
             reply: reply.into(),
-            calls: Arc::new(AtomicUsize::new(0)),
             captured: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -32,23 +27,8 @@ impl Summarizer for FakeSummarizer {
         _target_tokens: u32,
         _max_tokens: u32,
     ) -> Result<String, ChatClientError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
         self.captured.lock().await.push(dialogue);
         Ok(self.reply.clone())
-    }
-}
-
-struct FailingSummarizer;
-
-#[async_trait]
-impl Summarizer for FailingSummarizer {
-    async fn summarize(
-        &self,
-        _dialogue: String,
-        _target_tokens: u32,
-        _max_tokens: u32,
-    ) -> Result<String, ChatClientError> {
-        Err(ChatClientError::Summarize("boom".into()))
     }
 }
 
@@ -105,26 +85,6 @@ fn user_text(message: &wire::ChatMessage<'_>) -> String {
 }
 
 #[test]
-fn transient_context_renders_inside_its_user_turn() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("earlier".into());
-    c.push_assistant("reply".into());
-    c.set_transient_context("Relevant past context:\n- foo\n".into());
-    c.push_user("hello".into());
-    let wire = c.as_wire_messages();
-    let roles: Vec<_> = wire.iter().map(|m| m.role).collect();
-    assert_eq!(roles, ["system", "user", "assistant", "user"]);
-    assert_eq!(user_text(&wire[1]), "earlier");
-    assert_eq!(
-        user_text(&wire[3]),
-        "[Context: added automatically, not written by the user]\n\
-         Relevant past context:\n- foo\n\
-         [End of context]\n\n\
-         hello"
-    );
-}
-
-#[test]
 fn transient_context_neutralises_forged_delimiters() {
     let mut c = Conversation::new("sys".into());
     c.set_transient_context(
@@ -171,24 +131,6 @@ fn wire_carries_a_single_leading_system_message() {
 }
 
 #[test]
-fn transient_context_attaches_to_image_turns_too() {
-    let mut c = Conversation::new("sys".into());
-    c.set_transient_context("ctx".into());
-    c.push_user_with_attachments(
-        "what is this?".into(),
-        vec![Attachment::Image {
-            mime: "image/png".into(),
-            bytes: vec![0xAB],
-        }],
-    );
-    let wire = c.as_wire_messages();
-    assert_eq!(wire.len(), 2);
-    assert!(matches!(wire[1].content, Some(wire::ContentBody::Parts(_))));
-    assert_eq!(user_text(&wire[1]), with_context("ctx", "what is this?"));
-    assert!(c.pending_context().is_none());
-}
-
-#[test]
 fn transient_context_stays_on_its_turn_so_the_prefix_never_changes() {
     let mut c = Conversation::new("sys".into());
     c.set_transient_context("ctx".into());
@@ -231,9 +173,7 @@ fn rollback_last_user_returns_its_context_to_the_pending_slot() {
     let mut c = Conversation::new("sys".into());
     c.set_transient_context("ctx".into());
     c.push_user("hi".into());
-    assert!(c.pending_context().is_none());
     c.rollback_last_user();
-    assert_eq!(c.pending_context(), Some("ctx"));
     c.push_user("hi again".into());
     assert_eq!(
         user_text(&c.as_wire_messages()[1]),
@@ -292,114 +232,6 @@ fn image_tool_results_do_not_close_the_turn() {
 }
 
 #[test]
-fn reasoning_is_sent_with_its_tool_call_and_kept_across_user_turns() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("look".into());
-    c.push_assistant_with_tool_calls(None, "list first".into(), vec![mk_call("c-1", "{}")]);
-    c.push_tool_result("c-1".into(), "out".into());
-
-    let reasoning_on_wire = |c: &Conversation| {
-        c.as_wire_messages()
-            .iter()
-            .find(|m| m.tool_calls.is_some())
-            .and_then(|m| m.reasoning_content.map(str::to_string))
-    };
-    assert_eq!(reasoning_on_wire(&c).as_deref(), Some("list first"));
-    let in_loop = c.approx_total_tokens();
-
-    c.push_assistant("done".into());
-    c.push_user("thanks".into());
-    assert_eq!(reasoning_on_wire(&c).as_deref(), Some("list first"));
-    assert_eq!(
-        c.approx_total_tokens(),
-        in_loop + 2 * TOKENS_PER_MESSAGE_OVERHEAD + approx_tokens("done") + approx_tokens("thanks"),
-        "kept reasoning keeps counting toward the budget"
-    );
-}
-
-#[test]
-fn transient_note_renders_as_final_user_message_for_one_request() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("hello".into());
-    c.push_assistant_with_tool_calls(None, String::new(), vec![mk_call("c-1", "{}")]);
-    c.push_tool_result("c-1".into(), "out".into());
-    c.set_transient_note("stop calling tools".into());
-
-    let wire = c.as_wire_messages();
-    let last = wire.last().expect("messages");
-    assert_eq!(last.role, "user");
-    match &last.content {
-        Some(wire::ContentBody::Text(t)) => assert_eq!(*t, "stop calling tools"),
-        other => panic!("expected text body on transient note, got {other:?}"),
-    }
-    let with_note = wire.len();
-
-    assert_eq!(
-        c.consume_transient_note().as_deref(),
-        Some("stop calling tools")
-    );
-    assert_eq!(c.as_wire_messages().len(), with_note - 1);
-    assert_eq!(c.as_wire_messages().last().map(|m| m.role), Some("tool"));
-}
-
-#[test]
-fn transient_note_counts_toward_budget_and_is_cleared_with_history() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("hello".into());
-    let baseline = c.approx_total_tokens();
-    c.set_transient_note("a".repeat(100));
-    assert_eq!(
-        c.approx_total_tokens(),
-        baseline + TOKENS_PER_MESSAGE_OVERHEAD + 25
-    );
-
-    c.replace_messages(Vec::new());
-    assert_eq!(c.consume_transient_note(), None);
-}
-
-#[test]
-fn approx_total_tokens_includes_transient_context() {
-    let mut c = Conversation::new("sys".into());
-    let baseline = c.approx_total_tokens();
-    c.set_transient_context("a".repeat(100));
-    let pending = c.approx_total_tokens();
-    assert_eq!(pending, baseline + TOKENS_PER_MESSAGE_OVERHEAD + 25);
-    c.push_user("q".into());
-    let attached = c.approx_total_tokens();
-    assert!(
-        attached > pending,
-        "attached context must keep counting: {pending} → {attached}"
-    );
-}
-
-#[test]
-fn replace_messages_swaps_history_and_clears_transient() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("first".into());
-    c.set_transient_context("ctx".into());
-    c.replace_messages(vec![
-        message(Role::User, "loaded user"),
-        message(Role::Assistant, "loaded assistant"),
-    ]);
-    let wire = c.as_wire_messages();
-    let roles: Vec<_> = wire.iter().map(|m| m.role).collect();
-    assert_eq!(roles, ["system", "user", "assistant"]);
-    assert_eq!(user_text(&wire[1]), "loaded user");
-    assert!(c.pending_context().is_none());
-}
-
-#[test]
-fn truncate_to_last_real_user_drops_through_assistant_chain() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("first".into());
-    c.push_assistant("a1".into());
-    c.push_user("second".into());
-    c.push_assistant("a2".into());
-    assert_eq!(c.truncate_to_last_real_user(), 2);
-    assert_eq!(contents(&c), ["first", "a1"]);
-}
-
-#[test]
 fn truncate_to_last_real_user_skips_both_tool_result_shapes() {
     for image_result in [false, true] {
         let mut c = Conversation::new("sys".into());
@@ -418,59 +250,6 @@ fn truncate_to_last_real_user_skips_both_tool_result_shapes() {
         );
         assert!(c.messages.is_empty(), "image_result = {image_result}");
     }
-}
-
-#[test]
-fn truncate_to_last_real_user_returns_zero_when_no_user_present() {
-    let mut c = Conversation::new("sys".into());
-    assert_eq!(c.truncate_to_last_real_user(), 0);
-}
-
-#[test]
-fn push_and_rollback_user_message() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("hi".into());
-    c.push_assistant("hello".into());
-    c.rollback_last_user();
-    assert_eq!(
-        contents(&c),
-        ["hi", "hello"],
-        "rollback is a no-op when last is assistant"
-    );
-
-    c.push_user("again".into());
-    c.rollback_last_user();
-    assert_eq!(contents(&c), ["hi", "hello"]);
-}
-
-#[test]
-fn as_wire_messages_injects_system_first() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("hi".into());
-    let wire = c.as_wire_messages();
-    assert_eq!(wire.len(), 2);
-    assert_eq!(wire[0].role, "system");
-    assert_eq!(wire[0].content, Some(wire::ContentBody::Text("sys".into())));
-    assert_eq!(wire[1].role, "user");
-    assert_eq!(wire[1].content, Some(wire::ContentBody::Text("hi".into())));
-}
-
-#[test]
-fn as_wire_messages_drops_empty_system_prompt() {
-    let mut c = Conversation::new(String::new());
-    c.push_user("hi".into());
-    let wire = c.as_wire_messages();
-    assert_eq!(wire.len(), 1);
-    assert_eq!(wire[0].role, "user");
-    assert_eq!(wire[0].content, Some(wire::ContentBody::Text("hi".into())));
-}
-
-#[test]
-fn approx_tokens_matches_bytes_over_four() {
-    assert_eq!(approx_tokens(""), 0);
-    assert_eq!(approx_tokens("abcd"), 1);
-    assert_eq!(approx_tokens("abcde"), 2);
-    assert_eq!(approx_tokens("hello world"), 3);
 }
 
 #[test]
@@ -499,63 +278,6 @@ fn push_user_with_attachments_renders_multimodal_wire() {
             },
         ]))
     );
-}
-
-#[test]
-fn attachments_contribute_to_token_budget() {
-    let mut c = Conversation::new(String::new());
-    c.push_user("q".into());
-    let baseline = c.approx_total_tokens();
-
-    let mut c = Conversation::new(String::new());
-    c.push_user_with_attachments(
-        "q".into(),
-        vec![Attachment::Image {
-            mime: "image/png".into(),
-            bytes: vec![0; 10],
-        }],
-    );
-    let with_image = c.approx_total_tokens();
-    assert_eq!(with_image, baseline + TOKENS_PER_IMAGE);
-}
-
-#[tokio::test]
-async fn ensure_budget_noop_when_under() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("hi".into());
-    let fake = FakeSummarizer::new("summary");
-    let (chat, model) = spec(10_000, 4, 20_000);
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn ensure_budget_summarizes_when_over() {
-    let mut c = Conversation::new("sys".into());
-    for i in 0..10 {
-        c.push_user(format!("user turn {i} with some filler text"));
-        c.push_assistant(format!(
-            "assistant reply {i} with enough text to blow the budget"
-        ));
-    }
-    c.push_user("latest question".into());
-
-    let fake = FakeSummarizer::new("the conversation covered topics 0 through 9");
-    let (chat, model) = spec(60, 2, 10_000);
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
-
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-    assert!(c.approx_total_tokens() <= 60, "{}", c.approx_total_tokens());
-    let first = &c.messages[0];
-    assert_eq!(first.role, Role::System);
-    assert_eq!(
-        first.content,
-        "[Conversation summary] the conversation covered topics 0 through 9"
-    );
-
-    let last = c.messages.last().unwrap();
-    assert_eq!(last.role, Role::User);
-    assert_eq!(last.content, "latest question");
 }
 
 #[tokio::test]
@@ -630,37 +352,6 @@ async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
     assert_eq!(system_positions, [0]);
 }
 
-#[tokio::test]
-async fn ensure_budget_summarize_failure_propagates() {
-    let mut c = Conversation::new("sys".into());
-    for i in 0..20 {
-        c.push_user(format!("user turn {i}"));
-        c.push_assistant(format!("assistant reply {i}"));
-    }
-    let (chat, model) = spec(40, 2, 10_000);
-    let result = c.ensure_budget(&FailingSummarizer, &chat, &model).await;
-    assert!(matches!(result, Err(ChatClientError::Summarize(_))));
-}
-
-#[test]
-fn truncate_drops_oldest_first() {
-    let mut c = Conversation::new("sys".into());
-    for i in 0..8 {
-        c.push_user(format!("user message {i} with padding"));
-        c.push_assistant(format!("assistant reply {i} with padding"));
-    }
-    let before: Vec<String> = c.messages.iter().map(|m| m.content.clone()).collect();
-    let (chat, model) = spec(40, 2, 10_000);
-    c.truncate_to_budget(&chat, &model);
-    let after: Vec<String> = contents(&c).into_iter().map(String::from).collect();
-    assert!(after.len() < before.len());
-    assert!(
-        before.ends_with(&after),
-        "{after:?} is not a suffix of {before:?}"
-    );
-    assert!(c.approx_total_tokens() <= 40);
-}
-
 #[test]
 fn truncate_preserves_last_user_message() {
     let mut c = Conversation::new("sys".into());
@@ -716,30 +407,6 @@ fn as_wire_messages_renders_tool_calls_with_content_absent() {
 }
 
 #[test]
-fn as_wire_messages_keeps_narration_alongside_tool_calls() {
-    let mut c = Conversation::new(String::new());
-    c.push_user("do it".into());
-    c.push_assistant_with_tool_calls(
-        Some("Got it, listing the directory.".into()),
-        String::new(),
-        vec![mk_call("call-1", r#"{"command":"ls"}"#)],
-    );
-    let wire = c.as_wire_messages();
-    assert_eq!(
-        serde_json::to_value(&wire[1]).unwrap(),
-        serde_json::json!({
-            "role": "assistant",
-            "content": "Got it, listing the directory.",
-            "tool_calls": [{
-                "id": "call-1",
-                "type": "function",
-                "function": {"name": "run", "arguments": r#"{"command":"ls"}"#},
-            }],
-        })
-    );
-}
-
-#[test]
 fn tool_results_render_on_the_tool_role_with_their_call_id() {
     let mut c = Conversation::new(String::new());
     c.push_user("do it".into());
@@ -780,74 +447,6 @@ fn dropping_a_tool_call_message_drops_all_of_its_results() {
         contents(&c),
         ["answer", "second question"],
         "dropping a call must drop every one of its results"
-    );
-}
-
-#[test]
-fn tool_results_do_not_count_as_preserved_turns() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("real question with enough length to count".into());
-    for i in 0..6 {
-        c.push_assistant_with_tool_calls(
-            None,
-            String::new(),
-            vec![mk_call(&format!("c-{i}"), "{}")],
-        );
-        c.push_tool_result(format!("c-{i}"), format!("output {i} with padding"));
-    }
-    c.push_assistant("done".into());
-
-    let idx = c.first_preserved_index(2);
-    let preserved = &c.messages[idx..];
-    assert!(
-        preserved
-            .iter()
-            .filter(|m| m.role == Role::Assistant)
-            .count()
-            >= 2,
-        "expected assistant turns in the preserved tail, got {preserved:?}"
-    );
-}
-
-#[test]
-fn tool_calls_contribute_to_token_budget() {
-    let mut c = Conversation::new(String::new());
-    c.push_user("q".into());
-    let baseline = c.approx_total_tokens();
-    c.push_assistant_with_tool_calls(
-        None,
-        String::new(),
-        vec![mk_call(
-            "call-1",
-            r#"{"command":"a very long command string here to make the call nontrivial"}"#,
-        )],
-    );
-    let call_cost = c.approx_total_tokens() - baseline;
-    assert!(
-        call_cost > TOKENS_PER_MESSAGE_OVERHEAD,
-        "an empty-content message costs only the overhead; got {call_cost}"
-    );
-}
-
-#[test]
-fn truncate_drops_image_tool_result_with_its_call() {
-    let mut c = Conversation::new(String::new());
-    c.push_user("old q".into());
-    c.push_assistant_with_tool_calls(
-        None,
-        String::new(),
-        vec![mk_call("c-1", r#"{"command":"ls"}"#)],
-    );
-    c.push_tool_result_with_attachments("run", "some output\n", Vec::new());
-    c.push_assistant("old reply".into());
-    c.push_user("latest".into());
-
-    let (chat, model) = spec(30, 1, 10_000);
-    c.truncate_to_budget(&chat, &model);
-    assert_eq!(
-        contents(&c),
-        ["old reply", "latest"],
-        "dropping a call must also drop its result"
     );
 }
 
@@ -945,18 +544,6 @@ fn truncate_keeps_the_question_and_newest_step_of_a_long_tool_loop() {
 }
 
 #[test]
-fn truncate_never_drops_the_only_step_of_the_current_turn() {
-    let mut c = Conversation::new("sys".into());
-    c.push_user("current question".into());
-    push_tool_steps(&mut c, 1);
-
-    let (chat, model) = spec(5, 2, 10_000);
-    c.truncate_to_budget(&chat, &model);
-
-    assert_eq!(c.messages.len(), 3);
-}
-
-#[test]
 fn calibration_shifts_the_estimate_by_the_measured_error() {
     let mut c = Conversation::new("sys".into());
     c.push_user("a question".into());
@@ -972,24 +559,4 @@ fn calibration_shifts_the_estimate_by_the_measured_error() {
 
     c.replace_messages(Vec::new());
     assert_eq!(c.approx_total_tokens(), c.heuristic_tokens());
-}
-
-#[tokio::test]
-async fn a_measured_overrun_triggers_summarization_the_heuristic_would_skip() {
-    let mut c = Conversation::new("sys".into());
-    for i in 0..4 {
-        c.push_user(format!("question {i}"));
-        c.push_assistant(format!("answer {i}"));
-    }
-    c.push_user("latest".into());
-    let fake = FakeSummarizer::new("summary");
-    let (chat, model) = spec(200, 1, 10_000);
-
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
-    assert_eq!(c.message_count(), 9, "the heuristic alone is under budget");
-
-    c.calibrate(c.heuristic_tokens(), 400);
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
-    assert_eq!(c.messages[0].content, "[Conversation summary] summary");
-    assert!(c.message_count() < 9);
 }

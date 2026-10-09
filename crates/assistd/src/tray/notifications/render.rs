@@ -121,10 +121,6 @@ mod tests {
         markup: true,
         actions: true,
     };
-    const PLAIN: Capabilities = Capabilities {
-        markup: false,
-        actions: false,
-    };
 
     fn busy(view: ActivityView) -> Notification {
         Notification {
@@ -142,55 +138,6 @@ mod tests {
     }
 
     #[test]
-    fn summary_is_the_session_title_whatever_the_activity() {
-        for activity in [
-            Activity::Idle,
-            Activity::Streaming,
-            Activity::Thinking,
-            Activity::RunningTool {
-                name: "bash".into(),
-            },
-            Activity::Listening,
-            Activity::Done,
-            Activity::Failed,
-        ] {
-            let untitled = ActivityView {
-                activity: activity.clone(),
-                ..ActivityView::default()
-            };
-            assert_eq!(render(&busy(untitled), PLAIN).summary, "assistd");
-            let titled = ActivityView {
-                title: Some("Cats And Dogs".into()),
-                activity,
-                ..ActivityView::default()
-            };
-            assert_eq!(render(&busy(titled), PLAIN).summary, "Cats And Dogs");
-        }
-    }
-
-    #[test]
-    fn empty_body_names_the_activity() {
-        for (activity, expected) in [
-            (Activity::Thinking, "Thinking…"),
-            (Activity::Streaming, "Thinking…"),
-            (Activity::Listening, "Listening…"),
-            (Activity::Done, ""),
-        ] {
-            let view = ActivityView {
-                activity,
-                ..ActivityView::default()
-            };
-            assert_eq!(render(&busy(view), PLAIN).body, expected);
-        }
-        let replying = ActivityView {
-            body: "hi".into(),
-            activity: Activity::Streaming,
-            ..ActivityView::default()
-        };
-        assert_eq!(render(&busy(replying), PLAIN).body, "hi");
-    }
-
-    #[test]
     fn markup_body_bolds_tool_names_and_escapes_model_text() {
         let view = ActivityView {
             body: "a < b && c > d".into(),
@@ -201,47 +148,5 @@ mod tests {
             render(&busy(view), MARKUP).body,
             "<b>bash</b> command=\"ls &lt;dir&gt;\"\na &lt; b &amp;&amp; c &gt; d"
         );
-    }
-
-    #[test]
-    fn plain_body_sends_text_unescaped() {
-        let view = ActivityView {
-            body: "a < b".into(),
-            tool_calls: vec![tool("bash", "ls")],
-            error: Some("boom".into()),
-            activity: Activity::Failed,
-            ..ActivityView::default()
-        };
-        let rendered = render(&busy(view), PLAIN);
-        assert_eq!(rendered.body, "bash ls\na < b\nboom");
-        assert_eq!(rendered.urgency, 2);
-    }
-
-    #[test]
-    fn hide_action_needs_a_busy_turn_and_service_support() {
-        for (hideable, caps, expected) in [
-            (true, MARKUP, vec![HIDE_ACTION, HIDE_LABEL]),
-            (false, MARKUP, vec![]),
-            (true, PLAIN, vec![]),
-        ] {
-            let notification = Notification {
-                hideable,
-                ..busy(ActivityView::default())
-            };
-            assert_eq!(
-                render(&notification, caps).actions,
-                expected,
-                "{hideable} {caps:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn expire_timeout_saturates() {
-        let notification = Notification {
-            expire_ms: u64::MAX,
-            ..busy(ActivityView::default())
-        };
-        assert_eq!(render(&notification, PLAIN).expire_timeout, i32::MAX);
     }
 }

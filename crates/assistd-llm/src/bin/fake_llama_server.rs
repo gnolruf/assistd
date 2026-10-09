@@ -2,7 +2,6 @@
 //! for exercising lifecycle, presence, and chat-completion paths without a
 //! real llama-server binary.
 
-use std::collections::VecDeque;
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
@@ -26,8 +25,6 @@ enum Mode {
     Normal,
     /// `never-ready`: serve 503 on `/health` forever.
     NeverReady,
-    /// `crash-after=<secs>`: serve normally, then exit 0 after that long.
-    CrashAfter(u64),
     /// `bind-fail`: exit 1 without binding.
     BindFail,
     /// `load-failure`: fail `POST /models/load` with 500.
@@ -46,27 +43,14 @@ struct Args {
     mode: Mode,
 }
 
-#[derive(Clone, Default)]
-struct ChatScript {
-    deltas: Vec<String>,
-    delay_ms_between: u64,
-}
-
 #[derive(Default)]
 struct ServerState {
     loaded_model: Option<String>,
     load_count: u32,
     unload_count: u32,
-    chat_completions_count: u32,
-    last_prompt: Option<String>,
-    chat_scripts: VecDeque<ChatScript>,
 }
 
 fn parse_mode(s: &str) -> Option<Mode> {
-    if let Some(rest) = s.strip_prefix("crash-after=") {
-        let secs: u64 = rest.parse().ok()?;
-        return Some(Mode::CrashAfter(secs));
-    }
     if let Some(rest) = s.strip_prefix("slow-term=") {
         let secs: u64 = rest.parse().ok()?;
         return Some(Mode::SlowTerm(secs));
@@ -172,19 +156,6 @@ async fn main() -> ExitCode {
 
     let state = Arc::new(Mutex::new(ServerState::default()));
 
-    if let Mode::CrashAfter(secs) = args.mode {
-        let state = state.clone();
-        tokio::spawn(async move {
-            serve_loop(listener, Mode::Normal, state).await;
-        });
-        tokio::time::sleep(Duration::from_secs(secs)).await;
-        let _ = writeln!(
-            io::stderr(),
-            "fake_llama_server: crash-after elapsed; exiting 0"
-        );
-        return ExitCode::SUCCESS;
-    }
-
     if let Mode::SlowTerm(secs) = args.mode {
         let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         let state = state.clone();
@@ -227,9 +198,7 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
 ///   updates the load state.
 /// - `GET /models`: the current load state.
 /// - `POST /v1/chat/completions`: an SSE stream or a JSON summary.
-/// - `POST /test/script`, `POST /test/reset`: queue a scripted chat reply,
-///   or clear the queue and counters. Both require `X-Test-Control: 1`.
-/// - `GET /debug/counters`: PID, hit counts and last prompt.
+/// - `GET /debug/counters`: load and unload counts and the loaded model.
 async fn serve_connection(
     mut sock: TcpStream,
     mode: Mode,
@@ -238,29 +207,8 @@ async fn serve_connection(
     let (head, body) = read_request(&mut sock).await?;
     let (method, path) = parse_request_line(&head);
 
-    match (method.as_str(), path.as_str()) {
-        ("POST", "/v1/chat/completions") => {
-            serve_chat_completion(&mut sock, &state, &body).await?;
-            return Ok(());
-        }
-        ("POST", "/test/script" | "/test/reset") => {
-            let resp = if has_test_control_header(&head) {
-                if path == "/test/script" {
-                    queue_script_response(&state, &body).await
-                } else {
-                    reset_response(&state).await
-                }
-            } else {
-                (
-                    "HTTP/1.1 403 Forbidden",
-                    "application/json",
-                    "{\"error\":\"missing X-Test-Control: 1 header\"}".to_string(),
-                )
-            };
-            write_one_shot(&mut sock, resp).await?;
-            return Ok(());
-        }
-        _ => {}
+    if (method.as_str(), path.as_str()) == ("POST", "/v1/chat/completions") {
+        return serve_chat_completion(&mut sock, &body).await;
     }
 
     let resp = match (method.as_str(), path.as_str()) {
@@ -357,20 +305,6 @@ fn parse_request_line(head: &str) -> (String, String) {
     (method, path)
 }
 
-/// Whether the request carries `X-Test-Control: 1`, which gates `/test/*`.
-fn has_test_control_header(head: &str) -> bool {
-    for line in head.lines() {
-        if let Some(colon) = line.find(':') {
-            let name = line[..colon].trim();
-            let value = line[colon + 1..].trim();
-            if name.eq_ignore_ascii_case("x-test-control") && value == "1" {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn health_response(mode: &Mode) -> (&'static str, &'static str, String) {
     if matches!(mode, Mode::NeverReady) {
         (
@@ -450,139 +384,37 @@ async fn counters_response(
         "load_count": server.load_count,
         "unload_count": server.unload_count,
         "loaded_model": server.loaded_model,
-        "chat_completions_count": server.chat_completions_count,
-        "last_prompt": server.last_prompt,
     });
     ("HTTP/1.1 200 OK", "application/json", body.to_string())
 }
 
-async fn queue_script_response(
-    state: &Arc<Mutex<ServerState>>,
-    body: &str,
-) -> (&'static str, &'static str, String) {
-    let parsed: Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                "HTTP/1.1 400 Bad Request",
-                "application/json",
-                json!({ "error": format!("invalid json: {e}") }).to_string(),
-            );
-        }
-    };
-    let deltas = parsed
-        .get("deltas")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(ToString::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let delay_ms_between = parsed
-        .get("delay_ms_between")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let mut server = state.lock().await;
-    server.chat_scripts.push_back(ChatScript {
-        deltas,
-        delay_ms_between,
-    });
-    (
-        "HTTP/1.1 200 OK",
-        "application/json",
-        "{\"status\":\"queued\"}".to_string(),
-    )
-}
-
-async fn reset_response(state: &Arc<Mutex<ServerState>>) -> (&'static str, &'static str, String) {
-    let mut server = state.lock().await;
-    server.chat_scripts.clear();
-    server.chat_completions_count = 0;
-    server.last_prompt = None;
-    (
-        "HTTP/1.1 200 OK",
-        "application/json",
-        "{\"status\":\"reset\"}".to_string(),
-    )
-}
-
-/// Answer `POST /v1/chat/completions` with the next scripted reply (default
-/// `"hello"`): a chunked SSE stream written as produced, or one JSON body.
-async fn serve_chat_completion(
-    sock: &mut TcpStream,
-    state: &Arc<Mutex<ServerState>>,
-    body: &str,
-) -> io::Result<()> {
-    let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    let stream = parsed
-        .get("stream")
-        .and_then(Value::as_bool)
+/// Answer `POST /v1/chat/completions` with `"hello"`: a chunked SSE stream
+/// when the request asks to stream, else one JSON body.
+async fn serve_chat_completion(sock: &mut TcpStream, body: &str) -> io::Result<()> {
+    let stream = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|request| request.get("stream")?.as_bool())
         .unwrap_or(false);
-    let last_user = parsed
-        .get("messages")
-        .and_then(|m| m.as_array())
-        .and_then(|arr| {
-            arr.iter().rev().find_map(|msg| {
-                if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
-                    msg.get("content")
-                        .and_then(|c| c.as_str())
-                        .map(ToString::to_string)
-                } else {
-                    None
-                }
-            })
-        });
-
-    let script = {
-        let mut server = state.lock().await;
-        server.chat_completions_count += 1;
-        if let Some(prompt) = last_user {
-            server.last_prompt = Some(prompt);
-        }
-        server.chat_scripts.pop_front().unwrap_or(ChatScript {
-            deltas: vec!["hello".to_string()],
-            delay_ms_between: 0,
-        })
-    };
-
     if stream {
-        write_sse_stream(sock, &script).await?;
-    } else {
-        let combined: String = script.deltas.join("");
-        let body = format!(
-            "{{\"choices\":[{{\"message\":{{\"role\":\"assistant\",\"content\":{}}}}}]}}",
-            serde_json::to_string(&combined).unwrap_or_else(|_| "\"\"".to_string())
-        );
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        sock.write_all(resp.as_bytes()).await?;
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        sock.write_all(headers).await?;
+        write_chunk(
+            sock,
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+        )
+        .await?;
+        write_chunk(sock, b"data: [DONE]\n\n").await?;
+        write_final_chunk(sock).await?;
         let _ = sock.shutdown().await;
+        Ok(())
+    } else {
+        let reply = json!({"choices": [{"message": {"role": "assistant", "content": "hello"}}]});
+        write_one_shot(
+            sock,
+            ("HTTP/1.1 200 OK", "application/json", reply.to_string()),
+        )
+        .await
     }
-    Ok(())
-}
-
-async fn write_sse_stream(sock: &mut TcpStream, script: &ChatScript) -> io::Result<()> {
-    let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
-    sock.write_all(headers).await?;
-
-    for (i, delta) in script.deltas.iter().enumerate() {
-        if i > 0 && script.delay_ms_between > 0 {
-            tokio::time::sleep(Duration::from_millis(script.delay_ms_between)).await;
-        }
-        let frame = format!(
-            "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
-            serde_json::to_string(&delta).unwrap_or_else(|_| "\"\"".to_string())
-        );
-        write_chunk(sock, frame.as_bytes()).await?;
-    }
-    write_chunk(sock, b"data: [DONE]\n\n").await?;
-    write_final_chunk(sock).await?;
-    let _ = sock.shutdown().await;
-    Ok(())
 }
 
 async fn write_chunk(sock: &mut TcpStream, payload: &[u8]) -> io::Result<()> {

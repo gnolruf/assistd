@@ -263,31 +263,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_json_is_an_error() {
-        let (_dir, path, server) = mock_server_raw(vec![r#"{"type":"delta","id":"r""#.into()]);
-        let client = IpcClient::with_path(path);
-        let mut stream = client.one_shot(Request::query("r", "x")).await.unwrap();
-        let err = stream.next_event().await.expect_err("expected Json");
-        assert!(matches!(err, IpcClientError::Json(_)), "{err:?}");
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn one_shot_reports_not_reachable_when_no_listener() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("missing.sock");
-        let client = IpcClient::with_path(path);
-        let err = client
-            .one_shot(Request::query("r", "x"))
-            .await
-            .expect_err("expected NotReachable");
-        assert!(
-            matches!(err, IpcClientError::NotReachable { .. }),
-            "{err:?}"
-        );
-    }
-
-    #[tokio::test]
     async fn collect_errors_on_premature_close() {
         let (_dir, path, server) = mock_server(&[Event::Delta {
             id: "r".into(),

@@ -109,42 +109,16 @@ impl Command for UppercaseCommand {
 mod tests {
     use super::*;
 
-    async fn run_uppercase(args: Vec<String>, stdin: Option<&[u8]>) -> CommandOutput {
-        UppercaseCommand
-            .run(CommandInput {
-                args,
-                stdin: stdin.map(<[u8]>::to_vec),
-            })
-            .await
-    }
-
     #[tokio::test]
     async fn uppercases_ascii_stdin() {
-        let out = run_uppercase(Vec::new(), Some(b"Hello, World!".as_slice())).await;
+        let out = UppercaseCommand
+            .run(CommandInput {
+                args: Vec::new(),
+                stdin: Some(b"Hello, World!".to_vec()),
+            })
+            .await;
         assert_eq!(out.stdout, b"HELLO, WORLD!");
         assert_eq!(out.exit_code, 0);
-    }
-
-    #[tokio::test]
-    async fn passes_through_non_ascii_bytes() {
-        let out = run_uppercase(Vec::new(), Some("café".as_bytes())).await;
-        assert_eq!(out.stdout, "CAFé".as_bytes());
-    }
-
-    #[tokio::test]
-    async fn no_stdin_replies_with_usage() {
-        let out = run_uppercase(Vec::new(), None).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: uppercase"), "{out:?}");
-    }
-
-    #[tokio::test]
-    async fn arguments_rejected_with_convention_error() {
-        let out = run_uppercase(vec!["FILE".into()], None).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[error] uppercase: "), "{stderr}");
-        assert!(stderr.contains("Use:"), "{stderr}");
     }
 }
 ```

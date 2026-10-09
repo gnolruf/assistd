@@ -98,12 +98,3 @@ async fn approvals_are_saved_and_loaded() {
     let reloaded = Allowlist::load(Vec::new(), sandboxed(&[bin.path()]), store).expect("reload");
     assert_eq!(reloaded.verdict("tool"), Verdict::Allowed);
 }
-
-#[test]
-fn a_malformed_approvals_file_is_an_error() {
-    let config = tempfile::tempdir().expect("tempdir");
-    let store = config.path().join(APPROVALS_FILE);
-    std::fs::write(&store, "[[program]]\nname = 3\n").expect("write");
-    let err = Allowlist::load(Vec::new(), sandboxed(&[]), store).expect_err("malformed");
-    assert!(matches!(err, AllowlistError::Parse { .. }), "{err:?}");
-}

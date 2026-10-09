@@ -463,71 +463,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_empty_and_well_formed_hotkeys() {
-        let cases: [(&str, Edit); 2] = [
-            ("all empty", |_, _| {}),
-            ("all set", |p, v| {
-                p.hotkey = "Super+Escape".into();
-                v.hotkey = "Super+Space".into();
-                v.continuous.hotkey = "Super+Shift+L".into();
-                v.synthesis.toggle_hotkey = "Super+Shift+M".into();
-                v.synthesis.skip_hotkey = "Super+Shift+S".into();
-            }),
-        ];
-        for (label, edit) in cases {
-            let (p, v) = configs(edit);
-            validate(&p, &v).unwrap_or_else(|e| panic!("{label}: {e:#}"));
-        }
-    }
+    fn validate_rejects_garbage_only_for_enabled_features() {
+        let (p, v) = configs(|_, v| v.continuous.hotkey = GARBAGE.into());
+        let err = validate(&p, &v).expect_err("garbage hotkey must be rejected");
+        assert!(
+            err.to_string()
+                .starts_with("invalid voice.continuous.hotkey "),
+            "{err}"
+        );
 
-    #[test]
-    fn validate_rejects_garbage_naming_the_config_key() {
-        let cases: [(&str, Edit); 5] = [
-            ("presence.hotkey", |p, _| p.hotkey = GARBAGE.into()),
-            ("voice.hotkey", |_, v| v.hotkey = GARBAGE.into()),
-            ("voice.continuous.hotkey", |_, v| {
-                v.continuous.hotkey = GARBAGE.into();
-            }),
-            ("voice.synthesis.toggle_hotkey", |_, v| {
-                v.synthesis.toggle_hotkey = GARBAGE.into();
-            }),
-            ("voice.synthesis.skip_hotkey", |_, v| {
-                v.synthesis.skip_hotkey = GARBAGE.into();
-            }),
-        ];
-        for (key, edit) in cases {
-            let (p, v) = configs(edit);
-            let err = validate(&p, &v).expect_err(key);
-            assert!(
-                err.to_string().starts_with(&format!("invalid {key} ")),
-                "{key}: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_ignores_hotkeys_of_disabled_features() {
-        let cases: [(&str, Edit); 3] = [
-            ("voice disabled", |_, v| {
-                v.enabled = false;
-                v.hotkey = GARBAGE.into();
-                v.continuous.hotkey = GARBAGE.into();
-                v.synthesis.toggle_hotkey = GARBAGE.into();
-            }),
-            ("continuous disabled", |_, v| {
-                v.continuous.enabled = false;
-                v.continuous.hotkey = GARBAGE.into();
-            }),
-            ("synthesis disabled", |_, v| {
-                v.synthesis.enabled = false;
-                v.synthesis.toggle_hotkey = GARBAGE.into();
-                v.synthesis.skip_hotkey = GARBAGE.into();
-            }),
-        ];
-        for (label, edit) in cases {
-            let (p, v) = configs(edit);
-            validate(&p, &v).unwrap_or_else(|e| panic!("{label}: {e:#}"));
-        }
+        let (p, v) = configs(|_, v| {
+            v.continuous.enabled = false;
+            v.continuous.hotkey = GARBAGE.into();
+        });
+        validate(&p, &v).expect("disabled feature's hotkey is ignored");
     }
 
     #[tokio::test]

@@ -1,7 +1,0 @@
-# Every section is optional and defaults on its own, so a working config
-# only needs the values a given deployment actually overrides.
-[model]
-name = "test/model-GGUF:Q4_K_M"
-
-[compositor]
-type = "sway"

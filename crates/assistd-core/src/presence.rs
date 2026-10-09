@@ -664,10 +664,6 @@ impl PresenceManager {
             stream_count_tx,
         })
     }
-
-    pub(crate) fn set_state_for_test(&self, state: PresenceTarget) {
-        self.publish_state(state);
-    }
 }
 
 /// Holds the daemon `Active` for a query: [`PresenceManager::sleep`] and

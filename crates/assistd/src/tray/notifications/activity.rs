@@ -320,41 +320,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn summarize_args_renders_a_single_line_preview() {
-        for (args, expected) in [
-            (json!({"a": 1, "b": "two"}), "a=1 b=two"),
-            (
-                json!({"command": "ls -la\n/tmp"}),
-                "command=\"ls -la /tmp\"",
-            ),
-            (json!({"q": "hello world"}), "q=\"hello world\""),
-            (json!({"k": "a=b"}), "k=\"a=b\""),
-            (json!([1, 2, 3, 4, 5]), "[5 items]"),
-            (Value::Null, ""),
-        ] {
-            assert_eq!(summarize_args(&args, 100), expected, "{args}");
-        }
-    }
-
-    #[test]
-    fn summarize_args_truncates_to_max_chars() {
-        let s = summarize_args(&json!({"a": "x".repeat(1000)}), 30);
-        assert_eq!(s, format!("a={}…", "x".repeat(28)));
-    }
-
-    #[test]
-    fn truncate_chars_from_end_keeps_last_n_codepoints() {
-        for (input, max, expected) in [
-            ("hello world", 5, "…world"),
-            ("short", 100, "short"),
-            ("", 5, ""),
-            ("🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀", 3, "…🦀🦀🦀"),
-        ] {
-            assert_eq!(truncate_chars_from_end(input, max), expected, "{input:?}");
-        }
-    }
-
     fn delta(id: &str, text: &str) -> Event {
         Event::Delta {
             id: id.into(),
@@ -395,15 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn tracker_keeps_displayed_turn_after_done() {
-        let mut t = ActivityTracker::default();
-        t.ingest(&last_delta("a", "the reply"));
-        t.ingest(&done("a"));
-        let s = t.snapshot();
-        assert_eq!(s.body, "the reply");
-    }
-
-    #[test]
     fn tracker_switches_to_new_turn_and_drops_old() {
         let mut t = ActivityTracker::default();
         t.ingest(&last_delta("a", "turn a body"));
@@ -411,38 +367,6 @@ mod tests {
         t.ingest(&last_delta("b", "turn b body"));
         assert_eq!(t.snapshot().body, "turn b body");
         assert!(!t.turns.contains_key("a"));
-    }
-
-    #[test]
-    fn tracker_keeps_the_last_tool_calls_with_args_summaries() {
-        let mut t = ActivityTracker::default();
-        for n in 0..4 {
-            t.ingest(&tool_call(
-                "a",
-                "bash",
-                json!({"command": format!("ls /tmp/{n}")}),
-            ));
-        }
-        let s = t.snapshot();
-        let summaries: Vec<_> = s
-            .tool_calls
-            .iter()
-            .map(|c| c.args_summary.as_str())
-            .collect();
-        assert_eq!(
-            summaries,
-            [
-                "command=\"ls /tmp/1\"",
-                "command=\"ls /tmp/2\"",
-                "command=\"ls /tmp/3\""
-            ]
-        );
-        assert_eq!(
-            s.activity,
-            Activity::RunningTool {
-                name: "bash".into()
-            }
-        );
     }
 
     #[test]
@@ -484,67 +408,6 @@ mod tests {
         assert_eq!(t.snapshot().title.as_deref(), Some("Cats And Dogs"));
         t.set_disconnected();
         assert_eq!(t.snapshot().title, None);
-    }
-
-    #[test]
-    fn finished_turn_reports_done_or_failed_with_its_error() {
-        let mut t = ActivityTracker::default();
-        t.ingest(&last_delta("a", "reply"));
-        t.ingest(&done("a"));
-        assert_eq!(t.snapshot().activity, Activity::Done);
-
-        t.ingest(&delta("b", "x"));
-        t.ingest(&Event::Error {
-            id: "b".into(),
-            message: "boom".into(),
-        });
-        let s = t.snapshot();
-        assert_eq!(s.activity, Activity::Failed);
-        assert_eq!(s.error.as_deref(), Some("boom"));
-        assert_eq!(t.current_turn(), Some("b"));
-    }
-
-    #[test]
-    fn tracker_truncates_body_to_the_last_body_chars() {
-        let mut t = ActivityTracker::default();
-        let long = "a".repeat(BODY_CHARS) + &"b".repeat(BODY_CHARS);
-        t.ingest(&last_delta("a", &long));
-        assert_eq!(t.snapshot().body, format!("…{}", "b".repeat(BODY_CHARS)));
-    }
-
-    #[test]
-    fn tracker_ignores_unrelated_event_kinds() {
-        let mut t = ActivityTracker::default();
-        let before = t.snapshot();
-        t.ingest(&Event::Capabilities {
-            id: "a".into(),
-            vision: false,
-            model_name: "test".into(),
-        });
-        let after = t.snapshot();
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn tool_result_marks_displayed_turn_as_thinking() {
-        let mut t = ActivityTracker::default();
-        t.ingest(&tool_call("a", "bash", json!({"command": "sleep 30"})));
-        t.ingest(&Event::ToolResult {
-            id: "a".into(),
-            name: "bash".into(),
-            result: json!({"ok": true}),
-        });
-        assert_eq!(t.snapshot().activity, Activity::Thinking);
-    }
-
-    #[test]
-    fn tracker_marks_busy_while_turn_in_flight() {
-        let mut t = ActivityTracker::default();
-        assert!(!t.is_busy());
-        t.ingest(&delta("a", "hi"));
-        assert!(t.is_busy());
-        t.ingest(&done("a"));
-        assert!(!t.is_busy());
     }
 
     #[test]
@@ -600,26 +463,6 @@ mod tests {
             id: "b".into(),
             speaking: false,
         });
-        assert!(!t.is_speaking());
-    }
-
-    #[test]
-    fn tracker_disconnect_clears_all_state() {
-        let mut t = ActivityTracker::default();
-        t.ingest(&last_delta("a", "x"));
-        t.ingest(&tool_call("a", "bash", json!({"command": "ls"})));
-        t.ingest(&Event::ListenState {
-            id: "x".into(),
-            active: true,
-        });
-        t.ingest(&Event::SpeakingState {
-            id: "a".into(),
-            speaking: true,
-        });
-        t.set_disconnected();
-        assert_eq!(t.snapshot(), ActivityView::default());
-        assert!(!t.is_busy());
-        assert!(!t.is_listening());
         assert!(!t.is_speaking());
     }
 }

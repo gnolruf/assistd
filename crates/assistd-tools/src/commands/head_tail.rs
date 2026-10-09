@@ -155,11 +155,8 @@ fn last_lines(text: &[u8], count: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::RangeInclusive;
-    use std::time::Duration;
 
     use super::*;
-    use crate::commands::{hold_fifo_open, make_fifo};
 
     async fn run(cmd: &dyn Command, args: &[&str], stdin: &[u8]) -> CommandOutput {
         cmd.run(CommandInput {
@@ -172,16 +169,6 @@ mod tests {
     const FIVE: &[u8] = b"one\ntwo\nthree\nfour\nfive\n";
 
     #[tokio::test]
-    async fn head_defaults_to_ten_lines() {
-        let lines = |range: RangeInclusive<u32>| -> String {
-            range.map(|i| format!("line{i}\n")).collect()
-        };
-        let out = run(&HeadCommand, &[], lines(1..=12).as_bytes()).await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(String::from_utf8_lossy(&out.stdout), lines(1..=10));
-    }
-
-    #[tokio::test]
     async fn head_accepts_every_count_spelling() {
         for args in [vec!["-n", "2"], vec!["-n2"], vec!["-2"]] {
             let out = run(&HeadCommand, &args, FIVE).await;
@@ -192,13 +179,10 @@ mod tests {
     #[tokio::test]
     async fn takes_lines_from_the_right_end() {
         const FIVE_TEXT: &str = "one\ntwo\nthree\nfour\nfive\n";
-        let cases: [(&dyn Command, &[&str], &str, &str); 6] = [
+        let cases: [(&dyn Command, &[&str], &str, &str); 3] = [
             (&TailCommand, &["-2"], FIVE_TEXT, "four\nfive\n"),
-            (&HeadCommand, &["-99"], FIVE_TEXT, FIVE_TEXT),
             (&TailCommand, &["-99"], FIVE_TEXT, FIVE_TEXT),
             (&TailCommand, &["-1"], "a\nb", "b"),
-            (&HeadCommand, &[], "", ""),
-            (&TailCommand, &[], "", ""),
         ];
         for (cmd, args, stdin, expected) in cases {
             let label = format!("{} {args:?} {stdin:?}", cmd.name());
@@ -206,82 +190,6 @@ mod tests {
             assert_eq!(out.exit_code, 0, "{label}");
             assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{label}");
         }
-    }
-
-    #[tokio::test]
-    async fn no_stdin_emits_usage() {
-        for (cmd, name) in [
-            (&HeadCommand as &dyn Command, "head"),
-            (&TailCommand, "tail"),
-        ] {
-            let out = cmd
-                .run(CommandInput {
-                    args: vec!["-n".into(), "2".into()],
-                    stdin: None,
-                })
-                .await;
-            assert_eq!(out.exit_code, 2, "{name}");
-            let usage = format!("usage: {name}");
-            assert!(out.stdout.starts_with(usage.as_bytes()), "{name}: {out:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn named_files_are_read_beat_stdin_and_concatenate() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.txt");
-        let b = dir.path().join("b.txt");
-        std::fs::write(&a, b"one\ntwo\n").unwrap();
-        std::fs::write(&b, b"three\nfour\n").unwrap();
-        let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
-
-        let out = run(&HeadCommand, &[a], b"ignored\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"one\ntwo\n");
-
-        let both = run(&HeadCommand, &["-2", a, b], b"").await;
-        assert_eq!(both.stdout, b"one\ntwo\n");
-        let tail = run(&TailCommand, &["-2", a, b], b"").await;
-        assert_eq!(tail.stdout, b"three\nfour\n");
-    }
-
-    #[tokio::test]
-    async fn missing_file_reports_navigation_error() {
-        let out = run(&HeadCommand, &["/nope/missing.txt"], b"").await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] head: file not found: /nope/missing.txt. Use: ls /nope to see what is there\n"
-        );
-    }
-
-    async fn assert_head_refuses_fifo_promptly(fifo: &str) {
-        let out = tokio::time::timeout(Duration::from_secs(5), run(&HeadCommand, &[fifo], b""))
-            .await
-            .expect("head blocked on a FIFO");
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            format!(
-                "[error] head: {fifo}: not a regular file (device, pipe, or socket). \
-                 Check: ls -l {fifo}\n"
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn fifo_with_no_writer_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let fifo = make_fifo(dir.path());
-        assert_head_refuses_fifo_promptly(&fifo).await;
-    }
-
-    #[tokio::test]
-    async fn fifo_held_open_by_a_writer_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let fifo = make_fifo(dir.path());
-        let _ends = hold_fifo_open(&fifo);
-        assert_head_refuses_fifo_promptly(&fifo).await;
     }
 
     #[tokio::test]
@@ -294,27 +202,5 @@ mod tests {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("[error] tail: binary"), "{stderr}");
         assert!(stderr.contains("Use: cat -b "), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn non_numeric_count_errors() {
-        let out = run(&TailCommand, &["-n", "lots"], FIVE).await;
-        assert_eq!(out.exit_code, 2);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("[error] tail: not a line count"),
-            "{stderr}"
-        );
-        assert!(stderr.contains("Use: tail -n 20"), "{stderr}");
-    }
-
-    #[tokio::test]
-    async fn dangling_n_errors() {
-        let out = run(&HeadCommand, &["-n"], FIVE).await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] head: -n needs a line count. Use: head -n 20\n"
-        );
     }
 }

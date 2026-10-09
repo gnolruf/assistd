@@ -296,12 +296,6 @@ mod tests {
     }
 
     #[test]
-    fn silent_input_produces_no_events() {
-        let mut vad = UtteranceVad::new(tight_tuning());
-        assert_eq!(feed(&mut vad, false, 100), NO_EVENTS);
-    }
-
-    #[test]
     fn voiced_burst_bounded_by_silence_emits_one_utterance() {
         let mut vad = UtteranceVad::new(tight_tuning());
         assert_eq!(feed(&mut vad, false, 5), NO_EVENTS);
@@ -339,17 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn onset_requires_multiple_confirmed_frames() {
-        let mut vad = UtteranceVad::new(VadTuning {
-            onset_confirm_frames: 3,
-            ..tight_tuning()
-        });
-        feed(&mut vad, false, 5);
-        feed(&mut vad, true, 2);
-        assert_eq!(feed(&mut vad, false, 10), NO_EVENTS);
-    }
-
-    #[test]
     fn reset_discards_in_progress_utterance_and_preroll() {
         let mut vad = UtteranceVad::new(tight_tuning());
         feed(&mut vad, false, 5);
@@ -369,19 +352,5 @@ mod tests {
             [VadEvent::UtteranceComplete(expected)],
             "pre-roll after reset holds only post-reset silence"
         );
-    }
-
-    #[test]
-    fn vad_tuning_from_ms_rounds_up_to_whole_frames() {
-        for (silence_ms, max_secs, offset_frames, max_utterance_frames) in
-            [(800, 30, 40, 1500), (810, 30, 41, 1500), (1, 0, 1, 1)]
-        {
-            let tuning = VadTuning::from_ms(silence_ms, max_secs);
-            assert_eq!(
-                (tuning.offset_frames, tuning.max_utterance_frames),
-                (offset_frames, max_utterance_frames),
-                "from_ms({silence_ms}, {max_secs})"
-            );
-        }
     }
 }

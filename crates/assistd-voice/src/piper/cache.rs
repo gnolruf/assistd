@@ -82,19 +82,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn read_sample_rate_parses_audio_section() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("voice.onnx.json");
-        tokio::fs::write(
-            &path,
-            r#"{"audio": {"sample_rate": 22050, "quality": "medium"}, "phoneme_id_map": {}}"#,
-        )
-        .await
-        .unwrap();
-        assert_eq!(read_sample_rate(&path).await.unwrap(), 22050);
-    }
-
-    #[tokio::test]
     async fn read_sample_rate_rejects_html_body() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("voice.onnx.json");

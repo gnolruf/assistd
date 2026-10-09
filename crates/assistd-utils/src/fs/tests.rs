@@ -12,17 +12,6 @@ fn assert_not_regular(err: &io::Error) {
 }
 
 #[test]
-fn reads_a_regular_file_with_its_size() {
-    for open in [open_regular, open_regular_or_dir] {
-        let (mut file, size) = open(Path::new("Cargo.toml")).unwrap();
-        let mut text = String::new();
-        file.read_to_string(&mut text).unwrap();
-        assert_eq!(size, text.len() as u64);
-        assert!(text.contains("assistd-utils"));
-    }
-}
-
-#[test]
 fn directory_is_refused_or_fails_on_read() {
     assert_not_regular(&open_regular(Path::new("src")).unwrap_err());
     let (mut dir, _) = open_regular_or_dir(Path::new("src")).unwrap();

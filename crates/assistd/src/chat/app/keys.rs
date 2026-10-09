@@ -10,10 +10,10 @@ use uuid::Uuid;
 use super::{App, WireStream};
 use crate::chat::input::InputAction;
 
-pub(super) const MOUSE_WHEEL_STEP: u16 = 3;
+const MOUSE_WHEEL_STEP: u16 = 3;
 
 /// `(command, usage_hint)` pairs for the autocomplete popup.
-pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
+const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/attach", "<path>"),
     ("/fork", "<name>"),
     ("/new", ""),

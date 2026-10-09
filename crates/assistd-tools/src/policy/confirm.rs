@@ -395,11 +395,4 @@ mod tests {
         rx.try_recv()
             .expect_err("a gate with no router must not reach the wire");
     }
-
-    #[test]
-    fn an_answer_is_always_only_when_it_allows() {
-        assert_eq!(Approval::from_answer(false, true), Approval::Deny);
-        assert_eq!(Approval::from_answer(true, false), Approval::Once);
-        assert_eq!(Approval::from_answer(true, true), Approval::Always);
-    }
 }

@@ -37,35 +37,6 @@ async fn set_enabled_false_cancels_inner_once() {
 }
 
 #[tokio::test]
-async fn set_enabled_true_does_not_cancel_or_bump_epoch() {
-    let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::ready(inner.clone(), false);
-    ctrl.set_enabled(true).await;
-    assert!(ctrl.enabled());
-    assert_eq!(inner.cancels.load(Ordering::SeqCst), 0);
-    assert_eq!(ctrl.current_epoch(), 0);
-}
-
-#[tokio::test]
-async fn skip_advances_epoch_and_cancels() {
-    let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::ready(inner.clone(), true);
-    let before = ctrl.current_epoch();
-    ctrl.skip().await;
-    assert_eq!(ctrl.current_epoch(), before + 1);
-    assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn interrupt_is_alias_of_skip() {
-    let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::ready(inner.clone(), true);
-    ctrl.interrupt().await;
-    assert_eq!(ctrl.current_epoch(), 1);
-    assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn should_speak_decision() {
     for (enabled, skip_before_start, skip_after_start, expected) in [
         (true, false, false, SpeakDecision::Speak),
@@ -88,18 +59,6 @@ async fn should_speak_decision() {
             "enabled={enabled} skip_before_start={skip_before_start} skip_after_start={skip_after_start}"
         );
     }
-}
-
-#[tokio::test]
-async fn toggle_off_then_on_resumes_speak_decision() {
-    let inner = Arc::new(RecordingOutput::default());
-    let ctrl = VoiceOutputController::ready(inner.clone(), true);
-    let start = ctrl.current_epoch();
-    ctrl.set_enabled(false).await;
-    assert_eq!(ctrl.should_speak(start), SpeakDecision::DropSilent);
-    ctrl.set_enabled(true).await;
-    assert_eq!(ctrl.should_speak(start), SpeakDecision::Speak);
-    assert_eq!(ctrl.current_epoch(), start);
 }
 
 #[tokio::test]

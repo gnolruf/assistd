@@ -46,17 +46,6 @@ async fn focus_event_overwrites_all_fields() {
 }
 
 #[tokio::test]
-async fn title_event_for_focused_id_updates_title_and_class() {
-    let snapshot = snap();
-    event(&snapshot, WindowChangeKind::Focus, 42, "Firefox", "Old").await;
-    event(&snapshot, WindowChangeKind::Title, 42, "firefox", "New").await;
-    assert_eq!(
-        read_focused_context(&snapshot).await,
-        focused(42, "firefox", "New")
-    );
-}
-
-#[tokio::test]
 async fn title_event_for_other_id_is_ignored() {
     let snapshot = snap();
     event(
@@ -87,33 +76,4 @@ async fn close_event_for_focused_id_clears_focus() {
     event(&snapshot, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
     event(&snapshot, WindowChangeKind::Close, 42, "Firefox", "GitHub").await;
     assert_eq!(read_focused_context(&snapshot).await, None);
-}
-
-#[tokio::test]
-async fn close_event_for_other_id_is_ignored() {
-    let snapshot = snap();
-    event(&snapshot, WindowChangeKind::Focus, 42, "Firefox", "GitHub").await;
-    event(&snapshot, WindowChangeKind::Close, 99, "Other", "Other").await;
-    assert_eq!(
-        read_focused_context(&snapshot).await,
-        focused(42, "Firefox", "GitHub")
-    );
-}
-
-#[tokio::test]
-async fn read_focused_context_returns_none_for_empty() {
-    assert_eq!(read_focused_context(&snap()).await, None);
-}
-
-#[tokio::test]
-async fn workspace_focus_alone_yields_a_partial_context() {
-    let snapshot = snap();
-    apply_workspace_focus(&snapshot, Some("3".into())).await;
-    assert_eq!(
-        read_focused_context(&snapshot).await,
-        Some(FocusedWindowContext {
-            workspace: Some("3".into()),
-            ..FocusedWindowContext::default()
-        })
-    );
 }

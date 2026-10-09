@@ -55,22 +55,11 @@ fn write_default_refuses_to_overwrite_an_existing_file() {
 }
 
 #[test]
-fn readable_file_with_mcp_env_is_exposed() {
-    let config: Config = toml::from_str(MCP_SERVER_WITH_ENV).unwrap();
-    assert!(config.exposes_mcp_env(0o644));
-    assert!(config.exposes_mcp_env(0o640));
-    assert!(config.exposes_mcp_env(0o604));
-}
-
-#[test]
-fn owner_only_file_with_mcp_env_is_not_exposed() {
-    let config: Config = toml::from_str(MCP_SERVER_WITH_ENV).unwrap();
-    assert!(!config.exposes_mcp_env(0o600));
-}
-
-#[test]
-fn readable_file_without_mcp_env_is_not_exposed() {
-    let config: Config = toml::from_str(MCP_SERVER_WITHOUT_ENV).unwrap();
-    assert!(!config.exposes_mcp_env(0o644));
-    assert!(!Config::default().exposes_mcp_env(0o644));
+fn only_a_readable_file_with_mcp_env_is_exposed() {
+    let with_env: Config = toml::from_str(MCP_SERVER_WITH_ENV).unwrap();
+    assert!(with_env.exposes_mcp_env(0o640));
+    assert!(with_env.exposes_mcp_env(0o604));
+    assert!(!with_env.exposes_mcp_env(0o600));
+    let without_env: Config = toml::from_str(MCP_SERVER_WITHOUT_ENV).unwrap();
+    assert!(!without_env.exposes_mcp_env(0o644));
 }

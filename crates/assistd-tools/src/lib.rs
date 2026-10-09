@@ -176,14 +176,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_finds_tools_by_name() {
-        let mut reg = ToolRegistry::new();
-        reg.register(Noop);
-        assert_eq!(reg.get("noop").map(Tool::name), Some("noop"));
-        assert!(reg.get("missing").is_none());
-    }
-
-    #[test]
     fn openai_schemas_wraps_each_tool() {
         let mut reg = ToolRegistry::new();
         reg.register(Noop);

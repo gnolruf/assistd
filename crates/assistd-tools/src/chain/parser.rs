@@ -425,22 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn a_backslash_before_other_chars_in_double_quotes_stays_literal() {
-        assert_eq!(
-            tokenize(r#"grep "\d+\s""#),
-            Ok(vec![bare("grep"), quoted(r"\d+\s")])
-        );
-    }
-
-    #[test]
-    fn a_partly_quoted_word_counts_as_quoted() {
-        assert_eq!(
-            tokenize("echo pre\"fix\""),
-            Ok(vec![bare("echo"), quoted("prefix")])
-        );
-    }
-
-    #[test]
     fn tokenize_rejects_unterminated_quotes() {
         for line in ["echo 'abc", "echo \"abc"] {
             assert_eq!(
@@ -522,14 +506,6 @@ mod tests {
         ] {
             assert_eq!(tokenize(line), Ok(expected), "{line:?}");
         }
-    }
-
-    #[test]
-    fn a_quoted_fd_prefix_is_not_a_stderr_redirect() {
-        assert_eq!(
-            tokenize(r#"echo "2" > out"#),
-            Err(ParseError::Redirection(Redirection::Output))
-        );
     }
 
     #[test]

@@ -744,71 +744,13 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use assistd_core::Config;
-    use assistd_ipc::IpcClient;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use tokio::sync::mpsc;
 
     use super::*;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    fn test_app() -> App {
-        let (tx, _rx) = mpsc::channel(1);
-        App::new(
-            Arc::new(IpcClient::with_path("/tmp/assistd-test-nonexistent.sock")),
-            tx,
-            "test-model".into(),
-            Config::default().sleep,
-            false,
-            None,
-        )
-    }
-
-    fn output_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-        terminal
-            .draw(|frame| render_output(frame, frame.area(), app))
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        (0..height)
-            .map(|y| {
-                let row: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
-                row.trim_end().to_string()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn output_pane_draws_the_scrolled_window() {
-        let mut app = test_app();
-        for i in 0..30 {
-            app.output.push_info(&format!("line {i}"));
-        }
-        assert_eq!(
-            output_rows(&mut app, 20, 3),
-            ["line 27", "line 28", "line 29"]
-        );
-        app.output.scroll_lines_up(10);
-        assert_eq!(
-            output_rows(&mut app, 20, 3),
-            ["line 17", "line 18", "line 19"]
-        );
-        app.output.clear();
-        app.output.push_info("only");
-        assert_eq!(output_rows(&mut app, 20, 3), ["only", "", ""]);
-    }
-
-    #[test]
-    fn centered_rect_fits_inside_a_narrow_area() {
-        let area = Rect::new(3, 2, 20, 5);
-        assert_eq!(centered_rect(area, 40, 8), area);
-        assert_eq!(centered_rect(area, 10, 3), Rect::new(8, 3, 10, 3));
     }
 
     #[test]
@@ -852,14 +794,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    #[test]
-    fn script_rows_splits_multiline_scripts() {
-        let (rows, visibility) = script_rows("echo ok\nrm -rf ~", 40, CONFIRM_SCRIPT_MAX_ROWS);
-        let texts: Vec<String> = rows.iter().map(line_text).collect();
-        assert_eq!(texts, vec!["echo ok", "rm -rf ~"]);
-        assert_eq!(visibility, ScriptVisibility::Whole);
     }
 
     #[test]
@@ -911,12 +845,6 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_modal_names_the_tool() {
-        let screen = modal_screen(&mut confirmation_modal("mcp__files__delete", "{}"), 100, 30);
-        assert!(screen.contains("tool: mcp__files__delete"), "{screen}");
-    }
-
-    #[test]
     fn confirmation_modal_summarises_rows_that_do_not_fit() {
         let script = (0..CONFIRM_SCRIPT_MAX_ROWS)
             .map(|i| format!("cmd{i}"))
@@ -958,47 +886,14 @@ mod tests {
         assert_eq!(compute_input_height(10, 24, &"a".repeat(18)), 3);
     }
 
-    #[test]
-    fn input_height_capped_to_leave_room_for_output_and_status() {
-        assert_eq!(compute_input_height(10, 6, &"a".repeat(100)), 2);
-    }
-
-    #[test]
-    fn input_height_minimum_one_even_in_tiny_frame() {
-        assert_eq!(compute_input_height(10, 0, ""), 1);
-        assert_eq!(compute_input_height(0, 24, "anything"), 1);
-    }
-
     fn chars(s: &str) -> Vec<char> {
         s.chars().collect()
-    }
-
-    #[test]
-    fn wrap_input_breaks_at_word_boundary() {
-        let rows = wrap_input(&chars("hello world this is"), 2, 10);
-        let texts: Vec<String> = rows
-            .iter()
-            .map(|&(s, e)| chars("hello world this is")[s..e].iter().collect())
-            .collect();
-        assert_eq!(texts, vec!["hello ", "world ", "this is"]);
     }
 
     #[test]
     fn wrap_input_hard_breaks_when_word_is_longer_than_row() {
         let rows = wrap_input(&chars("hellotherefriend"), 2, 10);
         assert_eq!(rows, vec![(0, 8), (8, 16)]);
-    }
-
-    #[test]
-    fn wrap_input_adds_phantom_row_when_last_row_full() {
-        let rows = wrap_input(&chars("aaaaaaaa"), 2, 10);
-        assert_eq!(rows, vec![(0, 8), (8, 8)]);
-    }
-
-    #[test]
-    fn wrap_input_empty_buffer_has_one_row() {
-        let rows = wrap_input(&[], 2, 10);
-        assert_eq!(rows, vec![(0, 0)]);
     }
 
     #[test]

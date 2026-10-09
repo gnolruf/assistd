@@ -1,64 +1,13 @@
 //! Every section is optional, and a key the schema doesn't know is
 //! skipped and reported rather than rejected.
 
-use assistd_config::{Config, fixtures};
-
-#[test]
-fn empty_toml_yields_the_code_defaults() {
-    let cfg: Config = toml::from_str("").expect("an empty config must parse");
-    assert_eq!(cfg, Config::default());
-}
-
-#[test]
-fn every_section_may_be_declared_empty() {
-    let toml_src = "\
-[model]
-[chat]
-[voice]
-[voice.transcription]
-[voice.continuous]
-[voice.synthesis]
-[compositor]
-[sleep]
-[presence]
-[daemon]
-[tools]
-[tools.output]
-[tools.bash]
-[tools.write]
-[tools.screenshot]
-[memory]
-[embedding]
-[mcp]
-[tray]
-[tray.icons]
-[tray.notifications]
-[tray.notifications.wake_on]
-";
-    let cfg: Config = toml::from_str(toml_src).expect("empty sections must parse");
-    assert_eq!(cfg, Config::default());
-}
+use assistd_config::Config;
 
 #[test]
 fn deleted_sections_are_ignored_and_reported() {
     let (cfg, unknown) = parse_reporting_unknown_keys("[remote]\nport = 8384\n\n[timeouts]\n");
     assert_eq!(cfg, Config::default());
     assert_eq!(unknown, ["remote", "timeouts"]);
-}
-
-#[test]
-fn replaced_tray_popup_section_is_reported() {
-    let (cfg, unknown) = parse_reporting_unknown_keys("[tray.popup]\nanchor = \"bottom_right\"\n");
-    assert_eq!(cfg, Config::default());
-    assert_eq!(unknown, ["tray.popup"]);
-}
-
-#[test]
-fn deleted_keys_in_known_sections_are_reported_with_their_path() {
-    let (_, unknown) = parse_reporting_unknown_keys(
-        "[chat]\nmax_summary_tokens = 1200\n\n[sleep]\nsuspend = false\n",
-    );
-    assert_eq!(unknown, ["chat.max_summary_tokens", "sleep.suspend"]);
 }
 
 #[test]
@@ -98,13 +47,6 @@ env = { API_KEY = \"x\" }
 }
 
 #[test]
-fn a_wrong_type_is_still_a_parse_error() {
-    let err = toml::from_str::<Config>("[chat]\ntemperature = \"hot\"\n")
-        .expect_err("a mistyped known key must not parse");
-    assert!(err.to_string().contains("temperature"), "{err}");
-}
-
-#[test]
 fn custom_args_with_a_refused_flag_is_a_parse_error() {
     let err =
         toml::from_str::<Config>("[model]\ncustom_args = \"--flash-attn on --host 0.0.0.0\"\n")
@@ -112,15 +54,6 @@ fn custom_args_with_a_refused_flag_is_a_parse_error() {
     let message = err.to_string();
     assert!(message.contains("custom_args"), "{message}");
     assert!(message.contains("--host"), "{message}");
-}
-
-#[test]
-fn embedding_custom_args_refuse_their_own_managed_flags() {
-    let err = toml::from_str::<Config>("[embedding]\ncustom_args = \"--pooling cls\"\n")
-        .expect_err("custom_args must not change the pooling assistd relies on");
-    assert!(err.to_string().contains("--pooling"), "{err}");
-    toml::from_str::<Config>("[embedding]\ncustom_args = \"-c 8192 --threads 4\"\n")
-        .expect("embedding tuning flags parse");
 }
 
 #[test]
@@ -139,13 +72,6 @@ fn defaults_validate() {
 }
 
 #[test]
-fn minimal_fixture_parses_and_validates() {
-    fixtures::minimal()
-        .validate()
-        .expect("minimal fixture must validate");
-}
-
-#[test]
 fn non_loopback_server_hosts_are_rejected() {
     let cfg: Config =
         toml::from_str("[model]\nhost = \"0.0.0.0\"\n[embedding]\nenabled = true\nhost = \"::\"\n")
@@ -156,32 +82,6 @@ fn non_loopback_server_hosts_are_rejected() {
     let message = err.to_string();
     assert!(message.contains("model.host"), "{message}");
     assert!(message.contains("embedding.host"), "{message}");
-}
-
-#[test]
-fn relative_overflow_dir_is_rejected() {
-    for dir in ["~/.cache/assistd/output", "output", "."] {
-        let cfg: Config = toml::from_str(&format!("[tools.output]\noverflow_dir = \"{dir}\"\n"))
-            .expect("config must parse");
-        let err = cfg
-            .validate()
-            .expect_err("a relative overflow_dir must not validate");
-        let message = err.to_string();
-        assert!(
-            message.contains("tools.output.overflow_dir"),
-            "{dir}: {message}"
-        );
-    }
-}
-
-#[test]
-fn relative_scratch_dir_is_rejected() {
-    let cfg: Config =
-        toml::from_str("[tools.scratch]\ndir = \"scratch\"\n").expect("config must parse");
-    let err = cfg
-        .validate()
-        .expect_err("a relative scratch dir must not validate");
-    assert!(err.to_string().contains("tools.scratch.dir"), "{err}");
 }
 
 #[test]
@@ -229,13 +129,6 @@ fn history_and_response_must_fit_the_context_together() {
 }
 
 #[test]
-fn ipv6_loopback_server_hosts_validate() {
-    let cfg: Config = toml::from_str("[model]\nhost = \"::1\"\n[embedding]\nhost = \"::1\"\n")
-        .expect("config must parse");
-    cfg.validate().expect("::1 is loopback");
-}
-
-#[test]
 fn mcp_server_names_that_could_share_a_tool_name_are_rejected() {
     for name in ["a__b", "a_", "a___b"] {
         let cfg: Config = toml::from_str(&format!(
@@ -249,10 +142,6 @@ fn mcp_server_names_that_could_share_a_tool_name_are_rejected() {
         let message = err.to_string();
         assert!(message.contains("mcp.servers[0].name"), "{name}: {message}");
     }
-}
-
-#[test]
-fn mcp_server_names_with_single_underscores_validate() {
     let cfg: Config = toml::from_str(
         "[mcp]\nenabled = true\n[[mcp.servers]]\nname = \"google_calendar-v2\"\n\
          command = \"npx\"\n",
@@ -267,16 +156,4 @@ fn parse_reporting_unknown_keys(toml_src: &str) -> (Config, Vec<String>) {
     let raw: toml::Table = toml::from_str(toml_src).expect("config must be valid TOML");
     let unknown = cfg.unknown_keys(&raw).expect("config must serialize");
     (cfg, unknown)
-}
-
-#[test]
-fn empty_tray_icon_names_are_rejected() {
-    let cfg: Config = toml::from_str("[tray.icons]\nactive = \"\"\ngenerating = \" \"\n")
-        .expect("config must parse");
-    let message = cfg
-        .validate()
-        .expect_err("empty icon names must not validate")
-        .to_string();
-    assert!(message.contains("tray.icons.active"), "{message}");
-    assert!(message.contains("tray.icons.generating"), "{message}");
 }

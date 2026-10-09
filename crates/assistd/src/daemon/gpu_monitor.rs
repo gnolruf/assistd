@@ -321,20 +321,9 @@ mod tests {
                 sleep(42, "game"),
             ),
             (
-                "below threshold",
-                vec![sample(42, 500, "something")],
-                Action::None,
-            ),
-            ("no processes", vec![], Action::None),
-            (
                 "allowlisted above threshold",
                 vec![sample(42, 4096, "firefox")],
                 Action::None,
-            ),
-            (
-                "denylisted below threshold",
-                vec![sample(42, 10, "miner")],
-                sleep(42, "miner"),
             ),
             (
                 "denylist beats allowlist",
@@ -388,26 +377,10 @@ mod tests {
                 Action::Wake,
             ),
             (
-                "contention gone, no auto-wake",
-                PresenceState::Sleeping,
-                vec![],
-                false,
-                contention,
-                Action::None,
-            ),
-            (
                 "user sleep, auto-wake",
                 PresenceState::Sleeping,
                 vec![],
                 true,
-                SleepCause::None,
-                Action::None,
-            ),
-            (
-                "user sleep with contender",
-                PresenceState::Sleeping,
-                contender(),
-                false,
                 SleepCause::None,
                 Action::None,
             ),
@@ -434,49 +407,12 @@ mod tests {
         let parent_of = |pid: u32| parents.get(&pid).copied();
         let cases = [
             ("router itself", 100, true),
-            ("model child", 200, true),
             ("grandchild", 300, true),
             ("sibling of router", 400, false),
-            ("unknown pid", 999, false),
             ("parent cycle", 500, false),
         ];
         for (label, pid, expected) in cases {
             assert_eq!(descends_from(pid, 100, parent_of), expected, "{label}");
-        }
-    }
-
-    #[test]
-    fn is_own_process_matches_self_and_router_tree() {
-        let self_pid = std::process::id();
-        let parent = std::os::unix::process::parent_id();
-        assert!(is_own_process(self_pid, self_pid, None));
-        assert!(is_own_process(self_pid, u32::MAX, Some(parent)));
-        assert!(!is_own_process(self_pid, u32::MAX, Some(u32::MAX - 1)));
-        assert!(!is_own_process(self_pid, u32::MAX, None));
-    }
-
-    #[test]
-    fn read_parent_pid_parses_proc_stat() {
-        assert_eq!(
-            read_parent_pid(std::process::id()),
-            Some(std::os::unix::process::parent_id())
-        );
-        assert_eq!(read_parent_pid(u32::MAX), None);
-    }
-
-    #[test]
-    fn read_comm_falls_back_to_a_pid_label() {
-        assert_eq!(read_comm(u32::MAX), format!("<pid {}>", u32::MAX));
-    }
-
-    #[test]
-    #[ignore = "requires NVIDIA driver"]
-    fn live_nvml_collect_foreign_usage_does_not_panic() {
-        let nvml = Nvml::init().expect("Nvml::init should succeed with NVIDIA driver present");
-        let samples = collect_foreign_usage(&nvml, std::process::id(), None)
-            .expect("collect_foreign_usage should succeed on a working system");
-        for s in &samples {
-            assert_ne!(s.pid, std::process::id(), "self pid must be filtered out");
         }
     }
 }

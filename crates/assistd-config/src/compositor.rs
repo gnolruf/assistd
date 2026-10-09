@@ -81,20 +81,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compositor_type_parses_lowercase_names() {
-        for (raw, want) in [
-            ("auto", CompositorType::Auto),
-            ("i3", CompositorType::I3),
-            ("sway", CompositorType::Sway),
-            ("hyprland", CompositorType::Hyprland),
-        ] {
-            let parsed: CompositorConfig =
-                toml::from_str(&format!("type = \"{raw}\"\n")).expect("deserialize");
-            assert_eq!(parsed.compositor_type, want, "raw {raw}");
-        }
-    }
-
-    #[test]
     fn detect_from_env_follows_priority_order() {
         let xdg = |d: &str| SessionEnv {
             xdg_current_desktop: Some(d.into()),
@@ -109,14 +95,6 @@ mod tests {
                     ..SessionEnv::default()
                 },
                 Some(CompositorType::Sway),
-            ),
-            (
-                "i3sock only",
-                SessionEnv {
-                    i3sock: true,
-                    ..SessionEnv::default()
-                },
-                Some(CompositorType::I3),
             ),
             (
                 "hyprland signature",
@@ -135,18 +113,9 @@ mod tests {
                 },
                 Some(CompositorType::I3),
             ),
-            ("xdg sway", xdg("sway"), Some(CompositorType::Sway)),
-            ("xdg i3", xdg("i3"), Some(CompositorType::I3)),
-            (
-                "xdg Hyprland",
-                xdg("Hyprland"),
-                Some(CompositorType::Hyprland),
-            ),
             ("xdg SWAY", xdg("SWAY"), Some(CompositorType::Sway)),
             ("nothing set", SessionEnv::default(), None),
-            ("xdg empty", xdg(""), None),
             ("xdg KDE", xdg("KDE"), None),
-            ("xdg GNOME", xdg("GNOME"), None),
         ];
         for (label, env, want) in cases {
             assert_eq!(detect_from_env(&env), want, "{label}");

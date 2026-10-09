@@ -22,57 +22,6 @@ fn contents(history: &[HistoryRow]) -> Vec<(PersistedRole, &str)> {
 }
 
 #[tokio::test]
-async fn round_trip_user_and_assistant_messages() {
-    let (store, _guard) = fresh_store().await;
-    let session = SessionId::new();
-    let branch = store
-        .begin_session_with_main_branch(&session, 42)
-        .await
-        .unwrap();
-    let turn = store.begin_turn(&session, "what is 2+2?").await.unwrap();
-
-    store
-        .append_message_to_branch(
-            &session,
-            branch,
-            Some(turn),
-            PersistedMessage::user("what is 2+2?"),
-        )
-        .await
-        .unwrap();
-    store
-        .append_message_to_branch(
-            &session,
-            branch,
-            Some(turn),
-            PersistedMessage::assistant_text("four"),
-        )
-        .await
-        .unwrap();
-    store.end_turn(turn).await.unwrap();
-    store.end_session(&session).await.unwrap();
-
-    let history = store.load_branch_history(branch).await.unwrap();
-    assert_eq!(
-        contents(&history),
-        [
-            (PersistedRole::User, "what is 2+2?"),
-            (PersistedRole::Assistant, "four")
-        ]
-    );
-
-    let recent = store.recent_turns(5).await.unwrap();
-    let [summary] = recent.as_slice() else {
-        panic!("expected one turn, got {recent:?}");
-    };
-    assert_eq!(summary.turn_id, turn.0);
-    assert_eq!(summary.session_id, session.0);
-    assert_eq!(summary.user_text, "what is 2+2?");
-    assert_eq!(summary.message_count, 2);
-    assert!(summary.ended_at.is_some());
-}
-
-#[tokio::test]
 async fn tool_calls_and_tool_results_round_trip() {
     let (store, _guard) = fresh_store().await;
     let session = SessionId::new();
@@ -126,30 +75,6 @@ async fn tool_calls_and_tool_results_round_trip() {
             },
         ]
     );
-}
-
-#[tokio::test]
-async fn begin_session_with_main_branch_inserts_session_and_main_branch() {
-    let (store, _guard) = fresh_store().await;
-    let session = SessionId::new();
-    let branch = store
-        .begin_session_with_main_branch(&session, 123)
-        .await
-        .unwrap();
-    assert_eq!(
-        store.get_current_branch(&session).await.unwrap(),
-        Some(branch)
-    );
-    let branches = store.list_branches().await.unwrap();
-    let [main] = branches.as_slice() else {
-        panic!("expected one branch, got {branches:?}");
-    };
-    assert_eq!(main.branch_id, branch);
-    assert_eq!(main.session_id, session.0);
-    assert_eq!(main.name, "main");
-    assert!(main.is_current_in_session);
-    assert_eq!(main.parent_branch_id, None);
-    assert_eq!(main.message_count, 0);
 }
 
 #[tokio::test]

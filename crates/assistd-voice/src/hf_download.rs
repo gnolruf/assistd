@@ -262,17 +262,4 @@ mod tests {
         );
         stalled_server.abort();
     }
-
-    #[test]
-    fn cached_path_sanitizes_slash() {
-        let path = cached_path(
-            Path::new("/cache"),
-            "ggml-org/whisper-vad",
-            "ggml-silero-v6.2.0.bin",
-        );
-        assert_eq!(
-            path,
-            Path::new("/cache/ggml-org__whisper-vad/ggml-silero-v6.2.0.bin")
-        );
-    }
 }

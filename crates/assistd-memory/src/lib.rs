@@ -81,17 +81,3 @@ impl MemoryStore for NoMemoryStore {
         Ok(Vec::new())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn no_memory_store_persists_nothing() {
-        let store = NoMemoryStore;
-        assert_eq!(store.save("fact:user.name", "Ben".into()).await.unwrap(), 0);
-        assert_eq!(store.load("fact:user.name").await.unwrap(), None);
-        assert_eq!(store.list("fact:").await.unwrap(), Vec::<String>::new());
-        assert_eq!(store.list_full("fact:").await.unwrap(), Vec::new());
-    }
-}

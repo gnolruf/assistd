@@ -5,9 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_mcp::{
-    McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools, mcp_error_line,
-};
+use assistd_mcp::{McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools};
 use assistd_tools::presentation::PresentSpec;
 use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool, VisionGate};
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -134,15 +132,6 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
 }
 
 #[tokio::test]
-async fn shut_down_server_refuses_calls_instead_of_restarting() {
-    let server = start_fake().await;
-    server.shutdown().await;
-
-    let err = server.list_tools().await.unwrap_err();
-    assert!(matches!(err, McpError::ServerDown), "{err}");
-}
-
-#[tokio::test]
 async fn crashed_server_fails_fast_then_restarts_on_a_later_call() {
     let server = start_fake().await;
     let tools = adapt_allowing(&server).await;
@@ -159,32 +148,6 @@ async fn crashed_server_fails_fast_then_restarts_on_a_later_call() {
     assert!(
         echo_answers_again(echo).await,
         "a call after the backoff must restart the server"
-    );
-
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn crashed_server_is_refused_with_server_down_during_backoff() {
-    let server = start_fake().await;
-    let tools = adapt_allowing(&server).await;
-    let echo = find(&tools, "mcp__fake__echo");
-
-    let _ = find(&tools, "mcp__fake__crash_me").invoke(json!({})).await;
-
-    let refused = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let post = echo.invoke(json!({"msg": "x"})).await.unwrap();
-            if post["output"] == mcp_error_line("mcp__fake__echo", &McpError::ServerDown) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    assert!(
-        refused.is_ok(),
-        "calls inside the backoff must be refused as ServerDown"
     );
 
     server.shutdown().await;

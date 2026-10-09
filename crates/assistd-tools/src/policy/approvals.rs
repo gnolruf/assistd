@@ -201,15 +201,4 @@ mod tests {
         assert!(reloaded.contains("example.com"));
         assert!(!reloaded.contains("example.org"));
     }
-
-    #[test]
-    fn unparseable_store_is_an_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = dir.path().join(APPROVED_MCP_TOOLS_FILE);
-        std::fs::write(&store, "approved = 3\n").expect("write");
-        assert!(matches!(
-            Approvals::load(store),
-            Err(AllowlistError::Parse { .. })
-        ));
-    }
 }

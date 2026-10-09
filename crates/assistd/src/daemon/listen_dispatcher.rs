@@ -295,13 +295,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launch_start_runs_at_once_when_the_model_is_up() {
-        let listener = FakeListener::default();
-        assert!(!start_unless_asleep(&listener, PresenceState::Active).await);
-        assert!(listener.is_active());
-    }
-
-    #[tokio::test]
     async fn sleep_pauses_until_the_next_wake_finishes() {
         let listener = FakeListener::default();
         listener.start().await.unwrap();

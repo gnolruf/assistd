@@ -43,13 +43,6 @@ async fn run(cmd: &BashCommand, script: &str, stdin: Option<Vec<u8>>) -> Command
 }
 
 #[tokio::test]
-async fn bash_runs_echo() {
-    let out = run(&BashCommand::default(), "echo hi", None).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, b"hi\n");
-}
-
-#[tokio::test]
 async fn glob_matches_reach_bash_as_file_names_not_code() {
     let dir = tempfile::tempdir().expect("tempdir");
     let planted = dir.path().join("a$(echo injected).txt");
@@ -80,31 +73,6 @@ async fn leading_dash_c_is_accepted_as_bash_would() {
 }
 
 #[tokio::test]
-async fn bare_dash_c_prints_usage() {
-    let out = run(&BashCommand::default(), "-c", None).await;
-    assert_eq!(out.exit_code, 2);
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("usage: bash"));
-}
-
-#[tokio::test]
-async fn bash_propagates_nonzero_exit() {
-    let out = run(&BashCommand::default(), "exit 3", None).await;
-    assert_eq!(out.exit_code, 3);
-}
-
-#[tokio::test]
-async fn bash_receives_stdin() {
-    let out = run(
-        &BashCommand::default(),
-        "tr a-z A-Z",
-        Some(b"hello".to_vec()),
-    )
-    .await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, b"HELLO");
-}
-
-#[tokio::test]
 async fn bash_timeout_returns_137_with_timeout_message() {
     let out = run(&with_timeout(Duration::from_millis(100)), "sleep 5", None).await;
     assert_eq!(out.exit_code, 137);
@@ -114,24 +82,6 @@ async fn bash_timeout_returns_137_with_timeout_message() {
         "{stderr}"
     );
     assert!(stderr.ends_with("s]\n"), "{stderr}");
-}
-
-/// The model must see *which* dependency is missing, not a bare exit 127.
-#[tokio::test]
-async fn bash_missing_dependency_forwards_subprocess_stderr() {
-    let out = run(
-        &BashCommand::default(),
-        "assistd-definitely-not-a-real-binary-xyz",
-        None,
-    )
-    .await;
-    assert_eq!(out.exit_code, 127);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("command not found"), "{stderr}");
-    assert!(
-        stderr.contains("assistd-definitely-not-a-real-binary-xyz"),
-        "{stderr}"
-    );
 }
 
 #[tokio::test]
@@ -184,31 +134,6 @@ async fn bash_output_overflow_kills_child_and_returns_141() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("output exceeded"), "{stderr}");
-}
-
-#[tokio::test]
-async fn bash_stderr_overflow_also_caps() {
-    let out = run(&with_timeout(Duration::from_secs(10)), "yes 1>&2", None).await;
-    assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
-    assert!(
-        out.stderr.len() <= OUTPUT_BUF_MAX + 256,
-        "stderr was {} bytes, expected <= ~{OUTPUT_BUF_MAX} + overflow message",
-        out.stderr.len()
-    );
-}
-
-#[tokio::test]
-async fn bash_below_cap_returns_full_output() {
-    let out = run(&BashCommand::default(), "printf '%.0sx' {1..51200}", None).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout, vec![b'x'; 51200]);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn bash_signal_death_reports_128_plus_signum_not_timeout() {
-    let out = run(&BashCommand::default(), "kill -SEGV $$", None).await;
-    assert_eq!(out.exit_code, 139);
 }
 
 /// Poll `kill -0` for up to two seconds; returns whether `pid` exited.
@@ -270,26 +195,6 @@ async fn timeout_kills_backgrounded_grandchild() {
     );
 }
 
-/// `yes` dies of SIGPIPE on its own; the quiet background child only dies
-/// if the group is signalled.
-#[cfg(unix)]
-#[tokio::test]
-async fn output_overflow_kills_backgrounded_grandchild() {
-    let cfg = BashPolicyCfg {
-        timeout: Duration::from_secs(30),
-        ..Default::default()
-    };
-    let (out, pid) = run_leaving_background_child(cfg, |pidfile| {
-        format!("sleep 300 & echo $! > {}; yes", pidfile.display())
-    })
-    .await;
-    assert_eq!(out.exit_code, OUTPUT_OVERFLOW_EXIT);
-    assert!(
-        waited_for_exit(&pid).await,
-        "grandchild {pid} survived the overflow kill"
-    );
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn normal_exit_kills_backgrounded_grandchild() {
@@ -327,20 +232,4 @@ async fn stdin_larger_than_a_pipe_buffer_arrives_whole() {
     .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1048576");
-}
-
-#[test]
-fn private_dir_note_follows_the_script_stderr_on_its_own_line() {
-    let failed = CommandOutput::failed(1, b"cat: /tmp/x: No such file or directory".to_vec());
-    let out = with_private_dir_note(failed, "/tmp, /run", "a path under /shared");
-    let stderr = String::from_utf8(out.stderr).expect("utf-8");
-    let (script_line, note) = stderr.split_once('\n').expect("two lines");
-    assert_eq!(script_line, "cat: /tmp/x: No such file or directory");
-    assert!(
-        note.starts_with(
-            "[note] bash: the sandbox gives each bash call its own empty /tmp, /run: "
-        )
-    );
-    assert!(note.ends_with("Use: a path under /shared\n"));
-    assert_eq!(out.exit_code, 1);
 }

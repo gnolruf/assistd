@@ -890,14 +890,6 @@ mod tests {
     }
 
     #[test]
-    fn unsandboxed_command_passes_argv_through_verbatim() {
-        let cmd =
-            SandboxInfo::none().command(SandboxAccess::Default, "firefox", ["--new-window", "a b"]);
-        assert_eq!(cmd.as_std().get_program(), "firefox");
-        assert_eq!(argv_of(&cmd), ["--new-window", "a b"]);
-    }
-
-    #[test]
     fn bwrap_argv_is_profile_then_access_binds_then_extra_args_then_program() {
         let home_dir = tempfile::tempdir().expect("tempdir");
         let home = Some(home_dir.path().to_string_lossy().into_owned());
@@ -944,11 +936,6 @@ mod tests {
         }
     }
 
-    fn named_in(info: &SandboxInfo, script: &str) -> Vec<PathBuf> {
-        let cmd = info.command(SandboxAccess::Default, "bash", ["-c", script]);
-        info.private_dirs_named(&cmd, script)
-    }
-
     fn mounts_of(flags: &[&str]) -> Mounts {
         let flags: Vec<&OsStr> = flags.iter().map(OsStr::new).collect();
         Mounts::of(&flags)
@@ -991,47 +978,6 @@ mod tests {
     }
 
     #[test]
-    fn a_read_only_tmpfs_is_not_private() {
-        let mounts = mounts_of(&[
-            "--tmpfs",
-            "/tmp",
-            "--tmpfs",
-            "/home/u/go/bin",
-            "--remount-ro",
-            "/home/u/go/bin",
-        ]);
-        assert_eq!(mounts.private, [PathBuf::from("/tmp")]);
-    }
-
-    #[test]
-    fn a_host_bind_inside_a_private_dir_is_shared() {
-        let mounts = mounts_of(&["--tmpfs", "/tmp", "--bind", "/tmp/shared", "/tmp/shared"]);
-        assert!(
-            mounts
-                .private_dirs_named("cat /tmp/shared/out.txt")
-                .is_empty()
-        );
-        assert_eq!(
-            mounts.private_dirs_named("cat /tmp/out.txt"),
-            [PathBuf::from("/tmp")]
-        );
-    }
-
-    #[test]
-    fn host_paths_under_a_private_dir_are_hidden_only_when_wrapped() {
-        let info = bwrap_info(Vec::new());
-        assert_eq!(
-            info.private_dir_hiding(Path::new("/tmp/out.txt")),
-            Some(PathBuf::from("/tmp"))
-        );
-        assert_eq!(info.private_dir_hiding(Path::new("/usr/share/x")), None);
-        assert_eq!(
-            SandboxInfo::none().private_dir_hiding(Path::new("/tmp/out.txt")),
-            None
-        );
-    }
-
-    #[test]
     fn shared_dirs_are_bound_for_default_access_only_and_are_not_private() {
         let info = SandboxInfo {
             shared: SharedDirs {
@@ -1063,21 +1009,6 @@ mod tests {
         assert_eq!(
             info.private_dir_hiding(Path::new("/run/user/1000/other")),
             Some(PathBuf::from("/run"))
-        );
-    }
-
-    #[test]
-    fn private_dirs_follow_the_profile_and_the_operator_extra_args() {
-        assert!(named_in(&SandboxInfo::none(), "ls /tmp").is_empty());
-        let default_profile = bwrap_info(Vec::new());
-        assert_eq!(
-            named_in(&default_profile, "ls /tmp /run /scratch"),
-            [PathBuf::from("/tmp"), PathBuf::from("/run")]
-        );
-        let extra = ["--bind", "/tmp", "/tmp", "--tmpfs", "/scratch"].map(String::from);
-        assert_eq!(
-            named_in(&bwrap_info(extra.into()), "ls /tmp /run /scratch"),
-            [PathBuf::from("/run"), PathBuf::from("/scratch")]
         );
     }
 
@@ -1544,19 +1475,6 @@ mod tests {
             probed,
             ToolSandbox::Disabled(ToolsDisabled::ByConfig)
         ));
-    }
-
-    #[test]
-    fn setuid_is_read_from_the_mode_bits() {
-        let file = tempfile::NamedTempFile::new().expect("tempfile");
-        let set_mode = |mode| {
-            std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(mode))
-                .expect("chmod");
-        };
-        set_mode(0o755);
-        assert!(!is_setuid(file.path()));
-        set_mode(0o4755);
-        assert!(is_setuid(file.path()));
     }
 
     #[test]

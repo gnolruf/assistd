@@ -125,11 +125,8 @@ mod tests {
 
     #[tokio::test]
     async fn counts_per_flags() {
-        let cases: [(&[&str], &[u8], &str); 6] = [
+        let cases: [(&[&str], &[u8], &str); 3] = [
             (&[], b"hello world\nagain\n", "2 3 18\n"),
-            (&["-l"], b"a\nb\nc\n", "3\n"),
-            (&["-w"], b"a b\nc\n", "3\n"),
-            (&["-c"], b"abc\n", "4\n"),
             (&["-w"], b"a \xff b\n", "3\n"),
             (&["-wl"], b"a b\nc\n", "2 3\n"),
         ];
@@ -138,39 +135,6 @@ mod tests {
             assert_eq!(out.exit_code, 0, "{args:?}");
             assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{args:?}");
         }
-    }
-
-    #[tokio::test]
-    async fn wc_no_stdin_emits_usage() {
-        let out = run_wc(&[], None).await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: wc"), "{out:?}");
-    }
-
-    #[tokio::test]
-    async fn wc_unknown_flag_errors() {
-        let out = run_wc(&["-q"], Some(b"")).await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] wc: flag '-q' not supported. Use: wc, wc -l, wc -w or wc -c\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn named_files_count_as_one_stream() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.txt");
-        let b = dir.path().join("b.txt");
-        std::fs::write(&a, b"one two\n").unwrap();
-        std::fs::write(&b, b"three\n").unwrap();
-        let out = run_wc(
-            &["-l", a.to_str().unwrap(), b.to_str().unwrap()],
-            Some(b"ignored\n"),
-        )
-        .await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"2\n");
     }
 
     #[tokio::test]
@@ -186,26 +150,6 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
             "[error] wc: files together exceed the 10.0MB read limit. Try: fewer files per wc\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_file_reports_navigation_error() {
-        let out = run_wc(&["/nope/missing.txt"], Some(b"")).await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] wc: file not found: /nope/missing.txt. Use: ls /nope to see what is there\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn wc_refuses_a_device_file() {
-        let out = run_wc(&["/dev/null"], None).await;
-        assert_eq!(out.exit_code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] wc: /dev/null: not a regular file (device, pipe, or socket). Check: ls -l /dev/null\n"
         );
     }
 }

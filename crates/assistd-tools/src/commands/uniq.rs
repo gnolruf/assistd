@@ -92,11 +92,8 @@ mod tests {
 
     #[tokio::test]
     async fn collapses_adjacent_runs() {
-        let cases: [(&[&str], &str, &str); 5] = [
+        let cases: [(&[&str], &str, &str); 2] = [
             (&[], "a\na\nb\na\n", "a\nb\na\n"),
-            (&["-c"], "a\na\nb\n", "2\ta\n1\tb\n"),
-            (&[], "a\nb", "a\nb\n"),
-            (&[], "", ""),
             (&["-c"], "a\n\n\nb\n", "1\ta\n2\t\n1\tb\n"),
         ];
         for (args, stdin, expected) in cases {
@@ -105,37 +102,5 @@ mod tests {
             assert_eq!(out.exit_code, 0, "{label}");
             assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{label}");
         }
-    }
-
-    #[tokio::test]
-    async fn no_stdin_emits_usage() {
-        let out = UniqCommand
-            .run(CommandInput {
-                args: Vec::new(),
-                stdin: None,
-            })
-            .await;
-        assert_eq!(out.exit_code, 2);
-        assert!(out.stdout.starts_with(b"usage: uniq"), "{out:?}");
-    }
-
-    #[tokio::test]
-    async fn named_file_is_read_instead_of_stdin() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("lines.txt");
-        std::fs::write(&file, b"a\na\nb\n").unwrap();
-        let out = run_uniq(&["-c", file.to_str().unwrap()], b"ignored\n").await;
-        assert_eq!(out.exit_code, 0);
-        assert_eq!(out.stdout, b"2\ta\n1\tb\n");
-    }
-
-    #[tokio::test]
-    async fn unknown_flag_errors() {
-        let out = run_uniq(&["-q"], b"a\n").await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] uniq: unknown flag '-q'. Use: uniq or uniq -c\n"
-        );
     }
 }

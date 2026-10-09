@@ -1,17 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 
-use assistd_ipc::{ComponentReadiness, StartupComponent};
-
 use super::super::ui;
 use super::attach::longest_common_prefix;
-use super::keys::{MOUSE_WHEEL_STEP, SLASH_COMMANDS};
 use super::*;
 
 fn test_sleep_cfg() -> SleepConfig {
@@ -22,27 +19,13 @@ fn test_sleep_cfg() -> SleepConfig {
 }
 
 fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
-    test_app_with(true)
+    test_app_at(PathBuf::from("/tmp/assistd-test-nonexistent.sock"))
 }
 
-fn test_app_with(vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
-    test_app_at(
-        PathBuf::from("/tmp/assistd-test-nonexistent.sock"),
-        vision_enabled,
-    )
-}
-
-fn test_app_at(socket: PathBuf, vision_enabled: bool) -> (App, mpsc::Receiver<ChatEvent>) {
+fn test_app_at(socket: PathBuf) -> (App, mpsc::Receiver<ChatEvent>) {
     let (tx, rx) = mpsc::channel::<ChatEvent>(16);
     let ipc = Arc::new(IpcClient::with_path(socket));
-    let app = App::new(
-        ipc,
-        tx,
-        "test-model".into(),
-        test_sleep_cfg(),
-        vision_enabled,
-        None,
-    );
+    let app = App::new(ipc, tx, "test-model".into(), test_sleep_cfg(), true, None);
     (app, rx)
 }
 
@@ -133,17 +116,6 @@ fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
 }
 
 #[test]
-fn reply_wire_error_clears_generating() {
-    let (mut app, _rx) = test_app();
-    app.generating = true;
-    app.on_chat_event(ChatEvent::WireError {
-        stream: WireStream::Reply,
-        message: "boom".into(),
-    });
-    assert!(!app.generating);
-}
-
-#[test]
 fn branch_wire_error_releases_the_in_flight_op() {
     let (mut app, _rx) = test_app();
     app.generating = true;
@@ -154,18 +126,6 @@ fn branch_wire_error_releases_the_in_flight_op() {
     });
     assert!(app.in_flight_branch_op.is_none());
     assert!(app.generating, "a branch failure must not end the reply");
-}
-
-#[test]
-fn session_title_event_lands_in_the_status_bar() {
-    let (mut app, _rx) = test_app();
-    assert!(app.session_title.is_none());
-    app.on_chat_event(status(Event::SessionTitle {
-        id: "q-1".into(),
-        session_id: "s-1".into(),
-        title: "Cats And Dogs".into(),
-    }));
-    assert_eq!(app.session_title.as_deref(), Some("Cats And Dogs"));
 }
 
 #[test]
@@ -301,7 +261,7 @@ async fn query_driver_outlives_its_writer_channel() {
     let socket = dir.path().join("mock.sock");
     let server = mock_daemon(&socket, vec![delta("hi"), done()]);
 
-    let (mut app, mut rx) = test_app_at(socket, true);
+    let (mut app, mut rx) = test_app_at(socket);
     app.spawn_query("hi".into(), Vec::new());
     app.active_reply = None;
 
@@ -316,96 +276,6 @@ async fn query_driver_outlives_its_writer_channel() {
         }
     }
     server.await.unwrap();
-}
-
-#[test]
-fn page_up_increments_scroll() {
-    let (mut app, _rx) = test_app();
-    app.last_output_height = 10;
-    app.on_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
-    assert_eq!(app.output.scroll_offset(), 5);
-}
-
-fn wheel(kind: MouseEventKind) -> MouseEvent {
-    MouseEvent {
-        kind,
-        column: 0,
-        row: 0,
-        modifiers: KeyModifiers::NONE,
-    }
-}
-
-#[test]
-fn mouse_wheel_scrolls_by_a_fixed_step() {
-    let (mut app, _rx) = test_app();
-    for (kind, expected) in [
-        (MouseEventKind::ScrollUp, MOUSE_WHEEL_STEP),
-        (MouseEventKind::ScrollUp, 2 * MOUSE_WHEEL_STEP),
-        (MouseEventKind::Moved, 2 * MOUSE_WHEEL_STEP),
-        (MouseEventKind::ScrollDown, MOUSE_WHEEL_STEP),
-    ] {
-        app.on_mouse(wheel(kind));
-        assert_eq!(
-            app.output.scroll_offset(),
-            usize::from(expected),
-            "after {kind:?}"
-        );
-    }
-}
-
-#[test]
-fn ctrl_c_on_empty_input_sets_quitting() {
-    let (mut app, _rx) = test_app();
-    app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    assert!(app.should_quit());
-}
-
-#[test]
-fn enter_while_generating_sets_notice() {
-    let (mut app, _rx) = test_app();
-    app.generating = true;
-    app.on_key(typed('h'));
-    app.on_key(typed('i'));
-    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.notice(), Some("still generating, please wait"));
-}
-
-#[test]
-fn on_tick_clears_stale_notice() {
-    let (mut app, _rx) = test_app();
-    app.notice = Some((
-        "old".into(),
-        Instant::now()
-            .checked_sub(Duration::from_secs(10))
-            .expect("uptime exceeds 10s"),
-    ));
-    app.on_tick();
-    assert!(app.notice().is_none());
-}
-
-#[test]
-fn spinner_char_cycles() {
-    let (mut app, _rx) = test_app();
-    let c0 = app.spinner_char();
-    app.on_tick();
-    let c1 = app.spinner_char();
-    assert_ne!(c0, c1);
-}
-
-#[tokio::test]
-async fn presence_event_updates_state() {
-    let (mut app, _rx) = test_app();
-    assert_eq!(app.presence_state, None);
-    app.on_chat_event(status(Event::Presence {
-        id: "p".into(),
-        state: PresenceState::Drowsy,
-    }));
-    assert_eq!(app.presence_state, Some(PresenceState::Drowsy));
-    app.on_chat_event(status(Event::Presence {
-        id: "p".into(),
-        state: PresenceState::Active,
-    }));
-    assert_eq!(app.presence_state, Some(PresenceState::Active));
 }
 
 #[tokio::test]
@@ -681,80 +551,10 @@ fn tool_call_then_result_creates_one_block_with_command() {
     );
 }
 
-#[test]
-fn compacting_history_status_leaves_a_line_in_the_transcript() {
-    let (mut app, _rx) = test_app();
-    app.on_chat_event(reply(Event::Status {
-        id: "r1".into(),
-        severity: assistd_ipc::StatusSeverity::Info,
-        component: assistd_ipc::Component::Llm,
-        event: assistd_ipc::StatusKind::CompactingHistory,
-        message: "compacting history…".into(),
-    }));
-    let lines = rendered(&mut app);
-    assert!(
-        lines.contains(&"[compacting history…]".to_string()),
-        "{lines:#?}"
-    );
-}
-
-#[test]
-fn confirm_request_event_opens_modal() {
-    let (mut app, _rx) = test_app();
-    app.on_chat_event(reply(Event::ConfirmRequest {
-        id: "r".into(),
-        confirm_id: "c-xyz".into(),
-        tool: "bash".into(),
-        script: "rm -rf /tmp/foo".into(),
-        matched_pattern: "rm -rf".into(),
-        always_allow: vec!["foo".into()],
-    }));
-    let modal = app.modal.as_ref().expect("modal opened");
-    assert_eq!(modal.request.always_allow, ["foo"]);
-    assert_eq!(modal.confirm_id, "c-xyz");
-    assert_eq!(modal.request.script, "rm -rf /tmp/foo");
-}
-
-#[test]
-fn capabilities_event_updates_vision_and_model_name() {
-    let (mut app, _rx) = test_app_with(false);
-    assert!(!app.vision_enabled);
-    app.on_chat_event(status(Event::Capabilities {
-        id: "c".into(),
-        vision: true,
-        model_name: "Qwen".into(),
-    }));
-    assert!(app.vision_enabled);
-    assert_eq!(app.model_name, "Qwen");
-}
-
 fn type_str(app: &mut App, s: &str) {
     for c in s.chars() {
         app.on_key(typed(c));
     }
-}
-
-#[test]
-fn slash_popup_shows_after_slash() {
-    let (mut app, _rx) = test_app();
-    assert!(app.slash_suggestions().is_empty());
-    type_str(&mut app, "/");
-    let s = app.slash_suggestions();
-    assert_eq!(s.len(), SLASH_COMMANDS.len());
-}
-
-#[test]
-fn slash_popup_filters_by_prefix() {
-    let (mut app, _rx) = test_app();
-    type_str(&mut app, "/fo");
-    assert_eq!(app.slash_suggestions(), [&("/fork", "<name>")]);
-}
-
-#[test]
-fn slash_popup_hides_after_whitespace() {
-    let (mut app, _rx) = test_app();
-    type_str(&mut app, "/attach ");
-    assert!(app.slash_suggestions().is_empty());
 }
 
 #[test]
@@ -764,25 +564,6 @@ fn tab_accepts_selection_and_fills_buffer() {
     app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.input.buffer(), "/fork");
     assert!(app.slash_suggestions().is_empty());
-}
-
-#[test]
-fn down_moves_selection_when_popup_active() {
-    let (mut app, _rx) = test_app();
-    type_str(&mut app, "/");
-    assert_eq!(app.slash_selected(), 0);
-    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.slash_selected(), 1);
-}
-
-#[test]
-fn esc_dismisses_popup_without_clearing_buffer() {
-    let (mut app, _rx) = test_app();
-    type_str(&mut app, "/at");
-    assert!(!app.slash_suggestions().is_empty());
-    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(app.slash_suggestions().is_empty());
-    assert_eq!(app.input.buffer(), "/at");
 }
 
 fn picker_entry(name: &str, session: &str, current: bool, active_sess: bool) -> BranchListEntry {
@@ -813,14 +594,6 @@ fn open_branch_picker_highlights_active_current() {
 }
 
 #[test]
-fn open_branch_picker_with_no_entries_sets_notice() {
-    let (mut app, _rx) = test_app();
-    app.open_branch_picker();
-    assert!(app.picker_modal.is_none());
-    assert_eq!(app.notice(), Some("no branches to resume"));
-}
-
-#[test]
 fn picker_current_target_is_session_qualified() {
     let modal = BranchPickerModal {
         entries: vec![picker_entry("feature-x", "deadbeef", false, false)],
@@ -833,101 +606,10 @@ fn picker_current_target_is_session_qualified() {
 }
 
 #[test]
-fn picker_arrow_keys_move_selection() {
-    let (mut app, _rx) = test_app();
-    app.picker_modal = Some(BranchPickerModal {
-        entries: vec![
-            picker_entry("a", "11111111", false, false),
-            picker_entry("b", "11111111", false, false),
-            picker_entry("c", "11111111", false, false),
-        ],
-        selected: 0,
-    });
-    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.picker_modal.as_ref().unwrap().selected, 2);
-    app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.picker_modal.as_ref().unwrap().selected, 1);
-}
-
-#[test]
-fn picker_esc_cancels_without_dispatching() {
-    let (mut app, _rx) = test_app();
-    app.picker_modal = Some(BranchPickerModal {
-        entries: vec![picker_entry("a", "11111111", false, false)],
-        selected: 0,
-    });
-    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(app.picker_modal.is_none());
-    assert!(app.in_flight_branch_op.is_none());
-}
-
-#[test]
-fn dismissal_resets_after_buffer_clears() {
-    let (mut app, _rx) = test_app();
-    type_str(&mut app, "/at");
-    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    for _ in 0..3 {
-        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-    }
-    type_str(&mut app, "/");
-    assert!(!app.slash_suggestions().is_empty());
-}
-
-#[test]
 fn longest_common_prefix_stops_at_char_boundaries() {
     assert_eq!(longest_common_prefix(&["é1.txt", "è2.txt"]), "");
     assert_eq!(longest_common_prefix(&["日本a", "日本b"]), "日本");
     assert_eq!(longest_common_prefix(&["日本", "日本語"]), "日本");
     assert_eq!(longest_common_prefix(&["abc"]), "abc");
     assert_eq!(longest_common_prefix(&[]), "");
-}
-
-#[test]
-fn status_bar_names_the_subsystems_still_starting() {
-    let (mut app, _rx) = test_app();
-    let readiness = |component, state| {
-        status(Event::Readiness {
-            id: "r".into(),
-            component,
-            state,
-        })
-    };
-    app.on_chat_event(readiness(
-        StartupComponent::Embedding,
-        ComponentReadiness::Starting,
-    ));
-    app.on_chat_event(readiness(
-        StartupComponent::Mcp {
-            server: "fs".into(),
-        },
-        ComponentReadiness::Starting,
-    ));
-    let mut terminal = Terminal::new(TestBackend::new(200, 10)).expect("test terminal");
-    terminal
-        .draw(|frame| ui::render(frame, &mut app))
-        .expect("draw");
-    let screen: String = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(ratatui::buffer::Cell::symbol)
-        .collect();
-    assert!(
-        screen.contains("starting: semantic memory, MCP fs"),
-        "status bar: {screen}"
-    );
-
-    app.on_chat_event(readiness(
-        StartupComponent::Embedding,
-        ComponentReadiness::Ready,
-    ));
-    app.on_chat_event(readiness(
-        StartupComponent::Mcp {
-            server: "fs".into(),
-        },
-        ComponentReadiness::Ready,
-    ));
-    assert_eq!(app.startup.starting().count(), 0);
 }

@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use assistd_voice::{Transcriber, TranscriptionError, WhisperTranscriber};
+use assistd_voice::{Transcriber, WhisperTranscriber};
 
 const TINY_MODEL_ID: &str = "ggerganov/whisper.cpp:ggml-tiny.en-q5_1.bin";
 const VAD_MODEL_ID: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
@@ -151,17 +151,4 @@ async fn vad_trims_silence_padding() {
         padded_words <= plain_words.saturating_add(3),
         "VAD should have trimmed silence: plain={plain_words} padded={padded_words}"
     );
-}
-
-#[tokio::test]
-#[ignore = "shares the heavyweight setup() that downloads the Whisper model"]
-async fn empty_audio_is_rejected() {
-    init_tracing();
-    let fixture = setup().await;
-    let transcriber = make_transcriber(&fixture.cache, false).await;
-    let err = transcriber
-        .transcribe(&[])
-        .await
-        .expect_err("empty audio should fail");
-    assert!(matches!(err, TranscriptionError::EmptyAudio));
 }

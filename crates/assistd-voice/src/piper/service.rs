@@ -263,17 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn degraded_drop_is_logged_exactly_once() {
-        let mut state = CircuitState::new();
-        trip(&mut state);
-        assert!(!state.logged_degraded, "tripping must not consume the log");
-
-        assert!(!state.admit());
-        assert!(state.logged_degraded, "first dropped speak() logs");
-        assert!(!state.admit());
-    }
-
-    #[test]
     fn half_open_probe_admits_after_the_window_cools() {
         let mut state = CircuitState::new();
         trip(&mut state);

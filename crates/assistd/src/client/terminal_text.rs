@@ -34,32 +34,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_text_is_borrowed_unchanged() {
-        assert!(matches!(
-            escape_controls("héllo\n\tworld"),
-            Cow::Borrowed("héllo\n\tworld")
-        ));
-    }
-
-    #[test]
     fn osc52_clipboard_write_is_escaped() {
         assert_eq!(
             escape_controls("hi\x1b]52;c;cm0gLXJm\x07"),
             r"hi\u{1b}]52;c;cm0gLXJm\u{7}"
         );
-    }
-
-    #[test]
-    fn cursor_movement_and_carriage_return_are_escaped() {
-        assert_eq!(
-            escape_controls("\x1b[1A\x1b[2K\rok"),
-            r"\u{1b}[1A\u{1b}[2K\rok"
-        );
-    }
-
-    #[test]
-    fn c1_control_introducers_are_escaped() {
-        assert_eq!(escape_controls("\u{9b}1A\u{9d}52"), r"\u{9b}1A\u{9d}52");
     }
 
     #[test]

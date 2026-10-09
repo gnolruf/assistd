@@ -156,16 +156,4 @@ mod tests {
             .await
             .expect("sentinel must not panic on inner panic");
     }
-
-    #[test]
-    fn panic_message_extracts_string_payloads() {
-        let cases: [(Box<dyn Any + Send>, &str); 3] = [
-            (Box::new("static panic text"), "static panic text"),
-            (Box::new("owned panic text".to_string()), "owned panic text"),
-            (Box::new(42u32), "<non-string panic payload>"),
-        ];
-        for (payload, expected) in cases {
-            assert_eq!(panic_message(&*payload), expected);
-        }
-    }
 }

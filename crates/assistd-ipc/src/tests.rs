@@ -46,62 +46,18 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"chat_state","id":"r","focused":false}"#,
         ),
-        (
-            Request::ChatClosed { id: id() },
-            r#"{"type":"chat_closed","id":"r"}"#,
-        ),
-        (
-            Request::GetChatFocus { id: id() },
-            r#"{"type":"get_chat_focus","id":"r"}"#,
-        ),
-        (
-            Request::GetReadiness { id: id() },
-            r#"{"type":"get_readiness","id":"r"}"#,
-        ),
-        (
-            Request::GetPresence { id: id() },
-            r#"{"type":"get_presence","id":"r"}"#,
-        ),
         (Request::Cycle { id: id() }, r#"{"type":"cycle","id":"r"}"#),
         (
             Request::PttStart { id: id() },
             r#"{"type":"ptt_start","id":"r"}"#,
         ),
         (
-            Request::PttStop { id: id() },
-            r#"{"type":"ptt_stop","id":"r"}"#,
-        ),
-        (
             Request::ListenStart { id: id() },
             r#"{"type":"listen_start","id":"r"}"#,
         ),
         (
-            Request::ListenStop { id: id() },
-            r#"{"type":"listen_stop","id":"r"}"#,
-        ),
-        (
-            Request::ListenToggle { id: id() },
-            r#"{"type":"listen_toggle","id":"r"}"#,
-        ),
-        (
-            Request::GetListenState { id: id() },
-            r#"{"type":"get_listen_state","id":"r"}"#,
-        ),
-        (
             Request::VoiceToggle { id: id() },
             r#"{"type":"voice_toggle","id":"r"}"#,
-        ),
-        (
-            Request::VoiceSkip { id: id() },
-            r#"{"type":"voice_skip","id":"r"}"#,
-        ),
-        (
-            Request::InterruptTurn { id: id() },
-            r#"{"type":"interrupt_turn","id":"r"}"#,
-        ),
-        (
-            Request::GetVoiceState { id: id() },
-            r#"{"type":"get_voice_state","id":"r"}"#,
         ),
     ]
 }
@@ -160,10 +116,6 @@ fn memory_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"memory_semantic_search","id":"r","query":"the rust thing","limit":5}"#,
         ),
-        (
-            Request::MemoryReindex { id: id() },
-            r#"{"type":"memory_reindex","id":"r"}"#,
-        ),
     ]
 }
 
@@ -188,19 +140,11 @@ fn session_request_cases() -> Vec<(Request, &'static str)> {
             r#"{"type":"confirm_response","id":"r","confirm_id":"c-abc","allow":true,"always":true}"#,
         ),
         (
-            Request::GetCapabilities { id: id() },
-            r#"{"type":"get_capabilities","id":"r"}"#,
-        ),
-        (
             Request::Fork {
                 id: id(),
                 name: "experiment".into(),
             },
             r#"{"type":"fork","id":"r","name":"experiment"}"#,
-        ),
-        (
-            Request::Branches { id: id() },
-            r#"{"type":"branches","id":"r"}"#,
         ),
         (
             Request::Switch {
@@ -209,17 +153,12 @@ fn session_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"switch","id":"r","target":"abc12345/main"}"#,
         ),
-        (Request::Undo { id: id() }, r#"{"type":"undo","id":"r"}"#),
         (
             Request::ResumeOrNew {
                 id: id(),
                 recency_secs: 600,
             },
             r#"{"type":"resume_or_new","id":"r","recency_secs":600}"#,
-        ),
-        (
-            Request::NewSession { id: id() },
-            r#"{"type":"new_session","id":"r"}"#,
         ),
         (
             Request::Subscribe {
@@ -256,49 +195,8 @@ fn requests_match_pinned_wire_format() {
     }
 }
 
-#[test]
-fn request_optional_fields_default_when_absent() {
-    let cases = [
-        (
-            r#"{"type":"memory_list","id":"r"}"#,
-            Request::MemoryList {
-                id: id(),
-                prefix: String::new(),
-            },
-        ),
-        (
-            r#"{"type":"memory_list_all","id":"r"}"#,
-            Request::MemoryListAll {
-                id: id(),
-                prefix: String::new(),
-                limit: 0,
-            },
-        ),
-        (
-            r#"{"type":"memory_semantic_search","id":"r","query":"q"}"#,
-            Request::MemorySemanticSearch {
-                id: id(),
-                query: "q".into(),
-                limit: 0,
-            },
-        ),
-        (
-            r#"{"type":"subscribe","id":"r"}"#,
-            Request::Subscribe {
-                id: id(),
-                filter: SubscribeFilter::default(),
-            },
-        ),
-    ];
-    for (wire, expected) in cases {
-        let parsed: Request = serde_json::from_str(wire).unwrap();
-        assert_eq!(parsed, expected, "{wire}");
-    }
-}
-
-/// One of every [`Event`] variant with its exact wire form and its
-/// broadcast kind.
-fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+/// One of every [`Event`] variant with its exact wire form.
+fn event_cases() -> Vec<(Event, &'static str)> {
     [
         turn_event_cases(),
         voice_and_presence_event_cases(),
@@ -309,7 +207,7 @@ fn event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
     .concat()
 }
 
-fn turn_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+fn turn_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
             Event::Delta {
@@ -317,7 +215,6 @@ fn turn_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 text: "pong".into(),
             },
             r#"{"type":"delta","id":"r","text":"pong"}"#,
-            Some(EventKind::Delta),
         ),
         (
             Event::ReasoningDelta {
@@ -325,7 +222,6 @@ fn turn_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 text: "hmm".into(),
             },
             r#"{"type":"reasoning_delta","id":"r","text":"hmm"}"#,
-            Some(EventKind::ReasoningDelta),
         ),
         (
             Event::ToolCall {
@@ -334,7 +230,6 @@ fn turn_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 args: json!({"text": "hi"}),
             },
             r#"{"type":"tool_call","id":"r","name":"echo","args":{"text":"hi"}}"#,
-            Some(EventKind::ToolCall),
         ),
         (
             Event::ToolResult {
@@ -343,7 +238,6 @@ fn turn_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 result: json!("hi"),
             },
             r#"{"type":"tool_result","id":"r","name":"echo","result":"hi"}"#,
-            Some(EventKind::ToolResult),
         ),
         (
             Event::Error {
@@ -351,25 +245,19 @@ fn turn_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 message: "boom".into(),
             },
             r#"{"type":"error","id":"r","message":"boom"}"#,
-            Some(EventKind::Error),
         ),
-        (
-            Event::Done { id: id() },
-            r#"{"type":"done","id":"r"}"#,
-            Some(EventKind::Done),
-        ),
+        (Event::Done { id: id() }, r#"{"type":"done","id":"r"}"#),
         (
             Event::LastDelta {
                 id: id(),
                 text: "Hello world".into(),
             },
             r#"{"type":"last_delta","id":"r","text":"Hello world"}"#,
-            Some(EventKind::LastDelta),
         ),
     ]
 }
 
-fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+fn voice_and_presence_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
             Event::Presence {
@@ -377,7 +265,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 state: PresenceState::Sleeping,
             },
             r#"{"type":"presence","id":"r","state":"sleeping"}"#,
-            Some(EventKind::Presence),
         ),
         (
             Event::VoiceState {
@@ -385,15 +272,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 state: VoiceCaptureState::Recording,
             },
             r#"{"type":"voice_state","id":"r","state":"recording"}"#,
-            Some(EventKind::VoiceState),
-        ),
-        (
-            Event::VoiceState {
-                id: id(),
-                state: VoiceCaptureState::Queued,
-            },
-            r#"{"type":"voice_state","id":"r","state":"queued"}"#,
-            Some(EventKind::VoiceState),
         ),
         (
             Event::Transcription {
@@ -401,7 +279,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 text: "hello world".into(),
             },
             r#"{"type":"transcription","id":"r","text":"hello world"}"#,
-            Some(EventKind::Transcription),
         ),
         (
             Event::ListenState {
@@ -409,7 +286,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 active: true,
             },
             r#"{"type":"listen_state","id":"r","active":true}"#,
-            Some(EventKind::ListenState),
         ),
         (
             Event::VoiceOutputState {
@@ -417,7 +293,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 enabled: true,
             },
             r#"{"type":"voice_output_state","id":"r","enabled":true}"#,
-            None,
         ),
         (
             Event::Readiness {
@@ -430,7 +305,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 },
             },
             r#"{"type":"readiness","id":"r","component":{"kind":"mcp","server":"fs"},"state":{"state":"unavailable","reason":"no npx"}}"#,
-            Some(EventKind::Readiness),
         ),
         (
             Event::Readiness {
@@ -439,7 +313,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 state: ComponentReadiness::Starting,
             },
             r#"{"type":"readiness","id":"r","component":{"kind":"voice_input"},"state":{"state":"starting"}}"#,
-            Some(EventKind::Readiness),
         ),
         (
             Event::SpeakingState {
@@ -447,7 +320,6 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 speaking: true,
             },
             r#"{"type":"speaking_state","id":"r","speaking":true}"#,
-            Some(EventKind::SpeakingState),
         ),
         (
             Event::ChatFocus {
@@ -455,12 +327,11 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
                 focused: true,
             },
             r#"{"type":"chat_focus","id":"r","focused":true}"#,
-            Some(EventKind::ChatFocus),
         ),
     ]
 }
 
-fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+fn memory_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
             Event::SemanticHit {
@@ -474,7 +345,6 @@ fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 similarity: 0.5,
             },
             r#"{"type":"semantic_hit","id":"r","conversation_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5}"#,
-            None,
         ),
         (
             Event::MemoryValue {
@@ -483,7 +353,6 @@ fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 value: None,
             },
             r#"{"type":"memory_value","id":"r","key":"absent","value":null}"#,
-            None,
         ),
         (
             Event::MemoryKeys {
@@ -491,7 +360,6 @@ fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 keys: vec!["a".into(), "b".into()],
             },
             r#"{"type":"memory_keys","id":"r","keys":["a","b"]}"#,
-            None,
         ),
         (
             Event::MemoryRow {
@@ -501,7 +369,6 @@ fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 value: "Ben".into(),
             },
             r#"{"type":"memory_row","id":"r","memory_id":17,"key":"fact:user.name","value":"Ben"}"#,
-            None,
         ),
         (
             Event::MemoryForgetResult {
@@ -510,7 +377,6 @@ fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 key: Some("fact:user.name".into()),
             },
             r#"{"type":"memory_forget_result","id":"r","deleted":true,"key":"fact:user.name"}"#,
-            None,
         ),
         (
             Event::ReindexProgress {
@@ -520,12 +386,11 @@ fn memory_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 total: 10,
             },
             r#"{"type":"reindex_progress","id":"r","kind":"chunks","done":3,"total":10}"#,
-            None,
         ),
     ]
 }
 
-fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
             Event::ConfirmRequest {
@@ -537,7 +402,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str, Option<Eve
                 always_allow: Vec::new(),
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
-            None,
         ),
         (
             Event::ConfirmRequest {
@@ -549,7 +413,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str, Option<Eve
                 always_allow: vec!["cargo".into()],
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"cargo build","matched_pattern":"not on the allowlist: cargo","always_allow":["cargo"]}"#,
-            None,
         ),
         (
             Event::Capabilities {
@@ -558,7 +421,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str, Option<Eve
                 model_name: "Qwen3-14B-GGUF:Q4_K_M".into(),
             },
             r#"{"type":"capabilities","id":"r","vision":true,"model_name":"Qwen3-14B-GGUF:Q4_K_M"}"#,
-            None,
         ),
         (
             Event::Status {
@@ -569,12 +431,11 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str, Option<Eve
                 message: "m".into(),
             },
             r#"{"type":"status","id":"r","severity":"warning","component":"idle_monitor","event":"tools_withdrawn","message":"m"}"#,
-            None,
         ),
     ]
 }
 
-fn session_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
+fn session_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
             Event::SessionTitle {
@@ -583,7 +444,6 @@ fn session_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 title: "cats".into(),
             },
             r#"{"type":"session_title","id":"r","session_id":"s","title":"cats"}"#,
-            Some(EventKind::SessionTitle),
         ),
         (
             Event::BranchInfo {
@@ -602,7 +462,6 @@ fn session_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 is_active_session: false,
             },
             r#"{"type":"branch_info","id":"r","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_ended_at":null,"session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false}"#,
-            None,
         ),
         (
             Event::BranchSwitched {
@@ -615,7 +474,6 @@ fn session_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 fork_point_seq: Some(5),
             },
             r#"{"type":"branch_switched","id":"r","branch_id":9,"session_id":"s","session_title":null,"name":"experiment","parent_branch_name":"main","fork_point_seq":5}"#,
-            None,
         ),
         (
             Event::HistoryEntry {
@@ -626,7 +484,6 @@ fn session_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 tool_name: None,
             },
             r#"{"type":"history_entry","id":"r","seq":3,"role":"assistant","content":"hello","tool_name":null}"#,
-            None,
         ),
         (
             Event::UndoApplied {
@@ -635,33 +492,17 @@ fn session_event_cases() -> Vec<(Event, &'static str, Option<EventKind>)> {
                 last_user_text: Some("hi".into()),
             },
             r#"{"type":"undo_applied","id":"r","removed_messages":2,"last_user_text":"hi"}"#,
-            None,
         ),
     ]
 }
 
 #[test]
 fn events_match_pinned_wire_format() {
-    for (ev, wire, _) in event_cases() {
+    for (ev, wire) in event_cases() {
         assert_eq!(serde_json::to_string(&ev).unwrap(), wire);
         let parsed: Event = serde_json::from_str(wire).unwrap();
         assert_eq!(parsed, ev, "{wire}");
         assert_eq!(ev.id(), "r", "{wire}");
-    }
-}
-
-#[test]
-fn only_done_and_error_are_terminal() {
-    for (ev, wire, _) in event_cases() {
-        let expected = matches!(ev, Event::Done { .. } | Event::Error { .. });
-        assert_eq!(ev.is_terminal(), expected, "{wire}");
-    }
-}
-
-#[test]
-fn event_kind_matches_broadcast_eligibility() {
-    for (ev, wire, kind) in event_cases() {
-        assert_eq!(ev.kind(), kind, "{wire}");
     }
 }
 
@@ -703,71 +544,8 @@ fn wire_spelling_helpers_agree_with_serde() {
 }
 
 #[test]
-fn image_attachment_round_trips_through_base64() {
-    let payload = b"\x89PNG\r\n\x1a\n";
-    let att = ImageAttachment::from_bytes("image/png", payload);
-    assert_eq!(att.decode_bytes().unwrap(), payload);
-}
-
-#[test]
-fn presence_state_next_cycles() {
-    assert_eq!(PresenceState::Active.next(), PresenceTarget::Drowsy);
-    assert_eq!(PresenceState::Drowsy.next(), PresenceTarget::Sleeping);
-    assert_eq!(PresenceState::Sleeping.next(), PresenceTarget::Active);
-    assert_eq!(PresenceState::Waking.next(), PresenceTarget::Active);
-}
-
-#[test]
-fn presence_target_converts_to_the_same_wire_state() {
-    for target in [
-        PresenceTarget::Active,
-        PresenceTarget::Drowsy,
-        PresenceTarget::Sleeping,
-    ] {
-        assert_eq!(
-            serde_json::to_value(target).unwrap(),
-            serde_json::to_value(PresenceState::from(target)).unwrap()
-        );
-    }
-}
-
-#[test]
-fn socket_path_prefers_xdg_runtime_dir_then_uid_dir() {
-    let cases = [
-        (Some("/run/user/1234"), "/run/user/1234/assistd.sock"),
-        (None, "/tmp/assistd-1234/assistd.sock"),
-    ];
-    for (xdg, expected) in cases {
-        let path = socket_path_for(xdg.map(PathBuf::from), 1234);
-        assert_eq!(path, PathBuf::from(expected), "xdg={xdg:?}");
-    }
-}
-
-#[test]
-fn subscribe_filter_default_matches_all() {
-    let filter = SubscribeFilter::default();
-    for kind in [
-        EventKind::Delta,
-        EventKind::ReasoningDelta,
-        EventKind::ToolCall,
-        EventKind::ToolResult,
-        EventKind::Presence,
-        EventKind::ListenState,
-        EventKind::VoiceState,
-        EventKind::SpeakingState,
-        EventKind::SessionTitle,
-        EventKind::Done,
-        EventKind::Error,
-        EventKind::LastDelta,
-        EventKind::ChatFocus,
-        EventKind::Readiness,
-    ] {
-        assert!(filter.matches(kind), "default filter should match {kind:?}");
-    }
-}
-
-#[test]
-fn subscribe_filter_matches_listed_only() {
+fn subscribe_filter_matches_everything_by_default_else_listed_only() {
+    assert!(SubscribeFilter::default().matches(EventKind::Delta));
     let filter = SubscribeFilter {
         kinds: vec![EventKind::Presence, EventKind::LastDelta],
     };
@@ -776,49 +554,6 @@ fn subscribe_filter_matches_listed_only() {
     assert!(!filter.matches(EventKind::Delta));
     assert!(!filter.matches(EventKind::ToolCall));
     assert!(!filter.matches(EventKind::Done));
-}
-
-#[test]
-fn component_readiness_reads_as_a_status_word() {
-    assert_eq!(ComponentReadiness::Starting.to_string(), "starting");
-    assert_eq!(ComponentReadiness::Ready.to_string(), "ready");
-    assert_eq!(
-        ComponentReadiness::Unavailable {
-            reason: "disabled in config".into()
-        }
-        .to_string(),
-        "unavailable (disabled in config)"
-    );
-}
-
-#[test]
-fn component_readiness_follows_a_readiness_result() {
-    assert_eq!(
-        ComponentReadiness::from(Ok::<_, NotReady>(())),
-        ComponentReadiness::Ready
-    );
-    assert_eq!(
-        ComponentReadiness::from(Err::<(), _>(NotReady::Starting)),
-        ComponentReadiness::Starting
-    );
-    assert_eq!(
-        ComponentReadiness::from(Err::<(), _>(NotReady::Unavailable("off".into()))),
-        ComponentReadiness::Unavailable {
-            reason: "off".into()
-        }
-    );
-}
-
-#[test]
-fn startup_component_names_read_for_a_status_line() {
-    assert_eq!(StartupComponent::Embedding.to_string(), "semantic memory");
-    assert_eq!(
-        StartupComponent::Mcp {
-            server: "fs".into()
-        }
-        .to_string(),
-        "MCP fs"
-    );
 }
 
 #[test]

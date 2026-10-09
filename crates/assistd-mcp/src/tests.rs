@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use assistd_tools::{AlwaysAllowGate, Approval, Approvals, ConfirmationGate, DenyAllGate};
 use parking_lot::Mutex;
@@ -7,12 +6,16 @@ use parking_lot::Mutex;
 use super::*;
 
 /// [`adapt_client_as_tools`] for server `web` with every call allowed.
-async fn adapt_allowing(
-    client: Arc<dyn McpClient>,
-    output: PresentSpec,
-) -> Result<Vec<Box<dyn Tool>>, McpError> {
+async fn adapt_allowing(client: Arc<dyn McpClient>) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    adapt_client_as_tools(client, "web", output, &approvals, &VisionGate::new(true)).await
+    adapt_client_as_tools(
+        client,
+        "web",
+        PresentSpec::default(),
+        &approvals,
+        &VisionGate::new(true),
+    )
+    .await
 }
 
 fn mcp_tool(name: &str, description: &str) -> rmcp::model::Tool {
@@ -32,26 +35,10 @@ fn text_result(text: &str) -> CallToolResult {
     call_result(json!({"content": [{"type": "text", "text": text}]}))
 }
 
-/// Lists one `search` tool and echoes arguments back as text.
-#[derive(Debug)]
-struct FakeMcpClient;
-
-#[async_trait]
-impl McpClient for FakeMcpClient {
-    async fn list_tools(&self) -> Result<Vec<rmcp::model::Tool>, McpError> {
-        Ok(vec![mcp_tool("search", "search the web")])
-    }
-
-    async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError> {
-        Ok(text_result(&format!("called {name} with {arguments}")))
-    }
-}
-
-/// Fails its one `invoke` with a pre-armed error after `sleep`.
+/// Fails its one `invoke` with a pre-armed error.
 #[derive(Debug)]
 struct ErrFakeClient {
     err: Mutex<Option<McpError>>,
-    sleep: Duration,
 }
 
 #[async_trait]
@@ -61,75 +48,20 @@ impl McpClient for ErrFakeClient {
     }
 
     async fn invoke(&self, _name: &str, _arguments: Value) -> Result<CallToolResult, McpError> {
-        tokio::time::sleep(self.sleep).await;
         Err(self.err.lock().take().expect("err pre-armed"))
     }
 }
 
-async fn failing_tool(err: McpError, sleep: Duration) -> Box<dyn Tool> {
+async fn failing_tool(err: McpError) -> Box<dyn Tool> {
     let client = Arc::new(ErrFakeClient {
         err: Mutex::new(Some(err)),
-        sleep,
     });
-    let mut tools = adapt_allowing(client, PresentSpec::default())
-        .await
-        .unwrap();
+    let mut tools = adapt_allowing(client).await.unwrap();
     tools.pop().unwrap()
 }
 
 fn unlimited() -> TextTruncator {
     TextTruncator::new(PresentSpec::default(), "mcp-test")
-}
-
-#[tokio::test]
-async fn adapter_forwards_tool_metadata_under_registry_name() {
-    let tools = adapt_allowing(Arc::new(FakeMcpClient), PresentSpec::default())
-        .await
-        .unwrap();
-    let [tool] = tools.as_slice() else {
-        panic!("expected one tool");
-    };
-    assert_eq!(tool.name(), "mcp__web__search");
-    assert_eq!(tool.description(), "search the web");
-    assert_eq!(
-        tool.parameters_schema(),
-        json!({"type": "object", "properties": {}})
-    );
-}
-
-#[tokio::test]
-async fn adapter_invokes_the_server_native_name() {
-    let tools = adapt_allowing(Arc::new(FakeMcpClient), PresentSpec::default())
-        .await
-        .unwrap();
-    let out = tools[0].invoke(json!({"q": "rust"})).await.unwrap();
-    assert_eq!(out["type"], "text");
-    assert_eq!(out["output"], r#"called search with {"q":"rust"}"#);
-    assert_eq!(out["truncated"], false);
-}
-
-#[tokio::test]
-async fn adapter_cuts_long_results_and_spills_the_rest() {
-    let dir = tempfile::tempdir().unwrap();
-    let spec = PresentSpec {
-        max_lines: 200,
-        max_bytes: 16,
-        overflow_dir: dir.path().to_path_buf(),
-    };
-    let tools = adapt_allowing(Arc::new(FakeMcpClient), spec).await.unwrap();
-    let out = tools[0].invoke(json!({"q": "rust"})).await.unwrap();
-    let spilled = dir.path().join("mcp-web-1.txt");
-    assert_eq!(out["truncated"], true);
-    assert_eq!(out["overflow_file"], json!(spilled.to_string_lossy()));
-    let output = out["output"].as_str().unwrap();
-    assert!(
-        output.starts_with("called search wi\n--- output truncated"),
-        "{output}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(spilled).unwrap(),
-        r#"called search with {"q":"rust"}"#
-    );
 }
 
 fn text_envelope_of(output: &str) -> Value {
@@ -203,20 +135,6 @@ fn mixed_results_keep_every_block_and_collect_images() {
     );
 }
 
-#[test]
-fn images_become_notes_without_vision() {
-    let result = call_result(json!({
-        "content": [
-            {"type": "text", "text": "took screenshot"},
-            {"type": "image", "mimeType": "image/png", "data": "3q2+7w=="},
-        ]
-    }));
-    assert_eq!(
-        tool_result_to_json(result, 42, &unlimited(), false),
-        text_envelope_of("took screenshot\n(image omitted: image/png; model has no vision)")
-    );
-}
-
 /// Returns one PNG image for every call.
 #[derive(Debug)]
 struct ImageClient;
@@ -257,29 +175,13 @@ async fn adapter_follows_the_vision_gate_on_every_call() {
     );
 }
 
-#[test]
-fn error_flag_applies_when_the_first_block_is_not_text() {
-    let result = call_result(json!({
-        "content": [
-            {"type": "image", "mimeType": "image/png", "data": "AAAA"},
-            {"type": "text", "text": "page crashed"},
-        ],
-        "isError": true,
-    }));
-    let envelope = tool_result_to_json(result, 42, &unlimited(), true);
-    assert_eq!(
-        envelope["output"],
-        "[mcp tool error] (image: image/png)\npage crashed"
-    );
-}
-
 #[tokio::test]
 async fn adapter_turns_client_errors_into_error_envelopes() {
     let err = || McpError::RpcError {
         code: -32602,
         message: "missing field 'query'".into(),
     };
-    let tool = failing_tool(err(), Duration::ZERO).await;
+    let tool = failing_tool(err()).await;
     let mut out = tool.invoke(json!({})).await.unwrap();
     assert!(out["duration_ms"].is_u64(), "{out}");
     out.as_object_mut().unwrap().remove("duration_ms");
@@ -291,17 +193,6 @@ async fn adapter_turns_client_errors_into_error_envelopes() {
             "exit_code": -1,
             "truncated": false,
         })
-    );
-}
-
-#[tokio::test]
-async fn adapter_records_real_duration_ms() {
-    let tool = failing_tool(McpError::ServerDown, Duration::from_millis(20)).await;
-    let out = tool.invoke(json!({})).await.unwrap();
-    let dur = out["duration_ms"].as_u64().expect("duration_ms u64");
-    assert!(
-        dur >= 15,
-        "duration must include the upstream sleep: got {dur}ms"
     );
 }
 

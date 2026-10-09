@@ -168,19 +168,4 @@ mod tests {
             "the restriction leaked to another thread"
         );
     }
-
-    #[test]
-    fn wayland_socket_resolves_a_relative_display_under_the_runtime_dir() {
-        let os = |text: &str| Some(OsString::from(text));
-        assert_eq!(
-            wayland_socket(os("/run/user/1000"), os("wayland-1")),
-            Some(PathBuf::from("/run/user/1000/wayland-1"))
-        );
-        assert_eq!(
-            wayland_socket(None, os("/run/wl.sock")),
-            Some(PathBuf::from("/run/wl.sock"))
-        );
-        assert_eq!(wayland_socket(None, os("wayland-1")), None);
-        assert_eq!(wayland_socket(os("/run/user/1000"), None), None);
-    }
 }

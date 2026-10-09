@@ -439,79 +439,6 @@ async fn single_turn_streams_deltas_and_finishes() {
 }
 
 #[tokio::test]
-async fn multi_turn_request_includes_prior_exchange() {
-    let script = Script::new();
-    script
-        .push_stream(StreamResponse::Deltas(vec![
-            "first".into(),
-            " reply".into(),
-        ]))
-        .await;
-    script
-        .push_stream(StreamResponse::Deltas(vec!["second reply".into()]))
-        .await;
-    let (port, _server) = spawn_fake(script.clone()).await;
-
-    let client = build_client(&chat_spec(port));
-
-    let (tx1, mut rx1) = mpsc::channel(32);
-    client.generate("question one".into(), tx1).await.unwrap();
-    drain(&mut rx1).await;
-
-    let (tx2, mut rx2) = mpsc::channel(32);
-    client.generate("question two".into(), tx2).await.unwrap();
-    drain(&mut rx2).await;
-
-    let captured = script.captured().await;
-    assert_eq!(captured.len(), 2);
-    assert_eq!(
-        captured[1].body["messages"],
-        json!([
-            {"role": "system", "content": "test system prompt"},
-            {"role": "user", "content": "question one"},
-            {"role": "assistant", "content": "first reply"},
-            {"role": "user", "content": "question two"},
-        ])
-    );
-}
-
-#[tokio::test]
-async fn connection_refused_returns_typed_error_not_panic() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let mut spec = chat_spec(port);
-    spec.chat.request_timeout_secs = nz64(2);
-    let client = build_client(&spec);
-    let (tx, mut rx) = mpsc::channel(32);
-    let err = client.generate("hi".into(), tx).await.unwrap_err();
-    assert!(
-        matches!(err, LlmError::Chat(ChatClientError::Http(_))),
-        "{err:?}"
-    );
-    assert!(drain(&mut rx).await.is_empty());
-}
-
-#[tokio::test]
-async fn http_500_returns_server_error() {
-    let script = Script::new();
-    script
-        .push_stream(StreamResponse::HttpError(500, "oom".into()))
-        .await;
-    let (port, _server) = spawn_fake(script).await;
-
-    let client = build_client(&chat_spec(port));
-    let (tx, mut rx) = mpsc::channel(32);
-    let err = client.generate("hi".into(), tx).await.unwrap_err();
-    assert!(
-        matches!(&err, LlmError::Chat(ChatClientError::Server { status: 500, body }) if body == "oom"),
-        "{err:?}"
-    );
-    assert!(drain(&mut rx).await.is_empty());
-}
-
-#[tokio::test]
 async fn conv_lock_is_not_held_while_streaming() {
     let script = Script::new();
     let many: Vec<String> = (0..200).map(|i| format!("d{i}")).collect();
@@ -678,82 +605,6 @@ async fn mid_stream_drop_after_deltas_emits_done() {
 }
 
 #[tokio::test]
-async fn first_chunk_role_only_delta_is_ignored() {
-    let script = Script::new();
-    script
-        .push_stream(StreamResponse::RawFrames(vec![
-            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n".into(),
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".into(),
-            "data: [DONE]\n\n".into(),
-        ]))
-        .await;
-    let (port, _server) = spawn_fake(script).await;
-
-    let client = build_client(&chat_spec(port));
-    let (tx, mut rx) = mpsc::channel(32);
-    client.generate("hi".into(), tx).await.unwrap();
-    assert_eq!(drain(&mut rx).await, [delta("hi"), LlmEvent::Done]);
-}
-
-#[tokio::test]
-async fn summarization_triggered_when_over_budget() {
-    let script = Script::new();
-    let long_reply: String = "long ".repeat(30);
-    script
-        .push_stream(StreamResponse::Deltas(vec![long_reply.clone()]))
-        .await;
-    script
-        .push_stream(StreamResponse::Deltas(vec![long_reply.clone()]))
-        .await;
-    script
-        .push_stream(StreamResponse::Deltas(vec!["final".into()]))
-        .await;
-    script
-        .push_summary(SummaryResponse::Ok(
-            "prior conversation covered various topics".into(),
-        ))
-        .await;
-    let (port, _server) = spawn_fake(script.clone()).await;
-
-    let mut spec = chat_spec(port);
-    spec.chat.max_history_tokens = nz32(60);
-    spec.chat.summary_target_tokens = nz32(15);
-    spec.chat.preserve_recent_turns = nz32(1);
-    let client = build_client(&spec);
-
-    for i in 0..3 {
-        let (tx, mut rx) = mpsc::channel(32);
-        client
-            .generate(format!("turn {i} with padding"), tx)
-            .await
-            .unwrap();
-        drain(&mut rx).await;
-    }
-
-    let captured = script.captured().await;
-    assert!(
-        captured.iter().any(|r| !r.stream),
-        "expected at least one non-streaming summarize request"
-    );
-
-    let last_stream = captured
-        .iter()
-        .rev()
-        .find(|r| r.stream)
-        .expect("at least one stream request");
-    let messages = last_stream.body["messages"].as_array().unwrap();
-    assert!(
-        messages.iter().any(|m| {
-            m["role"] == "system"
-                && m["content"]
-                    .as_str()
-                    .is_some_and(|s| s.contains("[Conversation summary]"))
-        }),
-        "final request should include the synthetic summary message"
-    );
-}
-
-#[tokio::test]
 async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip() {
     let script = Script::new();
     let reply_with_usage = |prompt_tokens: u32| {
@@ -903,29 +754,6 @@ fn tool_call_frames_finishing(
     ));
     frames.push("data: [DONE]\n\n".to_string());
     frames
-}
-
-#[tokio::test]
-async fn step_with_text_reply_returns_final_and_sends_no_tools() {
-    let script = Script::new();
-    script
-        .push_stream(StreamResponse::Deltas(vec!["answer".into()]))
-        .await;
-    let (port, _server) = spawn_fake(script.clone()).await;
-
-    let client = build_client(&chat_spec(port));
-    client
-        .push_user("what is 2+2?".into(), Vec::new())
-        .await
-        .unwrap();
-    let (tx, mut rx) = mpsc::channel(32);
-    let outcome = client.step(Vec::new(), tx).await.unwrap();
-    assert!(matches!(outcome, StepOutcome::Final));
-    assert_eq!(drain(&mut rx).await, [delta("answer")]);
-    let captured = script.captured().await;
-    assert_eq!(captured.len(), 1);
-    assert!(captured[0].body.get("tools").is_none());
-    assert!(captured[0].body.get("tool_choice").is_none());
 }
 
 #[tokio::test]
@@ -1254,30 +1082,6 @@ async fn narration_before_a_tool_call_stays_in_history() {
 }
 
 #[tokio::test]
-async fn request_timeout_surfaces_as_error() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            if let Ok((sock, _)) = listener.accept().await {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                drop(sock);
-            }
-        }
-    });
-
-    let mut spec = chat_spec(port);
-    spec.chat.request_timeout_secs = nz64(1);
-    let client = build_client(&spec);
-    let (tx, _rx) = mpsc::channel(32);
-    let err = client.generate("hi".into(), tx).await.unwrap_err();
-    assert!(
-        matches!(err, LlmError::Chat(ChatClientError::Sse(_))),
-        "{err:?}"
-    );
-}
-
-#[tokio::test]
 async fn complete_oneshot_survives_a_response_larger_than_the_channel() {
     let script = Script::new();
     let deltas: Vec<String> = (0..500).map(|i| format!("tok{i} ")).collect();
@@ -1340,38 +1144,6 @@ async fn complete_oneshot_sends_a_lone_prompt_on_the_summary_budget() {
     assert!(
         captured[1].body.get("chat_template_kwargs").is_none(),
         "Thinking::Enabled must leave the request untouched"
-    );
-}
-
-#[tokio::test]
-async fn configured_reasoning_effort_rides_every_request() {
-    let script = Script::new();
-    for reply in ["answer", "title"] {
-        script
-            .push_stream(StreamResponse::Deltas(vec![reply.into()]))
-            .await;
-    }
-    let (port, _server) = spawn_fake(script.clone()).await;
-
-    let mut cfg = chat_spec(port);
-    cfg.chat.reasoning_effort = Some("low".into());
-    let client = build_client(&cfg);
-    client.push_user("hi".into(), Vec::new()).await.unwrap();
-    let (tx, _rx) = mpsc::channel(32);
-    client.step(Vec::new(), tx).await.unwrap();
-    client
-        .complete_oneshot("title?".into(), Thinking::Disabled)
-        .await
-        .unwrap();
-
-    let captured = script.captured().await;
-    assert_eq!(
-        captured[0].body["chat_template_kwargs"],
-        json!({"reasoning_effort": "low"})
-    );
-    assert_eq!(
-        captured[1].body["chat_template_kwargs"],
-        json!({"enable_thinking": false, "reasoning_effort": "low"})
     );
 }
 

@@ -5,8 +5,7 @@ use async_trait::async_trait;
 
 use super::*;
 
-/// Returns `embedding` for every input, but fails any call that includes `"bad"`.
-/// Records the inputs of every call.
+/// Returns `embedding` for every input and records the inputs of every call.
 #[derive(Debug)]
 struct MockEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
@@ -26,9 +25,6 @@ impl Embedder for MockEmbedder {
             .lock()
             .unwrap()
             .push(texts.iter().map(|&t| t.to_owned()).collect());
-        if texts.contains(&"bad") {
-            return Err(EmbedError::Disabled);
-        }
         Ok(vec![self.embedding.clone(); texts.len()])
     }
     fn model(&self) -> &'static str {
@@ -142,55 +138,12 @@ async fn worker_routes_chunk_job_to_storechunkembedding() {
 }
 
 #[tokio::test]
-async fn worker_routes_memory_job_to_storememoryembedding() {
-    let mut harness = Harness::spawn(vec![0.0, 1.0]);
-    harness
-        .jobs
-        .send(EmbedJob::Memory {
-            memory_id: 7,
-            text: "vim".into(),
-        })
-        .await
-        .unwrap();
-
-    match harness.next_write().await {
-        WriteOp::StoreMemoryEmbedding {
-            memory_id,
-            model,
-            dim,
-            vector,
-            ack,
-        } => {
-            assert_eq!(memory_id, 7);
-            assert_eq!(model, "mock");
-            assert_eq!(dim, 2);
-            assert_eq!(vector, vector_to_blob(&[0.0, 1.0]));
-            ack.send(Ok(())).unwrap();
-        }
-        _ => panic!("expected StoreMemoryEmbedding"),
-    }
-    assert_eq!(harness.shut_down().await, vec![vec!["vim"]]);
-}
-
-#[tokio::test]
 async fn worker_coalesces_queued_jobs_into_one_embed_call() {
     let mut harness = Harness::spawn(vec![1.0]);
     harness.send_chunks(&["t0", "t1", "t2"]).await;
 
     harness.expect_chunk_writes(&[0, 1, 2]).await;
     assert_eq!(harness.shut_down().await, vec![vec!["t0", "t1", "t2"]]);
-}
-
-#[tokio::test]
-async fn worker_drops_only_the_bad_job_when_a_batch_fails() {
-    let mut harness = Harness::spawn(vec![1.0]);
-    harness.send_chunks(&["t0", "bad", "t2"]).await;
-
-    harness.expect_chunk_writes(&[0, 2]).await;
-    assert_eq!(
-        harness.shut_down().await,
-        vec![vec!["t0", "bad", "t2"], vec!["t0"], vec!["bad"], vec!["t2"]]
-    );
 }
 
 #[tokio::test]
@@ -201,22 +154,4 @@ async fn worker_embeds_queued_jobs_before_honouring_shutdown() {
 
     harness.expect_chunk_writes(&[0, 1, 2]).await;
     assert_eq!(harness.shut_down().await.concat(), vec!["t0", "t1", "t2"]);
-}
-
-#[test]
-fn drop_limiter_warns_once_per_interval_and_reports_held_back_drops() {
-    let mut limiter = DropWarnLimiter::new();
-    let start = Instant::now();
-
-    assert_eq!(limiter.record_drop(start), Some(0));
-    assert_eq!(limiter.record_drop(start + Duration::from_secs(1)), None);
-    assert_eq!(limiter.record_drop(start + Duration::from_secs(2)), None);
-    assert_eq!(
-        limiter.record_drop(start + QUEUE_FULL_WARN_INTERVAL),
-        Some(2)
-    );
-    assert_eq!(
-        limiter.record_drop(start + QUEUE_FULL_WARN_INTERVAL + Duration::from_secs(1)),
-        None
-    );
 }

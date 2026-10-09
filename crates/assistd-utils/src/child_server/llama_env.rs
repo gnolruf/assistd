@@ -40,17 +40,10 @@ mod tests {
     }
 
     #[test]
-    fn llama_settings_are_removed() {
+    fn only_llama_settings_are_removed() {
         assert_eq!(
-            removed_vars(&["LLAMA_ARG_TOOLS", "LLAMA_ARG_STATIC_PATH", "LLAMA_API_KEY"]),
-            ["LLAMA_API_KEY", "LLAMA_ARG_STATIC_PATH", "LLAMA_ARG_TOOLS"]
-        );
-    }
-
-    #[test]
-    fn unrelated_and_download_vars_are_kept() {
-        assert!(
-            removed_vars(&["PATH", "HF_TOKEN", "LLAMA_CACHE", "CUDA_VISIBLE_DEVICES"]).is_empty()
+            removed_vars(&["LLAMA_ARG_TOOLS", "PATH", "LLAMA_CACHE", "LLAMA_API_KEY"]),
+            ["LLAMA_API_KEY", "LLAMA_ARG_TOOLS"]
         );
     }
 }

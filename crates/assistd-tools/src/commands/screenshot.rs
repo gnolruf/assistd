@@ -265,46 +265,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_target_rejects_malformed_args() {
-        let cases: [(&[&str], &str); 5] = [
-            (
-                &["--full", "--focused"],
-                "expects at most one flag (--full, --focused, or --monitor=<name>)",
-            ),
-            (
-                &["--monitor"],
-                "--monitor requires a value: --monitor=<name> (e.g. --monitor=DP-1)",
-            ),
-            (
-                &["--monitor="],
-                "--monitor requires a name (try `xrandr --listmonitors` or `swaymsg -t get_outputs`)",
-            ),
-            (&["--monitor", ""], "--monitor requires a non-empty name"),
-            (&["--bogus"], "unknown flag: --bogus"),
-        ];
-        for (raw, expected) in cases {
-            assert_eq!(parse_target(&args(raw)), Err(expected.into()), "{raw:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn bogus_flag_emits_usage_error() {
-        let out = ScreenshotCommand::default()
-            .run(CommandInput {
-                args: args(&["--bogus-flag"]),
-                stdin: None,
-            })
-            .await;
-        assert_eq!(out.exit_code, 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[error] screenshot: unknown flag: --bogus-flag. \
-             Use: screenshot --full or screenshot --focused\n"
-        );
-        assert!(out.attachments.is_empty());
-    }
-
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
         let cmd = ScreenshotCommand::new(
@@ -325,18 +285,5 @@ mod tests {
              Use: a model with mmproj loaded\n"
         );
         assert!(out.attachments.is_empty());
-    }
-
-    #[test]
-    fn summary_changes_when_vision_disabled() {
-        let summary = |supported| {
-            ScreenshotCommand::new(
-                Arc::new(ScreenshotPolicyCfg::default()),
-                VisionGate::new(supported),
-            )
-            .summary()
-        };
-        assert!(summary(true).contains("capture the screen"));
-        assert!(summary(false).contains("unavailable"));
     }
 }

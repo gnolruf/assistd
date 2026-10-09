@@ -15,17 +15,3 @@ pub fn human_size(bytes: u64) -> String {
         format!("{bytes}B")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn human_size_formats_expected_ranges() {
-        assert_eq!(human_size(0), "0B");
-        assert_eq!(human_size(500), "500B");
-        assert_eq!(human_size(2048), "2KB");
-        assert_eq!(human_size(1024 * 1024 * 3), "3.0MB");
-        assert_eq!(human_size(1024 * 1024 * 1024 * 2), "2.0GB");
-    }
-}

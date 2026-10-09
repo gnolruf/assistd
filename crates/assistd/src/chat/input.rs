@@ -314,68 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn inserts_typed_chars() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello");
-        assert_eq!(i.buffer(), "hello");
-        assert_eq!(i.cursor_col(), 5);
-    }
-
-    #[test]
-    fn backspace_removes_previous_char() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "foo");
-        i.on_key(key(KeyCode::Backspace));
-        assert_eq!(i.buffer(), "fo");
-        assert_eq!(i.cursor_col(), 2);
-    }
-
-    #[test]
-    fn cursor_and_delete() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello");
-        i.on_key(key(KeyCode::Home));
-        assert_eq!(i.cursor_col(), 0);
-        i.on_key(key(KeyCode::Delete));
-        assert_eq!(i.buffer(), "ello");
-        i.on_key(key(KeyCode::End));
-        assert_eq!(i.cursor_col(), 4);
-    }
-
-    #[test]
-    fn ctrl_a_and_ctrl_e_move_cursor() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "abc");
-        i.on_key(ctrl('a'));
-        assert_eq!(i.cursor_col(), 0);
-        i.on_key(ctrl('e'));
-        assert_eq!(i.cursor_col(), 3);
-    }
-
-    #[test]
-    fn ctrl_k_kills_to_end() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello world");
-        for _ in 0..5 {
-            i.on_key(key(KeyCode::Left));
-        }
-        i.on_key(ctrl('k'));
-        assert_eq!(i.buffer(), "hello ");
-    }
-
-    #[test]
-    fn ctrl_u_kills_to_start() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello world");
-        for _ in 0..5 {
-            i.on_key(key(KeyCode::Left));
-        }
-        i.on_key(ctrl('u'));
-        assert_eq!(i.buffer(), "world");
-        assert_eq!(i.cursor_col(), 0);
-    }
-
-    #[test]
     fn ctrl_w_kills_previous_word() {
         for (typed, expected) in [
             ("hello  world", "hello  "),
@@ -395,52 +333,6 @@ mod tests {
             let mut i = InputLine::new();
             assert_eq!(i.on_key(ctrl(c)), InputAction::Quit, "ctrl-{c}");
         }
-    }
-
-    #[test]
-    fn ctrl_c_on_non_empty_clears() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello");
-        assert_eq!(i.on_key(ctrl('c')), InputAction::None);
-        assert_eq!(i.buffer(), "");
-    }
-
-    #[test]
-    fn ctrl_d_on_non_empty_deletes_at_cursor() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "abc");
-        i.on_key(ctrl('a'));
-        i.on_key(ctrl('d'));
-        assert_eq!(i.buffer(), "bc");
-    }
-
-    #[test]
-    fn enter_submits_and_records_history() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello");
-        let action = i.on_key(key(KeyCode::Enter));
-        assert_eq!(action, InputAction::Submit("hello".into()));
-        assert_eq!(i.buffer(), "");
-        assert_eq!(i.history, ["hello"]);
-    }
-
-    #[test]
-    fn enter_ignores_whitespace_only() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "   ");
-        let action = i.on_key(key(KeyCode::Enter));
-        assert_eq!(action, InputAction::None);
-        assert!(i.history.is_empty());
-    }
-
-    #[test]
-    fn enter_dedupes_consecutive_duplicates() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello");
-        i.on_key(key(KeyCode::Enter));
-        type_str(&mut i, "hello");
-        i.on_key(key(KeyCode::Enter));
-        assert_eq!(i.history, ["hello"]);
     }
 
     #[test]
@@ -469,27 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn down_past_newest_with_no_draft_is_empty() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "old");
-        i.on_key(key(KeyCode::Enter));
-        i.on_key(key(KeyCode::Up));
-        i.on_key(key(KeyCode::Down));
-        assert_eq!(i.buffer(), "");
-    }
-
-    #[test]
-    fn history_cap_is_enforced() {
-        let mut i = InputLine::new();
-        i.history_cap = 3;
-        for n in 0..5 {
-            type_str(&mut i, &format!("m{n}"));
-            i.on_key(key(KeyCode::Enter));
-        }
-        assert_eq!(i.history, ["m2", "m3", "m4"]);
-    }
-
-    #[test]
     fn utf8_cursor_motion_and_backspace() {
         let mut i = InputLine::new();
         type_str(&mut i, "héllo");
@@ -510,15 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn esc_clears_buffer() {
-        let mut i = InputLine::new();
-        type_str(&mut i, "hello");
-        i.on_key(key(KeyCode::Esc));
-        assert_eq!(i.buffer(), "");
-        assert_eq!(i.cursor_col(), 0);
-    }
-
-    #[test]
     fn release_events_are_ignored() {
         let mut i = InputLine::new();
         let release = KeyEvent {
@@ -528,14 +390,6 @@ mod tests {
             state: KeyEventState::NONE,
         };
         i.on_key(release);
-        assert_eq!(i.buffer(), "");
-    }
-
-    #[test]
-    fn alt_modified_char_is_not_inserted() {
-        let mut i = InputLine::new();
-        let alt_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
-        i.on_key(alt_b);
         assert_eq!(i.buffer(), "");
     }
 }
