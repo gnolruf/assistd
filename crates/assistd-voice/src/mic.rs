@@ -176,7 +176,6 @@ impl VoiceInput for MicVoiceInput {
             target: "assistd::voice::mic",
             pcm_samples = pcm.len(),
             text_chars = text.chars().count(),
-            text = %text,
             "transcription complete"
         );
         Ok(text)
