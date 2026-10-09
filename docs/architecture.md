@@ -110,8 +110,13 @@ always includes the daemon and the IPC client subcommands; `tray` and
 The daemon opens its socket first and then spawns `llama-server` as a
 child process in the background, reporting `PresenceState::Waking` until
 the model has loaded (queries wait for it; requests that need no model
-are served at once). Voice initialises after the model, so a stalled
-Whisper or Piper download never holds up the socket. The server takes
+are served at once). Voice and the embedding server start after the
+model, so neither loads onto the GPU while it does, and MCP servers start
+straight away; none of them holds up the socket. `Request::GetReadiness`
+reports how far each has got as one `Event::Readiness` per subsystem, and
+the daemon broadcasts the same event as each one settles. The chat names
+whatever is still starting, and the tray tooltip lists every subsystem's
+state. The server takes
 its bind address, context length and GPU layer count from `[model]` in
 the config, plus any `custom_args` (parsed and checked at
 config load, never run through a shell). Inherited `LLAMA_ARG_*` and
@@ -237,16 +242,21 @@ embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays unindexed until `assistd memory reindex` picks it up.
 
+The queue and the semantic store exist from daemon start, but the
+embedder sits behind an `EmbedderHandle` that is `Starting` until the
+embedding server answers. Jobs queued before then wait in the channel and
+are embedded once the worker starts. Semantic search, reindex, `recall`
+and `reminisce` report "embedding is still starting" (or why it is
+unavailable) until then, and per-turn context injection skips recall.
+
 ### Voice (`assistd-voice`)
 
 `VoiceManager` owns voice for the daemon's lifetime. Capture (push-to-talk
 input and the continuous listener) and speech output each start as
 `Readiness::Starting` and become `Ready` or `Unavailable(reason)` once the
 background warmup brings up Whisper and Piper, so voice requests during
-startup or after a failed load are refused with the reason. `GetVoiceState`
-reports both as an `Event::VoiceReadiness`, which is also broadcast once
-voice startup finishes; the chat shows `voice: starting` and the tray
-tooltip shows each component's state.
+startup or after a failed load are refused with the reason. Both appear
+in `GetReadiness`, and `GetVoiceState` reports them too.
 
 Push-to-talk: the daemon receives `Request::PttStart` from a client
 or compositor binding, opens the configured microphone via cpal, and
@@ -302,9 +312,13 @@ External tool servers configured under `[[mcp.servers]]`. Each entry
 is a child process the daemon spawns in its own process group, with a
 scrubbed environment, and speaks MCP to over stdin/stdout through the
 `rmcp` crate. Discovered tools are wrapped by `McpToolAdapter`, which
-implements `Tool` over the discovered schema, and registered into the
-same `ToolRegistry` the LLM sees, under the name
-`mcp__<server-name>__<tool-name>`. Each call asks the user first until
+implements `Tool` over the discovered schema, and added to the
+`ToolCatalog` the LLM's tools come from, under the name
+`mcp__<server-name>__<tool-name>`. Servers start one after another in the
+background; each one's tools are offered from the next turn after it
+connects, since every turn takes its own snapshot of the catalog. A
+server that fails to start is reported as unavailable in `GetReadiness`
+and `GetCapabilities`. Each call asks the user first until
 that tool is "always allowed". Text and JSON results obey the same
 `[tools.output]` caps as `run`, spilling overflow to
 `mcp-<server-name>-<n>.txt`.

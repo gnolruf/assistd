@@ -477,15 +477,7 @@ fn status_indicators(app: &App) -> Vec<Span<'static>> {
     if let Some((color, label)) = voice_indicator(app.listening) {
         push_indicator(&mut spans, app.spinner_char().to_string(), color, label);
     }
-    if app.voice_starting {
-        spans.push(Span::styled(" │ ", reversed));
-        spans.push(Span::styled(
-            "voice: starting",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::REVERSED),
-        ));
-    }
+    push_starting(&mut spans, app);
     push_toggle(&mut spans, "vision", app.vision_enabled);
     push_toggle(&mut spans, "verbose", app.verbose);
     let pending_count = app.pending_attachments.len();
@@ -517,6 +509,21 @@ fn push_indicator(spans: &mut Vec<Span<'static>>, glyph: String, color: Color, l
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(format!(" {label}"), reversed_style()));
+}
+
+/// Name the daemon subsystems still starting, if any.
+fn push_starting(spans: &mut Vec<Span<'static>>, app: &App) {
+    let starting: Vec<String> = app.startup.starting().map(ToString::to_string).collect();
+    if starting.is_empty() {
+        return;
+    }
+    spans.push(Span::styled(" │ ", reversed_style()));
+    spans.push(Span::styled(
+        format!("starting: {}", starting.join(", ")),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::REVERSED),
+    ));
 }
 
 fn push_toggle(spans: &mut Vec<Span<'static>>, name: &str, on: bool) {

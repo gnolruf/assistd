@@ -27,6 +27,7 @@ pub(crate) mod memory_stack;
 pub(crate) mod persistence;
 pub(crate) mod presence_handlers;
 pub(crate) mod query;
+pub(crate) mod readiness;
 pub(crate) mod runtime;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
@@ -37,7 +38,7 @@ pub use self::branches::history_entries;
 pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, ConversationContext, RuntimeState};
-pub use self::subsystems::{McpStartupFailure, Subsystems};
+pub use self::subsystems::{McpServerStatus, Subsystems};
 
 /// Why a request handler failed.
 #[derive(Debug, Error)]
@@ -224,6 +225,7 @@ impl AppState {
             }
             Request::ChatClosed { id } => self.handle_chat_closed(id, peer_pid, tx).await,
             Request::GetChatFocus { id } => self.handle_get_chat_focus(id, tx).await,
+            Request::GetReadiness { id } => self.handle_get_readiness(id, tx).await,
             Request::Subscribe { id, filter } => self.handle_subscribe(id, filter, tx).await,
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 send_error(

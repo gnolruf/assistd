@@ -8,6 +8,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 
+use assistd_utils::readiness::NotReady;
+
 pub mod attachment;
 pub mod client;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
@@ -91,7 +93,32 @@ pub enum VoiceCaptureState {
     Transcribing,
 }
 
-/// How far one voice component's startup has got.
+/// A subsystem that starts in the background after the socket opens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StartupComponent {
+    /// Push-to-talk and continuous listening.
+    VoiceInput,
+    Speech,
+    /// The embedding server behind semantic recall.
+    Embedding,
+    Mcp {
+        server: String,
+    },
+}
+
+impl fmt::Display for StartupComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StartupComponent::VoiceInput => f.write_str("voice input"),
+            StartupComponent::Speech => f.write_str("speech"),
+            StartupComponent::Embedding => f.write_str("semantic memory"),
+            StartupComponent::Mcp { server } => write!(f, "MCP {server}"),
+        }
+    }
+}
+
+/// How far one [`StartupComponent`]'s startup has got.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ComponentReadiness {
@@ -109,6 +136,51 @@ impl fmt::Display for ComponentReadiness {
             ComponentReadiness::Starting => f.write_str("starting"),
             ComponentReadiness::Ready => f.write_str("ready"),
             ComponentReadiness::Unavailable { reason } => write!(f, "unavailable ({reason})"),
+        }
+    }
+}
+
+/// The latest [`ComponentReadiness`] a client has seen for each
+/// [`StartupComponent`], in the order each was first reported.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupReadiness {
+    components: Vec<(StartupComponent, ComponentReadiness)>,
+}
+
+impl StartupReadiness {
+    /// Record `component`'s latest `state`.
+    pub fn record(&mut self, component: StartupComponent, state: ComponentReadiness) {
+        match self
+            .components
+            .iter_mut()
+            .find(|(seen, _)| *seen == component)
+        {
+            Some((_, current)) => *current = state,
+            None => self.components.push((component, state)),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &(StartupComponent, ComponentReadiness)> {
+        self.components.iter()
+    }
+
+    /// Components still starting.
+    pub fn starting(&self) -> impl Iterator<Item = &StartupComponent> {
+        self.components
+            .iter()
+            .filter(|(_, state)| *state == ComponentReadiness::Starting)
+            .map(|(component, _)| component)
+    }
+}
+
+impl<T> From<Result<T, NotReady>> for ComponentReadiness {
+    fn from(ready: Result<T, NotReady>) -> Self {
+        match ready {
+            Ok(_) => ComponentReadiness::Ready,
+            Err(NotReady::Starting) => ComponentReadiness::Starting,
+            Err(NotReady::Unavailable(reason)) => ComponentReadiness::Unavailable {
+                reason: reason.to_string(),
+            },
         }
     }
 }
@@ -132,7 +204,7 @@ pub enum EventKind {
     LastDelta,
     Transcription,
     ChatFocus,
-    VoiceReadiness,
+    Readiness,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -189,7 +261,8 @@ pub enum Request {
     /// Cancel the in-flight turn and queued TTS audio; idempotent. Emits `Done`.
     InterruptTurn { id: String },
     /// Report whether TTS is enabled and how far voice startup has got.
-    /// Emits `VoiceOutputState`, `VoiceReadiness`, then `Done`.
+    /// Emits `VoiceOutputState`, a `Readiness` for voice input and for
+    /// speech, then `Done`.
     GetVoiceState { id: String },
     /// Store `value` under `key`, overwriting. Emits `Done`.
     MemorySave {
@@ -261,6 +334,9 @@ pub enum Request {
     ChatClosed { id: String },
     /// Report whether a live chat has keyboard focus. Emits `ChatFocus`, then `Done`.
     GetChatFocus { id: String },
+    /// Report how far every background subsystem has started. Emits one
+    /// `Readiness` per subsystem, then `Done`.
+    GetReadiness { id: String },
     /// Forward broadcast events matching `filter`, tagged with their turn's `id`, until the
     /// client disconnects; no `Done`, and `ToolResult` attachments are stripped.
     Subscribe {
@@ -310,6 +386,7 @@ impl Request {
             | Request::VoiceSkip { id }
             | Request::InterruptTurn { id }
             | Request::GetVoiceState { id }
+            | Request::GetReadiness { id }
             | Request::MemorySave { id, .. }
             | Request::MemoryLoad { id, .. }
             | Request::MemoryList { id, .. }
@@ -369,6 +446,7 @@ impl Request {
             Request::ChatState { .. } => "chat_state",
             Request::ChatClosed { .. } => "chat_closed",
             Request::GetChatFocus { .. } => "get_chat_focus",
+            Request::GetReadiness { .. } => "get_readiness",
             Request::Subscribe { .. } => "subscribe",
         }
     }
@@ -552,12 +630,12 @@ pub enum Event {
     ListenState { id: String, active: bool },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
-    /// How far voice capture (push-to-talk and listening) and speech output
-    /// have started; broadcast when voice startup finishes.
-    VoiceReadiness {
+    /// How far one background subsystem has started; broadcast whenever
+    /// one finishes starting.
+    Readiness {
         id: String,
-        capture: ComponentReadiness,
-        speech: ComponentReadiness,
+        component: StartupComponent,
+        state: ComponentReadiness,
     },
     /// Whether a live chat has keyboard focus; broadcast when it changes.
     ChatFocus { id: String, focused: bool },
@@ -703,7 +781,7 @@ impl Event {
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
             | Event::VoiceOutputState { id, .. }
-            | Event::VoiceReadiness { id, .. }
+            | Event::Readiness { id, .. }
             | Event::SpeakingState { id, .. }
             | Event::ChatFocus { id, .. }
             | Event::SessionTitle { id, .. }
@@ -743,7 +821,7 @@ impl Event {
             Event::LastDelta { .. } => EventKind::LastDelta,
             Event::Transcription { .. } => EventKind::Transcription,
             Event::ChatFocus { .. } => EventKind::ChatFocus,
-            Event::VoiceReadiness { .. } => EventKind::VoiceReadiness,
+            Event::Readiness { .. } => EventKind::Readiness,
             Event::VoiceOutputState { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }

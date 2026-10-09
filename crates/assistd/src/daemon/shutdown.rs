@@ -11,8 +11,8 @@ use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
 use tracing::info;
 
-use super::embed_init::EmbeddingSubsystem;
-use super::mcp_init::McpSubsystem;
+use super::embed_init::EmbeddingService;
+use super::mcp_init::McpService;
 use super::memory_init::MemorySubsystem;
 use super::wm_init::WindowSubsystem;
 
@@ -60,9 +60,9 @@ pub(super) struct DaemonShutdown {
     pub(super) persistence_tracker: TaskTracker,
     pub(super) presence: Arc<PresenceManager>,
     pub(super) memory: MemorySubsystem,
-    pub(super) embed: EmbeddingSubsystem,
+    pub(super) embed: EmbeddingService,
     pub(super) window: WindowSubsystem,
-    pub(super) mcp: McpSubsystem,
+    pub(super) mcp: McpService,
     pub(super) intake_tasks: IntakeTasks,
 }
 

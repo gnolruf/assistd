@@ -55,6 +55,10 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
             r#"{"type":"get_chat_focus","id":"r"}"#,
         ),
         (
+            Request::GetReadiness { id: id() },
+            r#"{"type":"get_readiness","id":"r"}"#,
+        ),
+        (
             Request::GetPresence { id: id() },
             r#"{"type":"get_presence","id":"r"}"#,
         ),
@@ -416,15 +420,26 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str, Option<EventKin
             None,
         ),
         (
-            Event::VoiceReadiness {
+            Event::Readiness {
                 id: id(),
-                capture: ComponentReadiness::Unavailable {
-                    reason: "no mic".into(),
+                component: StartupComponent::Mcp {
+                    server: "fs".into(),
                 },
-                speech: ComponentReadiness::Starting,
+                state: ComponentReadiness::Unavailable {
+                    reason: "no npx".into(),
+                },
             },
-            r#"{"type":"voice_readiness","id":"r","capture":{"state":"unavailable","reason":"no mic"},"speech":{"state":"starting"}}"#,
-            Some(EventKind::VoiceReadiness),
+            r#"{"type":"readiness","id":"r","component":{"kind":"mcp","server":"fs"},"state":{"state":"unavailable","reason":"no npx"}}"#,
+            Some(EventKind::Readiness),
+        ),
+        (
+            Event::Readiness {
+                id: id(),
+                component: StartupComponent::VoiceInput,
+                state: ComponentReadiness::Starting,
+            },
+            r#"{"type":"readiness","id":"r","component":{"kind":"voice_input"},"state":{"state":"starting"}}"#,
+            Some(EventKind::Readiness),
         ),
         (
             Event::SpeakingState {
@@ -745,7 +760,7 @@ fn subscribe_filter_default_matches_all() {
         EventKind::Error,
         EventKind::LastDelta,
         EventKind::ChatFocus,
-        EventKind::VoiceReadiness,
+        EventKind::Readiness,
     ] {
         assert!(filter.matches(kind), "default filter should match {kind:?}");
     }
@@ -773,5 +788,53 @@ fn component_readiness_reads_as_a_status_word() {
         }
         .to_string(),
         "unavailable (disabled in config)"
+    );
+}
+
+#[test]
+fn component_readiness_follows_a_readiness_result() {
+    assert_eq!(
+        ComponentReadiness::from(Ok::<_, NotReady>(())),
+        ComponentReadiness::Ready
+    );
+    assert_eq!(
+        ComponentReadiness::from(Err::<(), _>(NotReady::Starting)),
+        ComponentReadiness::Starting
+    );
+    assert_eq!(
+        ComponentReadiness::from(Err::<(), _>(NotReady::Unavailable("off".into()))),
+        ComponentReadiness::Unavailable {
+            reason: "off".into()
+        }
+    );
+}
+
+#[test]
+fn startup_component_names_read_for_a_status_line() {
+    assert_eq!(StartupComponent::Embedding.to_string(), "semantic memory");
+    assert_eq!(
+        StartupComponent::Mcp {
+            server: "fs".into()
+        }
+        .to_string(),
+        "MCP fs"
+    );
+}
+
+#[test]
+fn startup_readiness_keeps_the_latest_state_in_first_seen_order() {
+    let mut readiness = StartupReadiness::default();
+    readiness.record(StartupComponent::Embedding, ComponentReadiness::Starting);
+    readiness.record(StartupComponent::VoiceInput, ComponentReadiness::Ready);
+    assert_eq!(
+        readiness.starting().collect::<Vec<_>>(),
+        [&StartupComponent::Embedding]
+    );
+
+    readiness.record(StartupComponent::Embedding, ComponentReadiness::Ready);
+    assert_eq!(readiness.starting().count(), 0);
+    assert_eq!(
+        readiness.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
+        [StartupComponent::Embedding, StartupComponent::VoiceInput]
     );
 }

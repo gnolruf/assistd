@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use assistd_ipc::{ComponentReadiness, Event};
+use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use thiserror::Error;
 
@@ -73,24 +73,12 @@ impl VoiceManager {
         &self.speech
     }
 
-    /// How far capture and speech have started, as the event answering
-    /// request `id`.
-    pub fn readiness_event(&self, id: String) -> Event {
-        Event::VoiceReadiness {
-            id,
-            capture: component_readiness(self.capture.get()),
-            speech: component_readiness(self.speech.output()),
-        }
-    }
-}
-
-fn component_readiness<T>(ready: Result<T, NotReady>) -> ComponentReadiness {
-    match ready {
-        Ok(_) => ComponentReadiness::Ready,
-        Err(NotReady::Starting) => ComponentReadiness::Starting,
-        Err(NotReady::Unavailable(reason)) => ComponentReadiness::Unavailable {
-            reason: reason.to_string(),
-        },
+    /// How far capture and speech have started.
+    pub fn readiness(&self) -> [(StartupComponent, ComponentReadiness); 2] {
+        [
+            (StartupComponent::VoiceInput, self.capture.get().into()),
+            (StartupComponent::Speech, self.speech.output().into()),
+        ]
     }
 }
 
@@ -122,20 +110,22 @@ mod tests {
     }
 
     #[test]
-    fn readiness_event_reports_capture_and_speech_separately() {
+    fn readiness_reports_capture_and_speech_separately() {
         let manager = VoiceManager::new(true);
         manager
             .speech()
             .set_output(Readiness::Unavailable("disabled in config".into()));
         assert_eq!(
-            manager.readiness_event("v".into()),
-            Event::VoiceReadiness {
-                id: "v".into(),
-                capture: ComponentReadiness::Starting,
-                speech: ComponentReadiness::Unavailable {
-                    reason: "disabled in config".into(),
-                },
-            }
+            manager.readiness(),
+            [
+                (StartupComponent::VoiceInput, ComponentReadiness::Starting),
+                (
+                    StartupComponent::Speech,
+                    ComponentReadiness::Unavailable {
+                        reason: "disabled in config".into(),
+                    }
+                ),
+            ]
         );
     }
 }

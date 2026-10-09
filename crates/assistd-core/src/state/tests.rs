@@ -5,9 +5,10 @@ use parking_lot::Mutex as StdMutex;
 use tokio::sync::{Notify, watch};
 
 use assistd_config::ToolsOutputConfig;
+use assistd_embed::EmbedderHandle;
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, ImageAttachment, PresenceState, PresenceTarget,
-    StatusKind, StatusSeverity, SubscribeFilter, VoiceCaptureState,
+    StartupComponent, StatusKind, StatusSeverity, SubscribeFilter, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, FailedBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
@@ -17,6 +18,7 @@ use assistd_memory::{
     SqliteConversationStore, SqliteHandle,
 };
 use assistd_tools::{CommandRegistry, RunTool, ToolError, ToolsDisabled, commands::EchoCommand};
+use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     ContinuousListener, ListenError, VoiceCapture, VoiceInput, VoiceInputError, VoiceManager,
     VoiceOutputController, VoiceOutputError,
@@ -160,16 +162,12 @@ async fn dispatch_query_emits_delta_then_done() {
 }
 
 #[tokio::test]
-async fn simple_requests_emit_expected_events() {
+async fn presence_requests_emit_expected_events() {
     let presence = |id: &str, state| Event::Presence {
         id: id.into(),
         state,
     };
-    let voice_output = |id: &str, enabled| Event::VoiceOutputState {
-        id: id.into(),
-        enabled,
-    };
-    let cases = [
+    assert_request_events(vec![
         (
             PresenceTarget::Drowsy,
             Request::GetPresence { id: "gp".into() },
@@ -202,38 +200,6 @@ async fn simple_requests_emit_expected_events() {
         ),
         (
             PresenceTarget::Active,
-            Request::VoiceToggle { id: "vt".into() },
-            vec![voice_output("vt", false), done("vt")],
-            PresenceState::Active,
-        ),
-        (
-            PresenceTarget::Active,
-            Request::VoiceSkip { id: "vs".into() },
-            vec![voice_output("vs", true), done("vs")],
-            PresenceState::Active,
-        ),
-        (
-            PresenceTarget::Active,
-            Request::GetVoiceState { id: "gv".into() },
-            vec![
-                voice_output("gv", true),
-                Event::VoiceReadiness {
-                    id: "gv".into(),
-                    capture: ComponentReadiness::Ready,
-                    speech: ComponentReadiness::Ready,
-                },
-                done("gv"),
-            ],
-            PresenceState::Active,
-        ),
-        (
-            PresenceTarget::Active,
-            Request::InterruptTurn { id: "it".into() },
-            vec![done("it")],
-            PresenceState::Active,
-        ),
-        (
-            PresenceTarget::Active,
             Request::ConfirmResponse {
                 id: "cr".into(),
                 confirm_id: "x".into(),
@@ -247,7 +213,48 @@ async fn simple_requests_emit_expected_events() {
             )],
             PresenceState::Active,
         ),
-    ];
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn voice_output_requests_emit_expected_events() {
+    let voice_output = |id: &str, enabled| Event::VoiceOutputState {
+        id: id.into(),
+        enabled,
+    };
+    let readiness = |component| Event::Readiness {
+        id: "gv".into(),
+        component,
+        state: ComponentReadiness::Ready,
+    };
+    let active = |req, events| (PresenceTarget::Active, req, events, PresenceState::Active);
+    assert_request_events(vec![
+        active(
+            Request::VoiceToggle { id: "vt".into() },
+            vec![voice_output("vt", false), done("vt")],
+        ),
+        active(
+            Request::VoiceSkip { id: "vs".into() },
+            vec![voice_output("vs", true), done("vs")],
+        ),
+        active(
+            Request::GetVoiceState { id: "gv".into() },
+            vec![
+                voice_output("gv", true),
+                readiness(StartupComponent::VoiceInput),
+                readiness(StartupComponent::Speech),
+                done("gv"),
+            ],
+        ),
+        active(Request::InterruptTurn { id: "it".into() }, vec![done("it")]),
+    ])
+    .await;
+}
+
+/// Dispatch each request on a fresh state starting in its presence, and
+/// check the events it emits and the presence it leaves.
+async fn assert_request_events(cases: Vec<(PresenceTarget, Request, Vec<Event>, PresenceState)>) {
     for (initial, req, expected, presence_after) in cases {
         let kind = req.kind();
         let state = StateParts {
@@ -283,6 +290,107 @@ async fn capabilities_report_disabled_tools_before_the_model() {
             component: Component::Agent,
             event: StatusKind::StartupFailed,
             message: ToolsDisabled::BwrapMissing.to_string(),
+        }
+    );
+}
+
+/// A default state whose embedder is still starting and whose MCP servers
+/// `fs` and `git` are starting and unavailable.
+fn state_mid_startup() -> Arc<AppState> {
+    let mut state = Arc::into_inner(default_state()).expect("sole owner");
+    state.memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Starting));
+    let git = McpServerStatus::starting("git".into());
+    git.set(Readiness::Unavailable(
+        "failed to start: no such file".into(),
+    ));
+    state.subsystems.mcp_servers = vec![McpServerStatus::starting("fs".into()), git];
+    Arc::new(state)
+}
+
+#[tokio::test]
+async fn readiness_lists_every_background_subsystem() {
+    let state = state_mid_startup();
+    let (result, events) = dispatch(&state, Request::GetReadiness { id: "r".into() }).await;
+    result.expect("dispatch");
+    let readiness = |component, state| Event::Readiness {
+        id: "r".into(),
+        component,
+        state,
+    };
+    let mcp = |server: &str| StartupComponent::Mcp {
+        server: server.into(),
+    };
+    assert_eq!(
+        events,
+        [
+            readiness(StartupComponent::VoiceInput, ComponentReadiness::Ready),
+            readiness(StartupComponent::Speech, ComponentReadiness::Ready),
+            readiness(StartupComponent::Embedding, ComponentReadiness::Starting),
+            readiness(mcp("fs"), ComponentReadiness::Starting),
+            readiness(
+                mcp("git"),
+                ComponentReadiness::Unavailable {
+                    reason: "failed to start: no such file".into()
+                }
+            ),
+            done("r"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
+    let state = state_mid_startup();
+    let (result, events) = dispatch(
+        &state,
+        Request::MemorySemanticSearch {
+            id: "s".into(),
+            query: "the rust daemon".into(),
+            limit: 3,
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(DispatchError::Embed(_))), "{result:?}");
+    assert_eq!(
+        events,
+        [error(
+            "s",
+            "semantic search failed: embedding is still starting"
+        )]
+    );
+
+    let (result, events) = dispatch(&state, Request::MemoryReindex { id: "x".into() }).await;
+    assert!(result.is_err());
+    assert_eq!(
+        events,
+        [error("x", "reindex failed: embedding is still starting")]
+    );
+    assert_eq!(
+        state
+            .build_semantic_context("what did we say about rust")
+            .await
+            .unwrap(),
+        None,
+        "turn context skips recall instead of failing"
+    );
+}
+
+#[tokio::test]
+async fn capabilities_report_only_mcp_servers_that_failed() {
+    let state = state_mid_startup();
+    let (result, events) = dispatch(&state, Request::GetCapabilities { id: "c".into() }).await;
+    result.expect("dispatch");
+    let [status, Event::Capabilities { .. }, Event::Done { .. }] = events.as_slice() else {
+        panic!("expected one status, capabilities, done; got {events:?}");
+    };
+    assert_eq!(
+        *status,
+        Event::Status {
+            id: "c".into(),
+            severity: StatusSeverity::Warning,
+            component: Component::Mcp,
+            event: StatusKind::StartupFailed,
+            message: "MCP server 'git' is not available: failed to start: no such file".into(),
         }
     );
 }

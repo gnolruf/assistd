@@ -1,5 +1,6 @@
 //! Daemon entrypoint: bring up the subsystems, serve the IPC socket while
-//! the model and voice load in the background, tear down in order.
+//! the model, voice, embedding and MCP servers start in the background,
+//! tear down in order.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,8 @@ use tracing::info;
 
 use crate::hotkey;
 use crate::ipc_voice_proxy::IpcVoiceProxy;
-use embed_init::EmbeddingSubsystem;
+use embed_init::{EmbeddingHandles, EmbeddingService, EmbeddingStages, EmbeddingStartup};
+use mcp_init::{McpService, McpStartup};
 use memory_init::MemorySubsystem;
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 use tools_init::ToolDeps;
@@ -36,6 +38,8 @@ mod listen_dispatcher;
 mod mcp_init;
 mod memory_init;
 mod shutdown;
+#[cfg(test)]
+mod test_support;
 mod tools_init;
 mod voice_init;
 mod voice_probe;
@@ -132,13 +136,7 @@ async fn start(
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
     let mut memory = memory_init::init(&config, &stages.memory_writer).await;
-    let embed = embed_init::init(
-        &config,
-        memory.sqlite_handle.as_ref(),
-        &stages.embed_worker,
-        &stages.embed_server,
-    )
-    .await;
+    let (embed, embed_startup) = embed_init::prepare(&config, memory.sqlite_handle.as_ref());
     let window = wm_init::init(&config, &stages.tools).await;
 
     let conversation_ctx = Arc::new(ConversationContext::from_arc(
@@ -156,8 +154,7 @@ async fn start(
             current_session: conversation_ctx.session_updates(),
             window_manager: window.manager.clone(),
         },
-    )
-    .await?;
+    )?;
 
     let chat = build_chat_backend(&config, health_probe)?;
     let resumed_history = std::mem::take(&mut memory.resumed_history);
@@ -166,7 +163,7 @@ async fn start(
     let subsystems = Subsystems::new(chat, presence.clone(), tools.registry, voice.clone())
         .with_window_manager(window.manager.clone())
         .with_vision_revalidator(vision_revalidator.clone())
-        .with_mcp_startup_failures(tools.mcp.startup_failures.clone())
+        .with_mcp_servers(tools.mcp_servers)
         .with_tools_disabled(tools.disabled);
     let memory_stack = build_memory_stack(&config, &memory, &embed);
 
@@ -177,12 +174,14 @@ async fn start(
         runtime: RuntimeState::new().with_conversation_ctx(conversation_ctx),
     });
     let persistence_tracker = state.runtime.persistence_tracker_handle();
-    let warmup_handle = warmup::spawn(
-        Warmup {
-            state: state.clone(),
+    let background = spawn_background_starts(
+        &state,
+        BackgroundStarts {
             vision: vision_revalidator,
+            embed: embed_startup,
+            mcp: tools.mcp_startup,
         },
-        stages.intake.subscribe(),
+        stages,
     );
 
     Ok((
@@ -191,17 +190,65 @@ async fn start(
             persistence_tracker,
             presence,
             memory,
-            embed,
+            embed: background.embed,
             window,
-            mcp: tools.mcp,
+            mcp: background.mcp,
             intake_tasks: IntakeTasks {
                 hotkey: hotkey_handle,
                 gpu_monitor: gpu_monitor_handle,
                 idle_monitor: idle_monitor_handle,
-                warmup: warmup_handle,
+                warmup: background.warmup,
             },
         },
     ))
+}
+
+/// What starts after the socket opens.
+struct BackgroundStarts {
+    vision: Arc<VisionRevalidator>,
+    embed: Option<EmbeddingStartup>,
+    mcp: Option<McpStartup>,
+}
+
+/// The background starts, each joined at shutdown.
+struct BackgroundServices {
+    warmup: JoinHandle<()>,
+    embed: EmbeddingService,
+    mcp: McpService,
+}
+
+/// Start the MCP servers at once, and the embedding server once the model
+/// load has settled so the two never load onto the GPU together.
+fn spawn_background_starts(
+    state: &Arc<AppState>,
+    starts: BackgroundStarts,
+    stages: &ShutdownStages,
+) -> BackgroundServices {
+    let (model_settled_tx, model_settled_rx) = watch::channel(false);
+    let warmup = warmup::spawn(
+        Warmup {
+            state: state.clone(),
+            vision: starts.vision,
+            model_settled: model_settled_tx,
+        },
+        stages.intake.subscribe(),
+    );
+    let embed = starts
+        .embed
+        .map_or_else(EmbeddingService::disabled, |startup| {
+            startup.spawn(
+                state.clone(),
+                model_settled_rx,
+                EmbeddingStages {
+                    worker: stages.embed_worker.subscribe(),
+                    server: stages.embed_server.subscribe(),
+                },
+            )
+        });
+    let mcp = starts.mcp.map_or_else(McpService::disabled, |startup| {
+        startup.spawn(state.clone(), stages.tools.subscribe())
+    });
+    BackgroundServices { warmup, embed, mcp }
 }
 
 /// Write a default config file to the platform config directory.
@@ -270,7 +317,7 @@ fn build_chat_backend(
 fn build_memory_stack(
     config: &Config,
     memory: &MemorySubsystem,
-    embed: &EmbeddingSubsystem,
+    embed: &EmbeddingHandles,
 ) -> MemoryStack {
     let stack = MemoryStack::disabled(config.embedding.clone())
         .with_memory(memory.memory_store.clone())

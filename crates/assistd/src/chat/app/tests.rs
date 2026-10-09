@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 
+use assistd_ipc::{ComponentReadiness, StartupComponent};
+
 use super::super::ui;
 use super::attach::longest_common_prefix;
 use super::keys::{MOUSE_WHEEL_STEP, SLASH_COMMANDS};
@@ -879,4 +881,53 @@ fn longest_common_prefix_stops_at_char_boundaries() {
     assert_eq!(longest_common_prefix(&["日本", "日本語"]), "日本");
     assert_eq!(longest_common_prefix(&["abc"]), "abc");
     assert_eq!(longest_common_prefix(&[]), "");
+}
+
+#[test]
+fn status_bar_names_the_subsystems_still_starting() {
+    let (mut app, _rx) = test_app();
+    let readiness = |component, state| {
+        status(Event::Readiness {
+            id: "r".into(),
+            component,
+            state,
+        })
+    };
+    app.on_chat_event(readiness(
+        StartupComponent::Embedding,
+        ComponentReadiness::Starting,
+    ));
+    app.on_chat_event(readiness(
+        StartupComponent::Mcp {
+            server: "fs".into(),
+        },
+        ComponentReadiness::Starting,
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(200, 10)).expect("test terminal");
+    terminal
+        .draw(|frame| ui::render(frame, &mut app))
+        .expect("draw");
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(
+        screen.contains("starting: semantic memory, MCP fs"),
+        "status bar: {screen}"
+    );
+
+    app.on_chat_event(readiness(
+        StartupComponent::Embedding,
+        ComponentReadiness::Ready,
+    ));
+    app.on_chat_event(readiness(
+        StartupComponent::Mcp {
+            server: "fs".into(),
+        },
+        ComponentReadiness::Ready,
+    ));
+    assert_eq!(app.startup.starting().count(), 0);
 }

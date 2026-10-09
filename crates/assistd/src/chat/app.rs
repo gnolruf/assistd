@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::{PresenceState, SleepConfig};
-use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
+use assistd_ipc::{Event, IpcClient, Request, StartupReadiness, VoiceCaptureState};
 use assistd_tools::{Attachment, ConfirmationRequest};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -224,8 +224,8 @@ pub(super) struct App {
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     pub listen_active: bool,
-    /// Voice capture or speech output is still starting in the daemon.
-    pub voice_starting: bool,
+    /// How far the daemon's background subsystems have started.
+    pub startup: StartupReadiness,
     pub pending_attachments: Vec<PendingAttachment>,
     picker: Option<Picker>,
     ipc: Arc<IpcClient>,
@@ -335,7 +335,7 @@ impl App {
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             listen_active: false,
-            voice_starting: false,
+            startup: StartupReadiness::default(),
             pending_attachments: Vec::new(),
             picker,
             ipc,

@@ -5,12 +5,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use assistd_config::EmbeddingConfig;
-use assistd_embed::{EmbedJob, Embedder, NoEmbedder};
+use assistd_embed::{EmbedJob, EmbedderHandle};
 use assistd_memory::{
     ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, NoSemanticStore,
     SemanticStore, SqliteHandle,
 };
 use assistd_tools::MemoryOps;
+use assistd_utils::readiness::Readiness;
 
 /// Persistent stores, embedding pipeline, and the memory tool ops built
 /// over them.
@@ -19,7 +20,7 @@ pub struct MemoryStack {
     pub memory: Arc<dyn MemoryStore>,
     pub conversations: Arc<dyn ConversationStore>,
     pub memory_ops: Arc<MemoryOps>,
-    pub embedder: Arc<dyn Embedder>,
+    pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
     pub chunks: Option<Arc<SqliteHandle>>,
@@ -27,7 +28,8 @@ pub struct MemoryStack {
 }
 
 impl MemoryStack {
-    /// Construct a stack with every store wired to its no-op placeholder.
+    /// Construct a stack with every store wired to its no-op placeholder
+    /// and the embedder unavailable.
     pub fn disabled(embedding_cfg: EmbeddingConfig) -> Self {
         let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
         let conversations: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
@@ -38,7 +40,9 @@ impl MemoryStack {
             memory,
             conversations,
             memory_ops,
-            embedder: Arc::new(NoEmbedder),
+            embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(
+                "embedding not configured".into(),
+            ))),
             semantic: Arc::new(NoSemanticStore),
             embed_tx,
             chunks: None,
@@ -61,7 +65,7 @@ impl MemoryStack {
     }
 
     /// Replace the embedder.
-    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+    pub fn with_embedder(mut self, embedder: Arc<EmbedderHandle>) -> Self {
         self.embedder = embedder;
         self
     }

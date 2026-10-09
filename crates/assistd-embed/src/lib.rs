@@ -9,11 +9,13 @@ use async_trait::async_trait;
 pub mod client;
 pub mod embedder_task;
 mod error;
+mod handle;
 pub mod server;
 
 pub use client::LlamaEmbedder;
 pub use embedder_task::{EmbedJob, enqueue_embed_job, spawn_embedder_task};
 pub use error::EmbedError;
+pub use handle::EmbedderHandle;
 pub use server::EmbedServerSpec;
 
 /// Per-request HTTP deadline against `/v1/embeddings`.

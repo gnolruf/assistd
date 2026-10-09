@@ -19,7 +19,7 @@ const UNTRUSTED_WINDOW_NOTE: &str = "  The window class and title are set by the
 
 impl AppState {
     /// Render the nearest past conversation chunks as a context block.
-    /// `Ok(None)` when the query is too short, embedding is off, or
+    /// `Ok(None)` when the query is too short, the embedder is not up, or
     /// nothing matched.
     pub(super) async fn build_semantic_context(
         &self,
@@ -28,16 +28,16 @@ impl AppState {
         if query.trim().chars().count() < MIN_RECALL_QUERY_CHARS {
             return Ok(None);
         }
-        let embedding = self.memory.embedder.embed(query.to_string()).await?;
-        let model = self.memory.embedder.model().to_string();
-        if model.is_empty() {
+        let Ok(embedder) = self.memory.embedder.get() else {
             return Ok(None);
-        }
+        };
+        let embedding = embedder.embed(query.to_string()).await?;
+        let model = embedder.model();
         let top_k = self.memory.embedding_cfg.top_k.get() as usize;
         let hits = self
             .memory
             .semantic
-            .nearest_chunks(embedding, top_k, &model, None)
+            .nearest_chunks(embedding, top_k, model, None)
             .await?;
         if hits.is_empty() {
             return Ok(None);
