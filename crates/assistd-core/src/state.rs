@@ -39,6 +39,7 @@ pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, ConversationContext, RuntimeState};
 pub use self::subsystems::{McpServerStatus, Subsystems};
+pub use self::wire::AttachmentError;
 
 /// Why a request handler failed.
 #[derive(Debug, Error)]
@@ -46,12 +47,8 @@ pub enum DispatchError {
     #[error(transparent)]
     Presence(#[from] PresenceError),
 
-    #[error("invalid attachment: base64 decode failed for {mime}: {source}")]
-    InvalidAttachment {
-        mime: String,
-        #[source]
-        source: base64::DecodeError,
-    },
+    #[error("invalid attachment: {0}")]
+    InvalidAttachment(#[from] AttachmentError),
 
     #[error("vision not available: model does not support images")]
     VisionUnsupported,

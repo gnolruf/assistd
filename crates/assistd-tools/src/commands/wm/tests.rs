@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use super::*;
 use crate::commands::RecordingGate;
 use crate::commands::test_patterns as patterns;
-use crate::exec::POLICY_DENIED_EXIT;
+use crate::exec::{OUTPUT_OVERFLOW_EXIT, POLICY_DENIED_EXIT};
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
 fn id(n: u64) -> WindowId {
@@ -282,6 +282,43 @@ async fn open_reports_a_failed_startup_with_its_output() {
         String::from_utf8_lossy(&out.stderr).contains("boom"),
         "startup failure must surface the child's stderr: {out:?}"
     );
+}
+
+#[tokio::test]
+async fn open_asks_before_launching_a_program_with_no_desktop_entry() {
+    let gate = RecordingGate::new(false);
+    let cmd = policed_wm(BashPolicyCfg::default(), gate.clone());
+    let out = run_open(&cmd, &["cat", "/dev/urandom"]).await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert_eq!(
+        gate.prompts(),
+        [(
+            "wm".to_string(),
+            "cat /dev/urandom".to_string(),
+            "cat is not a desktop application".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn open_closes_the_pipe_of_a_chatty_launch_at_the_cap() {
+    let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
+    let out = run_open(&cmd, &["yes"]).await;
+    assert_eq!(
+        out.exit_code, OUTPUT_OVERFLOW_EXIT,
+        "yes should die of SIGPIPE"
+    );
+    assert_eq!(out.stdout.len(), 64 * 1024);
+}
+
+#[tokio::test]
+async fn open_refuses_once_the_launch_cap_is_reached() {
+    let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
+    for _ in 0..MAX_LAUNCHED {
+        assert_eq!(run_open(&cmd, &["sleep", "5"]).await.exit_code, 0);
+    }
+    let out = run_open(&cmd, &["sleep", "5"]).await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
 }
 
 #[tokio::test]

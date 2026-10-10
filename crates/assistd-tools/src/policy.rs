@@ -13,6 +13,7 @@ use crate::exec::POLICY_DENIED_EXIT;
 mod allowlist;
 mod approvals;
 mod confirm;
+mod desktop;
 mod review;
 mod sandbox;
 mod shell;
@@ -26,6 +27,7 @@ pub use confirm::{
     ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm,
     inherit_confirm_router,
 };
+pub(crate) use desktop::is_desktop_application;
 pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
 pub use sandbox::{
     LaunchError, Protected, ResolvedSandboxMode, SandboxAccess, SandboxError, SandboxInfo,
@@ -159,6 +161,9 @@ fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput
         }
         Confirmation::Unlisted { programs, .. } => {
             format!("Not on the allowlist: {}", programs.join(", "))
+        }
+        Confirmation::NotDesktopApplication(program) => {
+            format!("Not a desktop application: {program}")
         }
     };
     CommandOutput::failed(

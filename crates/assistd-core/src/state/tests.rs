@@ -327,7 +327,10 @@ async fn dispatch_query_refuses_images_without_vision() {
     let request = Request::Query {
         id: "q-img".into(),
         text: "what is this?".into(),
-        attachments: vec![ImageAttachment::from_bytes("image/png", &[0xAB])],
+        attachments: vec![ImageAttachment::from_bytes(
+            "image/png",
+            b"\x89PNG\r\n\x1a\n",
+        )],
     };
     let (res, events) = dispatch(&default_state(), request).await;
 
@@ -339,6 +342,32 @@ async fn dispatch_query_refuses_images_without_vision() {
             "q-img",
             "vision not available: model does not support images"
         )]
+    );
+}
+
+#[tokio::test]
+async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
+    let request = Request::Query {
+        id: "q-html".into(),
+        text: "render this".into(),
+        attachments: vec![ImageAttachment::from_bytes(
+            "text/html",
+            b"\x89PNG\r\n\x1a\n",
+        )],
+    };
+    let (res, events) = dispatch(&default_state(), request).await;
+
+    let err = res.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DispatchError::InvalidAttachment(AttachmentError::MimeMismatch { .. })
+        ),
+        "{err:?}"
+    );
+    assert!(
+        matches!(events.as_slice(), [Event::Error { id, .. }] if id == "q-html"),
+        "{events:?}"
     );
 }
 
