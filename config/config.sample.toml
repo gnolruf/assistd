@@ -38,7 +38,7 @@ hotkey = "Super+Space"  # hold to talk; empty disables
 # model = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin"
 # prefer_gpu = true
 # threads = 8
-# beams = 1  # 1 = greedy
+# beams = 1  # 1 = greedy, at most 8
 # vad_enabled = true
 # vad_model = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin"
 # model_cache_dir = "/var/cache/assistd/whisper"
@@ -49,7 +49,7 @@ enabled = false
 # start_on_launch = false
 # hotkey = "Super+Shift+L"  # toggles listening
 # silence_ms = 800  # trailing silence that ends an utterance
-# max_utterance_secs = 30
+# max_utterance_secs = 30  # at most 300
 # playback_gate = true  # mute the mic while replies are spoken; false needs an echo-cancelled mic
 
 [voice.synthesis]
@@ -61,7 +61,7 @@ enabled = false
 # length_scale = 1.0  # lower speaks faster
 # espeak_data_dir = "/usr/share/espeak-ng-data"
 # deadline_secs = 30
-# max_sentence_chars = 400
+# max_sentence_chars = 400  # 50..=2000
 # partial_flush_ms = 750  # 0 disables
 # code_block_mode = "skip"  # skip | summarize
 # use_cuda = false
@@ -150,7 +150,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 
 [memory]
 # enabled = true
-# db_path = "/home/you/.local/share/assistd/memory.db"
+# db_path = "~/.local/share/assistd/memory.db"
 
 [embedding]
 # A second model server for semantic recall.
@@ -162,7 +162,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # gpu_layers = 0
 # ready_timeout_secs = 300
 # custom_args = "--threads 4 --ubatch-size 2048"  # same rules as model.custom_args
-# top_k = 5
+# top_k = 5  # at most 20
 # auto_inject = true
 
 # [mcp]

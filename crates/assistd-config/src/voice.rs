@@ -55,15 +55,17 @@ pub struct TranscriptionConfig {
     pub prefer_gpu: bool,
     /// CPU threads. `None` lets whisper.cpp choose.
     pub threads: Option<NonZeroU32>,
-    /// Decoding beams; `1` is greedy.
+    /// Decoding beams, `1..=8`; `1` is greedy, and whisper.cpp runs at most
+    /// eight decoders.
     pub beams: NonZeroU32,
     /// Trim silence with Silero VAD before decoding.
     pub vad_enabled: bool,
     /// VAD GGML model as `<owner>/<repo>[@<revision>]:<file>`; used only with
     /// `vad_enabled`.
     pub vad_model: String,
-    /// Model cache directory. `None` uses `$XDG_CACHE_HOME/assistd/whisper/`
-    /// (or `~/.cache/assistd/whisper/`).
+    /// Model cache directory, absolute or starting with `~/`. `None` uses
+    /// `$XDG_CACHE_HOME/assistd/whisper/` (or `~/.cache/assistd/whisper/`).
+    #[serde(deserialize_with = "crate::home_path::deserialize_option")]
     pub model_cache_dir: Option<PathBuf>,
 }
 
@@ -94,7 +96,8 @@ pub struct ContinuousListenConfig {
     pub hotkey: String,
     /// Trailing silence, in ms, that ends an utterance.
     pub silence_ms: NonZeroU32,
-    /// Seconds after which an utterance is transcribed even mid-speech.
+    /// Seconds after which an utterance is transcribed even mid-speech,
+    /// `1..=300`; bounds the audio buffered under constant noise.
     pub max_utterance_secs: NonZeroU32,
     /// Discard mic audio while a reply is being spoken, so the daemon never
     /// transcribes its own speech. `false` allows barge-in but requires an
@@ -128,19 +131,21 @@ pub struct SynthesisConfig {
     /// Voice as `<owner>/<repo>[@<revision>]:<file>`, `<file>` being the
     /// `.onnx` path in the repo; its `.onnx.json` is fetched alongside.
     pub voice: String,
-    /// Voice cache directory. `None` uses `$XDG_CACHE_HOME/assistd/piper/`
-    /// (or `~/.cache/assistd/piper/`).
+    /// Voice cache directory, absolute or starting with `~/`. `None` uses
+    /// `$XDG_CACHE_HOME/assistd/piper/` (or `~/.cache/assistd/piper/`).
+    #[serde(deserialize_with = "crate::home_path::deserialize_option")]
     pub model_cache_dir: Option<PathBuf>,
     /// Speaking-rate scale: `1.0` is natural, lower is faster. Must be
     /// positive and finite.
     pub length_scale: f32,
-    /// espeak-ng data directory; set only if piper logs "Failed to load
-    /// espeak-ng".
+    /// espeak-ng data directory, absolute or starting with `~/`; set only if
+    /// piper logs "Failed to load espeak-ng".
+    #[serde(deserialize_with = "crate::home_path::deserialize_option")]
     pub espeak_data_dir: Option<PathBuf>,
     /// Seconds piper may take per utterance before it is killed.
     pub deadline_secs: NonZeroU32,
     /// Sentence length cap; longer text flushes at the last whitespace
-    /// before it. At least 50.
+    /// before it. `50..=2000`.
     pub max_sentence_chars: NonZeroU32,
     /// Idle gap, in ms, between LLM deltas after which buffered text is
     /// spoken unterminated. `0` disables; suspended during tool calls.

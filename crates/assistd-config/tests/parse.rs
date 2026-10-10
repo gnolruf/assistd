@@ -112,6 +112,22 @@ fn home_relative_and_absolute_writable_paths_validate() {
 }
 
 #[test]
+fn memory_db_path_expands_tilde_and_must_be_absolute() {
+    let cfg: Config =
+        toml::from_str("[memory]\ndb_path = \"~/assistd/memory.db\"\n").expect("config must parse");
+    assert!(cfg.memory.db_path.is_absolute());
+    assert!(cfg.memory.db_path.ends_with("assistd/memory.db"));
+    cfg.validate().expect("an expanded db_path is valid");
+
+    let cfg: Config =
+        toml::from_str("[memory]\ndb_path = \"memory.db\"\n").expect("config must parse");
+    let err = cfg
+        .validate()
+        .expect_err("a relative db_path must not validate");
+    assert!(err.to_string().contains("memory.db_path"), "{err}");
+}
+
+#[test]
 fn history_and_response_must_fit_the_context_together() {
     let parse = |response: u32| -> Config {
         toml::from_str(&format!(

@@ -12,7 +12,9 @@ use crate::defaults::{DEFAULT_MEMORY_ENABLED, default_memory_db_path};
 pub struct MemoryConfig {
     /// When `false`, the database is never opened.
     pub enabled: bool,
-    /// SQLite database file. Must not be empty when enabled.
+    /// SQLite database file; a leading `~/` expands to `$HOME`. Must be
+    /// absolute when enabled.
+    #[serde(deserialize_with = "crate::home_path::deserialize")]
     pub db_path: PathBuf,
 }
 

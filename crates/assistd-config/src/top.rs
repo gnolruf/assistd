@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::IpAddr;
+use std::num::NonZeroU32;
 use std::ops::RangeInclusive;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -23,11 +24,18 @@ use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::ToolsConfig;
 use crate::tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig};
-use crate::voice::{SynthesisConfig, VoiceConfig};
+use crate::voice::{SynthesisConfig, TranscriptionConfig, VoiceConfig};
 
 const CONFIG_DIR_MODE: u32 = 0o700;
 const CONFIG_FILE_MODE: u32 = 0o600;
 const GROUP_OR_WORLD_READABLE: u32 = 0o044;
+/// whisper.cpp's decoder limit.
+const MAX_WHISPER_BEAMS: u32 = 8;
+const MAX_UTTERANCE_SECS: u32 = 300;
+const MIN_SENTENCE_CHARS: u32 = 50;
+const MAX_SENTENCE_CHARS: u32 = 2000;
+/// Matches the largest `limit` the `reminisce` tool accepts.
+const MAX_EMBEDDING_TOP_K: u32 = 20;
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -289,19 +297,39 @@ fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfi
 
 fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {
     if voice.enabled {
-        let transcription = &voice.transcription;
-        require_hf_id(errors, "voice.transcription.model", &transcription.model);
-        if transcription.vad_enabled {
-            require_hf_id(
-                errors,
-                "voice.transcription.vad_model",
-                &transcription.vad_model,
-            );
-        }
+        validate_transcription(errors, &voice.transcription);
+        require_at_most(
+            errors,
+            "voice.continuous.max_utterance_secs",
+            voice.continuous.max_utterance_secs,
+            MAX_UTTERANCE_SECS,
+        );
     }
     if voice.synthesis.enabled {
         validate_synthesis(errors, &voice.synthesis);
     }
+}
+
+fn validate_transcription(errors: &mut Vec<String>, transcription: &TranscriptionConfig) {
+    require_hf_id(errors, "voice.transcription.model", &transcription.model);
+    if transcription.vad_enabled {
+        require_hf_id(
+            errors,
+            "voice.transcription.vad_model",
+            &transcription.vad_model,
+        );
+    }
+    require_at_most(
+        errors,
+        "voice.transcription.beams",
+        transcription.beams,
+        MAX_WHISPER_BEAMS,
+    );
+    require_absolute_dir(
+        errors,
+        "voice.transcription.model_cache_dir",
+        transcription.model_cache_dir.as_deref(),
+    );
 }
 
 fn validate_synthesis(errors: &mut Vec<String>, synthesis: &SynthesisConfig) {
@@ -313,9 +341,22 @@ fn validate_synthesis(errors: &mut Vec<String>, synthesis: &SynthesisConfig) {
     if !synthesis.length_scale.is_finite() || synthesis.length_scale <= 0.0 {
         errors.push("voice.synthesis.length_scale must be a positive, finite number".into());
     }
-    if synthesis.max_sentence_chars.get() < 50 {
-        errors.push("voice.synthesis.max_sentence_chars must be at least 50".into());
+    if !(MIN_SENTENCE_CHARS..=MAX_SENTENCE_CHARS).contains(&synthesis.max_sentence_chars.get()) {
+        errors.push(format!(
+            "voice.synthesis.max_sentence_chars must be in the range \
+             {MIN_SENTENCE_CHARS}..={MAX_SENTENCE_CHARS}"
+        ));
     }
+    require_absolute_dir(
+        errors,
+        "voice.synthesis.model_cache_dir",
+        synthesis.model_cache_dir.as_deref(),
+    );
+    require_absolute_dir(
+        errors,
+        "voice.synthesis.espeak_data_dir",
+        synthesis.espeak_data_dir.as_deref(),
+    );
 }
 
 fn validate_sleep(errors: &mut Vec<String>, sleep: &SleepConfig) {
@@ -332,12 +373,12 @@ fn validate_sleep(errors: &mut Vec<String>, sleep: &SleepConfig) {
 }
 
 fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
-    if !tools.scratch.dir.is_absolute() {
-        errors.push("tools.scratch.dir must be an absolute path".into());
-    }
-    if !tools.output.overflow_dir.is_absolute() {
-        errors.push("tools.output.overflow_dir must be an absolute path".into());
-    }
+    require_absolute_dir(errors, "tools.scratch.dir", Some(&tools.scratch.dir));
+    require_absolute_dir(
+        errors,
+        "tools.output.overflow_dir",
+        Some(&tools.output.overflow_dir),
+    );
     if tools.write.writable_paths.is_empty() {
         errors.push(
             "tools.write.writable_paths must not be empty (the write command would be unusable)"
@@ -354,8 +395,10 @@ fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
 }
 
 fn validate_memory(errors: &mut Vec<String>, memory: &MemoryConfig) {
-    if memory.enabled && memory.db_path.as_os_str().is_empty() {
-        errors.push("memory.db_path must not be empty when memory.enabled".into());
+    if memory.enabled && !memory.db_path.is_absolute() {
+        errors.push(
+            "memory.db_path must be an absolute path or start with `~/` when memory.enabled".into(),
+        );
     }
 }
 
@@ -374,6 +417,24 @@ fn validate_embedding(errors: &mut Vec<String>, embedding: &EmbeddingConfig, mod
     require_loopback(errors, "embedding.host", embedding.host);
     if embedding.port == model.port {
         errors.push("embedding.port must differ from model.port (the chat server)".into());
+    }
+    require_at_most(
+        errors,
+        "embedding.top_k",
+        embedding.top_k,
+        MAX_EMBEDDING_TOP_K,
+    );
+}
+
+fn require_at_most(errors: &mut Vec<String>, key: &str, value: NonZeroU32, max: u32) {
+    if value.get() > max {
+        errors.push(format!("{key} must be in the range 1..={max}, got {value}"));
+    }
+}
+
+fn require_absolute_dir(errors: &mut Vec<String>, key: &str, dir: Option<&Path>) {
+    if dir.is_some_and(|dir| !dir.is_absolute()) {
+        errors.push(format!("{key} must be an absolute path or start with `~/`"));
     }
 }
 
