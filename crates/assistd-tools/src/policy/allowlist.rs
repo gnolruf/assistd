@@ -214,7 +214,7 @@ impl Allowlist {
 }
 
 /// Whether the daemon's user may write to a file with this metadata.
-fn user_can_modify(meta: &Metadata) -> bool {
+pub(super) fn user_can_modify(meta: &Metadata) -> bool {
     let uid = rustix::process::geteuid();
     if uid.is_root() {
         return true;

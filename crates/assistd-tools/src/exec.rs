@@ -1,5 +1,6 @@
 //! Subprocess spawning: [`supervise`] runs a child to completion under a
-//! timeout, while [`watch_detached`] only watches a launch for early failure.
+//! timeout, while [`watch_detached`] watches a launch for early failure and
+//! then leaves it running under a bounded supervisor.
 
 use std::io;
 #[cfg(unix)]
@@ -44,9 +45,12 @@ pub(crate) const OUTPUT_OVERFLOW_EXIT: i32 = 141;
 /// Launch failures worth catching are fast; a slow one reads as success.
 const STARTUP_PROBE: Duration = Duration::from_millis(300);
 
-/// Cap on output kept from a detached launch; held for as long as the
-/// application runs, so it bounds retention per launched application.
+/// Cap on output read from each stream of a detached launch. Past it the
+/// pipe is closed, so a chatty application gets EPIPE instead of a reader.
 const STARTUP_OUTPUT_MAX: usize = 64 * 1024;
+
+/// Most applications [`watch_detached`] keeps running at once.
+pub(crate) const MAX_LAUNCHED: usize = 8;
 
 /// Bound on waiting for output pipes to reach EOF after the child exits,
 /// since a grandchild can keep the write end open forever.
@@ -71,56 +75,24 @@ pub(crate) struct Captured {
 /// A stream passed its byte cap.
 struct Overflow;
 
-/// Owns the output readers of applications watched by [`watch_detached`];
-/// dropping it aborts any reader still running.
+/// Applications started by [`watch_detached`], each supervised by a task
+/// that lives until it exits; dropping it aborts the tasks without killing
+/// the applications.
 #[derive(Debug, Default)]
-pub(crate) struct DetachedReaders(Mutex<JoinSet<()>>);
+pub(crate) struct Launched(Mutex<JoinSet<()>>);
 
-impl DetachedReaders {
-    fn spawn(&self, reader: impl Future<Output = ()> + Send + 'static) {
+impl Launched {
+    /// Whether [`MAX_LAUNCHED`] applications are still running.
+    pub(crate) fn is_full(&self) -> bool {
         let mut set = self.0.lock();
         while set.try_join_next().is_some() {}
-        set.spawn(reader);
-    }
-}
-
-/// Output of a detached child, filled by readers that outlive the call so a
-/// long-lived application never blocks on a full pipe or gets SIGPIPE.
-struct StartupOutput {
-    stdout: Arc<Mutex<Vec<u8>>>,
-    stderr: Arc<Mutex<Vec<u8>>>,
-    drained: oneshot::Receiver<()>,
-}
-
-impl StartupOutput {
-    fn start(child: &mut Child, readers: &DetachedReaders) -> Self {
-        let stdout = Arc::new(Mutex::new(Vec::new()));
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let stdout_pipe = child.stdout.take().expect("stdout was piped");
-        let stderr_pipe = child.stderr.take().expect("stderr was piped");
-        let (drained_tx, drained) = oneshot::channel::<()>();
-        let (stdout_sink, stderr_sink) = (stdout.clone(), stderr.clone());
-        readers.spawn(async move {
-            let _drained = drained_tx;
-            tokio::join!(
-                drain_into(stdout_pipe, STARTUP_OUTPUT_MAX, stdout_sink),
-                drain_into(stderr_pipe, STARTUP_OUTPUT_MAX, stderr_sink),
-            );
-        });
-        Self {
-            stdout,
-            stderr,
-            drained,
-        }
+        set.len() >= MAX_LAUNCHED
     }
 
-    /// Wait up to [`POST_EXIT_DRAIN`] for the readers to finish, then take
-    /// whatever they captured.
-    async fn take_after_exit(self) -> (Vec<u8>, Vec<u8>) {
-        let _ = timeout(POST_EXIT_DRAIN, self.drained).await;
-        let stdout = std::mem::take(&mut *self.stdout.lock());
-        let stderr = std::mem::take(&mut *self.stderr.lock());
-        (stdout, stderr)
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let mut set = self.0.lock();
+        while set.try_join_next().is_some() {}
+        set.spawn(task);
     }
 }
 
@@ -286,26 +258,70 @@ pub(crate) fn detach(cmd: &mut ProcCommand) {
 /// Watch `child`, spawned from a command [`detach`] configured, for
 /// [`STARTUP_PROBE`]. A child that exits in that window is reported with
 /// its exit code and output; one still alive is reported as exit 0 and left
-/// running, its readers handed to `readers`.
+/// running under a task in `launched`.
 ///
 /// Nothing kills it on drop; bubblewrap's `--die-with-parent` bounds it.
 pub(crate) async fn watch_detached(
-    tool: &str,
-    mut child: Child,
-    readers: &DetachedReaders,
+    tool: &'static str,
+    child: Child,
+    launched: &Launched,
 ) -> CommandOutput {
-    let output = StartupOutput::start(&mut child, readers);
+    let (report, startup) = oneshot::channel();
+    launched.spawn(supervise_detached(tool, child, report));
+    startup.await.unwrap_or_else(|_| {
+        CommandOutput::failed(
+            1,
+            error_line(
+                tool,
+                "launch supervisor stopped",
+                Hint::Try,
+                "re-running the command",
+            )
+            .into_bytes(),
+        )
+    })
+}
 
-    let Ok(waited) = timeout(STARTUP_PROBE, child.wait()).await else {
-        // Neither kills nor orphans it: tokio's reaper collects it on exit.
-        drop(child);
-        return CommandOutput::ok(Vec::new());
+/// Drain `child`'s output while it runs, sending its startup outcome to
+/// `report`; returns once it exits.
+async fn supervise_detached(
+    tool: &'static str,
+    mut child: Child,
+    report: oneshot::Sender<CommandOutput>,
+) {
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let (drained_tx, drained) = oneshot::channel::<()>();
+    let readers = {
+        let (stdout, stderr) = (stdout.clone(), stderr.clone());
+        async move {
+            tokio::join!(
+                drain_into(stdout_pipe, STARTUP_OUTPUT_MAX, stdout),
+                drain_into(stderr_pipe, STARTUP_OUTPUT_MAX, stderr),
+            );
+            drop(drained_tx);
+            std::future::pending::<()>().await;
+        }
     };
-
-    let (stdout, stderr) = output.take_after_exit().await;
-    match waited {
-        Ok(status) => exited(stdout, stderr, status),
-        Err(e) => wait_failed(tool, &e),
+    let monitor = async {
+        let Ok(waited) = timeout(STARTUP_PROBE, child.wait()).await else {
+            let _ = report.send(CommandOutput::ok(Vec::new()));
+            let _ = child.wait().await;
+            return;
+        };
+        let _ = timeout(POST_EXIT_DRAIN, drained).await;
+        let stdout = std::mem::take(&mut *stdout.lock());
+        let stderr = std::mem::take(&mut *stderr.lock());
+        let _ = report.send(match waited {
+            Ok(status) => exited(stdout, stderr, status),
+            Err(e) => wait_failed(tool, &e),
+        });
+    };
+    tokio::select! {
+        () = monitor => {}
+        () = readers => {}
     }
 }
 
@@ -331,18 +347,15 @@ fn wait_failed(tool: &str, e: &io::Error) -> CommandOutput {
     )
 }
 
+/// Copy `reader` into `sink` until EOF or `limit` bytes, then drop it.
 async fn drain_into<R: AsyncRead + Unpin>(mut reader: R, limit: usize, sink: Arc<Mutex<Vec<u8>>>) {
     let mut chunk = vec![0u8; READ_CHUNK_BYTES];
-    loop {
-        match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => {
-                let mut buf = sink.lock();
-                let room = limit.saturating_sub(buf.len());
-                if room > 0 {
-                    buf.extend_from_slice(&chunk[..n.min(room)]);
-                }
-            }
+    while let Ok(read @ 1..) = reader.read(&mut chunk).await {
+        let mut buf = sink.lock();
+        let room = limit.saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..read.min(room)]);
+        if read >= room {
+            return;
         }
     }
 }

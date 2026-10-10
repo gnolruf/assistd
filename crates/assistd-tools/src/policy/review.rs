@@ -253,6 +253,9 @@ pub enum Confirmation {
         programs: Vec<String>,
         approvable: bool,
     },
+    /// It launches this program in the background, and no desktop entry
+    /// marks it as a windowed application.
+    NotDesktopApplication(String),
 }
 
 impl Confirmation {
@@ -275,6 +278,9 @@ impl fmt::Display for Confirmation {
             Self::Unverifiable(why) => f.write_str(why),
             Self::Unlisted { programs, .. } => {
                 write!(f, "not on the allowlist: {}", programs.join(", "))
+            }
+            Self::NotDesktopApplication(program) => {
+                write!(f, "{program} is not a desktop application")
             }
         }
     }
@@ -884,6 +890,12 @@ fn wrapper_operands(word: &Word, next: Option<&Word>) -> Option<usize> {
         .map(|&(_, operands)| operands)
 }
 
+/// Whether `word` names a builtin or wrapper that runs another command.
+pub(super) fn runs_another_command(word: &str) -> bool {
+    let program = program(word);
+    WRAPPERS.iter().any(|&(wrapper, _)| wrapper == program)
+}
+
 /// A literal word holding a whole command line (`env -S 'rm -rf ~'`),
 /// not a program name.
 fn is_command_line(word: &Word) -> bool {
@@ -940,7 +952,7 @@ fn is_stdin_path(path: &str) -> bool {
         || path.starts_with("/proc/self/fd/")
 }
 
-fn basename(word: &str) -> &str {
+pub(super) fn basename(word: &str) -> &str {
     word.rsplit_once('/').map_or(word, |(_, name)| name)
 }
 
