@@ -21,6 +21,19 @@ pub const TOOL_RESULT_PREFIX: &str = "[tool:";
 /// templates mishandle system messages anywhere but the head of the list.
 const CONTEXT_OPEN: &str = "[Context: added automatically, not written by the user]\n";
 const CONTEXT_CLOSE: &str = "\n[End of context]\n\n";
+/// Chat-template token text and its inert spelling; llama-server tokenizes
+/// message text with special-token parsing on, so untrusted text could
+/// otherwise forge a turn boundary or tool call.
+const TEMPLATE_TOKEN_DEFANGS: [(&str, &str); 8] = [
+    ("<|", "< |"),
+    ("|>", "| >"),
+    ("<think>", "< think>"),
+    ("</think>", "< /think>"),
+    ("<tool_call>", "< tool_call>"),
+    ("</tool_call>", "< /tool_call>"),
+    ("<tool_response>", "< tool_response>"),
+    ("</tool_response>", "< /tool_response>"),
+];
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// Conservative per-image token weight; errs toward summarizing early.
 const TOKENS_PER_IMAGE: u32 = 1000;
@@ -561,7 +574,7 @@ fn wire_message(message: &Message) -> wire::ChatMessage<'_> {
         return tool_calls_message(message);
     }
     if message.role == Role::Tool {
-        let content = wire::ContentBody::Text(Cow::Borrowed(&message.content));
+        let content = wire::ContentBody::Text(neutralise_template_tokens(&message.content));
         return wire::ChatMessage {
             tool_call_id: message.tool_call_id.as_deref(),
             ..wire::ChatMessage::plain(message.role.as_wire(), content)
@@ -615,11 +628,17 @@ fn turn_content(message: &Message) -> wire::ContentBody<'_> {
 
 fn wire_text(message: &Message) -> Cow<'_, str> {
     match &message.context {
-        Some(ctx) => Cow::Owned(format!(
-            "{CONTEXT_OPEN}{}{CONTEXT_CLOSE}{}",
-            neutralise_context_markers(ctx.trim_end()),
-            message.content
-        )),
+        Some(ctx) => {
+            let ctx = neutralise_context_markers(ctx.trim_end());
+            Cow::Owned(format!(
+                "{CONTEXT_OPEN}{}{CONTEXT_CLOSE}{}",
+                neutralise_template_tokens(&ctx),
+                message.content
+            ))
+        }
+        None if Conversation::is_tool_result(message) => {
+            neutralise_template_tokens(&message.content)
+        }
         None => Cow::Borrowed(&message.content),
     }
 }
@@ -637,6 +656,22 @@ fn neutralise_context_markers(ctx: &str) -> Cow<'_, str> {
     )
 }
 
+fn neutralise_template_tokens(text: &str) -> Cow<'_, str> {
+    if !TEMPLATE_TOKEN_DEFANGS
+        .iter()
+        .any(|(token, _)| text.contains(token))
+    {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        TEMPLATE_TOKEN_DEFANGS
+            .iter()
+            .fold(text.to_string(), |acc, (token, inert)| {
+                acc.replace(token, inert)
+            }),
+    )
+}
+
 fn encode_all(attachments: Vec<Attachment>) -> Vec<ImageDataUri> {
     attachments.into_iter().map(ImageDataUri::encode).collect()
 }
@@ -650,7 +685,7 @@ fn serialize_tail(messages: &[Message]) -> String {
     for m in messages {
         out.push_str(m.role.as_wire());
         out.push_str(": ");
-        out.push_str(&m.content);
+        out.push_str(&neutralise_template_tokens(&m.content));
         out.push('\n');
     }
     out
