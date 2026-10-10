@@ -90,6 +90,20 @@ pub(crate) struct SubprocessPolicy {
 }
 
 impl SubprocessPolicy {
+    /// [`check_script`] on the blocking pool, since the allowlist reads
+    /// the filesystem for each program `script` runs.
+    pub(crate) async fn review_script(&self, script: String) -> Option<Confirmation> {
+        let cfg = Arc::clone(&self.cfg);
+        on_blocking_pool(move || check_script(&script, &cfg.rules())).await
+    }
+
+    /// [`check_argv`] on the blocking pool, as for
+    /// [`review_script`](Self::review_script).
+    pub(crate) async fn review_argv(&self, argv: Vec<String>) -> Option<Confirmation> {
+        let cfg = Arc::clone(&self.cfg);
+        on_blocking_pool(move || check_argv(&argv, &cfg.rules())).await
+    }
+
     /// Refuse `script` when it hits the denylist, or when the review's
     /// `confirmation` is set and the gate declines. `tool` and `op` name
     /// the command and operation in the error line.
@@ -176,6 +190,18 @@ fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput
         )
         .into_bytes(),
     )
+}
+
+/// Run filesystem-bound `work` on the blocking pool so a hung mount cannot
+/// pin an async worker; a panic in `work` resumes in the caller.
+pub(crate) async fn on_blocking_pool<T, F>(work: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()))
 }
 
 /// The first of `patterns` found in `script`, ignoring ASCII case. A

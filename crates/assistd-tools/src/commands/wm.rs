@@ -14,7 +14,7 @@ use crate::exec::{
 };
 use crate::policy::{
     BashPolicyCfg, Confirmation, ConfirmationGate, LaunchError, SandboxInfo, SubprocessPolicy,
-    check_argv, is_desktop_application,
+    is_desktop_application,
 };
 
 const NAME: &str = "wm";
@@ -94,7 +94,7 @@ impl WmCommand {
             return too_many_launched();
         }
         let argv = args.join(" ");
-        let review = check_argv(args, &self.policy.cfg.rules());
+        let review = self.policy.review_argv(args.to_vec()).await;
         let confirmation = launch_confirmation(app, review).await;
         if let Err(denied) = self
             .policy

@@ -9,7 +9,9 @@ use tokio::io::AsyncWriteExt;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{Approval, ConfirmationGate, ConfirmationRequest, SandboxInfo};
+use crate::policy::{
+    Approval, ConfirmationGate, ConfirmationRequest, SandboxInfo, on_blocking_pool,
+};
 
 /// Characters of the content shown when asking to confirm a write.
 const PREVIEW_MAX_CHARS: usize = 4096;
@@ -121,6 +123,14 @@ impl WriteCommand {
         approval != Approval::Deny
     }
 
+    /// [`WritePolicyCfg::resolve`] against `$HOME` on the blocking pool,
+    /// since it canonicalizes and stats the path.
+    async fn resolve(&self, raw_path: String) -> Result<PathBuf, PathResolveError> {
+        let cfg = Arc::clone(&self.cfg);
+        let home = std::env::var("HOME").ok();
+        on_blocking_pool(move || cfg.resolve(&raw_path, home.as_deref())).await
+    }
+
     fn scratch(&self) -> Option<&Path> {
         self.sandbox.shared.scratch.as_deref()
     }
@@ -179,8 +189,7 @@ impl Command for WriteCommand {
             input.stdin.unwrap_or_default()
         };
 
-        let home = std::env::var("HOME").ok();
-        let write_target = match self.cfg.resolve(&raw_path, home.as_deref()) {
+        let write_target = match self.resolve(raw_path.clone()).await {
             Ok(path) => path,
             Err(e) => {
                 return CommandOutput::failed(
@@ -203,7 +212,7 @@ impl Command for WriteCommand {
             );
         }
 
-        let hidden_by = self.sandbox.private_dir_hiding(&write_target);
+        let hidden_by = self.sandbox.private_dir_hiding(write_target.clone()).await;
         match write_without_symlinks(write_target, content).await {
             Ok(()) => CommandOutput {
                 stderr: hidden_by
