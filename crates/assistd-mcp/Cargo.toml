@@ -21,7 +21,7 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 assistd-tools = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "io-util"] }
 
 [lints]
 workspace = true

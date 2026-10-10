@@ -5,8 +5,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,6 +19,7 @@ use rmcp::model::{
 use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use rustix::process::Signal;
 use serde_json::Value;
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::process::{Child, ChildStderr, Command};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
@@ -36,6 +39,10 @@ const INHERITED_ENV: &[&str] = &[
 /// How long a shutdown waits for the MCP session to close the child's
 /// stdin before signalling the process group.
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Longest JSON-RPC line read from a server: a largest accepted image
+/// base64-encoded, plus envelope.
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-server stdio transport configuration. `Debug` lists env var names,
 /// never values.
@@ -89,7 +96,7 @@ impl StdioMcpClient {
     /// handshake. Errors if either fails; a failed handshake kills the child.
     pub(crate) async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
         let (mut child, group) = spawn_child(&cfg)?;
-        let stdout = child.stdout.take().expect("stdout piped");
+        let stdout = LineCappedReader::new(child.stdout.take().expect("stdout piped"));
         let stdin = child.stdin.take().expect("stdin piped");
         let stderr = child.stderr.take().expect("stderr piped");
         let stderr_task =
@@ -226,6 +233,44 @@ impl ChildLifeline {
     }
 }
 
+/// A server's stdout that fails with `InvalidData` once a line runs past
+/// [`MAX_MESSAGE_BYTES`], ending the session instead of buffering an
+/// unterminated line without bound.
+struct LineCappedReader<R> {
+    inner: R,
+    line_len: usize,
+}
+
+impl<R> LineCappedReader<R> {
+    fn new(inner: R) -> Self {
+        Self { inner, line_len: 0 }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for LineCappedReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buf.filled().len();
+        ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
+        let read = &buf.filled()[filled_before..];
+        this.line_len = match read.iter().rposition(|byte| *byte == b'\n') {
+            Some(newline_at) => read.len() - newline_at - 1,
+            None => this.line_len + read.len(),
+        };
+        if this.line_len > MAX_MESSAGE_BYTES {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("MCP server sent a line longer than {MAX_MESSAGE_BYTES} bytes"),
+            )));
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
 fn spawn_child(cfg: &StdioConfig) -> Result<(Child, ProcessGroup), McpError> {
     let spawn_error = |source| McpError::Spawn {
         path: cfg.command.clone(),
@@ -294,7 +339,23 @@ async fn forward_stderr(stream: ChildStderr, label: String) {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
     use super::*;
+
+    #[tokio::test]
+    async fn an_unterminated_line_past_the_cap_fails_the_read() {
+        let mut input = b"{\"jsonrpc\":\"2.0\"}\n".to_vec();
+        input.resize(input.len() + MAX_MESSAGE_BYTES + 1, b'x');
+        let mut reader = BufReader::new(LineCappedReader::new(input.as_slice()));
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await.unwrap();
+        assert_eq!(line, b"{\"jsonrpc\":\"2.0\"}\n");
+        line.clear();
+        let err = reader.read_until(b'\n', &mut line).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(line.len() <= MAX_MESSAGE_BYTES + 8 * 1024);
+    }
 
     #[test]
     fn debug_lists_env_names_but_not_values() {
