@@ -6,6 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use assistd_tools::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
 use assistd_tools::{ApprovalGate, ConfirmationRequest, Tool, ToolError, VisionGate};
 use async_trait::async_trait;
@@ -183,12 +184,20 @@ fn tool_result_to_json(
 }
 
 /// The text one content block contributes to the output, plus its
-/// attachment if it is an image and `vision` is on.
+/// attachment if it is an image, `vision` is on, and it decodes to at
+/// most [`MAX_IMAGE_BYTES`].
 fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Value>) {
     match block {
         ContentBlock::Text(text) => (text.text, None),
         ContentBlock::Image(image) if !vision => (
             format!("(image omitted: {}; model has no vision)", image.mime_type),
+            None,
+        ),
+        ContentBlock::Image(image) if decoded_len(&image.data) > MAX_IMAGE_BYTES => (
+            format!(
+                "(image omitted: {}; larger than {MAX_IMAGE_BYTES} bytes)",
+                image.mime_type
+            ),
             None,
         ),
         ContentBlock::Image(image) => (
@@ -200,6 +209,11 @@ fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Value>) {
             None,
         ),
     }
+}
+
+/// Bytes `base64` decodes to, give or take padding.
+fn decoded_len(base64: &str) -> u64 {
+    base64.len() as u64 / 4 * 3
 }
 
 fn text_envelope(cut: TruncatedText, duration_ms: u128) -> Value {
