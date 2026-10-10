@@ -36,43 +36,42 @@ impl ChildServer {
     /// Spawn the supervisor and wait until the child reports `Ready`. Errors
     /// with [`ChildServerError::ShutdownDuringHealth`] if the supervisor exits
     /// first, or [`ChildServerError::StartupFailed`] once it goes `Degraded`.
+    /// Dropping the returned future aborts the supervisor.
     #[tracing::instrument(skip(spec, shutdown_rx), fields(server = spec.name(), addr = %spec.listen_addr()))]
     pub async fn start<S: ChildServerSpec>(
         spec: S,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Result<Self, ChildServerError> {
         let server = spec.name();
-        let (ready_tx, mut ready_rx) = watch::channel(ReadyState::Starting);
+        let (ready_tx, ready_rx) = watch::channel(ReadyState::Starting);
         let pid = Arc::new(Mutex::new(None));
         let supervisor = Supervisor::new(spec, shutdown_rx, ready_tx, pid.clone());
-        let task = tokio::spawn(supervisor.run());
+        let mut child_server = Self {
+            server,
+            task: Some(tokio::spawn(supervisor.run())),
+            status: ChildServerStatus { ready_rx, pid },
+        };
+        child_server.await_ready().await?;
+        Ok(child_server)
+    }
 
+    async fn await_ready(&mut self) -> Result<(), ChildServerError> {
         loop {
-            match ready_rx.changed().await {
-                Err(_) => {
+            if self.status.ready_rx.changed().await.is_err() {
+                if let Some(task) = self.task.take() {
                     let _ = task.await;
-                    return Err(ChildServerError::ShutdownDuringHealth);
                 }
-                Ok(()) => {
-                    let state = *ready_rx.borrow();
-                    match state {
-                        ReadyState::Ready => {
-                            return Ok(Self {
-                                server,
-                                task: Some(task),
-                                status: ChildServerStatus { ready_rx, pid },
-                            });
-                        }
-                        ReadyState::Degraded => {
-                            task.abort();
-                            return Err(ChildServerError::StartupFailed {
-                                server,
-                                attempts: MAX_CONSECUTIVE_FAILURES,
-                            });
-                        }
-                        ReadyState::Starting | ReadyState::BackingOff { .. } => continue,
-                    }
+                return Err(ChildServerError::ShutdownDuringHealth);
+            }
+            match *self.status.ready_rx.borrow() {
+                ReadyState::Ready => return Ok(()),
+                ReadyState::Degraded => {
+                    return Err(ChildServerError::StartupFailed {
+                        server: self.server,
+                        attempts: MAX_CONSECUTIVE_FAILURES,
+                    });
                 }
+                ReadyState::Starting | ReadyState::BackingOff { .. } => {}
             }
         }
     }

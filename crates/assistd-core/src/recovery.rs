@@ -6,6 +6,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, warn};
 
 pub use assistd_ipc::{Component, StatusSeverity};
@@ -46,11 +47,12 @@ macro_rules! recovery_event {
 
 /// `tokio::spawn` a detached future and emit a recovery event if it
 /// panics, instead of losing the panic in a never-joined `JoinHandle`.
+/// Aborting the returned handle cancels `future`.
 pub fn spawn_supervised<F>(name: &'static str, component: Component, future: F) -> JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let inner = tokio::spawn(future);
+    let inner = AbortOnDropHandle::new(tokio::spawn(future));
     tokio::spawn(async move {
         match inner.await {
             Ok(()) => {}
