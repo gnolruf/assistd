@@ -114,6 +114,10 @@ const INPUT_PLACEHOLDER: &str = "{}";
 /// `find` flags after which it runs a command.
 const FIND_EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
+/// Options whose value names a program the command runs, checked like a
+/// command word whatever the destructive patterns say.
+const PROGRAM_OPTIONS: &[(&str, &[&str])] = &[("rg", &["--pre", "--hostname-bin"])];
+
 /// Files a redirection may write without confirmation, besides `/dev/fd/N`
 /// and files under `/tmp` or the scratch directory.
 const HARMLESS_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
@@ -498,6 +502,7 @@ impl<'a> Matcher<'a> {
             if may_be_command {
                 self.allowed(word, index, script, depth, out);
                 self.runs(word, args, Site { cmd, script, depth }, out);
+                self.program_options(word, args, fed, out);
                 fed_wrapper =
                     (fed && wrapper_operands(word, args.first()).is_some()).then_some(word);
                 fed |= program(&word.text) == FEEDS_ARGUMENTS;
@@ -537,11 +542,38 @@ impl<'a> Matcher<'a> {
             out.unlisted(text, false);
             return;
         }
-        match self.allowlist.verdict(text) {
+        self.listed(text, out);
+    }
+
+    /// Record `program` when the allowlist does not allow it.
+    fn listed(&self, program: &str, out: &mut Findings<'a>) {
+        match self.allowlist.verdict(program) {
             Verdict::Allowed => {}
             Verdict::Missing if self.allowlist.search_path_fixed() => {}
-            Verdict::Missing => out.unlisted(text, false),
-            Verdict::Unlisted { approvable } => out.unlisted(text, approvable),
+            Verdict::Missing => out.unlisted(program, false),
+            Verdict::Unlisted { approvable } => out.unlisted(program, approvable),
+        }
+    }
+
+    /// Check the programs `word` runs through its [`PROGRAM_OPTIONS`],
+    /// which any argument known only at run time may name.
+    fn program_options(&self, word: &Word, args: &[Word], fed: bool, out: &mut Findings<'a>) {
+        let options = program_options(word);
+        if options.is_empty() {
+            return;
+        }
+        if fed || args.iter().any(|arg| arg.dynamic || arg.splits) {
+            out.unverifiable(|| {
+                format!(
+                    "`{}` may be given `{}` at run time, which runs a program",
+                    word.text,
+                    options.join("` or `")
+                )
+            });
+            return;
+        }
+        for program in option_values(args, options).filter(|value| !value.is_empty()) {
+            self.listed(program, out);
         }
     }
 
@@ -907,6 +939,33 @@ fn is_command_line(word: &Word) -> bool {
 
 fn exec_flags(word: &Word) -> Option<&'static [&'static str]> {
     (!word.dynamic_name && program(&word.text) == "find").then_some(FIND_EXEC_FLAGS)
+}
+
+fn program_options(word: &Word) -> &'static [&'static str] {
+    if word.dynamic_name {
+        return &[];
+    }
+    let program = program(&word.text);
+    PROGRAM_OPTIONS
+        .iter()
+        .find(|&&(p, _)| p == program)
+        .map_or(&[], |&(_, options)| options)
+}
+
+/// The values `args` give `options`, as `--option value` or
+/// `--option=value`.
+fn option_values<'w>(
+    args: &'w [Word],
+    options: &'static [&'static str],
+) -> impl Iterator<Item = &'w str> {
+    args.iter().enumerate().flat_map(move |(at, arg)| {
+        options
+            .iter()
+            .filter_map(move |option| match arg.text.strip_prefix(option)? {
+                "" => args.get(at + 1).map(|value| value.text.as_str()),
+                attached => attached.strip_prefix('='),
+            })
+    })
 }
 
 fn value_options(program: &str) -> &'static [&'static str] {

@@ -274,6 +274,7 @@ pub fn default_bash_destructive_patterns() -> Vec<String> {
         "kill -1",
         "sort --compress-program",
         "rg --pre",
+        "rg --hostname-bin",
     ]
     .map(String::from)
     .into()

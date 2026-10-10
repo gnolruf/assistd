@@ -927,3 +927,35 @@ fn redirections_into_the_scratch_dir_need_no_confirmation() {
     ));
     assert!(asks("echo x > /run/user/1000/assistd/out.txt"));
 }
+
+#[test]
+fn programs_rg_options_run_must_be_allowed_whatever_the_patterns() {
+    let machine = Programs::new(&["rg", "make", "cat", "xargs"], &["rg", "cat", "xargs"]);
+    let unverifiable = |script: &str| {
+        matches!(
+            machine.review(script, &[]),
+            Some(Confirmation::Unverifiable(_))
+        )
+    };
+    for (script, expected) in [
+        (
+            "rg --hostname-bin=make --hyperlink-format='file://{host}{path}' -H all Makefile",
+            unlisted(&["make"], true),
+        ),
+        ("rg --pre make x", unlisted(&["make"], true)),
+        ("make() { :; }; rg --pre=make x", unlisted(&["make"], true)),
+        ("nice rg --hostname-bin ./x y", unlisted(&["./x"], false)),
+        ("rg --pre cat x", None),
+        ("rg --pre-glob '*.pdf' --pre= x", None),
+    ] {
+        assert_eq!(machine.review(script, &[]), expected, "{script:?}");
+    }
+    for script in [
+        "rg --pre \"$p\" x",
+        "rg x \"$f\"",
+        "rg x *",
+        "echo --pre=make | xargs rg x",
+    ] {
+        assert!(unverifiable(script), "{script:?}");
+    }
+}
