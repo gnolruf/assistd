@@ -9,9 +9,12 @@ use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
-use crate::exec::{DetachedReaders, POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, detach, watch_detached};
+use crate::exec::{
+    Launched, MAX_LAUNCHED, POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, detach, watch_detached,
+};
 use crate::policy::{
-    BashPolicyCfg, ConfirmationGate, LaunchError, SandboxInfo, SubprocessPolicy, check_argv,
+    BashPolicyCfg, Confirmation, ConfirmationGate, LaunchError, SandboxInfo, SubprocessPolicy,
+    check_argv, is_desktop_application,
 };
 
 const NAME: &str = "wm";
@@ -35,15 +38,17 @@ const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
     arguments are forwarded to the spawned process.\n\
     \n\
     Runs under the same policy as `bash`: denylist, allowlist and \
-    destructive-pattern confirmation, and the bubblewrap sandbox, widened only to share the \
-    network and reach the compositor through a restricted Wayland socket. X11, D-Bus and \
+    destructive-pattern confirmation, and the bubblewrap sandbox. A program \
+    with no desktop entry always needs confirmation. The sandbox is widened \
+    only to share the network and reach the compositor through a restricted Wayland socket. X11, D-Bus and \
     other session sockets stay unreachable, so launching needs a Wayland session.\n\
     \n\
     The application is briefly watched, then left running. If it exits \
     during that window its exit code and output are returned, which is \
     how a failed launch surfaces; if it is still alive, exit 0 with no \
     output means the launch succeeded. Stdin is not forwarded, and no \
-    timeout applies once it is running.\n";
+    timeout applies once it is running, but only a few launched \
+    applications may run at once.\n";
 
 const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
     \n\
@@ -62,7 +67,7 @@ const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|spli
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
     policy: SubprocessPolicy,
-    launched: DetachedReaders,
+    launched: Launched,
 }
 
 impl WmCommand {
@@ -77,7 +82,7 @@ impl WmCommand {
         Self {
             wm,
             policy: SubprocessPolicy { cfg, sandbox, gate },
-            launched: DetachedReaders::default(),
+            launched: Launched::default(),
         }
     }
 
@@ -85,8 +90,12 @@ impl WmCommand {
         let Some((app, extra)) = args.split_first() else {
             return CommandOutput::usage(OPEN_HELP.to_string());
         };
+        if self.launched.is_full() {
+            return too_many_launched();
+        }
         let argv = args.join(" ");
-        let confirmation = check_argv(args, &self.policy.cfg.rules());
+        let review = check_argv(args, &self.policy.cfg.rules());
+        let confirmation = launch_confirmation(app, review).await;
         if let Err(denied) = self
             .policy
             .authorize(NAME, "open", &argv, confirmation)
@@ -259,6 +268,31 @@ fn spawn_failed(app: &str, err: &io::Error) -> CommandOutput {
         )
     };
     CommandOutput::failed(SPAWN_FAILED_EXIT, line.into_bytes())
+}
+
+/// `review` for launching `app`, which also needs confirmation when `app`
+/// is not a desktop application; a destructive pattern still outranks that.
+async fn launch_confirmation(app: &str, review: Option<Confirmation>) -> Option<Confirmation> {
+    match review {
+        Some(Confirmation::Pattern(_)) => review,
+        _ if !is_desktop_application(app).await => {
+            Some(Confirmation::NotDesktopApplication(app.to_string()))
+        }
+        _ => review,
+    }
+}
+
+fn too_many_launched() -> CommandOutput {
+    CommandOutput::failed(
+        POLICY_DENIED_EXIT,
+        error_line(
+            NAME,
+            format_args!("open refused: {MAX_LAUNCHED} launched applications are still running"),
+            Hint::Note,
+            "the user must close one before another can be opened",
+        )
+        .into_bytes(),
+    )
 }
 
 fn launch_refused(err: &LaunchError) -> CommandOutput {

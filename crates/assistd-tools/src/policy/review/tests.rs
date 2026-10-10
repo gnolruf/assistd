@@ -56,7 +56,7 @@ fn check_against(script: &str, patterns: &[DestructivePattern]) -> Option<String
     match check_script(script, &rules)? {
         Confirmation::Pattern(pattern) => Some(pattern),
         Confirmation::Unverifiable(_) => Some("?".to_string()),
-        Confirmation::Unlisted { .. } => None,
+        Confirmation::Unlisted { .. } | Confirmation::NotDesktopApplication(_) => None,
     }
 }
 
