@@ -251,6 +251,10 @@ impl LlamaChatClient {
         Duration::from_secs(self.chat.request_timeout_secs.get())
     }
 
+    fn stream_inactivity(&self) -> Duration {
+        Duration::from_secs(self.timeouts.stream_inactivity_secs)
+    }
+
     async fn send_request(
         &self,
         body: Vec<u8>,
@@ -292,7 +296,8 @@ impl LlamaChatClient {
         }
         let status = response.status();
         if !status.is_success() {
-            let body = read_body_capped(&mut response, ERROR_BODY_CAP).await;
+            let body =
+                read_body_capped(&mut response, ERROR_BODY_CAP, self.stream_inactivity()).await;
             let err = ChatClientError::Server {
                 status: status.as_u16(),
                 body,
@@ -311,7 +316,7 @@ impl LlamaChatClient {
         pid_at_request: Option<u32>,
     ) -> Result<bool, StreamOutcome> {
         let mut reader = SseLineReader::new();
-        let inter_chunk = Duration::from_secs(self.timeouts.stream_inactivity_secs);
+        let inter_chunk = self.stream_inactivity();
         let mut saw_bytes = false;
         loop {
             let (deadline, next) = if saw_bytes {
@@ -630,7 +635,8 @@ impl Summarizer for LlamaChatClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let body = read_body_capped(&mut response, ERROR_BODY_CAP).await;
+            let body =
+                read_body_capped(&mut response, ERROR_BODY_CAP, self.stream_inactivity()).await;
             return Err(ChatClientError::Server {
                 status: status.as_u16(),
                 body,
@@ -927,25 +933,19 @@ async fn flush_splitter(accum: &mut StreamAccum, tx: &mpsc::Sender<LlmEvent>) {
     }
 }
 
-async fn read_body_capped(response: &mut reqwest::Response, cap: usize) -> String {
+async fn read_body_capped(response: &mut reqwest::Response, cap: usize, idle: Duration) -> String {
     let mut buf = Vec::new();
-    loop {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                let remaining = cap.saturating_sub(buf.len());
-                if remaining == 0 {
-                    buf.extend_from_slice(b"...<truncated>");
-                    break;
-                }
-                let take = chunk.len().min(remaining);
-                buf.extend_from_slice(&chunk[..take]);
-                if take < chunk.len() {
-                    buf.extend_from_slice(b"...<truncated>");
-                    break;
-                }
-            }
-            Ok(None) => break,
-            Err(_) => break,
+    while let Ok(Ok(Some(chunk))) = timeout(idle, response.chunk()).await {
+        let remaining = cap.saturating_sub(buf.len());
+        if remaining == 0 {
+            buf.extend_from_slice(b"...<truncated>");
+            break;
+        }
+        let take = chunk.len().min(remaining);
+        buf.extend_from_slice(&chunk[..take]);
+        if take < chunk.len() {
+            buf.extend_from_slice(b"...<truncated>");
+            break;
         }
     }
     String::from_utf8_lossy(&buf).into_owned()
