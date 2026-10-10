@@ -358,7 +358,7 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
             "DELETE FROM memories WHERE key = ?1",
             rusqlite::params![key],
         )?;
-        Ok(())
+        truncate_wal(c)
     })
     .await
     .map_err(MemoryError::sqlite("delete_memory"))
@@ -366,12 +366,15 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
 
 async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String>> {
     conn.call(move |c| -> rusqlite::Result<_> {
-        c.query_row(
-            "DELETE FROM memories WHERE id = ?1 RETURNING key",
-            rusqlite::params![id],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()
+        let key = c
+            .query_row(
+                "DELETE FROM memories WHERE id = ?1 RETURNING key",
+                rusqlite::params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        truncate_wal(c)?;
+        Ok(key)
     })
     .await
     .map_err(MemoryError::sqlite("delete_memory_by_id"))
@@ -618,6 +621,7 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
         delete_unreferenced_conversations(&tx, &orphan_candidates)?;
         delete_turn_if_unreferenced(&tx, turn_id)?;
         tx.commit()?;
+        truncate_wal(c)?;
         Ok(UndoOutcome {
             removed_messages: u32::try_from(removed).unwrap_or(u32::MAX),
             last_user_text,
@@ -684,6 +688,18 @@ fn delete_turn_if_unreferenced(tx: &Transaction<'_>, turn_id: i64) -> rusqlite::
             "DELETE FROM turns WHERE id = ?1",
             rusqlite::params![turn_id],
         )?;
+    }
+    Ok(())
+}
+
+/// Checkpoint and empty the WAL so frames holding deleted rows don't outlive the delete.
+fn truncate_wal(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let busy: bool = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    if busy {
+        tracing::warn!(
+            target: "assistd::memory",
+            "WAL checkpoint blocked by another reader; deleted rows stay in the WAL until the next checkpoint"
+        );
     }
     Ok(())
 }
