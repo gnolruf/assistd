@@ -330,6 +330,8 @@ dependencies = [
 name = "assistd-utils"
 version = "1.2.1"
 dependencies = [
+ "dirs",
+ "futures-util",
  "parking_lot",
  "procfs",
  "reqwest",
@@ -354,7 +356,6 @@ dependencies = [
  "clap",
  "cpal 0.18.2",
  "dirs",
- "futures-util",
  "hound",
  "num-traits",
  "nvml-wrapper",

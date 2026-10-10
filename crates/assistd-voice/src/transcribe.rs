@@ -40,7 +40,7 @@ pub enum TranscriptionError {
     ModelParse { id: String, reason: String },
 
     #[error(transparent)]
-    Download(#[from] crate::hf_download::DownloadError),
+    Download(#[from] assistd_utils::hf::download::DownloadError),
 
     #[error("failed to initialize whisper context: {0}")]
     WhisperInit(String),

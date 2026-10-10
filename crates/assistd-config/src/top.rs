@@ -6,6 +6,7 @@ use std::ops::RangeInclusive;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use assistd_utils::hf::HfFileId;
 use assistd_utils::path::tilde_remainder;
 use serde::{Deserialize, Serialize};
 
@@ -362,7 +363,11 @@ fn validate_embedding(errors: &mut Vec<String>, embedding: &EmbeddingConfig, mod
     if !embedding.enabled {
         return;
     }
-    require_hf_id(errors, "embedding.model", &embedding.model);
+    if require_hf_id(errors, "embedding.model", &embedding.model)
+        .is_some_and(|id| id.revision().is_some())
+    {
+        errors.push("embedding.model does not support an '@<revision>' pin".into());
+    }
     if embedding.server_binary.as_os_str().is_empty() {
         errors.push("embedding.server_binary must not be empty when embedding is enabled".into());
     }
@@ -437,25 +442,14 @@ fn require_in_range(
     }
 }
 
-fn require_hf_id(errors: &mut Vec<String>, field: &str, value: &str) {
-    if !is_valid_hf_id(value) {
-        errors.push(format!(
-            "{field} must be of the form '<owner>/<repo>:<file>'"
-        ));
-    }
-}
-
-fn is_valid_hf_id(id: &str) -> bool {
-    let Some((repo, file)) = id.split_once(':') else {
-        return false;
-    };
-    if file.is_empty() || file.contains(':') {
-        return false;
-    }
-    let Some((owner, name)) = repo.split_once('/') else {
-        return false;
-    };
-    !owner.is_empty() && !name.is_empty()
+fn require_hf_id(errors: &mut Vec<String>, field: &str, value: &str) -> Option<HfFileId> {
+    HfFileId::parse(value)
+        .inspect_err(|reason| {
+            errors.push(format!(
+                "{field} must be of the form '<owner>/<repo>[@<revision>]:<file>': {reason}"
+            ));
+        })
+        .ok()
 }
 
 fn is_mcp_server_name(name: &str) -> bool {

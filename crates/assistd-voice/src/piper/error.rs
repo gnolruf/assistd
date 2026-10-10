@@ -7,7 +7,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum PiperError {
     #[error(transparent)]
-    Download(#[from] crate::hf_download::DownloadError),
+    Download(#[from] assistd_utils::hf::download::DownloadError),
 
     #[error("voice file at {path} is not valid JSON: starts with {prefix:?}")]
     JsonShape { path: PathBuf, prefix: String },

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_config::TranscriptionConfig;
+use assistd_utils::hf::download;
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
 use parking_lot::Mutex;
@@ -16,7 +17,6 @@ use whisper_rs::{
 };
 
 use crate::gpu;
-use crate::hf_download;
 use crate::transcribe::{Transcriber, TranscriptionError};
 
 /// Minimum trailing silence, in seconds, before Silero VAD trims a
@@ -276,9 +276,9 @@ impl WhisperTranscriberBuilder {
         })?;
         let cache_dir = self
             .cache_dir
-            .map_or_else(|| hf_download::default_cache_dir("whisper"), Ok)?;
+            .map_or_else(|| download::default_cache_dir("whisper"), Ok)?;
 
-        let model_path = hf_download::ensure_cached(&model, &cache_dir).await?;
+        let model_path = download::ensure_cached(&model, &cache_dir).await?;
         let vad = if self.vad_enabled {
             Some(fetch_vad(self.vad_model, self.vad_silence_secs, &cache_dir).await?)
         } else {
@@ -424,7 +424,7 @@ async fn fetch_vad(
         id: String::new(),
         reason: "vad_model identifier is required when vad_enabled".into(),
     })?;
-    let vad_path = hf_download::ensure_cached(&vad_id, cache_dir).await?;
+    let vad_path = download::ensure_cached(&vad_id, cache_dir).await?;
     Ok(SileroVadParams {
         model_path: vad_path.to_string_lossy().into_owned(),
         silence_secs: silence_secs.max(0.0),

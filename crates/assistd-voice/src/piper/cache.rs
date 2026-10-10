@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
+use assistd_utils::hf::download::{self, DownloadError, cached_path, ensure_file, parse_id};
 use serde::Deserialize;
 
-use crate::hf_download::{self, DownloadError, cached_path, ensure_file, parse_hf_id};
 use crate::piper::error::PiperError;
 
 /// Resolved on-disk paths for a voice, plus the sample rate read from
@@ -29,18 +29,19 @@ struct VoiceConfigJson {
 
 /// The `piper` subdirectory of the shared model cache.
 pub fn default_cache_dir() -> Result<PathBuf, DownloadError> {
-    hf_download::default_cache_dir("piper")
+    download::default_cache_dir("piper")
 }
 
 /// Ensure both voice files exist locally, downloading whichever is
 /// missing.
 pub async fn ensure_voice(hf_id: &str, cache_dir: &Path) -> Result<VoiceFiles, PiperError> {
-    let (repo, file) = parse_hf_id(hf_id)?;
-    let onnx = cached_path(cache_dir, &repo, &file);
-    let json = onnx.with_extension("onnx.json");
+    let onnx_id = parse_id(hf_id)?;
+    let json_id = parse_id(&format!("{onnx_id}.json"))?;
+    let onnx = cached_path(cache_dir, &onnx_id);
+    let json = cached_path(cache_dir, &json_id);
 
-    ensure_file(&repo, &file, &onnx).await?;
-    ensure_file(&repo, &format!("{file}.json"), &json).await?;
+    ensure_file(&onnx_id, &onnx).await?;
+    ensure_file(&json_id, &json).await?;
 
     let sample_rate = read_sample_rate(&json).await?;
     Ok(VoiceFiles {
