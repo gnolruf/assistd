@@ -1,7 +1,8 @@
-//! Owning handle to the process group a spawned child leads.
+//! Owning handle to the process group a spawned child leads, and the
+//! parent-death signal that reaps it if the daemon dies first.
 
 use rustix::process::{Pid, Signal, kill_process_group};
-use tokio::process::Child;
+use tokio::process::{Child, Command};
 
 /// The process group a child spawned with `process_group(0)` leads. The id
 /// is fixed at spawn and outlives the leader's own exit. Dropping it
@@ -35,3 +36,25 @@ impl Drop for ProcessGroup {
         self.signal(Signal::KILL);
     }
 }
+
+/// Have the kernel SIGTERM the child `cmd` spawns when the daemon dies, even
+/// by SIGKILL. `pre_exec` is the only way to set PDEATHSIG on a spawned child.
+#[cfg(target_os = "linux")]
+#[allow(
+    unsafe_code,
+    reason = "std exposes no safe way to run code between fork and exec"
+)]
+pub fn set_parent_death_signal(cmd: &mut Command) {
+    // SAFETY: the closure runs in the child between fork() and exec(). It
+    // captures nothing and only issues the prctl(PR_SET_PDEATHSIG) syscall,
+    // which is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            rustix::process::set_parent_process_death_signal(Some(Signal::TERM)).map_err(Into::into)
+        });
+    }
+}
+
+/// No-op off Linux, where PDEATHSIG does not exist.
+#[cfg(not(target_os = "linux"))]
+pub fn set_parent_death_signal(_cmd: &mut Command) {}

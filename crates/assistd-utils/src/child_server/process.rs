@@ -4,7 +4,7 @@ use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use rustix::process::{Pid, Signal};
-use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdout};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{info, warn};
@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use super::ChildServerSpec;
 use super::error::ChildServerError;
 use crate::log_lines::forward_lines;
-use crate::process_group::ProcessGroup;
+use crate::process_group::{ProcessGroup, set_parent_death_signal};
 
 const OUTPUT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -128,27 +128,6 @@ impl ChildProcess {
         Ok(())
     }
 }
-
-/// Have the kernel SIGTERM the child when the daemon dies, even by SIGKILL.
-/// `pre_exec` is the only way to set PDEATHSIG on a spawned child.
-#[cfg(target_os = "linux")]
-#[allow(
-    unsafe_code,
-    reason = "std exposes no safe way to run code between fork and exec"
-)]
-fn set_parent_death_signal(cmd: &mut Command) {
-    // SAFETY: the closure runs in the child between fork() and exec(). It
-    // captures nothing and only issues the prctl(PR_SET_PDEATHSIG) syscall,
-    // which is async-signal-safe.
-    unsafe {
-        cmd.pre_exec(|| {
-            rustix::process::set_parent_process_death_signal(Some(Signal::TERM)).map_err(Into::into)
-        });
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_parent_death_signal(_cmd: &mut Command) {}
 
 async fn forward_stdout(server: &'static str, stream: ChildStdout) {
     let forwarded = forward_lines(stream, |line| {
