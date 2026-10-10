@@ -38,7 +38,7 @@ pub struct EmbeddingConfig {
     /// files, tools or state through the server, fail to parse.
     pub custom_args: CustomArgs<EmbeddingServer>,
     /// Nearest-neighbour matches per query, for auto-injection and as the
-    /// `reminisce` default.
+    /// `reminisce` default. `1..=20`, the most `reminisce` returns.
     pub top_k: NonZeroU32,
     /// Prepend the `top_k` most similar past chunks to every query; when
     /// `false`, recall happens only through `reminisce`.

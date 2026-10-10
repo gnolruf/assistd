@@ -26,9 +26,10 @@ pub struct ToolsConfig {
 #[serde(default)]
 pub struct ToolsScratchConfig {
     /// Bound writable into the sandbox, and writable by `write` without
-    /// asking. Created owner-only on daemon startup. Must be absolute.
-    /// Defaults to `$XDG_RUNTIME_DIR/assistd/scratch`, else under the user
-    /// cache dir.
+    /// asking. Created owner-only on daemon startup. Must be absolute or
+    /// start with `~/`. Defaults to `$XDG_RUNTIME_DIR/assistd/scratch`, else
+    /// under the user cache dir.
+    #[serde(deserialize_with = "crate::home_path::deserialize")]
     pub dir: PathBuf,
     /// Days an entry in `dir` is kept after it last changed; older ones,
     /// and directories that leaves empty, are removed on daemon startup.
@@ -58,8 +59,9 @@ pub struct ToolsOutputConfig {
     /// `mcp-<server>-<n>.txt` for MCP tools); made owner-only on daemon
     /// startup, when earlier spill files are removed and nothing else is.
     /// Each new spill deletes the oldest ones beyond the newest 64 files
-    /// or 128 MiB. Must be absolute. Defaults to `$XDG_RUNTIME_DIR/assistd/output`,
-    /// else under the user cache dir.
+    /// or 128 MiB. Must be absolute or start with `~/`. Defaults to
+    /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
+    #[serde(deserialize_with = "crate::home_path::deserialize")]
     pub overflow_dir: PathBuf,
 }
 
