@@ -2,8 +2,8 @@ use std::sync::Mutex;
 
 use super::*;
 
-/// Fails any call that includes the text `"bad"`, and refuses any call that includes
-/// `"offline"` as not ready; records the inputs of every call.
+/// Fails any call that includes `"bad"` as input-caused, any that includes `"down"` with a
+/// server error, and refuses any that includes `"offline"` as not ready; records every call.
 #[derive(Debug, Default)]
 struct PickyEmbedder {
     calls: Mutex<Vec<Vec<String>>>,
@@ -23,7 +23,16 @@ impl Embedder for PickyEmbedder {
             .unwrap()
             .push(texts.iter().map(|&t| t.to_owned()).collect());
         if texts.contains(&"bad") {
-            return Err(EmbedError::Disabled);
+            return Err(EmbedError::DimMismatch {
+                got: 2,
+                expected: 1,
+            });
+        }
+        if texts.contains(&"down") {
+            return Err(EmbedError::Status {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                body: String::new(),
+            });
         }
         if texts.contains(&"offline") {
             return Err(EmbedError::NotReady);
@@ -66,5 +75,22 @@ async fn embed_each_fails_every_input_without_retrying_when_the_server_is_not_re
     assert_eq!(
         *embedder.calls.lock().unwrap(),
         vec![vec!["a", "offline", "ccc"]]
+    );
+}
+
+#[tokio::test]
+async fn embed_each_fails_every_input_without_retrying_on_a_server_error() {
+    let embedder = PickyEmbedder::default();
+    let results = embed_each(&embedder, &["a", "down", "ccc"]).await;
+    assert_eq!(results.len(), 3);
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result, Err(EmbedError::BatchFailed(_)))),
+        "{results:?}"
+    );
+    assert_eq!(
+        *embedder.calls.lock().unwrap(),
+        vec![vec!["a", "down", "ccc"]]
     );
 }

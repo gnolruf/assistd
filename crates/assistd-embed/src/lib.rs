@@ -2,6 +2,7 @@
 //! dedicated embedding llama-server, and the background task that embeds queued rows.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -47,8 +48,9 @@ pub trait Embedder: fmt::Debug + Send + Sync + 'static {
 }
 
 /// Embed `texts` in one [`Embedder::embed_batch`] call, returning one result per input.
-/// If the batch fails, each text is retried alone so a bad input fails only itself;
-/// a batch refused with [`EmbedError::NotReady`] fails every input without a retry.
+/// If the batch fails because of an input ([`EmbedError::is_input_caused`]), each text
+/// is retried alone so a bad input fails only itself; any other failure fails every
+/// input without a retry.
 pub async fn embed_each(
     embedder: &dyn Embedder,
     texts: &[&str],
@@ -56,6 +58,13 @@ pub async fn embed_each(
     match embedder.embed_batch(texts).await {
         Ok(vectors) => vectors.into_iter().map(Ok).collect(),
         Err(EmbedError::NotReady) => texts.iter().map(|_| Err(EmbedError::NotReady)).collect(),
+        Err(err) if !err.is_input_caused() => {
+            let shared = Arc::new(err);
+            texts
+                .iter()
+                .map(|_| Err(EmbedError::BatchFailed(Arc::clone(&shared))))
+                .collect()
+        }
         Err(err) if texts.len() > 1 => {
             tracing::debug!(
                 target: "assistd::embed",
