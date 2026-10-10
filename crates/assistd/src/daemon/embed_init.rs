@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use assistd_core::{AppState, Config};
 use assistd_embed::{
@@ -17,6 +18,9 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 const EMBED_QUEUE_CAPACITY: usize = 256;
+
+/// Longest the worker gets at shutdown to embed and store what is still queued.
+const EMBED_DRAIN_BUDGET: Duration = Duration::from_secs(10);
 
 /// The handles the daemon serves from startup.
 pub(super) struct EmbeddingHandles {
@@ -73,9 +77,9 @@ impl EmbeddingService {
         Self { startup: None }
     }
 
-    /// Drain queued jobs while the server is still up, then stop it. A
-    /// start still under way is cancelled. The memory writer must still
-    /// be running.
+    /// Drain queued jobs while the server is still up, abandoning them after
+    /// [`EMBED_DRAIN_BUDGET`], then stop it. A start still under way is
+    /// cancelled. The memory writer must still be running.
     pub(super) async fn shutdown(
         self,
         worker_shutdown: &watch::Sender<bool>,
@@ -99,12 +103,26 @@ impl EmbeddingService {
             return;
         };
         if let Some(worker) = worker {
-            let _ = worker.await;
+            join_worker_within_budget(worker).await;
         }
         server_shutdown.send_replace(true);
         if let Err(e) = server.shutdown().await {
             tracing::warn!("embed-server shutdown error: {e:#}");
         }
+    }
+}
+
+async fn join_worker_within_budget(mut worker: JoinHandle<()>) {
+    if tokio::time::timeout(EMBED_DRAIN_BUDGET, &mut worker)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            target: "assistd::embed",
+            "embed queue drain timed out at shutdown; queued rows stay unindexed"
+        );
+        worker.abort();
+        let _ = worker.await;
     }
 }
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use assistd_utils::readiness::NotReady;
 use thiserror::Error;
 
@@ -49,4 +51,19 @@ pub enum EmbedError {
     /// The server's vector length changed after the dimension probe.
     #[error("embed server returned dim {got} but probe latched {expected}; refusing to mix")]
     DimMismatch { got: usize, expected: usize },
+
+    /// The batch this input was part of failed for a reason not tied to any one input.
+    #[error("embed batch failed: {0}")]
+    BatchFailed(Arc<EmbedError>),
+}
+
+impl EmbedError {
+    /// Whether retrying the inputs one at a time could isolate the failure to one of them.
+    pub fn is_input_caused(&self) -> bool {
+        match self {
+            Self::Status { status, .. } => status.is_client_error(),
+            Self::DimMismatch { .. } => true,
+            _ => false,
+        }
+    }
 }
