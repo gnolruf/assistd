@@ -14,11 +14,38 @@ use assistd_ipc::Event;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
-use tracing::{Instrument, error, info, warn};
+use tracing::{Instrument, debug, error, info, warn};
 
 pub(super) struct ListenDispatcherHandles {
     pub forwarder: JoinHandle<()>,
     pub presence_gate: JoinHandle<()>,
+}
+
+/// The running listen turn plus at most one utterance waiting behind it;
+/// a newer utterance replaces the waiting one.
+#[derive(Default)]
+struct ListenTurns {
+    running: JoinSet<()>,
+    waiting: Option<String>,
+}
+
+impl ListenTurns {
+    fn submit(&mut self, state: &Arc<AppState>, text: String) {
+        if self.running.is_empty() {
+            spawn_listen_query(&mut self.running, state, text);
+        } else if self.waiting.replace(text).is_some() {
+            debug!(
+                target: "assistd::listen",
+                "turn still running; dropped the waiting utterance for a newer one"
+            );
+        }
+    }
+
+    fn start_waiting(&mut self, state: &Arc<AppState>) {
+        if let Some(text) = self.waiting.take() {
+            spawn_listen_query(&mut self.running, state, text);
+        }
+    }
 }
 
 pub(super) fn spawn_dispatcher(
@@ -51,7 +78,7 @@ async fn run_utterance_forwarder(
 ) {
     let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut utterances = listener.subscribe_utterances();
-    let mut handlers: JoinSet<()> = JoinSet::new();
+    let mut turns = ListenTurns::default();
     loop {
         tokio::select! {
             res = utterances.recv() => {
@@ -59,7 +86,7 @@ async fn run_utterance_forwarder(
                     Ok(text) => {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() {
-                            spawn_listen_query(&mut handlers, &state, trimmed.to_string());
+                            turns.submit(&state, trimmed.to_string());
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
@@ -78,7 +105,7 @@ async fn run_utterance_forwarder(
                     }
                 }
             }
-            Some(res) = handlers.join_next(), if !handlers.is_empty() => {
+            Some(res) = turns.running.join_next(), if !turns.running.is_empty() => {
                 if let Err(e) = res
                     && e.is_panic()
                 {
@@ -87,6 +114,7 @@ async fn run_utterance_forwarder(
                         "listen-triggered query task panicked: {e}"
                     );
                 }
+                turns.start_waiting(&state);
             }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
@@ -96,7 +124,7 @@ async fn run_utterance_forwarder(
         }
     }
 
-    drain_join_set(&mut handlers, grace, "listen-triggered query").await;
+    drain_join_set(&mut turns.running, grace, "listen-triggered query").await;
 }
 
 fn spawn_listen_query(handlers: &mut JoinSet<()>, state: &Arc<AppState>, text: String) {

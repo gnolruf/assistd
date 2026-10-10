@@ -338,8 +338,8 @@ impl AppState {
         cancel: &CancellationToken,
     ) -> Result<Option<(QueryGuards, OwnedMutexGuard<()>)>, DispatchError> {
         let admission = async {
-            let guards = self.acquire_query_guards(id, tx).await?;
             let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+            let guards = self.acquire_query_guards(id, tx).await?;
             Ok((guards, agent_guard))
         };
         tokio::select! {
