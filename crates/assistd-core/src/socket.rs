@@ -65,7 +65,7 @@ const SOCKET_DIR_MODE: u32 = 0o700;
 /// Mode for the socket itself: only the daemon's user may connect.
 const SOCKET_MODE: u32 = 0o600;
 
-/// Mode for the startup lock file beside the socket.
+/// Mode for lock files beside the socket.
 const LOCK_FILE_MODE: u32 = 0o600;
 
 /// Errors produced by the socket listener and per-connection handlers.
@@ -82,6 +82,13 @@ pub enum SocketError {
          running"
     )]
     AlreadyStarting { path: PathBuf },
+
+    #[error("failed to open lock file at {path}: {source}")]
+    LockFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 
     #[error("failed to take the startup lock at {path}: {source}")]
     StartupLock {
@@ -147,25 +154,14 @@ impl StartupLock {
     /// process exits.
     pub fn acquire_at(socket_path: &Path) -> Result<Self, SocketError> {
         let lock_path = socket_path.with_extension("lock");
-        if let Some(dir) = lock_path.parent() {
-            ensure_private_socket_dir(dir)?;
-        }
-        let lock_error = |source| SocketError::StartupLock {
-            path: lock_path.clone(),
-            source,
-        };
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(LOCK_FILE_MODE)
-            .open(&lock_path)
-            .map_err(lock_error)?;
+        let file = open_private_lock_file(&lock_path)?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(TryLockError::WouldBlock) => Err(SocketError::AlreadyStarting { path: lock_path }),
-            Err(TryLockError::Error(source)) => Err(lock_error(source)),
+            Err(TryLockError::Error(source)) => Err(SocketError::StartupLock {
+                path: lock_path,
+                source,
+            }),
         }
     }
 }
@@ -216,6 +212,27 @@ where
     }
 
     result
+}
+
+/// Open (creating owner-only if needed) a lock file in the socket
+/// directory without following a symlink at `lock_path`. Fails when the
+/// directory is not a private directory owned by this user.
+pub fn open_private_lock_file(lock_path: &Path) -> Result<File, SocketError> {
+    if let Some(dir) = lock_path.parent() {
+        ensure_private_socket_dir(dir)?;
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(LOCK_FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(lock_path)
+        .map_err(|source| SocketError::LockFile {
+            path: lock_path.to_path_buf(),
+            source,
+        })
 }
 
 fn ensure_private_socket_dir(dir: &Path) -> Result<(), SocketError> {

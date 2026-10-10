@@ -7,12 +7,12 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use assistd_core::socket::open_private_lock_file;
 use assistd_core::{Config, SleepConfig};
 use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
 use assistd_utils::tracing_init::env_filter_or;
@@ -51,7 +51,6 @@ const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const INSTANCE_LOCK_FILE: &str = "chat.lock";
-const INSTANCE_LOCK_MODE: u32 = 0o600;
 
 #[derive(Args)]
 pub(crate) struct ChatArgs {
@@ -86,14 +85,7 @@ impl InstanceLock {
     /// Fails when another `assistd chat` holds the lock.
     fn acquire(socket_path: &Path) -> Result<Self> {
         let lock_path = socket_path.with_file_name(INSTANCE_LOCK_FILE);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(INSTANCE_LOCK_MODE)
-            .open(&lock_path)
-            .with_context(|| format!("opening chat lock {}", lock_path.display()))?;
+        let file = open_private_lock_file(&lock_path)?;
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(TryLockError::WouldBlock) => anyhow::bail!(
