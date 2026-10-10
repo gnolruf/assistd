@@ -1072,6 +1072,23 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
     assert_eq!(user_prompts, ["kept"]);
 }
 
+#[tokio::test]
+async fn a_turn_waiting_to_start_does_not_hold_the_daemon_awake() {
+    let state = default_state();
+    let earlier_turn = state.runtime.agent_turn_lock.clone().lock_owned().await;
+    let query_state = state.clone();
+    let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "waiting")).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    tokio::time::timeout(Duration::from_secs(5), state.subsystems.presence.sleep())
+        .await
+        .expect("a queued turn kept the daemon from sleeping")
+        .unwrap();
+    assert_eq!(state.subsystems.presence.state(), PresenceState::Sleeping);
+    queued.abort();
+    drop(earlier_turn);
+}
+
 #[tokio::test(start_paused = true)]
 async fn query_turn_outlives_the_dispatch_envelope() {
     let backend = ToolCallBackend::new(
