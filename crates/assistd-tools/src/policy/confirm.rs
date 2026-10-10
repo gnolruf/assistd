@@ -129,22 +129,21 @@ impl ConfirmRouter {
     }
 
     /// Forward the prompt to the client and await the answer. Every
-    /// failure mode is [`Approval::Deny`].
+    /// failure mode is [`Approval::Deny`]; cancelling the future forgets
+    /// the prompt.
     pub async fn ask(&self, req: ConfirmationRequest) -> Approval {
-        let confirm_id = uuid::Uuid::new_v4().to_string();
-        let Some(answer) = self.register(&confirm_id, &req) else {
+        let Some((prompt, answer)) = self.register(&req) else {
             return Approval::Deny;
         };
         let event = Event::ConfirmRequest {
             id: self.request_id.clone(),
-            confirm_id: confirm_id.clone(),
+            confirm_id: prompt.confirm_id.clone(),
             tool: req.tool.clone(),
             script: req.script.clone(),
             matched_pattern: req.matched_pattern.clone(),
             always_allow: req.always_allow.clone(),
         };
         if self.wire.send(event).await.is_err() {
-            self.forget(&confirm_id);
             warn!(
                 target: "assistd::policy",
                 tool = %req.tool,
@@ -152,16 +151,15 @@ impl ConfirmRouter {
             );
             return Approval::Deny;
         }
-        self.await_answer(&confirm_id, &req, answer).await
+        self.await_answer(&req, answer).await
     }
 
-    /// Record a pending prompt under `confirm_id`, or `None` when the
+    /// Record a pending prompt under a fresh id, or `None` when the
     /// router is closed or full.
     fn register(
         &self,
-        confirm_id: &str,
         req: &ConfirmationRequest,
-    ) -> Option<oneshot::Receiver<Approval>> {
+    ) -> Option<(PendingPrompt<'_>, oneshot::Receiver<Approval>)> {
         let mut pending = self.pending.lock();
         if pending.closed {
             warn!(
@@ -182,21 +180,24 @@ impl ConfirmRouter {
             );
             return None;
         }
+        let confirm_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        pending.prompts.insert(confirm_id.to_string(), tx);
-        Some(rx)
+        pending.prompts.insert(confirm_id.clone(), tx);
+        let prompt = PendingPrompt {
+            router: self,
+            confirm_id,
+        };
+        Some((prompt, rx))
     }
 
     async fn await_answer(
         &self,
-        confirm_id: &str,
         req: &ConfirmationRequest,
         answer: oneshot::Receiver<Approval>,
     ) -> Approval {
         match tokio::time::timeout(self.timeout, answer).await {
             Ok(Ok(approval)) => approval,
             Ok(Err(_)) => {
-                self.forget(confirm_id);
                 warn!(
                     target: "assistd::policy",
                     tool = %req.tool,
@@ -205,7 +206,6 @@ impl ConfirmRouter {
                 Approval::Deny
             }
             Err(_) => {
-                self.forget(confirm_id);
                 warn!(
                     target: "assistd::policy",
                     tool = %req.tool,
@@ -215,10 +215,6 @@ impl ConfirmRouter {
                 Approval::Deny
             }
         }
-    }
-
-    fn forget(&self, confirm_id: &str) {
-        self.pending.lock().prompts.remove(confirm_id);
     }
 
     /// Deliver a client's answer to the matching pending prompt.
@@ -255,6 +251,19 @@ impl ConfirmRouter {
     #[cfg(test)]
     fn pending_len(&self) -> usize {
         self.pending.lock().prompts.len()
+    }
+}
+
+/// A prompt registered with a [`ConfirmRouter`], removed from its
+/// routing table when dropped.
+struct PendingPrompt<'router> {
+    router: &'router ConfirmRouter,
+    confirm_id: String,
+}
+
+impl Drop for PendingPrompt<'_> {
+    fn drop(&mut self) {
+        self.router.pending.lock().prompts.remove(&self.confirm_id);
     }
 }
 
@@ -330,6 +339,22 @@ mod tests {
         router
             .route_response(&confirm_id, Approval::Once)
             .expect_err("a timed-out prompt is no longer routable");
+    }
+
+    #[tokio::test]
+    async fn cancelled_ask_forgets_its_prompt() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let asker = Arc::clone(&router);
+        let in_flight = tokio::spawn(async move { asker.ask(sample_request()).await });
+        let confirm_id = recv_confirm_id(&mut rx).await;
+
+        in_flight.abort();
+        in_flight.await.expect_err("ask was aborted");
+        assert_eq!(router.pending_len(), 0);
+        router
+            .route_response(&confirm_id, Approval::Once)
+            .expect_err("a cancelled prompt is no longer routable");
     }
 
     #[tokio::test]
