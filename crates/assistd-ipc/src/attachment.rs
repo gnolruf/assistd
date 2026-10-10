@@ -5,8 +5,10 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-use assistd_utils::text::human_size;
+use thiserror::Error;
 use tokio::io::AsyncReadExt;
+
+use assistd_utils::text::human_size;
 
 /// MIME types llama.cpp's vision adapters accept; `infer::is_image` alone also passes GIF, BMP,
 /// TIFF and HEIC.
@@ -14,6 +16,9 @@ const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
 /// Largest accepted image: room for a 4K PNG screenshot, small enough to reject video or RAW.
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Largest combined decoded size of every image on one query, matching the socket's query frame.
+pub const MAX_QUERY_IMAGE_BYTES: u64 = MAX_IMAGE_BYTES;
 
 /// A validated image read by [`load_image`].
 #[derive(Debug)]
@@ -79,6 +84,33 @@ impl LoadImageError {
     }
 }
 
+/// Why [`sniff_image`] refused a byte buffer.
+#[derive(Debug, Error)]
+pub enum ImageFormatError {
+    #[error("not a recognized image")]
+    Unrecognized,
+    #[error("not an image (detected {detected})")]
+    NotAnImage { detected: &'static str },
+    #[error("unsupported image format {mime}; supported: {}", SUPPORTED_MIMES.join(", "))]
+    UnsupportedFormat { mime: &'static str },
+}
+
+impl ImageFormatError {
+    fn at_path(self, path: String) -> LoadImageError {
+        match self {
+            ImageFormatError::Unrecognized => LoadImageError::Unrecognized { path },
+            ImageFormatError::NotAnImage { detected } => LoadImageError::NotAnImage {
+                path,
+                detected: detected.to_string(),
+            },
+            ImageFormatError::UnsupportedFormat { mime } => LoadImageError::UnsupportedFormat {
+                path,
+                mime: mime.to_string(),
+            },
+        }
+    }
+}
+
 impl fmt::Display for LoadImageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.user_message())
@@ -112,28 +144,24 @@ pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await.map_err(io_error)?;
-    let Some(detected) = infer::get(&bytes) else {
-        return Err(LoadImageError::Unrecognized {
-            path: display_path(),
-        });
-    };
-    let mime = detected.mime_type();
-    if !infer::is_image(&bytes) {
-        return Err(LoadImageError::NotAnImage {
-            path: display_path(),
-            detected: mime.to_string(),
-        });
-    }
-    if !SUPPORTED_MIMES.contains(&mime) {
-        return Err(LoadImageError::UnsupportedFormat {
-            path: display_path(),
-            mime: mime.to_string(),
-        });
-    }
+    let mime = sniff_image(&bytes).map_err(|e| e.at_path(display_path()))?;
     Ok(LoadedImage {
         mime: mime.to_string(),
         bytes,
     })
+}
+
+/// Detect the MIME type of `bytes` from its magic number, accepting only PNG, JPEG and WebP.
+pub fn sniff_image(bytes: &[u8]) -> Result<&'static str, ImageFormatError> {
+    let detected = infer::get(bytes).ok_or(ImageFormatError::Unrecognized)?;
+    let mime = detected.mime_type();
+    if !infer::is_image(bytes) {
+        return Err(ImageFormatError::NotAnImage { detected: mime });
+    }
+    if !SUPPORTED_MIMES.contains(&mime) {
+        return Err(ImageFormatError::UnsupportedFormat { mime });
+    }
+    Ok(mime)
 }
 
 async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {

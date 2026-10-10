@@ -305,7 +305,7 @@ impl AppState {
         wire: &[ImageAttachment],
         tx: &mpsc::Sender<Event>,
     ) -> Result<Vec<Attachment>, DispatchError> {
-        let decoded = decode_wire_attachments(wire);
+        let decoded = decode_wire_attachments(wire).map_err(DispatchError::from);
         if let Err(e) = &decoded {
             send_error(tx, id.to_string(), e.to_string()).await;
         }
