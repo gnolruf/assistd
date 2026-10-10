@@ -56,6 +56,7 @@ impl SqliteHandle {
             c.pragma_update(None, "journal_mode", "WAL")?;
             c.pragma_update(None, "synchronous", "NORMAL")?;
             c.pragma_update(None, "foreign_keys", "ON")?;
+            c.pragma_update(None, "secure_delete", "ON")?;
             Ok(())
         })
         .await

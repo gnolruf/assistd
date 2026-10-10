@@ -184,4 +184,22 @@ mod tests {
             .collect();
         assert_eq!(full, ["100%:a"]);
     }
+
+    #[tokio::test]
+    async fn deleted_memory_leaves_no_trace_in_database_files() {
+        let (store, guard) = fresh().await;
+        let secret = "zq-forgotten-secret-7f3a";
+        store.save("fact:secret", secret.into()).await.unwrap();
+        store.delete("fact:secret").await.unwrap();
+
+        for entry in std::fs::read_dir(guard.0.path()).unwrap() {
+            let file = entry.unwrap().path();
+            let bytes = std::fs::read(&file).unwrap();
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "{} still holds the deleted value",
+                file.display()
+            );
+        }
+    }
 }

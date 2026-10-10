@@ -121,9 +121,15 @@ CREATE TABLE embeddings (
 CREATE INDEX idx_embeddings_model ON embeddings(model);
 ";
 
+/// V2: zero deleted tokens out of the full-text index instead of leaving them
+/// in its segments until the next merge.
+const V2_SQL: &str = r"
+INSERT INTO conversations_fts(conversations_fts, rank) VALUES('secure-delete', 1);
+";
+
 /// The full migration set.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1_SQL)])
+    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL)])
 }
 
 /// Apply all pending migrations to `conn`; a no-op on an up-to-date database.
@@ -149,6 +155,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 }
