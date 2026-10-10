@@ -22,7 +22,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
 use assistd_utils::log_lines::forward_lines;
-use assistd_utils::process_group::ProcessGroup;
+use assistd_utils::process_group::{ProcessGroup, set_parent_death_signal};
 
 use crate::McpClient;
 use crate::error::McpError;
@@ -231,8 +231,8 @@ fn spawn_child(cfg: &StdioConfig) -> Result<(Child, ProcessGroup), McpError> {
         path: cfg.command.clone(),
         source,
     };
-    let child = Command::new(&cfg.command)
-        .args(&cfg.args)
+    let mut cmd = Command::new(&cfg.command);
+    cmd.args(&cfg.args)
         .env_clear()
         .envs(inherited_env(std::env::vars_os()))
         .envs(cfg.env.iter())
@@ -240,9 +240,9 @@ fn spawn_child(cfg: &StdioConfig) -> Result<(Child, ProcessGroup), McpError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .process_group(0)
-        .spawn()
-        .map_err(spawn_error)?;
+        .process_group(0);
+    set_parent_death_signal(&mut cmd);
+    let child = cmd.spawn().map_err(spawn_error)?;
     let group = ProcessGroup::led_by(&child)
         .ok_or_else(|| spawn_error(io::Error::other("spawned child reported no pid")))?;
     Ok((child, group))
