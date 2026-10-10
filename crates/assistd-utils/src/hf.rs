@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub mod download;
+
 /// A validated Hugging Face file reference. Every component is a plain
 /// name: no `.`/`..` segments, no absolute paths, and only URL-safe chars.
 #[derive(Debug, Clone, PartialEq, Eq)]

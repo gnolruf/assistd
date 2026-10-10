@@ -1,19 +1,20 @@
-//! HuggingFace file downloads with an on-disk cache.
+//! Hugging Face file downloads into an on-disk cache.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use assistd_utils::hf::{HfFileId, InvalidHfId};
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 
+use super::{HfFileId, InvalidHfId};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest wait for the next chunk before a download counts as stalled.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
-/// Largest file a download may write; well above any Whisper or Piper model.
+/// Largest file a download may write; well above any model assistd fetches.
 const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Errors from resolving or downloading a HuggingFace file.
@@ -51,7 +52,7 @@ pub enum DownloadError {
 
 /// Parse `"<owner>/<repo>[@<revision>]:<file>"`, rejecting any path that
 /// could escape the cache directory.
-pub fn parse_hf_id(id: &str) -> Result<HfFileId, DownloadError> {
+pub fn parse_id(id: &str) -> Result<HfFileId, DownloadError> {
     HfFileId::parse(id).map_err(|reason| DownloadError::InvalidId {
         id: id.to_string(),
         reason,
@@ -77,7 +78,7 @@ pub fn cached_path(cache_dir: &Path, id: &HfFileId) -> PathBuf {
 
 /// Path to the cached file for `hf_id`, downloading it first if missing.
 pub async fn ensure_cached(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, DownloadError> {
-    let id = parse_hf_id(hf_id)?;
+    let id = parse_id(hf_id)?;
     let dest = cached_path(cache_dir, &id);
     ensure_file(&id, &dest).await?;
     Ok(dest)
@@ -90,7 +91,7 @@ pub async fn ensure_cached(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, Dow
 pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError> {
     if dest.exists() {
         tracing::debug!(
-            target: "assistd::voice::download",
+            target: "assistd::hf::download",
             path = %dest.display(),
             "already cached"
         );
@@ -109,7 +110,7 @@ pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError
         id.file()
     );
     tracing::info!(
-        target: "assistd::voice::download",
+        target: "assistd::hf::download",
         %url,
         path = %dest.display(),
         "downloading"
@@ -128,7 +129,7 @@ pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError
     part.persist(dest)
         .map_err(|err| io_error(dest, err.error))?;
     tracing::info!(
-        target: "assistd::voice::download",
+        target: "assistd::hf::download",
         path = %dest.display(),
         "download complete"
     );
@@ -203,7 +204,7 @@ async fn stream_to_file(
             && downloaded >= next_progress_log
         {
             tracing::info!(
-                target: "assistd::voice::download",
+                target: "assistd::hf::download",
                 pct = downloaded * 100 / total,
                 downloaded_mib = downloaded / (1024 * 1024),
                 total_mib = total / (1024 * 1024),

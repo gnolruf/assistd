@@ -9,24 +9,18 @@ rust-version.workspace = true
 default = ["whisper", "mic", "listen", "tts"]
 whisper = [
     "dep:whisper-rs",
-    "dep:reqwest",
     "dep:nvml-wrapper",
-    "dep:futures-util",
     "dep:num-traits",
-    "dep:tempfile",
 ]
 # Requires `whisper` because `MicVoiceInput` wraps `WhisperTranscriber`.
 mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
 listen = ["mic", "dep:webrtc-vad"]
-# Pulls in rodio (which itself uses cpal) plus reqwest and tempfile (shared with whisper).
+# Pulls in rodio (which itself uses cpal).
 tts = [
     "dep:rodio",
     "dep:serde",
     "dep:serde_json",
-    "dep:reqwest",
-    "dep:futures-util",
     "dep:which",
-    "dep:tempfile",
 ]
 cuda = ["whisper", "whisper-rs/cuda"]
 test-support = ["whisper", "mic", "listen", "tts"]
@@ -49,11 +43,8 @@ assistd-utils = { workspace = true }
 parking_lot = { workspace = true }
 
 whisper-rs = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true, features = ["stream"] }
 nvml-wrapper = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
 
 cpal = { workspace = true, optional = true }
 ringbuf = { workspace = true, optional = true }
@@ -73,6 +64,7 @@ clap = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
+reqwest = { workspace = true }
 hound = { workspace = true }
 
 [lints]
