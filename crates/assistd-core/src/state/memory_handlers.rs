@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use assistd_embed::{BATCH_SIZE, Embedder, embed_each};
+use assistd_embed::{BATCH_SIZE, EmbedError, Embedder, embed_each};
 use assistd_ipc::{Event, ReindexKind};
 use assistd_memory::{MemoryError, vector_to_blob};
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
@@ -234,27 +234,16 @@ impl AppState {
         let model = embedder.model().to_string();
         let dim = i64::try_from(embedder.dim()).unwrap_or(i64::MAX);
 
-        let chunks = match self.memory.semantic.chunks_missing_embedding(&model).await {
-            Ok(chunks) => chunks,
-            Err(e) => {
-                send_error(&tx, id, format!("reindex: list missing chunks: {e}")).await;
-                return Err(e.into());
-            }
-        };
-        let memories = match self
-            .memory
-            .semantic
-            .memories_missing_embedding(&model)
-            .await
+        let (chunks_total, memories_total) = match self.memory.semantic.count_missing(&model).await
         {
-            Ok(memories) => memories,
+            Ok(counts) => counts,
             Err(e) => {
-                send_error(&tx, id, format!("reindex: list missing memories: {e}")).await;
+                send_error(&tx, id, format!("reindex: count missing rows: {e}")).await;
                 return Err(e.into());
             }
         };
-        let chunks_total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
-        let memories_total = u32::try_from(memories.len()).unwrap_or(u32::MAX);
+        let chunks_total = u32::try_from(chunks_total).unwrap_or(u32::MAX);
+        let memories_total = u32::try_from(memories_total).unwrap_or(u32::MAX);
 
         let _ = tx
             .send(Event::ReindexProgress {
@@ -275,78 +264,133 @@ impl AppState {
 
         let semantic = &self.memory.semantic;
         let embedder = embedder.as_ref();
-        reindex_items(
+        let chunks = reindex_items(
             embedder,
-            &id,
-            &tx,
-            ReindexKind::Chunks,
-            chunks,
+            KindProgress::new(&id, &tx, ReindexKind::Chunks, chunks_total),
+            |after, limit| semantic.chunks_missing_embedding(&model, after, limit),
             |chunk_id, blob| semantic.store_chunk_embedding(chunk_id, model.clone(), dim, blob),
         )
         .await;
-        reindex_items(
+        if let Err(e) = chunks {
+            send_error(&tx, id, format!("reindex: list missing chunks: {e}")).await;
+            return Err(e.into());
+        }
+        let memories = reindex_items(
             embedder,
-            &id,
-            &tx,
-            ReindexKind::Memories,
-            memories,
+            KindProgress::new(&id, &tx, ReindexKind::Memories, memories_total),
+            |after, limit| semantic.memories_missing_embedding(&model, after, limit),
             |memory_id, blob| semantic.store_memory_embedding(memory_id, model.clone(), dim, blob),
         )
         .await;
+        if let Err(e) = memories {
+            send_error(&tx, id, format!("reindex: list missing memories: {e}")).await;
+            return Err(e.into());
+        }
 
         let _ = tx.send(Event::Done { id }).await;
         Ok(())
     }
 }
 
-async fn reindex_items<F, Fut>(
-    embedder: &dyn Embedder,
-    id: &str,
-    tx: &mpsc::Sender<Event>,
+/// Progress through the `total` rows of one [`ReindexKind`], streamed
+/// to `tx` as `ReindexProgress` events.
+struct KindProgress<'a> {
+    id: &'a str,
+    tx: &'a mpsc::Sender<Event>,
     kind: ReindexKind,
-    items: Vec<(i64, String)>,
-    store: F,
-) where
-    F: Fn(i64, Vec<u8>) -> Fut,
-    Fut: Future<Output = Result<(), MemoryError>>,
+    total: u32,
+    done: u32,
+}
+
+impl<'a> KindProgress<'a> {
+    fn new(id: &'a str, tx: &'a mpsc::Sender<Event>, kind: ReindexKind, total: u32) -> Self {
+        Self {
+            id,
+            tx,
+            kind,
+            total,
+            done: 0,
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        usize::try_from(self.total - self.done).unwrap_or(usize::MAX)
+    }
+
+    async fn advance(&mut self) {
+        self.done += 1;
+        let _ = self
+            .tx
+            .send(Event::ReindexProgress {
+                id: self.id.to_string(),
+                kind: self.kind,
+                done: self.done,
+                total: self.total,
+            })
+            .await;
+    }
+}
+
+/// Embed and store up to `progress.total` rows, listed a page at a time in
+/// id order. Per-item failures are logged; a listing failure aborts.
+async fn reindex_items<L, LFut, S, SFut>(
+    embedder: &dyn Embedder,
+    mut progress: KindProgress<'_>,
+    list: L,
+    store: S,
+) -> Result<(), MemoryError>
+where
+    L: Fn(i64, usize) -> LFut,
+    LFut: Future<Output = Result<Vec<(i64, String)>, MemoryError>>,
+    S: Fn(i64, Vec<u8>) -> SFut,
+    SFut: Future<Output = Result<(), MemoryError>>,
 {
-    let total = u32::try_from(items.len()).unwrap_or(u32::MAX);
-    let mut done = 0u32;
-    for batch in items.chunks(BATCH_SIZE) {
+    let mut after = 0;
+    while progress.remaining() > 0 {
+        let batch = list(after, progress.remaining().min(BATCH_SIZE)).await?;
+        let Some(&(last_id, _)) = batch.last() else {
+            break;
+        };
+        after = last_id;
         let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
         let results = embed_each(embedder, &texts).await;
         for (&(item_id, _), result) in batch.iter().zip(results) {
-            match result {
-                Ok(embedding) => {
-                    if let Err(e) = store(item_id, vector_to_blob(&embedding)).await {
-                        warn!(
-                            target: "assistd::memory",
-                            kind = kind.as_str(),
-                            item_id,
-                            error = %e,
-                            "reindex: store embedding failed"
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        target: "assistd::memory",
-                        kind = kind.as_str(),
-                        item_id,
-                        error = %e,
-                        "reindex: embed failed"
-                    );
-                }
-            }
-            done += 1;
-            let _ = tx
-                .send(Event::ReindexProgress {
-                    id: id.to_string(),
-                    kind,
-                    done,
-                    total,
-                })
-                .await;
+            store_embedding(progress.kind, item_id, result, &store).await;
+            progress.advance().await;
         }
+    }
+    Ok(())
+}
+
+async fn store_embedding<S, SFut>(
+    kind: ReindexKind,
+    item_id: i64,
+    embedded: Result<Vec<f32>, EmbedError>,
+    store: &S,
+) where
+    S: Fn(i64, Vec<u8>) -> SFut,
+    SFut: Future<Output = Result<(), MemoryError>>,
+{
+    let embedding = match embedded {
+        Ok(embedding) => embedding,
+        Err(e) => {
+            warn!(
+                target: "assistd::memory",
+                kind = kind.as_str(),
+                item_id,
+                error = %e,
+                "reindex: embed failed"
+            );
+            return;
+        }
+    };
+    if let Err(e) = store(item_id, vector_to_blob(&embedding)).await {
+        warn!(
+            target: "assistd::memory",
+            kind = kind.as_str(),
+            item_id,
+            error = %e,
+            "reindex: store embedding failed"
+        );
     }
 }

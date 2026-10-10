@@ -65,11 +65,23 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Rows with no embedding under `current`, as `(chunks, memories)`.
     async fn count_missing(&self, current: &str) -> Result<(i64, i64)>;
 
-    /// Memories with no embedding under `current`, as `(id, value)`.
-    async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
+    /// Up to `limit` memories with id above `after` and no embedding under
+    /// `current`, in id order, as `(id, value)`.
+    async fn memories_missing_embedding(
+        &self,
+        current: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>>;
 
-    /// Conversation chunks with no embedding under `current`, as `(id, content)`.
-    async fn chunks_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>>;
+    /// Up to `limit` conversation chunks with id above `after` and no
+    /// embedding under `current`, in id order, as `(id, content)`.
+    async fn chunks_missing_embedding(
+        &self,
+        current: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>>;
 
     /// Upsert the embedding for a `conversation_chunks` row.
     async fn store_chunk_embedding(
@@ -122,10 +134,20 @@ impl SemanticStore for NoSemanticStore {
     async fn count_missing(&self, _current: &str) -> Result<(i64, i64)> {
         Ok((0, 0))
     }
-    async fn memories_missing_embedding(&self, _current: &str) -> Result<Vec<(i64, String)>> {
+    async fn memories_missing_embedding(
+        &self,
+        _current: &str,
+        _after: i64,
+        _limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
         Ok(Vec::new())
     }
-    async fn chunks_missing_embedding(&self, _current: &str) -> Result<Vec<(i64, String)>> {
+    async fn chunks_missing_embedding(
+        &self,
+        _current: &str,
+        _after: i64,
+        _limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
         Ok(Vec::new())
     }
     async fn store_chunk_embedding(
@@ -421,8 +443,14 @@ impl SemanticStore for SqliteSemanticStore {
             .map_err(MemoryError::sqlite("count_missing"))
     }
 
-    async fn memories_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>> {
+    async fn memories_missing_embedding(
+        &self,
+        current: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
         let current = current.to_string();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
@@ -431,11 +459,12 @@ impl SemanticStore for SqliteSemanticStore {
                      FROM memories m
                      LEFT JOIN memory_embeddings e
                        ON e.memory_id = m.id AND e.model = ?1
-                     WHERE e.id IS NULL
-                     ORDER BY m.id",
+                     WHERE e.id IS NULL AND m.id > ?2
+                     ORDER BY m.id
+                     LIMIT ?3",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![current], |r| {
+                    .query_map(rusqlite::params![current, after, limit], |r| {
                         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -445,8 +474,14 @@ impl SemanticStore for SqliteSemanticStore {
             .map_err(MemoryError::sqlite("memories_missing_embedding"))
     }
 
-    async fn chunks_missing_embedding(&self, current: &str) -> Result<Vec<(i64, String)>> {
+    async fn chunks_missing_embedding(
+        &self,
+        current: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String)>> {
         let current = current.to_string();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
             .conn()
             .call(move |c| -> rusqlite::Result<_> {
@@ -455,11 +490,12 @@ impl SemanticStore for SqliteSemanticStore {
                      FROM conversation_chunks cc
                      LEFT JOIN embeddings e
                        ON e.conversation_chunk_id = cc.id AND e.model = ?1
-                     WHERE e.id IS NULL
-                     ORDER BY cc.id",
+                     WHERE e.id IS NULL AND cc.id > ?2
+                     ORDER BY cc.id
+                     LIMIT ?3",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![current], |r| {
+                    .query_map(rusqlite::params![current, after, limit], |r| {
                         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;

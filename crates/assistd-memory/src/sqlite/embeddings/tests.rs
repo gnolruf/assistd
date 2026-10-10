@@ -195,7 +195,7 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
         Vec::<MemoryHit>::new()
     );
     assert_eq!(
-        store.memories_missing_embedding("m").await.unwrap(),
+        store.memories_missing_embedding("m", 0, 100).await.unwrap(),
         [(mem_id, "emacs".to_string())]
     );
 }
@@ -240,20 +240,37 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
     let bare_mem = save_memory(&handle, "bare", "v2").await;
 
     assert_eq!(
-        store.chunks_missing_embedding("new").await.unwrap(),
+        store.chunks_missing_embedding("new", 0, 100).await.unwrap(),
         [
             (old_chunk, "chunk1".to_string()),
             (naked_chunk, "naked-chunk".to_string())
         ]
     );
     assert_eq!(
-        store.memories_missing_embedding("new").await.unwrap(),
+        store.chunks_missing_embedding("new", 0, 1).await.unwrap(),
+        [(old_chunk, "chunk1".to_string())]
+    );
+    assert_eq!(
+        store
+            .chunks_missing_embedding("new", old_chunk, 100)
+            .await
+            .unwrap(),
+        [(naked_chunk, "naked-chunk".to_string())]
+    );
+    assert_eq!(
+        store
+            .memories_missing_embedding("new", 0, 100)
+            .await
+            .unwrap(),
         [(bare_mem, "v2".to_string())]
     );
 
     embed_memory(&store, bare_mem, &unit_vec(0.0), "new").await;
     assert_eq!(
-        store.memories_missing_embedding("new").await.unwrap(),
+        store
+            .memories_missing_embedding("new", 0, 100)
+            .await
+            .unwrap(),
         Vec::<(i64, String)>::new()
     );
 }

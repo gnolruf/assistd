@@ -14,6 +14,22 @@ use super::store::like_prefix_pattern;
 use super::writer::{WriteOp, dispatch_write};
 use crate::{MemoryError, Result};
 
+/// Columns [`branch_info`] reads, over `branches b JOIN sessions s`.
+const BRANCH_INFO_SELECT: &str = "
+    SELECT  b.id,
+            b.session_id,
+            s.started_at,
+            s.ended_at,
+            s.title,
+            b.name,
+            b.parent_branch_id,
+            (SELECT name FROM branches p WHERE p.id = b.parent_branch_id),
+            b.fork_point_seq,
+            b.created_at,
+            (SELECT COUNT(*) FROM branch_messages bm WHERE bm.branch_id = b.id),
+            (b.id = s.current_branch_id) AS is_current
+    FROM branches b JOIN sessions s ON s.id = b.session_id";
+
 /// Session identifier: a UUID string, stable across daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -233,6 +249,9 @@ pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
     /// Every branch of every session, newest session first, then by branch id.
     async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
 
+    /// Metadata of `branch`, or `None` when it does not exist.
+    async fn branch_info(&self, branch: BranchId) -> Result<Option<BranchInfo>>;
+
     /// Resolve `name` or `<session-id-prefix>/name` to a branch. An unqualified name
     /// prefers `prefer_session`; remaining ties go to the newest session.
     async fn resolve_branch(
@@ -247,6 +266,10 @@ pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
 
     /// Every message on `branch`, ordered by branch-local seq.
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
+
+    /// Branch-local seq of the newest message on `branch`, or `None`
+    /// when the branch is empty.
+    async fn branch_tail_seq(&self, branch: BranchId) -> Result<Option<i64>>;
 
     /// RFC3339 timestamp of the newest message on `branch`, or `None`
     /// when the branch is empty.
@@ -324,6 +347,10 @@ impl ConversationStore for NoConversationStore {
         Ok(Vec::new())
     }
 
+    async fn branch_info(&self, _branch: BranchId) -> Result<Option<BranchInfo>> {
+        Ok(None)
+    }
+
     async fn resolve_branch(
         &self,
         _target: &str,
@@ -338,6 +365,10 @@ impl ConversationStore for NoConversationStore {
 
     async fn load_branch_history(&self, _branch: BranchId) -> Result<Vec<HistoryRow>> {
         Ok(Vec::new())
+    }
+
+    async fn branch_tail_seq(&self, _branch: BranchId) -> Result<Option<i64>> {
+        Ok(None)
     }
 
     async fn latest_branch_activity(&self, _branch: BranchId) -> Result<Option<String>> {
@@ -497,23 +528,8 @@ impl ConversationStore for SqliteConversationStore {
         self.handle
             .conn()
             .call(|c| -> rusqlite::Result<_> {
-                let sql = "
-                    SELECT  b.id,
-                            b.session_id,
-                            s.started_at,
-                            s.ended_at,
-                            s.title,
-                            b.name,
-                            b.parent_branch_id,
-                            (SELECT name FROM branches p WHERE p.id = b.parent_branch_id),
-                            b.fork_point_seq,
-                            b.created_at,
-                            (SELECT COUNT(*) FROM branch_messages bm WHERE bm.branch_id = b.id),
-                            (b.id = s.current_branch_id) AS is_current
-                    FROM branches b JOIN sessions s ON s.id = b.session_id
-                    ORDER BY s.started_at DESC, b.id ASC
-                ";
-                let mut stmt = c.prepare(sql)?;
+                let sql = format!("{BRANCH_INFO_SELECT} ORDER BY s.started_at DESC, b.id ASC");
+                let mut stmt = c.prepare(&sql)?;
                 let rows: Vec<BranchInfo> = stmt
                     .query_map([], branch_info)?
                     .collect::<std::result::Result<_, _>>()?;
@@ -521,6 +537,18 @@ impl ConversationStore for SqliteConversationStore {
             })
             .await
             .map_err(MemoryError::sqlite("list_branches"))
+    }
+
+    async fn branch_info(&self, branch: BranchId) -> Result<Option<BranchInfo>> {
+        self.handle
+            .conn()
+            .call(move |c| -> rusqlite::Result<_> {
+                let sql = format!("{BRANCH_INFO_SELECT} WHERE b.id = ?1");
+                c.query_row(&sql, rusqlite::params![branch.0], branch_info)
+                    .optional()
+            })
+            .await
+            .map_err(MemoryError::sqlite("branch_info"))
     }
 
     async fn resolve_branch(
@@ -609,6 +637,20 @@ impl ConversationStore for SqliteConversationStore {
             })
             .await
             .map_err(MemoryError::sqlite("load_branch_history"))
+    }
+
+    async fn branch_tail_seq(&self, branch: BranchId) -> Result<Option<i64>> {
+        self.handle
+            .conn()
+            .call(move |c| -> rusqlite::Result<_> {
+                c.query_row(
+                    "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
+                    rusqlite::params![branch.0],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("branch_tail_seq"))
     }
 
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<String>> {
