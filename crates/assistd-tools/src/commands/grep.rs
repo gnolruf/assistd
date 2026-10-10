@@ -12,6 +12,8 @@ use crate::commands::read_regular_file;
 /// reads as the literal character.
 const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
 const STDIN_LABEL: &str = "(standard input)";
+/// Directory entries `-r` may visit before giving up on the walk.
+const WALK_ENTRY_MAX: usize = 50_000;
 
 /// `grep [-cilnrv] [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...`: print lines from the named files
 /// or stdin matching `PATTERN`. Exits 0 on a match, 1 on none, 2 on errors.
@@ -85,6 +87,86 @@ impl Target {
         match self {
             Self::Named(path) | Self::Found(path) => path,
         }
+    }
+}
+
+/// A path named on the command line, classified before any search.
+enum Root<'a> {
+    File(&'a Path),
+    /// A directory to walk under `-r`.
+    Tree(&'a Path),
+}
+
+/// Running state of one `grep` over files: accumulated output, match
+/// total, and how many directory entries the walk may still visit.
+struct Search<'a> {
+    re: &'a Regex,
+    flags: &'a Flags,
+    label_lines: bool,
+    out: Vec<u8>,
+    total: usize,
+    entries_left: usize,
+}
+
+impl Search<'_> {
+    fn is_full(&self) -> bool {
+        self.out.len() > OUTPUT_MAX
+    }
+
+    async fn search_target(&mut self, target: &Target) -> Result<(), TargetError> {
+        let Some(text) = read_text(target).await? else {
+            return Ok(());
+        };
+        let display = target.path().to_string_lossy();
+        let label = self.label_lines.then_some(display.as_ref());
+        let count = scan(self.re, self.flags, &text, label, &mut self.out);
+        if self.flags.files_only {
+            self.out.extend(matching_file_line(&display, count));
+        } else if self.flags.count_only && self.label_lines {
+            self.out
+                .extend_from_slice(format!("{display}:{count}\n").as_bytes());
+        }
+        self.total += count;
+        Ok(())
+    }
+
+    /// Search every file under `root` in sorted depth-first order while
+    /// walking, until the output or the entry budget is used up.
+    async fn search_tree(&mut self, root: &Path) -> Result<(), TargetError> {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let (files, dirs) = list_dir(&dir, &mut self.entries_left).await;
+            for file in files {
+                self.search_target(&Target::Found(file)).await?;
+                if self.is_full() {
+                    return Ok(());
+                }
+            }
+            if self.entries_left == 0 {
+                return Ok(());
+            }
+            stack.extend(dirs.into_iter().rev());
+        }
+        Ok(())
+    }
+
+    fn into_output(self) -> CommandOutput {
+        let stdout = if self.flags.count_only && !self.flags.files_only && !self.label_lines {
+            format!("{}\n", self.total).into_bytes()
+        } else {
+            self.out
+        };
+        let mut output = outcome(self.total, stdout);
+        if self.entries_left == 0 {
+            output.stderr = error_line(
+                "grep",
+                format_args!("stopped after visiting {WALK_ENTRY_MAX} directory entries"),
+                Hint::Try,
+                "a narrower directory",
+            )
+            .into_bytes();
+        }
+        output
     }
 }
 
@@ -293,41 +375,29 @@ async fn search_paths(
     flags: &Flags,
     paths: &[String],
 ) -> Result<CommandOutput, TargetError> {
-    let targets = collect_targets(paths, flags.recursive).await?;
-    search_files(re, flags, &targets).await
-}
-
-async fn search_files(
-    re: &Regex,
-    flags: &Flags,
-    targets: &[Target],
-) -> Result<CommandOutput, TargetError> {
-    let label_lines = targets.len() > 1 || flags.recursive;
-    let mut out = Vec::new();
-    let mut total = 0usize;
-    for target in targets {
-        let Some(text) = read_text(target).await? else {
-            continue;
-        };
-        let display = target.path().to_string_lossy();
-        let label = label_lines.then_some(display.as_ref());
-        let count = scan(re, flags, &text, label, &mut out);
-        if flags.files_only {
-            out.extend(matching_file_line(&display, count));
-        } else if flags.count_only && label_lines {
-            out.extend_from_slice(format!("{display}:{count}\n").as_bytes());
+    let roots = resolve_roots(paths, flags.recursive).await?;
+    let mut search = Search {
+        re,
+        flags,
+        label_lines: roots.len() > 1 || flags.recursive,
+        out: Vec::new(),
+        total: 0,
+        entries_left: WALK_ENTRY_MAX,
+    };
+    for root in &roots {
+        match root {
+            Root::File(path) => {
+                search
+                    .search_target(&Target::Named(path.to_path_buf()))
+                    .await?;
+            }
+            Root::Tree(path) => search.search_tree(path).await?,
         }
-        total += count;
-        if out.len() > OUTPUT_MAX {
+        if search.is_full() || search.entries_left == 0 {
             break;
         }
     }
-    let stdout = if flags.count_only && !flags.files_only && !label_lines {
-        format!("{total}\n").into_bytes()
-    } else {
-        out
-    };
-    Ok(outcome(total, stdout))
+    Ok(search.into_output())
 }
 
 /// Text of `target`, or `None` when it is binary, not UTF-8, or an
@@ -433,8 +503,8 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     }
 }
 
-async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<Target>, TargetError> {
-    let mut targets = Vec::with_capacity(paths.len());
+async fn resolve_roots(paths: &[String], recursive: bool) -> Result<Vec<Root<'_>>, TargetError> {
+    let mut roots = Vec::with_capacity(paths.len());
     for raw in paths {
         let path = Path::new(raw);
         let meta =
@@ -445,45 +515,42 @@ async fn collect_targets(paths: &[String], recursive: bool) -> Result<Vec<Target
                     source,
                 })?;
         if !meta.is_dir() {
-            targets.push(Target::Named(path.to_path_buf()));
-            continue;
-        }
-        if !recursive {
+            roots.push(Root::File(path));
+        } else if recursive {
+            roots.push(Root::Tree(path));
+        } else {
             return Err(TargetError::DirectoryWithoutRecursion { path: raw.clone() });
         }
-        descend(path, &mut targets).await;
     }
-    Ok(targets)
+    Ok(roots)
 }
 
-/// Append every non-directory entry under `root` in sorted depth-first
-/// order, skipping symlinks and anything unreadable.
-async fn descend(root: &Path, targets: &mut Vec<Target>) {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(mut reader) = tokio::fs::read_dir(&dir).await else {
+/// Sorted file and subdirectory paths of `dir`, skipping symlinks and
+/// unreadable entries; reads at most `*entries_left` entries and
+/// subtracts what it read.
+async fn list_dir(dir: &Path, entries_left: &mut usize) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    let Ok(mut reader) = tokio::fs::read_dir(dir).await else {
+        return (files, dirs);
+    };
+    while *entries_left > 0 {
+        let Ok(Some(entry)) = reader.next_entry().await else {
+            break;
+        };
+        *entries_left -= 1;
+        let Ok(kind) = entry.file_type().await else {
             continue;
         };
-        let mut files = Vec::new();
-        let mut dirs = Vec::new();
-        while let Ok(Some(entry)) = reader.next_entry().await {
-            let Ok(kind) = entry.file_type().await else {
-                continue;
-            };
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                dirs.push(entry.path());
-            } else {
-                files.push(entry.path());
-            }
+        if kind.is_dir() {
+            dirs.push(entry.path());
+        } else if !kind.is_symlink() {
+            files.push(entry.path());
         }
-        files.sort();
-        dirs.sort();
-        targets.extend(files.into_iter().map(Target::Found));
-        stack.extend(dirs.into_iter().rev());
     }
+    files.sort();
+    dirs.sort();
+    (files, dirs)
 }
 
 #[cfg(test)]

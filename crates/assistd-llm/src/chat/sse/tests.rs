@@ -53,3 +53,20 @@ fn handles_chunk_boundary_mid_utf8_codepoint() {
     r.feed(&bytes[split..]);
     assert_eq!(drain_all(&mut r), vec![SseEvent::Data("世界".into())]);
 }
+
+#[test]
+fn rejects_unterminated_line_past_cap_across_feeds() {
+    let mut r = SseLineReader::new();
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut fed = 0;
+    let err = loop {
+        r.feed(&chunk);
+        fed += chunk.len();
+        match r.next_event() {
+            Ok(None) => assert!(fed <= LINE_MAX, "cap not enforced"),
+            Ok(Some(ev)) => panic!("unexpected event {ev:?}"),
+            Err(e) => break e,
+        }
+    };
+    assert!(matches!(err, ChatClientError::Sse(_)));
+}
