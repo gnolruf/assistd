@@ -41,6 +41,12 @@ const GLOBAL_UNICAST_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0,
 
 const DOCUMENTATION_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
 
+/// Teredo tunnels reach an obfuscated IPv4 client behind a relay, so the real target is unknowable.
+const TEREDO_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32);
+
+/// 6to4 addresses carry the IPv4 endpoint in bits 16..48.
+const SIX_TO_FOUR_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16);
+
 /// `web URL`: HTTP GET a URL and return the response body as stdout. Hosts
 /// not yet approved for good are fetched only once the user confirms, and
 /// only public addresses are ever connected to.
@@ -287,9 +293,7 @@ fn unreachable_literal(url: &Url, reachable: fn(IpAddr) -> bool) -> Option<NonPu
 fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map_or_else(|| is_public_v6(v6), is_public_v4),
+        IpAddr::V6(v6) => embedded_v4(v6).map_or_else(|| is_public_v6(v6), is_public_v4),
     }
 }
 
@@ -302,8 +306,17 @@ fn in_v4_prefix(ip: Ipv4Addr, (network, prefix_len): (Ipv4Addr, u32)) -> bool {
     u32::from(ip) & mask == u32::from(network)
 }
 
+fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    ip.to_ipv4_mapped().or_else(|| {
+        let [_, _, a, b, c, d, ..] = ip.octets();
+        in_v6_prefix(ip, SIX_TO_FOUR_V6).then(|| Ipv4Addr::new(a, b, c, d))
+    })
+}
+
 fn is_public_v6(ip: Ipv6Addr) -> bool {
-    in_v6_prefix(ip, GLOBAL_UNICAST_V6) && !in_v6_prefix(ip, DOCUMENTATION_V6)
+    in_v6_prefix(ip, GLOBAL_UNICAST_V6)
+        && !in_v6_prefix(ip, DOCUMENTATION_V6)
+        && !in_v6_prefix(ip, TEREDO_V6)
 }
 
 fn in_v6_prefix(ip: Ipv6Addr, (network, prefix_len): (Ipv6Addr, u32)) -> bool {

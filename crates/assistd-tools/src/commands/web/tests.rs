@@ -209,7 +209,7 @@ async fn name_resolving_only_to_loopback_is_refused() {
 
 #[test]
 fn public_addresses_are_told_from_non_public_ones() {
-    let cases: [(&str, bool); 22] = [
+    let cases: [(&str, bool); 26] = [
         ("1.1.1.1", true),
         ("8.8.8.8", true),
         ("100.63.255.255", true),
@@ -232,6 +232,10 @@ fn public_addresses_are_told_from_non_public_ones() {
         ("fd00::1", false),
         ("fe80::1", false),
         ("2001:db8::1", false),
+        ("2002:808:808::1", true),
+        ("2002:7f00:1::", false),
+        ("2002:a9fe:a9fe::1", false),
+        ("2001:0:4136:e378:8000:63bf:3fff:fdd2", false),
     ];
     for (addr, public) in cases {
         assert_eq!(is_public(addr.parse().unwrap()), public, "{addr}");
