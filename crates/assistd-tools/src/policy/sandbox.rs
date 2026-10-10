@@ -12,6 +12,7 @@ use tokio::process::{Child, Command as ProcCommand};
 use tracing::{info, warn};
 
 use super::allowlist::SearchPath;
+use super::on_blocking_pool;
 
 mod session;
 
@@ -203,9 +204,9 @@ impl SandboxInfo {
 
     /// The tmpfs mount that hides the host's `path` from sandboxed
     /// commands, if any.
-    pub fn private_dir_hiding(&self, path: &Path) -> Option<PathBuf> {
-        let cmd = self.command(SandboxAccess::Default, "true", [""; 0]);
-        self.mounts_of(&cmd)?.private_dir_of(path).cloned()
+    pub async fn private_dir_hiding(self: &Arc<Self>, path: PathBuf) -> Option<PathBuf> {
+        let cmd = self.command("true", Vec::new()).await;
+        self.mounts_of(&cmd)?.private_dir_of(&path).cloned()
     }
 
     fn mounts_of(&self, cmd: &ProcCommand) -> Option<Mounts> {
@@ -222,11 +223,19 @@ impl SandboxInfo {
         }
     }
 
-    /// The [`ProcCommand`] that runs `program` with `args`, wrapped in
-    /// bubblewrap when the mode is [`ResolvedSandboxMode::Bwrap`].
-    /// Unwrapped, `PATH` is limited to the directories
-    /// [`SandboxInfo::search_path`] reports.
-    pub fn command<I, S>(&self, access: SandboxAccess<'_>, program: &str, args: I) -> ProcCommand
+    /// The [`ProcCommand`] that runs `program` with `args` under the default
+    /// access, wrapped in bubblewrap when the mode is
+    /// [`ResolvedSandboxMode::Bwrap`]. Unwrapped, `PATH` is limited to the
+    /// directories [`SandboxInfo::search_path`] reports.
+    pub async fn command(self: &Arc<Self>, program: &str, args: Vec<String>) -> ProcCommand {
+        let info = Arc::clone(self);
+        let program = program.to_owned();
+        on_blocking_pool(move || info.build_command(SandboxAccess::Default, &program, args)).await
+    }
+
+    /// Reads `$HOME` and the command directories to build the bwrap
+    /// profile, so it blocks on the filesystem.
+    fn build_command<I, S>(&self, access: SandboxAccess<'_>, program: &str, args: I) -> ProcCommand
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -244,21 +253,26 @@ impl SandboxInfo {
     /// restricted socket and no abstract Unix socket, and is refused when
     /// either protection is unavailable.
     pub(crate) async fn spawn_graphical(
-        &self,
+        self: &Arc<Self>,
         program: &str,
         args: &[String],
         configure: fn(&mut ProcCommand),
     ) -> Result<Child, LaunchError> {
-        let ResolvedSandboxMode::Bwrap { path } = &self.mode else {
+        let ResolvedSandboxMode::Bwrap { .. } = &self.mode else {
             let mut cmd = self.unwrapped_command(program, args);
             configure(&mut cmd);
             return cmd.spawn().map_err(LaunchError::Spawn);
         };
         let display = self.display.get().await?;
-        let home = std::env::var("HOME").ok();
-        let mut cmd = self.bwrap_command(path, home, display.access(), program, args);
-        configure(&mut cmd);
-        spawn_without_abstract_sockets(cmd)
+        let info = Arc::clone(self);
+        let program = program.to_owned();
+        let args = args.to_vec();
+        spawn_without_abstract_sockets(move || {
+            let mut cmd = info.build_command(display.access(), &program, args);
+            configure(&mut cmd);
+            cmd
+        })
+        .await
     }
 
     fn unwrapped_command<I, S>(&self, program: &str, args: I) -> ProcCommand
@@ -977,15 +991,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_dirs_are_bound_for_default_access_only_and_are_not_private() {
-        let info = SandboxInfo {
+    #[tokio::test]
+    async fn shared_dirs_are_bound_for_default_access_only_and_are_not_private() {
+        let info = Arc::new(SandboxInfo {
             shared: SharedDirs {
                 scratch: Some(PathBuf::from("/run/user/1000/assistd/scratch")),
                 read_only: vec![PathBuf::from("/tmp/assistd-output")],
             },
             ..bwrap_info(Vec::new())
-        };
+        });
         let binds = [
             "--bind-try",
             "/run/user/1000/assistd/scratch",
@@ -995,7 +1009,7 @@ mod tests {
             "/tmp/assistd-output",
         ];
         let has_binds = |access| {
-            let argv = argv_of(&info.command(access, "true", [""; 0]));
+            let argv = argv_of(&info.build_command(access, "true", [""; 0]));
             argv.windows(binds.len()).any(|w| w == binds)
         };
         assert!(has_binds(SandboxAccess::Default));
@@ -1004,10 +1018,15 @@ mod tests {
             "/run/user/1000/assistd/scratch/out.txt",
             "/tmp/assistd-output/cmd-1.txt",
         ] {
-            assert_eq!(info.private_dir_hiding(Path::new(shared)), None, "{shared}");
+            assert_eq!(
+                info.private_dir_hiding(PathBuf::from(shared)).await,
+                None,
+                "{shared}"
+            );
         }
         assert_eq!(
-            info.private_dir_hiding(Path::new("/run/user/1000/other")),
+            info.private_dir_hiding(PathBuf::from("/run/user/1000/other"))
+                .await,
             Some(PathBuf::from("/run"))
         );
     }
@@ -1039,7 +1058,7 @@ mod tests {
     #[test]
     fn bwrap_process_starts_from_a_cleared_environment() {
         let info = bwrap_info(Vec::new());
-        let cmd = info.command(SandboxAccess::Default, "true", Vec::<String>::new());
+        let cmd = info.build_command(SandboxAccess::Default, "true", Vec::<String>::new());
         let expected: Vec<_> = kept_env(std::env::vars_os(), SandboxAccess::Default)
             .into_iter()
             .map(|(name, value)| (name, Some(value)))

@@ -40,7 +40,13 @@ impl RodioPlaybackWorker {
     /// Open the named output device (as listed by `aplay -L`), or the
     /// system default for `None`. A name that isn't found falls back
     /// to the default with a warning.
-    pub fn start(device_name: Option<&str>) -> Result<Self, PiperError> {
+    pub async fn start(device_name: Option<String>) -> Result<Self, PiperError> {
+        tokio::task::spawn_blocking(move || Self::open(device_name.as_deref()))
+            .await
+            .map_err(|err| PiperError::Audio(format!("audio init task failed: {err}")))?
+    }
+
+    fn open(device_name: Option<&str>) -> Result<Self, PiperError> {
         let host = cpal::default_host();
         let selected = select_output_device(&host, device_name);
 
@@ -111,7 +117,7 @@ impl Drop for RodioPlaybackWorker {
             let _ = shutdown_tx.send(());
         }
         if let Some(device_thread) = self.device_thread.take() {
-            join_with_timeout(device_thread);
+            join_off_runtime(device_thread);
         }
     }
 }
@@ -234,6 +240,16 @@ fn run_device_thread(
 
     let _ = shutdown_rx.recv();
     drop(device_sink);
+}
+
+/// Run [`join_with_timeout`] on the blocking pool when dropped inside a
+/// runtime, so no async worker waits on the device; runtime shutdown still
+/// waits for it.
+fn join_off_runtime(device_thread: thread::JoinHandle<()>) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => drop(runtime.spawn_blocking(move || join_with_timeout(device_thread))),
+        Err(_) => join_with_timeout(device_thread),
+    }
 }
 
 /// Join `device_thread` from a watchdog thread so a wedged audio device cannot

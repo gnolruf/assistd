@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use super::SandboxAccess;
+use crate::policy::on_blocking_pool;
 
 /// File name of the restricted socket, under `$XDG_RUNTIME_DIR`.
 const RESTRICTED_SOCKET_NAME: &str = "assistd-wayland.sock";
@@ -104,18 +105,25 @@ pub(super) fn wayland_socket(
     Some(PathBuf::from(runtime_dir?).join(display))
 }
 
-/// Spawn `cmd` from a new thread that Landlock bars from connecting to
-/// abstract Unix sockets made outside it, such as the X server's; the child
-/// inherits the restriction and the daemon's other threads keep none.
-pub(super) fn spawn_without_abstract_sockets(mut cmd: ProcCommand) -> Result<Child, LaunchError> {
+/// Build and spawn a command from a new thread that Landlock bars from
+/// connecting to abstract Unix sockets made outside it, such as the X
+/// server's; the child inherits the restriction and the daemon's other
+/// threads keep none.
+pub(super) async fn spawn_without_abstract_sockets<F>(build: F) -> Result<Child, LaunchError>
+where
+    F: FnOnce() -> ProcCommand + Send + 'static,
+{
     let runtime = tokio::runtime::Handle::current();
-    std::thread::spawn(move || {
-        let _runtime = runtime.enter();
-        forbid_abstract_sockets()?;
-        cmd.spawn().map_err(LaunchError::Spawn)
+    on_blocking_pool(move || {
+        std::thread::spawn(move || {
+            let _runtime = runtime.enter();
+            forbid_abstract_sockets()?;
+            build().spawn().map_err(LaunchError::Spawn)
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     })
-    .join()
-    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    .await
 }
 
 fn forbid_abstract_sockets() -> Result<(), RulesetError> {

@@ -135,7 +135,7 @@ impl PiperVoiceOutput {
 
         let runtime = Arc::new(runtime_config(&config, voice_files));
         let synth = Arc::new(OneShotSynth::new(runtime));
-        let playback = Arc::new(RodioPlaybackWorker::start(config.output_device.as_deref())?);
+        let playback = Arc::new(RodioPlaybackWorker::start(config.output_device.clone()).await?);
 
         synth.health_check().await?;
         tracing::info!(

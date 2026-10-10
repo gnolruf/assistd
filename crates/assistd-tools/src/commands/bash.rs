@@ -9,9 +9,7 @@ use tracing::warn;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{SPAWN_FAILED_EXIT, supervise};
-use crate::policy::{
-    BashPolicyCfg, ConfirmationGate, SandboxAccess, SandboxInfo, SubprocessPolicy, check_script,
-};
+use crate::policy::{BashPolicyCfg, ConfirmationGate, SandboxInfo, SubprocessPolicy};
 
 /// `bash SCRIPT`: run a policy-gated `bash -c <script>` subprocess. Policy
 /// refusals exit 126; a timeout kills the process group and exits 137.
@@ -91,7 +89,7 @@ impl Command for BashCommand {
             return CommandOutput::usage(self.help());
         }
         let script = script_words.join(" ");
-        let confirmation = check_script(&script, &self.policy.cfg.rules());
+        let confirmation = self.policy.review_script(script.clone()).await;
         if let Err(denied) = self
             .policy
             .authorize("bash", "command", &script, confirmation)
@@ -100,10 +98,11 @@ impl Command for BashCommand {
             return denied;
         }
 
-        let cmd =
-            self.policy
-                .sandbox
-                .command(SandboxAccess::Default, "bash", ["-c", script.as_str()]);
+        let cmd = self
+            .policy
+            .sandbox
+            .command("bash", vec!["-c".to_string(), script.clone()])
+            .await;
         let private_dirs = display_list(&self.policy.sandbox.private_dirs_named(&cmd, &script));
         let out = supervise(
             "bash",
