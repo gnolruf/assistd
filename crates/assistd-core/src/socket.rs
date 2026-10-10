@@ -35,9 +35,22 @@ const EVENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// a client that leaves is noticed even while no event is being written.
 const PEER_HANGUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Cap on one request frame: a 32 MiB image base64-encoded plus JSON
+/// Cap on one `query` frame: a 32 MiB image base64-encoded plus JSON
 /// overhead, so a runaway client cannot OOM the daemon.
 const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Cap on every other frame, which carries no attachments.
+const MAX_CONTROL_REQUEST_BYTES: u64 = 64 * 1024;
+
+/// Start of a serialized `Request::Query`; only a frame opening with it
+/// may grow past [`MAX_CONTROL_REQUEST_BYTES`].
+const QUERY_FRAME_PREFIX: &[u8] = br#"{"type":"query""#;
+
+/// How long a new connection may take to deliver its first frame.
+const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connections served at once; further ones are closed on accept.
+const MAX_CONNECTIONS: usize = 128;
 
 /// Pause after EMFILE/ENFILE from `accept()`, which would otherwise spin.
 const FD_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(100);
@@ -292,7 +305,12 @@ where
                             );
                             fd_exhausted = false;
                         }
-                        if peer_is_daemon_user(&stream) {
+                        if connections.len() >= MAX_CONNECTIONS {
+                            warn!(
+                                limit = MAX_CONNECTIONS,
+                                "rejecting IPC connection: too many open connections"
+                            );
+                        } else if peer_is_daemon_user(&stream) {
                             spawn_connection(
                                 &mut connections,
                                 stream,
@@ -446,21 +464,34 @@ async fn handle_connection(
 }
 
 /// Read and parse the connection's first frame. `None` means the client
-/// left or was already sent an error and closed.
+/// left, missed [`INITIAL_REQUEST_TIMEOUT`], or was already sent an error
+/// and closed.
 async fn read_initial_request(
     reader: &mut BufReader<OwnedReadHalf>,
     write_half: &mut OwnedWriteHalf,
 ) -> Result<Option<Request>, SocketError> {
-    let mut line = String::new();
-    let bytes_read = reader.take(MAX_REQUEST_BYTES).read_line(&mut line).await?;
-    if bytes_read == 0 {
+    let mut line = Vec::new();
+    let Ok(limit) = tokio::time::timeout(
+        INITIAL_REQUEST_TIMEOUT,
+        read_request_frame(reader, &mut line),
+    )
+    .await
+    else {
+        warn!(
+            timeout_secs = INITIAL_REQUEST_TIMEOUT.as_secs(),
+            "client sent no complete request in time; closing"
+        );
+        return Ok(None);
+    };
+    let limit = limit?;
+    if line.is_empty() {
         debug!("client disconnected without sending a request");
         return Ok(None);
     }
-    let rejection = if !line.ends_with('\n') {
-        format!("request exceeded {MAX_REQUEST_BYTES}-byte limit")
+    let rejection = if !line.ends_with(b"\n") {
+        format!("request exceeded {limit}-byte limit")
     } else {
-        match serde_json::from_str::<Request>(line.trim()) {
+        match serde_json::from_slice::<Request>(line.trim_ascii()) {
             Ok(req) => return Ok(Some(req)),
             Err(e) => format!("invalid request: {e}"),
         }
@@ -472,6 +503,28 @@ async fn read_initial_request(
     write_event(write_half, &err).await?;
     write_half.shutdown().await?;
     Ok(None)
+}
+
+/// Read one frame into `line`, stopping at the cap its prefix allows,
+/// which is returned.
+async fn read_request_frame(
+    reader: &mut BufReader<OwnedReadHalf>,
+    line: &mut Vec<u8>,
+) -> io::Result<u64> {
+    (&mut *reader)
+        .take(MAX_CONTROL_REQUEST_BYTES)
+        .read_until(b'\n', line)
+        .await?;
+    let may_grow =
+        !line.ends_with(b"\n") && line.trim_ascii_start().starts_with(QUERY_FRAME_PREFIX);
+    if !may_grow {
+        return Ok(MAX_CONTROL_REQUEST_BYTES);
+    }
+    reader
+        .take(MAX_REQUEST_BYTES - MAX_CONTROL_REQUEST_BYTES)
+        .read_until(b'\n', line)
+        .await?;
+    Ok(MAX_REQUEST_BYTES)
 }
 
 /// Write every dispatched event to the client, teeing it onto the bus
@@ -524,7 +577,7 @@ async fn route_confirm_responses(mut reader: BufReader<OwnedReadHalf>, router: A
     loop {
         buf.clear();
         match (&mut reader)
-            .take(MAX_REQUEST_BYTES)
+            .take(MAX_CONTROL_REQUEST_BYTES)
             .read_line(&mut buf)
             .await
         {
@@ -538,8 +591,8 @@ async fn route_confirm_responses(mut reader: BufReader<OwnedReadHalf>, router: A
         if !buf.ends_with('\n') {
             warn!(
                 bytes = buf.len(),
-                "mid-stream request exceeded {MAX_REQUEST_BYTES}-byte limit; closing read \
-                 side"
+                "mid-stream request exceeded {MAX_CONTROL_REQUEST_BYTES}-byte limit; closing \
+                 read side"
             );
             break;
         }

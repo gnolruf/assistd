@@ -196,34 +196,44 @@ async fn concurrent_connections_sharing_a_request_id_stay_isolated() {
 }
 
 #[tokio::test]
-async fn oversize_request_is_rejected_without_oom() {
-    with_server(test_state(), |path| async move {
-        let stream = UnixStream::connect(&path).await.unwrap();
-        let (read, mut write) = stream.into_split();
-
-        let chunk = vec![b'a'; 1024 * 1024];
-        let mut remaining = usize::try_from(MAX_REQUEST_BYTES).expect("request cap fits usize") + 1;
-        while remaining > 0 {
-            let n = remaining.min(chunk.len());
-            if write.write_all(&chunk[..n]).await.is_err() {
-                break;
-            }
-            remaining -= n;
-        }
-        let _ = write.shutdown().await;
-
-        let event = read_event(&mut BufReader::new(read))
-            .await
-            .expect("expected an Error event before EOF");
+async fn oversize_request_is_rejected_at_its_kind_cap() {
+    let cases: [(&[u8], u64); 2] = [
+        (QUERY_FRAME_PREFIX, MAX_REQUEST_BYTES),
+        (br#"{"type":"memory_save""#, MAX_CONTROL_REQUEST_BYTES),
+    ];
+    for (prefix, cap) in cases {
+        let event = with_server(test_state(), |path| async move {
+            let stream = UnixStream::connect(&path).await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write_past_cap(&mut write, prefix, cap).await;
+            read_event(&mut BufReader::new(read)).await
+        })
+        .await;
         assert_eq!(
             event,
-            Event::Error {
+            Some(Event::Error {
                 id: String::new(),
-                message: format!("request exceeded {MAX_REQUEST_BYTES}-byte limit"),
-            }
+                message: format!("request exceeded {cap}-byte limit"),
+            })
         );
-    })
-    .await;
+    }
+}
+
+async fn write_past_cap(write: &mut OwnedWriteHalf, prefix: &[u8], cap: u64) {
+    let chunk = vec![b'a'; 1024 * 1024];
+    let mut remaining = usize::try_from(cap).expect("request cap fits usize") + 1;
+    if write.write_all(prefix).await.is_err() {
+        return;
+    }
+    remaining -= prefix.len();
+    while remaining > 0 {
+        let n = remaining.min(chunk.len());
+        if write.write_all(&chunk[..n]).await.is_err() {
+            break;
+        }
+        remaining -= n;
+    }
+    let _ = write.shutdown().await;
 }
 
 #[tokio::test]

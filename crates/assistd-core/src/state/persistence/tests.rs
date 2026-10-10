@@ -81,6 +81,9 @@ impl ConversationStore for SlowingStore {
     async fn list_branches(&self) -> assistd_memory::Result<Vec<BranchInfo>> {
         Ok(Vec::new())
     }
+    async fn branch_info(&self, _b: BranchId) -> assistd_memory::Result<Option<BranchInfo>> {
+        Ok(None)
+    }
     async fn resolve_branch(
         &self,
         _t: &str,
@@ -93,6 +96,9 @@ impl ConversationStore for SlowingStore {
     }
     async fn load_branch_history(&self, _b: BranchId) -> assistd_memory::Result<Vec<HistoryRow>> {
         Ok(Vec::new())
+    }
+    async fn branch_tail_seq(&self, _b: BranchId) -> assistd_memory::Result<Option<i64>> {
+        Ok(None)
     }
     async fn latest_branch_activity(&self, _b: BranchId) -> assistd_memory::Result<Option<String>> {
         Ok(None)

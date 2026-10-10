@@ -435,34 +435,28 @@ impl AppState {
     }
 
     pub(super) async fn lookup_branch_tail_seq(&self, branch: BranchId) -> Option<i64> {
-        let rows = self
-            .memory
+        self.memory
             .conversations
-            .load_branch_history(branch)
+            .branch_tail_seq(branch)
             .await
-            .ok()?;
-        rows.last().map(|row| row.seq)
+            .ok()
+            .flatten()
     }
 
     /// `(name, parent name, fork point)` of `branch`, all `None` when the
-    /// listing fails or the branch is unknown.
+    /// lookup fails or the branch is unknown.
     pub(super) async fn lookup_branch_meta(
         &self,
         branch: BranchId,
     ) -> (Option<String>, Option<String>, Option<i64>) {
-        let Ok(branches) = self.memory.conversations.list_branches().await else {
+        let Ok(Some(info)) = self.memory.conversations.branch_info(branch).await else {
             return (None, None, None);
         };
-        branches
-            .into_iter()
-            .find(|info| info.branch_id == branch)
-            .map_or((None, None, None), |info| {
-                (
-                    Some(info.name),
-                    info.parent_branch_name,
-                    info.fork_point_seq,
-                )
-            })
+        (
+            Some(info.name),
+            info.parent_branch_name,
+            info.fork_point_seq,
+        )
     }
 }
 

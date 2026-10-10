@@ -467,12 +467,16 @@ mod tests {
         async fn memories_missing_embedding(
             &self,
             _c: &str,
+            _after: i64,
+            _limit: usize,
         ) -> Result<Vec<(i64, String)>, MemoryError> {
             Ok(Vec::new())
         }
         async fn chunks_missing_embedding(
             &self,
             _c: &str,
+            _after: i64,
+            _limit: usize,
         ) -> Result<Vec<(i64, String)>, MemoryError> {
             Ok(Vec::new())
         }
