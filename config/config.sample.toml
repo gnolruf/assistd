@@ -138,6 +138,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 #     "kill -1",
 #     "sort --compress-program",
 #     "rg --pre",
+#     "rg --hostname-bin",
 # ]
 # sandbox = "auto"  # auto | bwrap | none
 # bwrap_extra_args = []  # e.g. ["--share-net"] to give bash the network
