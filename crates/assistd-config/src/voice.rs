@@ -46,8 +46,9 @@ impl Default for VoiceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TranscriptionConfig {
-    /// Whisper GGML model as `<owner>/<repo>:<file>`, downloaded on first
-    /// use. Validated when voice is enabled.
+    /// Whisper GGML model as `<owner>/<repo>[@<revision>]:<file>`, downloaded
+    /// on first use from `revision` (default `main`; a commit hash pins the
+    /// content). Validated when voice is enabled.
     pub model: String,
     /// Prefer GPU inference; falls back to CPU when no CUDA device is found
     /// or the `cuda` feature is off.
@@ -58,7 +59,8 @@ pub struct TranscriptionConfig {
     pub beams: NonZeroU32,
     /// Trim silence with Silero VAD before decoding.
     pub vad_enabled: bool,
-    /// VAD GGML model as `<owner>/<repo>:<file>`; used only with `vad_enabled`.
+    /// VAD GGML model as `<owner>/<repo>[@<revision>]:<file>`; used only with
+    /// `vad_enabled`.
     pub vad_model: String,
     /// Model cache directory. `None` uses `$XDG_CACHE_HOME/assistd/whisper/`
     /// (or `~/.cache/assistd/whisper/`).
@@ -123,8 +125,8 @@ pub struct SynthesisConfig {
     /// Piper binary: a path, or a bare name looked up on `$PATH`. Must not
     /// be empty when enabled.
     pub binary_path: PathBuf,
-    /// Voice as `<owner>/<repo>:<file>`, `<file>` being the `.onnx` path in
-    /// the repo; its `.onnx.json` is fetched alongside.
+    /// Voice as `<owner>/<repo>[@<revision>]:<file>`, `<file>` being the
+    /// `.onnx` path in the repo; its `.onnx.json` is fetched alongside.
     pub voice: String,
     /// Voice cache directory. `None` uses `$XDG_CACHE_HOME/assistd/piper/`
     /// (or `~/.cache/assistd/piper/`).

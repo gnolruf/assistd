@@ -4,19 +4,26 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use assistd_utils::hf::{HfFileId, InvalidHfId};
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
+use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest wait for the next chunk before a download counts as stalled.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Largest file a download may write; well above any Whisper or Piper model.
+const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Errors from resolving or downloading a HuggingFace file.
 #[derive(Debug, thiserror::Error)]
 pub enum DownloadError {
-    #[error("invalid HuggingFace identifier {id:?}: {reason} (expected '<owner>/<repo>:<file>')")]
-    InvalidId { id: String, reason: String },
+    #[error(
+        "invalid HuggingFace identifier {id:?}: {reason} \
+         (expected '<owner>/<repo>[@<revision>]:<file>')"
+    )]
+    InvalidId { id: String, reason: InvalidHfId },
 
     #[error("failed to download {url}: {source}")]
     Request {
@@ -27,6 +34,9 @@ pub enum DownloadError {
 
     #[error("download of {url} returned HTTP {status}")]
     Http { url: String, status: u16 },
+
+    #[error("download of {url} exceeds the {limit_bytes}-byte size limit")]
+    TooLarge { url: String, limit_bytes: u64 },
 
     #[error("I/O error at {path}: {source}")]
     Io {
@@ -39,23 +49,13 @@ pub enum DownloadError {
     NoCacheDir,
 }
 
-/// Parse `"<owner>/<repo>:<file>"` into `(repo, file)`.
-pub fn parse_hf_id(id: &str) -> Result<(String, String), DownloadError> {
-    let err = |reason: &str| DownloadError::InvalidId {
+/// Parse `"<owner>/<repo>[@<revision>]:<file>"`, rejecting any path that
+/// could escape the cache directory.
+pub fn parse_hf_id(id: &str) -> Result<HfFileId, DownloadError> {
+    HfFileId::parse(id).map_err(|reason| DownloadError::InvalidId {
         id: id.to_string(),
-        reason: reason.to_string(),
-    };
-    let (repo, file) = id.split_once(':').ok_or_else(|| err("missing ':'"))?;
-    if file.is_empty() || file.contains(':') {
-        return Err(err("file must be non-empty and must not contain ':'"));
-    }
-    let (owner, name) = repo
-        .split_once('/')
-        .ok_or_else(|| err("repo must be 'owner/name'"))?;
-    if owner.is_empty() || name.is_empty() {
-        return Err(err("owner and repo name must both be non-empty"));
-    }
-    Ok((repo.to_string(), file.to_string()))
+        reason,
+    })
 }
 
 /// `$XDG_CACHE_HOME/assistd/<subdir>/`, falling back to
@@ -65,24 +65,29 @@ pub fn default_cache_dir(subdir: &str) -> Result<PathBuf, DownloadError> {
     Ok(base.join("assistd").join(subdir))
 }
 
-/// Where `file` from `repo` lives under `cache_dir`.
-pub fn cached_path(cache_dir: &Path, repo: &str, file: &str) -> PathBuf {
-    cache_dir.join(repo.replace('/', "__")).join(file)
+/// Where `id` lives under `cache_dir`; pinned revisions get their own directory.
+pub fn cached_path(cache_dir: &Path, id: &HfFileId) -> PathBuf {
+    let repo_dir = id.repo().replace('/', "__");
+    let repo_dir = match id.revision() {
+        Some(revision) => format!("{repo_dir}@{revision}"),
+        None => repo_dir,
+    };
+    cache_dir.join(repo_dir).join(id.file())
 }
 
 /// Path to the cached file for `hf_id`, downloading it first if missing.
 pub async fn ensure_cached(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, DownloadError> {
-    let (repo, file) = parse_hf_id(hf_id)?;
-    let dest = cached_path(cache_dir, &repo, &file);
-    ensure_file(&repo, &file, &dest).await?;
+    let id = parse_hf_id(hf_id)?;
+    let dest = cached_path(cache_dir, &id);
+    ensure_file(&id, &dest).await?;
     Ok(dest)
 }
 
-/// Download `file` from `repo` to `dest` unless it already exists. The
-/// download lands in a `.part` sibling and is renamed on success, so a
-/// crash never leaves a partial file at `dest`. Fails when connecting or
-/// any read stalls past its timeout.
-pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), DownloadError> {
+/// Download `id` to `dest` unless it already exists. The download lands in
+/// a `.part` temp file beside `dest`, deleted unless the download completes
+/// (including when this future is dropped) and renamed on success. Fails when
+/// connecting or any read stalls past its timeout, or the file exceeds 8 GiB.
+pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError> {
     if dest.exists() {
         tracing::debug!(
             target: "assistd::voice::download",
@@ -97,7 +102,12 @@ pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), Down
         .await
         .map_err(|source| io_error(parent, source))?;
 
-    let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
+    let url = format!(
+        "https://huggingface.co/{}/resolve/{}/{}",
+        id.repo(),
+        id.revision().unwrap_or("main"),
+        id.file()
+    );
     tracing::info!(
         target: "assistd::voice::download",
         %url,
@@ -109,12 +119,14 @@ pub async fn ensure_file(repo: &str, file: &str, dest: &Path) -> Result<(), Down
         url: url.clone(),
         source,
     })?;
+    let part = tempfile::Builder::new()
+        .suffix(".part")
+        .tempfile_in(parent)
+        .map_err(|source| io_error(parent, source))?;
     let response = fetch(&client, &url).await?;
-    let part = part_path(dest);
     stream_to_file(response, &url, &part).await?;
-    tokio::fs::rename(&part, dest)
-        .await
-        .map_err(|source| io_error(dest, source))?;
+    part.persist(dest)
+        .map_err(|err| io_error(dest, err.error))?;
     tracing::info!(
         target: "assistd::voice::download",
         path = %dest.display(),
@@ -149,21 +161,27 @@ async fn fetch(client: &Client, url: &str) -> Result<Response, DownloadError> {
     Ok(response)
 }
 
-fn part_path(dest: &Path) -> PathBuf {
-    dest.with_extension(format!(
-        "{}.part",
-        dest.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("bin")
-    ))
-}
-
-/// Write the response body to `part`, logging progress every 5% when the length is known.
-async fn stream_to_file(response: Response, url: &str, part: &Path) -> Result<(), DownloadError> {
+/// Write the response body to `part`, logging progress every 5% when the
+/// length is known. Stops once the body passes [`MAX_DOWNLOAD_BYTES`].
+async fn stream_to_file(
+    response: Response,
+    url: &str,
+    part: &NamedTempFile,
+) -> Result<(), DownloadError> {
+    let too_large = || DownloadError::TooLarge {
+        url: url.to_string(),
+        limit_bytes: MAX_DOWNLOAD_BYTES,
+    };
     let total = response.content_length();
-    let mut out = tokio::fs::File::create(part)
-        .await
-        .map_err(|source| io_error(part, source))?;
+    if total.is_some_and(|total| total > MAX_DOWNLOAD_BYTES) {
+        return Err(too_large());
+    }
+    let part_path = part.path();
+    let mut out = part
+        .as_file()
+        .try_clone()
+        .map(tokio::fs::File::from_std)
+        .map_err(|source| io_error(part_path, source))?;
 
     let mut stream = response.bytes_stream();
     let mut downloaded: u64 = 0;
@@ -175,8 +193,11 @@ async fn stream_to_file(response: Response, url: &str, part: &Path) -> Result<()
         })?;
         out.write_all(&chunk)
             .await
-            .map_err(|source| io_error(part, source))?;
+            .map_err(|source| io_error(part_path, source))?;
         downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err(too_large());
+        }
         if let Some(total) = total
             && total > 0
             && downloaded >= next_progress_log
@@ -191,7 +212,9 @@ async fn stream_to_file(response: Response, url: &str, part: &Path) -> Result<()
             next_progress_log = downloaded + total / 20;
         }
     }
-    out.flush().await.map_err(|source| io_error(part, source))
+    out.flush()
+        .await
+        .map_err(|source| io_error(part_path, source))
 }
 
 fn io_error(path: &Path, source: io::Error) -> DownloadError {
@@ -204,33 +227,6 @@ fn io_error(path: &Path, source: io::Error) -> DownloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_valid_id() {
-        let (repo, file) =
-            parse_hf_id("rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx")
-                .unwrap();
-        assert_eq!(repo, "rhasspy/piper-voices");
-        assert_eq!(file, "en/en_US/lessac/medium/en_US-lessac-medium.onnx");
-    }
-
-    #[test]
-    fn rejects_malformed_ids() {
-        for id in [
-            "ggerganov/whisper.cpp",
-            "whisper:file.bin",
-            "owner/repo:",
-            "owner/repo:a:b",
-            "/repo:file.bin",
-            "owner/:file.bin",
-        ] {
-            let err = parse_hf_id(id).expect_err(id);
-            assert!(
-                matches!(&err, DownloadError::InvalidId { id: got, .. } if got == id),
-                "{id}: {err:?}"
-            );
-        }
-    }
 
     #[tokio::test]
     async fn stalled_download_fails_instead_of_hanging() {
@@ -246,8 +242,7 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(30)).await;
         });
 
-        let dir = tempfile::tempdir().unwrap();
-        let part = dir.path().join("model.bin.part");
+        let part = NamedTempFile::new().unwrap();
         let client = download_client(Duration::from_millis(200)).unwrap();
         let download = async {
             let response = fetch(&client, &url).await?;

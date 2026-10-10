@@ -35,12 +35,13 @@ pub fn default_cache_dir() -> Result<PathBuf, DownloadError> {
 /// Ensure both voice files exist locally, downloading whichever is
 /// missing.
 pub async fn ensure_voice(hf_id: &str, cache_dir: &Path) -> Result<VoiceFiles, PiperError> {
-    let (repo, file) = parse_hf_id(hf_id)?;
-    let onnx = cached_path(cache_dir, &repo, &file);
-    let json = onnx.with_extension("onnx.json");
+    let onnx_id = parse_hf_id(hf_id)?;
+    let json_id = parse_hf_id(&format!("{onnx_id}.json"))?;
+    let onnx = cached_path(cache_dir, &onnx_id);
+    let json = cached_path(cache_dir, &json_id);
 
-    ensure_file(&repo, &file, &onnx).await?;
-    ensure_file(&repo, &format!("{file}.json"), &json).await?;
+    ensure_file(&onnx_id, &onnx).await?;
+    ensure_file(&json_id, &json).await?;
 
     let sample_rate = read_sample_rate(&json).await?;
     Ok(VoiceFiles {

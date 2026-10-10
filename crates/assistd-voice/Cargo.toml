@@ -13,11 +13,12 @@ whisper = [
     "dep:nvml-wrapper",
     "dep:futures-util",
     "dep:num-traits",
+    "dep:tempfile",
 ]
 # Requires `whisper` because `MicVoiceInput` wraps `WhisperTranscriber`.
 mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
 listen = ["mic", "dep:webrtc-vad"]
-# Pulls in rodio (which itself uses cpal) and reqwest (shared with whisper).
+# Pulls in rodio (which itself uses cpal) plus reqwest and tempfile (shared with whisper).
 tts = [
     "dep:rodio",
     "dep:serde",
@@ -25,6 +26,7 @@ tts = [
     "dep:reqwest",
     "dep:futures-util",
     "dep:which",
+    "dep:tempfile",
 ]
 cuda = ["whisper", "whisper-rs/cuda"]
 test-support = ["whisper", "mic", "listen", "tts"]
@@ -51,6 +53,7 @@ reqwest = { workspace = true, optional = true, features = ["stream"] }
 nvml-wrapper = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 cpal = { workspace = true, optional = true }
 ringbuf = { workspace = true, optional = true }
