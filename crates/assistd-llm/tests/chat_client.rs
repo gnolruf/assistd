@@ -57,6 +57,8 @@ enum StreamResponse {
     /// The deltas with the given gap before each one, then `[DONE]`.
     PacedDeltas(Vec<String>, Duration),
     HttpError(u16, String),
+    /// Error headers announcing a body, then silence.
+    StallAfterErrorHeaders(u16),
 }
 
 #[derive(Clone)]
@@ -245,6 +247,13 @@ async fn write_stream_response(sock: &mut TcpStream, response: StreamResponse) -
         }
         StreamResponse::HttpError(status, body) => {
             write_error(sock, status, &body).await?;
+        }
+        StreamResponse::StallAfterErrorHeaders(status) => {
+            let headers = format!(
+                "HTTP/1.1 {status} Error\r\nContent-Type: text/plain\r\nContent-Length: 64\r\nConnection: close\r\n\r\npartial"
+            );
+            sock.write_all(headers.as_bytes()).await?;
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     }
     let _ = sock.shutdown().await;
@@ -497,6 +506,32 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
     assert_eq!(
         drain(&mut rx).await,
         [delta("hello"), delta(" "), LlmEvent::Done]
+    );
+}
+
+#[tokio::test]
+async fn stalled_error_body_aborts_within_inactivity_timeout() {
+    let script = Script::new();
+    script
+        .push_stream(StreamResponse::StallAfterErrorHeaders(500))
+        .await;
+    let (port, _server) = spawn_fake(script).await;
+
+    let mut spec = chat_spec(port);
+    spec.timeouts.stream_inactivity_secs = 1;
+    let client = build_client(&spec);
+
+    let (tx, _rx) = mpsc::channel(32);
+    let err = timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
+        .await
+        .expect("generate must return within outer 5s budget")
+        .expect_err("an error status is still an error");
+    assert!(
+        matches!(
+            &err,
+            LlmError::Chat(ChatClientError::Server { status: 500, body }) if body == "partial"
+        ),
+        "{err:?}"
     );
 }
 
