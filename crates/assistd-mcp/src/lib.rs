@@ -7,13 +7,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
-use assistd_tools::{
-    ApprovalGate, ConfirmationRequest, MCP_TOOL_NAME_PREFIX, Tool, ToolError, VisionGate,
-};
+use assistd_tools::{ApprovalGate, ConfirmationRequest, Tool, ToolError, VisionGate};
 use async_trait::async_trait;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 
+mod admission;
 mod error;
 mod server;
 mod stdio;
@@ -97,7 +96,8 @@ impl Tool for McpToolAdapter {
 }
 
 /// [`Tool`] entries for every tool `client` exposes, named
-/// `mcp__<server_name>__<tool>`. Results past `output`'s caps are cut, with
+/// `mcp__<server_name>__<tool>`; tools with an invalid or duplicate name or
+/// an oversized description or schema are skipped with a warning. Results past `output`'s caps are cut, with
 /// the overflow spilled as `mcp-<server_name>-<n>.txt`. Each call asks
 /// first unless `approvals` holds the tool. Image results are replaced by a
 /// text note whenever `vision` reports the model cannot take images.
@@ -110,12 +110,12 @@ pub async fn adapt_client_as_tools(
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let tools = client.list_tools().await?;
     let truncator = Arc::new(TextTruncator::new(output, format!("mcp-{server_name}")));
-    Ok(tools
+    Ok(admission::admit_tools(server_name, tools)
         .into_iter()
-        .map(|tool| {
+        .map(|(registry_name, tool)| {
             Box::new(McpToolAdapter {
                 client: client.clone(),
-                registry_name: format!("{MCP_TOOL_NAME_PREFIX}{server_name}__{}", tool.name),
+                registry_name,
                 tool,
                 truncator: truncator.clone(),
                 approvals: approvals.clone(),

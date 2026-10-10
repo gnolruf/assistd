@@ -298,3 +298,46 @@ async fn approved_tool_runs_without_asking() {
     tool.invoke(json!({})).await.unwrap();
     assert_eq!(client.calls.load(Ordering::SeqCst), 1);
 }
+
+/// Advertises a fixed list of tools.
+#[derive(Debug)]
+struct ListingClient(Vec<rmcp::model::Tool>);
+
+#[async_trait]
+impl McpClient for ListingClient {
+    async fn list_tools(&self) -> Result<Vec<rmcp::model::Tool>, McpError> {
+        Ok(self.0.clone())
+    }
+
+    async fn invoke(&self, _name: &str, _arguments: Value) -> Result<CallToolResult, McpError> {
+        Ok(text_result(""))
+    }
+}
+
+#[tokio::test]
+async fn only_well_formed_unique_tools_are_registered() {
+    let mut huge_schema = mcp_tool("huge_schema", "ok");
+    huge_schema.input_schema = Arc::new(
+        serde_json::from_value(json!({"type": "object", "description": "x".repeat(20_000)}))
+            .unwrap(),
+    );
+    let client = Arc::new(ListingClient(vec![
+        mcp_tool("search", "first"),
+        mcp_tool("bad name\"", "quoted"),
+        mcp_tool("", "empty"),
+        mcp_tool(&"a".repeat(60), "too long once prefixed"),
+        mcp_tool("verbose", &"x".repeat(5_000)),
+        huge_schema,
+        mcp_tool("search", "second"),
+        mcp_tool("fetch-page", "kept"),
+    ]));
+    let tools = adapt_allowing(client).await.unwrap();
+    let kept: Vec<(&str, &str)> = tools.iter().map(|t| (t.name(), t.description())).collect();
+    assert_eq!(
+        kept,
+        [
+            ("mcp__web__search", "first"),
+            ("mcp__web__fetch-page", "kept")
+        ]
+    );
+}
