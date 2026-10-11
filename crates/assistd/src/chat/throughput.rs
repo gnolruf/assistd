@@ -39,6 +39,11 @@ impl ThroughputMeter {
         self.chunk_count += 1;
     }
 
+    /// Chunks received since the last reset, an estimate of tokens generated.
+    pub(super) const fn tokens(&self) -> u64 {
+        self.chunk_count
+    }
+
     /// Mark generation complete, freezing the final rate for [`FINAL_RATE_HOLD`].
     pub(super) fn on_done(&mut self, now: Instant) {
         self.finished_at = Some(now);

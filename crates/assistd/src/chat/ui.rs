@@ -15,8 +15,7 @@ use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
 use super::app::{
-    App, BranchListEntry, BranchPickerModal, ConfirmOffer, ConfirmationModal, ReplyPhase,
-    ReplyProgress, ScriptVisibility,
+    App, BranchListEntry, BranchPickerModal, ConfirmOffer, ConfirmationModal, ScriptVisibility,
 };
 use super::markdown::BLEY;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot};
@@ -366,21 +365,33 @@ fn confirmation_footer(modal: &ConfirmationModal) -> Span<'static> {
     }
 }
 
+/// The transcript, with a blank row and the generating row below it while
+/// a reply is open.
 fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let Some(started_at) = app.reply_started_at else {
+        render_transcript(frame, area, &mut app.output);
+        return;
+    };
+    let [transcript_area, _, status_row] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    render_generating_row(frame, status_row, app, started_at);
+    render_transcript(frame, transcript_area, &mut app.output);
+}
 
-    let slots = app.output.thumbnail_layout(area.width);
-    let (lines, viewport_top) = app.output.render_view(area.width, area.height);
+fn render_transcript(frame: &mut Frame<'_>, area: Rect, output: &mut OutputPane) {
+    let slots = output.thumbnail_layout(area.width);
+    let (lines, viewport_top) = output.render_view(area.width, area.height);
     for (line, row) in lines.iter().zip(area.rows()) {
         frame.render_widget(line, row);
     }
-    render_thumbnails(frame, area, &mut app.output, &slots, viewport_top);
-
-    if let Some(reply) = &app.reply {
-        render_generating_row(frame, area, app.spinner_char(), reply);
-    }
+    render_thumbnails(frame, area, output, &slots, viewport_top);
 }
 
 /// Draw each thumbnail whose image rows sit wholly inside the viewport
@@ -416,37 +427,37 @@ fn render_thumbnails(
     }
 }
 
-/// Spinner row for an open reply with its elapsed time, plus the step it
-/// is on when that is thinking or running a tool.
-fn render_generating_row(frame: &mut Frame<'_>, area: Rect, spinner: char, reply: &ReplyProgress) {
-    let row = Rect {
-        y: area.y + area.height.saturating_sub(1),
-        height: 1,
-        ..area
+/// Spinner row for an open reply with its elapsed time and tokens so far,
+/// plus a thinking sub-status while the model is reasoning.
+fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at: Instant) {
+    let elapsed_secs = started_at.elapsed().as_secs();
+    let progress = match app.throughput.tokens() {
+        0 => format!("{elapsed_secs}s"),
+        tokens => format!("{elapsed_secs}s · ↓ {} tokens", compact_count(tokens)),
     };
     let mut spans = vec![Span::styled(
-        format!(
-            "{spinner} Generating… ({}s)",
-            reply.started_at.elapsed().as_secs()
-        ),
+        format!("{} Generating… ({progress})", app.spinner_char()),
         Style::default()
             .fg(Color::Gray)
             .add_modifier(Modifier::DIM)
             .add_modifier(Modifier::ITALIC),
     )];
-    let sub_status = match &reply.phase {
-        ReplyPhase::Generating => None,
-        ReplyPhase::Thinking => Some(" · thinking".to_string()),
-        ReplyPhase::Executing { tool } => Some(format!(" · executing {tool}")),
-    };
-    if let Some(sub_status) = sub_status {
+    if app.output.thinking() {
         spans.push(Span::styled(
-            sub_status,
+            " · thinking",
             Style::default().fg(BLEY).add_modifier(Modifier::ITALIC),
         ));
     }
-    frame.render_widget(Clear, row);
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
+}
+
+/// `950`, `1.2k`, `34.5k`: one decimal place from a thousand up.
+fn compact_count(count: u64) -> String {
+    if count < 1000 {
+        count.to_string()
+    } else {
+        format!("{:.1}k", count as f64 / 1000.0)
+    }
 }
 
 /// Indicators on the left, and a notice or key hints right-aligned when
