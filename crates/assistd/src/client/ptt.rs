@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use assistd_ipc::{Event, Request, VoiceCaptureState};
+use assistd_ipc::{Event, Request, StatusKind, VoiceCaptureState};
 use uuid::Uuid;
 
 use super::run_one_shot;
@@ -68,6 +68,10 @@ pub(crate) async fn run(action: PttAction) -> Result<()> {
                     .unwrap_or(0);
                 writeln!(io::stderr(), "[tool result: {name} exit:{exit}]")?;
             }
+            Event::Status {
+                event: StatusKind::CompactingSoon,
+                ..
+            } => {}
             Event::Status {
                 severity,
                 component,

@@ -209,6 +209,8 @@ pub(super) struct App {
     pub model_name: String,
     /// When the open reply stream began; `None` between replies.
     pub reply_started_at: Option<Instant>,
+    /// Whether the daemon expects to compact history during the open reply.
+    pub compacting_soon: bool,
     pub quitting: bool,
     pub spinner: usize,
     /// Transient status-bar message and when it was set.
@@ -323,6 +325,7 @@ impl App {
             resources: ResourceState::default(),
             model_name,
             reply_started_at: None,
+            compacting_soon: false,
             quitting: false,
             spinner: 0,
             notice: None,

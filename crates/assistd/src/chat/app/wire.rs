@@ -184,6 +184,10 @@ impl App {
                 }
             }
             Event::Status {
+                event: StatusKind::CompactingSoon,
+                ..
+            } => self.compacting_soon = true,
+            Event::Status {
                 severity,
                 component,
                 event,
@@ -196,7 +200,8 @@ impl App {
                         self.close_discarded_step(&format!("[{component} restarting…]"));
                     }
                     StatusKind::CompactingHistory => {
-                        self.output.push_info("[compacting history…]");
+                        self.compacting_soon = false;
+                        self.output.push_compaction_notice("[compacting history…]");
                     }
                     StatusKind::OutputTruncated => {
                         self.close_discarded_step(&format!(
@@ -427,6 +432,7 @@ impl App {
         self.output.abandon_running_tool();
         self.output.finish_assistant();
         self.reply_started_at = None;
+        self.compacting_soon = false;
         self.active_reply = None;
         self.modal = None;
         self.last_live_seconds = None;

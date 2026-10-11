@@ -428,7 +428,7 @@ fn render_thumbnails(
 }
 
 /// Spinner row for an open reply with its elapsed time and tokens so far,
-/// plus a thinking sub-status while the model is reasoning.
+/// plus a warning when the daemon is about to compact history.
 fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at: Instant) {
     let elapsed_secs = started_at.elapsed().as_secs();
     let progress = match app.throughput.tokens() {
@@ -442,9 +442,9 @@ fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at
             .add_modifier(Modifier::DIM)
             .add_modifier(Modifier::ITALIC),
     )];
-    if app.output.thinking() {
+    if app.compacting_soon {
         spans.push(Span::styled(
-            " · thinking",
+            " · compacting soon",
             Style::default().fg(BLEY).add_modifier(Modifier::ITALIC),
         ));
     }

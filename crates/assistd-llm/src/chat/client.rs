@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 
 use super::conversation::{
     Conversation, Message, Role, Summarizer, TOOL_RESULT_PREFIX, ToolCallRecord,
+    approx_tokens_bytes,
 };
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
@@ -180,7 +181,15 @@ impl LlamaChatClient {
         }
     }
 
-    async fn stream_openai(&self, body: Vec<u8>, tx: &mpsc::Sender<LlmEvent>) -> StreamOutcome {
+    /// Stream one completion. `compaction_headroom` is how many generated
+    /// tokens may stream before [`StatusKind::CompactingSoon`] is sent;
+    /// `None` never sends it.
+    async fn stream_openai(
+        &self,
+        body: Vec<u8>,
+        compaction_headroom: Option<NonZeroU32>,
+        tx: &mpsc::Sender<LlmEvent>,
+    ) -> StreamOutcome {
         let Ok(pid_at_request) = self.serving_pid().await else {
             return StreamOutcome::ServerRestart {
                 accum: Box::default(),
@@ -197,7 +206,10 @@ impl LlamaChatClient {
             Ok(response) => response,
             Err(outcome) => return outcome,
         };
-        let mut accum = StreamAccum::default();
+        let mut accum = StreamAccum {
+            compaction_headroom,
+            ..StreamAccum::default()
+        };
         let saw_done = match self
             .read_stream(&mut response, &mut accum, first_byte_by, tx, pid_at_request)
             .await
@@ -218,17 +230,13 @@ impl LlamaChatClient {
     }
 
     async fn fit_budget(&self, conv: &mut Conversation, tx: &mpsc::Sender<LlmEvent>) {
+        if conv.nears_budget(&self.chat, &self.model) {
+            send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
+        }
         if !conv.exceeds_budget(&self.chat, &self.model) {
             return;
         }
-        let _ = tx
-            .send(LlmEvent::Status {
-                severity: StatusSeverity::Info,
-                component: Component::Llm,
-                event: StatusKind::CompactingHistory,
-                message: "compacting history…".into(),
-            })
-            .await;
+        send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
         let before = (conv.message_count(), conv.approx_total_tokens());
         if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
             warn!(
@@ -245,6 +253,11 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
+    }
+
+    /// `None` when compaction is already near, so it is announced once.
+    fn compaction_headroom(&self, conv: &Conversation) -> Option<NonZeroU32> {
+        NonZeroU32::new(conv.compaction_warning_headroom(&self.chat, &self.model))
     }
 
     fn request_timeout(&self) -> Duration {
@@ -407,6 +420,7 @@ impl LlamaChatClient {
                 forward_segment(tx, segment, accum).await?;
             }
         }
+        warn_when_compaction_nears(tx, accum).await;
         Ok(())
     }
 }
@@ -414,7 +428,7 @@ impl LlamaChatClient {
 #[async_trait]
 impl LlmBackend for LlamaChatClient {
     async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        let (body_bytes, estimated_tokens) = {
+        let (body_bytes, estimated_tokens, compaction_headroom) = {
             let lock_start = std::time::Instant::now();
             let mut conv = self.conv.lock().await;
             if lock_start.elapsed() > Duration::from_secs(1) {
@@ -428,7 +442,7 @@ impl LlmBackend for LlamaChatClient {
             self.fit_budget(&mut conv, &tx).await;
             let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
-                Ok(b) => (b, conv.heuristic_tokens()),
+                Ok(b) => (b, conv.heuristic_tokens(), self.compaction_headroom(&conv)),
                 Err(e) => {
                     conv.rollback_last_user();
                     return Err(LlmError::Chat(ChatClientError::Json(e)));
@@ -436,7 +450,9 @@ impl LlmBackend for LlamaChatClient {
             }
         };
 
-        let outcome = self.stream_openai(body_bytes, &tx).await;
+        let outcome = self
+            .stream_openai(body_bytes, compaction_headroom, &tx)
+            .await;
 
         let mut conv = self.conv.lock().await;
         calibrate_from(&mut conv, estimated_tokens, &outcome);
@@ -492,7 +508,7 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        let (body_bytes, estimated_tokens) = {
+        let (body_bytes, estimated_tokens, compaction_headroom) = {
             let mut conv = self.conv.lock().await;
             self.fit_budget(&mut conv, &tx).await;
             let mut payload = self.base_request(conv.as_wire_messages());
@@ -502,10 +518,16 @@ impl LlmBackend for LlamaChatClient {
             }
             let body = serde_json::to_vec(&payload)
                 .map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?;
-            (body, conv.heuristic_tokens())
+            (
+                body,
+                conv.heuristic_tokens(),
+                self.compaction_headroom(&conv),
+            )
         };
 
-        let outcome = self.stream_openai(body_bytes, &tx).await;
+        let outcome = self
+            .stream_openai(body_bytes, compaction_headroom, &tx)
+            .await;
 
         let mut conv = self.conv.lock().await;
         calibrate_from(&mut conv, estimated_tokens, &outcome);
@@ -576,7 +598,7 @@ impl LlmBackend for LlamaChatClient {
 
         let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
         let stream = async {
-            let outcome = self.stream_openai(body_bytes, &tx).await;
+            let outcome = self.stream_openai(body_bytes, None, &tx).await;
             drop(tx);
             outcome
         };
@@ -665,12 +687,25 @@ struct StreamAccum {
     prompt_tokens: Option<u32>,
     has_emitted: bool,
     splitter: ThinkSplitter,
+    /// Generated tokens left before compaction is near; `None` once
+    /// announced or when not watched.
+    compaction_headroom: Option<NonZeroU32>,
 }
 
 impl StreamAccum {
     /// Whether anything reached the consumer or a tool call is in progress.
     fn has_output(&self) -> bool {
         self.has_emitted || !self.tool_calls.is_empty()
+    }
+
+    /// Bytes streamed so far that history will keep.
+    fn streamed_bytes(&self) -> usize {
+        let tool_call_bytes: usize = self
+            .tool_calls
+            .values()
+            .map(|call| call.id.len() + call.name.len() + call.arguments.len())
+            .sum();
+        self.text.len() + self.reasoning.len() + tool_call_bytes
     }
 
     fn merge_tool_call_delta(&mut self, delta: wire::ToolCallDelta) {
@@ -770,6 +805,28 @@ fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &Stre
         );
         conv.calibrate(estimated_tokens, prompt_tokens);
     }
+}
+
+async fn send_compaction_status(tx: &mpsc::Sender<LlmEvent>, event: StatusKind, message: &str) {
+    let _ = tx
+        .send(LlmEvent::Status {
+            severity: StatusSeverity::Info,
+            component: Component::Llm,
+            event,
+            message: message.into(),
+        })
+        .await;
+}
+
+async fn warn_when_compaction_nears(tx: &mpsc::Sender<LlmEvent>, accum: &mut StreamAccum) {
+    let Some(headroom) = accum.compaction_headroom else {
+        return;
+    };
+    if approx_tokens_bytes(accum.streamed_bytes()) < headroom.get() {
+        return;
+    }
+    accum.compaction_headroom = None;
+    send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
 }
 
 async fn forward_segment(
