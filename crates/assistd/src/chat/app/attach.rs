@@ -36,7 +36,7 @@ impl App {
         let name = Path::new(&path)
             .file_name()
             .map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned());
-        self.set_notice(&format!("📎 reading {name}…"));
+        self.set_notice(&format!("reading {name}…"));
         let chat_tx = self.chat_tx.clone();
         let picker = self.picker.clone();
         self.tasks.spawn(async move {
@@ -53,9 +53,9 @@ impl App {
             bytes,
             protocol,
         } = payload;
-        let label = format!("📎 attached: {name} ({mime}, {})", human_size(size as u64));
+        let label = format!("attached: {name} ({mime}, {})", human_size(size as u64));
         self.output.push_info(&label);
-        self.set_notice(&format!("📎 {name} attached"));
+        self.set_notice(&format!("{name} attached"));
         self.pending_attachments.push(PendingAttachment {
             name,
             mime,
@@ -67,7 +67,7 @@ impl App {
     pub(super) fn on_attach_failed(&mut self, path: &str, message: &str) {
         self.output
             .push_error(&format!("/attach {path}: {message}"));
-        self.set_notice(&format!("📎 {path}: {message}"));
+        self.set_notice(&format!("{path}: {message}"));
     }
 
     /// Tab-complete the path after `/attach `. Returns whether the buffer

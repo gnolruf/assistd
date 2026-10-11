@@ -12,13 +12,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
-use assistd_core::{Config, SleepConfig};
 use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream};
-use crossterm::{cursor, execute, terminal};
+use crossterm::{cursor, execute, style, terminal};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -41,9 +41,8 @@ mod focus;
 mod input;
 mod markdown;
 mod output;
-mod throughput;
+mod tokens;
 mod ui;
-mod vram;
 
 const CHAT_CHANNEL_CAPACITY: usize = 64;
 const RESUME_RECENCY_SECS: u64 = 10;
@@ -54,6 +53,10 @@ const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const INSTANCE_LOCK_FILE: &str = "chat.lock";
+const WINDOW_TITLE: &str = "assistd";
+/// xterm window-ops sequences that save and restore the terminal's title.
+const PUSH_WINDOW_TITLE: &str = "\x1b[22;0t";
+const POP_WINDOW_TITLE: &str = "\x1b[23;0t";
 
 #[derive(Args)]
 pub(crate) struct ChatArgs {
@@ -71,10 +74,8 @@ struct TuiContext {
     focus_tx: watch::Sender<bool>,
     chat_tx: mpsc::Sender<ChatEvent>,
     chat_rx: mpsc::Receiver<ChatEvent>,
-    resource_rx: watch::Receiver<vram::ResourceState>,
     shutdown_rx: watch::Receiver<bool>,
     model_name: String,
-    sleep_cfg: SleepConfig,
     vision_enabled: bool,
 }
 
@@ -107,13 +108,15 @@ impl InstanceLock {
 struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Enter raw mode and the alternate screen, and install a panic hook
-    /// that restores the terminal before the previous hook runs.
+    /// Enter raw mode and the alternate screen, saving the window title,
+    /// and install a panic hook that restores the terminal before the
+    /// previous hook runs.
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode().context("enable_raw_mode")?;
         if let Err(e) = execute!(
             io::stdout(),
             terminal::EnterAlternateScreen,
+            style::Print(PUSH_WINDOW_TITLE),
             event::EnableMouseCapture,
             event::EnableFocusChange
         ) {
@@ -134,6 +137,7 @@ impl TerminalGuard {
             io::stdout(),
             event::DisableFocusChange,
             event::DisableMouseCapture,
+            style::Print(POP_WINDOW_TITLE),
             terminal::LeaveAlternateScreen,
             cursor::Show,
         )?;
@@ -204,9 +208,6 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
 
     let (vision_enabled, model_name) = resolve_capabilities(&ipc, &config).await;
 
-    let (resource_rx, resource_probe) = vram::spawn_probe(shutdown_tx.subscribe());
-    let _resource_probe = AbortOnDropHandle::new(resource_probe);
-
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
 
     let _polling_handle = AbortOnDropHandle::new(spawn_status_polling(
@@ -232,10 +233,8 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         focus_tx,
         chat_tx,
         chat_rx,
-        resource_rx,
         shutdown_rx: shutdown_tx.subscribe(),
         model_name,
-        sleep_cfg: config.sleep.clone(),
         vision_enabled,
     })
     .await;
@@ -303,10 +302,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         focus_tx,
         chat_tx,
         mut chat_rx,
-        mut resource_rx,
         mut shutdown_rx,
         model_name,
-        sleep_cfg,
         vision_enabled,
     } = ctx;
 
@@ -315,7 +312,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
-    let mut app = App::new(ipc, chat_tx, model_name, sleep_cfg, vision_enabled, picker);
+    let mut app = App::new(ipc, chat_tx, model_name, vision_enabled, picker);
     app.spawn_resume_or_new(RESUME_RECENCY_SECS);
 
     let mut events = EventStream::new();
@@ -323,6 +320,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     let mut glyph_tick = tokio::time::interval(THINKING_GLYPH_INTERVAL);
     glyph_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    let mut window_title = String::new();
+    sync_window_title(&mut window_title, app.session_title.as_deref())?;
     terminal.draw(|f| ui::render(f, &mut app))?;
 
     while !app.should_quit() {
@@ -341,19 +340,34 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
             _ = glyph_tick.tick(), if app.output.thinking_live() => {
                 app.output.advance_thinking_glyph();
             }
-            Ok(()) = resource_rx.changed() => {
-                let v = resource_rx.borrow_and_update().clone();
-                app.on_resources(v);
-            }
             _ = shutdown_rx.changed() => {
                 break;
             }
         }
-        drain_queued(&mut app, &mut chat_rx, &mut resource_rx);
+        drain_queued(&mut app, &mut chat_rx);
+        sync_window_title(&mut window_title, app.session_title.as_deref())?;
         terminal.draw(|f| ui::render(f, &mut app))?;
     }
 
     drop(terminal);
+    Ok(())
+}
+
+/// Retitle the terminal window after the open conversation when its title
+/// differs from `shown`, the title last set. Control characters are dropped
+/// so a model-written title cannot end the escape sequence early.
+fn sync_window_title(shown: &mut String, session_title: Option<&str>) -> io::Result<()> {
+    let wanted = session_title.map_or_else(
+        || WINDOW_TITLE.to_string(),
+        |title| {
+            let printable: String = title.chars().filter(|c| !c.is_control()).collect();
+            format!("{WINDOW_TITLE} — {printable}")
+        },
+    );
+    if *shown != wanted {
+        execute!(io::stdout(), terminal::SetTitle(&wanted))?;
+        *shown = wanted;
+    }
     Ok(())
 }
 
@@ -416,20 +430,12 @@ fn apply_terminal_event(
 /// costs one frame, bounded so a producer that keeps pace cannot starve
 /// redraws. Terminal events stay with the select loop: polling
 /// `EventStream` outside it would drop its waker.
-fn drain_queued(
-    app: &mut App,
-    chat_rx: &mut mpsc::Receiver<ChatEvent>,
-    resource_rx: &mut watch::Receiver<vram::ResourceState>,
-) {
+fn drain_queued(app: &mut App, chat_rx: &mut mpsc::Receiver<ChatEvent>) {
     for _ in 0..CHAT_CHANNEL_CAPACITY {
         let Ok(ev) = chat_rx.try_recv() else {
             break;
         };
         app.on_chat_event(ev);
-    }
-    if resource_rx.has_changed().unwrap_or(false) {
-        let v = resource_rx.borrow_and_update().clone();
-        app.on_resources(v);
     }
 }
 
@@ -483,9 +489,6 @@ async fn poll_status(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
             id: Uuid::new_v4().to_string(),
         },
         Request::GetListenState {
-            id: Uuid::new_v4().to_string(),
-        },
-        Request::GetReadiness {
             id: Uuid::new_v4().to_string(),
         },
     ];
