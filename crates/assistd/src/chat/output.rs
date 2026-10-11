@@ -106,45 +106,32 @@ impl OutputPane {
         self.verbose = verbose;
     }
 
-    /// Append a `> `-prefixed prompt line and a blank separator.
+    /// Append a `> `-prefixed prompt line.
     pub(super) fn push_user(&mut self, text: &str) {
-        self.close_open_assistant();
-        self.items.push(OutputItem::Text(single_span_line(
-            format!("> {text}"),
-            user_style(),
-        )));
-        self.items.push(OutputItem::Text(Line::from("")));
+        self.push_separated(format!("> {text}"), user_style());
     }
 
     /// [`Self::push_user`] with a trailing 📎 tag naming the attachments.
     pub(super) fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
-        self.close_open_assistant();
         let tag = if names.len() == 1 {
             format!("  📎 {}", names[0])
         } else {
             format!("  📎 {} ({} files)", names.join(", "), names.len())
         };
-        self.items.push(OutputItem::Text(single_span_line(
-            format!("> {text}{tag}"),
-            user_style(),
-        )));
-        self.items.push(OutputItem::Text(Line::from("")));
+        self.push_separated(format!("> {text}{tag}"), user_style());
     }
 
     pub(super) fn push_info(&mut self, text: &str) {
-        self.close_open_assistant();
-        self.items.push(OutputItem::Text(single_span_line(
-            text.to_string(),
-            info_style(),
-        )));
+        self.push_separated(text.to_string(), info_style());
     }
 
     pub(super) fn push_compaction_notice(&mut self, text: &str) {
-        self.close_open_assistant();
-        self.items.push(OutputItem::Text(single_span_line(
-            text.to_string(),
-            compaction_style(),
-        )));
+        self.push_separated(text.to_string(), compaction_style());
+    }
+
+    /// Append the dim `Worked for …` line that closes a finished reply.
+    pub(super) fn push_turn_summary(&mut self, text: String) {
+        self.push_separated(text, summary_style());
     }
 
     /// Open a streaming assistant block for [`Self::append_assistant`].
@@ -179,11 +166,7 @@ impl OutputPane {
     }
 
     pub(super) fn push_error(&mut self, msg: &str) {
-        self.close_open_assistant();
-        self.items.push(OutputItem::Text(single_span_line(
-            format!("!! {msg}"),
-            error_style(),
-        )));
+        self.push_separated(format!("!! {msg}"), error_style());
     }
 
     /// Append a finished tool block. Blocks whose body exceeds
@@ -445,6 +428,14 @@ impl OutputPane {
         self.wrap.sync(&self.items, width, self.verbose);
     }
 
+    /// Append one styled line and the blank row that separates it from the next item.
+    fn push_separated(&mut self, text: String, style: Style) {
+        self.close_open_assistant();
+        self.items
+            .push(OutputItem::Text(single_span_line(text, style)));
+        self.items.push(OutputItem::Text(Line::from("")));
+    }
+
     fn close_open_assistant(&mut self) {
         if let Some(idx) = self.open_assistant.take() {
             let empty = matches!(
@@ -468,6 +459,7 @@ impl OutputPane {
                 name,
                 protocol,
             })));
+        self.items.push(OutputItem::Text(Line::from("")));
     }
 
     /// Where each thumbnail's reserved rows sit in the wrapped output that
@@ -854,6 +846,10 @@ fn error_style() -> Style {
 
 fn info_style() -> Style {
     Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
+}
+
+fn summary_style() -> Style {
+    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
 }
 
 fn compaction_style() -> Style {

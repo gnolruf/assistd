@@ -134,6 +134,8 @@ pub enum LlmEvent {
         name: String,
         result: Value,
     },
+    /// Tokens in the conversation as sent with the request about to stream.
+    ContextSize { tokens: u32 },
     /// Non-terminal recovery or status update.
     Status {
         severity: StatusSeverity,

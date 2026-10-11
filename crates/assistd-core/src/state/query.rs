@@ -155,6 +155,7 @@ impl TurnTranslator {
                 );
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
+            LlmEvent::ContextSize { tokens } => (Event::ContextSize { id, tokens }, Vec::new()),
             LlmEvent::Status {
                 severity,
                 component,

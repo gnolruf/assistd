@@ -13,6 +13,10 @@ pub(super) struct ThroughputMeter {
     chunk_count: u64,
     finished_at: Option<Instant>,
     final_rate: Option<f64>,
+    /// Turn tokens that never streamed as chunks, such as tool calls and their results.
+    unstreamed: u64,
+    /// The daemon's latest conversation size and the chunk count when it arrived.
+    context: Option<(u64, u64)>,
 }
 
 /// Point-in-time rate snapshot produced by [`ThroughputMeter::snapshot`].
@@ -29,6 +33,8 @@ impl ThroughputMeter {
             chunk_count: 0,
             finished_at: None,
             final_rate: None,
+            unstreamed: 0,
+            context: None,
         }
     }
 
@@ -39,9 +45,25 @@ impl ThroughputMeter {
         self.chunk_count += 1;
     }
 
-    /// Chunks received since the last reset, an estimate of tokens generated.
+    /// Tokens the turn has added to the conversation since the last reset.
     pub(super) const fn tokens(&self) -> u64 {
-        self.chunk_count
+        self.chunk_count + self.unstreamed
+    }
+
+    /// Record the conversation size the daemon sent with its latest request.
+    /// Growth beyond the chunks streamed since the previous size counts toward
+    /// the turn; shrinkage from compaction does not.
+    pub(super) fn on_context_size(&mut self, tokens: u32) {
+        if let Some(expected) = self.context_tokens() {
+            self.unstreamed += u64::from(tokens).saturating_sub(expected);
+        }
+        self.context = Some((u64::from(tokens), self.chunk_count));
+    }
+
+    /// Conversation tokens: the latest request's size plus chunks streamed since.
+    pub(super) fn context_tokens(&self) -> Option<u64> {
+        self.context
+            .map(|(tokens, chunks_at)| tokens + self.chunk_count - chunks_at)
     }
 
     /// Mark generation complete, freezing the final rate for [`FINAL_RATE_HOLD`].
@@ -110,5 +132,20 @@ mod tests {
 
         assert_eq!(m.snapshot(t0 + Duration::from_secs(3)).rate, Some(1.0));
         assert_eq!(m.snapshot(t0 + Duration::from_secs(10)).rate, None);
+    }
+
+    #[test]
+    fn turn_counts_unstreamed_growth_but_not_compaction() {
+        let t0 = Instant::now();
+        let mut m = ThroughputMeter::new();
+        m.on_context_size(1000);
+        m.on_delta(t0);
+        m.on_delta(t0);
+        m.on_context_size(1050);
+        assert_eq!((m.tokens(), m.context_tokens()), (50, Some(1050)));
+
+        m.on_context_size(400);
+        m.on_delta(t0);
+        assert_eq!((m.tokens(), m.context_tokens()), (51, Some(401)));
     }
 }

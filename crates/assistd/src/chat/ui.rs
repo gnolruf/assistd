@@ -427,13 +427,18 @@ fn render_thumbnails(
     }
 }
 
-/// Spinner row for an open reply with its elapsed time and tokens so far,
-/// plus a warning when the daemon is about to compact history.
+/// Spinner row for an open reply with its elapsed time, tokens so far and
+/// conversation total, plus a warning when the daemon is about to compact history.
 fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at: Instant) {
     let elapsed = compact_duration(started_at.elapsed().as_secs());
-    let progress = match app.throughput.tokens() {
-        0 => elapsed,
-        tokens => format!("{elapsed} · {} tokens", compact_count(tokens)),
+    let progress = match (app.throughput.tokens(), app.throughput.context_tokens()) {
+        (0, _) => elapsed,
+        (tokens, None) => format!("{elapsed} · {} tokens", compact_count(tokens)),
+        (tokens, Some(total)) => format!(
+            "{elapsed} · {} / {} tokens",
+            compact_count(tokens),
+            compact_count(total)
+        ),
     };
     let mut spans = vec![Span::styled(
         format!("{} Generating… ({progress})", app.spinner_char()),
@@ -449,6 +454,15 @@ fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
+}
+
+/// `Worked for 1m 5s (1.2k tokens)`, closing a finished reply.
+pub(super) fn turn_summary(elapsed_secs: u64, tokens: u64) -> String {
+    let elapsed = compact_duration(elapsed_secs);
+    match tokens {
+        0 => format!("Worked for {elapsed}"),
+        tokens => format!("Worked for {elapsed} ({} tokens)", compact_count(tokens)),
+    }
 }
 
 /// `42s`, `3m 5s`, `1hr 3m 3s`: leading zero units are dropped.

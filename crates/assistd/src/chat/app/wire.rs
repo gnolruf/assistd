@@ -7,6 +7,7 @@ use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity};
 use assistd_tools::ConfirmationRequest;
 use serde_json::Value;
 
+use super::super::ui::turn_summary;
 use super::{
     ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
     WireStream,
@@ -82,6 +83,7 @@ impl App {
             | Event::Readiness { .. }
             | Event::Capabilities { .. }
             | Event::Status { .. }) => self.on_state_event(state),
+            Event::ContextSize { tokens, .. } => self.throughput.on_context_size(tokens),
             session @ (Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }
             | Event::SessionTitle { .. }
@@ -438,9 +440,19 @@ impl App {
         self.last_live_seconds = None;
     }
 
+    fn finish_reply_with_summary(&mut self, now: Instant) {
+        let started_at = self.reply_started_at;
+        self.finish_reply(now);
+        if let Some(started_at) = started_at {
+            let elapsed_secs = now.duration_since(started_at).as_secs();
+            self.output
+                .push_turn_summary(turn_summary(elapsed_secs, self.throughput.tokens()));
+        }
+    }
+
     fn finish_stream(&mut self, stream: WireStream, now: Instant) {
         match stream {
-            WireStream::Reply => self.finish_reply(now),
+            WireStream::Reply => self.finish_reply_with_summary(now),
             WireStream::Branch => {
                 if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op.take() {
                     self.open_branch_picker();

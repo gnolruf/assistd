@@ -440,6 +440,7 @@ impl LlmBackend for LlamaChatClient {
             }
             conv.push_user(prompt);
             self.fit_budget(&mut conv, &tx).await;
+            send_context_size(&conv, &tx).await;
             let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
                 Ok(b) => (b, conv.heuristic_tokens(), self.compaction_headroom(&conv)),
@@ -511,6 +512,7 @@ impl LlmBackend for LlamaChatClient {
         let (body_bytes, estimated_tokens, compaction_headroom) = {
             let mut conv = self.conv.lock().await;
             self.fit_budget(&mut conv, &tx).await;
+            send_context_size(&conv, &tx).await;
             let mut payload = self.base_request(conv.as_wire_messages());
             if !tools.is_empty() {
                 payload.tools = Some(tools);
@@ -805,6 +807,11 @@ fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &Stre
         );
         conv.calibrate(estimated_tokens, prompt_tokens);
     }
+}
+
+async fn send_context_size(conv: &Conversation, tx: &mpsc::Sender<LlmEvent>) {
+    let tokens = conv.approx_total_tokens();
+    let _ = tx.send(LlmEvent::ContextSize { tokens }).await;
 }
 
 async fn send_compaction_status(tx: &mpsc::Sender<LlmEvent>, event: StatusKind, message: &str) {
