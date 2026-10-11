@@ -540,6 +540,9 @@ pub enum StatusKind {
     ModelLoading,
     /// A subsystem failed to start and is unavailable this run.
     StartupFailed,
+    /// History is close enough to the token budget that an upcoming step
+    /// will summarize it.
+    CompactingSoon,
     /// Older history is being summarized to fit the token budget.
     CompactingHistory,
 }
@@ -704,6 +707,8 @@ pub enum Event {
         vision: bool,
         model_name: String,
     },
+    /// Tokens in the conversation as sent with the model request about to stream.
+    ContextSize { id: String, tokens: u32 },
     /// Non-terminal notice of a recoverable condition.
     Status {
         id: String,
@@ -792,6 +797,7 @@ impl Event {
             | Event::ReindexProgress { id, .. }
             | Event::ConfirmRequest { id, .. }
             | Event::Capabilities { id, .. }
+            | Event::ContextSize { id, .. }
             | Event::Status { id, .. }
             | Event::BranchInfo { id, .. }
             | Event::BranchSwitched { id, .. }
@@ -830,6 +836,7 @@ impl Event {
             | Event::ReindexProgress { .. }
             | Event::ConfirmRequest { .. }
             | Event::Capabilities { .. }
+            | Event::ContextSize { .. }
             | Event::Status { .. }
             | Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }

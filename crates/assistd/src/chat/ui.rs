@@ -17,6 +17,7 @@ use textwrap::core::display_width;
 use super::app::{
     App, BranchListEntry, BranchPickerModal, ConfirmOffer, ConfirmationModal, ScriptVisibility,
 };
+use super::markdown::BLEY;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot};
 use super::vram::{RamState, VramState};
 
@@ -364,21 +365,33 @@ fn confirmation_footer(modal: &ConfirmationModal) -> Span<'static> {
     }
 }
 
+/// The transcript, with a blank row and the generating row below it while
+/// a reply is open.
 fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let Some(started_at) = app.reply_started_at else {
+        render_transcript(frame, area, &mut app.output);
+        return;
+    };
+    let [transcript_area, _, status_row] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    render_generating_row(frame, status_row, app, started_at);
+    render_transcript(frame, transcript_area, &mut app.output);
+}
 
-    let slots = app.output.thumbnail_layout(area.width);
-    let (lines, viewport_top) = app.output.render_view(area.width, area.height);
+fn render_transcript(frame: &mut Frame<'_>, area: Rect, output: &mut OutputPane) {
+    let slots = output.thumbnail_layout(area.width);
+    let (lines, viewport_top) = output.render_view(area.width, area.height);
     for (line, row) in lines.iter().zip(area.rows()) {
         frame.render_widget(line, row);
     }
-    render_thumbnails(frame, area, &mut app.output, &slots, viewport_top);
-
-    if app.generating {
-        render_generating_row(frame, area, app.spinner_char());
-    }
+    render_thumbnails(frame, area, output, &slots, viewport_top);
 }
 
 /// Draw each thumbnail whose image rows sit wholly inside the viewport
@@ -414,21 +427,61 @@ fn render_thumbnails(
     }
 }
 
-fn render_generating_row(frame: &mut Frame<'_>, area: Rect, spinner: char) {
-    let row = Rect {
-        y: area.y + area.height.saturating_sub(1),
-        height: 1,
-        ..area
+/// Spinner row for an open reply with its elapsed time, tokens so far and
+/// conversation total, plus a warning when the daemon is about to compact history.
+fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at: Instant) {
+    let elapsed = compact_duration(started_at.elapsed().as_secs());
+    let progress = match (app.throughput.tokens(), app.throughput.context_tokens()) {
+        (0, _) => elapsed,
+        (tokens, None) => format!("{elapsed} · {} tokens", compact_count(tokens)),
+        (tokens, Some(total)) => format!(
+            "{elapsed} · {} / {} tokens",
+            compact_count(tokens),
+            compact_count(total)
+        ),
     };
-    let para = Paragraph::new(Line::from(Span::styled(
-        format!("{spinner} Generating…"),
+    let mut spans = vec![Span::styled(
+        format!("{} Generating… ({progress})", app.spinner_char()),
         Style::default()
             .fg(Color::Gray)
             .add_modifier(Modifier::DIM)
             .add_modifier(Modifier::ITALIC),
-    )));
-    frame.render_widget(Clear, row);
-    frame.render_widget(para, row);
+    )];
+    if app.compacting_soon {
+        spans.push(Span::styled(
+            " · compacting soon",
+            Style::default().fg(BLEY).add_modifier(Modifier::ITALIC),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), row);
+}
+
+/// `Worked for 1m 5s (1.2k tokens)`, closing a finished reply.
+pub(super) fn turn_summary(elapsed_secs: u64, tokens: u64) -> String {
+    let elapsed = compact_duration(elapsed_secs);
+    match tokens {
+        0 => format!("Worked for {elapsed}"),
+        tokens => format!("Worked for {elapsed} ({} tokens)", compact_count(tokens)),
+    }
+}
+
+/// `42s`, `3m 5s`, `1hr 3m 3s`: leading zero units are dropped.
+fn compact_duration(total_secs: u64) -> String {
+    let (hours, mins, secs) = (total_secs / 3600, total_secs / 60 % 60, total_secs % 60);
+    match (hours, mins) {
+        (0, 0) => format!("{secs}s"),
+        (0, _) => format!("{mins}m {secs}s"),
+        _ => format!("{hours}hr {mins}m {secs}s"),
+    }
+}
+
+/// `950`, `1.2k`, `34.5k`: one decimal place from a thousand up.
+fn compact_count(count: u64) -> String {
+    if count < 1000 {
+        count.to_string()
+    } else {
+        format!("{:.1}k", count as f64 / 1000.0)
+    }
 }
 
 /// Indicators on the left, and a notice or key hints right-aligned when

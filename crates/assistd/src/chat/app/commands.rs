@@ -77,7 +77,7 @@ impl App {
     }
 
     fn submit_query(&mut self, text: String) {
-        if self.generating {
+        if self.generating() {
             self.set_notice("still generating, please wait");
             return;
         }
@@ -138,7 +138,7 @@ impl App {
             self.set_notice("branch command in flight, please wait");
             return;
         }
-        if self.generating {
+        if self.generating() {
             self.set_notice("still generating, please wait");
             return;
         }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use assistd_ipc::attachment::{LoadImageError, LoadedImage, MAX_IMAGE_BYTES, load_image};
-use assistd_ipc::{Event, ImageAttachment, Request};
+use assistd_ipc::{Event, ImageAttachment, Request, StatusKind};
 use clap::Args;
 use uuid::Uuid;
 
@@ -117,6 +117,10 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
                 if *enabled { "on" } else { "off" }
             )?;
         }
+        Event::Status {
+            event: StatusKind::CompactingSoon,
+            ..
+        } => {}
         Event::Status {
             severity,
             component,

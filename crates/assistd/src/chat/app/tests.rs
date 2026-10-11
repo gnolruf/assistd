@@ -118,25 +118,25 @@ fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
 #[test]
 fn branch_wire_error_releases_the_in_flight_op() {
     let (mut app, _rx) = test_app();
-    app.generating = true;
+    app.reply_started_at = Some(Instant::now());
     app.in_flight_branch_op = Some(BranchOp::Fork);
     app.on_chat_event(ChatEvent::WireError {
         stream: WireStream::Branch,
         message: "branch connect: no such file".into(),
     });
     assert!(app.in_flight_branch_op.is_none());
-    assert!(app.generating, "a branch failure must not end the reply");
+    assert!(app.generating(), "a branch failure must not end the reply");
 }
 
 #[test]
 fn status_stream_done_does_not_end_the_reply() {
     let (mut app, _rx) = test_app();
-    app.generating = true;
+    app.reply_started_at = Some(Instant::now());
     app.on_chat_event(reply(delta("hi")));
     app.on_chat_event(status(done()));
-    assert!(app.generating);
+    assert!(app.generating());
     app.on_chat_event(reply(done()));
-    assert!(!app.generating);
+    assert!(!app.generating());
 }
 
 #[test]
@@ -153,11 +153,11 @@ fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
     );
 
     app.on_chat_event(reply(Event::Done { id: "typed".into() }));
-    assert!(!app.generating);
+    assert!(!app.generating());
 
     app.on_chat_event(reply(delta_for("voice", "spoken answer")));
     assert!(
-        app.generating,
+        app.generating(),
         "the voice turn runs once the typed one ends"
     );
     let lines = rendered(&mut app);
@@ -168,7 +168,7 @@ fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
     assert!(spoken_q < spoken_a);
 
     app.on_chat_event(reply(Event::Done { id: "voice".into() }));
-    assert!(!app.generating);
+    assert!(!app.generating());
 }
 
 #[test]
@@ -178,12 +178,12 @@ fn another_turns_terminal_events_leave_the_owner_alone() {
     app.on_chat_event(reply(delta_for("typed", "half ")));
 
     app.on_chat_event(reply(Event::Done { id: "other".into() }));
-    assert!(app.generating, "a foreign Done must not end the reply");
+    assert!(app.generating(), "a foreign Done must not end the reply");
     app.on_chat_event(reply(Event::Error {
         id: "other".into(),
         message: "voice turn rejected".into(),
     }));
-    assert!(app.generating, "a foreign Error must not end the reply");
+    assert!(app.generating(), "a foreign Error must not end the reply");
     assert_eq!(app.notice(), Some("voice turn rejected"));
 
     app.on_chat_event(reply(delta_for("typed", "written")));
@@ -218,12 +218,12 @@ fn bus_turn_from_another_client_renders_with_its_transcript() {
     let (mut app, _rx) = test_app();
     app.on_chat_event(ChatEvent::Bus(transcription_for("ptt", "spoken question")));
     app.on_chat_event(ChatEvent::Bus(delta_for("ptt", "spoken answer")));
-    assert!(app.generating);
+    assert!(app.generating());
     let lines = rendered(&mut app);
     assert!(line_index(&lines, "spoken question") < line_index(&lines, "spoken answer"));
 
     app.on_chat_event(ChatEvent::Bus(Event::Done { id: "ptt".into() }));
-    assert!(!app.generating);
+    assert!(!app.generating());
 }
 
 #[test]
@@ -235,7 +235,10 @@ fn bus_copies_of_this_chats_query_are_ignored() {
     app.on_chat_event(ChatEvent::Bus(delta_for("typed", "echo")));
     app.on_chat_event(ChatEvent::Bus(Event::Done { id: "typed".into() }));
 
-    assert!(app.generating, "only the dialog's own Done ends the reply");
+    assert!(
+        app.generating(),
+        "only the dialog's own Done ends the reply"
+    );
     let lines = rendered(&mut app);
     assert!(
         !lines.iter().any(|l| l.contains("echo")),

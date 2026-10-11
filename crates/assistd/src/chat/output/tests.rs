@@ -248,24 +248,25 @@ fn scrolling_addresses_lines_past_u16_max() {
     for i in 0..total {
         p.push_info(&format!("line {i}"));
     }
+    let rows = 2 * total;
     let first_visible = |p: &mut OutputPane| {
         let (lines, start) = p.render_view(80, 10);
         (start, line_text(&lines[0]), lines.len())
     };
     assert_eq!(
         first_visible(&mut p),
-        (total - 10, format!("line {}", total - 10), 10)
+        (rows - 10, format!("line {}", total - 5), 10)
     );
     p.scroll_lines_up(2);
     assert_eq!(
         first_visible(&mut p),
-        (total - 12, format!("line {}", total - 12), 10)
+        (rows - 12, format!("line {}", total - 6), 10)
     );
-    p.scroll_offset = total - 10 - 66_000;
-    assert_eq!(first_visible(&mut p), (66_000, "line 66000".into(), 10));
+    p.scroll_offset = rows - 10 - 132_000;
+    assert_eq!(first_visible(&mut p), (132_000, "line 66000".into(), 10));
     p.scroll_offset = usize::MAX;
     assert_eq!(first_visible(&mut p), (0, "line 0".into(), 10));
-    assert_eq!(p.scroll_offset(), total - 10);
+    assert_eq!(p.scroll_offset(), rows - 10);
 }
 
 #[test]
@@ -291,7 +292,8 @@ fn thumbnail_slots_line_up_with_rendered_rows_at_narrow_widths() {
                 "width {width}"
             );
         }
-        assert_eq!(rendered[slots[0].start_row + slots[0].height], "below");
+        assert_eq!(rendered[slots[0].start_row + slots[0].height], "");
+        assert_eq!(rendered[slots[0].start_row + slots[0].height + 1], "below");
     }
 }
 

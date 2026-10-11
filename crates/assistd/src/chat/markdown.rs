@@ -12,8 +12,8 @@ const COLUMN_SEPARATOR: &str = " │ ";
 const COLUMN_RULE_JOINT: &str = "─┼─";
 /// Narrowest a table column shrinks to before the table overflows.
 const MIN_COLUMN_WIDTH: usize = 3;
-/// Blue-gray shared by heading text and list markers.
-const BLEY: Color = Color::Rgb(100, 116, 140);
+/// Blue-gray accent shared by markdown and secondary status text.
+pub(super) const BLEY: Color = Color::Rgb(100, 116, 140);
 
 /// Leading columns every physical line inside a block carries: a list
 /// marker or quote bar on the first line, matching padding afterwards.

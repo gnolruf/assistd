@@ -37,6 +37,8 @@ const TEMPLATE_TOKEN_DEFANGS: [(&str, &str); 8] = [
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// Conservative per-image token weight; errs toward summarizing early.
 const TOKENS_PER_IMAGE: u32 = 1000;
+/// Share of the history budget, in percent, past which compaction is near.
+const COMPACTION_WARNING_PERCENT: u64 = 80;
 
 /// Message role for conversation turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +436,15 @@ impl Conversation {
         self.approx_total_tokens() > effective_budget(chat, model)
     }
 
+    /// Tokens history can still grow before compaction is near; zero once
+    /// it is.
+    pub fn compaction_warning_headroom(&self, chat: &ChatConfig, model: &ModelConfig) -> u32 {
+        let warning_at =
+            u64::from(effective_budget(chat, model)) * COMPACTION_WARNING_PERCENT / 100;
+        let headroom = warning_at.saturating_sub(u64::from(self.approx_total_tokens()));
+        u32::try_from(headroom).unwrap_or(u32::MAX)
+    }
+
     /// Drop the oldest messages after any summary until the conversation
     /// fits the budget, then the oldest tool steps of the current turn. The
     /// latest user message and the newest step always stay.
@@ -565,7 +576,7 @@ fn approx_message_tokens(m: &Message) -> u32 {
         .saturating_add(context_cost)
 }
 
-fn approx_tokens_bytes(n: usize) -> u32 {
+pub(super) fn approx_tokens_bytes(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX).saturating_add(3) / 4
 }
 
