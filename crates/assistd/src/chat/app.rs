@@ -74,7 +74,7 @@ pub(super) struct AttachLoadedPayload {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WireStream {
     /// A query dialog or a turn seen on the bus; owns the assistant message,
-    /// [`App::generating`] and the query writer.
+    /// [`App::reply_started_at`] and the query writer.
     Reply,
     /// A branch command; owns the in-flight branch op and its rows.
     Branch,
@@ -207,8 +207,8 @@ pub(super) struct App {
     pub throughput: ThroughputMeter,
     pub resources: ResourceState,
     pub model_name: String,
-    /// `true` while a reply stream is open.
-    pub generating: bool,
+    /// When the open reply stream began; `None` between replies.
+    pub reply_started_at: Option<Instant>,
     pub quitting: bool,
     pub spinner: usize,
     /// Transient status-bar message and when it was set.
@@ -322,7 +322,7 @@ impl App {
             throughput: ThroughputMeter::new(),
             resources: ResourceState::default(),
             model_name,
-            generating: false,
+            reply_started_at: None,
             quitting: false,
             spinner: 0,
             notice: None,
@@ -357,6 +357,10 @@ impl App {
 
     pub(super) fn should_quit(&self) -> bool {
         self.quitting
+    }
+
+    pub(super) fn generating(&self) -> bool {
+        self.reply_started_at.is_some()
     }
 
     pub(super) fn spinner_char(&self) -> char {

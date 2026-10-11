@@ -418,7 +418,7 @@ impl App {
         self.output.reset_scroll();
         self.output.begin_assistant();
         self.throughput.reset();
-        self.generating = true;
+        self.reply_started_at = Some(Instant::now());
     }
 
     fn finish_reply(&mut self, now: Instant) {
@@ -426,7 +426,7 @@ impl App {
         self.output.finish_thinking();
         self.output.abandon_running_tool();
         self.output.finish_assistant();
-        self.generating = false;
+        self.reply_started_at = None;
         self.active_reply = None;
         self.modal = None;
         self.last_live_seconds = None;

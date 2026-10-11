@@ -299,15 +299,26 @@ impl OutputPane {
         }
     }
 
-    /// Whole seconds the live thinking or running tool block has run, if
-    /// any.
+    /// Whether a thinking block is still streaming.
+    pub(super) fn thinking(&self) -> bool {
+        self.items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                OutputItem::Thinking(t) => Some(t.ended_at.is_none()),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    /// Whole seconds the running tool block has run, if any.
     pub(super) fn live_block_seconds(&self) -> Option<u64> {
         self.live_block()
             .map(|(_, started_at)| started_at.elapsed().as_secs())
     }
 
-    /// Rewrap the live block on the next render so its elapsed time
-    /// advances. No-op when none is live.
+    /// Rewrap the running tool block on the next render so its elapsed
+    /// time advances. No-op when none is running.
     pub(super) fn refresh_live_block(&mut self) {
         if let Some((idx, _)) = self.live_block() {
             self.wrap.invalidate(idx);
@@ -320,7 +331,6 @@ impl OutputPane {
             .enumerate()
             .rev()
             .find_map(|(idx, item)| match item {
-                OutputItem::Thinking(t) if t.ended_at.is_none() => Some((idx, t.started_at)),
                 OutputItem::Tool(ToolBlock {
                     state: ToolState::Running { started_at },
                     ..
@@ -541,9 +551,10 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
             }
             OutputItem::Tool(b) => single_span_line(format!("$ {}", b.command), tool_call_style()),
             OutputItem::Thumbnail(t) => single_span_line(format!("📎 {}", t.name), info_style()),
-            OutputItem::Thinking(t) => {
-                single_span_line(thinking_header_text(t), thinking_header_style())
-            }
+            OutputItem::Thinking(t) => match thought_for_text(t) {
+                Some(header) => single_span_line(header, thinking_header_style()),
+                None => return,
+            },
         });
         return;
     }
@@ -595,16 +606,17 @@ fn render_thinking_block(
     width: u16,
     verbose: bool,
 ) {
+    let header = thought_for_text(t);
+    let show_text = (t.expanded || verbose) && !t.text.is_empty();
+    if header.is_none() && !show_text {
+        return;
+    }
     let bar = Span::styled("▎ ", thinking_bar_style());
     let inner_w = width.saturating_sub(2).max(1);
-    push_barred(
-        out,
-        &bar,
-        &thinking_header_text(t),
-        thinking_header_style(),
-        inner_w,
-    );
-    if (t.expanded || verbose) && !t.text.is_empty() {
+    if let Some(header) = header {
+        push_barred(out, &bar, &header, thinking_header_style(), inner_w);
+    }
+    if show_text {
         for line in t.text.lines() {
             if line.is_empty() {
                 out.push(Line::from(vec![bar.clone()]));
@@ -616,17 +628,13 @@ fn render_thinking_block(
     out.push(Line::from(""));
 }
 
-fn thinking_header_text(t: &ThinkingBlock) -> String {
-    let elapsed = match t.ended_at {
-        Some(end) => end.saturating_duration_since(t.started_at),
-        None => t.started_at.elapsed(),
-    };
-    let secs = elapsed.as_secs();
-    if t.ended_at.is_some() {
-        format!("✦ Thought for {secs}s")
-    } else {
-        format!("✻ Thinking… ({secs}s)")
-    }
+/// `None` while the block is live; the status row reports it instead.
+fn thought_for_text(t: &ThinkingBlock) -> Option<String> {
+    let secs = t
+        .ended_at?
+        .saturating_duration_since(t.started_at)
+        .as_secs();
+    Some(format!("✦ Thought for {secs}s"))
 }
 
 fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, verbose: bool) {

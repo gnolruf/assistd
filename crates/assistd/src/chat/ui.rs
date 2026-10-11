@@ -376,8 +376,8 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
     render_thumbnails(frame, area, &mut app.output, &slots, viewport_top);
 
-    if app.generating {
-        render_generating_row(frame, area, app.spinner_char());
+    if let Some(started_at) = app.reply_started_at {
+        render_reply_status_row(frame, area, app, started_at);
     }
 }
 
@@ -414,14 +414,25 @@ fn render_thumbnails(
     }
 }
 
-fn render_generating_row(frame: &mut Frame<'_>, area: Rect, spinner: char) {
+/// One spinner row naming what the open reply is doing and how long it
+/// has run.
+fn render_reply_status_row(frame: &mut Frame<'_>, area: Rect, app: &App, started_at: Instant) {
     let row = Rect {
         y: area.y + area.height.saturating_sub(1),
         height: 1,
         ..area
     };
+    let activity = if app.output.thinking() {
+        "Thinking"
+    } else {
+        "Generating"
+    };
     let para = Paragraph::new(Line::from(Span::styled(
-        format!("{spinner} Generating…"),
+        format!(
+            "{} {activity}… ({}s)",
+            app.spinner_char(),
+            started_at.elapsed().as_secs()
+        ),
         Style::default()
             .fg(Color::Gray)
             .add_modifier(Modifier::DIM)
