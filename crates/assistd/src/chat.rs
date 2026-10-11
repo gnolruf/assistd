@@ -27,6 +27,7 @@ use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -47,6 +48,8 @@ mod vram;
 const CHAT_CHANNEL_CAPACITY: usize = 64;
 const RESUME_RECENCY_SECS: u64 = 10;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
+/// Frame interval of the thinking glyph; its timer only runs while thinking.
+const THINKING_GLYPH_INTERVAL: Duration = Duration::from_millis(150);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -317,6 +320,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
+    let mut glyph_tick = tokio::time::interval(THINKING_GLYPH_INTERVAL);
+    glyph_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     terminal.draw(|f| ui::render(f, &mut app))?;
 
@@ -332,6 +337,9 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
             }
             _ = tick.tick() => {
                 app.on_tick();
+            }
+            _ = glyph_tick.tick(), if app.output.thinking_live() => {
+                app.output.advance_thinking_glyph();
             }
             Ok(()) = resource_rx.changed() => {
                 let v = resource_rx.borrow_and_update().clone();

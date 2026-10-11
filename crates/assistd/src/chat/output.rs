@@ -20,6 +20,10 @@ const COLLAPSED_HEAD_LINES: usize = 10;
 const NO_RESULT_OUTPUT: &str = "[stderr] no result received";
 const NO_RESULT_EXIT_CODE: i32 = -1;
 const UNANNOUNCED_COMMAND: &str = "<?>";
+/// First code point of the 8-dot braille block; the low byte picks the dots.
+const BRAILLE_BLANK: u32 = 0x2800;
+/// Fibonacci-hashing multiplier that scatters consecutive frames.
+const FRAME_SCATTER: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// One tool invocation, shown from the moment it is called.
 #[derive(Debug, Clone)]
@@ -58,6 +62,8 @@ pub(super) struct ThinkingBlock {
     /// `None` while still receiving deltas.
     pub ended_at: Option<Instant>,
     pub expanded: bool,
+    /// Animation step of the live header's glyph.
+    pub glyph_frame: u64,
 }
 
 enum OutputItem {
@@ -273,6 +279,7 @@ impl OutputPane {
             started_at: Instant::now(),
             ended_at: None,
             expanded: false,
+            glyph_frame: 0,
         }));
     }
 
@@ -320,6 +327,36 @@ impl OutputPane {
         if let Some((idx, _)) = self.live_block() {
             self.wrap.invalidate(idx);
         }
+    }
+
+    /// Step the live thinking block's glyph and rewrap it on the next
+    /// render. No-op when no thinking block is live.
+    pub(super) fn advance_thinking_glyph(&mut self) {
+        let Some(idx) = self.live_thinking_index() else {
+            return;
+        };
+        if let Some(OutputItem::Thinking(t)) = self.items.get_mut(idx) {
+            t.glyph_frame = t.glyph_frame.wrapping_add(1);
+            self.wrap.invalidate(idx);
+        }
+    }
+
+    /// Whether the newest thinking block is still streaming.
+    pub(super) fn thinking_live(&self) -> bool {
+        self.live_thinking_index().is_some()
+    }
+
+    fn live_thinking_index(&self) -> Option<usize> {
+        let (idx, t) = self
+            .items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, item)| match item {
+                OutputItem::Thinking(t) => Some((idx, t)),
+                _ => None,
+            })?;
+        t.ended_at.is_none().then_some(idx)
     }
 
     fn live_block(&self) -> Option<(usize, Instant)> {
@@ -631,10 +668,16 @@ fn thinking_header_text(t: &ThinkingBlock) -> String {
     };
     let secs = elapsed.as_secs();
     if t.ended_at.is_some() {
-        format!("✦ Thought for {secs}s")
+        format!("Thought for {secs}s")
     } else {
-        format!("✻ Thinking… ({secs}s)")
+        format!("{} Thinking… ({secs}s)", thinking_glyph(t.glyph_frame))
     }
+}
+
+/// A scattered, never-blank braille pattern for `frame`.
+fn thinking_glyph(frame: u64) -> char {
+    let dots = (frame.wrapping_mul(FRAME_SCATTER) >> 56).max(1);
+    char::from_u32(BRAILLE_BLANK + u32::try_from(dots).unwrap_or(1)).unwrap_or('⣿')
 }
 
 fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, verbose: bool) {
