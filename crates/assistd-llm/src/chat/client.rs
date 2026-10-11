@@ -230,10 +230,10 @@ impl LlamaChatClient {
     }
 
     async fn fit_budget(&self, conv: &mut Conversation, tx: &mpsc::Sender<LlmEvent>) {
-        if conv.nears_budget(&self.chat, &self.model) {
-            send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
-        }
         if !conv.exceeds_budget(&self.chat, &self.model) {
+            if self.compaction_headroom(conv).is_none() {
+                send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
+            }
             return;
         }
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;

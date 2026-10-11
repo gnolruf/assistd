@@ -436,11 +436,6 @@ impl Conversation {
         self.approx_total_tokens() > effective_budget(chat, model)
     }
 
-    /// Whether history has used most of its budget without exceeding it.
-    pub fn nears_budget(&self, chat: &ChatConfig, model: &ModelConfig) -> bool {
-        self.compaction_warning_headroom(chat, model) == 0 && !self.exceeds_budget(chat, model)
-    }
-
     /// Tokens history can still grow before compaction is near; zero once
     /// it is.
     pub fn compaction_warning_headroom(&self, chat: &ChatConfig, model: &ModelConfig) -> u32 {

@@ -12,7 +12,7 @@ const COLUMN_SEPARATOR: &str = " │ ";
 const COLUMN_RULE_JOINT: &str = "─┼─";
 /// Narrowest a table column shrinks to before the table overflows.
 const MIN_COLUMN_WIDTH: usize = 3;
-/// Blue-gray accent for headings, list markers, and secondary status text.
+/// Blue-gray accent shared by markdown and secondary status text.
 pub(super) const BLEY: Color = Color::Rgb(100, 116, 140);
 
 /// Leading columns every physical line inside a block carries: a list
