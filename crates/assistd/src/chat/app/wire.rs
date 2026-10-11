@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{
     ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
-    WireStream,
+    ReplyPhase, ReplyProgress, WireStream,
 };
 
 impl App {
@@ -103,11 +103,15 @@ impl App {
     fn on_turn_event(&mut self, ev: Event, now: Instant) {
         match ev {
             Event::Delta { text, .. } => {
+                if !text.trim().is_empty() {
+                    self.set_reply_phase(ReplyPhase::Generating);
+                }
                 self.output.finish_thinking();
                 self.throughput.on_delta(now);
                 self.output.append_assistant(&text);
             }
             Event::ReasoningDelta { text, .. } => {
+                self.set_reply_phase(ReplyPhase::Thinking);
                 self.throughput.on_delta(now);
                 self.output.append_thinking(&text);
             }
@@ -137,13 +141,20 @@ impl App {
         }
     }
 
+    fn set_reply_phase(&mut self, phase: ReplyPhase) {
+        if let Some(reply) = &mut self.reply {
+            reply.phase = phase;
+        }
+    }
+
     fn on_tool_call(&mut self, name: String, args: &Value) {
         self.output.finish_thinking();
         let command = args
             .get("command")
             .and_then(Value::as_str)
-            .map_or(name, str::to_string);
+            .map_or_else(|| name.clone(), str::to_string);
         self.output.begin_tool_block(command);
+        self.set_reply_phase(ReplyPhase::Executing { tool: name });
     }
 
     fn on_tool_result(&mut self, result: &Value) {
@@ -418,7 +429,7 @@ impl App {
         self.output.reset_scroll();
         self.output.begin_assistant();
         self.throughput.reset();
-        self.reply_started_at = Some(Instant::now());
+        self.reply = Some(ReplyProgress::new());
     }
 
     fn finish_reply(&mut self, now: Instant) {
@@ -426,7 +437,7 @@ impl App {
         self.output.finish_thinking();
         self.output.abandon_running_tool();
         self.output.finish_assistant();
-        self.reply_started_at = None;
+        self.reply = None;
         self.active_reply = None;
         self.modal = None;
         self.last_live_seconds = None;

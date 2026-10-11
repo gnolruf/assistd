@@ -15,8 +15,10 @@ use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
 use super::app::{
-    App, BranchListEntry, BranchPickerModal, ConfirmOffer, ConfirmationModal, ScriptVisibility,
+    App, BranchListEntry, BranchPickerModal, ConfirmOffer, ConfirmationModal, ReplyPhase,
+    ReplyProgress, ScriptVisibility,
 };
+use super::markdown::BLEY;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot};
 use super::vram::{RamState, VramState};
 
@@ -376,8 +378,8 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
     render_thumbnails(frame, area, &mut app.output, &slots, viewport_top);
 
-    if let Some(started_at) = app.reply_started_at {
-        render_reply_status_row(frame, area, app, started_at);
+    if let Some(reply) = &app.reply {
+        render_generating_row(frame, area, app.spinner_char(), reply);
     }
 }
 
@@ -414,32 +416,37 @@ fn render_thumbnails(
     }
 }
 
-/// One spinner row naming what the open reply is doing and how long it
-/// has run.
-fn render_reply_status_row(frame: &mut Frame<'_>, area: Rect, app: &App, started_at: Instant) {
+/// Spinner row for an open reply with its elapsed time, plus the step it
+/// is on when that is thinking or running a tool.
+fn render_generating_row(frame: &mut Frame<'_>, area: Rect, spinner: char, reply: &ReplyProgress) {
     let row = Rect {
         y: area.y + area.height.saturating_sub(1),
         height: 1,
         ..area
     };
-    let activity = if app.output.thinking() {
-        "Thinking"
-    } else {
-        "Generating"
-    };
-    let para = Paragraph::new(Line::from(Span::styled(
+    let mut spans = vec![Span::styled(
         format!(
-            "{} {activity}… ({}s)",
-            app.spinner_char(),
-            started_at.elapsed().as_secs()
+            "{spinner} Generating… ({}s)",
+            reply.started_at.elapsed().as_secs()
         ),
         Style::default()
             .fg(Color::Gray)
             .add_modifier(Modifier::DIM)
             .add_modifier(Modifier::ITALIC),
-    )));
+    )];
+    let sub_status = match &reply.phase {
+        ReplyPhase::Generating => None,
+        ReplyPhase::Thinking => Some(" · thinking".to_string()),
+        ReplyPhase::Executing { tool } => Some(format!(" · executing {tool}")),
+    };
+    if let Some(sub_status) = sub_status {
+        spans.push(Span::styled(
+            sub_status,
+            Style::default().fg(BLEY).add_modifier(Modifier::ITALIC),
+        ));
+    }
     frame.render_widget(Clear, row);
-    frame.render_widget(para, row);
+    frame.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
 /// Indicators on the left, and a notice or key hints right-aligned when

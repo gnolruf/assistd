@@ -299,18 +299,6 @@ impl OutputPane {
         }
     }
 
-    /// Whether a thinking block is still streaming.
-    pub(super) fn thinking(&self) -> bool {
-        self.items
-            .iter()
-            .rev()
-            .find_map(|item| match item {
-                OutputItem::Thinking(t) => Some(t.ended_at.is_none()),
-                _ => None,
-            })
-            .unwrap_or(false)
-    }
-
     /// Whole seconds the running tool block has run, if any.
     pub(super) fn live_block_seconds(&self) -> Option<u64> {
         self.live_block()

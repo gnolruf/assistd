@@ -74,7 +74,7 @@ pub(super) struct AttachLoadedPayload {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WireStream {
     /// A query dialog or a turn seen on the bus; owns the assistant message,
-    /// [`App::reply_started_at`] and the query writer.
+    /// [`App::reply`] and the query writer.
     Reply,
     /// A branch command; owns the in-flight branch op and its rows.
     Branch,
@@ -201,14 +201,36 @@ impl ConfirmationModal {
     }
 }
 
+/// An open reply's start time and what it is doing now.
+pub(super) struct ReplyProgress {
+    pub started_at: Instant,
+    pub phase: ReplyPhase,
+}
+
+impl ReplyProgress {
+    pub(super) fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            phase: ReplyPhase::Generating,
+        }
+    }
+}
+
+/// The step a reply is on; each holds until the stream moves to another.
+pub(super) enum ReplyPhase {
+    Generating,
+    Thinking,
+    Executing { tool: String },
+}
+
 pub(super) struct App {
     pub output: OutputPane,
     pub input: InputLine,
     pub throughput: ThroughputMeter,
     pub resources: ResourceState,
     pub model_name: String,
-    /// When the open reply stream began; `None` between replies.
-    pub reply_started_at: Option<Instant>,
+    /// The open reply stream; `None` between replies.
+    pub reply: Option<ReplyProgress>,
     pub quitting: bool,
     pub spinner: usize,
     /// Transient status-bar message and when it was set.
@@ -322,7 +344,7 @@ impl App {
             throughput: ThroughputMeter::new(),
             resources: ResourceState::default(),
             model_name,
-            reply_started_at: None,
+            reply: None,
             quitting: false,
             spinner: 0,
             notice: None,
@@ -360,7 +382,7 @@ impl App {
     }
 
     pub(super) fn generating(&self) -> bool {
-        self.reply_started_at.is_some()
+        self.reply.is_some()
     }
 
     pub(super) fn spinner_char(&self) -> char {

@@ -118,7 +118,7 @@ fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
 #[test]
 fn branch_wire_error_releases_the_in_flight_op() {
     let (mut app, _rx) = test_app();
-    app.reply_started_at = Some(Instant::now());
+    app.reply = Some(ReplyProgress::new());
     app.in_flight_branch_op = Some(BranchOp::Fork);
     app.on_chat_event(ChatEvent::WireError {
         stream: WireStream::Branch,
@@ -131,7 +131,7 @@ fn branch_wire_error_releases_the_in_flight_op() {
 #[test]
 fn status_stream_done_does_not_end_the_reply() {
     let (mut app, _rx) = test_app();
-    app.reply_started_at = Some(Instant::now());
+    app.reply = Some(ReplyProgress::new());
     app.on_chat_event(reply(delta("hi")));
     app.on_chat_event(status(done()));
     assert!(app.generating());
