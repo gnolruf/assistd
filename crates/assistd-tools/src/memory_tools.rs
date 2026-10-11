@@ -1,6 +1,7 @@
 //! LLM-callable memory tools. `remember` and `recall` work on saved
 //! key/value facts; `reminisce` searches past dialogue.
 
+use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
@@ -48,8 +49,9 @@ impl Tool for RememberTool {
         "remember"
     }
 
-    fn description(&self) -> &'static str {
-        "Save a fact or preference about the user across conversations. \
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(
+            "Save a fact or preference about the user across conversations. \
          Call this whenever the user states a stable preference, fact about \
          themselves, or anything they say they want remembered. Examples: \
          \"I prefer vim over emacs\" -> remember(key=\"editor_preference\", \
@@ -60,7 +62,8 @@ impl Tool for RememberTool {
          user.name, editor_preference, standup.2026-09-11). \
          Calling remember with an existing key overwrites the previous \
          value. Do NOT call this for ephemeral context within a single \
-         conversation; only durable user-facts."
+         conversation; only durable user-facts.",
+        )
     }
 
     fn parameters_schema(&self) -> Value {
@@ -157,15 +160,17 @@ impl Tool for RecallTool {
         "recall"
     }
 
-    fn description(&self) -> &'static str {
-        "Retrieve previously remembered facts and preferences about the user. \
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(
+            "Retrieve previously remembered facts and preferences about the user. \
          Call this when prior context might help (e.g. answering \"what editor \
          should I use?\", personalizing a response, or whenever the user \
          references something they told you before). Embeds `query` and ranks \
          memories by semantic similarity, so paraphrased questions still match \
          the stored fact (e.g. \"what editor do I prefer?\" finds an \
          `editor_preference` memory). Returns up to 50 `<key>: <value>` lines. \
-         If no memories match, the output is `(no memories)`."
+         If no memories match, the output is `(no memories)`.",
+        )
     }
 
     fn parameters_schema(&self) -> Value {
@@ -240,8 +245,9 @@ impl Tool for ReminisceTool {
         "reminisce"
     }
 
-    fn description(&self) -> &'static str {
-        "Search *earlier* conversations — every session except the one \
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Borrowed(
+            "Search *earlier* conversations — every session except the one \
          in progress, which is already in context — for messages similar \
          in meaning to a query. Complement to `recall`: `recall` looks \
          up *saved facts* (key/value), `reminisce` searches *past \
@@ -249,7 +255,8 @@ impl Tool for ReminisceTool {
          'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \
          match a past message about \"the assistd embedding daemon in Rust\". \
-         Returns up to `limit` ranked snippets with timestamps and roles."
+         Returns up to `limit` ranked snippets with timestamps and roles.",
+        )
     }
 
     fn parameters_schema(&self) -> Value {

@@ -2,6 +2,7 @@
 //! process managed by [`McpServer`], and each tool it exposes becomes a
 //! [`Tool`] via [`adapt_client_as_tools`].
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -68,8 +69,8 @@ impl Tool for McpToolAdapter {
         &self.registry_name
     }
 
-    fn description(&self) -> &str {
-        self.tool.description.as_deref().unwrap_or_default()
+    fn description(&self) -> Cow<'_, str> {
+        self.tool.description.as_deref().unwrap_or_default().into()
     }
 
     fn parameters_schema(&self) -> Value {

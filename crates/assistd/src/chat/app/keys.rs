@@ -62,6 +62,7 @@ impl App {
                 }
             }
             KeyCode::Esc if slash_active => self.slash_dismissed = true,
+            KeyCode::Esc if self.generating() => self.interrupt_turn(),
             _ => return false,
         }
         true
@@ -97,6 +98,14 @@ impl App {
                 self.quitting = true;
             }
         }
+    }
+
+    fn interrupt_turn(&mut self) {
+        self.set_notice("interrupting…");
+        let req = Request::InterruptTurn {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_one_shot(req, WireStream::Status, "interrupt");
     }
 
     fn on_cycle_key(&mut self) {

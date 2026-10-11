@@ -499,50 +499,33 @@ fn render_rule(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(Span::styled(rule, rule_style())), area);
 }
 
-/// Voice capture, a model that is not active and staged attachments on the left, a notice or the
-/// scroll position right-aligned when it fits.
+/// Voice capture, a model that is not active, staged attachments and then a notice, the scroll
+/// position or the interrupt hint, all gray and left-aligned.
 fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let width = usize::from(area.width);
-    let mut spans = status_segments(app);
-    let used = spans_width(&spans);
-    if let Some(hint) = status_hint(app)
-        && used + display_width(&hint) < width
-    {
-        spans.push(Span::raw(" ".repeat(width - used - display_width(&hint))));
-        spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
+    let mut spans = Vec::new();
+    for text in status_segments(app).into_iter().chain(status_hint(app)) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", rule_style()));
+        }
+        spans.push(Span::styled(text, Style::default().fg(Color::Gray)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn status_segments(app: &App) -> Vec<Span<'static>> {
+fn status_segments(app: &App) -> Vec<String> {
     let mut segments = Vec::new();
-    if let Some((color, label)) = voice_indicator(app.listening) {
-        segments.push(Span::styled(
-            format!("{} {label}", app.spinner_char()),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
+    if let Some(label) = voice_indicator(app.listening) {
+        segments.push(format!("{} {label}", app.spinner_char()));
     }
     if let Some(state) = app.presence_state.filter(|s| *s != PresenceState::Active) {
-        push_status_segment(
-            &mut segments,
-            format!("model is {}", state.as_str()),
-            Color::Yellow,
-        );
+        segments.push(format!("model is {}", state.as_str()));
     }
     match app.pending_attachments.len() {
         0 => {}
-        1 => push_status_segment(&mut segments, "1 attachment".into(), Color::Cyan),
-        count => push_status_segment(&mut segments, format!("{count} attachments"), Color::Cyan),
+        1 => segments.push("1 attachment".into()),
+        count => segments.push(format!("{count} attachments")),
     }
     segments
-}
-
-/// Append `text` in `color`, separated from any earlier segment by a dot.
-fn push_status_segment(segments: &mut Vec<Span<'static>>, text: String, color: Color) {
-    if !segments.is_empty() {
-        segments.push(Span::styled(" · ", rule_style()));
-    }
-    segments.push(Span::styled(text, Style::default().fg(color)));
 }
 
 fn status_hint(app: &App) -> Option<String> {
@@ -550,13 +533,11 @@ fn status_hint(app: &App) -> Option<String> {
         Some(notice.to_string())
     } else if app.output.scroll_offset() > 0 {
         Some(format!("↑{} · PgDn to follow", app.output.scroll_offset()))
+    } else if app.generating() {
+        Some("Esc to interrupt".to_string())
     } else {
         None
     }
-}
-
-fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|span| display_width(&span.content)).sum()
 }
 
 fn rule_style() -> Style {
@@ -573,12 +554,12 @@ fn selected_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn voice_indicator(s: VoiceCaptureState) -> Option<(Color, &'static str)> {
+fn voice_indicator(s: VoiceCaptureState) -> Option<&'static str> {
     match s {
         VoiceCaptureState::Idle => None,
-        VoiceCaptureState::Recording => Some((Color::Red, "Listening…")),
-        VoiceCaptureState::Queued => Some((Color::Blue, "Processing…")),
-        VoiceCaptureState::Transcribing => Some((Color::Yellow, "transcribing…")),
+        VoiceCaptureState::Recording => Some("Listening…"),
+        VoiceCaptureState::Queued => Some("Processing…"),
+        VoiceCaptureState::Transcribing => Some("transcribing…"),
     }
 }
 

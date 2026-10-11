@@ -332,7 +332,12 @@ async fn only_well_formed_unique_tools_are_registered() {
         mcp_tool("fetch-page", "kept"),
     ]));
     let tools = adapt_allowing(client).await.unwrap();
-    let kept: Vec<(&str, &str)> = tools.iter().map(|t| (t.name(), t.description())).collect();
+    let descriptions: Vec<_> = tools.iter().map(|t| t.description()).collect();
+    let kept: Vec<(&str, &str)> = tools
+        .iter()
+        .zip(&descriptions)
+        .map(|(t, description)| (t.name(), description.as_ref()))
+        .collect();
     assert_eq!(
         kept,
         [

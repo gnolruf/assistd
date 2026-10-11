@@ -39,6 +39,8 @@ impl ToolCatalog {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use async_trait::async_trait;
     use serde_json::{Value, json};
 
@@ -53,8 +55,8 @@ mod tests {
         fn name(&self) -> &str {
             self.0
         }
-        fn description(&self) -> &'static str {
-            ""
+        fn description(&self) -> Cow<'_, str> {
+            "".into()
         }
         fn parameters_schema(&self) -> Value {
             json!({})

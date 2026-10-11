@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -933,8 +934,8 @@ impl assistd_tools::Tool for SleepTool {
     fn name(&self) -> &'static str {
         "sleep"
     }
-    fn description(&self) -> &'static str {
-        "sleep for testing"
+    fn description(&self) -> Cow<'_, str> {
+        "sleep for testing".into()
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
@@ -1005,8 +1006,8 @@ impl assistd_tools::Tool for HangingTool {
     fn name(&self) -> &'static str {
         "hang"
     }
-    fn description(&self) -> &'static str {
-        "never returns"
+    fn description(&self) -> Cow<'_, str> {
+        "never returns".into()
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
