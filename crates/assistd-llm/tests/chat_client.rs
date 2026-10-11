@@ -405,9 +405,18 @@ fn build_probed_client(cfg: &ClientCfg, probe: &Arc<ScriptedProbe>) -> LlamaChat
     LlamaChatClient::new(&cfg.chat, &cfg.model, &cfg.timeouts, None, Some(health)).unwrap()
 }
 
+async fn next_non_context_event(rx: &mut mpsc::Receiver<LlmEvent>) -> Option<LlmEvent> {
+    loop {
+        match rx.recv().await? {
+            LlmEvent::ContextSize { .. } => {}
+            ev => return Some(ev),
+        }
+    }
+}
+
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
     let mut out = Vec::new();
-    while let Some(ev) = rx.recv().await {
+    while let Some(ev) = next_non_context_event(rx).await {
         out.push(ev);
     }
     out
@@ -459,7 +468,7 @@ async fn conv_lock_is_not_held_while_streaming() {
     let (tx, mut rx) = mpsc::channel(1);
     let gen_client = Arc::clone(&client);
     let stream_task = tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
-    rx.recv().await.expect("first delta");
+    next_non_context_event(&mut rx).await.expect("first delta");
 
     timeout(
         Duration::from_secs(2),
@@ -1424,7 +1433,11 @@ async fn a_failed_stream_is_a_restart_only_when_the_supervisor_moved_on_mid_requ
         client.push_user("hi".into(), Vec::new()).await.unwrap();
         let (tx, mut rx) = mpsc::channel(32);
         let change_supervisor_mid_stream = async {
-            assert_eq!(rx.recv().await, Some(delta("partial")), "{label}");
+            assert_eq!(
+                next_non_context_event(&mut rx).await,
+                Some(delta("partial")),
+                "{label}"
+            );
             probe.set(state, pid);
         };
         let (step, ()) = tokio::join!(client.step(Vec::new(), tx), change_supervisor_mid_stream);
