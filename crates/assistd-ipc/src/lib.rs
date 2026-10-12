@@ -73,6 +73,18 @@ impl PresenceState {
     }
 }
 
+/// How a query connection's confirmation prompts are answered.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Every prompt goes to the client.
+    #[default]
+    Manual,
+    /// Prompts the policy rates routine are approved once without asking;
+    /// the rest still go to the client.
+    AcceptCommands,
+}
+
 /// A presence state the daemon can be driven to and settle in.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -319,6 +331,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         always: bool,
     },
+    /// Switch how the rest of the turn's prompts on the same connection are
+    /// answered; honored only after a `Query`.
+    SetPermissionMode { id: String, mode: PermissionMode },
     /// Probe runtime capabilities. Emits `Capabilities`, then `Done`.
     GetCapabilities { id: String },
     /// Snapshot into new branch `name` and switch to it; errors if `name` is taken or empty.
@@ -405,6 +420,7 @@ impl Request {
             | Request::MemorySemanticSearch { id, .. }
             | Request::MemoryReindex { id, .. }
             | Request::ConfirmResponse { id, .. }
+            | Request::SetPermissionMode { id, .. }
             | Request::GetCapabilities { id, .. }
             | Request::Fork { id, .. }
             | Request::Branches { id }
@@ -445,6 +461,7 @@ impl Request {
             Request::MemorySemanticSearch { .. } => "memory_semantic_search",
             Request::MemoryReindex { .. } => "memory_reindex",
             Request::ConfirmResponse { .. } => "confirm_response",
+            Request::SetPermissionMode { .. } => "set_permission_mode",
             Request::GetCapabilities { .. } => "get_capabilities",
             Request::Fork { .. } => "fork",
             Request::Branches { .. } => "branches",

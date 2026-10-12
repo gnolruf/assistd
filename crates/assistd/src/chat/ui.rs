@@ -5,6 +5,7 @@
 use std::time::Instant;
 
 use assistd_core::{PresenceState, VoiceCaptureState};
+use assistd_ipc::PermissionMode;
 use assistd_tools::ConfirmationRequest;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -35,14 +36,19 @@ const THUMBNAIL_MAX_COLS: u16 = 32;
 const RULE: &str = "─";
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
-    let [main_area, status_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let [main_area, mode_area, status_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
     let output_area = match app.confirmation.as_mut() {
         Some(prompt) => render_confirmation_dock(frame, main_area, prompt),
         None => render_input_dock(frame, main_area, app),
     };
     app.set_output_height(output_area.height);
     render_output(frame, output_area, app);
+    render_mode_line(frame, mode_area, app.permission_mode);
     render_status_line(frame, status_area, app);
 
     if let Some(picker) = &app.picker_modal {
@@ -53,7 +59,7 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
 /// Draw the slash popup, the input line and its rules at the bottom of
 /// `area`, returning the rows above them for the transcript.
 fn render_input_dock(frame: &mut Frame<'_>, area: Rect, app: &App) -> Rect {
-    let input_height = compute_input_height(area.width, frame.area().height, app.input.buffer());
+    let input_height = compute_input_height(area.width, area.height, app.input.buffer());
     let suggestions = app.slash_suggestions();
     let popup_height = saturating_u16(suggestions.len()).min(SLASH_POPUP_MAX_ROWS);
     let [
@@ -121,7 +127,7 @@ fn render_branch_picker_modal(frame: &mut Frame<'_>, area: Rect, picker: &Branch
         frame,
         centered_rect(area, width, height),
         " Resume conversation ",
-        Color::Cyan,
+        BLEY,
     );
 
     let list_height = inner.height.saturating_sub(1);
@@ -207,7 +213,7 @@ fn render_slash_popup(
                 (selected_style(), reversed_style())
             } else {
                 (
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(BLEY),
                     Style::default().fg(Color::DarkGray),
                 )
             };
@@ -345,12 +351,7 @@ fn choice_rows(prompt: &ConfirmationPrompt, width: usize) -> Vec<Line<'static>> 
                 ConfirmChoice::Deny => "No (Esc)".to_string(),
             };
             let (pointer, style) = if index == prompt.selected {
-                (
-                    "❯",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
+                ("❯", Style::default().fg(BLEY).add_modifier(Modifier::BOLD))
             } else {
                 (" ", Style::default())
             };
@@ -539,6 +540,18 @@ fn render_rule(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(Span::styled(rule, rule_style())), area);
 }
 
+fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: PermissionMode) {
+    let label = match mode {
+        PermissionMode::Manual => "manual mode on",
+        PermissionMode::AcceptCommands => "accept commands on",
+    };
+    let line = Span::styled(
+        format!("{label} (shift+tab to cycle)"),
+        Style::default().fg(BLEY),
+    );
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 /// Voice capture, a model that is not active, staged attachments and then a notice, the scroll
 /// position or the interrupt hint, all gray and left-aligned.
 fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -641,14 +654,16 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.set_cursor_position(Position::new(cx, cy));
 }
 
-fn compute_input_height(frame_width: u16, frame_height: u16, buffer: &str) -> u16 {
+/// Rows the input line needs in a dock `dock_height` rows tall, leaving
+/// room for the transcript's minimum and the two rules.
+fn compute_input_height(frame_width: u16, dock_height: u16, buffer: &str) -> u16 {
     if frame_width == 0 {
         return 1;
     }
     let prompt_w = saturating_u16(INPUT_PROMPT.chars().count());
     let chars: Vec<char> = buffer.chars().collect();
     let needed = saturating_u16(wrap_input(&chars, prompt_w, frame_width).len());
-    let cap = frame_height.saturating_sub(6).max(1);
+    let cap = dock_height.saturating_sub(5).max(1);
     needed.clamp(1, cap)
 }
 
@@ -719,6 +734,7 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use assistd_tools::Risk;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -747,6 +763,7 @@ mod tests {
                 script: script.into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
+                risk: Risk::Elevated,
             },
         )
     }

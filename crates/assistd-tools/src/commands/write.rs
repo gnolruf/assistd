@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    Approval, ConfirmationGate, ConfirmationRequest, SandboxInfo, on_blocking_pool,
+    Approval, ConfirmationGate, ConfirmationRequest, Risk, SandboxInfo, on_blocking_pool,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.
@@ -121,6 +121,7 @@ impl WriteCommand {
                 script: confirmation_script(target, content),
                 matched_pattern: "writes a file outside the scratch directory".to_string(),
                 always_allow: Vec::new(),
+                risk: Risk::Routine,
             })
             .await;
         approval != Approval::Deny

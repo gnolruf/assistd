@@ -587,8 +587,8 @@ fn peer_hung_up(stream: &UnixStream) -> bool {
     }
 }
 
-/// Route mid-stream `ConfirmResponse` frames to `router` until the client
-/// closes its write side, then close the router.
+/// Route mid-stream `ConfirmResponse` and `SetPermissionMode` frames to
+/// `router` until the client closes its write side, then close the router.
 async fn route_confirm_responses(mut reader: BufReader<OwnedReadHalf>, router: Arc<ConfirmRouter>) {
     let mut buf = String::new();
     loop {
@@ -634,11 +634,15 @@ fn route_mid_stream_line(line: &str, router: &ConfirmRouter) {
                 warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
             }
         }
+        Ok(Request::SetPermissionMode { mode, .. }) => {
+            info!(?mode, "permission mode changed");
+            router.set_mode(mode);
+        }
         Ok(other) => {
             warn!(
                 kind = other.kind(),
-                "unexpected mid-stream request; only ConfirmResponse is honored after the \
-                 initial request"
+                "unexpected mid-stream request; only ConfirmResponse and SetPermissionMode \
+                 are honored after the initial request"
             );
         }
         Err(e) => {

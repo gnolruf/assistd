@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::PresenceState;
-use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
+use assistd_ipc::{Event, IpcClient, PermissionMode, Request, VoiceCaptureState};
 use assistd_tools::{Approval, Attachment, ConfirmationRequest};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -238,6 +238,8 @@ pub(super) struct App {
     /// Ctrl+O: force-expands every thinking and tool block without
     /// touching their per-item `expanded` flags.
     pub verbose: bool,
+    /// Shift+Tab: how this chat's turns answer confirmation prompts.
+    pub permission_mode: PermissionMode,
 }
 
 /// The reply turn that owns the output pane. The daemon serialises turns,
@@ -334,6 +336,7 @@ impl App {
             last_live_seconds: None,
             session_title: None,
             verbose: false,
+            permission_mode: PermissionMode::Manual,
         }
     }
 

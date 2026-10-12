@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, iter, mem};
 
 use super::allowlist::{Allowlist, Verdict};
+use super::confirm::Risk;
 use super::shell::{self, Redirect, Script, SimpleCommand, Word};
 use placeholder::Placeholder;
 
@@ -271,6 +272,18 @@ impl Confirmation {
                 approvable: true,
             } => programs,
             _ => &[],
+        }
+    }
+
+    /// Routine when only the allowlist or the desktop-application check
+    /// objects and "always allow" could cover every program named.
+    pub fn risk(&self) -> Risk {
+        match self {
+            Self::Unlisted {
+                approvable: true, ..
+            }
+            | Self::NotDesktopApplication(_) => Risk::Routine,
+            Self::Pattern(_) | Self::Unverifiable(_) | Self::Unlisted { .. } => Risk::Elevated,
         }
     }
 }

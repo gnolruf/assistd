@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use assistd_tools::Risk;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -298,6 +299,7 @@ fn open_prompt_offering(app: &mut App, always_allow: Vec<String>) {
             script: "rm -rf /tmp/junk".into(),
             matched_pattern: "rm -rf".into(),
             always_allow,
+            risk: Risk::Elevated,
         },
     );
 }
@@ -386,6 +388,20 @@ async fn prompt_swallows_typing_without_answering() {
     assert!(app.confirmation.as_ref().is_some_and(|p| p.expanded));
     assert!(app.input.buffer().is_empty());
     assert!(writer_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn shift_tab_switches_the_open_turn_to_accept_commands_without_answering_its_prompt() {
+    let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
+    app.on_key(key(KeyCode::BackTab));
+    assert_eq!(app.permission_mode, PermissionMode::AcceptCommands);
+    assert!(app.confirmation.is_some(), "the shown prompt stays open");
+    match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
+        Ok(Some(Request::SetPermissionMode { mode, .. })) => {
+            assert_eq!(mode, PermissionMode::AcceptCommands);
+        }
+        other => panic!("expected SetPermissionMode, got {other:?}"),
+    }
 }
 
 #[tokio::test]

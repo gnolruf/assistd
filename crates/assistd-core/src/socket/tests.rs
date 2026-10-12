@@ -703,9 +703,10 @@ impl assistd_llm::LlmBackend for GatedToolBackend {
     }
 }
 
-/// Tool that runs the production IPC gate and reports its verdict.
+/// Tool that runs the production IPC gate on a request of the given risk
+/// and reports its verdict.
 #[derive(Debug)]
-struct GatedTool;
+struct GatedTool(assistd_tools::Risk);
 
 #[async_trait::async_trait]
 impl assistd_tools::Tool for GatedTool {
@@ -732,6 +733,7 @@ impl assistd_tools::Tool for GatedTool {
                 script: "rm -rf /tmp/x".into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
+                risk: self.0,
             },
         )
         .await;
@@ -744,8 +746,12 @@ impl assistd_tools::Tool for GatedTool {
 }
 
 fn gated_tool_state() -> Arc<AppState> {
+    gated_tool_state_at(assistd_tools::Risk::Elevated)
+}
+
+fn gated_tool_state_at(risk: assistd_tools::Risk) -> Arc<AppState> {
     let mut tools = assistd_tools::ToolRegistry::new();
-    tools.register(GatedTool);
+    tools.register(GatedTool(risk));
     Arc::new(AppState::new(
         Config::default(),
         Arc::new(GatedToolBackend {
@@ -793,6 +799,37 @@ async fn dialog_client_answer_reaches_gate_in_spawned_agent_turn() {
             .expect("turn must finish once the prompt is answered");
         assert_eq!(outputs, ["approved"]);
     })
+    .await;
+}
+
+#[tokio::test]
+async fn accept_commands_frame_approves_a_routine_command_without_a_prompt() {
+    with_server(
+        gated_tool_state_at(assistd_tools::Risk::Routine),
+        |path| async move {
+            let (_write, mut reader) = open_connection(
+                &path,
+                &[
+                    r#"{"type":"query","id":"q1","text":"go"}"#,
+                    r#"{"type":"set_permission_mode","id":"m","mode":"accept_commands"}"#,
+                ],
+                false,
+            )
+            .await;
+            let events =
+                tokio::time::timeout(Duration::from_secs(10), read_until_terminal(&mut reader))
+                    .await
+                    .expect("a routine command must not wait on a prompt");
+            assert!(
+                !events
+                    .iter()
+                    .any(|ev| matches!(ev, Event::ConfirmRequest { .. })),
+                "{events:?}"
+            );
+            let outputs: Vec<&str> = events.iter().filter_map(tool_output).collect();
+            assert_eq!(outputs, ["approved"]);
+        },
+    )
     .await;
 }
 

@@ -24,7 +24,7 @@ pub use approvals::{APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, 
 pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
     Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm,
+    ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm, Risk,
     inherit_confirm_router,
 };
 pub(crate) use desktop::is_desktop_application;
@@ -157,6 +157,7 @@ impl SubprocessPolicy {
             script: script.to_string(),
             matched_pattern: confirmation.to_string(),
             always_allow: offered.to_vec(),
+            risk: confirmation.risk(),
         };
         approvals::confirm_remembering(
             self.gate.as_ref(),
@@ -238,6 +239,29 @@ fn ends_word(rest: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_allowlist_and_desktop_checks_rate_routine() {
+        let unlisted = |approvable| Confirmation::Unlisted {
+            programs: vec!["git".into()],
+            approvable,
+        };
+        for (confirmation, risk) in [
+            (unlisted(true), Risk::Routine),
+            (unlisted(false), Risk::Elevated),
+            (
+                Confirmation::NotDesktopApplication("htop".into()),
+                Risk::Routine,
+            ),
+            (Confirmation::Pattern("rm -rf".into()), Risk::Elevated),
+            (
+                Confirmation::Unverifiable("`eval` runs text as code".into()),
+                Risk::Elevated,
+            ),
+        ] {
+            assert_eq!(confirmation.risk(), risk, "{confirmation:?}");
+        }
+    }
 
     #[test]
     fn denylist_returns_first_case_insensitive_substring_match() {

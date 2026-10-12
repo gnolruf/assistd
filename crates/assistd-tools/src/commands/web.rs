@@ -10,7 +10,7 @@ use url::Host;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{ApprovalGate, ConfirmationRequest};
+use crate::policy::{ApprovalGate, ConfirmationRequest, Risk};
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
@@ -101,6 +101,7 @@ impl WebCommand {
                 script: format!("web {url}"),
                 matched_pattern: format!("fetches from {host}, which is not yet approved"),
                 always_allow: vec![host.to_string()],
+                risk: Risk::Elevated,
             })
             .await
     }
