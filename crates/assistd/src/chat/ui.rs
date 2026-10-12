@@ -2,7 +2,7 @@
 //! output pane's wrap cache, the app's last viewport height, and how much
 //! of the script the confirmation modal showed.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use assistd_core::{PresenceState, VoiceCaptureState};
 use assistd_tools::ConfirmationRequest;
@@ -19,7 +19,6 @@ use super::app::{
 };
 use super::markdown::BLEY;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot};
-use super::vram::{RamState, VramState};
 
 const INPUT_PROMPT: &str = "> ";
 const SLASH_POPUP_MAX_ROWS: u16 = 6;
@@ -31,7 +30,7 @@ const CONFIRM_FRAME_ROWS: usize = 3;
 /// Rows of a thumbnail slot taken by its filename caption.
 const THUMBNAIL_CAPTION_ROWS: u16 = 1;
 const THUMBNAIL_MAX_COLS: u16 = 32;
-const SESSION_TITLE_MAX_CHARS: usize = 32;
+const RULE: &str = "─";
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let frame_area = frame.area();
@@ -39,11 +38,20 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
         compute_input_height(frame_area.width, frame_area.height, app.input.buffer());
     let suggestions = app.slash_suggestions();
     let popup_height = saturating_u16(suggestions.len()).min(SLASH_POPUP_MAX_ROWS);
-    let [output_area, popup_area, status_area, input_area] = Layout::vertical([
+    let [
+        output_area,
+        popup_area,
+        upper_rule_area,
+        input_area,
+        lower_rule_area,
+        status_area,
+    ] = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(popup_height),
         Constraint::Length(1),
         Constraint::Length(input_height),
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .areas(frame_area);
 
@@ -53,8 +61,10 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     if popup_height > 0 {
         render_slash_popup(frame, popup_area, &suggestions, app.slash_selected());
     }
-    render_status(frame, status_area, app);
+    render_rule(frame, upper_rule_area);
     render_input(frame, input_area, app);
+    render_rule(frame, lower_rule_area);
+    render_status_line(frame, status_area, app);
 
     if let Some(picker) = &app.picker_modal {
         render_branch_picker_modal(frame, frame.area(), picker);
@@ -431,7 +441,7 @@ fn render_thumbnails(
 /// conversation total, plus a warning when the daemon is about to compact history.
 fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at: Instant) {
     let elapsed = compact_duration(started_at.elapsed().as_secs());
-    let progress = match (app.throughput.tokens(), app.throughput.context_tokens()) {
+    let progress = match (app.tokens.tokens(), app.tokens.context_tokens()) {
         (0, _) => elapsed,
         (tokens, None) => format!("{elapsed} · {} tokens", compact_count(tokens)),
         (tokens, Some(total)) => format!(
@@ -484,150 +494,55 @@ fn compact_count(count: u64) -> String {
     }
 }
 
-/// Indicators on the left, and a notice or key hints right-aligned when
-/// they fit.
-fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    if area.width == 0 {
-        return;
-    }
-    let mut spans = status_indicators(app);
-    let left_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let hint = status_hint(app);
-    let hint_len = hint.chars().count();
-    let width = area.width as usize;
-    if left_len + hint_len < width {
-        spans.push(Span::styled(
-            " ".repeat(width - left_len - hint_len),
-            reversed_style(),
-        ));
-        spans.push(Span::styled(
-            hint,
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::REVERSED),
-        ));
+fn render_rule(frame: &mut Frame<'_>, area: Rect) {
+    let rule = RULE.repeat(usize::from(area.width));
+    frame.render_widget(Paragraph::new(Span::styled(rule, rule_style())), area);
+}
+
+/// Voice capture, a model that is not active, staged attachments and then a notice, the scroll
+/// position or the interrupt hint, all gray and left-aligned.
+fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let text_style = Style::default().fg(Color::Gray).add_modifier(Modifier::DIM);
+    let mut spans = Vec::new();
+    for text in status_segments(app).into_iter().chain(status_hint(app)) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", rule_style()));
+        }
+        spans.push(Span::styled(text, text_style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn status_indicators(app: &App) -> Vec<Span<'static>> {
-    let reversed = reversed_style();
-    let mut spans = Vec::new();
-    if let Some(title) = app.session_title.as_deref() {
-        spans.push(Span::styled(truncate_title(title), highlight_style()));
-        spans.push(Span::styled(" │ ", reversed));
+fn status_segments(app: &App) -> Vec<String> {
+    let mut segments = Vec::new();
+    if let Some(label) = voice_indicator(app.listening) {
+        segments.push(format!("{} {label}", app.spinner_char()));
     }
-    spans.push(Span::styled(format!("model: {}", app.model_name), reversed));
-    if let Some((color, label)) = presence_dot(app.presence_state) {
-        push_indicator(&mut spans, "●".to_string(), color, label);
+    if let Some(state) = app.presence_state.filter(|s| *s != PresenceState::Active) {
+        segments.push(format!("model is {}", state.as_str()));
     }
-    if let Some(remaining) = app.local_time_until_next_transition() {
-        spans.push(Span::styled(
-            format!(" ({})", format_countdown(remaining)),
-            reversed,
-        ));
+    match app.pending_attachments.len() {
+        0 => {}
+        1 => segments.push("1 attachment".into()),
+        count => segments.push(format!("{count} attachments")),
     }
-    if let Some((color, label)) = voice_indicator(app.listening) {
-        push_indicator(&mut spans, app.spinner_char().to_string(), color, label);
-    }
-    push_starting(&mut spans, app);
-    push_toggle(&mut spans, "vision", app.vision_enabled);
-    push_toggle(&mut spans, "verbose", app.verbose);
-    let pending_count = app.pending_attachments.len();
-    if pending_count > 0 {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("📎×{pending_count}"),
-            highlight_style(),
-        ));
-    }
-    if let Some(rate) = app.throughput.snapshot(Instant::now()).rate {
-        spans.push(Span::styled(format!(" │ {rate:.0} tok/s"), reversed));
-    }
-    spans.push(Span::styled(
-        format!(" │ RAM: {}", ram_label(&app.resources.ram)),
-        reversed,
-    ));
-    spans.push(Span::styled(
-        format!(" │ VRAM: {}", vram_label(&app.resources.vram)),
-        reversed,
-    ));
-    spans
+    segments
 }
 
-fn push_indicator(spans: &mut Vec<Span<'static>>, glyph: String, color: Color, label: &str) {
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        glyph,
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(format!(" {label}"), reversed_style()));
-}
-
-fn push_starting(spans: &mut Vec<Span<'static>>, app: &App) {
-    let starting: Vec<String> = app.startup.starting().map(ToString::to_string).collect();
-    if starting.is_empty() {
-        return;
-    }
-    spans.push(Span::styled(" │ ", reversed_style()));
-    spans.push(Span::styled(
-        format!("starting: {}", starting.join(", ")),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::REVERSED),
-    ));
-}
-
-fn push_toggle(spans: &mut Vec<Span<'static>>, name: &str, on: bool) {
-    let (state, color) = if on {
-        ("on", Color::Green)
-    } else {
-        ("off", Color::DarkGray)
-    };
-    spans.push(Span::styled(" │ ", reversed_style()));
-    spans.push(Span::styled(
-        format!("{name}: {state}"),
-        Style::default().fg(color).add_modifier(Modifier::REVERSED),
-    ));
-}
-
-fn status_hint(app: &App) -> String {
+fn status_hint(app: &App) -> Option<String> {
     if let Some(notice) = app.notice() {
-        notice.to_string()
+        Some(notice.to_string())
     } else if app.output.scroll_offset() > 0 {
-        format!(
-            "↑{} · PgDn to follow · Ctrl+C quit",
-            app.output.scroll_offset()
-        )
-    } else if app.presence_state.is_some() {
-        "Ctrl+C quit · F2 cycle presence · PgUp/Dn scroll".to_string()
+        Some(format!("↑{} · PgDn to follow", app.output.scroll_offset()))
+    } else if app.generating() {
+        Some("Esc to interrupt".to_string())
     } else {
-        "Ctrl+C quit · PgUp/Dn scroll · ↑/↓ history".to_string()
+        None
     }
 }
 
-fn vram_label(state: &VramState) -> String {
-    match state {
-        VramState::Unknown => "…".to_string(),
-        VramState::Disabled => "N/A".to_string(),
-        VramState::Ok(info) => gib_label(info.used_mb, info.total_mb),
-        VramState::Err(_) => "err".to_string(),
-    }
-}
-
-fn ram_label(state: &RamState) -> String {
-    match state {
-        RamState::Unknown => "…".to_string(),
-        RamState::Ok(info) => gib_label(info.used_mb, info.total_mb),
-    }
-}
-
-fn gib_label(used_mb: u64, total_mb: u64) -> String {
-    format!(
-        "{:.1}/{:.1} GiB",
-        used_mb as f64 / 1024.0,
-        total_mb as f64 / 1024.0,
-    )
+fn rule_style() -> Style {
+    Style::default().fg(Color::DarkGray)
 }
 
 fn reversed_style() -> Style {
@@ -640,47 +555,12 @@ fn selected_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn highlight_style() -> Style {
-    Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
-        .add_modifier(Modifier::REVERSED)
-}
-
-fn truncate_title(title: &str) -> String {
-    if title.chars().count() <= SESSION_TITLE_MAX_CHARS {
-        return title.to_string();
-    }
-    let head: String = title.chars().take(SESSION_TITLE_MAX_CHARS - 1).collect();
-    format!("{}…", head.trim_end())
-}
-
-fn presence_dot(s: Option<PresenceState>) -> Option<(Color, &'static str)> {
-    match s? {
-        PresenceState::Active => Some((Color::Green, "active")),
-        PresenceState::Drowsy => Some((Color::Yellow, "drowsy")),
-        PresenceState::Sleeping => Some((Color::Red, "sleeping")),
-        PresenceState::Waking => Some((Color::Blue, "waking")),
-    }
-}
-
-fn voice_indicator(s: VoiceCaptureState) -> Option<(Color, &'static str)> {
+fn voice_indicator(s: VoiceCaptureState) -> Option<&'static str> {
     match s {
         VoiceCaptureState::Idle => None,
-        VoiceCaptureState::Recording => Some((Color::Red, "Listening…")),
-        VoiceCaptureState::Queued => Some((Color::Blue, "Processing…")),
-        VoiceCaptureState::Transcribing => Some((Color::Yellow, "transcribing…")),
-    }
-}
-
-fn format_countdown(d: Duration) -> String {
-    let total = d.as_secs();
-    if total >= 3600 {
-        format!("{}h{:02}m", total / 3600, (total % 3600) / 60)
-    } else if total >= 60 {
-        format!("{}m", total / 60)
-    } else {
-        format!("{total}s")
+        VoiceCaptureState::Recording => Some("Listening…"),
+        VoiceCaptureState::Queued => Some("Processing…"),
+        VoiceCaptureState::Transcribing => Some("transcribing…"),
     }
 }
 
@@ -726,7 +606,7 @@ fn compute_input_height(frame_width: u16, frame_height: u16, buffer: &str) -> u1
     let prompt_w = saturating_u16(INPUT_PROMPT.chars().count());
     let chars: Vec<char> = buffer.chars().collect();
     let needed = saturating_u16(wrap_input(&chars, prompt_w, frame_width).len());
-    let cap = frame_height.saturating_sub(4).max(1);
+    let cap = frame_height.saturating_sub(6).max(1);
     needed.clamp(1, cap)
 }
 

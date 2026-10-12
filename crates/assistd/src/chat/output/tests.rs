@@ -10,6 +10,7 @@ fn line_text(line: &Line<'static>) -> String {
 
 fn item_text(it: &OutputItem) -> String {
     match it {
+        OutputItem::Banner { model_name } => format!("[banner:{model_name}]"),
         OutputItem::Text(l) => line_text(l),
         OutputItem::Assistant(text) => text.clone(),
         OutputItem::Tool(b) => format!("[tool:{}]", b.command),
@@ -288,7 +289,7 @@ fn thumbnail_slots_line_up_with_rendered_rows_at_narrow_widths() {
             assert_eq!(slot.height, usize::from(THUMBNAIL_ROWS), "width {width}");
             assert_eq!(
                 rendered[slot.start_row],
-                format!("📎 {name}"),
+                format!("attached: {name}"),
                 "width {width}"
             );
         }

@@ -19,7 +19,7 @@ impl App {
             ChatEvent::Wire { stream, event } => self.on_wire_event(stream, event),
             ChatEvent::WireError { stream, message } => {
                 self.output.push_error(&format!("[wire error] {message}"));
-                self.fail_stream(stream, Instant::now());
+                self.fail_stream(stream);
             }
             ChatEvent::Bus(event) => self.on_bus_event(event),
             ChatEvent::AttachLoaded(payload) => self.on_attach_loaded(*payload),
@@ -68,28 +68,28 @@ impl App {
             Event::Done { .. } => self.finish_stream(stream, now),
             Event::Error { message, .. } => {
                 self.output.push_error(&message);
-                self.fail_stream(stream, now);
+                self.fail_stream(stream);
             }
             turn @ (Event::Delta { .. }
             | Event::ReasoningDelta { .. }
             | Event::ToolCall { .. }
             | Event::ToolResult { .. }
             | Event::ConfirmRequest { .. }
-            | Event::Transcription { .. }) => self.on_turn_event(turn, now),
+            | Event::Transcription { .. }) => self.on_turn_event(turn),
             state @ (Event::Presence { .. }
             | Event::VoiceState { .. }
             | Event::ListenState { .. }
             | Event::VoiceOutputState { .. }
-            | Event::Readiness { .. }
             | Event::Capabilities { .. }
             | Event::Status { .. }) => self.on_state_event(state),
-            Event::ContextSize { tokens, .. } => self.throughput.on_context_size(tokens),
+            Event::ContextSize { tokens, .. } => self.tokens.on_context_size(tokens),
             session @ (Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }
             | Event::SessionTitle { .. }
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. }) => self.on_session_event(session),
             Event::SpeakingState { .. }
+            | Event::Readiness { .. }
             | Event::ChatFocus { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
@@ -102,15 +102,15 @@ impl App {
     }
 
     /// Events that build the current reply in the output pane.
-    fn on_turn_event(&mut self, ev: Event, now: Instant) {
+    fn on_turn_event(&mut self, ev: Event) {
         match ev {
             Event::Delta { text, .. } => {
                 self.output.finish_thinking();
-                self.throughput.on_delta(now);
+                self.tokens.on_delta();
                 self.output.append_assistant(&text);
             }
             Event::ReasoningDelta { text, .. } => {
-                self.throughput.on_delta(now);
+                self.tokens.on_delta();
                 self.output.append_thinking(&text);
             }
             Event::ToolCall { args, name, .. } => self.on_tool_call(name, &args),
@@ -167,21 +167,19 @@ impl App {
             .finish_tool_block(output, exit_code, duration_ms);
     }
 
-    /// Daemon and model state shown in the status bar.
+    /// Daemon and model state the chat tracks between turns.
     fn on_state_event(&mut self, ev: Event) {
         match ev {
             Event::Presence { state, .. } => self.on_presence(state),
             Event::VoiceState { state, .. } => self.listening = state,
             Event::ListenState { active, .. } => self.listen_active = active,
             Event::VoiceOutputState { enabled, .. } => self.voice_output_enabled = enabled,
-            Event::Readiness {
-                component, state, ..
-            } => self.startup.record(component, state),
             Event::Capabilities {
                 vision, model_name, ..
             } => {
                 self.vision_enabled = vision;
                 if !model_name.is_empty() {
+                    self.output.set_banner_model(&model_name);
                     self.model_name = model_name;
                 }
             }
@@ -304,16 +302,14 @@ impl App {
         self.session_title = title.map(str::to_string);
         match self.in_flight_branch_op {
             Some(BranchOp::Switch) => {
-                self.output.clear();
+                self.reset_transcript();
                 let msg = match title {
                     Some(t) => format!("[switched to conversation '{t}' on branch '{name}']"),
                     None => format!("[switched to new conversation on branch '{name}']"),
                 };
                 self.output.push_info(&msg);
             }
-            Some(BranchOp::Resume | BranchOp::New) => {
-                self.output.clear();
-            }
+            Some(BranchOp::Resume | BranchOp::New) => self.reset_transcript(),
             _ => {
                 let detail = match (parent_branch_name, fork_point_seq) {
                     (Some(p), Some(seq)) => {
@@ -424,12 +420,11 @@ impl App {
         }
         self.output.reset_scroll();
         self.output.begin_assistant();
-        self.throughput.reset();
+        self.tokens.reset();
         self.reply_started_at = Some(Instant::now());
     }
 
-    fn finish_reply(&mut self, now: Instant) {
-        self.throughput.on_done(now);
+    fn finish_reply(&mut self) {
         self.output.finish_thinking();
         self.output.abandon_running_tool();
         self.output.finish_assistant();
@@ -442,11 +437,11 @@ impl App {
 
     fn finish_reply_with_summary(&mut self, now: Instant) {
         let started_at = self.reply_started_at;
-        self.finish_reply(now);
+        self.finish_reply();
         if let Some(started_at) = started_at {
             let elapsed_secs = now.duration_since(started_at).as_secs();
             self.output
-                .push_turn_summary(turn_summary(elapsed_secs, self.throughput.tokens()));
+                .push_turn_summary(turn_summary(elapsed_secs, self.tokens.tokens()));
         }
     }
 
@@ -462,9 +457,9 @@ impl App {
         }
     }
 
-    fn fail_stream(&mut self, stream: WireStream, now: Instant) {
+    fn fail_stream(&mut self, stream: WireStream) {
         match stream {
-            WireStream::Reply => self.finish_reply(now),
+            WireStream::Reply => self.finish_reply(),
             WireStream::Branch => {
                 self.in_flight_branch_op = None;
                 self.branches_buffer.clear();

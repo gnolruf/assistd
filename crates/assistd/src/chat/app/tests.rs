@@ -11,13 +11,6 @@ use super::super::ui;
 use super::attach::longest_common_prefix;
 use super::*;
 
-fn test_sleep_cfg() -> SleepConfig {
-    let mut cfg = assistd_core::Config::default().sleep;
-    cfg.idle_to_drowsy_mins = 0;
-    cfg.idle_to_sleep_mins = 0;
-    cfg
-}
-
 fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
     test_app_at(PathBuf::from("/tmp/assistd-test-nonexistent.sock"))
 }
@@ -25,7 +18,7 @@ fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
 fn test_app_at(socket: PathBuf) -> (App, mpsc::Receiver<ChatEvent>) {
     let (tx, rx) = mpsc::channel::<ChatEvent>(16);
     let ipc = Arc::new(IpcClient::with_path(socket));
-    let app = App::new(ipc, tx, "test-model".into(), test_sleep_cfg(), true, None);
+    let app = App::new(ipc, tx, "test-model".into(), true, None);
     (app, rx)
 }
 

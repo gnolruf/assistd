@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::oneshot;
@@ -712,8 +713,8 @@ impl assistd_tools::Tool for GatedTool {
         "gated"
     }
 
-    fn description(&self) -> &'static str {
-        "asks for confirmation"
+    fn description(&self) -> Cow<'_, str> {
+        "asks for confirmation".into()
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -992,8 +993,8 @@ impl assistd_tools::Tool for SilentHangingTool {
     fn name(&self) -> &'static str {
         "hang"
     }
-    fn description(&self) -> &'static str {
-        "never returns"
+    fn description(&self) -> Cow<'_, str> {
+        "never returns".into()
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})

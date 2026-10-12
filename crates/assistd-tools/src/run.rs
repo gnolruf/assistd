@@ -1,6 +1,7 @@
 //! The LLM-facing `run` tool: parses a command line, executes the chain, and
 //! truncates only the final output, so every stage sees its whole input.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -25,7 +26,7 @@ pub struct RunTool {
     registry: Arc<CommandRegistry>,
     spec: PresentSpec,
     overflow_counter: Arc<AtomicU64>,
-    description: String,
+    scratch_dir: Option<PathBuf>,
 }
 
 impl RunTool {
@@ -36,31 +37,29 @@ impl RunTool {
         output: &ToolsOutputConfig,
         overflow_dir: PathBuf,
     ) -> Self {
-        let spec = PresentSpec::from_config(output, overflow_dir);
-        let description = build_description(&registry, &spec);
         Self {
             registry,
-            spec,
+            spec: PresentSpec::from_config(output, overflow_dir),
             overflow_counter: Arc::new(AtomicU64::new(0)),
-            description,
+            scratch_dir: None,
         }
     }
 
     /// Also tell the model that `scratch_dir` is where files shared between
     /// `bash` scripts and the other commands go.
     pub fn with_scratch_dir(mut self, scratch_dir: &Path) -> Self {
-        self.description.push_str(&format!(
-            " `bash` scripts run sandboxed with their own empty /tmp and \
-             /run, so a file that both a script and the other commands \
-             need goes under `{}`, which they share; the `Full output:` \
-             files are readable from scripts too.",
-            scratch_dir.display()
-        ));
+        self.scratch_dir = Some(scratch_dir.to_path_buf());
         self
     }
 }
 
-fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
+/// Rebuilt per request so command summaries that track runtime state, such
+/// as vision support, stay current.
+fn build_description(
+    registry: &CommandRegistry,
+    spec: &PresentSpec,
+    scratch_dir: Option<&Path>,
+) -> String {
     let mut desc = String::with_capacity(1024);
     desc.push_str(
         "Execute a shell-style command line in the daemon's working \
@@ -105,6 +104,15 @@ fn build_description(registry: &CommandRegistry, spec: &PresentSpec) -> String {
          `Available:`; the recovery clause is a concrete command or check \
          you can run next.",
     );
+    if let Some(scratch_dir) = scratch_dir {
+        desc.push_str(&format!(
+            " `bash` scripts run sandboxed with their own empty /tmp and \
+             /run, so a file that both a script and the other commands \
+             need goes under `{}`, which they share; the `Full output:` \
+             files are readable from scripts too.",
+            scratch_dir.display()
+        ));
+    }
     desc
 }
 
@@ -114,8 +122,12 @@ impl Tool for RunTool {
         "run"
     }
 
-    fn description(&self) -> &str {
-        &self.description
+    fn description(&self) -> Cow<'_, str> {
+        Cow::Owned(build_description(
+            &self.registry,
+            &self.spec,
+            self.scratch_dir.as_deref(),
+        ))
     }
 
     fn parameters_schema(&self) -> Value {

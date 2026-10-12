@@ -1,6 +1,7 @@
 //! Tool-use subsystem: [`Tool`]s the model calls with JSON, chiefly
 //! [`RunTool`], which runs shell-style chains of byte-oriented [`Command`]s.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -59,8 +60,9 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     /// Identifier the model calls this tool by.
     fn name(&self) -> &str;
 
-    /// Description the model sees when deciding whether to call the tool.
-    fn description(&self) -> &str;
+    /// Description the model sees when deciding whether to call the tool,
+    /// read each time the tool list is sent.
+    fn description(&self) -> Cow<'_, str>;
 
     /// JSON Schema for the `arguments` object [`Tool::invoke`] accepts.
     fn parameters_schema(&self) -> Value;
@@ -164,8 +166,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "noop"
         }
-        fn description(&self) -> &'static str {
-            "does nothing"
+        fn description(&self) -> Cow<'_, str> {
+            "does nothing".into()
         }
         fn parameters_schema(&self) -> Value {
             json!({"type": "object", "properties": {}, "additionalProperties": false})

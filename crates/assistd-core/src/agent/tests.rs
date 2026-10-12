@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
@@ -101,8 +102,8 @@ impl Tool for HangingTool {
     fn name(&self) -> &'static str {
         "run"
     }
-    fn description(&self) -> &'static str {
-        "never returns"
+    fn description(&self) -> Cow<'_, str> {
+        "never returns".into()
     }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object"})

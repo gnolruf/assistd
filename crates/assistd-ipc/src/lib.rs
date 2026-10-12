@@ -61,6 +61,16 @@ impl PresenceState {
             PresenceState::Sleeping | PresenceState::Waking => PresenceTarget::Active,
         }
     }
+
+    /// Lower-case name, matching the wire form.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PresenceState::Active => "active",
+            PresenceState::Drowsy => "drowsy",
+            PresenceState::Sleeping => "sleeping",
+            PresenceState::Waking => "waking",
+        }
+    }
 }
 
 /// A presence state the daemon can be driven to and settle in.

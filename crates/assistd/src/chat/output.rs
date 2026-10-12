@@ -7,6 +7,7 @@ use std::time::Instant;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui_image::protocol::StatefulProtocol;
+use textwrap::core::display_width;
 
 use super::markdown::{BLEY, render_markdown};
 
@@ -24,6 +25,15 @@ const UNANNOUNCED_COMMAND: &str = "<?>";
 const BRAILLE_BLANK: u32 = 0x2800;
 /// Fibonacci-hashing multiplier that scatters consecutive frames.
 const FRAME_SCATTER: u64 = 0x9E37_79B9_7F4A_7C15;
+const LOGO: [&str; 5] = [
+    r"               _     _      _ ",
+    r"  __ _ ___ ___(_)___| |_ __| |",
+    r" / _` / __/ __| / __| __/ _` |",
+    r"| (_| \__ \__ \ \__ \ || (_| |",
+    r" \__,_|___/___/_|___/\__\__,_|",
+];
+const BANNER_GAP: &str = "   ";
+const BANNER_RULE: &str = "─";
 
 /// One tool invocation, shown from the moment it is called.
 #[derive(Debug, Clone)]
@@ -67,6 +77,10 @@ pub(super) struct ThinkingBlock {
 }
 
 enum OutputItem {
+    /// Logo, version and model name; drawn unwrapped.
+    Banner {
+        model_name: String,
+    },
     Text(Line<'static>),
     /// One assistant reply as raw markdown, rendered on wrap.
     Assistant(String),
@@ -106,18 +120,29 @@ impl OutputPane {
         self.verbose = verbose;
     }
 
+    /// Append the logo, version and `model_name`.
+    pub(super) fn push_banner(&mut self, model_name: String) {
+        self.items.push(OutputItem::Banner { model_name });
+    }
+
+    /// Rename the model on every banner.
+    pub(super) fn set_banner_model(&mut self, name: &str) {
+        for (idx, item) in self.items.iter_mut().enumerate() {
+            if let OutputItem::Banner { model_name } = item {
+                name.clone_into(model_name);
+                self.wrap.invalidate(idx);
+            }
+        }
+    }
+
     /// Append a `> `-prefixed prompt line.
     pub(super) fn push_user(&mut self, text: &str) {
         self.push_separated(format!("> {text}"), user_style());
     }
 
-    /// [`Self::push_user`] with a trailing 📎 tag naming the attachments.
+    /// [`Self::push_user`] with a trailing tag naming the attachments.
     pub(super) fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
-        let tag = if names.len() == 1 {
-            format!("  📎 {}", names[0])
-        } else {
-            format!("  📎 {} ({} files)", names.join(", "), names.len())
-        };
+        let tag = format!("  [attached: {}]", names.join(", "));
         self.push_separated(format!("> {text}{tag}"), user_style());
     }
 
@@ -243,9 +268,10 @@ impl OutputPane {
             let expanded = match item {
                 OutputItem::Tool(b) => &mut b.expanded,
                 OutputItem::Thinking(t) => &mut t.expanded,
-                OutputItem::Text(_) | OutputItem::Assistant(_) | OutputItem::Thumbnail(_) => {
-                    continue;
-                }
+                OutputItem::Banner { .. }
+                | OutputItem::Text(_)
+                | OutputItem::Assistant(_)
+                | OutputItem::Thumbnail(_) => continue,
             };
             *expanded = !*expanded;
             self.wrap.invalidate(idx);
@@ -571,13 +597,19 @@ impl WrapCache {
 fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verbose: bool) {
     if width == 0 {
         out.push(match item {
+            OutputItem::Banner { model_name } => {
+                render_banner(out, model_name, width);
+                return;
+            }
             OutputItem::Text(l) => l.clone(),
             OutputItem::Assistant(text) => {
                 out.extend(text.lines().map(|line| Line::from(line.to_string())));
                 return;
             }
             OutputItem::Tool(b) => single_span_line(format!("$ {}", b.command), tool_call_style()),
-            OutputItem::Thumbnail(t) => single_span_line(format!("📎 {}", t.name), info_style()),
+            OutputItem::Thumbnail(t) => {
+                single_span_line(format!("attached: {}", t.name), info_style())
+            }
             OutputItem::Thinking(t) => {
                 single_span_line(thinking_header_text(t), thinking_header_style())
             }
@@ -585,6 +617,7 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
         return;
     }
     match item {
+        OutputItem::Banner { model_name } => render_banner(out, model_name, width),
         OutputItem::Text(line) => wrap_line_into(out, line, width),
         OutputItem::Assistant(text) => out.extend(render_markdown(text, usize::from(width))),
         OutputItem::Tool(b) => render_tool_block(out, b, width, verbose),
@@ -593,8 +626,34 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
     }
 }
 
+/// The logo with the version and model right-aligned beside it, closed by a
+/// rule spanning `width`.
+fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16) {
+    let version = format!("v{}", assistd_core::version());
+    let beside_logo = [None, None, None, Some(version.as_str()), Some(model_name)];
+    out.push(Line::from(""));
+    out.extend(LOGO.into_iter().zip(beside_logo).map(|(row, value)| {
+        let mut spans = vec![Span::styled(row, logo_style())];
+        spans.extend(value.map(|value| {
+            let gap = usize::from(width)
+                .saturating_sub(display_width(row) + display_width(value))
+                .max(BANNER_GAP.len());
+            Span::styled(format!("{}{value}", " ".repeat(gap)), banner_value_style())
+        }));
+        Line::from(spans)
+    }));
+    out.push(single_span_line(
+        BANNER_RULE.repeat(usize::from(width)),
+        banner_value_style(),
+    ));
+    out.push(Line::from(""));
+}
+
 fn render_thumbnail_placeholder(out: &mut Vec<Line<'static>>, t: &ThumbnailItem) {
-    out.push(single_span_line(format!("📎 {}", t.name), info_style()));
+    out.push(single_span_line(
+        format!("attached: {}", t.name),
+        info_style(),
+    ));
     for _ in 1..THUMBNAIL_ROWS {
         out.push(Line::from(""));
     }
@@ -834,6 +893,14 @@ fn body_line_count(output: &str) -> usize {
 
 fn single_span_line(text: String, style: Style) -> Line<'static> {
     Line::from(Span::styled(text, style))
+}
+
+fn logo_style() -> Style {
+    Style::default().fg(BLEY).add_modifier(Modifier::BOLD)
+}
+
+fn banner_value_style() -> Style {
+    Style::default().fg(Color::DarkGray)
 }
 
 fn user_style() -> Style {

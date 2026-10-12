@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assistd_core::{PresenceState, SleepConfig};
-use assistd_ipc::{Event, IpcClient, Request, StartupReadiness, VoiceCaptureState};
+use assistd_core::PresenceState;
+use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
 use assistd_tools::{Attachment, ConfirmationRequest};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -15,8 +15,7 @@ use tokio::task::JoinSet;
 
 use super::input::InputLine;
 use super::output::OutputPane;
-use super::throughput::ThroughputMeter;
-use super::vram::ResourceState;
+use super::tokens::TokenCounter;
 
 mod attach;
 mod commands;
@@ -204,8 +203,7 @@ impl ConfirmationModal {
 pub(super) struct App {
     pub output: OutputPane,
     pub input: InputLine,
-    pub throughput: ThroughputMeter,
-    pub resources: ResourceState,
+    pub tokens: TokenCounter,
     pub model_name: String,
     /// When the open reply stream began; `None` between replies.
     pub reply_started_at: Option<Instant>,
@@ -213,21 +211,16 @@ pub(super) struct App {
     pub compacting_soon: bool,
     pub quitting: bool,
     pub spinner: usize,
-    /// Transient status-bar message and when it was set.
+    /// Transient message shown in the input rule and when it was set.
     pub notice: Option<(String, Instant)>,
     pub last_output_height: u16,
     /// `None` until the first poll response.
     pub presence_state: Option<PresenceState>,
-    pub sleep_cfg: SleepConfig,
-    /// Local approximation of the daemon's idle clock.
-    last_activity_at: Instant,
     pub vision_enabled: bool,
     pub modal: Option<ConfirmationModal>,
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     pub listen_active: bool,
-    /// How far the daemon's background subsystems have started.
-    pub startup: StartupReadiness,
     pub pending_attachments: Vec<PendingAttachment>,
     picker: Option<Picker>,
     ipc: Arc<IpcClient>,
@@ -314,15 +307,15 @@ impl App {
         ipc: Arc<IpcClient>,
         chat_tx: mpsc::Sender<ChatEvent>,
         model_name: String,
-        sleep_cfg: SleepConfig,
         vision_enabled: bool,
         picker: Option<Picker>,
     ) -> Self {
+        let mut output = OutputPane::new();
+        output.push_banner(model_name.clone());
         Self {
-            output: OutputPane::new(),
+            output,
             input: InputLine::new(),
-            throughput: ThroughputMeter::new(),
-            resources: ResourceState::default(),
+            tokens: TokenCounter::new(),
             model_name,
             reply_started_at: None,
             compacting_soon: false,
@@ -331,14 +324,11 @@ impl App {
             notice: None,
             last_output_height: 10,
             presence_state: None,
-            sleep_cfg,
-            last_activity_at: Instant::now(),
             vision_enabled,
             modal: None,
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             listen_active: false,
-            startup: StartupReadiness::default(),
             pending_attachments: Vec::new(),
             picker,
             ipc,
@@ -378,28 +368,6 @@ impl App {
         self.last_output_height = h;
     }
 
-    pub(super) fn on_resources(&mut self, v: ResourceState) {
-        self.resources = v;
-    }
-
-    /// Local approximation of the daemon's countdown to its next idle
-    /// transition. `None` when no transition is pending.
-    pub(super) fn local_time_until_next_transition(&self) -> Option<Duration> {
-        let state = self.presence_state?;
-        let next_threshold_secs = match state {
-            PresenceState::Active => self.sleep_cfg.idle_to_drowsy_mins * 60,
-            PresenceState::Drowsy => {
-                (self.sleep_cfg.idle_to_drowsy_mins + self.sleep_cfg.idle_to_sleep_mins) * 60
-            }
-            PresenceState::Sleeping | PresenceState::Waking => return None,
-        };
-        if next_threshold_secs == 0 {
-            return None;
-        }
-        let threshold = Duration::from_secs(next_threshold_secs);
-        Some(threshold.saturating_sub(self.last_activity_at.elapsed()))
-    }
-
     pub(super) fn on_tick(&mut self) {
         while let Some(res) = self.tasks.try_join_next() {
             if let Err(e) = res {
@@ -421,8 +389,9 @@ impl App {
         }
     }
 
-    fn touch_activity(&mut self) {
-        self.last_activity_at = Instant::now();
+    fn reset_transcript(&mut self) {
+        self.output.clear();
+        self.output.push_banner(self.model_name.clone());
     }
 
     fn set_notice(&mut self, text: &str) {

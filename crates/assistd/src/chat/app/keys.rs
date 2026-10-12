@@ -25,20 +25,13 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 impl App {
     pub(crate) fn on_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
-            MouseEventKind::ScrollUp => {
-                self.touch_activity();
-                self.output.scroll_lines_up(MOUSE_WHEEL_STEP);
-            }
-            MouseEventKind::ScrollDown => {
-                self.touch_activity();
-                self.output.scroll_lines_down(MOUSE_WHEEL_STEP);
-            }
+            MouseEventKind::ScrollUp => self.output.scroll_lines_up(MOUSE_WHEEL_STEP),
+            MouseEventKind::ScrollDown => self.output.scroll_lines_down(MOUSE_WHEEL_STEP),
             _ => {}
         }
     }
 
     pub(crate) fn on_key(&mut self, ev: KeyEvent) {
-        self.touch_activity();
         if self.modal.is_some() {
             self.on_confirmation_key(ev);
         } else if self.picker_modal.is_some() {
@@ -69,6 +62,7 @@ impl App {
                 }
             }
             KeyCode::Esc if slash_active => self.slash_dismissed = true,
+            KeyCode::Esc if self.generating() => self.interrupt_turn(),
             _ => return false,
         }
         true
@@ -106,11 +100,22 @@ impl App {
         }
     }
 
+    fn interrupt_turn(&mut self) {
+        self.set_notice("interrupting…");
+        let req = Request::InterruptTurn {
+            id: Uuid::new_v4().to_string(),
+        };
+        self.spawn_one_shot(req, WireStream::Status, "interrupt");
+    }
+
     fn on_cycle_key(&mut self) {
         let target = self
             .presence_state
             .map_or(PresenceTarget::Active, PresenceState::next);
-        self.set_notice(&format!("cycling → {}", presence_label(target.into())));
+        self.set_notice(&format!(
+            "cycling → {}",
+            PresenceState::from(target).as_str()
+        ));
         let req = Request::Cycle {
             id: Uuid::new_v4().to_string(),
         };
@@ -151,14 +156,5 @@ impl App {
         }
         let count = self.slash_suggestions().len();
         self.slash_selected = self.slash_selected.min(count.saturating_sub(1));
-    }
-}
-
-fn presence_label(s: PresenceState) -> &'static str {
-    match s {
-        PresenceState::Active => "active",
-        PresenceState::Drowsy => "drowsy",
-        PresenceState::Sleeping => "sleeping",
-        PresenceState::Waking => "waking",
     }
 }

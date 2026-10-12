@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use assistd_ipc::{Event, PresenceState, PresenceTarget, Request};
+use assistd_ipc::{Event, PresenceTarget, Request};
 use uuid::Uuid;
 
 use super::run_one_shot;
@@ -40,18 +40,9 @@ pub(crate) async fn run(action: PresenceAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
         if let Event::Presence { state, .. } = event {
-            writeln!(io::stdout(), "presence: {}", presence_label(*state))?;
+            writeln!(io::stdout(), "presence: {}", state.as_str())?;
         }
         Ok(())
     })
     .await
-}
-
-fn presence_label(state: PresenceState) -> &'static str {
-    match state {
-        PresenceState::Active => "active",
-        PresenceState::Drowsy => "drowsy",
-        PresenceState::Sleeping => "sleeping",
-        PresenceState::Waking => "waking",
-    }
 }
