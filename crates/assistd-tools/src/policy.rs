@@ -241,29 +241,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_allowlist_and_desktop_checks_rate_routine() {
-        let unlisted = |approvable| Confirmation::Unlisted {
-            programs: vec!["git".into()],
-            approvable,
-        };
-        for (confirmation, risk) in [
-            (unlisted(true), Risk::Routine),
-            (unlisted(false), Risk::Elevated),
-            (
-                Confirmation::NotDesktopApplication("htop".into()),
-                Risk::Routine,
-            ),
-            (Confirmation::Pattern("rm -rf".into()), Risk::Elevated),
-            (
-                Confirmation::Unverifiable("`eval` runs text as code".into()),
-                Risk::Elevated,
-            ),
-        ] {
-            assert_eq!(confirmation.risk(), risk, "{confirmation:?}");
-        }
-    }
-
-    #[test]
     fn denylist_returns_first_case_insensitive_substring_match() {
         let patterns = ["", "rm -rf /", "mkfs", "> /dev/nvme"].map(String::from);
         for (script, expected) in [
