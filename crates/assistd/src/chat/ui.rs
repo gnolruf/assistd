@@ -545,10 +545,7 @@ fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: PermissionMode) {
         PermissionMode::Manual => "manual mode on",
         PermissionMode::AcceptCommands => "accept commands on",
     };
-    let line = Span::styled(
-        format!("{label} (shift+tab to cycle)"),
-        Style::default().fg(BLEY),
-    );
+    let line = Span::styled(format!("{label} (shift+tab)"), Style::default().fg(BLEY));
     frame.render_widget(Paragraph::new(line), area);
 }
 
