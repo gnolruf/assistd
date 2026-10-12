@@ -507,7 +507,10 @@ fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
         if !spans.is_empty() {
             spans.push(Span::styled(" · ", rule_style()));
         }
-        spans.push(Span::styled(text, Style::default().fg(Color::Gray)));
+        spans.push(Span::styled(
+            text,
+            Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+        ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -7,6 +7,7 @@ use std::time::Instant;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui_image::protocol::StatefulProtocol;
+use textwrap::core::display_width;
 
 use super::markdown::{BLEY, render_markdown};
 
@@ -625,8 +626,8 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
     }
 }
 
-/// The logo with the version and model beside it, closed by a rule
-/// spanning `width`.
+/// The logo with the version and model right-aligned beside it, closed by a
+/// rule spanning `width`.
 fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16) {
     let version = format!("v{}", assistd_core::version());
     let beside_logo = [
@@ -639,9 +640,12 @@ fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16) {
     out.push(Line::from(""));
     out.extend(LOGO.into_iter().zip(beside_logo).map(|(row, value)| {
         let mut spans = vec![Span::styled(row, logo_style())];
-        spans.extend(
-            value.map(|value| Span::styled(format!("{BANNER_GAP}{value}"), banner_value_style())),
-        );
+        spans.extend(value.map(|value| {
+            let gap = usize::from(width)
+                .saturating_sub(display_width(row) + display_width(&value))
+                .max(BANNER_GAP.len());
+            Span::styled(format!("{}{value}", " ".repeat(gap)), banner_value_style())
+        }));
         Line::from(spans)
     }));
     out.push(single_span_line(
