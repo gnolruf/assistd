@@ -210,7 +210,7 @@ async fn open_destructive_inside_bash_c_argument_consults_gate() {
         gate.prompts(),
         [(
             "wm".to_string(),
-            "bash -c rm -rf /tmp/whatever".to_string(),
+            "bash -c 'rm -rf /tmp/whatever'".to_string(),
             "rm -rf".to_string()
         )]
     );

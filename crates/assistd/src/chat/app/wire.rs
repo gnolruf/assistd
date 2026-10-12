@@ -122,7 +122,7 @@ impl App {
                 matched_pattern,
                 always_allow,
                 ..
-            } => self.open_confirmation_modal(
+            } => self.open_confirmation(
                 confirm_id,
                 ConfirmationRequest {
                     tool,
@@ -431,7 +431,7 @@ impl App {
         self.reply_started_at = None;
         self.compacting_soon = false;
         self.active_reply = None;
-        self.modal = None;
+        self.confirmation = None;
         self.last_live_seconds = None;
     }
 

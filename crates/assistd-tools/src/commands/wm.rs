@@ -1,6 +1,7 @@
 //! `wm <subcommand> [args]`: drive the active [`WindowManager`] from the
 //! LLM's `run` tool.
 
+use std::borrow::Cow;
 use std::fmt::{Display, Write};
 use std::io;
 use std::sync::Arc;
@@ -93,7 +94,7 @@ impl WmCommand {
         if self.launched.is_full() {
             return too_many_launched();
         }
-        let argv = args.join(" ");
+        let argv = shell_quoted(args);
         let review = self.policy.review_argv(args.to_vec()).await;
         let confirmation = launch_confirmation(app, review).await;
         if let Err(denied) = self
@@ -279,6 +280,27 @@ async fn launch_confirmation(app: &str, review: Option<Confirmation>) -> Option<
             Some(Confirmation::NotDesktopApplication(app.to_string()))
         }
         _ => review,
+    }
+}
+
+/// `args` as a shell would need them typed, so one argument holding spaces
+/// or newlines cannot pass for several.
+fn shell_quoted(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| quote_word(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_word(word: &str) -> Cow<'_, str> {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
+    if plain {
+        Cow::Borrowed(word)
+    } else {
+        Cow::Owned(format!("'{}'", word.replace('\'', r"'\''")))
     }
 }
 

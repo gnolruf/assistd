@@ -13,7 +13,7 @@ pub(crate) mod memory;
 pub(crate) mod presence;
 pub(crate) mod ptt;
 pub(crate) mod query;
-mod terminal_text;
+pub(crate) mod terminal_text;
 pub(crate) mod voice_ctl;
 
 /// Send `req` and hand every event, terminal ones included, to

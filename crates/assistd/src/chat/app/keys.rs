@@ -32,7 +32,7 @@ impl App {
     }
 
     pub(crate) fn on_key(&mut self, ev: KeyEvent) {
-        if self.modal.is_some() {
+        if self.confirmation.is_some() {
             self.on_confirmation_key(ev);
         } else if self.picker_modal.is_some() {
             self.on_picker_key(ev);
@@ -94,7 +94,7 @@ impl App {
             InputAction::None => {}
             InputAction::Submit(text) => self.submit_typed(text),
             InputAction::Quit => {
-                self.resolve_modal(Approval::Deny);
+                self.resolve_confirmation(Approval::Deny);
                 self.quitting = true;
             }
         }
