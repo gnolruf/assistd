@@ -502,15 +502,13 @@ fn render_rule(frame: &mut Frame<'_>, area: Rect) {
 /// Voice capture, a model that is not active, staged attachments and then a notice, the scroll
 /// position or the interrupt hint, all gray and left-aligned.
 fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let text_style = Style::default().fg(Color::Gray).add_modifier(Modifier::DIM);
     let mut spans = Vec::new();
     for text in status_segments(app).into_iter().chain(status_hint(app)) {
         if !spans.is_empty() {
             spans.push(Span::styled(" · ", rule_style()));
         }
-        spans.push(Span::styled(
-            text,
-            Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
-        ));
+        spans.push(Span::styled(text, text_style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

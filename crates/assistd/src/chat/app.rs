@@ -389,7 +389,6 @@ impl App {
         }
     }
 
-    /// Clear the transcript down to a fresh banner.
     fn reset_transcript(&mut self) {
         self.output.clear();
         self.output.push_banner(self.model_name.clone());

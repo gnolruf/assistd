@@ -630,19 +630,13 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
 /// rule spanning `width`.
 fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16) {
     let version = format!("v{}", assistd_core::version());
-    let beside_logo = [
-        None,
-        None,
-        None,
-        Some(version),
-        Some(model_name.to_string()),
-    ];
+    let beside_logo = [None, None, None, Some(version.as_str()), Some(model_name)];
     out.push(Line::from(""));
     out.extend(LOGO.into_iter().zip(beside_logo).map(|(row, value)| {
         let mut spans = vec![Span::styled(row, logo_style())];
         spans.extend(value.map(|value| {
             let gap = usize::from(width)
-                .saturating_sub(display_width(row) + display_width(&value))
+                .saturating_sub(display_width(row) + display_width(value))
                 .max(BANNER_GAP.len());
             Span::styled(format!("{}{value}", " ".repeat(gap)), banner_value_style())
         }));
