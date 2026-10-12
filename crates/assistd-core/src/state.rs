@@ -235,6 +235,14 @@ impl AppState {
                 )
                 .await;
             }
+            Request::SetPermissionMode { id, .. } => {
+                send_error(
+                    &tx,
+                    id,
+                    "SetPermissionMode is honored only on a Query connection".to_string(),
+                )
+                .await;
+            }
         }
         Ok(())
     }

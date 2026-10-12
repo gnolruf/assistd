@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use assistd_tools::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
-use assistd_tools::{ApprovalGate, ConfirmationRequest, Tool, ToolError, VisionGate};
+use assistd_tools::{ApprovalGate, ConfirmationRequest, Risk, Tool, ToolError, VisionGate};
 use async_trait::async_trait;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
@@ -58,6 +58,7 @@ impl McpToolAdapter {
                 script: format!("{args:#}"),
                 matched_pattern: "calls an MCP tool that is not yet approved".to_string(),
                 always_allow: vec![name.to_string()],
+                risk: Risk::Elevated,
             })
             .await
     }

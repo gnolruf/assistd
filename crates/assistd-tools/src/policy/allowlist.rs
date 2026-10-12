@@ -152,9 +152,12 @@ impl Allowlist {
         }
     }
 
+    /// A configured path, the exact file an approved name is pinned to, or
+    /// an unmodifiable absolute path whose file name is configured.
     fn path_verdict(&self, word: &str) -> Verdict {
         let path = Path::new(word);
         let allowed = self.configured.contains(word)
+            || self.approved.read().values().any(|pinned| pinned == path)
             || (path.is_absolute()
                 && path
                     .file_name()

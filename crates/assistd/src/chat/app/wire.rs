@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity};
-use assistd_tools::ConfirmationRequest;
+use assistd_tools::{ConfirmationRequest, Risk};
 use serde_json::Value;
 
 use super::super::ui::turn_summary;
@@ -122,13 +122,14 @@ impl App {
                 matched_pattern,
                 always_allow,
                 ..
-            } => self.open_confirmation_modal(
+            } => self.open_confirmation(
                 confirm_id,
                 ConfirmationRequest {
                     tool,
                     script,
                     matched_pattern,
                     always_allow,
+                    risk: Risk::Elevated,
                 },
             ),
             Event::Transcription { text, .. } if text.trim().is_empty() => {
@@ -431,7 +432,7 @@ impl App {
         self.reply_started_at = None;
         self.compacting_soon = false;
         self.active_reply = None;
-        self.modal = None;
+        self.confirmation = None;
         self.last_live_seconds = None;
     }
 

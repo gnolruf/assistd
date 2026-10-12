@@ -226,6 +226,15 @@ beside the config in `approved_hosts.toml` or `approved_mcp_tools.toml`.
 Clients that cannot answer prompts (`assistd query`, push-to-talk) deny
 them, so there only approved hosts, tools and programs run.
 
+A query connection starts in manual mode, where every prompt goes to the
+client. A client can switch it to accept-commands mode with a mid-stream
+`Request::SetPermissionMode` (the TUI's Shift+Tab). That mode approves once,
+without asking, the prompts rated `Risk::Routine`: programs off the allowlist
+that "always allow" could cover, `wm open` of an app with no desktop entry,
+and `write` outside the scratch directory. Destructive patterns, scripts no
+check can fully see, protected paths, new web hosts and unapproved MCP tools
+still ask; the denylist still refuses, and nothing is added to the allowlist.
+
 ### Memory (`assistd-memory` + `assistd-embed`)
 
 One SQLite database (default: `~/.local/share/assistd/memory.db`)

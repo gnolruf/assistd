@@ -24,7 +24,7 @@ pub use approvals::{APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, 
 pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
     Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm,
+    ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm, Risk,
     inherit_confirm_router,
 };
 pub(crate) use desktop::is_desktop_application;
@@ -157,6 +157,7 @@ impl SubprocessPolicy {
             script: script.to_string(),
             matched_pattern: confirmation.to_string(),
             always_allow: offered.to_vec(),
+            risk: confirmation.risk(),
         };
         approvals::confirm_remembering(
             self.gate.as_ref(),

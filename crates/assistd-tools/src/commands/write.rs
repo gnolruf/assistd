@@ -2,6 +2,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_utils::path::tilde_remainder;
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use rustix::fs::{FileType, Mode, OFlags};
 use rustix::io::Errno;
@@ -10,11 +11,13 @@ use tokio::io::AsyncWriteExt;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    Approval, ConfirmationGate, ConfirmationRequest, SandboxInfo, on_blocking_pool,
+    Approval, ConfirmationGate, ConfirmationRequest, Risk, SandboxInfo, on_blocking_pool,
 };
 
-/// Characters of the content shown when asking to confirm a write.
-const PREVIEW_MAX_CHARS: usize = 4096;
+/// Leading characters of the content shown when asking to confirm a write.
+const PREVIEW_HEAD_CHARS: usize = 8192;
+/// Trailing characters shown after the head when the content is longer.
+const PREVIEW_TAIL_CHARS: usize = 2048;
 
 /// Writable-path allowlist of canonical prefixes, non-empty by construction.
 #[derive(Debug, Clone)]
@@ -118,6 +121,7 @@ impl WriteCommand {
                 script: confirmation_script(target, content),
                 matched_pattern: "writes a file outside the scratch directory".to_string(),
                 always_allow: Vec::new(),
+                risk: Risk::Routine,
             })
             .await;
         approval != Approval::Deny
@@ -416,13 +420,24 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
     )
 }
 
+/// The target and size, then the content: whole when short, otherwise its
+/// head and tail around a count of the characters left out.
 fn confirmation_script(target: &Path, content: &[u8]) -> String {
     let text = String::from_utf8_lossy(content);
-    let mut script = format!("write {}\n", target.display());
-    script.extend(text.chars().take(PREVIEW_MAX_CHARS));
-    if text.chars().nth(PREVIEW_MAX_CHARS).is_some() {
-        script.push_str("\n…");
+    let mut script = format!(
+        "write {} ({})\n",
+        target.display(),
+        human_size(u64::try_from(content.len()).unwrap_or(u64::MAX))
+    );
+    let total = text.chars().count();
+    if total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS {
+        script.push_str(&text);
+        return script;
     }
+    let omitted = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
+    script.extend(text.chars().take(PREVIEW_HEAD_CHARS));
+    script.push_str(&format!("\n… {omitted} characters not shown …\n"));
+    script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
     script
 }
 

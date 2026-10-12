@@ -912,7 +912,7 @@ fn error_style() -> Style {
 }
 
 fn info_style() -> Style {
-    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
+    Style::default().fg(BLEY).add_modifier(Modifier::DIM)
 }
 
 fn summary_style() -> Style {
@@ -924,7 +924,7 @@ fn compaction_style() -> Style {
 }
 
 fn tool_call_style() -> Style {
-    Style::default().fg(Color::Blue).add_modifier(Modifier::DIM)
+    Style::default().fg(BLEY).add_modifier(Modifier::BOLD)
 }
 
 fn tool_result_style() -> Style {
@@ -938,9 +938,7 @@ fn tool_running_style() -> Style {
 }
 
 fn header_style() -> Style {
-    Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(BLEY).add_modifier(Modifier::BOLD)
 }
 
 fn thinking_bar_style() -> Style {

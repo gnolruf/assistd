@@ -10,9 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
-use tracing::warn;
+use tracing::{info, warn};
 
-use assistd_ipc::Event;
+use assistd_ipc::{Event, PermissionMode};
 
 /// Cap on confirmation prompts in flight on one connection.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
@@ -31,6 +31,19 @@ pub struct ConfirmationRequest {
     pub matched_pattern: String,
     /// Programs an [`Approval::Always`] answer adds to the allowlist.
     pub always_allow: Vec<String>,
+    /// Whether [`PermissionMode::AcceptCommands`] may approve it unasked.
+    pub risk: Risk,
+}
+
+/// How much a [`ConfirmationRequest`] could do beyond what its tool shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Risk {
+    /// Runs or writes something that is merely not pre-approved: a program
+    /// off the allowlist, a file in the write allowlist, a launched app.
+    Routine,
+    /// A destructive pattern, a script no check can fully see, a protected
+    /// path, a new web host or an unapproved MCP tool.
+    Elevated,
 }
 
 /// The user's answer to a [`ConfirmationRequest`].
@@ -115,23 +128,45 @@ pub struct ConfirmRouter {
     wire: mpsc::Sender<Event>,
     timeout: Duration,
     pending: Mutex<PendingPrompts>,
+    mode: Mutex<PermissionMode>,
 }
 
 impl ConfirmRouter {
-    /// A router whose prompts are denied after `timeout` without an answer.
+    /// A router in [`PermissionMode::Manual`] whose prompts are denied after
+    /// `timeout` without an answer.
     pub fn new(request_id: String, wire: mpsc::Sender<Event>, timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
             request_id,
             wire,
             timeout,
             pending: Mutex::new(PendingPrompts::default()),
+            mode: Mutex::new(PermissionMode::Manual),
         })
     }
 
-    /// Forward the prompt to the client and await the answer. Every
-    /// failure mode is [`Approval::Deny`]; cancelling the future forgets
-    /// the prompt.
+    /// Answer later asks under `mode`; prompts already shown stay open.
+    pub fn set_mode(&self, mode: PermissionMode) {
+        *self.mode.lock() = mode;
+    }
+
+    /// In [`PermissionMode::AcceptCommands`], approve a [`Risk::Routine`]
+    /// request once; otherwise forward the prompt to the client and await
+    /// the answer. Every failure mode is [`Approval::Deny`]; cancelling the
+    /// future forgets the prompt.
     pub async fn ask(&self, req: ConfirmationRequest) -> Approval {
+        if req.risk == Risk::Routine && *self.mode.lock() == PermissionMode::AcceptCommands {
+            info!(
+                target: "assistd::policy",
+                tool = %req.tool,
+                pattern = %req.matched_pattern,
+                "accept-commands mode approved command"
+            );
+            return Approval::Once;
+        }
+        self.ask_client(req).await
+    }
+
+    async fn ask_client(&self, req: ConfirmationRequest) -> Approval {
         let Some((prompt, answer)) = self.register(&req) else {
             return Approval::Deny;
         };
@@ -318,6 +353,7 @@ mod tests {
             script: "rm -rf foo".into(),
             matched_pattern: "rm -rf".into(),
             always_allow: Vec::new(),
+            risk: Risk::Elevated,
         }
     }
 
@@ -325,6 +361,31 @@ mod tests {
         match rx.recv().await.expect("prompt on the wire") {
             Event::ConfirmRequest { confirm_id, .. } => confirm_id,
             other => panic!("expected ConfirmRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_commands_skips_only_routine_prompts() {
+        for (mode, risk, prompted) in [
+            (PermissionMode::Manual, Risk::Routine, true),
+            (PermissionMode::AcceptCommands, Risk::Elevated, true),
+            (PermissionMode::AcceptCommands, Risk::Routine, false),
+        ] {
+            let (tx, mut rx) = mpsc::channel(4);
+            let router = ConfirmRouter::new("r".into(), tx, Duration::from_millis(50));
+            router.set_mode(mode);
+            let approval = router.ask(ConfirmationRequest {
+                risk,
+                ..sample_request()
+            });
+            let approval = approval.await;
+            assert_eq!(rx.try_recv().is_ok(), prompted, "{mode:?} {risk:?}");
+            let expected = if prompted {
+                Approval::Deny
+            } else {
+                Approval::Once
+            };
+            assert_eq!(approval, expected, "{mode:?} {risk:?}");
         }
     }
 

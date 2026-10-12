@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::PresenceState;
-use assistd_ipc::{Event, IpcClient, Request, VoiceCaptureState};
-use assistd_tools::{Attachment, ConfirmationRequest};
+use assistd_ipc::{Event, IpcClient, PermissionMode, Request, VoiceCaptureState};
+use assistd_tools::{Approval, Attachment, ConfirmationRequest};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -26,10 +26,6 @@ mod wire;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
-/// Approving keys are ignored until the confirmation modal has been open
-/// this long with no keystroke, so typing aimed at the input line cannot
-/// approve unseen.
-const CONFIRM_ARM_DELAY: Duration = Duration::from_millis(750);
 
 /// Query ids remembered so their copies on the broadcast bus are ignored;
 /// the daemon runs one turn at a time, so a few suffice.
@@ -130,73 +126,66 @@ impl std::fmt::Debug for ChatEvent {
     }
 }
 
-/// How much of the script the last drawn frame of the confirmation modal
-/// showed.
+/// An answer the confirmation prompt offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ScriptVisibility {
-    /// Some rows were collapsed into a count, or no frame has been drawn.
-    Partial,
-    Whole,
+pub(super) enum ConfirmChoice {
+    Once,
+    /// Run, and stop asking for the request's `always_allow` names.
+    Always,
+    Deny,
 }
 
-/// The answers the confirmation modal accepts right now. Denial is
-/// accepted in every state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ConfirmOffer {
-    /// The arm delay has not passed since the last unaccepted key.
-    Arming,
-    /// The last frame did not show the whole script, so only denial counts.
-    ScriptHidden,
-    /// Approval is accepted; `always` when an always-allow rule is offered.
-    Approval { always: bool },
+impl ConfirmChoice {
+    fn approval(self) -> Approval {
+        match self {
+            Self::Once => Approval::Once,
+            Self::Always => Approval::Always,
+            Self::Deny => Approval::Deny,
+        }
+    }
 }
 
-/// Command-confirmation prompt shown while the daemon's agent loop blocks
-/// on the answer.
-pub(super) struct ConfirmationModal {
+/// Command-confirmation prompt drawn in the chat panel while the daemon's
+/// agent loop blocks on the answer.
+pub(super) struct ConfirmationPrompt {
     pub request: ConfirmationRequest,
     /// Echoed back in the `Request::ConfirmResponse`.
     confirm_id: String,
-    /// When the modal opened, last received a key it did not accept, or
-    /// last changed how much of the script it showed.
-    quiet_since: Instant,
-    script_visibility: ScriptVisibility,
+    /// Index into [`choices`](Self::choices).
+    pub selected: usize,
+    /// Every script row is shown, scrolled to `scroll`, rather than the
+    /// first few.
+    pub expanded: bool,
+    /// First script row shown while expanded; each frame clamps it.
+    pub scroll: usize,
 }
 
-impl ConfirmationModal {
+impl ConfirmationPrompt {
+    /// A prompt with "No" selected, so a stray Enter denies.
     pub(super) fn new(confirm_id: String, request: ConfirmationRequest) -> Self {
-        Self {
+        let mut prompt = Self {
             request,
             confirm_id,
-            quiet_since: Instant::now(),
-            script_visibility: ScriptVisibility::Partial,
-        }
+            selected: 0,
+            expanded: false,
+            scroll: 0,
+        };
+        prompt.selected = prompt.choices().len() - 1;
+        prompt
     }
 
-    /// Approval needs the whole script on screen and the arm delay passed.
-    pub(super) fn offer(&self) -> ConfirmOffer {
-        if self.script_visibility == ScriptVisibility::Partial {
-            ConfirmOffer::ScriptHidden
-        } else if self.quiet_since.elapsed() < CONFIRM_ARM_DELAY {
-            ConfirmOffer::Arming
+    /// The answers on offer, in display order; "always" only when the
+    /// request names something to stop asking about.
+    pub(super) fn choices(&self) -> &'static [ConfirmChoice] {
+        if self.request.always_allow.is_empty() {
+            &[ConfirmChoice::Once, ConfirmChoice::Deny]
         } else {
-            ConfirmOffer::Approval {
-                always: !self.request.always_allow.is_empty(),
-            }
+            &[
+                ConfirmChoice::Once,
+                ConfirmChoice::Always,
+                ConfirmChoice::Deny,
+            ]
         }
-    }
-
-    /// Record how much of the script a frame just drew; a change restarts
-    /// the arm delay so newly revealed rows get read before approval.
-    pub(super) fn record_script_visibility(&mut self, visibility: ScriptVisibility) {
-        if self.script_visibility != visibility {
-            self.script_visibility = visibility;
-            self.restart_arm_delay();
-        }
-    }
-
-    fn restart_arm_delay(&mut self) {
-        self.quiet_since = Instant::now();
     }
 }
 
@@ -217,7 +206,7 @@ pub(super) struct App {
     /// `None` until the first poll response.
     pub presence_state: Option<PresenceState>,
     pub vision_enabled: bool,
-    pub modal: Option<ConfirmationModal>,
+    pub confirmation: Option<ConfirmationPrompt>,
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     pub listen_active: bool,
@@ -241,7 +230,7 @@ pub(super) struct App {
     /// Set by Esc on the slash popup; cleared when the buffer leaves its
     /// `/` prefix.
     slash_dismissed: bool,
-    /// `/resume` picker; `modal` takes precedence while both are open.
+    /// `/resume` picker; `confirmation` takes precedence while both are open.
     pub picker_modal: Option<BranchPickerModal>,
     /// Throttles rewraps for a live block's timer to 1 Hz.
     last_live_seconds: Option<u64>,
@@ -249,6 +238,8 @@ pub(super) struct App {
     /// Ctrl+O: force-expands every thinking and tool block without
     /// touching their per-item `expanded` flags.
     pub verbose: bool,
+    /// Shift+Tab: how this chat's turns answer confirmation prompts.
+    pub permission_mode: PermissionMode,
 }
 
 /// The reply turn that owns the output pane. The daemon serialises turns,
@@ -325,7 +316,7 @@ impl App {
             last_output_height: 10,
             presence_state: None,
             vision_enabled,
-            modal: None,
+            confirmation: None,
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             listen_active: false,
@@ -345,6 +336,7 @@ impl App {
             last_live_seconds: None,
             session_title: None,
             verbose: false,
+            permission_mode: PermissionMode::Manual,
         }
     }
 

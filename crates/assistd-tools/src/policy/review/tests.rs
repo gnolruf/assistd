@@ -816,6 +816,32 @@ fn an_allowed_shell_runs_whatever_it_is_handed() {
     );
 }
 
+#[tokio::test]
+async fn an_approved_program_also_runs_by_the_exact_path_it_was_pinned_to() {
+    let machine = Programs::new(&["btop"], &[]);
+    let pinned = machine.path().join("btop");
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let impostor = elsewhere.path().join("btop");
+    std::fs::write(&impostor, b"#!/bin/sh\n").expect("write program");
+    std::fs::set_permissions(&impostor, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let by_path = |path: &Path| format!("{} --version", path.display());
+
+    assert_eq!(
+        machine.review(&by_path(&pinned), &[]),
+        unlisted(&[&pinned.display().to_string()], false)
+    );
+    machine
+        .allowlist
+        .approve(&["btop".to_string()])
+        .await
+        .expect("unsaved approval");
+    assert_eq!(machine.review(&by_path(&pinned), &[]), None);
+    assert_eq!(
+        machine.review(&by_path(&impostor), &[]),
+        unlisted(&[&impostor.display().to_string()], false)
+    );
+}
+
 #[test]
 fn always_allow_is_offered_only_for_unlisted_named_programs() {
     let machine = dev_machine();

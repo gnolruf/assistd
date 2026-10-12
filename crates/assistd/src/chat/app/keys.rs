@@ -2,7 +2,7 @@
 //! and the F2 presence cycle.
 
 use assistd_core::{PresenceState, PresenceTarget};
-use assistd_ipc::Request;
+use assistd_ipc::{PermissionMode, Request};
 use assistd_tools::Approval;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use uuid::Uuid;
@@ -32,7 +32,9 @@ impl App {
     }
 
     pub(crate) fn on_key(&mut self, ev: KeyEvent) {
-        if self.modal.is_some() {
+        if ev.code == KeyCode::BackTab {
+            self.toggle_permission_mode();
+        } else if self.confirmation.is_some() {
             self.on_confirmation_key(ev);
         } else if self.picker_modal.is_some() {
             self.on_picker_key(ev);
@@ -87,6 +89,30 @@ impl App {
         });
     }
 
+    /// Flip between manual and accept-commands mode, applying it to the open
+    /// turn too.
+    fn toggle_permission_mode(&mut self) {
+        self.permission_mode = match self.permission_mode {
+            PermissionMode::Manual => PermissionMode::AcceptCommands,
+            PermissionMode::AcceptCommands => PermissionMode::Manual,
+        };
+        if let Some(writer) = self
+            .active_reply
+            .as_ref()
+            .and_then(|reply| reply.writer.clone())
+        {
+            let req = Request::SetPermissionMode {
+                id: Uuid::new_v4().to_string(),
+                mode: self.permission_mode,
+            };
+            self.tasks.spawn(async move {
+                if let Err(e) = writer.send(req).await {
+                    tracing::warn!("SetPermissionMode send failed: {e}");
+                }
+            });
+        }
+    }
+
     fn on_input_key(&mut self, ev: KeyEvent) {
         let action = self.input.on_key(ev);
         self.refresh_slash_state();
@@ -94,7 +120,7 @@ impl App {
             InputAction::None => {}
             InputAction::Submit(text) => self.submit_typed(text),
             InputAction::Quit => {
-                self.resolve_modal(Approval::Deny);
+                self.resolve_confirmation(Approval::Deny);
                 self.quitting = true;
             }
         }
