@@ -1,6 +1,6 @@
-//! Renders a completed chain's [`CommandOutput`] for the model: refuses
-//! binary, truncates long stdout and stderr (spilling each to a file),
-//! and ends with an `[exit:N | Mms]` footer.
+//! The per-result output budget every tool shares, and the rendering of a
+//! completed chain's [`CommandOutput`] within it: binary refused, long
+//! stdout and stderr cut (each spilled to a file), an `[exit:N | Mms]` footer.
 
 use std::cmp::Reverse;
 use std::fs::{DirEntry, Metadata, OpenOptions};
@@ -16,6 +16,11 @@ use assistd_utils::text::human_size;
 
 use crate::command::{Attachment, CommandOutput};
 use crate::commands::cat::sniff_binary;
+
+/// Stem of the spill files `run` writes.
+const SPILL_STEM: &str = "cmd";
+
+const STDERR_PREFIX: &str = "[stderr] ";
 
 /// Spill files hold raw tool output, so only the daemon's user may read them.
 const OVERFLOW_FILE_MODE: u32 = 0o600;
@@ -50,24 +55,20 @@ impl PresentSpec {
 
 impl Default for PresentSpec {
     fn default() -> Self {
-        Self {
-            max_lines: 200,
-            max_bytes: 50 * 1024,
-            overflow_dir: default_tools_overflow_dir(),
-        }
+        Self::from_config(&ToolsOutputConfig::default(), default_tools_overflow_dir())
     }
 }
 
-/// Cuts text bodies to one [`PresentSpec`], spilling each overflow in
-/// full as `<stem>-<n>.txt` in the spec's overflow directory.
+/// The output budget of one tool result. Text past it is cut to a head and
+/// a truncation notice that together fit the budget, with the whole text
+/// spilled as `<stem>-<n>.txt`, numbered across every stem.
 #[derive(Debug)]
-pub struct TextTruncator {
+pub struct OutputCap {
     spec: PresentSpec,
-    stem: String,
     counter: AtomicU64,
 }
 
-/// A text body after [`TextTruncator::truncate`].
+/// A text body after [`OutputCap::cap`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TruncatedText {
     /// The visible head, followed by the truncation notice when cut.
@@ -77,20 +78,22 @@ pub struct TruncatedText {
     pub overflow_file: Option<PathBuf>,
 }
 
-impl TextTruncator {
-    /// A truncator whose spill files are named after `stem`.
-    pub fn new(spec: PresentSpec, stem: impl Into<String>) -> Self {
+impl OutputCap {
+    pub fn new(spec: PresentSpec) -> Self {
         Self {
             spec,
-            stem: stem.into(),
             counter: AtomicU64::new(0),
         }
     }
 
+    pub fn spec(&self) -> &PresentSpec {
+        &self.spec
+    }
+
     /// Return `text` unchanged when it fits, else its head plus the
-    /// truncation notice, with the whole body spilled to a file.
-    pub fn truncate(&self, text: String) -> TruncatedText {
-        let cut = cut_stream(text, "output", &self.spec, &self.stem, &self.counter);
+    /// truncation notice, with the whole body spilled under `stem`.
+    pub fn cap(&self, stem: &str, text: String) -> TruncatedText {
+        let cut = self.cut_stream(text, "output", self.budget(), stem);
         let truncated = cut.truncated();
         let mut text = cut.head;
         if let Some(notice) = &cut.notice {
@@ -101,6 +104,106 @@ impl TextTruncator {
             text,
             truncated,
             overflow_file: cut.overflow_file,
+        }
+    }
+
+    fn budget(&self) -> Budget {
+        Budget {
+            bytes: self.spec.max_bytes,
+            lines: self.spec.max_lines,
+        }
+    }
+
+    /// Cut `text` so its head, line terminator, and notice together fit
+    /// `budget`, spilling it in full when it overflows; `label` names the
+    /// stream in the notice.
+    fn cut_stream(&self, text: String, label: &str, budget: Budget, stem: &str) -> StreamCut {
+        let full = Budget::of(&text);
+        if full.fits_in(budget) {
+            return StreamCut {
+                head: text,
+                notice: None,
+                overflow_file: None,
+            };
+        }
+        let overflow_file = self.spill(text.as_bytes(), stem);
+        let notice = truncation_notice(label, full.lines, full.bytes, overflow_file.as_deref());
+        let room = budget
+            .saturating_sub(Budget::of(&notice))
+            .saturating_sub(Budget::NEWLINE);
+        let head = truncate_lines_bytes(&text, room.lines, room.bytes);
+        StreamCut {
+            head,
+            notice: Some(notice),
+            overflow_file,
+        }
+    }
+
+    /// Write `raw` to the next numbered `<stem>-<n>.txt` spill file,
+    /// logging and returning `None` when that fails.
+    fn spill(&self, raw: &[u8], stem: &str) -> Option<PathBuf> {
+        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let file_name = format!("{stem}-{n}.txt");
+        match write_overflow_file(raw, &self.spec.overflow_dir.join(&file_name)) {
+            Ok(path) => {
+                prune_spills(
+                    &self.spec.overflow_dir,
+                    &path,
+                    raw.len() as u64,
+                    SpillLimits::DEFAULT,
+                );
+                Some(path)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to write overflow file {file_name} to {}: {e}",
+                    self.spec.overflow_dir.display()
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Bytes and lines of text, or the room left for them.
+#[derive(Debug, Clone, Copy)]
+struct Budget {
+    bytes: usize,
+    lines: usize,
+}
+
+impl Budget {
+    const NEWLINE: Self = Self { bytes: 1, lines: 0 };
+
+    fn of(text: &str) -> Self {
+        Self {
+            bytes: text.len(),
+            lines: count_lines(text),
+        }
+    }
+
+    fn fits_in(self, budget: Self) -> bool {
+        self.bytes <= budget.bytes && self.lines <= budget.lines
+    }
+
+    fn saturating_sub(self, used: Self) -> Self {
+        Self {
+            bytes: self.bytes.saturating_sub(used.bytes),
+            lines: self.lines.saturating_sub(used.lines),
+        }
+    }
+
+    fn max(self, other: Self) -> Self {
+        Self {
+            bytes: self.bytes.max(other.bytes),
+            lines: self.lines.max(other.lines),
+        }
+    }
+
+    fn half(self) -> Self {
+        Self {
+            bytes: self.bytes / 2,
+            lines: self.lines / 2,
         }
     }
 }
@@ -178,26 +281,37 @@ pub struct PresentResult {
     pub attachments: Vec<Attachment>,
 }
 
-/// Render a completed chain's output. `counter` numbers the spill files;
-/// `duration` is the elapsed time shown in the footer.
-pub fn present(
-    out: CommandOutput,
-    spec: &PresentSpec,
-    counter: &AtomicU64,
-    duration: Duration,
-) -> PresentResult {
+/// Render a completed chain's output within `cap`, footer included;
+/// `duration` is the elapsed time shown in the footer. Stderr keeps at least
+/// half the budget when both streams overflow it.
+pub fn present(out: CommandOutput, cap: &OutputCap, duration: Duration) -> PresentResult {
     let duration_ms = duration.as_millis();
     let footer = format!("[exit:{} | {}ms]", out.exit_code, duration_ms);
+    let room = cap.budget().saturating_sub(Budget::of(&footer));
     let stderr_text = String::from_utf8_lossy(&out.stderr).into_owned();
 
     if let Some(label) = binary_label(&out.stdout) {
-        let stderr = cut_stream(stderr_text, "stderr", spec, "cmd", counter);
-        return present_binary(out, &label, &footer, stderr, duration_ms);
+        let notice = format!(
+            "[error] binary output ({}, {}). Use: cat -b <path>\n",
+            label,
+            human_size(out.stdout.len() as u64),
+        );
+        let stderr = cut_stderr(cap, stderr_text, room.saturating_sub(Budget::of(&notice)));
+        return present_binary(out, notice, &footer, stderr, duration_ms);
     }
 
     let stdout_text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stdout = cut_stream(stdout_text, "output", spec, "cmd", counter);
-    let stderr = cut_stream(stderr_text, "stderr", spec, "cmd", counter);
+    let stderr_room = room
+        .saturating_sub(Budget::of(&stdout_text))
+        .saturating_sub(Budget::NEWLINE)
+        .max(room.half());
+    let stderr = cut_stderr(cap, stderr_text, stderr_room);
+    let mut stderr_block = String::new();
+    push_stderr(&mut stderr_block, &stderr);
+    let stdout_room = room
+        .saturating_sub(Budget::of(&stderr_block))
+        .saturating_sub(Budget::NEWLINE);
+    let stdout = cap.cut_stream(stdout_text, "output", stdout_room, SPILL_STEM);
 
     let mut body = String::new();
     body.push_str(&stdout.head);
@@ -205,7 +319,7 @@ pub fn present(
     if let Some(notice) = &stdout.notice {
         body.push_str(notice);
     }
-    push_stderr(&mut body, &stderr);
+    body.push_str(&stderr_block);
     body.push_str(&footer);
 
     PresentResult {
@@ -221,18 +335,24 @@ pub fn present(
     }
 }
 
+/// Cut stderr to `room`, less the `[stderr] ` prefix and closing newline
+/// [`push_stderr`] adds.
+fn cut_stderr(cap: &OutputCap, text: String, room: Budget) -> StreamCut {
+    let frame = Budget {
+        bytes: STDERR_PREFIX.len() + 1,
+        lines: 0,
+    };
+    cap.cut_stream(text, "stderr", room.saturating_sub(frame), SPILL_STEM)
+}
+
 fn present_binary(
     out: CommandOutput,
-    label: &str,
+    notice: String,
     footer: &str,
     stderr: StreamCut,
     duration_ms: u128,
 ) -> PresentResult {
-    let mut body = format!(
-        "[error] binary output ({}, {}). Use: cat -b <path>\n",
-        label,
-        human_size(out.stdout.len() as u64),
-    );
+    let mut body = notice;
     push_stderr(&mut body, &stderr);
     body.push_str(footer);
     PresentResult {
@@ -245,64 +365,6 @@ fn present_binary(
         overflow_file: None,
         stderr_overflow_file: stderr.overflow_file,
         attachments: out.attachments,
-    }
-}
-
-/// Cut `text` to `spec`, spilling it in full as `<stem>-<n>.txt` and
-/// building a notice that names the stream `label` when it overflows.
-fn cut_stream(
-    text: String,
-    label: &str,
-    spec: &PresentSpec,
-    stem: &str,
-    counter: &AtomicU64,
-) -> StreamCut {
-    let line_count = count_lines(&text);
-    let byte_count = text.len();
-    if line_count <= spec.max_lines && byte_count <= spec.max_bytes {
-        return StreamCut {
-            head: text,
-            notice: None,
-            overflow_file: None,
-        };
-    }
-    let overflow_file = spill_overflow(text.as_bytes(), spec, stem, counter);
-    let head = truncate_lines_bytes(&text, spec.max_lines, spec.max_bytes);
-    let notice = truncation_notice(label, line_count, byte_count, overflow_file.as_deref());
-    StreamCut {
-        head,
-        notice: Some(notice),
-        overflow_file,
-    }
-}
-
-/// Write the full body to the next numbered `<stem>-<n>.txt` spill
-/// file, logging and returning `None` when that fails.
-fn spill_overflow(
-    raw: &[u8],
-    spec: &PresentSpec,
-    stem: &str,
-    counter: &AtomicU64,
-) -> Option<PathBuf> {
-    let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-    let file_name = format!("{stem}-{n}.txt");
-    match write_overflow_file(raw, &spec.overflow_dir.join(&file_name)) {
-        Ok(path) => {
-            prune_spills(
-                &spec.overflow_dir,
-                &path,
-                raw.len() as u64,
-                SpillLimits::DEFAULT,
-            );
-            Some(path)
-        }
-        Err(e) => {
-            tracing::warn!(
-                "failed to write overflow file {file_name} to {}: {e}",
-                spec.overflow_dir.display()
-            );
-            None
-        }
     }
 }
 
@@ -330,7 +392,7 @@ fn push_stderr(body: &mut String, stderr: &StreamCut) {
     if stderr.head.is_empty() && stderr.notice.is_none() {
         return;
     }
-    body.push_str("[stderr] ");
+    body.push_str(STDERR_PREFIX);
     body.push_str(stderr.head.trim_end_matches('\n'));
     body.push('\n');
     if let Some(notice) = &stderr.notice {

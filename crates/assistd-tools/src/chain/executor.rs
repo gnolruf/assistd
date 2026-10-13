@@ -71,9 +71,11 @@ impl AttachmentBudget {
 
 /// Execute a parsed chain. Pipes run sequentially, the left stage's stdout
 /// becoming the right's stdin; every stage's stderr lines are kept, prefixed
-/// `[name]\t`. Short-circuited stages emit nothing. A pipe stage whose stdout
-/// passes [`OUTPUT_MAX`] stops the pipe; any other output past it, including
-/// the streams `;`, `&&` and `||` join, is replaced by an overflow failure.
+/// `[name]\t`, and a pipe exits with its rightmost nonzero stage status, as
+/// under `pipefail`. Short-circuited stages emit nothing. A pipe stage whose
+/// stdout passes [`OUTPUT_MAX`] stops the pipe; any other output past it,
+/// including the streams `;`, `&&` and `||` join, is replaced by an overflow
+/// failure.
 /// Attachments past the chain's first four, or past 32 MiB in all, are
 /// dropped as their stage finishes, and that stage exits 141.
 pub async fn execute(
@@ -112,7 +114,7 @@ fn execute_uncapped<'a>(
                     return left.then(pipe_overflow());
                 }
                 let right = execute_uncapped(r, registry, Some(piped), budget).await;
-                left.then(right)
+                pipe_join(left, right)
             }
             Chain::And(l, r) | Chain::Or(l, r) => {
                 let left = execute_within(l, registry, stdin.clone(), budget).await;
@@ -130,6 +132,16 @@ fn execute_uncapped<'a>(
             }
         }
     })
+}
+
+/// `left` then `right`, keeping `left`'s failure when `right` succeeds.
+fn pipe_join(left: CommandOutput, right: CommandOutput) -> CommandOutput {
+    let left_exit = left.exit_code;
+    let mut joined = left.then(right);
+    if joined.exit_code == 0 {
+        joined.exit_code = left_exit;
+    }
+    joined
 }
 
 fn within_output_max(mut out: CommandOutput) -> CommandOutput {

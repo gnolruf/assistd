@@ -17,9 +17,9 @@ use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
-    ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps, Protected,
-    RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest,
-    SharedDirs, ToolSandbox, VisionGate,
+    ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps, OutputCap,
+    PresentSpec, Protected, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError,
+    SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -298,8 +298,12 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         window_manager,
     });
 
-    let run = RunTool::new(Arc::new(commands), &config.tools.output, overflow_dir);
-    let mut tools = ToolRegistry::new();
+    let output_cap = Arc::new(OutputCap::new(PresentSpec::from_config(
+        &config.tools.output,
+        overflow_dir,
+    )));
+    let run = RunTool::new(Arc::new(commands), Arc::clone(&output_cap));
+    let mut tools = ToolRegistry::with_output_cap(output_cap);
     tools.register(match &scratch_dir {
         Some(scratch_dir) => run.with_scratch_dir(scratch_dir),
         None => run,

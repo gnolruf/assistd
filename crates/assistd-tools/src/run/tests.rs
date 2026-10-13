@@ -67,12 +67,19 @@ fn full_registry() -> Arc<CommandRegistry> {
     Arc::new(crate::commands::test_registry())
 }
 
+fn cap_in(dir: &Path) -> Arc<OutputCap> {
+    Arc::new(OutputCap::new(PresentSpec {
+        overflow_dir: dir.to_path_buf(),
+        ..PresentSpec::default()
+    }))
+}
+
 fn tool_with_dir(dir: &Path) -> RunTool {
-    RunTool::new(registry(), &ToolsOutputConfig::default(), dir.to_path_buf())
+    RunTool::new(registry(), cap_in(dir))
 }
 
 fn tool_with(dir: &Path, reg: Arc<CommandRegistry>) -> RunTool {
-    RunTool::new(reg, &ToolsOutputConfig::default(), dir.to_path_buf())
+    RunTool::new(reg, cap_in(dir))
 }
 
 fn fresh_dir() -> TempDir {

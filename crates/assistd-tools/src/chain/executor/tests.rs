@@ -265,6 +265,14 @@ async fn combined_precedence_and_short_circuit() {
 }
 
 #[tokio::test]
+async fn a_pipe_exits_with_its_rightmost_failing_stage() {
+    let mut r = registry_of([Stub::new("fail2", b"x\n", 2), Stub::new("fail3", b"y\n", 3)]);
+    r.register(LineCount);
+    assert_eq!(run_line("fail2 | lc", &r).await.exit_code, 2);
+    assert_eq!(run_line("fail2 | fail3 | lc", &r).await.exit_code, 3);
+}
+
+#[tokio::test]
 async fn stderr_lines_are_each_prefixed_with_the_command_name() {
     let r = registry_of([Stub {
         name: "boom",

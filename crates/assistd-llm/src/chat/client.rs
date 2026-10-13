@@ -33,9 +33,11 @@ use crate::{
 const ERROR_BODY_CAP: usize = 1024;
 const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce a concise \
     summary of the following dialogue that preserves all factual claims, user requests, \
-    assistant conclusions, and what each tool call found. If the dialogue ends partway through \
-    a request, say what has been established so far and what remains open. Write in past \
-    tense. Do not add commentary.";
+    assistant conclusions, and what each tool call found. Keep every approach that failed and \
+    why, and every limit discovered in the tools or environment (commands or flags that are \
+    unsupported, hosts that are unreachable, paths that do not exist), so none is retried. If \
+    the dialogue ends partway through a request, say what has been established so far and \
+    what remains open. Write in past tense. Do not add commentary.";
 
 /// HTTP streaming chat client backed by a locally-managed llama-server.
 ///

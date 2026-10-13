@@ -91,7 +91,7 @@ pub const DEFAULT_GPU_POLL_SECS: NonZeroU64 = nz64(5);
 pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: NonZeroU64 = nz64(2048);
 
 pub const DEFAULT_TOOLS_MAX_LINES: NonZeroU32 = nz32(200);
-pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(50);
+pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(4);
 pub const DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS: u32 = 30;
 pub const DEFAULT_BASH_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 

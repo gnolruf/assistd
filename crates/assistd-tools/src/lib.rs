@@ -35,6 +35,7 @@ pub use policy::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};
+pub use presentation::{OutputCap, PresentSpec};
 pub use run::RunTool;
 pub use vision::VisionGate;
 
@@ -71,26 +72,45 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     async fn invoke(&self, args: Value) -> Result<Value, ToolError>;
 }
 
-/// Lookup table of registered tools; cloning shares the tools.
-#[derive(Debug, Default, Clone)]
+/// Lookup table of registered tools; cloning shares the tools. Every
+/// tool's text `output` is held to the registry's [`OutputCap`].
+#[derive(Debug, Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
+    output_cap: Arc<OutputCap>,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::with_output_cap(Arc::new(OutputCap::new(PresentSpec::default())))
+    }
 }
 
 impl ToolRegistry {
-    /// Create an empty registry.
+    /// An empty registry capped to the default `tools.output` limits.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// An empty registry whose tools' results are cut to `output_cap`.
+    pub fn with_output_cap(output_cap: Arc<OutputCap>) -> Self {
+        Self {
+            tools: Vec::new(),
+            output_cap,
+        }
+    }
+
     /// Register a tool by value.
     pub fn register<T: Tool>(&mut self, tool: T) {
-        self.tools.push(Arc::new(tool));
+        self.register_boxed(Box::new(tool));
     }
 
     /// Register an already-boxed tool.
     pub fn register_boxed(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(Arc::from(tool));
+        self.tools.push(Arc::new(CappedTool {
+            inner: tool,
+            output_cap: Arc::clone(&self.output_cap),
+        }));
     }
 
     /// Look up a registered tool by its `name()`.
@@ -136,6 +156,47 @@ impl ToolRegistry {
     }
 }
 
+/// A registered tool whose string `output` is cut to `output_cap`, spilling
+/// under the tool's name and flagging the result `truncated`.
+#[derive(Debug)]
+struct CappedTool {
+    inner: Box<dyn Tool>,
+    output_cap: Arc<OutputCap>,
+}
+
+#[async_trait]
+impl Tool for CappedTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> Cow<'_, str> {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> Value {
+        self.inner.parameters_schema()
+    }
+
+    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
+        let mut result = self.inner.invoke(args).await?;
+        let Some(Value::String(output)) = result.get_mut("output") else {
+            return Ok(result);
+        };
+        let cut = self
+            .output_cap
+            .cap(self.inner.name(), std::mem::take(output));
+        *output = cut.text;
+        if cut.truncated {
+            result["truncated"] = Value::Bool(true);
+        }
+        if let Some(path) = cut.overflow_file {
+            result["overflow_file"] = json!(path.to_string_lossy());
+        }
+        Ok(result)
+    }
+}
+
 /// Crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -175,6 +236,45 @@ mod tests {
         async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
             Ok(Value::Null)
         }
+    }
+
+    #[derive(Debug)]
+    struct Verbose;
+
+    #[async_trait]
+    impl Tool for Verbose {
+        fn name(&self) -> &'static str {
+            "verbose"
+        }
+        fn description(&self) -> Cow<'_, str> {
+            "prints a lot".into()
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({})
+        }
+        async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
+            Ok(json!({"output": "x".repeat(10_000), "truncated": false}))
+        }
+    }
+
+    #[tokio::test]
+    async fn every_registered_tool_is_held_to_the_output_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PresentSpec {
+            overflow_dir: dir.path().to_path_buf(),
+            ..PresentSpec::default()
+        };
+        let max_bytes = spec.max_bytes;
+        let mut reg = ToolRegistry::with_output_cap(Arc::new(OutputCap::new(spec)));
+        reg.register(Verbose);
+
+        let result = reg.get("verbose").unwrap().invoke(json!({})).await.unwrap();
+
+        assert!(result["output"].as_str().unwrap().len() <= max_bytes);
+        assert_eq!(result["truncated"], json!(true));
+        let spilled = dir.path().join("verbose-1.txt");
+        assert_eq!(result["overflow_file"], json!(spilled.to_string_lossy()));
+        assert_eq!(std::fs::read(spilled).unwrap().len(), 10_000);
     }
 
     #[test]

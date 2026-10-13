@@ -23,7 +23,11 @@ fn output(stdout: &[u8], stderr: &[u8], exit_code: i32) -> CommandOutput {
 }
 
 fn present_ms(out: CommandOutput, spec: &PresentSpec, ms: u64) -> PresentResult {
-    present(out, spec, &AtomicU64::new(0), Duration::from_millis(ms))
+    present(
+        out,
+        &OutputCap::new(spec.clone()),
+        Duration::from_millis(ms),
+    )
 }
 
 fn sorted_file_names(dir: &Path) -> Vec<String> {
@@ -115,8 +119,6 @@ fn present_appends_footer_on_success() {
     assert!(r.overflow_file.is_none());
 }
 
-/// A pipeline reports its last stage's exit code, so an earlier stage's
-/// failure is only visible through stderr.
 #[test]
 fn present_shows_stderr_on_zero_exit() {
     let dir = tempdir().unwrap();
@@ -150,7 +152,7 @@ fn present_overflow_writes_temp_file_and_exposes_path() {
     let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, OVERFLOW_FILE_MODE);
 
-    let head: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+    let head: String = (1..=195).map(|i| format!("line {i}\n")).collect();
     let p = path.display();
     assert_eq!(
         r.output,
@@ -191,34 +193,60 @@ fn present_binary_guard_suppresses_stdout_preserves_attachments() {
 }
 
 #[test]
-fn text_truncator_cuts_and_spills_under_its_own_stem() {
+fn output_cap_cuts_within_its_budget_and_spills_under_the_stem() {
     let dir = tempdir().unwrap();
     let spec = PresentSpec {
-        max_lines: 2,
+        max_lines: 6,
         max_bytes: 1024,
         overflow_dir: dir.path().to_path_buf(),
     };
-    let truncator = TextTruncator::new(spec, "mcp__web");
+    let cap = OutputCap::new(spec);
+    let body: String = (1..=10).map(|i| format!("line {i}\n")).collect();
 
-    for expected_file in ["mcp__web-1.txt", "mcp__web-2.txt"] {
-        let body = "line 1\nline 2\nline 3\nline 4";
-        let cut = truncator.truncate(body.into());
+    for expected_file in ["mcp__web-1.txt", "reminisce-2.txt"] {
+        let stem = expected_file.split_once('-').unwrap().0;
+        let cut = cap.cap(stem, body.clone());
         let spilled = dir.path().join(expected_file);
         assert_eq!(cut.overflow_file.as_deref(), Some(spilled.as_path()));
         assert!(cut.truncated);
         assert_eq!(std::fs::read_to_string(&spilled).unwrap(), body);
         assert!(
             cut.text
-                .starts_with("line 1\nline 2\n--- output truncated (4 lines, ")
-        );
-        assert!(
-            cut.text
-                .contains(&format!("Full output: {}\n", spilled.display())),
+                .starts_with("line 1\nline 2\n--- output truncated (10 lines, "),
             "{}",
             cut.text
         );
-        assert!(!cut.text.contains("line 3"));
+        assert_eq!(count_lines(&cut.text), 6);
     }
+}
+
+/// `run` results are already within the cap, so the registry never cuts
+/// them a second time.
+#[test]
+fn present_fits_the_cap_when_both_streams_overflow() {
+    let dir = tempdir().unwrap();
+    let spec = PresentSpec {
+        max_lines: 200,
+        max_bytes: 4096,
+        overflow_dir: dir.path().to_path_buf(),
+    };
+    let stdout: Vec<u8> = (1..=3000)
+        .flat_map(|i| format!("out {i}\n").into_bytes())
+        .collect();
+    let stderr: Vec<u8> = (1..=3000)
+        .flat_map(|i| format!("err {i}\n").into_bytes())
+        .collect();
+    let r = present_ms(output(&stdout, &stderr, 1), &spec, 5);
+
+    assert!(r.output.len() <= spec.max_bytes, "{}", r.output.len());
+    assert!(count_lines(&r.output) <= spec.max_lines);
+    assert!(r.output.contains("[stderr] err 1\n"));
+    assert!(r.output.ends_with("[exit:1 | 5ms]"));
+    assert_eq!(std::fs::read(r.overflow_file.unwrap()).unwrap(), stdout);
+    assert_eq!(
+        std::fs::read(r.stderr_overflow_file.unwrap()).unwrap(),
+        stderr
+    );
 }
 
 #[test]
@@ -235,7 +263,7 @@ fn present_overflow_truncates_stderr_and_spills_it() {
     assert_eq!(path, &dir.path().join("cmd-1.txt"));
     assert_eq!(std::fs::read(path).unwrap(), big);
 
-    let head: String = (1..=200).map(|i| format!("[find]\terr {i}\n")).collect();
+    let head: String = (1..=194).map(|i| format!("[find]\terr {i}\n")).collect();
     let p = path.display();
     assert_eq!(
         r.output,
@@ -260,11 +288,11 @@ fn spilling_past_the_file_cap_keeps_only_the_newest_spills() {
         max_lines: 1,
         ..spec_in(dir.path())
     };
-    let truncator = TextTruncator::new(spec, "cmd");
+    let cap = OutputCap::new(spec);
     let total = MAX_SPILL_FILES + 5;
 
     for _ in 0..total {
-        let cut = truncator.truncate("a\nb\n".into());
+        let cut = cap.cap("cmd", "a\nb\n".into());
         assert!(cut.overflow_file.as_deref().is_some_and(Path::exists));
     }
 

@@ -4,10 +4,8 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
-use assistd_config::ToolsOutputConfig;
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use base64::Engine;
@@ -16,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_line};
-use crate::presentation::{PresentResult, PresentSpec, present};
+use crate::presentation::{OutputCap, PresentResult, PresentSpec, present};
 use crate::{Tool, ToolError};
 
 /// The LLM-facing `run` tool, dispatching a command line through the chain
@@ -24,23 +22,16 @@ use crate::{Tool, ToolError};
 #[derive(Debug)]
 pub struct RunTool {
     registry: Arc<CommandRegistry>,
-    spec: PresentSpec,
-    overflow_counter: Arc<AtomicU64>,
+    output_cap: Arc<OutputCap>,
     scratch_dir: Option<PathBuf>,
 }
 
 impl RunTool {
-    /// `output` provides the truncation caps; `overflow_dir` is where
-    /// truncated output is spilled in full.
-    pub fn new(
-        registry: Arc<CommandRegistry>,
-        output: &ToolsOutputConfig,
-        overflow_dir: PathBuf,
-    ) -> Self {
+    /// Results are cut to `output_cap`, which should be the registry's own.
+    pub fn new(registry: Arc<CommandRegistry>, output_cap: Arc<OutputCap>) -> Self {
         Self {
             registry,
-            spec: PresentSpec::from_config(output, overflow_dir),
-            overflow_counter: Arc::new(AtomicU64::new(0)),
+            output_cap,
             scratch_dir: None,
         }
     }
@@ -77,12 +68,12 @@ fn build_description(
          needed. ",
     );
     desc.push_str(&format!(
-        "Output is returned whole unless its stdout or stderr exceeds \
-         {max_lines} lines or {max_size}; only then is that stream cut to \
-         its head and the full text saved, with the truncation notice \
-         giving a `Full output:` or `Full stderr:` path under \
+        "Output is returned whole unless the result exceeds {max_lines} \
+         lines or {max_size}; only then are stdout and stderr cut to their \
+         heads and each cut stream saved in full, with the truncation \
+         notice giving a `Full output:` or `Full stderr:` path under \
          `{dir}/cmd-N.txt` that subsequent `run` calls can grep/cat. No \
-         such file exists for a stream under those limits.\n\nCommands \
+         such file exists for a result under those limits.\n\nCommands \
          (first word of `command`):\n",
         max_lines = spec.max_lines,
         max_size = human_size(spec.max_bytes as u64),
@@ -125,7 +116,7 @@ impl Tool for RunTool {
     fn description(&self) -> Cow<'_, str> {
         Cow::Owned(build_description(
             &self.registry,
-            &self.spec,
+            self.output_cap.spec(),
             self.scratch_dir.as_deref(),
         ))
     }
@@ -159,7 +150,7 @@ impl Tool for RunTool {
             Ok(chain) => execute(&chain, &self.registry, None).await,
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
-        let presented = present(out, &self.spec, &self.overflow_counter, start.elapsed());
+        let presented = present(out, &self.output_cap, start.elapsed());
         Ok(build_result(&presented))
     }
 }

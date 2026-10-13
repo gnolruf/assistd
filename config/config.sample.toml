@@ -94,7 +94,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 
 [tools.output]
 # max_lines = 200
-# max_kb = 50
+# max_kb = 4  # at most a quarter of chat.max_history_tokens (1 KB ≈ 256 tokens)
 # overflow_dir = "/run/user/1000/assistd/output"
 
 [tools.bash]

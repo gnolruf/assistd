@@ -613,15 +613,53 @@ async fn a_long_tool_loop_folds_its_oldest_steps_into_the_summary_and_a_call_log
         StepRecord {
             call: r#"run {"command":"ls"}"#.into(),
             exit_code: Some(1),
+            failure: Some("output 1".into()),
         }
     );
     let question = serde_json::to_string(&c.as_wire_messages()[1]).unwrap();
-    assert!(question.contains("→ exit 1"), "{question}");
+    assert!(question.contains("→ exit 1: output 1"), "{question}");
 
     push_tool_steps(&mut c, 3);
     assert!(
         !c.exceeds_budget(&chat, &model),
         "compaction must leave room for further steps"
+    );
+}
+
+#[test]
+fn folded_steps_keep_the_error_line_of_a_failure() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("q".into());
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![
+            mk_call("ok", r#"{"command":"ls"}"#),
+            mk_call("web", r#"{"command":"web u | head"}"#),
+            mk_call("curl", r#"{"command":"bash curl u"}"#),
+        ],
+    );
+    c.push_tool_result("ok".into(), "a\nb\n[exit:0 | 1ms]".into());
+    c.push_tool_result(
+        "web".into(),
+        "[stderr] [web]\t[error] web: HTTP 404 Not Found\n[exit:0 | 1ms]".into(),
+    );
+    c.push_tool_result(
+        "curl".into(),
+        "[stderr] [bash]\tcurl: (6) Could not resolve host\n[exit:6 | 1ms]".into(),
+    );
+
+    let failures: Vec<_> = step_log::records(&c.messages[1..])
+        .into_iter()
+        .map(|r| r.failure)
+        .collect();
+    assert_eq!(
+        failures,
+        [
+            None,
+            Some("[web] [error] web: HTTP 404 Not Found".into()),
+            Some("[bash] curl: (6) Could not resolve host".into()),
+        ]
     );
 }
 

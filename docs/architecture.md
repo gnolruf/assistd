@@ -332,9 +332,9 @@ background; each one's tools are offered from the next turn after it
 connects, since every turn takes its own snapshot of the catalog. A
 server that fails to start is reported as unavailable in `GetReadiness`
 and `GetCapabilities`. Each call asks the user first until
-that tool is "always allowed". Text and JSON results obey the same
-`[tools.output]` caps as `run`, spilling overflow to
-`mcp-<server-name>-<n>.txt`.
+that tool is "always allowed". Like every tool's, their text results are
+held to the `[tools.output]` cap by the registry, spilling overflow to
+`<registry-name>-<n>.txt`.
 
 When a server's process or session ends, its process group is killed
 at once, and the next call to one of its tools starts it again. Restarts
@@ -387,8 +387,9 @@ A walk through `assistd query "what files changed this week?"`:
    any other path in one of the sandbox's tmpfs mounts gets a `[note]`
    line on stderr (and a daemon warning) pointing at the scratch
    directory, as does a `write` that puts a file there. The sandboxed `git` runs, returns
-   stdout. If stdout exceeds the `[tools.output]` line or byte cap,
-   `RunTool::invoke` cuts it to that head and spills the full text to
+   stdout. If the result exceeds the `[tools.output]` line or byte cap,
+   `RunTool::invoke` cuts stdout and stderr to heads that fit it together
+   with their notices and footer, and spills each cut stream in full to
    `tools.output.overflow_dir` (default `$XDG_RUNTIME_DIR/assistd/output`,
    owner-only, with earlier spill files removed at every daemon start and only the newest 64
    files or 128 MiB kept while it runs); it then base64-encodes any image
