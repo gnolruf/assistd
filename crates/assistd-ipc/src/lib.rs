@@ -760,6 +760,9 @@ pub enum Event {
         message_count: i64,
         is_current_in_session: bool,
         is_active_session: bool,
+        /// The later of the branch's creation and its newest message, RFC 3339.
+        #[serde(default)]
+        last_active_at: String,
     },
     /// The active branch changed; `session_id` is the now-active session.
     /// `branch_id` is `None` until the session's first message is saved.

@@ -7,17 +7,18 @@ use std::time::Instant;
 use assistd_core::{PresenceState, VoiceCaptureState};
 use assistd_ipc::PermissionMode;
 use assistd_tools::ConfirmationRequest;
+use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
 use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
-use super::app::{App, BranchListEntry, BranchPickerModal, ConfirmChoice, ConfirmationPrompt};
+use super::app::{App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker};
 use super::markdown::BLEY;
-use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot};
+use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use crate::client::terminal_text::escape_controls_single_line;
 
 const INPUT_PROMPT: &str = "> ";
@@ -34,26 +35,34 @@ const SCRIPT_INDENT: &str = "  ";
 const THUMBNAIL_CAPTION_ROWS: u16 = 1;
 const THUMBNAIL_MAX_COLS: u16 = 32;
 const RULE: &str = "─";
+/// Rows each `/resume` entry takes: its title and its details.
+const RESUME_ENTRY_ROWS: usize = 2;
+const RESUME_DETAIL_INDENT: &str = "    ";
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
-    let [main_area, mode_area, status_area] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    let [main_area, status_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    match app.shown_resume_picker() {
+        Some(picker) => {
+            render_resume_picker(frame, main_area, picker, &app.model_name, Utc::now());
+        }
+        None => render_chat(frame, main_area, app),
+    }
+    render_status_line(frame, status_area, app);
+}
+
+/// The transcript above the input line or the confirmation prompt, then
+/// the permission-mode line.
+fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let [chat_area, mode_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let output_area = match app.confirmation.as_mut() {
-        Some(prompt) => render_confirmation_dock(frame, main_area, prompt),
-        None => render_input_dock(frame, main_area, app),
+        Some(prompt) => render_confirmation_dock(frame, chat_area, prompt),
+        None => render_input_dock(frame, chat_area, app),
     };
     app.set_output_height(output_area.height);
     render_output(frame, output_area, app);
     render_mode_line(frame, mode_area, app.permission_mode);
-    render_status_line(frame, status_area, app);
-
-    if let Some(picker) = &app.picker_modal {
-        render_branch_picker_modal(frame, frame.area(), picker);
-    }
 }
 
 /// Draw the slash popup, the input line and its rules at the bottom of
@@ -85,79 +94,83 @@ fn render_input_dock(frame: &mut Frame<'_>, area: Rect, app: &App) -> Rect {
     output_area
 }
 
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    }
-}
-
-/// Clear `area`, draw a bordered block titled `title` in `color`, and
-/// return its inner area.
-fn render_modal_frame(
+/// The `/resume` list in place of the transcript, under the transcript's
+/// banner: the search box, the matching entries and a count.
+fn render_resume_picker(
     frame: &mut Frame<'_>,
     area: Rect,
-    title: &'static str,
-    color: Color,
-) -> Rect {
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .title(Span::styled(
-            title,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(color));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    inner
+    picker: &ResumePicker,
+    model_name: &str,
+    now: DateTime<Utc>,
+) {
+    let banner = banner_lines(model_name, area.width);
+    let [banner_area, search_area, _, list_area, count_area] = Layout::vertical([
+        Constraint::Length(saturating_u16(banner.len())),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    frame.render_widget(Paragraph::new(Text::from(banner)), banner_area);
+    render_resume_search(frame, search_area, picker.query());
+    let matches = picker.matches();
+    render_resume_list(frame, list_area, &matches, picker.selected(), now);
+    let count = Span::styled(
+        format!("{} of {}", matches.len(), picker.total()),
+        Style::default().fg(Color::DarkGray),
+    );
+    frame.render_widget(Paragraph::new(count), count_area);
 }
 
-fn render_branch_picker_modal(frame: &mut Frame<'_>, area: Rect, picker: &BranchPickerModal) {
-    let width = (area.width.saturating_mul(4) / 5).clamp(50, 120);
-    let height = saturating_u16(picker.entries.len())
-        .saturating_add(4)
-        .min(area.height.saturating_sub(2))
-        .max(6);
-    let inner = render_modal_frame(
-        frame,
-        centered_rect(area, width, height),
-        " Resume conversation ",
-        BLEY,
-    );
-
-    let list_height = inner.height.saturating_sub(1);
-    let list_area = Rect {
-        height: list_height,
-        ..inner
+/// The search query in a rounded box, with the cursor after it.
+fn render_resume_search(frame: &mut Frame<'_>, area: Rect, query: &str) {
+    let query = escape_controls_single_line(query);
+    let text = if query.is_empty() {
+        Span::styled("Search…", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw(query.as_ref())
     };
-    let footer_area = Rect {
-        y: inner.y + list_height,
-        height: 1,
-        ..inner
-    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(rule_style())
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(Paragraph::new(text).block(block), area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let cursor_x = inner
+        .x
+        .saturating_add(saturating_u16(display_width(&query)))
+        .min(inner.right().saturating_sub(1));
+    frame.set_cursor_position(Position::new(cursor_x, inner.y));
+}
 
-    let visible = usize::from(list_height);
-    let start = picker_scroll_start(picker.selected, picker.entries.len(), visible);
-    let lines: Vec<Line<'_>> = picker
-        .entries
+/// The window of `matches` that keeps `selected` in view, or a note when
+/// nothing matches.
+fn render_resume_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    matches: &[&BranchListEntry],
+    selected: usize,
+    now: DateTime<Utc>,
+) {
+    if matches.is_empty() {
+        let note = Span::styled("No matches", Style::default().fg(Color::DarkGray));
+        frame.render_widget(Paragraph::new(note), area);
+        return;
+    }
+    let visible = (usize::from(area.height) / RESUME_ENTRY_ROWS).max(1);
+    let start = picker_scroll_start(selected, matches.len(), visible);
+    let lines: Vec<Line<'static>> = matches
         .iter()
         .enumerate()
         .skip(start)
         .take(visible)
-        .map(|(i, entry)| picker_row(entry, i == picker.selected))
+        .flat_map(|(index, entry)| resume_entry_rows(entry, index == selected, now))
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
-
-    let footer = Line::from(Span::styled(
-        " ↑/↓ select · Enter resume · Esc cancel",
-        Style::default().fg(Color::DarkGray),
-    ));
-    frame.render_widget(Paragraph::new(footer), footer_area);
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 /// First entry of a `visible`-row window that keeps `selected` in view.
@@ -168,31 +181,70 @@ fn picker_scroll_start(selected: usize, total: usize, visible: usize) -> usize {
     (selected + 1).saturating_sub(visible).min(total - visible)
 }
 
-fn picker_row(entry: &BranchListEntry, selected: bool) -> Line<'static> {
-    let marker = if entry.is_active_session && entry.is_current_in_session {
-        "●"
-    } else {
-        " "
-    };
-    let parent = match (entry.parent_branch_name.as_deref(), entry.fork_point_seq) {
-        (Some(p), Some(seq)) => format!("  (forked from {p}@{seq})"),
-        _ => String::new(),
-    };
-    let session_label = entry
+/// The conversation title behind a selection pointer, then when it was last
+/// active, its size and its branch.
+fn resume_entry_rows(
+    entry: &BranchListEntry,
+    selected: bool,
+    now: DateTime<Utc>,
+) -> [Line<'static>; 2] {
+    let title = entry
         .session_title
         .as_deref()
+        .map(str::trim)
         .filter(|t| !t.is_empty())
-        .unwrap_or(entry.session_short.as_str());
-    let row = format!(
-        " {marker} [{session_label}] {}  · {} msgs{parent}",
-        entry.name, entry.message_count
-    );
-    let style = if selected {
-        selected_style()
+        .map_or_else(|| "Untitled".into(), escape_controls_single_line);
+    let (pointer, title_style) = if selected {
+        ("❯ ", Style::default().fg(BLEY).add_modifier(Modifier::BOLD))
     } else {
-        Style::default()
+        ("  ", Style::default())
     };
-    Line::from(Span::styled(row, style))
+    let mut title_row = vec![Span::styled(format!("{pointer}{title}"), title_style)];
+    if entry.is_active() {
+        title_row.push(Span::styled(
+            " (current)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let detail = Span::styled(
+        format!("{RESUME_DETAIL_INDENT}{}", resume_entry_details(entry, now)),
+        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+    );
+    [Line::from(title_row), Line::from(detail)]
+}
+
+/// `3h ago · 12 messages · fix (forked from main@4)`.
+fn resume_entry_details(entry: &BranchListEntry, now: DateTime<Utc>) -> String {
+    let mut details = Vec::new();
+    if let Some(last_active_at) = entry.last_active_at {
+        let secs = (now - last_active_at).num_seconds().max(0).unsigned_abs();
+        details.push(compact_age(secs));
+    }
+    details.push(match entry.message_count {
+        1 => "1 message".to_string(),
+        count => format!("{count} messages"),
+    });
+    let branch = escape_controls_single_line(&entry.name);
+    details.push(
+        match (entry.parent_branch_name.as_deref(), entry.fork_point_seq) {
+            (Some(parent), Some(seq)) => format!(
+                "{branch} (forked from {}@{seq})",
+                escape_controls_single_line(parent)
+            ),
+            _ => branch.into_owned(),
+        },
+    );
+    details.join(" · ")
+}
+
+/// `just now`, `5m ago`, `3h ago`, `2d ago`.
+fn compact_age(secs: u64) -> String {
+    match secs {
+        0..60 => "just now".to_string(),
+        60..3600 => format!("{}m ago", secs / 60),
+        3600..86_400 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
 }
 
 fn render_slash_popup(
@@ -582,6 +634,8 @@ fn status_segments(app: &App) -> Vec<String> {
 fn status_hint(app: &App) -> Option<String> {
     if app.confirmation.is_some() {
         Some("↑/↓ select · Enter confirm · Esc deny".to_string())
+    } else if app.resume_picker.is_some() {
+        Some("type to search · ↑/↓ select · Enter resume · Esc cancel".to_string())
     } else if let Some(notice) = app.notice() {
         Some(notice.to_string())
     } else if app.output.scroll_offset() > 0 {
@@ -736,21 +790,6 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-
-    #[test]
-    fn branch_picker_clamps_to_a_pane_narrower_than_its_floor() {
-        let picker = BranchPickerModal {
-            entries: Vec::new(),
-            selected: 0,
-        };
-        let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("test terminal");
-        terminal
-            .draw(|frame| render_branch_picker_modal(frame, frame.area(), &picker))
-            .expect("draw");
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 0)].symbol(), "┌");
-        assert_eq!(buffer[(19, 3)].symbol(), "┘");
-    }
 
     fn confirmation_prompt(script: &str) -> ConfirmationPrompt {
         ConfirmationPrompt::new(

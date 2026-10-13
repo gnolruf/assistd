@@ -251,6 +251,7 @@ impl App {
                 is_active_session,
                 session_id,
                 session_title,
+                last_active_at,
                 ..
             } => self.branches_buffer.push(BranchListEntry {
                 name,
@@ -261,6 +262,7 @@ impl App {
                 is_active_session,
                 session_short: session_id.chars().take(8).collect(),
                 session_title,
+                last_active_at: last_active_at.parse().ok(),
             }),
             Event::BranchSwitched {
                 name,
@@ -302,15 +304,7 @@ impl App {
         let title = session_title.map(str::trim).filter(|t| !t.is_empty());
         self.session_title = title.map(str::to_string);
         match self.in_flight_branch_op {
-            Some(BranchOp::Switch) => {
-                self.reset_transcript();
-                let msg = match title {
-                    Some(t) => format!("[switched to conversation '{t}' on branch '{name}']"),
-                    None => format!("[switched to new conversation on branch '{name}']"),
-                };
-                self.output.push_info(&msg);
-            }
-            Some(BranchOp::Resume | BranchOp::New) => self.reset_transcript(),
+            Some(BranchOp::Switch | BranchOp::Resume | BranchOp::New) => self.reset_transcript(),
             _ => {
                 let detail = match (parent_branch_name, fork_point_seq) {
                     (Some(p), Some(seq)) => {
@@ -451,7 +445,7 @@ impl App {
             WireStream::Reply => self.finish_reply_with_summary(now),
             WireStream::Branch => {
                 if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op.take() {
-                    self.open_branch_picker();
+                    self.open_resume_picker();
                 }
             }
             WireStream::Status => {}

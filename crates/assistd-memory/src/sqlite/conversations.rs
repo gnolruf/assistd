@@ -27,7 +27,12 @@ const BRANCH_INFO_SELECT: &str = "
             b.fork_point_seq,
             b.created_at,
             (SELECT COUNT(*) FROM branch_messages bm WHERE bm.branch_id = b.id),
-            (b.id = s.current_branch_id) AS is_current
+            (b.id = s.current_branch_id) AS is_current,
+            MAX(b.created_at, COALESCE(
+                (SELECT c.timestamp
+                 FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
+                 WHERE bm.branch_id = b.id ORDER BY bm.seq DESC LIMIT 1),
+                b.created_at)) AS last_active_at
     FROM branches b JOIN sessions s ON s.id = b.session_id";
 
 /// Session identifier: a UUID string, stable across daemon restarts.
@@ -188,6 +193,8 @@ pub struct BranchInfo {
     pub created_at: String,
     pub message_count: i64,
     pub is_current_in_session: bool,
+    /// The later of the branch's creation and its newest message, RFC 3339.
+    pub last_active_at: String,
 }
 
 /// One persisted message on a branch, as replayed into the in-memory conversation.
@@ -246,7 +253,8 @@ pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
         msg: PersistedMessage,
     ) -> Result<i64>;
 
-    /// Every branch of every session, newest session first, then by branch id.
+    /// Every branch of every session, most recently active first, then by
+    /// branch id.
     async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
 
     /// Metadata of `branch`, or `None` when it does not exist.
@@ -528,7 +536,7 @@ impl ConversationStore for SqliteConversationStore {
         self.handle
             .conn()
             .call(|c| -> rusqlite::Result<_> {
-                let sql = format!("{BRANCH_INFO_SELECT} ORDER BY s.started_at DESC, b.id ASC");
+                let sql = format!("{BRANCH_INFO_SELECT} ORDER BY last_active_at DESC, b.id ASC");
                 let mut stmt = c.prepare(&sql)?;
                 let rows: Vec<BranchInfo> = stmt
                     .query_map([], branch_info)?
@@ -773,6 +781,7 @@ fn branch_info(row: &Row<'_>) -> rusqlite::Result<BranchInfo> {
         created_at: row.get(9)?,
         message_count: row.get(10)?,
         is_current_in_session: is_current != 0,
+        last_active_at: row.get(12)?,
     })
 }
 

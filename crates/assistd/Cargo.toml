@@ -25,6 +25,7 @@ chat = [
     "dep:shlex",
     "dep:ratatui-image",
     "dep:image",
+    "dep:chrono",
 ]
 tray = [
     "dep:ksni",
@@ -59,6 +60,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
+chrono           = { workspace = true, optional = true }
 ratatui          = { workspace = true, optional = true }
 crossterm        = { workspace = true, optional = true }
 futures-util     = { workspace = true, optional = true }

@@ -116,6 +116,33 @@ async fn fork_creates_independent_branch_sharing_history() {
     assert_eq!(fork_info.parent_branch_name.as_deref(), Some("main"));
     assert_eq!(fork_info.fork_point_seq, Some(1));
     assert_eq!(fork_info.message_count, 2);
+    assert_eq!(
+        fork_info.last_active_at, fork_info.created_at,
+        "inherited messages predate the fork"
+    );
+}
+
+#[tokio::test]
+async fn branches_list_by_newest_message_not_session_start() {
+    let (store, _guard) = fresh_store().await;
+    let older = SessionId::new();
+    let older_main = store
+        .begin_session_with_main_branch(&older, 1)
+        .await
+        .unwrap();
+    let newer_main = store
+        .begin_session_with_main_branch(&SessionId::new(), 1)
+        .await
+        .unwrap();
+    store
+        .append_message_to_branch(&older, older_main, None, PersistedMessage::user("back"))
+        .await
+        .unwrap();
+
+    let branches = store.list_branches().await.unwrap();
+    let order: Vec<_> = branches.iter().map(|b| b.branch_id).collect();
+    assert_eq!(order, [older_main, newer_main]);
+    assert!(branches[0].last_active_at > branches[1].created_at);
 }
 
 #[tokio::test]

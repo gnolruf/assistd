@@ -18,7 +18,6 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/fork", "<name>"),
     ("/new", ""),
     ("/resume", ""),
-    ("/switch", "<target>"),
     ("/undo", ""),
 ];
 
@@ -32,12 +31,12 @@ impl App {
     }
 
     pub(crate) fn on_key(&mut self, ev: KeyEvent) {
-        if ev.code == KeyCode::BackTab {
+        if self.shown_resume_picker().is_some() {
+            self.on_resume_picker_key(ev);
+        } else if ev.code == KeyCode::BackTab {
             self.toggle_permission_mode();
         } else if self.confirmation.is_some() {
             self.on_confirmation_key(ev);
-        } else if self.picker_modal.is_some() {
-            self.on_picker_key(ev);
         } else if !self.on_shortcut_key(ev) {
             self.on_input_key(ev);
         }

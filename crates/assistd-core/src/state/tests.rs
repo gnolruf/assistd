@@ -1430,7 +1430,7 @@ async fn branches_lists_active_session_first() {
             _ => None,
         })
         .collect();
-    assert_eq!(infos, [("main", true), ("alt", true), ("main", false)]);
+    assert_eq!(infos, [("alt", true), ("main", true), ("main", false)]);
     assert_eq!(events.last(), Some(&done("rq")));
 }
 

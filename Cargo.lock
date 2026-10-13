@@ -136,6 +136,7 @@ dependencies = [
  "assistd-voice",
  "assistd-wm",
  "async-trait",
+ "chrono",
  "clap",
  "crossterm",
  "dirs",

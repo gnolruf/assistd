@@ -125,6 +125,7 @@ impl AppState {
                     message_count: branch.message_count,
                     is_current_in_session: branch.is_current_in_session,
                     is_active_session,
+                    last_active_at: branch.last_active_at,
                 })
                 .await;
         }
@@ -221,7 +222,7 @@ impl AppState {
         Some(title)
     }
 
-    /// `/switch <target>`: make the target branch active, replay its
+    /// Make the `target` branch active, replay its
     /// history into the LLM backend, and stream it to the client.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, target = %target))]
     pub(super) async fn handle_switch(
@@ -242,11 +243,11 @@ impl AppState {
         {
             Ok(Some(pair)) => pair,
             Ok(None) => {
-                send_error(&tx, id, format!("/switch: no branch named {target:?}")).await;
+                send_error(&tx, id, format!("/resume: no branch named {target:?}")).await;
                 return;
             }
             Err(e) => {
-                send_error(&tx, id, format!("/switch: {e}")).await;
+                send_error(&tx, id, format!("/resume: {e}")).await;
                 return;
             }
         };
@@ -260,7 +261,7 @@ impl AppState {
             send_error(
                 &tx,
                 id,
-                format!("/switch: failed to update current branch: {e}"),
+                format!("/resume: failed to update current branch: {e}"),
             )
             .await;
             return;
@@ -271,7 +272,7 @@ impl AppState {
             .replace(target_session.clone(), Some(target_branch))
             .await;
 
-        self.replay_branch(id, &target_session, target_branch, &tx, "/switch")
+        self.replay_branch(id, &target_session, target_branch, &tx, "/resume")
             .await;
     }
 
