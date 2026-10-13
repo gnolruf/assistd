@@ -290,7 +290,7 @@ impl BranchListEntry {
 
     /// Whether every whitespace-separated term of the lowercased `query`
     /// appears in the title, branch names or session id.
-    fn matches(&self, query: &str) -> bool {
+    fn matches_query(&self, query: &str) -> bool {
         let haystack = [
             self.session_title.as_deref(),
             Some(self.name.as_str()),
@@ -346,11 +346,11 @@ impl ResumePicker {
         let query = self.query.to_lowercase();
         self.entries
             .iter()
-            .filter(|entry| entry.matches(&query))
+            .filter(|entry| entry.matches_query(&query))
             .collect()
     }
 
-    /// The selected match as a session-qualified `/switch` target.
+    /// The selected match as a session-qualified switch target.
     fn current_target(&self) -> Option<String> {
         self.matches()
             .get(self.selected)

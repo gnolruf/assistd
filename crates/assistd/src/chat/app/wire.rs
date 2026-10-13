@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity};
 use assistd_tools::{ConfirmationRequest, Risk};
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::super::ui::turn_summary;
@@ -263,9 +262,7 @@ impl App {
                 is_active_session,
                 session_short: session_id.chars().take(8).collect(),
                 session_title,
-                last_active_at: DateTime::parse_from_rfc3339(&last_active_at)
-                    .ok()
-                    .map(|at| at.with_timezone(&Utc)),
+                last_active_at: last_active_at.parse().ok(),
             }),
             Event::BranchSwitched {
                 name,

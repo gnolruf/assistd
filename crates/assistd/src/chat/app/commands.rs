@@ -9,7 +9,6 @@ use super::{App, BranchOp, PendingAttachment, WireStream};
 enum SlashCommand {
     Attach(String),
     Fork(String),
-    Switch(String),
     Undo,
     New,
     Resume,
@@ -27,7 +26,6 @@ impl SlashCommand {
         match verb {
             "/attach" => Some(Self::Attach(arg.to_string())),
             "/fork" => Some(Self::Fork(arg.to_string())),
-            "/switch" => Some(Self::Switch(arg.to_string())),
             "/undo" => Some(Self::Undo),
             "/new" => Some(Self::New),
             "/resume" => Some(Self::Resume),
@@ -60,7 +58,6 @@ impl App {
             }
             SlashCommand::Attach(path) => self.load_attachment(&path),
             SlashCommand::Fork(name) => self.fork_branch(name),
-            SlashCommand::Switch(target) => self.switch_branch(target),
             SlashCommand::Undo => {
                 let id = Uuid::new_v4().to_string();
                 self.spawn_branch_command(BranchOp::Undo, Request::Undo { id });
@@ -119,12 +116,6 @@ impl App {
     }
 
     pub(super) fn switch_branch(&mut self, target: String) {
-        if target.trim().is_empty() {
-            self.output
-                .push_error("/switch: expected a target. Usage: /switch <name>");
-            self.set_notice("/switch: missing target");
-            return;
-        }
         let req = Request::Switch {
             id: Uuid::new_v4().to_string(),
             target,

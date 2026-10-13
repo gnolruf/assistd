@@ -18,7 +18,6 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/fork", "<name>"),
     ("/new", ""),
     ("/resume", ""),
-    ("/switch", "<target>"),
     ("/undo", ""),
 ];
 

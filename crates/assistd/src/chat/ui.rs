@@ -217,8 +217,8 @@ fn resume_entry_rows(
 fn resume_entry_details(entry: &BranchListEntry, now: DateTime<Utc>) -> String {
     let mut details = Vec::new();
     if let Some(last_active_at) = entry.last_active_at {
-        let secs = (now - last_active_at).num_seconds().max(0);
-        details.push(compact_age(secs.unsigned_abs()));
+        let secs = (now - last_active_at).num_seconds().max(0).unsigned_abs();
+        details.push(compact_age(secs));
     }
     details.push(match entry.message_count {
         1 => "1 message".to_string(),
