@@ -734,8 +734,9 @@ pub enum Event {
         vision: bool,
         model_name: String,
     },
-    /// Tokens in the conversation as sent with the model request about to stream.
-    ContextSize { id: String, tokens: u32 },
+    /// Tokens in the conversation as sent with the model request about to stream,
+    /// and `total` the conversation has held, counting what compaction removed.
+    ContextSize { id: String, tokens: u32, total: u32 },
     /// Non-terminal notice of a recoverable condition.
     Status {
         id: String,

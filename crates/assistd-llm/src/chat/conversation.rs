@@ -2,6 +2,7 @@
 //! heuristic, corrected by the prompt size the server last measured.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use assistd_config::{ChatConfig, ModelConfig};
 use assistd_tools::Attachment;
@@ -12,6 +13,10 @@ use tracing::{debug, warn};
 
 use super::error::ChatClientError;
 use super::wire;
+
+mod step_log;
+
+pub use step_log::StepRecord;
 
 const SUMMARY_PREFIX: &str = "[Conversation summary] ";
 /// Marks an image-carrying tool result sent on the user role (templates
@@ -39,6 +44,9 @@ const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 const TOKENS_PER_IMAGE: u32 = 1000;
 /// Share of the history budget, in percent, past which compaction is near.
 const COMPACTION_WARNING_PERCENT: u64 = 80;
+/// Share of the history budget, in percent, that compaction trims down to,
+/// leaving room for several tool steps before the next one.
+const COMPACTION_TARGET_PERCENT: u64 = 60;
 
 /// Message role for conversation turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +120,9 @@ pub struct Message {
     /// Context block rendered at the head of a user message's text,
     /// keeping earlier turns byte-identical for the prefix cache.
     pub context: Option<String>,
+    /// On a real user message: tool calls already folded out of its turn,
+    /// rendered after its text.
+    pub earlier_steps: Vec<StepRecord>,
 }
 
 impl Message {
@@ -125,6 +136,7 @@ impl Message {
             tool_call_id: None,
             reasoning: String::new(),
             context: None,
+            earlier_steps: Vec::new(),
         }
     }
 }
@@ -154,6 +166,8 @@ pub struct Conversation {
     /// How far the server's measured prompt size was from the heuristic
     /// on the last measured request, in tokens.
     calibration: i32,
+    /// Tokens compaction has removed since the message list was last replaced.
+    compacted_tokens: u32,
 }
 
 impl Conversation {
@@ -165,6 +179,7 @@ impl Conversation {
             transient_note: None,
             messages: Vec::new(),
             calibration: 0,
+            compacted_tokens: 0,
         }
     }
 
@@ -273,6 +288,7 @@ impl Conversation {
         self.pending_context = None;
         self.transient_note = None;
         self.calibration = 0;
+        self.compacted_tokens = 0;
     }
 
     /// Drop everything from the latest non-tool-result user message onward
@@ -293,6 +309,13 @@ impl Conversation {
     pub fn approx_total_tokens(&self) -> u32 {
         self.heuristic_tokens()
             .saturating_add_signed(self.calibration)
+    }
+
+    /// Tokens the conversation has held in all: its current size plus
+    /// everything compaction has removed from it.
+    pub fn total_tokens(&self) -> u32 {
+        self.approx_total_tokens()
+            .saturating_add(self.compacted_tokens)
     }
 
     /// Record that a request whose [`Self::heuristic_tokens`] was
@@ -321,10 +344,7 @@ impl Conversation {
                 TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(approx_tokens(transient)),
             );
         }
-        for m in &self.messages {
-            total = total.saturating_add(approx_message_tokens(m));
-        }
-        total
+        total.saturating_add(messages_tokens(&self.messages))
     }
 
     /// Render the current state as wire messages: the system head, each
@@ -359,26 +379,24 @@ impl Conversation {
         ))
     }
 
-    /// Keep the approximate token total under budget, folding the oldest
-    /// turns and any earlier summary into one summary if needed. Returns an
-    /// error, with history unchanged, if the summarizer fails or returns
-    /// empty text; [`Self::truncate_to_budget`] is the infallible fallback.
+    /// Keep the approximate token total under budget by folding older
+    /// history into one summary: the oldest steps of the current turn when
+    /// that turn alone outgrows the budget, else the turns before the
+    /// preserved ones. Returns an error, with history unchanged, if the
+    /// summarizer fails or returns empty text; [`Self::truncate_to_budget`]
+    /// is the infallible fallback.
     pub async fn ensure_budget(
         &mut self,
         summarizer: &dyn Summarizer,
         chat: &ChatConfig,
         model: &ModelConfig,
     ) -> Result<(), ChatClientError> {
-        let budget = effective_budget(chat, model);
         if !self.exceeds_budget(chat, model) {
             return Ok(());
         }
-
-        let preserve_pairs = chat.preserve_recent_turns.get() as usize;
-        let preserve_from = self.first_preserved_index(preserve_pairs);
-
-        let tail_start = self.summary_insertion_index();
-        if tail_start >= preserve_from {
+        let fold_end = self.fold_end(chat, model);
+        let dialogue = serialize_tail(&self.messages[..fold_end]);
+        if fold_end <= self.summary_insertion_index() || dialogue.trim().is_empty() {
             debug!(
                 target: "assistd::chat",
                 "ensure_budget: nothing to summarize, falling through to truncation"
@@ -387,42 +405,10 @@ impl Conversation {
             return Ok(());
         }
 
-        let dialogue = serialize_tail(&self.messages[..preserve_from]);
-        if dialogue.trim().is_empty() {
-            self.truncate_to_budget(chat, model);
-            return Ok(());
-        }
+        let summary = summarize_bounded(summarizer, dialogue, chat).await?;
+        self.fold_into_summary(fold_end, &summary);
 
-        let summary = summarizer
-            .summarize(
-                dialogue,
-                chat.summary_target_tokens.get(),
-                chat.max_summary_tokens(),
-            )
-            .await?;
-        let trimmed = summary.trim();
-        if trimmed.is_empty() {
-            return Err(ChatClientError::Summarize(
-                "summarizer returned empty text".into(),
-            ));
-        }
-
-        let max_summary_bytes = (chat.summary_target_tokens.get() as usize).saturating_mul(4);
-        let body = if trimmed.len() > max_summary_bytes {
-            truncate_utf8(trimmed, max_summary_bytes)
-        } else {
-            trimmed.to_string()
-        };
-
-        self.messages.splice(
-            ..preserve_from,
-            [Message::text(
-                Role::System,
-                format!("{SUMMARY_PREFIX}{body}"),
-            )],
-        );
-
-        if self.approx_total_tokens() > budget {
+        if self.exceeds_budget(chat, model) {
             debug!(
                 target: "assistd::chat",
                 "ensure_budget: still over budget after summarize, truncating"
@@ -432,6 +418,90 @@ impl Conversation {
         Ok(())
     }
 
+    /// End of the stretch to summarize. Past the current turn's question
+    /// only when that turn outgrows the budget even with all earlier
+    /// history summarized.
+    fn fold_end(&self, chat: &ChatConfig, model: &ModelConfig) -> usize {
+        let preserved = self.first_preserved_index(chat.preserve_recent_turns.get() as usize);
+        let turn_start = self.current_turn_start();
+        let turn_tokens = u64::from(messages_tokens(&self.messages[turn_start..]));
+        let fixed = u64::from(self.fixed_tokens()) + u64::from(chat.summary_target_tokens.get());
+        if fixed + turn_tokens <= u64::from(effective_budget(chat, model)) {
+            return preserved;
+        }
+        self.first_kept_step(chat, model).unwrap_or(preserved)
+    }
+
+    /// Oldest tool step of the current turn that, with every newer one,
+    /// fits under the compaction target beside the summary; `None` unless
+    /// at least one older step would be folded. The newest step is kept.
+    fn first_kept_step(&self, chat: &ChatConfig, model: &ModelConfig) -> Option<usize> {
+        let turn_start = self.current_turn_start();
+        let question = self.messages.get(turn_start)?;
+        let reserved = u64::from(self.fixed_tokens())
+            + u64::from(chat.summary_target_tokens.get())
+            + u64::from(approx_message_tokens(question));
+        let allowance =
+            budget_share(chat, model, COMPACTION_TARGET_PERCENT).saturating_sub(reserved);
+        let mut kept = None;
+        for start in (turn_start + 1..self.messages.len()).rev() {
+            if !is_tool_step(&self.messages[start]) {
+                continue;
+            }
+            if kept.is_some() && u64::from(messages_tokens(&self.messages[start..])) > allowance {
+                break;
+            }
+            kept = Some(start);
+        }
+        kept.filter(|&start| start > turn_start + 1)
+    }
+
+    /// Replace everything before `fold_end` with `summary`, keeping the
+    /// current turn's question and logging any of its steps folded away.
+    fn fold_into_summary(&mut self, fold_end: usize, summary: &str) {
+        let before = self.approx_total_tokens();
+        let turn_start = self.current_turn_start();
+        if fold_end > turn_start + 1 {
+            self.fold_steps_into_log(turn_start + 1..fold_end);
+        }
+        self.messages.splice(
+            ..fold_end.min(turn_start),
+            [Message::text(
+                Role::System,
+                format!("{SUMMARY_PREFIX}{summary}"),
+            )],
+        );
+        self.record_compaction(before);
+    }
+
+    fn record_compaction(&mut self, tokens_before: u32) {
+        let removed = tokens_before.saturating_sub(self.approx_total_tokens());
+        self.compacted_tokens = self.compacted_tokens.saturating_add(removed);
+    }
+
+    /// Remove `steps` from the current turn, recording their calls on its
+    /// question.
+    fn fold_steps_into_log(&mut self, steps: Range<usize>) {
+        let records = step_log::records(&self.messages[steps.clone()]);
+        self.messages.drain(steps);
+        let turn_start = self.current_turn_start();
+        if let Some(question) = self.messages.get_mut(turn_start) {
+            question.earlier_steps.extend(records);
+            let excess = question
+                .earlier_steps
+                .len()
+                .saturating_sub(step_log::MAX_LOGGED_CALLS);
+            question.earlier_steps.drain(..excess);
+        }
+    }
+
+    /// Tokens outside the message list: system prompt, transient text, and
+    /// the measured calibration.
+    fn fixed_tokens(&self) -> u32 {
+        self.approx_total_tokens()
+            .saturating_sub(messages_tokens(&self.messages))
+    }
+
     pub fn exceeds_budget(&self, chat: &ChatConfig, model: &ModelConfig) -> bool {
         self.approx_total_tokens() > effective_budget(chat, model)
     }
@@ -439,18 +509,19 @@ impl Conversation {
     /// Tokens history can still grow before compaction is near; zero once
     /// it is.
     pub fn compaction_warning_headroom(&self, chat: &ChatConfig, model: &ModelConfig) -> u32 {
-        let warning_at =
-            u64::from(effective_budget(chat, model)) * COMPACTION_WARNING_PERCENT / 100;
+        let warning_at = budget_share(chat, model, COMPACTION_WARNING_PERCENT);
         let headroom = warning_at.saturating_sub(u64::from(self.approx_total_tokens()));
         u32::try_from(headroom).unwrap_or(u32::MAX)
     }
 
-    /// Drop the oldest messages after any summary until the conversation
-    /// fits the budget, then the oldest tool steps of the current turn. The
-    /// latest user message and the newest step always stay.
+    /// Drop the oldest messages after any summary, then fold the oldest tool
+    /// steps of the current turn into its call log, until the conversation is
+    /// under a low-water mark well below the budget. The latest user message
+    /// and the newest step always stay.
     pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
-        let budget = effective_budget(chat, model);
-        while self.approx_total_tokens() > budget {
+        let before = self.approx_total_tokens();
+        let target = budget_share(chat, model, COMPACTION_TARGET_PERCENT);
+        while u64::from(self.approx_total_tokens()) > target {
             let Some(idx) = self.first_droppable_index() else {
                 warn!(
                     target: "assistd::chat",
@@ -458,24 +529,27 @@ impl Conversation {
                 );
                 break;
             };
-            self.drop_with_pair(idx);
+            let pair = self.pair_range(idx);
+            if idx > self.current_turn_start() {
+                self.fold_steps_into_log(pair);
+            } else {
+                self.messages.drain(pair);
+            }
         }
+        self.record_compaction(before);
     }
 
-    /// Remove `idx` and, when it is an assistant message with tool
-    /// calls, the tool results that follow it.
-    fn drop_with_pair(&mut self, idx: usize) {
-        if idx >= self.messages.len() {
-            return;
-        }
-        let drop_trailing_result = matches!(
-            self.messages.get(idx),
-            Some(m) if m.role == Role::Assistant && !m.tool_calls.is_empty()
-        );
-        self.messages.remove(idx);
-        while drop_trailing_result && self.messages.get(idx).is_some_and(Self::is_tool_result) {
-            self.messages.remove(idx);
-        }
+    /// `idx` plus, when it is a tool step, the results that follow it.
+    fn pair_range(&self, idx: usize) -> Range<usize> {
+        let results = if is_tool_step(&self.messages[idx]) {
+            self.messages[idx + 1..]
+                .iter()
+                .take_while(|m| Self::is_tool_result(m))
+                .count()
+        } else {
+            0
+        };
+        idx..idx + 1 + results
     }
 
     /// True for a [`Role::Tool`] message or a [`TOOL_RESULT_PREFIX`] user message.
@@ -534,10 +608,9 @@ impl Conversation {
     /// The first tool step of the turn starting at `turn_start`, unless it
     /// is also the newest one.
     fn oldest_superseded_step(&self, turn_start: usize) -> Option<usize> {
-        let is_step = |m: &Message| m.role == Role::Assistant && !m.tool_calls.is_empty();
         let oldest = turn_start + 1;
-        let newest = self.messages.iter().rposition(is_step)?;
-        (self.messages.get(oldest).is_some_and(is_step) && oldest < newest).then_some(oldest)
+        let newest = self.messages.iter().rposition(is_tool_step)?;
+        (self.messages.get(oldest).is_some_and(is_tool_step) && oldest < newest).then_some(oldest)
     }
 
     fn last_real_user_index(&self) -> Option<usize> {
@@ -549,6 +622,10 @@ impl Conversation {
     fn current_turn_start(&self) -> usize {
         self.last_real_user_index().unwrap_or(self.messages.len())
     }
+}
+
+fn is_tool_step(m: &Message) -> bool {
+    m.role == Role::Assistant && !m.tool_calls.is_empty()
 }
 
 fn approx_tokens(text: &str) -> u32 {
@@ -568,12 +645,20 @@ fn approx_message_tokens(m: &Message) -> u32 {
     let context_cost = m.context.as_deref().map_or(0, |ctx| {
         approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len())
     });
+    let step_log_cost = approx_tokens_bytes(step_log::rendered_len(&m.earlier_steps));
     TOKENS_PER_MESSAGE_OVERHEAD
         .saturating_add(approx_tokens(&m.content))
         .saturating_add(approx_tokens(&m.reasoning))
         .saturating_add(image_cost)
         .saturating_add(tool_call_cost)
         .saturating_add(context_cost)
+        .saturating_add(step_log_cost)
+}
+
+fn messages_tokens(messages: &[Message]) -> u32 {
+    messages
+        .iter()
+        .fold(0, |total, m| total.saturating_add(approx_message_tokens(m)))
 }
 
 pub(super) fn approx_tokens_bytes(n: usize) -> u32 {
@@ -638,6 +723,15 @@ fn turn_content(message: &Message) -> wire::ContentBody<'_> {
 }
 
 fn wire_text(message: &Message) -> Cow<'_, str> {
+    let text = text_with_context(message);
+    if message.earlier_steps.is_empty() {
+        return text;
+    }
+    let log = step_log::render(&message.earlier_steps);
+    Cow::Owned(format!("{text}\n\n{}", neutralise_template_tokens(&log)))
+}
+
+fn text_with_context(message: &Message) -> Cow<'_, str> {
     match &message.context {
         Some(ctx) => {
             let ctx = neutralise_context_markers(ctx.trim_end());
@@ -691,15 +785,52 @@ fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {
     chat.max_history_tokens.get().min(model.context_budget())
 }
 
+fn budget_share(chat: &ChatConfig, model: &ModelConfig, percent: u64) -> u64 {
+    u64::from(effective_budget(chat, model)) * percent / 100
+}
+
 fn serialize_tail(messages: &[Message]) -> String {
     let mut out = String::new();
     for m in messages {
         out.push_str(m.role.as_wire());
         out.push_str(": ");
         out.push_str(&neutralise_template_tokens(&m.content));
+        for call in &m.tool_calls {
+            let call = format!("[called {} {}]", call.name, call.arguments);
+            out.push_str(&neutralise_template_tokens(&call));
+        }
+        if !m.earlier_steps.is_empty() {
+            out.push('\n');
+            out.push_str(&neutralise_template_tokens(&step_log::render(
+                &m.earlier_steps,
+            )));
+        }
         out.push('\n');
     }
     out
+}
+
+/// Summarize `dialogue`, cut to about `summary_target_tokens`.
+async fn summarize_bounded(
+    summarizer: &dyn Summarizer,
+    dialogue: String,
+    chat: &ChatConfig,
+) -> Result<String, ChatClientError> {
+    let summary = summarizer
+        .summarize(
+            dialogue,
+            chat.summary_target_tokens.get(),
+            chat.max_summary_tokens(),
+        )
+        .await?;
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return Err(ChatClientError::Summarize(
+            "summarizer returned empty text".into(),
+        ));
+    }
+    let max_summary_bytes = (chat.summary_target_tokens.get() as usize).saturating_mul(4);
+    Ok(truncate_utf8(trimmed, max_summary_bytes))
 }
 
 fn truncate_utf8(s: &str, max_bytes: usize) -> String {

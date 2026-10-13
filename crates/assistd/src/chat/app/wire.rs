@@ -82,7 +82,7 @@ impl App {
             | Event::VoiceOutputState { .. }
             | Event::Capabilities { .. }
             | Event::Status { .. }) => self.on_state_event(state),
-            Event::ContextSize { tokens, .. } => self.tokens.on_context_size(tokens),
+            Event::ContextSize { tokens, total, .. } => self.tokens.on_context_size(tokens, total),
             session @ (Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }
             | Event::SessionTitle { .. }

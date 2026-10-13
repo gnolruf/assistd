@@ -134,8 +134,9 @@ pub enum LlmEvent {
         name: String,
         result: Value,
     },
-    /// Tokens in the conversation as sent with the request about to stream.
-    ContextSize { tokens: u32 },
+    /// Tokens in the conversation as sent with the request about to stream,
+    /// and `total` the conversation has held, counting what compaction removed.
+    ContextSize { tokens: u32, total: u32 },
     /// Non-terminal recovery or status update.
     Status {
         severity: StatusSeverity,

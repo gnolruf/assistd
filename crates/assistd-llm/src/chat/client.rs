@@ -32,8 +32,10 @@ use crate::{
 
 const ERROR_BODY_CAP: usize = 1024;
 const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce a concise \
-    summary of the following dialogue that preserves all factual claims, user requests, and \
-    assistant conclusions. Write in past tense. Do not add commentary.";
+    summary of the following dialogue that preserves all factual claims, user requests, \
+    assistant conclusions, and what each tool call found. If the dialogue ends partway through \
+    a request, say what has been established so far and what remains open. Write in past \
+    tense. Do not add commentary.";
 
 /// HTTP streaming chat client backed by a locally-managed llama-server.
 ///
@@ -811,7 +813,8 @@ fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &Stre
 
 async fn send_context_size(conv: &Conversation, tx: &mpsc::Sender<LlmEvent>) {
     let tokens = conv.approx_total_tokens();
-    let _ = tx.send(LlmEvent::ContextSize { tokens }).await;
+    let total = conv.total_tokens();
+    let _ = tx.send(LlmEvent::ContextSize { tokens, total }).await;
 }
 
 async fn send_compaction_status(tx: &mpsc::Sender<LlmEvent>, event: StatusKind, message: &str) {
