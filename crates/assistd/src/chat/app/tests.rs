@@ -473,43 +473,43 @@ fn tab_accepts_selection_and_fills_buffer() {
     assert!(app.slash_suggestions().is_empty());
 }
 
-fn picker_entry(name: &str, session: &str, current: bool, active_sess: bool) -> BranchListEntry {
+fn picker_entry(name: &str, session: &str, title: &str, active: bool) -> BranchListEntry {
     BranchListEntry {
         name: name.into(),
         parent_branch_name: None,
         fork_point_seq: None,
         message_count: 0,
-        is_current_in_session: current,
-        is_active_session: active_sess,
+        is_current_in_session: active,
+        is_active_session: active,
         session_short: session.into(),
-        session_title: None,
+        session_title: Some(title.into()),
+        last_active_at: None,
     }
 }
 
 #[test]
-fn open_branch_picker_highlights_active_current() {
+fn resume_search_targets_the_selected_match_not_the_unfiltered_row() {
     let (mut app, _rx) = test_app();
     app.branches_buffer = vec![
-        picker_entry("main", "aaaaaaaa", false, false),
-        picker_entry("main", "bbbbbbbb", true, true),
-        picker_entry("feat", "bbbbbbbb", false, true),
+        picker_entry("main", "aaaaaaaa", "Cat names", false),
+        picker_entry("main", "bbbbbbbb", "Tax return", true),
+        picker_entry("fix", "cccccccc", "Tax return", false),
     ];
-    app.open_branch_picker();
-    let picker = app.picker_modal.as_ref().expect("picker opened");
-    assert_eq!(picker.selected, 1);
-    assert_eq!(picker.entries.len(), 3);
-}
-
-#[test]
-fn picker_current_target_is_session_qualified() {
-    let modal = BranchPickerModal {
-        entries: vec![picker_entry("feature-x", "deadbeef", false, false)],
-        selected: 0,
+    app.in_flight_branch_op = Some(BranchOp::ResumePicker);
+    app.on_chat_event(ChatEvent::Wire {
+        stream: WireStream::Branch,
+        event: done(),
+    });
+    let target = |app: &App| {
+        app.resume_picker
+            .as_ref()
+            .and_then(ResumePicker::current_target)
     };
-    assert_eq!(
-        modal.current_target().as_deref(),
-        Some("deadbeef/feature-x")
-    );
+    assert_eq!(target(&app).as_deref(), Some("bbbbbbbb/main"));
+    type_str(&mut app, "TAX fi");
+    assert_eq!(target(&app).as_deref(), Some("cccccccc/fix"));
+    app.on_key(key(KeyCode::Down));
+    assert_eq!(target(&app).as_deref(), Some("cccccccc/fix"));
 }
 
 #[test]

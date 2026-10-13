@@ -1,11 +1,11 @@
-//! The inline command-confirmation prompt and the branch-picker overlay.
+//! The inline command-confirmation prompt.
 
 use assistd_ipc::Request;
 use assistd_tools::{Approval, ConfirmationRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use super::{App, BranchPickerModal, ConfirmChoice, ConfirmationPrompt};
+use super::{App, ConfirmChoice, ConfirmationPrompt};
 
 /// Script rows one PgUp/PgDn moves an expanded prompt.
 const PROMPT_SCROLL_STEP: usize = 10;
@@ -91,47 +91,6 @@ impl App {
         };
         if let Some(choice) = answer {
             self.resolve_confirmation(choice.approval());
-        }
-    }
-
-    /// Open the picker on the buffered `/resume` rows, preselecting the
-    /// active branch.
-    pub(super) fn open_branch_picker(&mut self) {
-        let entries = std::mem::take(&mut self.branches_buffer);
-        if entries.is_empty() {
-            self.set_notice("no branches to resume");
-            return;
-        }
-        let selected = entries
-            .iter()
-            .position(|e| e.is_active_session && e.is_current_in_session)
-            .unwrap_or(0);
-        self.picker_modal = Some(BranchPickerModal { entries, selected });
-    }
-
-    pub(super) fn on_picker_key(&mut self, ev: KeyEvent) {
-        let Some(picker) = self.picker_modal.as_mut() else {
-            return;
-        };
-        let len = picker.entries.len();
-        match ev.code {
-            KeyCode::Up if picker.selected > 0 => picker.selected -= 1,
-            KeyCode::Down if picker.selected + 1 < len => picker.selected += 1,
-            KeyCode::Home => picker.selected = 0,
-            KeyCode::End => picker.selected = len.saturating_sub(1),
-            KeyCode::Enter => self.switch_to_picked_branch(),
-            KeyCode::Esc => self.picker_modal = None,
-            _ => {}
-        }
-    }
-
-    fn switch_to_picked_branch(&mut self) {
-        let target = self
-            .picker_modal
-            .take()
-            .and_then(|picker| picker.current_target());
-        if let Some(target) = target {
-            self.switch_branch(target);
         }
     }
 }

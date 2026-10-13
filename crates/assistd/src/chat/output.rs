@@ -626,6 +626,13 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
     }
 }
 
+/// The transcript's opening banner on its own, `width` columns wide.
+pub(super) fn banner_lines(model_name: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    render_banner(&mut lines, model_name, width);
+    lines
+}
+
 /// The logo with the version and model right-aligned beside it, closed by a
 /// rule spanning `width`.
 fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16) {

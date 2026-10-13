@@ -125,6 +125,7 @@ impl AppState {
                     message_count: branch.message_count,
                     is_current_in_session: branch.is_current_in_session,
                     is_active_session,
+                    last_active_at: branch.last_active_at,
                 })
                 .await;
         }

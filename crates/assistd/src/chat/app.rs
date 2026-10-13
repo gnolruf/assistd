@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use assistd_core::PresenceState;
 use assistd_ipc::{Event, IpcClient, PermissionMode, Request, VoiceCaptureState};
 use assistd_tools::{Approval, Attachment, ConfirmationRequest};
+use chrono::{DateTime, Utc};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -22,6 +23,7 @@ mod commands;
 mod connection;
 mod keys;
 mod modal;
+mod resume;
 mod wire;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -230,8 +232,9 @@ pub(super) struct App {
     /// Set by Esc on the slash popup; cleared when the buffer leaves its
     /// `/` prefix.
     slash_dismissed: bool,
-    /// `/resume` picker; `confirmation` takes precedence while both are open.
-    pub picker_modal: Option<BranchPickerModal>,
+    /// `/resume` conversation list; `confirmation` takes precedence while
+    /// both are open.
+    pub resume_picker: Option<ResumePicker>,
     /// Throttles rewraps for a live block's timer to 1 Hz.
     last_live_seconds: Option<u64>,
     pub session_title: Option<String>,
@@ -276,20 +279,106 @@ pub(super) struct BranchListEntry {
     pub is_active_session: bool,
     pub session_short: String,
     pub session_title: Option<String>,
+    /// `None` when the daemon's timestamp does not parse.
+    pub last_active_at: Option<DateTime<Utc>>,
 }
 
-/// Branch picker shown by `/resume`.
-pub(super) struct BranchPickerModal {
-    pub entries: Vec<BranchListEntry>,
-    pub selected: usize,
+impl BranchListEntry {
+    pub(super) fn is_active(&self) -> bool {
+        self.is_active_session && self.is_current_in_session
+    }
+
+    /// Whether every whitespace-separated term of the lowercased `query`
+    /// appears in the title, branch names or session id.
+    fn matches(&self, query: &str) -> bool {
+        let haystack = [
+            self.session_title.as_deref(),
+            Some(self.name.as_str()),
+            self.parent_branch_name.as_deref(),
+            Some(self.session_short.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+        query.split_whitespace().all(|term| haystack.contains(term))
+    }
 }
 
-impl BranchPickerModal {
-    /// The selected entry as a session-qualified `/switch` target.
-    pub(super) fn current_target(&self) -> Option<String> {
+/// Conversation list `/resume` draws in the chat panel, narrowed by a
+/// typed search.
+pub(super) struct ResumePicker {
+    entries: Vec<BranchListEntry>,
+    query: String,
+    /// Index into [`matches`](Self::matches).
+    selected: usize,
+}
+
+impl ResumePicker {
+    /// Selects the active branch when it is listed.
+    fn new(entries: Vec<BranchListEntry>) -> Self {
+        let selected = entries
+            .iter()
+            .position(BranchListEntry::is_active)
+            .unwrap_or(0);
+        Self {
+            entries,
+            query: String::new(),
+            selected,
+        }
+    }
+
+    pub(super) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(super) fn selected(&self) -> usize {
+        self.selected
+    }
+
+    pub(super) fn total(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// The entries the search keeps, in listing order.
+    pub(super) fn matches(&self) -> Vec<&BranchListEntry> {
+        let query = self.query.to_lowercase();
         self.entries
+            .iter()
+            .filter(|entry| entry.matches(&query))
+            .collect()
+    }
+
+    /// The selected match as a session-qualified `/switch` target.
+    fn current_target(&self) -> Option<String> {
+        self.matches()
             .get(self.selected)
             .map(|e| format!("{}/{}", e.session_short, e.name))
+    }
+
+    fn select_previous(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn select_next(&mut self) {
+        let last = self.matches().len().saturating_sub(1);
+        self.selected = (self.selected + 1).min(last);
+    }
+
+    fn push_query(&mut self, c: char) {
+        self.query.push(c);
+        self.selected = 0;
+    }
+
+    fn pop_query(&mut self) {
+        self.query.pop();
+        self.selected = 0;
+    }
+
+    fn clear_query(&mut self) {
+        self.query.clear();
+        self.selected = 0;
     }
 }
 
@@ -332,7 +421,7 @@ impl App {
             tasks: JoinSet::new(),
             slash_selected: 0,
             slash_dismissed: false,
-            picker_modal: None,
+            resume_picker: None,
             last_live_seconds: None,
             session_title: None,
             verbose: false,
@@ -350,6 +439,14 @@ impl App {
 
     pub(super) fn spinner_char(&self) -> char {
         SPINNER_CHARS[self.spinner % SPINNER_CHARS.len()]
+    }
+
+    /// The `/resume` list when it is on screen; an open confirmation prompt
+    /// hides it.
+    pub(super) fn shown_resume_picker(&self) -> Option<&ResumePicker> {
+        self.resume_picker
+            .as_ref()
+            .filter(|_| self.confirmation.is_none())
     }
 
     pub(super) fn notice(&self) -> Option<&str> {
