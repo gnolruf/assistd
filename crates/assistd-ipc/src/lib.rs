@@ -226,6 +226,7 @@ pub enum EventKind {
     Transcription,
     ChatFocus,
     Readiness,
+    ContextSize,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -858,6 +859,7 @@ impl Event {
             Event::Transcription { .. } => EventKind::Transcription,
             Event::ChatFocus { .. } => EventKind::ChatFocus,
             Event::Readiness { .. } => EventKind::Readiness,
+            Event::ContextSize { .. } => EventKind::ContextSize,
             Event::VoiceOutputState { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
@@ -867,7 +869,6 @@ impl Event {
             | Event::ReindexProgress { .. }
             | Event::ConfirmRequest { .. }
             | Event::Capabilities { .. }
-            | Event::ContextSize { .. }
             | Event::Status { .. }
             | Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }

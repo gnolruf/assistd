@@ -700,12 +700,17 @@ fn render_thinking_block(
 ) {
     let bar = Span::styled("▎ ", thinking_bar_style());
     let inner_w = width.saturating_sub(2).max(1);
+    let (header_bar, header_w) = if t.ended_at.is_some() {
+        (bar.clone(), inner_w)
+    } else {
+        (Span::raw(""), width.max(1))
+    };
     push_barred(
         out,
-        &bar,
+        &header_bar,
         &thinking_header_text(t),
         thinking_header_style(),
-        inner_w,
+        header_w,
     );
     if (t.expanded || verbose) && !t.text.is_empty() {
         for line in t.text.lines() {

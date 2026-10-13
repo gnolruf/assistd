@@ -553,6 +553,7 @@ async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
                 EventKind::ReasoningDelta,
                 EventKind::ToolCall,
                 EventKind::ToolResult,
+                EventKind::ContextSize,
                 EventKind::Done,
                 EventKind::Error,
             ],
