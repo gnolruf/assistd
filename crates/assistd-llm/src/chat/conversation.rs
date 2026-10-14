@@ -19,6 +19,19 @@ mod step_log;
 pub use step_log::StepRecord;
 
 const SUMMARY_PREFIX: &str = "[Conversation summary] ";
+/// Opens the instruction that asks the model to summarize its own context.
+const SUMMARY_INSTRUCTION_HEAD: &str = "[Context compaction] Pause the task and make no tool \
+    calls in this reply. Part of the conversation above is about to be replaced by your summary, \
+    and you will continue from that summary alone.";
+/// What every summary must keep.
+const SUMMARY_INSTRUCTION_RULES: &str = "Preserve every factual claim, user request, \
+    conclusion, and what each tool call found. Keep every approach that failed and why, and every \
+    limit discovered in the tools or environment (commands or flags that are unsupported, hosts \
+    that are unreachable, paths that do not exist), so none is retried. If a request is still in \
+    progress, say what has been established and what remains open. Write in past tense, with no \
+    preamble or commentary.";
+/// Longest quote of a message the summary instruction uses to name it.
+const SUMMARY_QUOTE_BYTES: usize = 120;
 /// Marks an image-carrying tool result sent on the user role (templates
 /// render images only on user turns); text-only results use [`Role::Tool`].
 pub const TOOL_RESULT_PREFIX: &str = "[tool:";
@@ -141,17 +154,22 @@ impl Message {
     }
 }
 
-/// Condenses a stretch of dialogue into a summary when the conversation
-/// outgrows its token budget.
+/// A summary to write by continuing the conversation itself, so the server
+/// can reuse the prompt it already holds and read only the instruction.
+#[derive(Debug)]
+pub struct SummaryRequest<'a> {
+    /// The conversation exactly as the next step would render it.
+    pub messages: Vec<wire::ChatMessage<'a>>,
+    /// The closing user message, naming the stretch to summarize.
+    pub instruction: String,
+}
+
+/// Condenses a stretch of the conversation into a summary when it outgrows
+/// its token budget.
 #[async_trait]
 pub trait Summarizer: Send + Sync {
-    /// Summarize `dialogue` into at most `max_tokens`, targeting `target_tokens`.
-    async fn summarize(
-        &self,
-        dialogue: String,
-        target_tokens: u32,
-        max_tokens: u32,
-    ) -> Result<String, ChatClientError>;
+    /// The model's reply to `request`: the summary text alone.
+    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError>;
 }
 
 /// Mutable conversation state. `messages` never holds the system prompt,
@@ -395,8 +413,7 @@ impl Conversation {
             return Ok(());
         }
         let fold_end = self.fold_end(chat, model);
-        let dialogue = serialize_tail(&self.messages[..fold_end]);
-        if fold_end <= self.summary_insertion_index() || dialogue.trim().is_empty() {
+        if fold_end <= self.summary_insertion_index() {
             debug!(
                 target: "assistd::chat",
                 "ensure_budget: nothing to summarize, falling through to truncation"
@@ -405,7 +422,11 @@ impl Conversation {
             return Ok(());
         }
 
-        let summary = summarize_bounded(summarizer, dialogue, chat).await?;
+        let request = SummaryRequest {
+            messages: self.as_wire_messages(),
+            instruction: self.summary_instruction(fold_end, chat.summary_target_tokens.get()),
+        };
+        let summary = summarize_bounded(summarizer, request, chat).await?;
         self.fold_into_summary(fold_end, &summary);
 
         if self.exceeds_budget(chat, model) {
@@ -416,6 +437,32 @@ impl Conversation {
             self.truncate_to_budget(chat, model);
         }
         Ok(())
+    }
+
+    /// The instruction asking for a summary of everything before `fold_end`,
+    /// naming the first message kept word for word by quoting it.
+    fn summary_instruction(&self, fold_end: usize, target_tokens: u32) -> String {
+        let scope = match self.messages.get(fold_end) {
+            Some(step) if fold_end > self.current_turn_start() => format!(
+                "Cover everything before your tool call {}, including any earlier conversation \
+                 summary and the steps already taken for the user's current request. The current \
+                 request, that call, and everything after it stay in context word for word.",
+                quote_first_call(step)
+            ),
+            Some(kept) => format!(
+                "Cover everything before the {} message containing \"{}\", including any earlier \
+                 conversation summary. That message and everything after it stay in context word \
+                 for word.",
+                kept.role.as_wire(),
+                quote(&kept.content)
+            ),
+            None => "Cover the whole conversation, including any earlier conversation summary."
+                .to_string(),
+        };
+        format!(
+            "{SUMMARY_INSTRUCTION_HEAD} {scope} {SUMMARY_INSTRUCTION_RULES} Keep it under about \
+             {target_tokens} tokens."
+        )
     }
 
     /// End of the stretch to summarize. Past the current turn's question
@@ -789,40 +836,35 @@ fn budget_share(chat: &ChatConfig, model: &ModelConfig, percent: u64) -> u64 {
     u64::from(effective_budget(chat, model)) * percent / 100
 }
 
-fn serialize_tail(messages: &[Message]) -> String {
-    let mut out = String::new();
-    for m in messages {
-        out.push_str(m.role.as_wire());
-        out.push_str(": ");
-        out.push_str(&neutralise_template_tokens(&m.content));
-        for call in &m.tool_calls {
-            let call = format!("[called {} {}]", call.name, call.arguments);
-            out.push_str(&neutralise_template_tokens(&call));
-        }
-        if !m.earlier_steps.is_empty() {
-            out.push('\n');
-            out.push_str(&neutralise_template_tokens(&step_log::render(
-                &m.earlier_steps,
-            )));
-        }
-        out.push('\n');
-    }
-    out
+/// The opening of `text`'s first non-empty line, defanged, for naming a
+/// message inside the summary instruction.
+fn quote(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    truncate_utf8(&neutralise_template_tokens(line), SUMMARY_QUOTE_BYTES)
 }
 
-/// Summarize `dialogue`, cut to about `summary_target_tokens`.
+/// `step`'s first tool call as the instruction names it.
+fn quote_first_call(step: &Message) -> String {
+    step.tool_calls.first().map_or_else(String::new, |call| {
+        format!(
+            "`{}` with arguments `{}`",
+            call.name,
+            quote(&call.arguments)
+        )
+    })
+}
+
+/// The summary `request` yields, cut to about `summary_target_tokens`.
 async fn summarize_bounded(
     summarizer: &dyn Summarizer,
-    dialogue: String,
+    request: SummaryRequest<'_>,
     chat: &ChatConfig,
 ) -> Result<String, ChatClientError> {
-    let summary = summarizer
-        .summarize(
-            dialogue,
-            chat.summary_target_tokens.get(),
-            chat.max_summary_tokens(),
-        )
-        .await?;
+    let summary = summarizer.summarize(request).await?;
     let trimmed = summary.trim();
     if trimmed.is_empty() {
         return Err(ChatClientError::Summarize(

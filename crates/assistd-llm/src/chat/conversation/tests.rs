@@ -5,9 +5,16 @@ use tokio::sync::Mutex;
 
 use super::*;
 
+/// One summary request as the summarizer received it.
+struct CapturedRequest {
+    /// The rendered messages, as JSON.
+    messages: String,
+    instruction: String,
+}
+
 struct FakeSummarizer {
     reply: String,
-    captured: Arc<Mutex<Vec<String>>>,
+    captured: Arc<Mutex<Vec<CapturedRequest>>>,
 }
 
 impl FakeSummarizer {
@@ -21,13 +28,11 @@ impl FakeSummarizer {
 
 #[async_trait]
 impl Summarizer for FakeSummarizer {
-    async fn summarize(
-        &self,
-        dialogue: String,
-        _target_tokens: u32,
-        _max_tokens: u32,
-    ) -> Result<String, ChatClientError> {
-        self.captured.lock().await.push(dialogue);
+    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
+        self.captured.lock().await.push(CapturedRequest {
+            messages: serde_json::to_string(&request.messages).unwrap(),
+            instruction: request.instruction,
+        });
         Ok(self.reply.clone())
     }
 }
@@ -315,12 +320,22 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
 
     let fake = FakeSummarizer::new("early chat covered topics 0 to 4");
     let (chat, model) = spec(120, 2, 10_000);
+    let rendered_before = serde_json::to_string(&c.as_wire_messages()).unwrap();
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
-    let summarized: String = (0..5)
-        .map(|i| format!("user: {}\nassistant: {}\n", user(i), assistant(i)))
-        .collect();
-    assert_eq!(*fake.captured.lock().await, [summarized]);
+    let captured = fake.captured.lock().await;
+    assert_eq!(
+        captured[0].messages, rendered_before,
+        "the summary must continue the prompt the server already holds"
+    );
+    assert!(
+        captured[0].instruction.contains(&format!(
+            "before the user message containing \"{}\"",
+            user(5)
+        )),
+        "{}",
+        captured[0].instruction
+    );
     assert_eq!(
         contents(&c),
         [
@@ -353,8 +368,11 @@ async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
 
     let captured = fake.captured.lock().await;
     assert!(
-        captured[0].starts_with("system: [Conversation summary] first summary\n"),
-        "{captured:?}"
+        captured[0]
+            .messages
+            .contains("[Conversation summary] first summary"),
+        "{}",
+        captured[0].messages
     );
     assert_eq!(
         contents(&c),
@@ -589,17 +607,24 @@ async fn a_long_tool_loop_folds_its_oldest_steps_into_the_summary_and_a_call_log
         "compaction must not lower the total"
     );
 
-    let dialogue = fake.captured.lock().await.remove(0);
-    for folded in [
-        "user: old question\n",
-        "user: current question\n",
-        r#"[called run {"command":"ls"}]"#,
-    ] {
-        assert!(
-            dialogue.contains(folded),
-            "{folded:?} missing from {dialogue}"
-        );
-    }
+    let request = fake.captured.lock().await.remove(0);
+    let first_kept_call = c
+        .messages
+        .iter()
+        .find_map(|m| m.tool_calls.first())
+        .map(|call| call.id.clone())
+        .unwrap();
+    assert!(
+        request
+            .instruction
+            .contains("before your tool call `run` with arguments `{\"command\":\"ls\"}`"),
+        "{}",
+        request.instruction
+    );
+    assert!(
+        request.messages.contains("old question") && request.messages.contains(&first_kept_call),
+        "the request must carry the folded and the kept stretches alike"
+    );
     assert_eq!(
         contents(&c)[..2],
         ["[Conversation summary] summary", "current question"]

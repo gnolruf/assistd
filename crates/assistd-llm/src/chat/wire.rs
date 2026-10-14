@@ -32,6 +32,13 @@ pub struct ChatRequest<'a> {
     /// forces a text reply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<&'a str>,
+    /// Most tokens the model may think for before llama-server ends its
+    /// `<think>` block; a sampler setting, so the prompt is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_tokens: Option<u32>,
+    /// Text llama-server writes into the thinking where the budget cut it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget_message: Option<&'a str>,
     /// Extra variables handed to llama.cpp's Jinja chat template.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs<'a>>,

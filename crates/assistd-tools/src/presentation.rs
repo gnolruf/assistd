@@ -94,15 +94,9 @@ impl OutputCap {
     /// truncation notice, with the whole body spilled under `stem`.
     pub fn cap(&self, stem: &str, text: String) -> TruncatedText {
         let cut = self.cut_stream(text, "output", self.budget(), stem);
-        let truncated = cut.truncated();
-        let mut text = cut.head;
-        if let Some(notice) = &cut.notice {
-            terminate_line(&mut text);
-            text.push_str(notice);
-        }
         TruncatedText {
-            text,
-            truncated,
+            text: cut.visible(),
+            truncated: cut.truncated(),
             overflow_file: cut.overflow_file,
         }
     }
@@ -114,27 +108,29 @@ impl OutputCap {
         }
     }
 
-    /// Cut `text` so its head, line terminator, and notice together fit
-    /// `budget`, spilling it in full when it overflows; `label` names the
-    /// stream in the notice.
+    /// Cut `text` so its banner, head, line terminator, and notice together
+    /// fit `budget`, spilling it in full when it overflows; `label` names the
+    /// stream in the banner and notice.
     fn cut_stream(&self, text: String, label: &str, budget: Budget, stem: &str) -> StreamCut {
         let full = Budget::of(&text);
         if full.fits_in(budget) {
             return StreamCut {
                 head: text,
-                notice: None,
+                truncation: None,
                 overflow_file: None,
             };
         }
         let overflow_file = self.spill(text.as_bytes(), stem);
-        let notice = truncation_notice(label, full.lines, full.bytes, overflow_file.as_deref());
+        let spill = overflow_file.as_deref();
+        let widest = Truncation::new(label, full.lines, full, spill);
         let room = budget
-            .saturating_sub(Budget::of(&notice))
+            .saturating_sub(widest.cost())
             .saturating_sub(Budget::NEWLINE);
         let head = truncate_lines_bytes(&text, room.lines, room.bytes);
+        let truncation = Truncation::new(label, count_lines(&head), full, spill);
         StreamCut {
             head,
-            notice: Some(notice),
+            truncation: Some(truncation),
             overflow_file,
         }
     }
@@ -209,17 +205,83 @@ impl Budget {
 }
 
 /// One stream cut to a [`PresentSpec`]: its visible head and, when cut,
-/// the notice pointing at the spill file.
+/// the banner and notice that say so.
 #[derive(Debug)]
 struct StreamCut {
     head: String,
-    notice: Option<String>,
+    truncation: Option<Truncation>,
     overflow_file: Option<PathBuf>,
 }
 
 impl StreamCut {
     fn truncated(&self) -> bool {
-        self.notice.is_some()
+        self.truncation.is_some()
+    }
+
+    /// The head as the model sees it: between the banner and the notice
+    /// when the stream was cut.
+    fn visible(&self) -> String {
+        let Some(truncation) = &self.truncation else {
+            return self.head.clone();
+        };
+        let mut text = truncation.banner.clone();
+        text.push_str(&self.head);
+        terminate_line(&mut text);
+        text.push_str(&truncation.notice);
+        text
+    }
+}
+
+/// What a cut stream says about itself: a banner line above the head and a
+/// notice below it naming the lines left out and how to read them.
+#[derive(Debug)]
+struct Truncation {
+    banner: String,
+    notice: String,
+}
+
+impl Truncation {
+    /// Texts for a stream of `full` size cut to its first `shown` lines,
+    /// spilled to `spill` unless writing it failed. Never longer for a
+    /// smaller `shown`, so sizing with `shown` at its maximum is safe.
+    fn new(label: &str, shown: usize, full: Budget, spill: Option<&Path>) -> Self {
+        let tag = format!("[{} TRUNCATED]", label.to_uppercase());
+        let total = full.lines;
+        let size = human_size(full.bytes as u64);
+        let banner = match shown {
+            0 => format!("{tag} None of its {total} lines ({size}) fit here.\n"),
+            _ => format!(
+                "{tag} Showing only lines 1-{shown} of {total} ({size}); the rest is NOT shown.\n"
+            ),
+        };
+        let mut notice = format!(
+            "{tag} Lines {}-{total} were left out. Do not treat the lines above as the whole {label}.\n",
+            shown + 1
+        );
+        match spill {
+            Some(path) => {
+                let path = path.display();
+                notice.push_str(&format!("Full {label}: {path}\n"));
+                if shown > 0 {
+                    notice.push_str(&format!(
+                        "Next page: cat {path} | head -n {} | tail -n {shown}\n",
+                        2 * shown
+                    ));
+                }
+                notice.push_str(&format!("Search it: cat {path} | grep PATTERN\n"));
+            }
+            None => notice.push_str(&format!("The full {label} could not be saved.\n")),
+        }
+        Self { banner, notice }
+    }
+
+    fn cost(&self) -> Budget {
+        let banner = Budget::of(&self.banner);
+        let notice = Budget::of(&self.notice);
+        Budget {
+            bytes: banner.bytes + notice.bytes,
+            lines: banner.lines + notice.lines,
+        }
     }
 }
 
@@ -313,12 +375,8 @@ pub fn present(out: CommandOutput, cap: &OutputCap, duration: Duration) -> Prese
         .saturating_sub(Budget::NEWLINE);
     let stdout = cap.cut_stream(stdout_text, "output", stdout_room, SPILL_STEM);
 
-    let mut body = String::new();
-    body.push_str(&stdout.head);
+    let mut body = stdout.visible();
     terminate_line(&mut body);
-    if let Some(notice) = &stdout.notice {
-        body.push_str(notice);
-    }
     body.push_str(&stderr_block);
     body.push_str(&footer);
 
@@ -368,36 +426,13 @@ fn present_binary(
     }
 }
 
-fn truncation_notice(
-    label: &str,
-    line_count: usize,
-    byte_count: usize,
-    overflow_file: Option<&Path>,
-) -> String {
-    let mut notice = format!(
-        "--- {label} truncated ({} lines, {}) ---\n",
-        line_count,
-        human_size(byte_count as u64),
-    );
-    if let Some(path) = overflow_file {
-        let display = path.display();
-        notice.push_str(&format!("Full {label}: {display}\n"));
-        notice.push_str(&format!("Explore: cat {display} | grep\n"));
-        notice.push_str(&format!("cat {display} | tail -n 100\n"));
-    }
-    notice
-}
-
 fn push_stderr(body: &mut String, stderr: &StreamCut) {
-    if stderr.head.is_empty() && stderr.notice.is_none() {
+    if stderr.head.is_empty() && !stderr.truncated() {
         return;
     }
     body.push_str(STDERR_PREFIX);
-    body.push_str(stderr.head.trim_end_matches('\n'));
+    body.push_str(stderr.visible().trim_end_matches('\n'));
     body.push('\n');
-    if let Some(notice) = &stderr.notice {
-        body.push_str(notice);
-    }
 }
 
 /// End `text` with a newline unless it is empty or already does.

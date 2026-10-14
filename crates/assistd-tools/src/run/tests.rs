@@ -6,7 +6,8 @@ use tempfile::{TempDir, tempdir};
 use super::*;
 use crate::command::{Command, CommandInput};
 use crate::commands::{
-    CatCommand, EchoCommand, GrepCommand, LsCommand, SeeCommand, TailCommand, WcCommand,
+    CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand, SeeCommand, TailCommand,
+    WcCommand,
 };
 use crate::fixtures::PNG_BYTES;
 
@@ -183,27 +184,32 @@ fn run_pipe_integrity_full_bytes_reach_final_stage() {
     assert!(result.get("overflow_file").is_none());
 }
 
-/// The tail hint in the overflow banner must be runnable as printed;
-/// `tail` rejects a bare count, so the banner has to spell `-n`.
+/// The next-page hint in the truncation notice must run as printed and
+/// return the lines right after the ones shown.
 #[test]
-fn run_overflow_tail_hint_runs_as_printed() {
+fn run_overflow_next_page_hint_runs_as_printed() {
     let mut reg = CommandRegistry::new();
     reg.register(Lines(5000));
     reg.register(CatCommand);
+    reg.register(HeadCommand);
     reg.register(TailCommand);
     let dir = fresh_dir();
     let tool = tool_with(dir.path(), Arc::new(reg));
 
     let first = invoke(&tool, "lines");
-    let output = first["output"].as_str().unwrap();
-    let hint = output
+    let shown = first["stdout"].as_str().unwrap().lines().count();
+    let hint = first["output"]
+        .as_str()
+        .unwrap()
         .lines()
-        .find(|l| l.contains("| tail"))
-        .expect("tail hint in banner");
+        .find_map(|l| l.strip_prefix("Next page: "))
+        .expect("next-page hint in notice");
 
     let followup = invoke(&tool, hint);
     assert_eq!(followup["exit_code"], 0, "{followup}");
-    let expected: String = (4901..=5000).map(|i| format!("line {i}\n")).collect();
+    let expected: String = (shown + 1..=2 * shown)
+        .map(|i| format!("line {i}\n"))
+        .collect();
     assert_eq!(followup["stdout"], expected);
 }
 

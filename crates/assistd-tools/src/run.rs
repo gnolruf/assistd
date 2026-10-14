@@ -70,10 +70,12 @@ fn build_description(
     desc.push_str(&format!(
         "Output is returned whole unless the result exceeds {max_lines} \
          lines or {max_size}; only then are stdout and stderr cut to their \
-         heads and each cut stream saved in full, with the truncation \
-         notice giving a `Full output:` or `Full stderr:` path under \
-         `{dir}/cmd-N.txt` that subsequent `run` calls can grep/cat. No \
-         such file exists for a result under those limits.\n\nCommands \
+         heads and each cut stream saved in full. A cut stream opens with \
+         an `[OUTPUT TRUNCATED]` or `[STDERR TRUNCATED]` banner and ends \
+         with a notice giving a `Full output:` or `Full stderr:` path under \
+         `{dir}/cmd-N.txt` and a `Next page:` command; when reading a file, \
+         page through it before drawing conclusions about its contents. \
+         No such file exists for a result under those limits.\n\nCommands \
          (first word of `command`):\n",
         max_lines = spec.max_lines,
         max_size = human_size(spec.max_bytes as u64),

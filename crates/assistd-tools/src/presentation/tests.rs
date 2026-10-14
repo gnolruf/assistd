@@ -152,17 +152,20 @@ fn present_overflow_writes_temp_file_and_exposes_path() {
     let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, OVERFLOW_FILE_MODE);
 
-    let head: String = (1..=195).map(|i| format!("line {i}\n")).collect();
+    let head: String = (1..=194).map(|i| format!("line {i}\n")).collect();
     let p = path.display();
+    let size = human_size(big.len() as u64);
     assert_eq!(
         r.output,
         format!(
-            "{head}--- output truncated (5000 lines, {}) ---\n\
+            "[OUTPUT TRUNCATED] Showing only lines 1-194 of 5000 ({size}); the rest is NOT shown.\n\
+             {head}\
+             [OUTPUT TRUNCATED] Lines 195-5000 were left out. Do not treat the lines above as \
+             the whole output.\n\
              Full output: {p}\n\
-             Explore: cat {p} | grep\n\
-             cat {p} | tail -n 100\n\
+             Next page: cat {p} | head -n 388 | tail -n 194\n\
+             Search it: cat {p} | grep PATTERN\n\
              [exit:0 | 9ms]",
-            human_size(big.len() as u64),
         )
     );
     assert_eq!(r.stdout_raw, head);
@@ -196,7 +199,7 @@ fn present_binary_guard_suppresses_stdout_preserves_attachments() {
 fn output_cap_cuts_within_its_budget_and_spills_under_the_stem() {
     let dir = tempdir().unwrap();
     let spec = PresentSpec {
-        max_lines: 6,
+        max_lines: 8,
         max_bytes: 1024,
         overflow_dir: dir.path().to_path_buf(),
     };
@@ -211,12 +214,14 @@ fn output_cap_cuts_within_its_budget_and_spills_under_the_stem() {
         assert!(cut.truncated);
         assert_eq!(std::fs::read_to_string(&spilled).unwrap(), body);
         assert!(
-            cut.text
-                .starts_with("line 1\nline 2\n--- output truncated (10 lines, "),
+            cut.text.starts_with(
+                "[OUTPUT TRUNCATED] Showing only lines 1-3 of 10 (71B); the rest is NOT shown.\n\
+                 line 1\nline 2\nline 3\n[OUTPUT TRUNCATED] Lines 4-10 were left out."
+            ),
             "{}",
             cut.text
         );
-        assert_eq!(count_lines(&cut.text), 6);
+        assert_eq!(count_lines(&cut.text), 8);
     }
 }
 
@@ -240,7 +245,11 @@ fn present_fits_the_cap_when_both_streams_overflow() {
 
     assert!(r.output.len() <= spec.max_bytes, "{}", r.output.len());
     assert!(count_lines(&r.output) <= spec.max_lines);
-    assert!(r.output.contains("[stderr] err 1\n"));
+    assert!(
+        r.output
+            .contains("[stderr] [STDERR TRUNCATED] Showing only lines 1-")
+    );
+    assert!(r.output.contains("\nerr 1\n"));
     assert!(r.output.ends_with("[exit:1 | 5ms]"));
     assert_eq!(std::fs::read(r.overflow_file.unwrap()).unwrap(), stdout);
     assert_eq!(
@@ -263,18 +272,21 @@ fn present_overflow_truncates_stderr_and_spills_it() {
     assert_eq!(path, &dir.path().join("cmd-1.txt"));
     assert_eq!(std::fs::read(path).unwrap(), big);
 
-    let head: String = (1..=194).map(|i| format!("[find]\terr {i}\n")).collect();
+    let head: String = (1..=193).map(|i| format!("[find]\terr {i}\n")).collect();
     let p = path.display();
+    let size = human_size(big.len() as u64);
     assert_eq!(
         r.output,
         format!(
-            "ok\n[stderr] {}\n--- stderr truncated (5000 lines, {}) ---\n\
+            "ok\n[stderr] [STDERR TRUNCATED] Showing only lines 1-193 of 5000 ({size}); the rest \
+             is NOT shown.\n\
+             {head}\
+             [STDERR TRUNCATED] Lines 194-5000 were left out. Do not treat the lines above as \
+             the whole stderr.\n\
              Full stderr: {p}\n\
-             Explore: cat {p} | grep\n\
-             cat {p} | tail -n 100\n\
+             Next page: cat {p} | head -n 386 | tail -n 193\n\
+             Search it: cat {p} | grep PATTERN\n\
              [exit:1 | 3ms]",
-            head.trim_end_matches('\n'),
-            human_size(big.len() as u64),
         )
     );
     assert_eq!(r.stdout_raw, "ok\n");

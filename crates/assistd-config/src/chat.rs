@@ -27,9 +27,9 @@ pub struct ChatConfig {
     pub preserve_recent_turns: NonZeroU32,
     /// Sampling temperature, `0.0..=2.0`.
     pub temperature: f32,
-    /// Max tokens per model response, reasoning included; a response that
-    /// hits it is discarded and retried. See `max_history_tokens` for the
-    /// bound.
+    /// Max tokens per model response, reasoning included; thinking is cut off
+    /// at half of it, and a response that still hits it is discarded and
+    /// retried. See `max_history_tokens` for the bound.
     pub max_response_tokens: NonZeroU32,
     /// Seconds to the first streamed byte (prompt prefill); generation
     /// itself is unbounded. Also caps the whole summarization call.
