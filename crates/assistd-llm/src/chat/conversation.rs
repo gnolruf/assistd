@@ -23,13 +23,15 @@ const SUMMARY_PREFIX: &str = "[Conversation summary] ";
 const SUMMARY_INSTRUCTION_HEAD: &str = "[Context compaction] Pause the task and make no tool \
     calls in this reply. Part of the conversation above is about to be replaced by your summary, \
     and you will continue from that summary alone.";
-/// What every summary must keep.
-const SUMMARY_INSTRUCTION_RULES: &str = "Preserve every factual claim, user request, \
-    conclusion, and what each tool call found. Keep every approach that failed and why, and every \
-    limit discovered in the tools or environment (commands or flags that are unsupported, hosts \
-    that are unreachable, paths that do not exist), so none is retried. If a request is still in \
-    progress, say what has been established and what remains open. Write in past tense, with no \
-    preamble or commentary.";
+/// What every summary must keep, current state first so a reply cut off at
+/// its length limit loses the oldest history rather than the next step.
+const SUMMARY_INSTRUCTION_RULES: &str = "Start with where things stand now: what the user's \
+    latest request needs, what has been established for it, what remains open, and the next \
+    step. Then cover the earlier history, most recent first, preserving every factual claim, user \
+    request, conclusion, and what each tool call found. Keep every approach that failed and why, \
+    and every limit discovered in the tools or environment (commands or flags that are \
+    unsupported, hosts that are unreachable, paths that do not exist), so none is retried. Write \
+    with no preamble or commentary.";
 /// Longest quote of a message the summary instruction uses to name it.
 const SUMMARY_QUOTE_BYTES: usize = 120;
 /// Marks an image-carrying tool result sent on the user role (templates
@@ -58,8 +60,11 @@ const TOKENS_PER_IMAGE: u32 = 1000;
 /// Share of the history budget, in percent, past which compaction is near.
 const COMPACTION_WARNING_PERCENT: u64 = 80;
 /// Share of the history budget, in percent, that compaction trims down to,
-/// leaving room for several tool steps before the next one.
-const COMPACTION_TARGET_PERCENT: u64 = 60;
+/// leaving room for several large tool steps before the next one.
+const COMPACTION_TARGET_PERCENT: u64 = 40;
+/// Share of `summary_target_tokens`, in percent, the instruction asks for, so
+/// a summary that overruns it still ends before its length limit.
+const SUMMARY_ASK_PERCENT: u32 = 75;
 
 /// Message role for conversation turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,7 +466,8 @@ impl Conversation {
         };
         format!(
             "{SUMMARY_INSTRUCTION_HEAD} {scope} {SUMMARY_INSTRUCTION_RULES} Keep it under about \
-             {target_tokens} tokens."
+             {} tokens.",
+            target_tokens.saturating_mul(SUMMARY_ASK_PERCENT) / 100
         )
     }
 

@@ -482,7 +482,7 @@ fn dropping_a_tool_call_message_drops_all_of_its_results() {
     c.push_assistant("answer".into());
     c.push_user("second question".into());
 
-    let (chat, model) = spec(40, 1, 10_000);
+    let (chat, model) = spec(60, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
     assert_eq!(
         contents(&c),
