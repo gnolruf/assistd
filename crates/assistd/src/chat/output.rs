@@ -670,7 +670,9 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
         OutputItem::Tool(b) => render_tool_block(out, b, width, verbose),
         OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t),
         OutputItem::Thinking(t) => render_thinking_block(out, t, width, verbose),
-        OutputItem::Compaction(c) => render_compaction_line(out, c, width),
+        OutputItem::Compaction(c) => {
+            push_live_header(out, &compaction_text(c), c.ended_at.is_some(), width);
+        }
     }
 }
 
@@ -746,21 +748,10 @@ fn render_thinking_block(
     width: u16,
     verbose: bool,
 ) {
-    let bar = Span::styled("▎ ", thinking_bar_style());
-    let inner_w = width.saturating_sub(2).max(1);
-    let (header_bar, header_w) = if t.ended_at.is_some() {
-        (bar.clone(), inner_w)
-    } else {
-        (Span::raw(""), width.max(1))
-    };
-    push_barred(
-        out,
-        &header_bar,
-        &thinking_header_text(t),
-        thinking_header_style(),
-        header_w,
-    );
+    push_live_header(out, &thinking_header_text(t), t.ended_at.is_some(), width);
     if (t.expanded || verbose) && !t.text.is_empty() {
+        let bar = Span::styled("▎ ", thinking_bar_style());
+        let inner_w = width.saturating_sub(2).max(1);
         for line in t.text.lines() {
             if line.is_empty() {
                 out.push(Line::from(vec![bar.clone()]));
@@ -772,12 +763,21 @@ fn render_thinking_block(
     out.push(Line::from(""));
 }
 
-fn thinking_header_text(t: &ThinkingBlock) -> String {
-    let elapsed = match t.ended_at {
-        Some(end) => end.saturating_duration_since(t.started_at),
-        None => t.started_at.elapsed(),
+/// A thinking or compaction header: unbarred while live, barred once done.
+fn push_live_header(out: &mut Vec<Line<'static>>, text: &str, done: bool, width: u16) {
+    let (bar, bar_w) = if done {
+        (
+            Span::styled("▎ ", thinking_bar_style()),
+            width.saturating_sub(2).max(1),
+        )
+    } else {
+        (Span::raw(""), width.max(1))
     };
-    let elapsed = compact_duration(elapsed.as_secs());
+    push_barred(out, &bar, text, thinking_header_style(), bar_w);
+}
+
+fn thinking_header_text(t: &ThinkingBlock) -> String {
+    let elapsed = elapsed_text(t.started_at, t.ended_at);
     if t.ended_at.is_some() {
         format!("Thought for {elapsed}")
     } else {
@@ -785,36 +785,25 @@ fn thinking_header_text(t: &ThinkingBlock) -> String {
     }
 }
 
-fn render_compaction_line(out: &mut Vec<Line<'static>>, c: &CompactionBlock, width: u16) {
-    let (bar, bar_w) = match c.ended_at {
-        Some(_) => (
-            Span::styled("▎ ", thinking_bar_style()),
-            width.saturating_sub(2).max(1),
-        ),
-        None => (Span::raw(""), width.max(1)),
-    };
-    push_barred(
-        out,
-        &bar,
-        &compaction_text(c),
-        thinking_header_style(),
-        bar_w,
-    );
-}
-
 fn compaction_text(c: &CompactionBlock) -> String {
-    let elapsed = match c.ended_at {
-        Some(end) => end.saturating_duration_since(c.started_at),
-        None => c.started_at.elapsed(),
-    };
-    let elapsed = compact_duration(elapsed.as_secs());
-    match c.ended_at {
-        Some(_) => format!("Compacted in {elapsed}"),
-        None => format!(
+    let elapsed = elapsed_text(c.started_at, c.ended_at);
+    if c.ended_at.is_some() {
+        format!("Compacted in {elapsed}")
+    } else {
+        format!(
             "{} Compacting… ({elapsed})",
             compaction_glyph(c.glyph_frame)
-        ),
+        )
     }
+}
+
+/// Time from `started_at` to `ended_at`, or to now while still running.
+fn elapsed_text(started_at: Instant, ended_at: Option<Instant>) -> String {
+    let elapsed = match ended_at {
+        Some(end) => end.saturating_duration_since(started_at),
+        None => started_at.elapsed(),
+    };
+    compact_duration(elapsed.as_secs())
 }
 
 fn compaction_glyph(frame: u64) -> char {

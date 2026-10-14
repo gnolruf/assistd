@@ -32,8 +32,7 @@ pub struct ChatConfig {
     /// bound.
     pub max_response_tokens: NonZeroU32,
     /// Max tokens the model may think for in one response before the server
-    /// ends its thinking and it must act. Must be below `max_response_tokens`;
-    /// at about 55 tokens a second, 2048 is roughly 40 s.
+    /// ends its thinking and it must act. Must be below `max_response_tokens`.
     pub max_reasoning_tokens: NonZeroU32,
     /// Seconds to the first streamed byte (prompt prefill); generation
     /// itself is unbounded. Also caps the whole summarization call.

@@ -225,8 +225,6 @@ fn output_cap_cuts_within_its_budget_and_spills_under_the_stem() {
     }
 }
 
-/// `run` results are already within the cap, so the registry never cuts
-/// them a second time.
 #[test]
 fn present_fits_the_cap_when_both_streams_overflow() {
     let dir = tempdir().unwrap();

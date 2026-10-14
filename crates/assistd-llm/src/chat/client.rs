@@ -643,9 +643,8 @@ impl LlmBackend for LlamaChatClient {
 }
 
 /// Summarizes by continuing the live conversation with the request's own
-/// tools and template settings, so llama-server reuses the prompt it holds
-/// and reads only the closing instruction. A zero thinking budget skips
-/// thinking without the template change that disabling it would make.
+/// tools and template settings, so llama-server reuses its cached prompt; a
+/// zero thinking budget skips thinking without changing the template.
 struct ContinuationSummarizer<'a> {
     client: &'a LlamaChatClient,
     tools: &'a [Value],
