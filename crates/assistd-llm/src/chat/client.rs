@@ -108,7 +108,7 @@ impl LlamaChatClient {
             presence_penalty: self.chat.presence_penalty,
             tools: None,
             tool_choice: None,
-            reasoning_budget_tokens: Some(reasoning_budget(self.chat.max_response_tokens.get())),
+            reasoning_budget_tokens: Some(self.chat.max_reasoning_tokens.get()),
             reasoning_budget_message: Some(REASONING_BUDGET_MESSAGE),
             chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
         }
@@ -611,7 +611,12 @@ impl LlmBackend for LlamaChatClient {
                 wire::ContentBody::Text(prompt.as_str().into()),
             )]);
             payload.max_tokens = self.chat.max_summary_tokens();
-            payload.reasoning_budget_tokens = Some(reasoning_budget(payload.max_tokens));
+            payload.reasoning_budget_tokens = Some(
+                self.chat
+                    .max_reasoning_tokens
+                    .get()
+                    .min(payload.max_tokens / 2),
+            );
             payload.chat_template_kwargs = self.template_kwargs(thinking);
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
@@ -638,7 +643,8 @@ impl LlmBackend for LlamaChatClient {
 
 /// Summarizes by continuing the live conversation with the request's own
 /// tools and template settings, so llama-server reuses the prompt it holds
-/// and reads only the closing instruction.
+/// and reads only the closing instruction. A zero thinking budget skips
+/// thinking without the template change that disabling it would make.
 struct ContinuationSummarizer<'a> {
     client: &'a LlamaChatClient,
     tools: &'a [Value],
@@ -662,6 +668,9 @@ impl Summarizer for ContinuationSummarizer<'_> {
         payload.stream = false;
         payload.stream_options = None;
         payload.temperature = client.chat.summary_temperature;
+        payload.max_tokens = client.chat.max_summary_tokens();
+        payload.reasoning_budget_tokens = Some(0);
+        payload.reasoning_budget_message = None;
 
         let url = format!("{}/v1/chat/completions", client.base_url);
         let mut response = client
@@ -695,12 +704,6 @@ impl Summarizer for ContinuationSummarizer<'_> {
         }
         Ok(text)
     }
-}
-
-/// Thinking allowed in a response of `max_tokens`: half of it, so a runaway
-/// think still leaves room for the reply or tool call.
-fn reasoning_budget(max_tokens: u32) -> u32 {
-    max_tokens / 2
 }
 
 /// Offer `tools` on `payload`, leaving it tool-free when there are none.

@@ -3,10 +3,10 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
-    DEFAULT_CHAT_MAX_HISTORY_TOKENS, DEFAULT_CHAT_MAX_RESPONSE_TOKENS,
-    DEFAULT_CHAT_PRESERVE_RECENT_TURNS, DEFAULT_CHAT_REQUEST_TIMEOUT_SECS,
-    DEFAULT_CHAT_SUMMARY_TARGET_TOKENS, DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE,
-    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_CHAT_MAX_HISTORY_TOKENS, DEFAULT_CHAT_MAX_REASONING_TOKENS,
+    DEFAULT_CHAT_MAX_RESPONSE_TOKENS, DEFAULT_CHAT_PRESERVE_RECENT_TURNS,
+    DEFAULT_CHAT_REQUEST_TIMEOUT_SECS, DEFAULT_CHAT_SUMMARY_TARGET_TOKENS,
+    DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE, DEFAULT_SYSTEM_PROMPT,
 };
 
 /// System prompt, history window and sampling. Sampler fields left `None`
@@ -27,10 +27,14 @@ pub struct ChatConfig {
     pub preserve_recent_turns: NonZeroU32,
     /// Sampling temperature, `0.0..=2.0`.
     pub temperature: f32,
-    /// Max tokens per model response, reasoning included; thinking is cut off
-    /// at half of it, and a response that still hits it is discarded and
-    /// retried. See `max_history_tokens` for the bound.
+    /// Max tokens per model response, reasoning included; a response that
+    /// hits it is discarded and retried. See `max_history_tokens` for the
+    /// bound.
     pub max_response_tokens: NonZeroU32,
+    /// Max tokens the model may think for in one response before the server
+    /// ends its thinking and it must act. Must be below `max_response_tokens`;
+    /// at about 55 tokens a second, 2048 is roughly 40 s.
+    pub max_reasoning_tokens: NonZeroU32,
     /// Seconds to the first streamed byte (prompt prefill); generation
     /// itself is unbounded. Also caps the whole summarization call.
     pub request_timeout_secs: NonZeroU64,
@@ -58,6 +62,7 @@ impl Default for ChatConfig {
             preserve_recent_turns: DEFAULT_CHAT_PRESERVE_RECENT_TURNS,
             temperature: DEFAULT_CHAT_TEMPERATURE,
             max_response_tokens: DEFAULT_CHAT_MAX_RESPONSE_TOKENS,
+            max_reasoning_tokens: DEFAULT_CHAT_MAX_REASONING_TOKENS,
             request_timeout_secs: DEFAULT_CHAT_REQUEST_TIMEOUT_SECS,
             summary_temperature: DEFAULT_CHAT_SUMMARY_TEMPERATURE,
             top_p: None,

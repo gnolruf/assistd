@@ -250,6 +250,11 @@ fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfi
             model.context_budget()
         ));
     }
+    if chat.max_reasoning_tokens >= chat.max_response_tokens {
+        errors.push(
+            "chat.max_reasoning_tokens must be strictly less than chat.max_response_tokens".into(),
+        );
+    }
     if chat.summary_target_tokens >= chat.max_history_tokens {
         errors.push(
             "chat.summary_target_tokens must be strictly less than chat.max_history_tokens".into(),

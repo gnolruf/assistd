@@ -41,6 +41,7 @@ pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: NonZeroU32 = nz32(1000);
 pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: NonZeroU32 = nz32(4);
 pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: NonZeroU32 = nz32(1024);
+pub const DEFAULT_CHAT_MAX_REASONING_TOKENS: NonZeroU32 = nz32(512);
 pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(120);
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
 /// Must not name tools: each request already carries their schemas.

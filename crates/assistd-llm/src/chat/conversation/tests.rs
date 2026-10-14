@@ -45,6 +45,7 @@ fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) 
         preserve_recent_turns: nz32(preserve),
         temperature: 0.7,
         max_response_tokens: nz32(512),
+        max_reasoning_tokens: nz32(256),
         request_timeout_secs: nz64(60),
         summary_temperature: 0.3,
         top_p: None,
