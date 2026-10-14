@@ -47,7 +47,7 @@ impl Command for HeadCommand {
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
         };
-        CommandOutput::ok(first_lines(&data, count))
+        CommandOutput::ok(first_lines(&data, count.amount()))
     }
 }
 
@@ -63,7 +63,7 @@ impl Command for TailCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "emit the last N lines of FILE or stdin (default 10; -n N to change)"
+        "emit the last N lines of FILE or stdin (default 10; -n N, or -n +N from line N)"
     }
 
     fn help(&self) -> String {
@@ -72,7 +72,8 @@ impl Command for TailCommand {
              \n\
              Emit the last N lines of the named files, or of stdin when \
              none are given, {DEFAULT_LINES} by default. `-n N`, `-nN` \
-             and `-N` are all accepted.\n\
+             and `-N` are all accepted. `-n +N` instead emits everything \
+             from line N onward.\n\
              \n\
              Several files concatenate, exactly as `cat FILE... | tail` \
              would; there are no `==> FILE <==` banners. Binary files are \
@@ -90,7 +91,28 @@ impl Command for TailCommand {
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
         };
-        CommandOutput::ok(last_lines(&data, count))
+        let lines = match count {
+            LineCount::Last(count) => last_lines(&data, count),
+            LineCount::FromLine(line) => lines_from(&data, line),
+        };
+        CommandOutput::ok(lines)
+    }
+}
+
+/// A parsed `-n` value: a plain count, or a `+`-prefixed 1-based line to
+/// start from (`tail` only; `head` reads the number as a count, as coreutils
+/// does).
+#[derive(Debug, Clone, Copy)]
+enum LineCount {
+    Last(usize),
+    FromLine(usize),
+}
+
+impl LineCount {
+    fn amount(self) -> usize {
+        match self {
+            Self::Last(n) | Self::FromLine(n) => n,
+        }
     }
 }
 
@@ -102,8 +124,8 @@ struct CountError {
 
 /// Split argv into the line count and the files to read. A bare `-` is a
 /// file (stdin, as in coreutils), not a flag.
-fn parse_flags(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), CountError> {
-    let mut count = DEFAULT_LINES;
+fn parse_flags(cmd: &str, argv: &[String]) -> Result<(LineCount, Vec<String>), CountError> {
+    let mut count = LineCount::Last(DEFAULT_LINES);
     let mut files = Vec::new();
     let mut pos = 0;
     while pos < argv.len() {
@@ -126,13 +148,29 @@ fn parse_flags(cmd: &str, argv: &[String]) -> Result<(usize, Vec<String>), Count
             Some(glued) => glued,
             None => rest,
         };
-        count = digits.parse().map_err(|_| CountError {
+        count = parse_count(digits).ok_or_else(|| CountError {
             what: format!("not a line count: '-{digits}'"),
             recovery: format!("{cmd} -n 20"),
         })?;
         pos += 1;
     }
     Ok((count, files))
+}
+
+fn parse_count(digits: &str) -> Option<LineCount> {
+    let (from_line, digits) = match digits.strip_prefix('+') {
+        Some(rest) => (true, rest),
+        None => (false, digits),
+    };
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n = digits.parse().ok()?;
+    Some(if from_line {
+        LineCount::FromLine(n)
+    } else {
+        LineCount::Last(n)
+    })
 }
 
 fn count_error(cmd: &str, e: CountError) -> CommandOutput {
@@ -151,6 +189,15 @@ fn first_lines(text: &[u8], count: usize) -> Vec<u8> {
 fn last_lines(text: &[u8], count: usize) -> Vec<u8> {
     let lines: Vec<&[u8]> = text.split_inclusive(|b| *b == b'\n').collect();
     lines[lines.len().saturating_sub(count)..].concat()
+}
+
+/// Lines from 1-based `line` onward; `0` and `1` both mean the whole text.
+fn lines_from(text: &[u8], line: usize) -> Vec<u8> {
+    text.split_inclusive(|b| *b == b'\n')
+        .skip(line.saturating_sub(1))
+        .flatten()
+        .copied()
+        .collect()
 }
 
 #[cfg(test)]
@@ -179,8 +226,15 @@ mod tests {
     #[tokio::test]
     async fn takes_lines_from_the_right_end() {
         const FIVE_TEXT: &str = "one\ntwo\nthree\nfour\nfive\n";
-        let cases: [(&dyn Command, &[&str], &str, &str); 3] = [
+        let cases: [(&dyn Command, &[&str], &str, &str); 5] = [
             (&TailCommand, &["-2"], FIVE_TEXT, "four\nfive\n"),
+            (&TailCommand, &["-n", "+4"], FIVE_TEXT, "four\nfive\n"),
+            (
+                &TailCommand,
+                &["-n+2"],
+                FIVE_TEXT,
+                "two\nthree\nfour\nfive\n",
+            ),
             (&TailCommand, &["-99"], FIVE_TEXT, FIVE_TEXT),
             (&TailCommand, &["-1"], "a\nb", "b"),
         ];
