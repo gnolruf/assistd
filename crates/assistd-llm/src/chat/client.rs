@@ -273,6 +273,7 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
+        send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
     }
 
     /// `None` when compaction is already near, so it is announced once.

@@ -572,7 +572,7 @@ pub(super) fn turn_summary(elapsed_secs: u64, tokens: u64) -> String {
 }
 
 /// `42s`, `3m 5s`, `1hr 3m 3s`: leading zero units are dropped.
-fn compact_duration(total_secs: u64) -> String {
+pub(super) fn compact_duration(total_secs: u64) -> String {
     let (hours, mins, secs) = (total_secs / 3600, total_secs / 60 % 60, total_secs % 60);
     match (hours, mins) {
         (0, 0) => format!("{secs}s"),

@@ -573,6 +573,8 @@ pub enum StatusKind {
     CompactingSoon,
     /// Older history is being summarized to fit the token budget.
     CompactingHistory,
+    /// The compaction announced by [`StatusKind::CompactingHistory`] finished.
+    HistoryCompacted,
 }
 
 /// Author of a persisted conversation message.

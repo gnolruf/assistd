@@ -10,6 +10,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use textwrap::core::display_width;
 
 use super::markdown::{BLEY, render_markdown};
+use super::ui::compact_duration;
 
 /// Rows an inline thumbnail reserves.
 pub(super) const THUMBNAIL_ROWS: u16 = 8;
@@ -25,6 +26,10 @@ const UNANNOUNCED_COMMAND: &str = "<?>";
 const BRAILLE_BLANK: u32 = 0x2800;
 /// Fibonacci-hashing multiplier that scatters consecutive frames.
 const FRAME_SCATTER: u64 = 0x9E37_79B9_7F4A_7C15;
+/// Compaction glyph frames: every dot lit, then one row dark per frame from the top.
+const COMPACTION_GLYPHS: [char; 4] = ['⣿', '⣶', '⣤', '⣀'];
+/// Glyph ticks each compaction frame is held for.
+const COMPACTION_TICKS_PER_FRAME: u64 = 2;
 const LOGO: [&str; 5] = [
     r"               _     _      _ ",
     r"  __ _ ___ ___(_)___| |_ __| |",
@@ -76,6 +81,16 @@ pub(super) struct ThinkingBlock {
     pub glyph_frame: u64,
 }
 
+/// One history compaction, shown as a single timed line.
+#[derive(Debug, Clone)]
+pub(super) struct CompactionBlock {
+    pub started_at: Instant,
+    /// `None` while the daemon is still compacting.
+    pub ended_at: Option<Instant>,
+    /// Animation step of the live line's glyph.
+    pub glyph_frame: u64,
+}
+
 enum OutputItem {
     /// Logo, version and model name; drawn unwrapped.
     Banner {
@@ -87,6 +102,7 @@ enum OutputItem {
     Tool(ToolBlock),
     Thumbnail(Box<ThumbnailItem>),
     Thinking(ThinkingBlock),
+    Compaction(CompactionBlock),
 }
 
 pub(super) struct OutputPane {
@@ -150,8 +166,25 @@ impl OutputPane {
         self.push_separated(text.to_string(), info_style());
     }
 
-    pub(super) fn push_compaction_notice(&mut self, text: &str) {
-        self.push_separated(text.to_string(), compaction_style());
+    /// Open a live compaction line.
+    pub(super) fn begin_compaction(&mut self) {
+        self.close_open_assistant();
+        self.items.push(OutputItem::Compaction(CompactionBlock {
+            started_at: Instant::now(),
+            ended_at: None,
+            glyph_frame: 0,
+        }));
+        self.items.push(OutputItem::Text(Line::from("")));
+    }
+
+    /// Stamp the live compaction line. No-op when none is live.
+    pub(super) fn finish_compaction(&mut self) {
+        if let Some(idx) = self.live_compaction_index()
+            && let Some(OutputItem::Compaction(c)) = self.items.get_mut(idx)
+        {
+            c.ended_at = Some(Instant::now());
+            self.wrap.invalidate(idx);
+        }
     }
 
     /// Append the dim `Worked for …` line that closes a finished reply.
@@ -271,7 +304,8 @@ impl OutputPane {
                 OutputItem::Banner { .. }
                 | OutputItem::Text(_)
                 | OutputItem::Assistant(_)
-                | OutputItem::Thumbnail(_) => continue,
+                | OutputItem::Thumbnail(_)
+                | OutputItem::Compaction(_) => continue,
             };
             *expanded = !*expanded;
             self.wrap.invalidate(idx);
@@ -338,21 +372,30 @@ impl OutputPane {
         }
     }
 
-    /// Step the live thinking block's glyph and rewrap it on the next
-    /// render. No-op when no thinking block is live.
-    pub(super) fn advance_thinking_glyph(&mut self) {
-        let Some(idx) = self.live_thinking_index() else {
-            return;
-        };
-        if let Some(OutputItem::Thinking(t)) = self.items.get_mut(idx) {
-            t.glyph_frame = t.glyph_frame.wrapping_add(1);
+    /// Step the glyphs of the live thinking block and compaction line and
+    /// rewrap them on the next render.
+    pub(super) fn advance_live_glyphs(&mut self) {
+        let live = [self.live_thinking_index(), self.live_compaction_index()];
+        for idx in live.into_iter().flatten() {
+            let glyph_frame = match self.items.get_mut(idx) {
+                Some(OutputItem::Thinking(t)) => &mut t.glyph_frame,
+                Some(OutputItem::Compaction(c)) => &mut c.glyph_frame,
+                _ => continue,
+            };
+            *glyph_frame = glyph_frame.wrapping_add(1);
             self.wrap.invalidate(idx);
         }
     }
 
-    /// Whether the newest thinking block is still streaming.
-    pub(super) fn thinking_live(&self) -> bool {
-        self.live_thinking_index().is_some()
+    /// Whether a thinking block or compaction line is still animating.
+    pub(super) fn glyph_live(&self) -> bool {
+        self.live_thinking_index().is_some() || self.live_compaction_index().is_some()
+    }
+
+    fn live_compaction_index(&self) -> Option<usize> {
+        self.items
+            .iter()
+            .rposition(|item| matches!(item, OutputItem::Compaction(c) if c.ended_at.is_none()))
     }
 
     fn live_thinking_index(&self) -> Option<usize> {
@@ -375,6 +418,7 @@ impl OutputPane {
             .rev()
             .find_map(|(idx, item)| match item {
                 OutputItem::Thinking(t) if t.ended_at.is_none() => Some((idx, t.started_at)),
+                OutputItem::Compaction(c) if c.ended_at.is_none() => Some((idx, c.started_at)),
                 OutputItem::Tool(ToolBlock {
                     state: ToolState::Running { started_at },
                     ..
@@ -613,6 +657,9 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
             OutputItem::Thinking(t) => {
                 single_span_line(thinking_header_text(t), thinking_header_style())
             }
+            OutputItem::Compaction(c) => {
+                single_span_line(compaction_text(c), thinking_header_style())
+            }
         });
         return;
     }
@@ -623,6 +670,7 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
         OutputItem::Tool(b) => render_tool_block(out, b, width, verbose),
         OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t),
         OutputItem::Thinking(t) => render_thinking_block(out, t, width, verbose),
+        OutputItem::Compaction(c) => render_compaction_line(out, c, width),
     }
 }
 
@@ -729,12 +777,50 @@ fn thinking_header_text(t: &ThinkingBlock) -> String {
         Some(end) => end.saturating_duration_since(t.started_at),
         None => t.started_at.elapsed(),
     };
-    let secs = elapsed.as_secs();
+    let elapsed = compact_duration(elapsed.as_secs());
     if t.ended_at.is_some() {
-        format!("Thought for {secs}s")
+        format!("Thought for {elapsed}")
     } else {
-        format!("{} Thinking… ({secs}s)", thinking_glyph(t.glyph_frame))
+        format!("{} Thinking… ({elapsed})", thinking_glyph(t.glyph_frame))
     }
+}
+
+fn render_compaction_line(out: &mut Vec<Line<'static>>, c: &CompactionBlock, width: u16) {
+    let (bar, bar_w) = match c.ended_at {
+        Some(_) => (
+            Span::styled("▎ ", thinking_bar_style()),
+            width.saturating_sub(2).max(1),
+        ),
+        None => (Span::raw(""), width.max(1)),
+    };
+    push_barred(
+        out,
+        &bar,
+        &compaction_text(c),
+        thinking_header_style(),
+        bar_w,
+    );
+}
+
+fn compaction_text(c: &CompactionBlock) -> String {
+    let elapsed = match c.ended_at {
+        Some(end) => end.saturating_duration_since(c.started_at),
+        None => c.started_at.elapsed(),
+    };
+    let elapsed = compact_duration(elapsed.as_secs());
+    match c.ended_at {
+        Some(_) => format!("Compacted in {elapsed}"),
+        None => format!(
+            "{} Compacting… ({elapsed})",
+            compaction_glyph(c.glyph_frame)
+        ),
+    }
+}
+
+fn compaction_glyph(frame: u64) -> char {
+    let len = COMPACTION_GLYPHS.len() as u64;
+    let step = frame / COMPACTION_TICKS_PER_FRAME % len;
+    COMPACTION_GLYPHS[usize::try_from(step).unwrap_or(0)]
 }
 
 /// A scattered, never-blank braille pattern for `frame`.
@@ -929,10 +1015,6 @@ fn info_style() -> Style {
 
 fn summary_style() -> Style {
     Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
-}
-
-fn compaction_style() -> Style {
-    Style::default().fg(BLEY)
 }
 
 fn tool_call_style() -> Style {

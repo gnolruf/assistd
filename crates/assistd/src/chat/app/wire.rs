@@ -189,6 +189,10 @@ impl App {
                 ..
             } => self.compacting_soon = true,
             Event::Status {
+                event: StatusKind::HistoryCompacted,
+                ..
+            } => self.output.finish_compaction(),
+            Event::Status {
                 severity,
                 component,
                 event,
@@ -202,7 +206,7 @@ impl App {
                     }
                     StatusKind::CompactingHistory => {
                         self.compacting_soon = false;
-                        self.output.push_compaction_notice("[compacting history…]");
+                        self.output.begin_compaction();
                     }
                     StatusKind::OutputTruncated => {
                         self.close_discarded_step(&format!(
@@ -421,6 +425,7 @@ impl App {
 
     fn finish_reply(&mut self) {
         self.output.finish_thinking();
+        self.output.finish_compaction();
         self.output.abandon_running_tool();
         self.output.finish_assistant();
         self.reply_started_at = None;

@@ -20,6 +20,10 @@ fn item_text(it: &OutputItem) -> String {
             if t.ended_at.is_some() { "done" } else { "live" },
             t.text
         ),
+        OutputItem::Compaction(c) => format!(
+            "[compaction:{}]",
+            if c.ended_at.is_some() { "done" } else { "live" }
+        ),
     }
 }
 
