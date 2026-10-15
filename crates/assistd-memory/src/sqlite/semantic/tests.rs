@@ -1,33 +1,26 @@
-use tokio::sync::watch;
-
 use super::*;
-use crate::sqlite::{SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore};
-use crate::{MemoryStore, PersistedMessage};
+use crate::sqlite::{SqliteMemoryStore, SqliteTranscriptStore};
+use crate::{MemoryStore, MessageId, PersistedMessage, PersistedRole, TranscriptStore};
 
-/// The returned guard keeps the temp dir and the writer's shutdown sender alive.
-async fn fresh() -> (
-    SqliteHandle,
-    SqliteSemanticStore,
-    (tempfile::TempDir, watch::Sender<bool>),
-) {
+/// The returned temp dir must outlive the stores.
+async fn fresh() -> (SqliteHandle, SqliteSemanticStore, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
-    let (tx, rx) = watch::channel(false);
-    let (handle, _writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
         .await
         .unwrap();
     let store = SqliteSemanticStore::new(handle.clone());
-    (handle, store, (temp, tx))
+    (handle, store, temp)
 }
 
 async fn seed_message(handle: &SqliteHandle, msg: PersistedMessage) -> (SessionId, MessageId) {
     let store = SqliteTranscriptStore::new(handle.clone());
     let session = SessionId::new();
     let branch = store
-        .begin_session_with_main_branch(&session, 0)
+        .begin_session_with_main_branch(session, 0)
         .await
         .unwrap();
     let message_id = store
-        .append_message_to_branch(&session, branch, None, msg)
+        .append_message_to_branch(session, branch, None, msg)
         .await
         .unwrap();
     (session, message_id)
@@ -46,10 +39,16 @@ async fn insert_chunk_with_vec(
     vector: &[f32],
     model: &str,
 ) -> ChunkId {
-    let chunk_id = handle
-        .store_chunk(message_id, byte_start..byte_start + 1)
+    let [chunk_id] = handle
+        .store_chunks(
+            message_id,
+            std::slice::from_ref(&(byte_start..byte_start + 1)),
+        )
         .await
-        .unwrap();
+        .unwrap()[..]
+    else {
+        panic!("one range stores one chunk");
+    };
     store
         .store_embeddings(
             model,
@@ -90,7 +89,7 @@ async fn embed_memory(
 
 #[tokio::test]
 async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let (session, message_id) = seed_message(&handle, PersistedMessage::user("hello world")).await;
 
     let c1 = insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "m").await;
@@ -116,7 +115,7 @@ async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
 
 #[tokio::test]
 async fn nearest_chunks_keeps_the_best_top_k() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
     let mut ids = Vec::new();
     for i in 0..10 {
@@ -145,7 +144,7 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 
 #[tokio::test]
 async fn nearest_chunks_can_exclude_one_session() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let (past, past_message) = seed_message(&handle, PersistedMessage::user("past")).await;
     let (current, current_message) = seed_message(&handle, PersistedMessage::user("current")).await;
     let past_chunk =
@@ -165,7 +164,7 @@ async fn nearest_chunks_can_exclude_one_session() {
     );
 
     let others = store
-        .nearest_chunks(unit_vec(0.0), 5, "m", Some(&current))
+        .nearest_chunks(unit_vec(0.0), 5, "m", Some(current))
         .await
         .unwrap();
     let other_ids: Vec<(ChunkId, SessionId)> =
@@ -175,7 +174,7 @@ async fn nearest_chunks_can_exclude_one_session() {
 
 #[tokio::test]
 async fn upsert_replaces_memory_embedding_in_place() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let mem_id = save_memory(&handle, "k", "v").await;
     embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
     embed_memory(&store, mem_id, &unit_vec(std::f32::consts::FRAC_PI_2), "m").await;
@@ -197,7 +196,7 @@ async fn upsert_replaces_memory_embedding_in_place() {
 
 #[tokio::test]
 async fn overwriting_a_memory_value_drops_its_stale_embedding() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let mem_id = save_memory(&handle, "editor", "vim").await;
     embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
 
@@ -224,7 +223,7 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
 
 #[tokio::test]
 async fn non_finite_vectors_never_enter_top_k() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
     insert_chunk_with_vec(&handle, &store, message_id, 0, &[f32::NAN, 0.0], "m").await;
     insert_chunk_with_vec(&handle, &store, message_id, 1, &[f32::INFINITY, 0.0], "m").await;
@@ -242,13 +241,16 @@ async fn non_finite_vectors_never_enter_top_k() {
 
 #[tokio::test]
 async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let (_, message_id) = seed_message(&handle, PersistedMessage::user("xyz")).await;
 
     insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "new").await;
     let old_chunk =
         insert_chunk_with_vec(&handle, &store, message_id, 1, &unit_vec(0.5), "old").await;
-    let naked_chunk = handle.store_chunk(message_id, 2..3).await.unwrap();
+    let naked_chunk = handle
+        .store_chunks(message_id, std::slice::from_ref(&(2..3)))
+        .await
+        .unwrap()[0];
 
     let indexed_mem = save_memory(&handle, "indexed", "v1").await;
     embed_memory(&store, indexed_mem, &unit_vec(0.0), "new").await;
@@ -295,7 +297,7 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
 
 #[tokio::test]
 async fn count_stale_aggregates_across_chunks_and_memories() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
 
     insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "old-A").await;
@@ -325,7 +327,7 @@ async fn count_stale_aggregates_across_chunks_and_memories() {
 
 #[tokio::test]
 async fn batch_skips_targets_deleted_before_it_lands() {
-    let (handle, store, _guard) = fresh().await;
+    let (handle, store, _temp) = fresh().await;
     let kept = save_memory(&handle, "kept", "v").await;
     let deleted = save_memory(&handle, "deleted", "v").await;
     SqliteMemoryStore::new(handle.clone())

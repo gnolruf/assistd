@@ -1,7 +1,6 @@
 //! Fire-and-forget message persistence and its bounded drain.
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
@@ -21,7 +20,7 @@ const PERSISTENCE_DRAIN_POLL: Duration = Duration::from_millis(5);
 impl AppState {
     /// The active session and branch, inserting the session and its `main`
     /// branch first when the session is still unsaved.
-    pub(super) async fn saved_session(&self) -> assistd_memory::Result<(Arc<SessionId>, BranchId)> {
+    pub(super) async fn saved_session(&self) -> assistd_memory::Result<(SessionId, BranchId)> {
         let (session, branch) = self.runtime.session_ctx.current().await;
         if let Some(branch) = branch {
             return Ok((session, branch));
@@ -29,11 +28,11 @@ impl AppState {
         let branch = self
             .memory
             .transcripts
-            .begin_session_with_main_branch(&session, std::process::id())
+            .begin_session_with_main_branch(session, std::process::id())
             .await?;
         self.runtime
             .session_ctx
-            .replace(session.clone(), Some(branch))
+            .replace(session, Some(branch))
             .await;
         Ok((session, branch))
     }
@@ -67,7 +66,7 @@ impl AppState {
                 return;
             };
             let append = transcripts
-                .append_message_to_branch(&session, branch, turn, msg)
+                .append_message_to_branch(session, branch, turn, msg)
                 .await;
             let _ = landed_tx.send(());
             let message_id = match append {
@@ -164,24 +163,27 @@ async fn store_and_queue_chunks(
     message_id: MessageId,
     content: &str,
 ) {
-    for bytes in chunk_ranges(content, &ChunkingConfig::default()) {
-        let text = content[bytes.clone()].to_string();
-        match chunks.store_chunk(message_id, bytes.clone()).await {
-            Ok(chunk_id) => enqueue_embed_job(
-                embed_tx,
-                EmbedJob {
-                    target: EmbeddingTarget::Chunk(chunk_id),
-                    text,
-                },
-            ),
-            Err(e) => warn!(
+    let ranges = chunk_ranges(content, &ChunkingConfig::default());
+    let chunk_ids = match chunks.store_chunks(message_id, &ranges).await {
+        Ok(chunk_ids) => chunk_ids,
+        Err(e) => {
+            warn!(
                 target: "assistd::memory",
                 %message_id,
-                byte_start = bytes.start,
                 error = %e,
-                "failed to persist chunk (continuing)"
-            ),
+                "failed to persist chunks (continuing)"
+            );
+            return;
         }
+    };
+    for (chunk_id, bytes) in chunk_ids.into_iter().zip(ranges) {
+        enqueue_embed_job(
+            embed_tx,
+            EmbedJob {
+                target: EmbeddingTarget::Chunk(chunk_id),
+                text: content[bytes].to_string(),
+            },
+        );
     }
 }
 

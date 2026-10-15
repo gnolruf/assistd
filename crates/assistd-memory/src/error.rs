@@ -1,3 +1,5 @@
+//! Error type for the memory database.
+
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -39,12 +41,6 @@ pub enum MemoryError {
 
     #[error("serialize tool_calls: {0}")]
     SerializeToolCalls(#[from] serde_json::Error),
-
-    #[error("memory writer task is gone")]
-    WriterGone,
-
-    #[error("memory writer task dropped ack channel")]
-    AckDropped,
 }
 
 impl MemoryError {

@@ -135,15 +135,12 @@ async fn start(
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
-    let mut memory = memory_init::init(&config, &stages.memory_writer).await;
+    let mut memory = memory_init::init(&config).await;
     let (embed, embed_startup) =
         embed_init::prepare(&config, &api_key, memory.sqlite_handle.as_ref());
     let window = wm_init::init(&config, &stages.tools).await;
 
-    let session_ctx = Arc::new(SessionContext::from_arc(
-        memory.session_id.clone(),
-        memory.branch_id,
-    ));
+    let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
 
     let tools = tools_init::init(
         &config,

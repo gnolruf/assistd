@@ -80,7 +80,7 @@ impl AppState {
         if let Err(e) = self
             .memory
             .transcripts
-            .set_current_branch(&session, new_branch)
+            .set_current_branch(session, new_branch)
             .await
         {
             send_error(
@@ -93,7 +93,7 @@ impl AppState {
         }
         self.runtime
             .session_ctx
-            .replace(session.clone(), Some(new_branch))
+            .replace(session, Some(new_branch))
             .await;
 
         let (parent_name, _, _) = self.lookup_branch_meta(current_branch).await;
@@ -101,7 +101,7 @@ impl AppState {
         let session_title = self
             .memory
             .transcripts
-            .get_session_title(&session)
+            .session_title(session)
             .await
             .ok()
             .flatten();
@@ -132,9 +132,9 @@ impl AppState {
         let (active_session, _) = self.runtime.session_ctx.current().await;
         let (active, other): (Vec<_>, Vec<_>) = branches
             .into_iter()
-            .partition(|branch| branch.session_id == *active_session);
+            .partition(|branch| branch.session_id == active_session);
         for branch in active.into_iter().chain(other) {
-            let is_active_session = branch.session_id == *active_session;
+            let is_active_session = branch.session_id == active_session;
             let _ = tx
                 .send(Event::BranchInfo {
                     id: id.clone(),
@@ -163,12 +163,12 @@ impl AppState {
     pub(super) fn spawn_session_title_broadcast(
         self: Arc<Self>,
         id: String,
-        session: Arc<SessionId>,
+        session: SessionId,
         user_text: &str,
     ) {
         let trimmed: String = user_text.chars().take(MAX_TITLE_PROMPT_CHARS).collect();
         self.runtime.persistence_tracker.clone().spawn(async move {
-            let Some(title) = self.session_title_for_turn(&session, &trimmed).await else {
+            let Some(title) = self.session_title_for_turn(session, &trimmed).await else {
                 return;
             };
             let _ = self.runtime.events_bus().send(Event::SessionTitle {
@@ -181,15 +181,15 @@ impl AppState {
 
     /// `session`'s stored title, else a newly generated and saved one.
     /// `None` when any step fails.
-    async fn session_title_for_turn(&self, session: &SessionId, user_text: &str) -> Option<String> {
-        match self.memory.transcripts.get_session_title(session).await {
+    async fn session_title_for_turn(&self, session: SessionId, user_text: &str) -> Option<String> {
+        match self.memory.transcripts.session_title(session).await {
             Ok(Some(title)) => return Some(title),
             Ok(None) => {}
             Err(e) => {
                 debug!(
                     target: "assistd::memory",
                     error = %e,
-                    "get_session_title failed; skipping the session title"
+                    "session_title failed; skipping the session title"
                 );
                 return None;
             }
@@ -263,7 +263,7 @@ impl AppState {
         let (target_session, target_branch) = match self
             .memory
             .transcripts
-            .resolve_branch(&target, Some(&active_session))
+            .resolve_branch(&target, Some(active_session))
             .await
         {
             Ok(Some(pair)) => pair,
@@ -280,7 +280,7 @@ impl AppState {
         if let Err(e) = self
             .memory
             .transcripts
-            .set_current_branch(&target_session, target_branch)
+            .set_current_branch(target_session, target_branch)
             .await
         {
             send_error(
@@ -291,13 +291,12 @@ impl AppState {
             .await;
             return;
         }
-        let target_session = Arc::new(target_session);
         self.runtime
             .session_ctx
-            .replace(target_session.clone(), Some(target_branch))
+            .replace(target_session, Some(target_branch))
             .await;
 
-        self.replay_branch(id, &target_session, target_branch, &tx, "/resume")
+        self.replay_branch(id, target_session, target_branch, &tx, "/resume")
             .await;
     }
 
@@ -352,7 +351,7 @@ impl AppState {
 
         let (session, branch) = self.runtime.session_ctx.current().await;
         let Some(branch) = branch else {
-            announce_unsaved_session(id, &session, &tx).await;
+            announce_unsaved_session(id, session, &tx).await;
             return;
         };
         let latest = self
@@ -363,7 +362,7 @@ impl AppState {
             .ok()
             .flatten();
         if is_within_recency(latest, recency_secs) {
-            self.replay_branch(id, &session, branch, &tx, "/resume")
+            self.replay_branch(id, session, branch, &tx, "/resume")
                 .await;
         } else {
             self.begin_unsaved_session(id, &tx, "/resume").await;
@@ -383,7 +382,7 @@ impl AppState {
     async fn replay_branch(
         &self,
         id: String,
-        session: &SessionId,
+        session: SessionId,
         branch: BranchId,
         tx: &mpsc::Sender<Event>,
         label: &str,
@@ -415,7 +414,7 @@ impl AppState {
         let session_title = self
             .memory
             .transcripts
-            .get_session_title(session)
+            .session_title(session)
             .await
             .ok()
             .flatten();
@@ -484,11 +483,8 @@ impl AppState {
     /// report `BranchSwitched` then `Done`. The session and its `main`
     /// branch are inserted with its first message.
     async fn begin_unsaved_session(&self, id: String, tx: &mpsc::Sender<Event>, label: &str) {
-        let new_session = Arc::new(SessionId::new());
-        self.runtime
-            .session_ctx
-            .replace(new_session.clone(), None)
-            .await;
+        let new_session = SessionId::new();
+        self.runtime.session_ctx.replace(new_session, None).await;
         if let Err(e) = self.subsystems.llm.replace_history(None, Vec::new()).await {
             warn!(
                 target: "assistd::state",
@@ -496,7 +492,7 @@ impl AppState {
                 "replace_history(empty) failed during {label} (non-fatal)"
             );
         }
-        announce_unsaved_session(id, &new_session, tx).await;
+        announce_unsaved_session(id, new_session, tx).await;
     }
 
     pub(super) async fn lookup_branch_tail_seq(&self, branch: BranchId) -> Option<i64> {
@@ -527,7 +523,7 @@ impl AppState {
 
 /// Report the unsaved `session` as active on its future `main` branch:
 /// `BranchSwitched` without a branch id, then `Done`.
-async fn announce_unsaved_session(id: String, session: &SessionId, tx: &mpsc::Sender<Event>) {
+async fn announce_unsaved_session(id: String, session: SessionId, tx: &mpsc::Sender<Event>) {
     let _ = tx
         .send(Event::BranchSwitched {
             id: id.clone(),

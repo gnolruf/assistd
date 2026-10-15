@@ -8,17 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::OpenFlags;
-use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
-use crate::{MemoryError, Result, migrations};
-
-use super::ids::{ChunkId, MessageId};
-use super::writer::{WriteOp, dispatch_write, spawn_writer};
-
-/// Deep enough to absorb one bursty agent step without backpressuring the sender.
-const WRITER_QUEUE_DEPTH: usize = 256;
+use crate::{ChunkId, MemoryError, MessageId, Result, migrations};
 
 /// How long a statement waits on a lock held by another process (e.g. a
 /// `sqlite3` shell) before failing with `SQLITE_BUSY`.
@@ -35,47 +27,92 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Cheaply cloneable handle shared by every store: reads go to a read-only
-/// connection, writes through the writer task, which owns the only writable one.
+/// connection and writes to the only writable one, each run in submission
+/// order on its connection's own thread.
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
     reader: Connection,
-    writer_tx: mpsc::Sender<WriteOp>,
+    writer: Connection,
 }
 
 impl SqliteHandle {
     /// Open `path` (creating parent directories), restrict it to its owner, apply
-    /// pragmas, run migrations, and spawn the writer task, returning it alongside
-    /// the handle.
-    pub async fn open(
-        path: &Path,
-        shutdown: watch::Receiver<bool>,
-    ) -> Result<(Self, JoinHandle<()>)> {
+    /// pragmas, and run migrations.
+    pub async fn open(path: &Path) -> Result<Self> {
         prepare_private_db_file(path).await?;
         let writer = open_writer(path).await?;
         let reader = open_reader(path).await?;
+        Ok(Self { reader, writer })
+    }
 
-        let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_DEPTH);
-        let writer_handle = spawn_writer(writer, writer_rx, shutdown);
-
-        Ok((Self { reader, writer_tx }, writer_handle))
+    /// Refresh planner statistics and close both connections once every call
+    /// already queued has run; later calls through any clone fail.
+    pub async fn close(self) -> Result<()> {
+        if let Err(e) = self
+            .writer
+            .call(|c| c.execute_batch("PRAGMA optimize"))
+            .await
+        {
+            tracing::warn!(
+                target: "assistd::memory",
+                error = %e,
+                "PRAGMA optimize failed before close"
+            );
+        }
+        self.writer
+            .close()
+            .await
+            .map_err(MemoryError::sqlite("close writer connection"))?;
+        self.reader
+            .close()
+            .await
+            .map_err(MemoryError::sqlite("close reader connection"))
     }
 
     pub(super) fn reader(&self) -> &Connection {
         &self.reader
     }
 
-    pub(super) fn writer(&self) -> &mpsc::Sender<WriteOp> {
-        &self.writer_tx
+    pub(super) fn writer(&self) -> &Connection {
+        &self.writer
     }
 
-    /// Persist the chunk at byte range `bytes` of a message and return its id.
-    pub async fn store_chunk(&self, message_id: MessageId, bytes: Range<usize>) -> Result<ChunkId> {
-        dispatch_write(self.writer(), |ack| WriteOp::StoreChunk {
-            message_id,
-            bytes,
-            ack,
-        })
-        .await
+    /// Persist a message's chunks at byte ranges `ranges` in one transaction and
+    /// return their ids in the same order.
+    pub async fn store_chunks(
+        &self,
+        message_id: MessageId,
+        ranges: &[Range<usize>],
+    ) -> Result<Vec<ChunkId>> {
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ranges = ranges.to_vec();
+        self.writer
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let chunk_ids = {
+                    let mut upsert = tx.prepare_cached(
+                        "INSERT INTO message_chunks (message_id, byte_start, byte_end)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(message_id, byte_start) DO UPDATE SET byte_end = excluded.byte_end
+                         RETURNING id",
+                    )?;
+                    ranges
+                        .iter()
+                        .map(|bytes| {
+                            upsert.query_row(
+                                rusqlite::params![message_id, bytes.start, bytes.end],
+                                |r| r.get(0),
+                            )
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                tx.commit()?;
+                Ok(chunk_ids)
+            })
+            .await
+            .map_err(MemoryError::sqlite("store_chunks"))
     }
 }
 
@@ -172,6 +209,19 @@ async fn restrict_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Checkpoint and empty the WAL so frames holding deleted or overwritten rows
+/// don't outlive the write.
+pub(super) fn truncate_wal(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let busy: bool = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+    if busy {
+        tracing::warn!(
+            target: "assistd::memory",
+            "WAL checkpoint blocked by another reader; old rows stay in the WAL until the next checkpoint"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,8 +235,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("nested/memory.db");
 
-        let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
+        let handle = SqliteHandle::open(&path).await.unwrap();
 
         assert_eq!(mode_of(&path), PRIVATE_FILE_MODE);
         assert_eq!(
@@ -195,8 +244,7 @@ mod tests {
         );
         assert_eq!(mode_of(path.parent().unwrap()), PRIVATE_DIR_MODE);
 
-        drop(handle);
-        writer.await.unwrap();
+        handle.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -209,27 +257,11 @@ mod tests {
             std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
+        let handle = SqliteHandle::open(&path).await.unwrap();
 
         assert_eq!(mode_of(&path), PRIVATE_FILE_MODE);
         assert_eq!(mode_of(&wal), PRIVATE_FILE_MODE);
 
-        drop(handle);
-        writer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn shutdown_signal_stops_writer_while_handle_is_alive() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("memory.db");
-        let (tx, rx) = watch::channel(false);
-        let (_handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
-
-        tx.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), writer)
-            .await
-            .expect("writer exits once its idle drain window passes")
-            .unwrap();
+        handle.close().await.unwrap();
     }
 }

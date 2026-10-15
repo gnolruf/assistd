@@ -399,10 +399,10 @@ impl AppState {
         })
     }
 
-    async fn open_persistence_turn(&self, text: &str) -> (Arc<SessionId>, Option<TurnId>) {
+    async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<TurnId>) {
         let (current_session, turn_id) = match self.saved_session().await {
             Ok((session, _branch)) => {
-                let turn_id = self.begin_persisted_turn(&session).await;
+                let turn_id = self.begin_persisted_turn(session).await;
                 (session, turn_id)
             }
             Err(e) => {
@@ -419,7 +419,7 @@ impl AppState {
         (current_session, turn_id)
     }
 
-    async fn begin_persisted_turn(&self, session: &SessionId) -> Option<TurnId> {
+    async fn begin_persisted_turn(&self, session: SessionId) -> Option<TurnId> {
         match self.memory.transcripts.begin_turn(session).await {
             Ok(turn) => Some(turn),
             Err(e) => {

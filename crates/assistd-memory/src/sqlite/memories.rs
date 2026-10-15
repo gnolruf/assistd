@@ -3,12 +3,10 @@
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, Row};
 
-use crate::{MemoryError, MemoryRecord, MemoryStore, Result};
+use crate::{MemoryError, MemoryId, MemoryRecord, MemoryStore, Result};
 
-use super::connection::SqliteHandle;
-use super::ids::MemoryId;
-use super::timestamp::timestamp_at;
-use super::writer::{WriteOp, dispatch_write};
+use super::connection::{SqliteHandle, truncate_wal};
+use super::timestamp::{now_millis, timestamp_at};
 
 /// SQLite-backed [`MemoryStore`].
 #[derive(Debug, Clone)]
@@ -25,47 +23,78 @@ impl SqliteMemoryStore {
 
 #[async_trait]
 impl MemoryStore for SqliteMemoryStore {
+    /// A changed value bumps `updated_at`, drops the row's embedding (by schema
+    /// trigger), and truncates the WAL so the old value leaves no trace.
     async fn save(&self, key: &str, value: String) -> Result<MemoryId> {
         let key = key.to_string();
-        dispatch_write(self.handle.writer(), |ack| WriteOp::SaveMemory {
-            key,
-            value,
-            ack,
-        })
-        .await
+        let now = now_millis();
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let previous_value = value_at(&tx, &key)?;
+                let id = tx.query_row(
+                    "INSERT INTO memories (key, value, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?3)
+                     ON CONFLICT(key) DO UPDATE SET
+                         value = excluded.value,
+                         updated_at = CASE WHEN value = excluded.value
+                                           THEN updated_at
+                                           ELSE MAX(excluded.updated_at, created_at) END
+                     RETURNING id",
+                    rusqlite::params![key, value, now],
+                    |r| r.get(0),
+                )?;
+                tx.commit()?;
+                if previous_value.is_some_and(|previous| previous != value) {
+                    truncate_wal(c)?;
+                }
+                Ok(id)
+            })
+            .await
+            .map_err(MemoryError::sqlite("memory save"))
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>> {
         let key = key.to_string();
         self.handle
             .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                c.query_row(
-                    "SELECT value FROM memories WHERE key = ?1",
-                    rusqlite::params![key],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-            })
+            .call(move |c| value_at(c, &key))
             .await
             .map_err(MemoryError::sqlite("memory load"))
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
-        dispatch_write(self.handle.writer(), |ack| WriteOp::DeleteMemory {
-            key,
-            ack,
-        })
-        .await
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                c.execute(
+                    "DELETE FROM memories WHERE key = ?1",
+                    rusqlite::params![key],
+                )?;
+                truncate_wal(c)
+            })
+            .await
+            .map_err(MemoryError::sqlite("memory delete"))
     }
 
     async fn delete_by_id(&self, id: MemoryId) -> Result<Option<String>> {
-        dispatch_write(self.handle.writer(), |ack| WriteOp::DeleteMemoryById {
-            id,
-            ack,
-        })
-        .await
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let key = c
+                    .query_row(
+                        "DELETE FROM memories WHERE id = ?1 RETURNING key",
+                        rusqlite::params![id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?;
+                truncate_wal(c)?;
+                Ok(key)
+            })
+            .await
+            .map_err(MemoryError::sqlite("memory delete_by_id"))
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
@@ -103,6 +132,15 @@ impl MemoryStore for SqliteMemoryStore {
     }
 }
 
+fn value_at(c: &rusqlite::Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    c.query_row(
+        "SELECT value FROM memories WHERE key = ?1",
+        rusqlite::params![key],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 fn memory_record(row: &Row<'_>) -> rusqlite::Result<MemoryRecord> {
     Ok(MemoryRecord {
         id: row.get(0)?,
@@ -132,23 +170,20 @@ fn glob_prefix_pattern(prefix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::watch;
-
     use super::*;
 
-    /// The returned guard keeps the temp dir and the writer's shutdown sender alive.
-    async fn fresh() -> (SqliteMemoryStore, (tempfile::TempDir, watch::Sender<bool>)) {
+    /// The returned temp dir must outlive the store.
+    async fn fresh() -> (SqliteMemoryStore, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
-        let (tx, rx) = watch::channel(false);
-        let (handle, _writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
+        let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        (SqliteMemoryStore::new(handle), (temp, tx))
+        (SqliteMemoryStore::new(handle), temp)
     }
 
     #[tokio::test]
     async fn save_overwrites_in_place_and_load_sees_latest_value() {
-        let (store, _guard) = fresh().await;
+        let (store, _temp) = fresh().await;
         let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
         assert_eq!(
             store.load("fact:user.name").await.unwrap().as_deref(),
@@ -168,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefix_matches_literally_and_case_sensitively() {
-        let (store, _guard) = fresh().await;
+        let (store, _temp) = fresh().await;
         for key in [
             "pref:a", "prefXa", "Pref:b", "a*b:1", "axb:1", "q?:1", "qx:1", "[x]:1",
         ] {
@@ -189,20 +224,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleted_memory_leaves_no_trace_in_database_files() {
-        let (store, guard) = fresh().await;
-        let secret = "zq-forgotten-secret-7f3a";
-        store.save("fact:secret", secret.into()).await.unwrap();
-        store.delete("fact:secret").await.unwrap();
+    async fn deleted_and_overwritten_memories_leave_no_trace_in_database_files() {
+        let (store, temp) = fresh().await;
+        let deleted = "zq-forgotten-secret-7f3a";
+        let overwritten = "zq-replaced-secret-91c4";
+        store.save("fact:deleted", deleted.into()).await.unwrap();
+        store.delete("fact:deleted").await.unwrap();
+        store.save("fact:edited", overwritten.into()).await.unwrap();
+        store.save("fact:edited", "redacted".into()).await.unwrap();
 
-        for entry in std::fs::read_dir(guard.0.path()).unwrap() {
+        for entry in std::fs::read_dir(temp.path()).unwrap() {
             let file = entry.unwrap().path();
             let bytes = std::fs::read(&file).unwrap();
-            assert!(
-                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
-                "{} still holds the deleted value",
-                file.display()
-            );
+            for secret in [deleted, overwritten] {
+                assert!(
+                    !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                    "{} still holds {secret}",
+                    file.display()
+                );
+            }
         }
     }
 }

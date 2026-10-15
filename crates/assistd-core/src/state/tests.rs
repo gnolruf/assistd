@@ -1308,12 +1308,11 @@ async fn branch_state_with(
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory.db");
     std::mem::forget(temp);
-    let (_tx, rx) = watch::channel(false);
-    let (handle, _writer_handle) = SqliteHandle::open(&path, rx).await.unwrap();
+    let handle = SqliteHandle::open(&path).await.unwrap();
     let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let session = SessionId::new();
     let branch = conv
-        .begin_session_with_main_branch(&session, 123)
+        .begin_session_with_main_branch(session, 123)
         .await
         .unwrap();
     let ctx = Arc::new(SessionContext::new(session, Some(branch)));
@@ -1346,7 +1345,7 @@ async fn fresh_branch_state() -> (Arc<AppState>, Arc<dyn TranscriptStore>, Sessi
 /// Persist one completed turn of `user` then `assistant` on `branch`.
 async fn append_turn(
     conv: &Arc<dyn TranscriptStore>,
-    session: &SessionId,
+    session: SessionId,
     branch: BranchId,
     user: &str,
     assistant: &str,
@@ -1387,11 +1386,11 @@ async fn fork_creates_branch_and_switches() {
     assert_eq!(events.last(), Some(&done("rq")));
 
     let (active_session, active_branch) = state.runtime.session_ctx.current().await;
-    assert_eq!(*active_session, session);
+    assert_eq!(active_session, session);
     let active_branch = active_branch.expect("fork lands on a saved branch");
     assert_ne!(active_branch, main_branch);
     assert_eq!(
-        conv.get_current_branch(&session).await.unwrap(),
+        conv.current_branch(session).await.unwrap(),
         Some(active_branch)
     );
     assert!(
@@ -1410,7 +1409,7 @@ async fn fork_creates_branch_and_switches() {
 async fn branches_lists_active_session_first() {
     let (state, conv, _session, main_branch) = fresh_branch_state().await;
     conv.fork_branch(main_branch, "alt").await.unwrap();
-    conv.begin_session_with_main_branch(&SessionId::new(), 456)
+    conv.begin_session_with_main_branch(SessionId::new(), 456)
         .await
         .unwrap();
 
@@ -1434,7 +1433,7 @@ async fn branches_lists_active_session_first() {
 #[tokio::test]
 async fn switch_replays_history_into_event_stream() {
     let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, &session, main_branch, "hello", "world").await;
+    append_turn(&conv, session, main_branch, "hello", "world").await;
     conv.fork_branch(main_branch, "alt").await.unwrap();
 
     let (res, events) = dispatch(
@@ -1460,7 +1459,7 @@ async fn switch_replays_history_into_event_stream() {
 #[tokio::test]
 async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
     let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, &session, main_branch, "hello", "world").await;
+    append_turn(&conv, session, main_branch, "hello", "world").await;
 
     let (res, events) = dispatch(
         &state,
@@ -1482,8 +1481,8 @@ async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
 #[tokio::test]
 async fn undo_drops_last_turn_and_emits_count() {
     let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, &session, main_branch, "first", "a").await;
-    append_turn(&conv, &session, main_branch, "second", "b").await;
+    append_turn(&conv, session, main_branch, "first", "a").await;
+    append_turn(&conv, session, main_branch, "second", "b").await;
 
     let (res, events) = dispatch(&state, Request::Undo { id: "rq".into() }).await;
     res.unwrap();
@@ -1517,7 +1516,7 @@ async fn new_session_writes_no_rows_until_the_first_message() {
     res.unwrap();
 
     let (unsaved_session, unsaved_branch) = state.runtime.session_ctx.current().await;
-    assert_ne!(*unsaved_session, session);
+    assert_ne!(unsaved_session, session);
     assert_eq!(unsaved_branch, None);
     assert_eq!(
         events,
@@ -1541,10 +1540,10 @@ async fn new_session_writes_no_rows_until_the_first_message() {
     state.drain_persistence_inflight().await;
 
     let (saved_session, saved_branch) = state.runtime.session_ctx.current().await;
-    assert_eq!(*saved_session, *unsaved_session);
+    assert_eq!(saved_session, unsaved_session);
     let saved_branch = saved_branch.expect("the first message saves the session");
     assert_eq!(
-        conv.get_current_branch(&saved_session).await.unwrap(),
+        conv.current_branch(saved_session).await.unwrap(),
         Some(saved_branch)
     );
     assert_eq!(conv.list_branches().await.unwrap().len(), 2);
@@ -1573,7 +1572,7 @@ async fn resume_or_new_keeps_an_unsaved_session() {
     res.unwrap();
 
     let (session, branch) = state.runtime.session_ctx.current().await;
-    assert_eq!(*session, *unsaved_session);
+    assert_eq!(session, unsaved_session);
     assert_eq!(branch, None);
     assert!(
         matches!(

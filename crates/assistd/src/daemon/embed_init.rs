@@ -81,7 +81,7 @@ impl EmbeddingService {
 
     /// Drain queued jobs while the server is still up, abandoning them after
     /// [`EMBED_DRAIN_BUDGET`], then stop it. A start still under way is
-    /// cancelled. The memory writer must still be running.
+    /// cancelled. The memory database must still be open.
     pub(super) async fn shutdown(
         self,
         worker_shutdown: &watch::Sender<bool>,

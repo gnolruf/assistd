@@ -1,23 +1,14 @@
-//! SQLite-backed stores sharing one [`SqliteHandle`]: reads go to the
-//! connection directly, writes through a single writer task.
+//! SQLite implementations of the stores, sharing one [`SqliteHandle`] with a
+//! read-only connection and a single writable one.
 
 mod connection;
-mod embeddings;
 mod ids;
-mod store;
+mod memories;
+mod semantic;
 mod timestamp;
 mod transcripts;
-mod writer;
 
 pub use connection::SqliteHandle;
-pub use embeddings::{
-    Embedding, EmbeddingHit, EmbeddingTarget, MemoryHit, NoSemanticStore, SemanticStore,
-    SqliteSemanticStore, StaleEmbeddings, UnindexedRows,
-};
-pub use ids::{BranchId, ChunkId, MemoryId, MessageId, SessionId, TurnId};
-pub use store::SqliteMemoryStore;
-pub use transcripts::{
-    BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore, PersistedMessage,
-    PersistedRole, ResumeCandidate, SqliteTranscriptStore, ToolOutcome, TranscriptStore,
-    UndoOutcome,
-};
+pub use memories::SqliteMemoryStore;
+pub use semantic::SqliteSemanticStore;
+pub use transcripts::SqliteTranscriptStore;

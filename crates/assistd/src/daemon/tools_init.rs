@@ -33,7 +33,7 @@ pub(super) struct ToolDeps<'a> {
     pub vision_gate: Arc<VisionGate>,
     pub memory: &'a MemorySubsystem,
     pub embed: &'a EmbeddingHandles,
-    pub current_session: watch::Receiver<Arc<SessionId>>,
+    pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
 }
 

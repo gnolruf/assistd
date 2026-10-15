@@ -1,89 +1,25 @@
-//! Persistent memory: the key/value [`MemoryStore`], the SQLite transcript and
-//! semantic stores, and no-op fallbacks for when memory is disabled.
-
-use std::fmt;
-
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+//! Persistent memory: the key/value, transcript, and semantic stores, their
+//! SQLite implementations, and no-op fallbacks for when memory is disabled.
 
 mod chunking;
 mod error;
+mod ids;
+mod memories;
 mod migrations;
+mod semantic;
 mod sqlite;
+mod transcripts;
 
 pub use chunking::{ChunkingConfig, chunk_ranges};
 pub use error::{MemoryError, Result};
-pub use sqlite::{
-    BranchId, BranchInfo, BranchSummary, ChunkId, Embedding, EmbeddingHit, EmbeddingTarget,
-    HistoryRow, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore, NoTranscriptStore,
-    PersistedMessage, PersistedRole, ResumeCandidate, SemanticStore, SessionId, SqliteHandle,
-    SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, StaleEmbeddings, ToolOutcome,
-    TranscriptStore, TurnId, UndoOutcome, UnindexedRows,
+pub use ids::{BranchId, ChunkId, MemoryId, MessageId, SessionId, TurnId};
+pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore};
+pub use semantic::{
+    Embedding, EmbeddingHit, EmbeddingTarget, MemoryHit, NoSemanticStore, SemanticStore,
+    StaleEmbeddings, UnindexedRows,
 };
-
-/// One row from the `memories` table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryRecord {
-    pub id: MemoryId,
-    pub key: String,
-    pub value: String,
-    pub created_at: DateTime<Utc>,
-    /// When the value last changed; re-saving an identical value leaves it alone.
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Persistent string-keyed, string-valued memory.
-#[async_trait]
-pub trait MemoryStore: fmt::Debug + Send + Sync + 'static {
-    /// Persist `value` under `key`, overwriting any existing value; returns the row id.
-    /// A subsequent `load(key)` observes the write.
-    async fn save(&self, key: &str, value: String) -> Result<MemoryId>;
-
-    /// Value stored at `key`, or `None` when absent.
-    async fn load(&self, key: &str) -> Result<Option<String>>;
-
-    /// Remove `key`. No-op when already absent.
-    async fn delete(&self, key: &str) -> Result<()>;
-
-    /// Remove the row with `id`; returns its key, or `None` when no row matched.
-    async fn delete_by_id(&self, id: MemoryId) -> Result<Option<String>>;
-
-    /// Keys starting with `prefix` (case-sensitive), in unspecified order.
-    async fn list(&self, prefix: &str) -> Result<Vec<String>>;
-
-    /// Full rows whose key starts with `prefix` (case-sensitive), in unspecified order.
-    async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>>;
-}
-
-/// No-op store: writes are discarded and reads find nothing. Returned ids are
-/// placeholders, meaningful only when passed back to this store.
-#[derive(Debug)]
-pub struct NoMemoryStore;
-
-#[async_trait]
-impl MemoryStore for NoMemoryStore {
-    async fn save(&self, key: &str, _value: String) -> Result<MemoryId> {
-        tracing::debug!(target: "assistd::memory", key, "save: no backend configured (drop)");
-        Ok(MemoryId(0))
-    }
-
-    async fn load(&self, _key: &str) -> Result<Option<String>> {
-        Ok(None)
-    }
-
-    async fn delete(&self, _key: &str) -> Result<()> {
-        Ok(())
-    }
-
-    async fn delete_by_id(&self, _id: MemoryId) -> Result<Option<String>> {
-        Ok(None)
-    }
-
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_full(&self, _prefix: &str) -> Result<Vec<MemoryRecord>> {
-        Ok(Vec::new())
-    }
-}
+pub use sqlite::{SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore};
+pub use transcripts::{
+    BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore, PersistedMessage,
+    PersistedRole, ResumeCandidate, ToolOutcome, TranscriptStore, UndoOutcome,
+};

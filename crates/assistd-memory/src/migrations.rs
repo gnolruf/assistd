@@ -3,11 +3,9 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1 schema. Applied versions live in `PRAGMA user_version`. Forked branches
-/// share `messages` rows through `branch_messages`. Timestamps are Unix
-/// milliseconds. `turns`, `messages`, `message_chunks` and `memories` keep
-/// `AUTOINCREMENT` because their ids travel in queued writes and embed jobs,
-/// which must never land on a newer row that reused a deleted id.
+/// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and
+/// every foreign key is indexed. Ids that travel in embed jobs use
+/// `AUTOINCREMENT` so a job never lands on a row that reused a deleted id.
 const V1_SQL: &str = r"
 CREATE TABLE sessions (
     id                INTEGER PRIMARY KEY,
@@ -18,6 +16,7 @@ CREATE TABLE sessions (
     title             TEXT,
     current_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL
 ) STRICT;
+CREATE INDEX idx_sessions_current_branch ON sessions(current_branch_id);
 
 CREATE TABLE branches (
     id               INTEGER PRIMARY KEY,
@@ -28,11 +27,13 @@ CREATE TABLE branches (
     created_at       INTEGER NOT NULL,
     UNIQUE (session_id, name)
 ) STRICT;
+CREATE INDEX idx_branches_parent ON branches(parent_branch_id);
 
 CREATE TABLE turns (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
 ) STRICT;
+CREATE INDEX idx_turns_session ON turns(session_id);
 
 CREATE TABLE messages (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,12 +101,20 @@ CREATE TABLE chunk_embeddings (
     model_id INTEGER NOT NULL REFERENCES embedding_models(id),
     vector   BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
 ) STRICT;
+CREATE INDEX idx_chunk_embeddings_model ON chunk_embeddings(model_id);
 
 CREATE TABLE memory_embeddings (
     memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     model_id  INTEGER NOT NULL REFERENCES embedding_models(id),
     vector    BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
 ) STRICT;
+CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model_id);
+
+CREATE TRIGGER memory_value_changed AFTER UPDATE OF value ON memories
+WHEN old.value IS NOT new.value
+BEGIN
+    DELETE FROM memory_embeddings WHERE memory_id = new.id;
+END;
 ";
 
 /// The full migration set.

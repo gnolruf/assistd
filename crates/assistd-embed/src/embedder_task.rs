@@ -87,8 +87,8 @@ fn warn_queue_full(job: &EmbedJob) {
 }
 
 /// Spawn the worker, embedding queued jobs in batches of up to [`BATCH_SIZE`]. It exits
-/// when the job channel closes, or on `shutdown` once queued jobs are stored; the memory
-/// writer behind `store` must outlive it.
+/// when the job channel closes, or on `shutdown` once queued jobs are stored; the database
+/// behind `store` must stay open until it exits.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn SemanticStore>,

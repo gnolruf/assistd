@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -40,7 +41,7 @@ impl SlowingStore {
 impl TranscriptStore for SlowingStore {
     async fn append_message_to_branch(
         &self,
-        _s: &SessionId,
+        _s: SessionId,
         _b: BranchId,
         _t: Option<TurnId>,
         m: PersistedMessage,
@@ -56,23 +57,23 @@ impl TranscriptStore for SlowingStore {
         Ok(MessageId(0))
     }
 
-    async fn end_session(&self, _id: &SessionId) -> assistd_memory::Result<()> {
+    async fn end_session(&self, _s: SessionId) -> assistd_memory::Result<()> {
         Ok(())
     }
-    async fn begin_turn(&self, _s: &SessionId) -> assistd_memory::Result<TurnId> {
+    async fn begin_turn(&self, _s: SessionId) -> assistd_memory::Result<TurnId> {
         Ok(TurnId(0))
     }
     async fn begin_session_with_main_branch(
         &self,
-        _s: &SessionId,
+        _s: SessionId,
         _pid: u32,
     ) -> assistd_memory::Result<BranchId> {
         Ok(BranchId(0))
     }
-    async fn set_current_branch(&self, _s: &SessionId, _b: BranchId) -> assistd_memory::Result<()> {
+    async fn set_current_branch(&self, _s: SessionId, _b: BranchId) -> assistd_memory::Result<()> {
         Ok(())
     }
-    async fn get_current_branch(&self, _s: &SessionId) -> assistd_memory::Result<Option<BranchId>> {
+    async fn current_branch(&self, _s: SessionId) -> assistd_memory::Result<Option<BranchId>> {
         Ok(None)
     }
     async fn list_branches(&self) -> assistd_memory::Result<Vec<BranchInfo>> {
@@ -84,7 +85,7 @@ impl TranscriptStore for SlowingStore {
     async fn resolve_branch(
         &self,
         _t: &str,
-        _p: Option<&SessionId>,
+        _p: Option<SessionId>,
     ) -> assistd_memory::Result<Option<(SessionId, BranchId)>> {
         Ok(None)
     }
@@ -123,10 +124,10 @@ impl TranscriptStore for SlowingStore {
     async fn find_resumable_session(&self) -> assistd_memory::Result<Option<ResumeCandidate>> {
         Ok(None)
     }
-    async fn get_session_title(&self, _s: &SessionId) -> assistd_memory::Result<Option<String>> {
+    async fn session_title(&self, _s: SessionId) -> assistd_memory::Result<Option<String>> {
         Ok(None)
     }
-    async fn set_session_title(&self, _s: &SessionId, _t: &str) -> assistd_memory::Result<()> {
+    async fn set_session_title(&self, _s: SessionId, _t: &str) -> assistd_memory::Result<()> {
         Ok(())
     }
 }

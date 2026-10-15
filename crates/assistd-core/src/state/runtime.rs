@@ -24,52 +24,46 @@ pub struct SessionContext {
     inner: RwLock<SessionContextInner>,
     /// Lets holders that cannot await the lock read the session
     /// synchronously.
-    session: watch::Sender<Arc<SessionId>>,
+    session: watch::Sender<SessionId>,
 }
 
 impl SessionContext {
     /// Point at `branch_id` of `session_id`; `None` means the session has
     /// no rows yet and is saved with its first message.
     pub fn new(session_id: SessionId, branch_id: Option<BranchId>) -> Self {
-        Self::from_arc(Arc::new(session_id), branch_id)
-    }
-
-    /// [`Self::new`] for an already shared session id.
-    pub fn from_arc(session_id: Arc<SessionId>, branch_id: Option<BranchId>) -> Self {
-        let (session, _) = watch::channel(session_id.clone());
         Self {
             inner: RwLock::new(SessionContextInner {
                 session_id,
                 branch_id,
             }),
-            session,
+            session: watch::channel(session_id).0,
         }
     }
 
     /// Watch the active session id.
-    pub fn session_updates(&self) -> watch::Receiver<Arc<SessionId>> {
+    pub fn session_updates(&self) -> watch::Receiver<SessionId> {
         self.session.subscribe()
     }
 
     /// The active session and its branch, `None` while the session is unsaved.
-    pub async fn current(&self) -> (Arc<SessionId>, Option<BranchId>) {
+    pub async fn current(&self) -> (SessionId, Option<BranchId>) {
         let active = self.inner.read().await;
-        (active.session_id.clone(), active.branch_id)
+        (active.session_id, active.branch_id)
     }
 
     /// Make `branch_id` of `session_id` active and notify
     /// [`Self::session_updates`] watchers.
-    pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: Option<BranchId>) {
+    pub async fn replace(&self, session_id: SessionId, branch_id: Option<BranchId>) {
         let mut active = self.inner.write().await;
-        active.session_id = session_id.clone();
+        active.session_id = session_id;
         active.branch_id = branch_id;
         self.session.send_replace(session_id);
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct SessionContextInner {
-    session_id: Arc<SessionId>,
+    session_id: SessionId,
     branch_id: Option<BranchId>,
 }
 

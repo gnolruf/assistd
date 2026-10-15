@@ -241,9 +241,9 @@ One SQLite database (default: `~/.local/share/assistd/memory.db`)
 holds three schemas: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
 + undo), and a `SemanticStore` for embedding-indexed chunks. Every
-write goes through one writer task that owns the only read-write
-connection; reads use a separate read-only connection, so a long
-vector scan never holds up a write.
+write runs in order on the only read-write connection; reads use a
+separate read-only connection, so a long vector scan never holds up a
+write. Shutdown closes the database once queued writes have run.
 
 Transcript rows keep each step's reasoning, every tool call's arguments,
 and how each tool run ended. Each branch also keeps its latest

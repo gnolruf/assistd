@@ -224,7 +224,7 @@ impl Tool for RecallTool {
 pub struct ReminisceTool {
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
-    current_session: watch::Receiver<Arc<SessionId>>,
+    current_session: watch::Receiver<SessionId>,
 }
 
 impl ReminisceTool {
@@ -233,7 +233,7 @@ impl ReminisceTool {
     pub fn new(
         embedder: Arc<EmbedderHandle>,
         semantic: Arc<dyn SemanticStore>,
-        current_session: watch::Receiver<Arc<SessionId>>,
+        current_session: watch::Receiver<SessionId>,
     ) -> Self {
         Self {
             embedder,
@@ -313,10 +313,10 @@ impl Tool for ReminisceTool {
                 ));
             }
         };
-        let current = self.current_session.borrow().clone();
+        let current = *self.current_session.borrow();
         let hits = self
             .semantic
-            .nearest_chunks(query_vec, limit, embedder.model(), Some(&current))
+            .nearest_chunks(query_vec, limit, embedder.model(), Some(current))
             .await?;
 
         let output = format_chunks(&hits);
@@ -395,7 +395,6 @@ mod tests {
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
-    use tokio::task::JoinHandle;
 
     use super::*;
 
@@ -453,9 +452,9 @@ mod tests {
             _q: Vec<f32>,
             _k: usize,
             _model: &str,
-            exclude_session: Option<&SessionId>,
+            exclude_session: Option<SessionId>,
         ) -> Result<Vec<EmbeddingHit>, MemoryError> {
-            *self.excluded.lock() = exclude_session.copied();
+            *self.excluded.lock() = exclude_session;
             Ok(Vec::new())
         }
         async fn nearest_memories(
@@ -500,37 +499,36 @@ mod tests {
     #[tokio::test]
     async fn reminisce_excludes_the_session_in_progress() {
         let spy = Arc::new(ExclusionSpy::default());
-        let first = Arc::new(SessionId::new());
-        let (session_tx, session_rx) = watch::channel(first.clone());
+        let first = SessionId::new();
+        let (session_tx, session_rx) = watch::channel(first);
         let tool = ReminisceTool::new(ready(Arc::new(FixedEmbedder)), spy.clone(), session_rx);
 
         tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
             .await
             .unwrap();
-        assert_eq!(*spy.excluded.lock(), Some(*first));
+        assert_eq!(*spy.excluded.lock(), Some(first));
 
-        let second = Arc::new(SessionId::new());
-        session_tx.send_replace(second.clone());
+        let second = SessionId::new();
+        session_tx.send_replace(second);
         tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
             .await
             .unwrap();
         assert_eq!(
             *spy.excluded.lock(),
-            Some(*second),
+            Some(second),
             "the tool must follow a session switch, not pin its first session"
         );
     }
 
-    /// A SQLite-backed `MemoryOps`; hold the writer and tempdir for the test.
-    async fn fresh_ops() -> (Arc<MemoryOps>, JoinHandle<()>, TempDir) {
+    /// A SQLite-backed `MemoryOps`; hold the tempdir for the test.
+    async fn fresh_ops() -> (Arc<MemoryOps>, TempDir) {
         let temp = tempfile::tempdir().unwrap();
-        let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
+        let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
         let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
         let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle));
-        (Arc::new(MemoryOps::new(mem, conv)), writer, temp)
+        (Arc::new(MemoryOps::new(mem, conv)), temp)
     }
 
     fn no_ops() -> Arc<MemoryOps> {
@@ -549,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn remember_dedups_by_key() {
-        let (ops, _w, _dir) = fresh_ops().await;
+        let (ops, _dir) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         tool.invoke(json!({"key": "editor_preference", "value": "vim"}))
             .await
@@ -583,7 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn remember_enqueues_embed_job_with_value_text() {
-        let (ops, _w, _dir) = fresh_ops().await;
+        let (ops, _dir) = fresh_ops().await;
         let (etx, mut erx) = live_embed_tx();
         let tool = RememberTool::new(ops.clone(), etx);
         tool.invoke(json!({"key": "editor_preference", "value": "vim is the way"}))
@@ -612,7 +610,7 @@ mod tests {
             Box::new(ReminisceTool::new(
                 no_embedder(),
                 no_semantic(),
-                watch::channel(Arc::new(SessionId::new())).1,
+                watch::channel(SessionId::new()).1,
             )),
         ];
         for tool in tools {

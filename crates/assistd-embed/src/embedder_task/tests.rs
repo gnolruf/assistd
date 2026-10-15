@@ -54,7 +54,7 @@ impl SemanticStore for RecordingStore {
         _query_vector: Vec<f32>,
         _top_k: usize,
         _model: &str,
-        _exclude_session: Option<&SessionId>,
+        _exclude_session: Option<SessionId>,
     ) -> MemoryResult<Vec<EmbeddingHit>> {
         Ok(Vec::new())
     }
