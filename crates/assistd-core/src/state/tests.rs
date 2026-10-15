@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use parking_lot::Mutex as StdMutex;
 use tokio::sync::{Notify, watch};
 
-use assistd_config::ToolsOutputConfig;
 use assistd_embed::EmbedderHandle;
 use assistd_ipc::{
     Component, ComponentReadiness, ImageAttachment, PresenceState, PresenceTarget,
@@ -16,7 +15,10 @@ use assistd_memory::{
     BranchId, ConversationStore, PersistedMessage, PersistedRole, SessionId,
     SqliteConversationStore, SqliteHandle,
 };
-use assistd_tools::{CommandRegistry, RunTool, ToolError, ToolsDisabled, commands::EchoCommand};
+use assistd_tools::{
+    CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolsDisabled,
+    commands::EchoCommand,
+};
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     ContinuousListener, ListenError, VoiceCapture, VoiceInput, VoiceInputError, VoiceManager,
@@ -375,12 +377,13 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
 fn echo_tools() -> Arc<ToolRegistry> {
     let mut commands = CommandRegistry::new();
     commands.register(EchoCommand);
-    let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(
-        Arc::new(commands),
-        &ToolsOutputConfig::default(),
-        std::env::temp_dir().join(format!("assistd-state-test-{}", std::process::id())),
-    ));
+    let output_cap = Arc::new(OutputCap::new(PresentSpec {
+        overflow_dir: std::env::temp_dir()
+            .join(format!("assistd-state-test-{}", std::process::id())),
+        ..PresentSpec::default()
+    }));
+    let mut tools = ToolRegistry::with_output_cap(Arc::clone(&output_cap));
+    tools.register(RunTool::new(Arc::new(commands), output_cap));
     Arc::new(tools)
 }
 

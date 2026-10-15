@@ -29,7 +29,6 @@ use assistd_core::{
     AppState, Config, PresenceError, PresenceManager, PresenceState, ToolRegistry, VoiceManager,
 };
 use assistd_ipc::{Event, Request};
-use assistd_llm::chat::conversation::Summarizer;
 use assistd_llm::{
     EchoBackend, LlamaChatClient, LlamaServerError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
     LlmResult, ReadyState, StepOutcome, Thinking, ToolResultPayload,
@@ -340,10 +339,8 @@ async fn contend_for_llama_slot(manager: Arc<PresenceManager>, stop: Arc<AtomicB
     }
 }
 
-/// Run a summary, a one-shot completion and an agent step, asserting each succeeds.
+/// Run a one-shot completion and an agent step, asserting each succeeds.
 async fn complete_each_kind_of_request(client: &LlamaChatClient, round: usize) {
-    let summary = client.summarize("user: hi".into(), 16, 64).await;
-    assert!(summary.is_ok(), "summary {round}: {summary:?}");
     let oneshot = client
         .complete_oneshot("title?".into(), Thinking::Disabled)
         .await;

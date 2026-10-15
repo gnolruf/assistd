@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use assistd_tools::attachment::MAX_IMAGE_BYTES;
-use assistd_tools::presentation::{PresentSpec, TextTruncator, TruncatedText};
 use assistd_tools::{ApprovalGate, ConfirmationRequest, Risk, Tool, ToolError, VisionGate};
 use async_trait::async_trait;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -42,7 +41,6 @@ struct McpToolAdapter {
     client: Arc<dyn McpClient>,
     tool: rmcp::model::Tool,
     registry_name: String,
-    truncator: Arc<TextTruncator>,
     approvals: ApprovalGate,
     vision: Arc<VisionGate>,
 }
@@ -90,7 +88,6 @@ impl Tool for McpToolAdapter {
             Ok(result) => Ok(tool_result_to_json(
                 result,
                 duration_ms,
-                &self.truncator,
                 self.vision.supported(),
             )),
             Err(err) => Ok(error_envelope(&self.registry_name, &err, duration_ms)),
@@ -100,19 +97,16 @@ impl Tool for McpToolAdapter {
 
 /// [`Tool`] entries for every tool `client` exposes, named
 /// `mcp__<server_name>__<tool>`; tools with an invalid or duplicate name or
-/// an oversized description or schema are skipped with a warning. Results past `output`'s caps are cut, with
-/// the overflow spilled as `mcp-<server_name>-<n>.txt`. Each call asks
+/// an oversized description or schema are skipped with a warning. Each call asks
 /// first unless `approvals` holds the tool. Image results are replaced by a
 /// text note whenever `vision` reports the model cannot take images.
 pub async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     server_name: &str,
-    output: PresentSpec,
     approvals: &ApprovalGate,
     vision: &Arc<VisionGate>,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let tools = client.list_tools().await?;
-    let truncator = Arc::new(TextTruncator::new(output, format!("mcp-{server_name}")));
     Ok(admission::admit_tools(server_name, tools)
         .into_iter()
         .map(|(registry_name, tool)| {
@@ -120,7 +114,6 @@ pub async fn adapt_client_as_tools(
                 client: client.clone(),
                 registry_name,
                 tool,
-                truncator: truncator.clone(),
                 approvals: approvals.clone(),
                 vision: vision.clone(),
             }) as Box<dyn Tool>
@@ -154,16 +147,10 @@ fn declined_envelope(tool_name: &str) -> Value {
 }
 
 /// Render every content block of `result` as one tool-result envelope.
-/// Blocks are joined by newlines (non-text ones as JSON) and cut by
-/// `truncator`; with `vision`, images also go into `attachments[]` as is,
+/// Blocks are joined by newlines (non-text ones as JSON); with `vision`, images also go into `attachments[]` as is,
 /// and without it they become a note only. Without content,
 /// `structuredContent` is the body. An `isError` result is prefixed as a whole.
-fn tool_result_to_json(
-    result: CallToolResult,
-    duration_ms: u128,
-    truncator: &TextTruncator,
-    vision: bool,
-) -> Value {
+fn tool_result_to_json(result: CallToolResult, duration_ms: u128, vision: bool) -> Value {
     let (sections, attachments): (Vec<String>, Vec<Option<Value>>) = result
         .content
         .into_iter()
@@ -177,7 +164,7 @@ fn tool_result_to_json(
         Some(true) => format!("[mcp tool error] {body}"),
         _ => body,
     };
-    let mut envelope = text_envelope(truncator.truncate(body), duration_ms);
+    let mut envelope = text_envelope(&body, duration_ms);
     let attachments: Vec<Value> = attachments.into_iter().flatten().collect();
     if !attachments.is_empty() {
         envelope["attachments"] = Value::Array(attachments);
@@ -218,18 +205,14 @@ fn decoded_len(base64: &str) -> u64 {
     base64.len() as u64 / 4 * 3
 }
 
-fn text_envelope(cut: TruncatedText, duration_ms: u128) -> Value {
-    let mut envelope = json!({
+fn text_envelope(body: &str, duration_ms: u128) -> Value {
+    json!({
         "type": "text",
-        "output": cut.text,
+        "output": body,
         "exit_code": 0,
         "duration_ms": duration_ms,
-        "truncated": cut.truncated,
-    });
-    if let Some(path) = cut.overflow_file {
-        envelope["overflow_file"] = json!(path.to_string_lossy());
-    }
-    envelope
+        "truncated": false,
+    })
 }
 
 #[cfg(test)]

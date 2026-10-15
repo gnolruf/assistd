@@ -373,6 +373,7 @@ fn chat_spec(port: u16) -> ClientCfg {
             preserve_recent_turns: nz32(2),
             temperature: 0.5,
             max_response_tokens: nz32(256),
+            max_reasoning_tokens: nz32(128),
             request_timeout_secs: nz64(5),
             summary_temperature: 0.3,
             top_p: None,

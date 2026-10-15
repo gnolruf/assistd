@@ -226,6 +226,7 @@ pub enum EventKind {
     Transcription,
     ChatFocus,
     Readiness,
+    ContextSize,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -572,6 +573,8 @@ pub enum StatusKind {
     CompactingSoon,
     /// Older history is being summarized to fit the token budget.
     CompactingHistory,
+    /// The compaction announced by [`StatusKind::CompactingHistory`] finished.
+    HistoryCompacted,
 }
 
 /// Author of a persisted conversation message.
@@ -734,8 +737,9 @@ pub enum Event {
         vision: bool,
         model_name: String,
     },
-    /// Tokens in the conversation as sent with the model request about to stream.
-    ContextSize { id: String, tokens: u32 },
+    /// Tokens in the conversation as sent with the model request about to stream,
+    /// and `total` the conversation has held, counting what compaction removed.
+    ContextSize { id: String, tokens: u32, total: u32 },
     /// Non-terminal notice of a recoverable condition.
     Status {
         id: String,
@@ -857,6 +861,7 @@ impl Event {
             Event::Transcription { .. } => EventKind::Transcription,
             Event::ChatFocus { .. } => EventKind::ChatFocus,
             Event::Readiness { .. } => EventKind::Readiness,
+            Event::ContextSize { .. } => EventKind::ContextSize,
             Event::VoiceOutputState { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
@@ -866,7 +871,6 @@ impl Event {
             | Event::ReindexProgress { .. }
             | Event::ConfirmRequest { .. }
             | Event::Capabilities { .. }
-            | Event::ContextSize { .. }
             | Event::Status { .. }
             | Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }

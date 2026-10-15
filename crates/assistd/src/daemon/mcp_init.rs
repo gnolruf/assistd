@@ -1,14 +1,12 @@
 //! MCP subsystem wiring for the daemon: servers start in the background
 //! and each one's tools are offered once it has connected.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_core::{AppState, Config, McpServerConfig, McpServerStatus};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_mcp::{McpServer, StdioConfig, adapt_client_as_tools};
-use assistd_tools::presentation::PresentSpec;
 use assistd_tools::{ApprovalGate, Tool, VisionGate};
 use assistd_utils::readiness::Readiness;
 use tokio::sync::watch;
@@ -18,7 +16,6 @@ use tracing::info;
 /// What starting the configured MCP servers in the background needs.
 pub(super) struct McpStartup {
     servers: Vec<McpServerConfig>,
-    output: PresentSpec,
     approvals: ApprovalGate,
     vision: Arc<VisionGate>,
 }
@@ -77,10 +74,8 @@ pub(super) fn prepare(
         .iter()
         .map(|server| McpServerStatus::starting(server.name.clone()))
         .collect();
-    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let startup = McpStartup {
         servers: config.mcp.servers.clone(),
-        output: PresentSpec::from_config(&config.tools.output, overflow_dir),
         approvals,
         vision,
     };
@@ -146,15 +141,7 @@ async fn start_server(
         }
     };
 
-    match adapt_client_as_tools(
-        started.clone(),
-        &name,
-        startup.output.clone(),
-        &startup.approvals,
-        &startup.vision,
-    )
-    .await
-    {
+    match adapt_client_as_tools(started.clone(), &name, &startup.approvals, &startup.vision).await {
         Ok(tools) => {
             info!("mcp: {name} ready ({} tools)", tools.len());
             Ok((started, tools))

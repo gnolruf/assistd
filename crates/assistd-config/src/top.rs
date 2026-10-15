@@ -22,7 +22,7 @@ use crate::model::ModelConfig;
 use crate::presence::PresenceConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
-use crate::tools::ToolsConfig;
+use crate::tools::{ToolsConfig, ToolsOutputConfig};
 use crate::tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig};
 use crate::voice::{SynthesisConfig, TranscriptionConfig, VoiceConfig};
 
@@ -67,6 +67,7 @@ impl Config {
         validate_voice(&mut errors, &self.voice);
         validate_sleep(&mut errors, &self.sleep);
         validate_tools(&mut errors, &self.tools);
+        validate_tool_output_share(&mut errors, &self.tools.output, &self.chat);
         validate_memory(&mut errors, &self.memory);
         validate_embedding(&mut errors, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
@@ -249,6 +250,11 @@ fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfi
             model.context_budget()
         ));
     }
+    if chat.max_reasoning_tokens >= chat.max_response_tokens {
+        errors.push(
+            "chat.max_reasoning_tokens must be strictly less than chat.max_response_tokens".into(),
+        );
+    }
     if chat.summary_target_tokens >= chat.max_history_tokens {
         errors.push(
             "chat.summary_target_tokens must be strictly less than chat.max_history_tokens".into(),
@@ -391,6 +397,23 @@ fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
                 "tools.write.writable_paths entry {entry:?} must be absolute or start with `~/`"
             ));
         }
+    }
+}
+
+/// One tool result's head must leave room for the rest of the history.
+fn validate_tool_output_share(
+    errors: &mut Vec<String>,
+    output: &ToolsOutputConfig,
+    chat: &ChatConfig,
+) {
+    let head_tokens = u64::from(output.max_kb.get()) * 1024 / 4;
+    let allowed = u64::from(chat.max_history_tokens.get()) / 4;
+    if head_tokens > allowed {
+        errors.push(format!(
+            "tools.output.max_kb ({} KB, about {head_tokens} tokens) must not exceed a quarter \
+             of chat.max_history_tokens ({allowed} tokens)",
+            output.max_kb
+        ));
     }
 }
 

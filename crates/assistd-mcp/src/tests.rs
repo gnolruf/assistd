@@ -8,14 +8,7 @@ use super::*;
 /// [`adapt_client_as_tools`] for server `web` with every call allowed.
 async fn adapt_allowing(client: Arc<dyn McpClient>) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    adapt_client_as_tools(
-        client,
-        "web",
-        PresentSpec::default(),
-        &approvals,
-        &VisionGate::new(true),
-    )
-    .await
+    adapt_client_as_tools(client, "web", &approvals, &VisionGate::new(true)).await
 }
 
 fn mcp_tool(name: &str, description: &str) -> rmcp::model::Tool {
@@ -60,10 +53,6 @@ async fn failing_tool(err: McpError) -> Box<dyn Tool> {
     tools.pop().unwrap()
 }
 
-fn unlimited() -> TextTruncator {
-    TextTruncator::new(PresentSpec::default(), "mcp-test")
-}
-
 fn text_envelope_of(output: &str) -> Value {
     json!({
         "type": "text",
@@ -97,7 +86,7 @@ fn text_only_results_join_every_block() {
     ];
     for (result, expected) in cases {
         assert_eq!(
-            tool_result_to_json(call_result(result), 42, &unlimited(), true),
+            tool_result_to_json(call_result(result), 42, true),
             text_envelope_of(expected)
         );
     }
@@ -113,7 +102,7 @@ fn mixed_results_keep_every_block_and_collect_images() {
             {"type": "image", "mimeType": "image/jpeg", "data": "AAAA"},
         ]
     }));
-    let envelope = tool_result_to_json(result, 42, &unlimited(), true);
+    let envelope = tool_result_to_json(result, 42, true);
     let output = envelope["output"].as_str().unwrap();
     let lines: Vec<&str> = output.lines().collect();
     let [text, png, link, jpeg] = lines.as_slice() else {
@@ -156,15 +145,9 @@ impl McpClient for ImageClient {
 async fn adapter_follows_the_vision_gate_on_every_call() {
     let vision = VisionGate::new(false);
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    let tools = adapt_client_as_tools(
-        Arc::new(ImageClient),
-        "shots",
-        PresentSpec::default(),
-        &approvals,
-        &vision,
-    )
-    .await
-    .unwrap();
+    let tools = adapt_client_as_tools(Arc::new(ImageClient), "shots", &approvals, &vision)
+        .await
+        .unwrap();
     let without = tools[0].invoke(json!({})).await.unwrap();
     assert!(without.get("attachments").is_none());
     vision.set(true);
@@ -237,7 +220,6 @@ async fn gated_tool(
     let mut tools = adapt_client_as_tools(
         client.clone(),
         "files",
-        PresentSpec::default(),
         &ApprovalGate::new(gate, approvals),
         &VisionGate::new(true),
     )

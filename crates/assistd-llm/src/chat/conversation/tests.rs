@@ -5,9 +5,16 @@ use tokio::sync::Mutex;
 
 use super::*;
 
+/// One summary request as the summarizer received it.
+struct CapturedRequest {
+    /// The rendered messages, as JSON.
+    messages: String,
+    instruction: String,
+}
+
 struct FakeSummarizer {
     reply: String,
-    captured: Arc<Mutex<Vec<String>>>,
+    captured: Arc<Mutex<Vec<CapturedRequest>>>,
 }
 
 impl FakeSummarizer {
@@ -21,13 +28,11 @@ impl FakeSummarizer {
 
 #[async_trait]
 impl Summarizer for FakeSummarizer {
-    async fn summarize(
-        &self,
-        dialogue: String,
-        _target_tokens: u32,
-        _max_tokens: u32,
-    ) -> Result<String, ChatClientError> {
-        self.captured.lock().await.push(dialogue);
+    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
+        self.captured.lock().await.push(CapturedRequest {
+            messages: serde_json::to_string(&request.messages).unwrap(),
+            instruction: request.instruction,
+        });
         Ok(self.reply.clone())
     }
 }
@@ -40,6 +45,7 @@ fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) 
         preserve_recent_turns: nz32(preserve),
         temperature: 0.7,
         max_response_tokens: nz32(512),
+        max_reasoning_tokens: nz32(256),
         request_timeout_secs: nz64(60),
         summary_temperature: 0.3,
         top_p: None,
@@ -315,12 +321,22 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
 
     let fake = FakeSummarizer::new("early chat covered topics 0 to 4");
     let (chat, model) = spec(120, 2, 10_000);
+    let rendered_before = serde_json::to_string(&c.as_wire_messages()).unwrap();
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
-    let summarized: String = (0..5)
-        .map(|i| format!("user: {}\nassistant: {}\n", user(i), assistant(i)))
-        .collect();
-    assert_eq!(*fake.captured.lock().await, [summarized]);
+    let captured = fake.captured.lock().await;
+    assert_eq!(
+        captured[0].messages, rendered_before,
+        "the summary must continue the prompt the server already holds"
+    );
+    assert!(
+        captured[0].instruction.contains(&format!(
+            "before the user message containing \"{}\"",
+            user(5)
+        )),
+        "{}",
+        captured[0].instruction
+    );
     assert_eq!(
         contents(&c),
         [
@@ -353,8 +369,11 @@ async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
 
     let captured = fake.captured.lock().await;
     assert!(
-        captured[0].starts_with("system: [Conversation summary] first summary\n"),
-        "{captured:?}"
+        captured[0]
+            .messages
+            .contains("[Conversation summary] first summary"),
+        "{}",
+        captured[0].messages
     );
     assert_eq!(
         contents(&c),
@@ -463,7 +482,7 @@ fn dropping_a_tool_call_message_drops_all_of_its_results() {
     c.push_assistant("answer".into());
     c.push_user("second question".into());
 
-    let (chat, model) = spec(24, 1, 10_000);
+    let (chat, model) = spec(60, 1, 10_000);
     c.truncate_to_budget(&chat, &model);
     assert_eq!(
         contents(&c),
@@ -516,7 +535,12 @@ fn push_tool_steps(c: &mut Conversation, steps: usize) {
             String::new(),
             vec![mk_call(&format!("c-{i}"), r#"{"command":"ls"}"#)],
         );
-        c.push_tool_result(format!("c-{i}"), format!("output {i} with enough padding"));
+        let padding = "x".repeat(400);
+        let exit = i % 2;
+        c.push_tool_result(
+            format!("c-{i}"),
+            format!("output {i}\n{padding}\n[exit:{exit} | 1ms]"),
+        );
     }
 }
 
@@ -553,16 +577,116 @@ fn truncate_keeps_the_question_and_newest_step_of_a_long_tool_loop() {
     c.push_user("current question".into());
     push_tool_steps(&mut c, 12);
 
-    let (chat, model) = spec(60, 2, 10_000);
+    let (chat, model) = spec(600, 2, 10_000);
     c.truncate_to_budget(&chat, &model);
 
     assert_eq!(c.messages[0].content, "current question");
-    assert_eq!(
-        c.messages.last().map(|m| m.content.as_str()),
-        Some("output 11 with enough padding")
+    assert_eq!(c.messages[0].earlier_steps.len(), 11);
+    assert!(
+        c.messages
+            .last()
+            .is_some_and(|m| m.content.starts_with("output 11\n"))
     );
-    assert!(c.messages.len() < 25, "older steps must be dropped");
-    assert!(c.approx_total_tokens() <= 60);
+    assert!(c.approx_total_tokens() <= 600 * 60 / 100);
+}
+
+#[tokio::test]
+async fn a_long_tool_loop_folds_its_oldest_steps_into_the_summary_and_a_call_log() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("old question".into());
+    c.push_assistant("old answer".into());
+    c.push_user("current question".into());
+    push_tool_steps(&mut c, 25);
+
+    let fake = FakeSummarizer::new("summary");
+    let (chat, model) = spec(3000, 2, 10_000);
+    let total_before = c.total_tokens();
+    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    assert_eq!(
+        c.total_tokens(),
+        total_before,
+        "compaction must not lower the total"
+    );
+
+    let request = fake.captured.lock().await.remove(0);
+    let first_kept_call = c
+        .messages
+        .iter()
+        .find_map(|m| m.tool_calls.first())
+        .map(|call| call.id.clone())
+        .unwrap();
+    assert!(
+        request
+            .instruction
+            .contains("before your tool call `run` with arguments `{\"command\":\"ls\"}`"),
+        "{}",
+        request.instruction
+    );
+    assert!(
+        request.messages.contains("old question") && request.messages.contains(&first_kept_call),
+        "the request must carry the folded and the kept stretches alike"
+    );
+    assert_eq!(
+        contents(&c)[..2],
+        ["[Conversation summary] summary", "current question"]
+    );
+    let log = &c.messages[1].earlier_steps;
+    let kept = c.messages.iter().filter(|m| is_tool_step(m)).count();
+    assert!(kept > 1, "the newest steps that fit must stay verbatim");
+    assert_eq!(log.len() + kept, 25);
+    assert_eq!(
+        log[1],
+        StepRecord {
+            call: r#"run {"command":"ls"}"#.into(),
+            exit_code: Some(1),
+            failure: Some("output 1".into()),
+        }
+    );
+    let question = serde_json::to_string(&c.as_wire_messages()[1]).unwrap();
+    assert!(question.contains("→ exit 1: output 1"), "{question}");
+
+    push_tool_steps(&mut c, 3);
+    assert!(
+        !c.exceeds_budget(&chat, &model),
+        "compaction must leave room for further steps"
+    );
+}
+
+#[test]
+fn folded_steps_keep_the_error_line_of_a_failure() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("q".into());
+    c.push_assistant_with_tool_calls(
+        None,
+        String::new(),
+        vec![
+            mk_call("ok", r#"{"command":"ls"}"#),
+            mk_call("web", r#"{"command":"web u | head"}"#),
+            mk_call("curl", r#"{"command":"bash curl u"}"#),
+        ],
+    );
+    c.push_tool_result("ok".into(), "a\nb\n[exit:0 | 1ms]".into());
+    c.push_tool_result(
+        "web".into(),
+        "[stderr] [web]\t[error] web: HTTP 404 Not Found\n[exit:0 | 1ms]".into(),
+    );
+    c.push_tool_result(
+        "curl".into(),
+        "[stderr] [bash]\tcurl: (6) Could not resolve host\n[exit:6 | 1ms]".into(),
+    );
+
+    let failures: Vec<_> = step_log::records(&c.messages[1..])
+        .into_iter()
+        .map(|r| r.failure)
+        .collect();
+    assert_eq!(
+        failures,
+        [
+            None,
+            Some("[web] [error] web: HTTP 404 Not Found".into()),
+            Some("[bash] curl: (6) Could not resolve host".into()),
+        ]
+    );
 }
 
 #[test]

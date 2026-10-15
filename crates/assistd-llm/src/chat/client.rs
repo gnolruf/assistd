@@ -18,7 +18,7 @@ use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, info, warn};
 
 use super::conversation::{
-    Conversation, Message, Role, Summarizer, TOOL_RESULT_PREFIX, ToolCallRecord,
+    Conversation, Message, Role, Summarizer, SummaryRequest, TOOL_RESULT_PREFIX, ToolCallRecord,
     approx_tokens_bytes,
 };
 use super::error::ChatClientError;
@@ -31,9 +31,13 @@ use crate::{
 };
 
 const ERROR_BODY_CAP: usize = 1024;
-const SUMMARY_SYSTEM_PROMPT: &str = "You are a conversation summarizer. Produce a concise \
-    summary of the following dialogue that preserves all factual claims, user requests, and \
-    assistant conclusions. Write in past tense. Do not add commentary.";
+/// Written into the model's thinking where its budget ran out, so it moves
+/// on instead of starting over.
+const REASONING_BUDGET_MESSAGE: &str =
+    "\n\nThinking budget reached. Stop planning and act now: make the next tool call or answer.\n";
+/// Tool-call markup the chat template emits; a summary containing it tried
+/// to act instead of summarizing.
+const TOOL_CALL_MARKUP: &str = "<tool_call>";
 
 /// HTTP streaming chat client backed by a locally-managed llama-server.
 ///
@@ -104,6 +108,8 @@ impl LlamaChatClient {
             presence_penalty: self.chat.presence_penalty,
             tools: None,
             tool_choice: None,
+            reasoning_budget_tokens: Some(self.chat.max_reasoning_tokens.get()),
+            reasoning_budget_message: Some(REASONING_BUDGET_MESSAGE),
             chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
         }
     }
@@ -229,7 +235,14 @@ impl LlamaChatClient {
         StreamOutcome::Ok(Box::new(accum))
     }
 
-    async fn fit_budget(&self, conv: &mut Conversation, tx: &mpsc::Sender<LlmEvent>) {
+    /// Compact `conv` when it is over budget, summarizing with the same
+    /// `tools` the coming request offers so its prompt prefix is unchanged.
+    async fn fit_budget(
+        &self,
+        conv: &mut Conversation,
+        tools: &[Value],
+        tx: &mpsc::Sender<LlmEvent>,
+    ) {
         if !conv.exceeds_budget(&self.chat, &self.model) {
             if self.compaction_headroom(conv).is_none() {
                 send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
@@ -238,7 +251,14 @@ impl LlamaChatClient {
         }
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
         let before = (conv.message_count(), conv.approx_total_tokens());
-        if let Err(e) = conv.ensure_budget(self, &self.chat, &self.model).await {
+        let summarizer = ContinuationSummarizer {
+            client: self,
+            tools,
+        };
+        if let Err(e) = conv
+            .ensure_budget(&summarizer, &self.chat, &self.model)
+            .await
+        {
             warn!(
                 target: "assistd::chat",
                 "ensure_budget failed ({e}); falling back to truncation"
@@ -253,6 +273,7 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
+        send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
     }
 
     /// `None` when compaction is already near, so it is announced once.
@@ -439,7 +460,7 @@ impl LlmBackend for LlamaChatClient {
                 );
             }
             conv.push_user(prompt);
-            self.fit_budget(&mut conv, &tx).await;
+            self.fit_budget(&mut conv, &[], &tx).await;
             send_context_size(&conv, &tx).await;
             let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
@@ -511,13 +532,10 @@ impl LlmBackend for LlamaChatClient {
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         let (body_bytes, estimated_tokens, compaction_headroom) = {
             let mut conv = self.conv.lock().await;
-            self.fit_budget(&mut conv, &tx).await;
+            self.fit_budget(&mut conv, &tools, &tx).await;
             send_context_size(&conv, &tx).await;
             let mut payload = self.base_request(conv.as_wire_messages());
-            if !tools.is_empty() {
-                payload.tools = Some(tools);
-                payload.tool_choice = Some("auto");
-            }
+            offer_tools(&mut payload, tools);
             let body = serde_json::to_vec(&payload)
                 .map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?;
             (
@@ -594,6 +612,12 @@ impl LlmBackend for LlamaChatClient {
                 wire::ContentBody::Text(prompt.as_str().into()),
             )]);
             payload.max_tokens = self.chat.max_summary_tokens();
+            payload.reasoning_budget_tokens = Some(
+                self.chat
+                    .max_reasoning_tokens
+                    .get()
+                    .min(payload.max_tokens / 2),
+            );
             payload.chat_template_kwargs = self.template_kwargs(thinking);
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
@@ -618,49 +642,48 @@ impl LlmBackend for LlamaChatClient {
     }
 }
 
-#[async_trait]
-impl Summarizer for LlamaChatClient {
-    async fn summarize(
-        &self,
-        dialogue: String,
-        _target_tokens: u32,
-        max_tokens: u32,
-    ) -> Result<String, ChatClientError> {
-        self.serving_pid().await?;
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let payload = wire::ChatRequest {
-            model: self.model.name.as_str(),
-            messages: vec![
-                wire::ChatMessage::plain(
-                    "system",
-                    wire::ContentBody::Text(SUMMARY_SYSTEM_PROMPT.into()),
-                ),
-                wire::ChatMessage::plain("user", wire::ContentBody::Text(dialogue.as_str().into())),
-            ],
-            stream: false,
-            stream_options: None,
-            temperature: self.chat.summary_temperature,
-            max_tokens,
-            top_p: None,
-            top_k: None,
-            min_p: None,
-            presence_penalty: None,
-            tools: None,
-            tool_choice: None,
-            chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
-        };
+/// Summarizes by continuing the live conversation with the request's own
+/// tools and template settings, so llama-server reuses its cached prompt; a
+/// zero thinking budget skips thinking without changing the template.
+struct ContinuationSummarizer<'a> {
+    client: &'a LlamaChatClient,
+    tools: &'a [Value],
+}
 
-        let mut response = self
+#[async_trait]
+impl Summarizer for ContinuationSummarizer<'_> {
+    async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
+        let client = self.client;
+        client.serving_pid().await?;
+        let SummaryRequest {
+            mut messages,
+            instruction,
+        } = request;
+        messages.push(wire::ChatMessage::plain(
+            Role::User.as_wire(),
+            wire::ContentBody::Text(instruction.as_str().into()),
+        ));
+        let mut payload = client.base_request(messages);
+        offer_tools(&mut payload, self.tools.to_vec());
+        payload.stream = false;
+        payload.stream_options = None;
+        payload.temperature = client.chat.summary_temperature;
+        payload.max_tokens = client.chat.max_summary_tokens();
+        payload.reasoning_budget_tokens = Some(0);
+        payload.reasoning_budget_message = None;
+
+        let url = format!("{}/v1/chat/completions", client.base_url);
+        let mut response = client
             .client
             .post(&url)
-            .timeout(self.request_timeout())
+            .timeout(client.request_timeout())
             .json(&payload)
             .send()
             .await?;
         let status = response.status();
         if !status.is_success() {
             let body =
-                read_body_capped(&mut response, ERROR_BODY_CAP, self.stream_inactivity()).await;
+                read_body_capped(&mut response, ERROR_BODY_CAP, client.stream_inactivity()).await;
             return Err(ChatClientError::Server {
                 status: status.as_u16(),
                 body,
@@ -674,7 +697,20 @@ impl Summarizer for LlamaChatClient {
             .next()
             .map(|c| c.message.content)
             .ok_or_else(|| ChatClientError::Summarize("no choices returned".into()))?;
+        if text.contains(TOOL_CALL_MARKUP) {
+            return Err(ChatClientError::Summarize(
+                "the model called a tool instead of summarizing".into(),
+            ));
+        }
         Ok(text)
+    }
+}
+
+/// Offer `tools` on `payload`, leaving it tool-free when there are none.
+fn offer_tools(payload: &mut wire::ChatRequest<'_>, tools: Vec<Value>) {
+    if !tools.is_empty() {
+        payload.tools = Some(tools);
+        payload.tool_choice = Some("auto");
     }
 }
 
@@ -811,7 +847,8 @@ fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &Stre
 
 async fn send_context_size(conv: &Conversation, tx: &mpsc::Sender<LlmEvent>) {
     let tokens = conv.approx_total_tokens();
-    let _ = tx.send(LlmEvent::ContextSize { tokens }).await;
+    let total = conv.total_tokens();
+    let _ = tx.send(LlmEvent::ContextSize { tokens, total }).await;
 }
 
 async fn send_compaction_status(tx: &mpsc::Sender<LlmEvent>, event: StatusKind, message: &str) {

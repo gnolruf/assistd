@@ -530,16 +530,19 @@ fn render_thumbnails(
     }
 }
 
-/// Spinner row for an open reply with its elapsed time, tokens so far and
-/// conversation total, plus a warning when the daemon is about to compact history.
+/// Spinner row for an open reply with its elapsed time, the turn's tokens,
+/// the conversation's current size and its total including compacted
+/// history, plus a warning when the daemon is about to compact history.
 fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at: Instant) {
     let elapsed = compact_duration(started_at.elapsed().as_secs());
-    let progress = match (app.tokens.tokens(), app.tokens.context_tokens()) {
+    let sizes = app.tokens.context_tokens().zip(app.tokens.total_tokens());
+    let progress = match (app.tokens.tokens(), sizes) {
         (0, _) => elapsed,
         (tokens, None) => format!("{elapsed} · {} tokens", compact_count(tokens)),
-        (tokens, Some(total)) => format!(
-            "{elapsed} · {} / {} tokens",
+        (tokens, Some((context, total))) => format!(
+            "{elapsed} · {} turn · {} context · {} total",
             compact_count(tokens),
+            compact_count(context),
             compact_count(total)
         ),
     };
@@ -569,7 +572,7 @@ pub(super) fn turn_summary(elapsed_secs: u64, tokens: u64) -> String {
 }
 
 /// `42s`, `3m 5s`, `1hr 3m 3s`: leading zero units are dropped.
-fn compact_duration(total_secs: u64) -> String {
+pub(super) fn compact_duration(total_secs: u64) -> String {
     let (hours, mins, secs) = (total_secs / 3600, total_secs / 60 % 60, total_secs % 60);
     match (hours, mins) {
         (0, 0) => format!("{secs}s"),

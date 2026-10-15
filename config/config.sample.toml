@@ -26,6 +26,7 @@ temperature = 0.7
 # presence_penalty = 1.5
 # reasoning_effort = "low"  # thinking level; values depend on the model's chat template
 max_response_tokens = 1024  # includes reasoning; history + this must fit 90% of context_length
+# max_reasoning_tokens = 512  # thinking cap per response; below max_response_tokens
 request_timeout_secs = 120  # wait for the first token
 # summary_temperature = 0.3
 
@@ -94,7 +95,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 
 [tools.output]
 # max_lines = 200
-# max_kb = 50
+# max_kb = 4  # at most a quarter of chat.max_history_tokens (1 KB ≈ 256 tokens)
 # overflow_dir = "/run/user/1000/assistd/output"
 
 [tools.bash]

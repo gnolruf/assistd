@@ -26,6 +26,8 @@ fn request(messages: Vec<ChatMessage<'_>>) -> ChatRequest<'_> {
         presence_penalty: None,
         tools: None,
         tool_choice: None,
+        reasoning_budget_tokens: None,
+        reasoning_budget_message: None,
         chat_template_kwargs: None,
     }
 }

@@ -41,6 +41,7 @@ pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: NonZeroU32 = nz32(1000);
 pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: NonZeroU32 = nz32(4);
 pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: NonZeroU32 = nz32(1024);
+pub const DEFAULT_CHAT_MAX_REASONING_TOKENS: NonZeroU32 = nz32(512);
 pub const DEFAULT_CHAT_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(120);
 pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
 /// Must not name tools: each request already carries their schemas.
@@ -91,7 +92,7 @@ pub const DEFAULT_GPU_POLL_SECS: NonZeroU64 = nz64(5);
 pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: NonZeroU64 = nz64(2048);
 
 pub const DEFAULT_TOOLS_MAX_LINES: NonZeroU32 = nz32(200);
-pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(50);
+pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(4);
 pub const DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS: u32 = 30;
 pub const DEFAULT_BASH_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 

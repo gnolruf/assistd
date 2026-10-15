@@ -26,7 +26,7 @@ mod modal;
 mod resume;
 mod wire;
 
-const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER_CHARS: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
 
 /// Query ids remembered so their copies on the broadcast bus are ignored;

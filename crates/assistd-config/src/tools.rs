@@ -46,17 +46,18 @@ impl Default for ToolsScratchConfig {
     }
 }
 
-/// Limits on a `run` or MCP tool result before it reaches the LLM; the
-/// excess spills to a file whose path the model is given.
+/// Limits on every tool result before it reaches the LLM; the excess
+/// spills to a file whose path the model is given.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsOutputConfig {
-    /// Max output lines shown to the LLM.
+    /// Max lines of one tool result, notices included.
     pub max_lines: NonZeroU32,
-    /// Max size of the shown head, in KB.
+    /// Max size of one tool result in KB, notices included. At about 256
+    /// tokens per KB, must not exceed a quarter of `chat.max_history_tokens`.
     pub max_kb: NonZeroU32,
     /// Spill directory for overflow (`cmd-<n>.txt` for `run`,
-    /// `mcp-<server>-<n>.txt` for MCP tools); made owner-only on daemon
+    /// `<tool>-<n>.txt` for any other tool); made owner-only on daemon
     /// startup, when earlier spill files are removed and nothing else is.
     /// Each new spill deletes the oldest ones beyond the newest 64 files
     /// or 128 MiB. Must be absolute or start with `~/`. Defaults to

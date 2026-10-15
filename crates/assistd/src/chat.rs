@@ -47,8 +47,8 @@ mod ui;
 const CHAT_CHANNEL_CAPACITY: usize = 64;
 const RESUME_RECENCY_SECS: u64 = 10;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
-/// Frame interval of the live thinking glyph.
-const THINKING_GLYPH_INTERVAL: Duration = Duration::from_millis(150);
+/// Frame interval of the live thinking and compaction glyphs.
+const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -317,7 +317,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
-    let mut glyph_tick = tokio::time::interval(THINKING_GLYPH_INTERVAL);
+    let mut glyph_tick = tokio::time::interval(GLYPH_INTERVAL);
     glyph_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut window_title = String::new();
@@ -337,8 +337,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
             _ = tick.tick() => {
                 app.on_tick();
             }
-            _ = glyph_tick.tick(), if app.output.thinking_live() => {
-                app.output.advance_thinking_glyph();
+            _ = glyph_tick.tick(), if app.output.glyph_live() => {
+                app.output.advance_live_glyphs();
             }
             _ = shutdown_rx.changed() => {
                 break;
@@ -553,6 +553,7 @@ async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
                 EventKind::ReasoningDelta,
                 EventKind::ToolCall,
                 EventKind::ToolResult,
+                EventKind::ContextSize,
                 EventKind::Done,
                 EventKind::Error,
             ],

@@ -5,10 +5,9 @@ use async_trait::async_trait;
 use parking_lot::Mutex as StdMutex;
 use tokio::sync::Notify;
 
-use assistd_config::ToolsOutputConfig;
 use assistd_llm::{HealthSnapshot, LlmResult};
 use assistd_tools::commands::EchoCommand;
-use assistd_tools::{CommandRegistry, RunTool, Tool, ToolError};
+use assistd_tools::{CommandRegistry, OutputCap, PresentSpec, RunTool, Tool, ToolError};
 
 use super::*;
 
@@ -126,12 +125,13 @@ fn call(id: &str, command: &str) -> ToolCall {
 fn tools_with_echo() -> Arc<ToolRegistry> {
     let mut commands = CommandRegistry::new();
     commands.register(EchoCommand);
-    let mut tools = ToolRegistry::new();
-    tools.register(RunTool::new(
-        Arc::new(commands),
-        &ToolsOutputConfig::default(),
-        std::env::temp_dir().join(format!("assistd-agent-test-{}", std::process::id())),
-    ));
+    let output_cap = Arc::new(OutputCap::new(PresentSpec {
+        overflow_dir: std::env::temp_dir()
+            .join(format!("assistd-agent-test-{}", std::process::id())),
+        ..PresentSpec::default()
+    }));
+    let mut tools = ToolRegistry::with_output_cap(Arc::clone(&output_cap));
+    tools.register(RunTool::new(Arc::new(commands), output_cap));
     Arc::new(tools)
 }
 
