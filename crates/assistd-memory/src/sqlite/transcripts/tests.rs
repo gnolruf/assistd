@@ -11,7 +11,7 @@ async fn fresh_store() -> (
     let (handle, _writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
         .await
         .unwrap();
-    (SqliteTranscriptStore::new(Arc::new(handle)), (temp, tx))
+    (SqliteTranscriptStore::new(handle), (temp, tx))
 }
 
 fn contents(history: &[HistoryRow]) -> Vec<(PersistedRole, &str)> {
@@ -231,7 +231,6 @@ async fn undo_removes_only_the_last_turn() {
         UndoOutcome {
             removed_messages: 2,
             last_user_text: Some("second".into()),
-            removed_turn_id: Some(t2),
         }
     );
 

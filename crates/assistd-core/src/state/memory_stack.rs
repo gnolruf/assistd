@@ -23,7 +23,7 @@ pub struct MemoryStack {
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
-    pub chunks: Option<Arc<SqliteHandle>>,
+    pub chunks: Option<SqliteHandle>,
     pub embedding_cfg: EmbeddingConfig,
 }
 
@@ -84,7 +84,7 @@ impl MemoryStack {
 
     /// Attach the SQLite handle new messages are chunked into. Without
     /// one, persisted messages are never chunked or embedded.
-    pub fn with_chunks(mut self, chunks: Arc<SqliteHandle>) -> Self {
+    pub fn with_chunks(mut self, chunks: SqliteHandle) -> Self {
         self.chunks = Some(chunks);
         self
     }

@@ -6,7 +6,9 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
-use assistd_memory::{EmbeddingHit, MemoryHit, MemoryId, SemanticStore, SessionId};
+use assistd_memory::{
+    EmbeddingHit, EmbeddingTarget, MemoryHit, MemoryId, SemanticStore, SessionId,
+};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -39,7 +41,13 @@ impl RememberTool {
     }
 
     fn queue_embedding(&self, memory_id: MemoryId, text: String) {
-        enqueue_embed_job(&self.embed_tx, EmbedJob::Memory { memory_id, text });
+        enqueue_embed_job(
+            &self.embed_tx,
+            EmbedJob {
+                target: EmbeddingTarget::Memory(memory_id),
+                text,
+            },
+        );
     }
 }
 
@@ -101,9 +109,7 @@ impl Tool for RememberTool {
         }
 
         let memory_id = self.ops.save(&key, value.clone()).await?;
-        if memory_id != MemoryId(0) {
-            self.queue_embedding(memory_id, value);
-        }
+        self.queue_embedding(memory_id, value);
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
             target: "assistd::memory",
@@ -383,8 +389,9 @@ fn tool_result(output: &str, duration_ms: u128) -> Value {
 mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        ChunkId, MemoryError, MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore,
-        SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
+        ChunkId, Embedding, MemoryError, MemoryStore, NoMemoryStore, NoSemanticStore,
+        NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, StaleEmbeddings,
+        TranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -459,14 +466,11 @@ mod tests {
         ) -> Result<Vec<MemoryHit>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn count_for_model(&self, _model: &str) -> Result<(i64, i64), MemoryError> {
-            Ok((0, 0))
+        async fn count_stale(&self, _current: &str) -> Result<StaleEmbeddings, MemoryError> {
+            Ok(StaleEmbeddings::default())
         }
-        async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>), MemoryError> {
-            Ok((0, Vec::new()))
-        }
-        async fn count_missing(&self, _current: &str) -> Result<(i64, i64), MemoryError> {
-            Ok((0, 0))
+        async fn count_missing(&self, _current: &str) -> Result<UnindexedRows, MemoryError> {
+            Ok(UnindexedRows::default())
         }
         async fn memories_missing_embedding(
             &self,
@@ -484,19 +488,10 @@ mod tests {
         ) -> Result<Vec<(ChunkId, String)>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn store_chunk_embedding(
+        async fn store_embeddings(
             &self,
-            _chunk_id: ChunkId,
-            _model: String,
-            _vector: Vec<u8>,
-        ) -> Result<(), MemoryError> {
-            Ok(())
-        }
-        async fn store_memory_embedding(
-            &self,
-            _memory_id: MemoryId,
-            _model: String,
-            _vector: Vec<u8>,
+            _model: &str,
+            _embeddings: Vec<Embedding>,
         ) -> Result<(), MemoryError> {
             Ok(())
         }
@@ -533,7 +528,6 @@ mod tests {
         let (handle, writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
             .await
             .unwrap();
-        let handle = Arc::new(handle);
         let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
         let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle));
         (Arc::new(MemoryOps::new(mem, conv)), writer, temp)
@@ -595,19 +589,17 @@ mod tests {
         tool.invoke(json!({"key": "editor_preference", "value": "vim is the way"}))
             .await
             .unwrap();
-        match erx
+        let job = erx
             .try_recv()
-            .expect("embed job queued before invoke returns")
-        {
-            EmbedJob::Memory { memory_id, text } => {
-                assert!(
-                    memory_id > MemoryId(0),
-                    "expected real rowid, got {memory_id}"
-                );
-                assert_eq!(text, "vim is the way");
-            }
-            EmbedJob::Chunk { .. } => panic!("expected Memory job, got Chunk"),
-        }
+            .expect("embed job queued before invoke returns");
+        let EmbeddingTarget::Memory(memory_id) = job.target else {
+            panic!("expected a memory job, got {job:?}");
+        };
+        assert!(
+            memory_id > MemoryId(0),
+            "expected real rowid, got {memory_id}"
+        );
+        assert_eq!(job.text, "vim is the way");
     }
 
     /// Strict mode requires every declared property to be listed as

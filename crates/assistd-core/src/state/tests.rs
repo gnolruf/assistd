@@ -1310,7 +1310,6 @@ async fn branch_state_with(
     std::mem::forget(temp);
     let (_tx, rx) = watch::channel(false);
     let (handle, _writer_handle) = SqliteHandle::open(&path, rx).await.unwrap();
-    let handle = Arc::new(handle);
     let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let session = SessionId::new();
     let branch = conv

@@ -421,8 +421,7 @@ impl AppState {
 
     async fn begin_persisted_turn(&self, session: &SessionId) -> Option<TurnId> {
         match self.memory.transcripts.begin_turn(session).await {
-            Ok(turn) if turn.0 != 0 => Some(turn),
-            Ok(_) => None,
+            Ok(turn) => Some(turn),
             Err(e) => {
                 warn!(
                     target: "assistd::memory",

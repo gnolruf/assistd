@@ -5,7 +5,7 @@ use rusqlite_migration::{M, Migrations};
 
 /// V1 schema. Applied versions live in `PRAGMA user_version`. Forked branches
 /// share `messages` rows through `branch_messages`. Timestamps are Unix
-/// milliseconds. `messages`, `message_chunks` and `memories` keep
+/// milliseconds. `turns`, `messages`, `message_chunks` and `memories` keep
 /// `AUTOINCREMENT` because their ids travel in queued writes and embed jobs,
 /// which must never land on a newer row that reused a deleted id.
 const V1_SQL: &str = r"
@@ -30,7 +30,7 @@ CREATE TABLE branches (
 ) STRICT;
 
 CREATE TABLE turns (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
 ) STRICT;
 
@@ -55,6 +55,7 @@ CREATE TABLE messages (
     CHECK ((role = 2) = (tool_duration_ms IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_messages_turn ON messages(turn_id);
+CREATE INDEX idx_messages_session ON messages(session_id);
 
 CREATE TABLE branch_messages (
     branch_id  INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
@@ -108,12 +109,12 @@ CREATE TABLE memory_embeddings (
 ";
 
 /// The full migration set.
-pub fn migrations() -> Migrations<'static> {
+fn migrations() -> Migrations<'static> {
     Migrations::new(vec![M::up(V1_SQL)])
 }
 
 /// Apply all pending migrations to `conn`; a no-op on an up-to-date database.
-pub fn run(conn: &mut Connection) -> Result<(), rusqlite_migration::Error> {
+pub(crate) fn run(conn: &mut Connection) -> Result<(), rusqlite_migration::Error> {
     migrations().to_latest(conn)
 }
 

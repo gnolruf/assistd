@@ -1,7 +1,5 @@
 //! SQLite-backed [`MemoryStore`] over the `memories` table.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, Row};
 
@@ -15,12 +13,12 @@ use super::writer::{WriteOp, dispatch_write};
 /// SQLite-backed [`MemoryStore`].
 #[derive(Debug, Clone)]
 pub struct SqliteMemoryStore {
-    handle: Arc<SqliteHandle>,
+    handle: SqliteHandle,
 }
 
 impl SqliteMemoryStore {
     /// Store over the shared database handle.
-    pub fn new(handle: Arc<SqliteHandle>) -> Self {
+    pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
     }
 }
@@ -145,7 +143,7 @@ mod tests {
         let (handle, _writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
             .await
             .unwrap();
-        (SqliteMemoryStore::new(Arc::new(handle)), (temp, tx))
+        (SqliteMemoryStore::new(handle), (temp, tx))
     }
 
     #[tokio::test]

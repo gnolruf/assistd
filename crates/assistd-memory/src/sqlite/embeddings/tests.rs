@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tokio::sync::watch;
 
 use super::*;
@@ -8,7 +6,7 @@ use crate::{MemoryStore, PersistedMessage};
 
 /// The returned guard keeps the temp dir and the writer's shutdown sender alive.
 async fn fresh() -> (
-    Arc<SqliteHandle>,
+    SqliteHandle,
     SqliteSemanticStore,
     (tempfile::TempDir, watch::Sender<bool>),
 ) {
@@ -17,12 +15,11 @@ async fn fresh() -> (
     let (handle, _writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
         .await
         .unwrap();
-    let handle = Arc::new(handle);
     let store = SqliteSemanticStore::new(handle.clone());
     (handle, store, (temp, tx))
 }
 
-async fn seed_message(handle: &Arc<SqliteHandle>, msg: PersistedMessage) -> (SessionId, MessageId) {
+async fn seed_message(handle: &SqliteHandle, msg: PersistedMessage) -> (SessionId, MessageId) {
     let store = SqliteTranscriptStore::new(handle.clone());
     let session = SessionId::new();
     let branch = store
@@ -54,13 +51,19 @@ async fn insert_chunk_with_vec(
         .await
         .unwrap();
     store
-        .store_chunk_embedding(chunk_id, model.into(), vector_to_blob(vector))
+        .store_embeddings(
+            model,
+            vec![Embedding {
+                target: EmbeddingTarget::Chunk(chunk_id),
+                vector: vector.to_vec(),
+            }],
+        )
         .await
         .unwrap();
     chunk_id
 }
 
-async fn save_memory(handle: &Arc<SqliteHandle>, key: &str, value: &str) -> MemoryId {
+async fn save_memory(handle: &SqliteHandle, key: &str, value: &str) -> MemoryId {
     SqliteMemoryStore::new(handle.clone())
         .save(key, value.into())
         .await
@@ -74,7 +77,13 @@ async fn embed_memory(
     model: &str,
 ) {
     store
-        .store_memory_embedding(memory_id, model.into(), vector_to_blob(vector))
+        .store_embeddings(
+            model,
+            vec![Embedding {
+                target: EmbeddingTarget::Memory(memory_id),
+                vector: vector.to_vec(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -171,7 +180,10 @@ async fn upsert_replaces_memory_embedding_in_place() {
     embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
     embed_memory(&store, mem_id, &unit_vec(std::f32::consts::FRAC_PI_2), "m").await;
 
-    assert_eq!(store.count_for_model("m").await.unwrap(), (0, 1));
+    assert_eq!(
+        store.count_missing("m").await.unwrap(),
+        UnindexedRows::default()
+    );
     let hits = store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap();
     let [hit] = hits.as_slice() else {
         panic!("expected one hit, got {hits:?}");
@@ -190,7 +202,13 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
     embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
 
     assert_eq!(save_memory(&handle, "editor", "emacs").await, mem_id);
-    assert_eq!(store.count_for_model("m").await.unwrap(), (0, 0));
+    assert_eq!(
+        store.count_missing("m").await.unwrap(),
+        UnindexedRows {
+            chunks: 0,
+            memories: 1
+        }
+    );
     assert_eq!(
         store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap(),
         Vec::<MemoryHit>::new()
@@ -289,14 +307,43 @@ async fn count_stale_aggregates_across_chunks_and_memories() {
 
     assert_eq!(
         store.count_stale("new").await.unwrap(),
-        (4, vec!["old-A".to_string(), "old-B".to_string()]),
+        StaleEmbeddings {
+            rows: 4,
+            models: vec!["old-A".to_string(), "old-B".to_string()]
+        },
         "2 old-A chunks + 1 old-B chunk + 1 old-A memory"
     );
     assert_eq!(
         store.count_stale("old-A").await.unwrap(),
-        (2, vec!["new".to_string(), "old-B".to_string()]),
+        StaleEmbeddings {
+            rows: 2,
+            models: vec!["new".to_string(), "old-B".to_string()]
+        },
         "the old-B chunk + the new chunk"
     );
+}
+
+#[tokio::test]
+async fn batch_skips_targets_deleted_before_it_lands() {
+    let (handle, store, _guard) = fresh().await;
+    let kept = save_memory(&handle, "kept", "v").await;
+    let deleted = save_memory(&handle, "deleted", "v").await;
+    SqliteMemoryStore::new(handle.clone())
+        .delete("deleted")
+        .await
+        .unwrap();
+
+    let embeddings = [deleted, kept]
+        .map(|memory_id| Embedding {
+            target: EmbeddingTarget::Memory(memory_id),
+            vector: unit_vec(0.0),
+        })
+        .to_vec();
+    store.store_embeddings("m", embeddings).await.unwrap();
+
+    let hits = store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap();
+    let hit_ids: Vec<MemoryId> = hits.iter().map(|hit| hit.memory_id).collect();
+    assert_eq!(hit_ids, [kept]);
 }
 
 #[test]

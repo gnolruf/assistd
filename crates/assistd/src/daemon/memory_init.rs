@@ -24,7 +24,7 @@ pub(super) struct MemorySubsystem {
     pub branch_id: Option<BranchId>,
     /// History of the resumed branch, to replay into the LLM.
     pub resumed_history: LlmReplay,
-    pub sqlite_handle: Option<Arc<SqliteHandle>>,
+    pub sqlite_handle: Option<SqliteHandle>,
 }
 
 impl MemorySubsystem {
@@ -74,7 +74,6 @@ pub(super) async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> 
         }
     };
 
-    let handle = Arc::new(handle);
     let conv_store = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
     let (session_id, branch_id, resumed_history) =

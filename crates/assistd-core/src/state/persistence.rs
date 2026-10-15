@@ -9,17 +9,14 @@ use tracing::warn;
 
 use assistd_embed::{EmbedJob, enqueue_embed_job};
 use assistd_memory::{
-    BranchId, ChunkingConfig, MessageId, MessageKind, PersistedMessage, SessionId, SqliteHandle,
-    TurnId, chunk_ranges,
+    BranchId, ChunkingConfig, EmbeddingTarget, MessageId, MessageKind, PersistedMessage, SessionId,
+    SqliteHandle, TurnId, chunk_ranges,
 };
 
 use super::AppState;
 
 const PERSISTENCE_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const PERSISTENCE_DRAIN_POLL: Duration = Duration::from_millis(5);
-
-/// Id [`assistd_memory::NoTranscriptStore`] returns for a message it did not store.
-const UNSTORED_MESSAGE_ID: MessageId = MessageId(0);
 
 impl AppState {
     /// The active session and branch, inserting the session and its `main`
@@ -84,9 +81,7 @@ impl AppState {
                     return;
                 }
             };
-            if let Some((chunks, content)) = chunk_target
-                && message_id != UNSTORED_MESSAGE_ID
-            {
+            if let Some((chunks, content)) = chunk_target {
                 store_and_queue_chunks(&chunks, &embed_tx, message_id, &content).await;
             }
         });
@@ -138,7 +133,7 @@ impl AppState {
 
     /// The chunk store and text to chunk for `msg`, or `None` when it
     /// should not be embedded.
-    fn chunk_target(&self, msg: &PersistedMessage) -> Option<(Arc<SqliteHandle>, String)> {
+    fn chunk_target(&self, msg: &PersistedMessage) -> Option<(SqliteHandle, String)> {
         let embeddable = self.memory.embedding_cfg.enabled
             && matches!(msg.kind, MessageKind::User | MessageKind::Assistant { .. })
             && !msg.content.is_empty();
@@ -172,7 +167,13 @@ async fn store_and_queue_chunks(
     for bytes in chunk_ranges(content, &ChunkingConfig::default()) {
         let text = content[bytes.clone()].to_string();
         match chunks.store_chunk(message_id, bytes.clone()).await {
-            Ok(chunk_id) => enqueue_embed_job(embed_tx, EmbedJob::Chunk { chunk_id, text }),
+            Ok(chunk_id) => enqueue_embed_job(
+                embed_tx,
+                EmbedJob {
+                    target: EmbeddingTarget::Chunk(chunk_id),
+                    text,
+                },
+            ),
             Err(e) => warn!(
                 target: "assistd::memory",
                 %message_id,

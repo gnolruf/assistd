@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use assistd_memory::Embedding;
+
 pub mod client;
 pub mod embedder_task;
 mod error;
@@ -51,10 +53,7 @@ pub trait Embedder: fmt::Debug + Send + Sync + 'static {
 /// If the batch fails because of an input ([`EmbedError::is_input_caused`]), each text
 /// is retried alone so a bad input fails only itself; any other failure fails every
 /// input without a retry.
-pub async fn embed_each(
-    embedder: &dyn Embedder,
-    texts: &[&str],
-) -> Vec<Result<Vec<f32>, EmbedError>> {
+async fn embed_each(embedder: &dyn Embedder, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>> {
     match embedder.embed_batch(texts).await {
         Ok(vectors) => vectors.into_iter().map(Ok).collect(),
         Err(EmbedError::NotReady) => texts.iter().map(|_| Err(EmbedError::NotReady)).collect(),
@@ -80,6 +79,31 @@ pub async fn embed_each(
         }
         Err(err) => vec![Err(err)],
     }
+}
+
+/// Embed the jobs' texts in one batch, retrying alone any input that fails it, and
+/// return the embeddings; jobs whose embed still fails are logged and dropped.
+pub async fn embed_jobs(embedder: &dyn Embedder, jobs: &[EmbedJob]) -> Vec<Embedding> {
+    let texts: Vec<&str> = jobs.iter().map(|job| job.text.as_str()).collect();
+    let results = embed_each(embedder, &texts).await;
+    jobs.iter()
+        .zip(results)
+        .filter_map(|(job, result)| match result {
+            Ok(vector) => Some(Embedding {
+                target: job.target,
+                vector,
+            }),
+            Err(err) => {
+                tracing::warn!(
+                    target: "assistd::embed",
+                    row = %job.target,
+                    error = %err,
+                    "embed failed; row stays unindexed until `assistd memory reindex`"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// Fallback when embedding is disabled: `embed` errors, `model` is empty, `dim` is zero.

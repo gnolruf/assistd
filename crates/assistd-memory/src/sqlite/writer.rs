@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
+use super::embeddings::{Embedding, EmbeddingTarget, vector_to_blob};
 use super::ids::{BranchId, ChunkId, MemoryId, MessageId, SessionId, TurnId};
 use super::timestamp::now_millis;
 use super::transcripts::{MessageKind, PersistedMessage, PersistedRole, UndoOutcome};
@@ -19,7 +20,7 @@ const DRAIN_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Mutations the writer task executes, each with a `oneshot` ack.
 #[derive(Debug)]
-pub enum WriteOp {
+pub(crate) enum WriteOp {
     EndSession {
         session_id: SessionId,
         ack: oneshot::Sender<Result<()>>,
@@ -49,18 +50,10 @@ pub enum WriteOp {
         bytes: Range<usize>,
         ack: oneshot::Sender<Result<ChunkId>>,
     },
-    /// Upsert the embedding for a `message_chunks` row.
-    StoreChunkEmbedding {
-        chunk_id: ChunkId,
+    /// Upsert a batch of embeddings under `model` in one transaction.
+    StoreEmbeddings {
         model: String,
-        vector: Vec<u8>,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    /// Upsert the embedding for a `memories` row.
-    StoreMemoryEmbedding {
-        memory_id: MemoryId,
-        model: String,
-        vector: Vec<u8>,
+        embeddings: Vec<Embedding>,
         ack: oneshot::Sender<Result<()>>,
     },
     /// Begin a session and create its `main` branch in one transaction.
@@ -109,7 +102,7 @@ pub enum WriteOp {
 
 /// Spawn the writer task. It exits once every sender is dropped, or once `shutdown`
 /// flips to `true` and the queue then stays idle for two seconds.
-pub fn spawn_writer(
+pub(super) fn spawn_writer(
     conn: Connection,
     mut rx: mpsc::Receiver<WriteOp>,
     mut shutdown: watch::Receiver<bool>,
@@ -138,7 +131,20 @@ pub fn spawn_writer(
                 }
             }
         }
+        optimize_before_close(&conn).await;
     })
+}
+
+/// Refresh planner statistics the session's writes may have skewed, as SQLite
+/// advises before closing a long-lived connection.
+async fn optimize_before_close(conn: &Connection) {
+    if let Err(e) = conn.call(|c| c.execute_batch("PRAGMA optimize")).await {
+        tracing::warn!(
+            target: "assistd::memory",
+            error = %e,
+            "PRAGMA optimize failed at writer exit"
+        );
+    }
 }
 
 /// Execute queued ops until the channel closes or stays idle for [`DRAIN_IDLE_TIMEOUT`].
@@ -175,24 +181,11 @@ async fn execute(conn: &Connection, op: WriteOp) {
             bytes,
             ack,
         } => reply(ack, store_chunk(conn, message_id, bytes).await),
-        WriteOp::StoreChunkEmbedding {
-            chunk_id,
+        WriteOp::StoreEmbeddings {
             model,
-            vector,
+            embeddings,
             ack,
-        } => reply(
-            ack,
-            store_embedding(conn, EmbeddingOwner::Chunk(chunk_id), model, vector).await,
-        ),
-        WriteOp::StoreMemoryEmbedding {
-            memory_id,
-            model,
-            vector,
-            ack,
-        } => reply(
-            ack,
-            store_embedding(conn, EmbeddingOwner::Memory(memory_id), model, vector).await,
-        ),
+        } => reply(ack, store_embeddings(conn, model, embeddings).await),
         WriteOp::BeginSessionWithMainBranch {
             session_id,
             daemon_pid,
@@ -238,28 +231,6 @@ async fn execute(conn: &Connection, op: WriteOp) {
             title,
             ack,
         } => reply(ack, set_session_title(conn, session_id, title).await),
-    }
-}
-
-/// The row an embedding belongs to.
-#[derive(Debug, Clone, Copy)]
-enum EmbeddingOwner {
-    Chunk(ChunkId),
-    Memory(MemoryId),
-}
-
-impl EmbeddingOwner {
-    fn id(self) -> i64 {
-        match self {
-            EmbeddingOwner::Chunk(ChunkId(id)) | EmbeddingOwner::Memory(MemoryId(id)) => id,
-        }
-    }
-
-    fn op_label(self) -> &'static str {
-        match self {
-            EmbeddingOwner::Chunk(_) => "store_chunk_embedding",
-            EmbeddingOwner::Memory(_) => "store_memory_embedding",
-        }
     }
 }
 
@@ -392,30 +363,45 @@ async fn store_chunk(
     .map_err(MemoryError::sqlite("store_chunk"))
 }
 
-async fn store_embedding(
+async fn store_embeddings(
     conn: &Connection,
-    owner: EmbeddingOwner,
     model: String,
-    vector: Vec<u8>,
+    embeddings: Vec<Embedding>,
 ) -> Result<()> {
-    let upsert = match owner {
-        EmbeddingOwner::Chunk(_) => {
-            "INSERT INTO chunk_embeddings (chunk_id, model_id, vector) VALUES (?1, ?2, ?3)
-             ON CONFLICT(chunk_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector"
-        }
-        EmbeddingOwner::Memory(_) => {
-            "INSERT INTO memory_embeddings (memory_id, model_id, vector) VALUES (?1, ?2, ?3)
-             ON CONFLICT(memory_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector"
-        }
-    };
     conn.call(move |c| -> rusqlite::Result<_> {
         let tx = c.transaction()?;
         let model_id = embedding_model_id(&tx, &model)?;
-        tx.execute(upsert, rusqlite::params![owner.id(), model_id, vector])?;
+        for Embedding { target, vector } in &embeddings {
+            let (upsert, target_id) = upsert_embedding_sql(*target);
+            tx.prepare_cached(upsert)?.execute(rusqlite::params![
+                target_id,
+                model_id,
+                vector_to_blob(vector)
+            ])?;
+        }
         tx.commit()
     })
     .await
-    .map_err(MemoryError::sqlite(owner.op_label()))
+    .map_err(MemoryError::sqlite("store_embeddings"))
+}
+
+/// The upsert for `target`'s embedding table, and the row id it binds as `?1`;
+/// the `SELECT` makes a since-deleted target a no-op rather than a foreign-key error.
+fn upsert_embedding_sql(target: EmbeddingTarget) -> (&'static str, i64) {
+    match target {
+        EmbeddingTarget::Chunk(ChunkId(id)) => (
+            "INSERT INTO chunk_embeddings (chunk_id, model_id, vector)
+             SELECT id, ?2, ?3 FROM message_chunks WHERE id = ?1
+             ON CONFLICT(chunk_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector",
+            id,
+        ),
+        EmbeddingTarget::Memory(MemoryId(id)) => (
+            "INSERT INTO memory_embeddings (memory_id, model_id, vector)
+             SELECT id, ?2, ?3 FROM memories WHERE id = ?1
+             ON CONFLICT(memory_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector",
+            id,
+        ),
+    }
 }
 
 /// The `embedding_models` id of `name`, inserting the model on first use.
@@ -631,7 +617,6 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
         Ok(UndoOutcome {
             removed_messages: u32::try_from(removed).unwrap_or(u32::MAX),
             last_user_text,
-            removed_turn_id: Some(turn_id),
         })
     })
     .await

@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
 use std::hash::Hash;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -40,6 +39,44 @@ pub struct MemoryHit {
     pub similarity: f32,
 }
 
+/// The row an embedding belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingTarget {
+    Chunk(ChunkId),
+    Memory(MemoryId),
+}
+
+impl fmt::Display for EmbeddingTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Chunk(id) => write!(f, "chunk {id}"),
+            Self::Memory(id) => write!(f, "memory {id}"),
+        }
+    }
+}
+
+/// An L2-normalised embedding of `target`'s text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Embedding {
+    pub target: EmbeddingTarget,
+    pub vector: Vec<f32>,
+}
+
+/// Rows with no embedding under a given model, by table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnindexedRows {
+    pub chunks: u64,
+    pub memories: u64,
+}
+
+/// Rows embedded under models other than the current one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StaleEmbeddings {
+    pub rows: u64,
+    /// The other models' names, sorted.
+    pub models: Vec<String>,
+}
+
 /// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
@@ -61,14 +98,11 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         model: &str,
     ) -> Result<Vec<MemoryHit>>;
 
-    /// Embedding row counts under `model`, as `(chunks, memories)`.
-    async fn count_for_model(&self, model: &str) -> Result<(i64, i64)>;
+    /// Rows embedded under a model other than `current`.
+    async fn count_stale(&self, current: &str) -> Result<StaleEmbeddings>;
 
-    /// Count of rows embedded under a model other than `current`, plus those model names sorted.
-    async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)>;
-
-    /// Rows with no embedding under `current`, as `(chunks, memories)`.
-    async fn count_missing(&self, current: &str) -> Result<(i64, i64)>;
+    /// Rows with no embedding under `current`.
+    async fn count_missing(&self, current: &str) -> Result<UnindexedRows>;
 
     /// Up to `limit` memories after `after` (from the start when `None`) with no
     /// embedding under `current`, in id order, as `(id, value)`.
@@ -88,21 +122,9 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>>;
 
-    /// Upsert the embedding for a `message_chunks` row under `model`.
-    async fn store_chunk_embedding(
-        &self,
-        chunk_id: ChunkId,
-        model: String,
-        vector: Vec<u8>,
-    ) -> Result<()>;
-
-    /// Upsert the embedding for a `memories` row under `model`.
-    async fn store_memory_embedding(
-        &self,
-        memory_id: MemoryId,
-        model: String,
-        vector: Vec<u8>,
-    ) -> Result<()>;
+    /// Upsert `embeddings` under `model` in one transaction, skipping targets
+    /// deleted since they were embedded.
+    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()>;
 }
 
 /// No-op store: writes are discarded and searches find nothing.
@@ -128,14 +150,11 @@ impl SemanticStore for NoSemanticStore {
     ) -> Result<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn count_for_model(&self, _model: &str) -> Result<(i64, i64)> {
-        Ok((0, 0))
+    async fn count_stale(&self, _current: &str) -> Result<StaleEmbeddings> {
+        Ok(StaleEmbeddings::default())
     }
-    async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>)> {
-        Ok((0, Vec::new()))
-    }
-    async fn count_missing(&self, _current: &str) -> Result<(i64, i64)> {
-        Ok((0, 0))
+    async fn count_missing(&self, _current: &str) -> Result<UnindexedRows> {
+        Ok(UnindexedRows::default())
     }
     async fn memories_missing_embedding(
         &self,
@@ -153,20 +172,7 @@ impl SemanticStore for NoSemanticStore {
     ) -> Result<Vec<(ChunkId, String)>> {
         Ok(Vec::new())
     }
-    async fn store_chunk_embedding(
-        &self,
-        _chunk_id: ChunkId,
-        _model: String,
-        _vector: Vec<u8>,
-    ) -> Result<()> {
-        Ok(())
-    }
-    async fn store_memory_embedding(
-        &self,
-        _memory_id: MemoryId,
-        _model: String,
-        _vector: Vec<u8>,
-    ) -> Result<()> {
+    async fn store_embeddings(&self, _model: &str, _embeddings: Vec<Embedding>) -> Result<()> {
         Ok(())
     }
 }
@@ -175,12 +181,12 @@ impl SemanticStore for NoSemanticStore {
 /// batched lookup of the winners.
 #[derive(Debug, Clone)]
 pub struct SqliteSemanticStore {
-    handle: Arc<SqliteHandle>,
+    handle: SqliteHandle,
 }
 
 impl SqliteSemanticStore {
     /// Store over the shared database handle.
-    pub fn new(handle: Arc<SqliteHandle>) -> Self {
+    pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
     }
 
@@ -299,37 +305,12 @@ impl SemanticStore for SqliteSemanticStore {
         self.hydrate_memory_hits(ranked).await
     }
 
-    async fn count_for_model(&self, model: &str) -> Result<(i64, i64)> {
-        let model = model.to_string();
-        self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                let chunks: i64 = c.query_row(
-                    "SELECT count(*)
-                     FROM chunk_embeddings e JOIN embedding_models m ON m.id = e.model_id
-                     WHERE m.name = ?1",
-                    rusqlite::params![model],
-                    |r| r.get(0),
-                )?;
-                let memories: i64 = c.query_row(
-                    "SELECT count(*)
-                     FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
-                     WHERE m.name = ?1",
-                    rusqlite::params![model],
-                    |r| r.get(0),
-                )?;
-                Ok((chunks, memories))
-            })
-            .await
-            .map_err(MemoryError::sqlite("count_for_model"))
-    }
-
-    async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)> {
+    async fn count_stale(&self, current: &str) -> Result<StaleEmbeddings> {
         let current = current.to_string();
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut total: i64 = 0;
+                let mut rows: u64 = 0;
                 let mut models = BTreeSet::new();
                 let sql = "SELECT m.name, count(*)
                            FROM chunk_embeddings e JOIN embedding_models m ON m.id = e.model_id
@@ -339,26 +320,29 @@ impl SemanticStore for SqliteSemanticStore {
                            FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
                            WHERE m.name != ?1 GROUP BY m.name";
                 let mut stmt = c.prepare(sql)?;
-                let rows = stmt.query_map(rusqlite::params![current], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                let model_counts = stmt.query_map(rusqlite::params![current], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
                 })?;
-                for row in rows {
-                    let (model, count) = row?;
-                    total += count;
+                for model_count in model_counts {
+                    let (model, count) = model_count?;
+                    rows += count;
                     models.insert(model);
                 }
-                Ok((total, models.into_iter().collect::<Vec<_>>()))
+                Ok(StaleEmbeddings {
+                    rows,
+                    models: models.into_iter().collect(),
+                })
             })
             .await
             .map_err(MemoryError::sqlite("count_stale"))
     }
 
-    async fn count_missing(&self, current: &str) -> Result<(i64, i64)> {
+    async fn count_missing(&self, current: &str) -> Result<UnindexedRows> {
         let current = current.to_string();
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let chunks: i64 = c.query_row(
+                let chunks = c.query_row(
                     "SELECT count(*)
                      FROM message_chunks cc
                      WHERE NOT EXISTS (
@@ -369,7 +353,7 @@ impl SemanticStore for SqliteSemanticStore {
                     rusqlite::params![current],
                     |r| r.get(0),
                 )?;
-                let memories: i64 = c.query_row(
+                let memories = c.query_row(
                     "SELECT count(*)
                      FROM memories mem
                      WHERE NOT EXISTS (
@@ -380,7 +364,7 @@ impl SemanticStore for SqliteSemanticStore {
                     rusqlite::params![current],
                     |r| r.get(0),
                 )?;
-                Ok((chunks, memories))
+                Ok(UnindexedRows { chunks, memories })
             })
             .await
             .map_err(MemoryError::sqlite("count_missing"))
@@ -455,31 +439,14 @@ impl SemanticStore for SqliteSemanticStore {
             .map_err(MemoryError::sqlite("chunks_missing_embedding"))
     }
 
-    async fn store_chunk_embedding(
-        &self,
-        chunk_id: ChunkId,
-        model: String,
-        vector: Vec<u8>,
-    ) -> Result<()> {
-        dispatch_write(self.handle.writer(), |ack| WriteOp::StoreChunkEmbedding {
-            chunk_id,
+    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()> {
+        if embeddings.is_empty() {
+            return Ok(());
+        }
+        let model = model.to_string();
+        dispatch_write(self.handle.writer(), |ack| WriteOp::StoreEmbeddings {
             model,
-            vector,
-            ack,
-        })
-        .await
-    }
-
-    async fn store_memory_embedding(
-        &self,
-        memory_id: MemoryId,
-        model: String,
-        vector: Vec<u8>,
-    ) -> Result<()> {
-        dispatch_write(self.handle.writer(), |ack| WriteOp::StoreMemoryEmbedding {
-            memory_id,
-            model,
-            vector,
+            embeddings,
             ack,
         })
         .await
@@ -627,9 +594,8 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     similarity.is_finite().then_some(similarity)
 }
 
-/// Encode `vector` as the little-endian `f32` BLOB the embedding tables store. It must
-/// be L2-normalised, since similarity is scored as a plain dot product.
-pub fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
+/// Encode `vector` as the little-endian `f32` BLOB the embedding tables store.
+pub(super) fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
     let mut blob = Vec::with_capacity(vector.len() * 4);
     for value in vector {
         blob.extend_from_slice(&value.to_le_bytes());

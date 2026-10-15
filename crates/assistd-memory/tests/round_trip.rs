@@ -1,7 +1,5 @@
 //! Persistence survives closing and reopening the store at the same path.
 
-use std::sync::Arc;
-
 use assistd_memory::{
     BranchId, MemoryStore, PersistedMessage, PersistedRole, SessionId, SqliteHandle,
     SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
@@ -18,7 +16,6 @@ async fn turn_persists_across_store_reopen() {
     {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
-        let handle = Arc::new(handle);
         let convs = SqliteTranscriptStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
@@ -67,7 +64,6 @@ async fn turn_persists_across_store_reopen() {
     {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
-        let handle = Arc::new(handle);
         let convs = SqliteTranscriptStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
@@ -107,7 +103,6 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
     {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, shutdown_rx).await.unwrap();
-        let handle = Arc::new(handle);
         let convs = SqliteTranscriptStore::new(handle.clone());
 
         let session = SessionId::new();
@@ -146,7 +141,6 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
 
     let (_tx, rx) = watch::channel(false);
     let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
-    let handle = Arc::new(handle);
     let convs = SqliteTranscriptStore::new(handle);
     let history: Vec<String> = convs
         .load_branch_history(branch)

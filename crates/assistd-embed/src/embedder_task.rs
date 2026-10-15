@@ -1,41 +1,26 @@
-//! Background worker that embeds queued rows in batches and stores the vectors through
-//! the memory writer. A row whose embed fails is logged and left unindexed.
+//! Background worker that embeds queued rows in batches and stores each batch in the
+//! semantic store. A row whose embed fails is logged and left unindexed.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use assistd_memory::{ChunkId, MemoryId, WriteOp, vector_to_blob};
+use assistd_memory::{EmbeddingTarget, SemanticStore};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::{BATCH_SIZE, EmbedError, Embedder, embed_each};
+use crate::{BATCH_SIZE, Embedder, embed_jobs};
 
 /// Shortest gap between two "embed queue full" warnings.
 const QUEUE_FULL_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 static QUEUE_FULL_WARNINGS: Mutex<DropWarnLimiter> = Mutex::new(DropWarnLimiter::new());
 
-/// One row to embed.
-#[derive(Debug)]
-pub enum EmbedJob {
-    Chunk { chunk_id: ChunkId, text: String },
-    Memory { memory_id: MemoryId, text: String },
-}
-
-impl EmbedJob {
-    fn text(&self) -> &str {
-        match self {
-            Self::Chunk { text, .. } | Self::Memory { text, .. } => text,
-        }
-    }
-
-    fn target(&self) -> (&'static str, i64) {
-        match *self {
-            Self::Chunk { chunk_id, .. } => ("chunk", chunk_id.0),
-            Self::Memory { memory_id, .. } => ("memory", memory_id.0),
-        }
-    }
+/// One row to embed: `text` is the content of `target`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedJob {
+    pub target: EmbeddingTarget,
+    pub text: String,
 }
 
 /// Rate limit for queue-full warnings, counting the drops it holds back.
@@ -73,20 +58,15 @@ pub fn enqueue_embed_job(tx: &mpsc::Sender<EmbedJob>, job: EmbedJob) {
     match tx.try_send(job) {
         Ok(()) => {}
         Err(TrySendError::Full(job)) => warn_queue_full(&job),
-        Err(TrySendError::Closed(job)) => {
-            let (kind, rowid) = job.target();
-            tracing::debug!(
-                target: "assistd::embed",
-                kind,
-                rowid,
-                "embed queue closed; row stays unindexed"
-            );
-        }
+        Err(TrySendError::Closed(job)) => tracing::debug!(
+            target: "assistd::embed",
+            row = %job.target,
+            "embed queue closed; row stays unindexed"
+        ),
     }
 }
 
 fn warn_queue_full(job: &EmbedJob) {
-    let (kind, rowid) = job.target();
     let due = QUEUE_FULL_WARNINGS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -94,15 +74,13 @@ fn warn_queue_full(job: &EmbedJob) {
     match due {
         Some(suppressed) => tracing::warn!(
             target: "assistd::embed",
-            kind,
-            rowid,
+            row = %job.target,
             suppressed,
             "embed queue full; dropping job, row stays unindexed until `assistd memory reindex`"
         ),
         None => tracing::debug!(
             target: "assistd::embed",
-            kind,
-            rowid,
+            row = %job.target,
             "embed queue full; dropping job"
         ),
     }
@@ -110,10 +88,10 @@ fn warn_queue_full(job: &EmbedJob) {
 
 /// Spawn the worker, embedding queued jobs in batches of up to [`BATCH_SIZE`]. It exits
 /// when the job channel closes, or on `shutdown` once queued jobs are stored; the memory
-/// writer behind `writer_tx` must outlive it.
+/// writer behind `store` must outlive it.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
-    writer_tx: Arc<mpsc::Sender<WriteOp>>,
+    store: Arc<dyn SemanticStore>,
     mut rx: mpsc::Receiver<EmbedJob>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
@@ -130,11 +108,11 @@ pub fn spawn_embedder_task(
                         );
                         break;
                     }
-                    embed_and_store_batch(&*embedder, &writer_tx, &mut batch).await;
+                    embed_and_store_batch(&*embedder, &*store, &mut batch).await;
                 }
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
-                        drain_queue(&*embedder, &writer_tx, &mut rx, &mut batch).await;
+                        drain_queue(&*embedder, &*store, &mut rx, &mut batch).await;
                         break;
                     }
                 }
@@ -145,7 +123,7 @@ pub fn spawn_embedder_task(
 
 async fn drain_queue(
     embedder: &dyn Embedder,
-    writer_tx: &mpsc::Sender<WriteOp>,
+    store: &dyn SemanticStore,
     rx: &mut mpsc::Receiver<EmbedJob>,
     batch: &mut Vec<EmbedJob>,
 ) {
@@ -158,84 +136,26 @@ async fn drain_queue(
         if batch.is_empty() {
             break;
         }
-        embed_and_store_batch(embedder, writer_tx, batch).await;
+        embed_and_store_batch(embedder, store, batch).await;
     }
 }
 
 /// Embed and store every job in `batch`, leaving it empty.
 async fn embed_and_store_batch(
     embedder: &dyn Embedder,
-    writer_tx: &mpsc::Sender<WriteOp>,
+    store: &dyn SemanticStore,
     batch: &mut Vec<EmbedJob>,
 ) {
-    let texts: Vec<&str> = batch.iter().map(EmbedJob::text).collect();
-    let results = embed_each(embedder, &texts).await;
-    for (job, result) in batch.drain(..).zip(results) {
-        store_embedding(embedder, writer_tx, job, result).await;
-    }
-}
-
-async fn store_embedding(
-    embedder: &dyn Embedder,
-    writer_tx: &mpsc::Sender<WriteOp>,
-    job: EmbedJob,
-    result: Result<Vec<f32>, EmbedError>,
-) {
-    let (kind, rowid) = job.target();
-    let embedding = match result {
-        Ok(embedding) => embedding,
-        Err(err) => {
-            tracing::warn!(
-                target: "assistd::embed",
-                kind,
-                rowid,
-                error = %err,
-                "embed failed; row stays unindexed (backfill can recover)"
-            );
-            return;
-        }
-    };
-    let model = embedder.model().to_string();
-    let vector = vector_to_blob(&embedding);
-    let (ack_tx, ack_rx) = oneshot::channel();
-    let op = match job {
-        EmbedJob::Chunk { chunk_id, .. } => WriteOp::StoreChunkEmbedding {
-            chunk_id,
-            model,
-            vector,
-            ack: ack_tx,
-        },
-        EmbedJob::Memory { memory_id, .. } => WriteOp::StoreMemoryEmbedding {
-            memory_id,
-            model,
-            vector,
-            ack: ack_tx,
-        },
-    };
-    if writer_tx.send(op).await.is_err() {
+    let embeddings = embed_jobs(embedder, batch).await;
+    batch.clear();
+    let rows = embeddings.len();
+    if let Err(err) = store.store_embeddings(embedder.model(), embeddings).await {
         tracing::warn!(
             target: "assistd::embed",
-            kind,
-            rowid,
-            "memory writer task is gone; dropping embedding"
-        );
-        return;
-    }
-    match ack_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => tracing::warn!(
-            target: "assistd::embed",
-            kind,
-            rowid,
+            rows,
             error = %err,
-            "memory writer rejected embedding"
-        ),
-        Err(_) => tracing::warn!(
-            target: "assistd::embed",
-            kind,
-            rowid,
-            "memory writer dropped ack channel before responding"
-        ),
+            "storing embeddings failed; rows stay unindexed until `assistd memory reindex`"
+        );
     }
 }
 

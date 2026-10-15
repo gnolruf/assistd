@@ -5,7 +5,6 @@ use std::io;
 use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::OpenFlags;
@@ -40,7 +39,7 @@ const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
     reader: Connection,
-    writer_tx: Arc<mpsc::Sender<WriteOp>>,
+    writer_tx: mpsc::Sender<WriteOp>,
 }
 
 impl SqliteHandle {
@@ -58,13 +57,7 @@ impl SqliteHandle {
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_DEPTH);
         let writer_handle = spawn_writer(writer, writer_rx, shutdown);
 
-        Ok((
-            Self {
-                reader,
-                writer_tx: Arc::new(writer_tx),
-            },
-            writer_handle,
-        ))
+        Ok((Self { reader, writer_tx }, writer_handle))
     }
 
     pub(super) fn reader(&self) -> &Connection {
@@ -73,11 +66,6 @@ impl SqliteHandle {
 
     pub(super) fn writer(&self) -> &mpsc::Sender<WriteOp> {
         &self.writer_tx
-    }
-
-    /// Clone of the writer sender, for enqueueing [`WriteOp`]s directly.
-    pub fn writer_tx(&self) -> Arc<mpsc::Sender<WriteOp>> {
-        self.writer_tx.clone()
     }
 
     /// Persist the chunk at byte range `bytes` of a message and return its id.
@@ -231,7 +219,7 @@ mod tests {
         writer.await.unwrap();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn shutdown_signal_stops_writer_while_handle_is_alive() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");

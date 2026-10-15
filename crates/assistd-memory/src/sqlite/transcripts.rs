@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -217,7 +216,6 @@ pub struct UndoOutcome {
     /// Number of `branch_messages` rows dropped.
     pub removed_messages: u32,
     pub last_user_text: Option<String>,
-    pub removed_turn_id: Option<TurnId>,
 }
 
 /// Persistence for session transcripts.
@@ -315,7 +313,8 @@ pub struct ResumeCandidate {
     pub started_at: DateTime<Utc>,
 }
 
-/// No-op store: writes are discarded and reads find nothing.
+/// No-op store: writes are discarded and reads find nothing. Returned ids are
+/// placeholders, meaningful only when passed back to this store.
 #[derive(Debug)]
 pub struct NoTranscriptStore;
 
@@ -419,12 +418,12 @@ impl TranscriptStore for NoTranscriptStore {
 /// SQLite-backed [`TranscriptStore`].
 #[derive(Debug, Clone)]
 pub struct SqliteTranscriptStore {
-    handle: Arc<SqliteHandle>,
+    handle: SqliteHandle,
 }
 
 impl SqliteTranscriptStore {
     /// Store over the shared database handle.
-    pub fn new(handle: Arc<SqliteHandle>) -> Self {
+    pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
     }
 }

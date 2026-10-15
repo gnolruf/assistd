@@ -1,24 +1,24 @@
-//! Persistent memory: the key/value [`MemoryStore`], the transcript and semantic
-//! stores under [`sqlite`], and no-op fallbacks for when memory is disabled.
+//! Persistent memory: the key/value [`MemoryStore`], the SQLite transcript and
+//! semantic stores, and no-op fallbacks for when memory is disabled.
 
 use std::fmt;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-pub mod chunking;
+mod chunking;
 mod error;
-pub mod migrations;
-pub mod sqlite;
+mod migrations;
+mod sqlite;
 
 pub use chunking::{ChunkingConfig, chunk_ranges};
 pub use error::{MemoryError, Result};
 pub use sqlite::{
-    BranchId, BranchInfo, BranchSummary, ChunkId, EmbeddingHit, HistoryRow, MemoryHit, MemoryId,
-    MessageId, MessageKind, NoSemanticStore, NoTranscriptStore, PersistedMessage, PersistedRole,
-    ResumeCandidate, SemanticStore, SessionId, SqliteHandle, SqliteMemoryStore,
-    SqliteSemanticStore, SqliteTranscriptStore, ToolOutcome, TranscriptStore, TurnId, UndoOutcome,
-    WriteOp, vector_to_blob,
+    BranchId, BranchInfo, BranchSummary, ChunkId, Embedding, EmbeddingHit, EmbeddingTarget,
+    HistoryRow, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore, NoTranscriptStore,
+    PersistedMessage, PersistedRole, ResumeCandidate, SemanticStore, SessionId, SqliteHandle,
+    SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, StaleEmbeddings, ToolOutcome,
+    TranscriptStore, TurnId, UndoOutcome, UnindexedRows,
 };
 
 /// One row from the `memories` table.
@@ -55,7 +55,8 @@ pub trait MemoryStore: fmt::Debug + Send + Sync + 'static {
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>>;
 }
 
-/// No-op store: writes are discarded and reads find nothing.
+/// No-op store: writes are discarded and reads find nothing. Returned ids are
+/// placeholders, meaningful only when passed back to this store.
 #[derive(Debug)]
 pub struct NoMemoryStore;
 
