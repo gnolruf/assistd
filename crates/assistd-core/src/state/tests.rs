@@ -1355,7 +1355,7 @@ async fn append_turn(
         PersistedMessage::user(user),
         PersistedMessage::assistant_text(assistant, String::new()),
     ] {
-        conv.append_message_to_branch(session, branch, Some(turn), msg)
+        conv.append_message_to_branch(branch, Some(turn), msg)
             .await
             .unwrap();
     }

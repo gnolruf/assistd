@@ -13,7 +13,6 @@ rusqlite = { workspace = true }
 tokio-rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
 chrono = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }

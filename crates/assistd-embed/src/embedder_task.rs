@@ -146,8 +146,7 @@ async fn embed_and_store_batch(
     store: &dyn SemanticStore,
     batch: &mut Vec<EmbedJob>,
 ) {
-    let embeddings = embed_jobs(embedder, batch).await;
-    batch.clear();
+    let embeddings = embed_jobs(embedder, std::mem::take(batch)).await;
     let rows = embeddings.len();
     if let Err(err) = store.store_embeddings(embedder.model(), embeddings).await {
         tracing::warn!(

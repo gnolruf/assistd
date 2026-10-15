@@ -2,15 +2,13 @@
 
 use std::ops::Range;
 
-use serde::{Deserialize, Serialize};
-
 /// Chunking policy; `overlap_chars` must be less than `chunk_chars`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChunkingConfig {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChunkingConfig {
     /// Maximum number of Unicode characters per chunk.
-    pub chunk_chars: usize,
+    pub(crate) chunk_chars: usize,
     /// Number of characters shared between consecutive chunks.
-    pub overlap_chars: usize,
+    pub(crate) overlap_chars: usize,
 }
 
 impl Default for ChunkingConfig {
@@ -25,7 +23,7 @@ impl Default for ChunkingConfig {
 /// Byte ranges of `content`'s windows of `chunk_chars` characters, advancing by
 /// `chunk_chars - overlap_chars` and dropping whitespace-only windows. Short inputs
 /// and invalid configs yield the whole input as one range.
-pub fn chunk_ranges(content: &str, cfg: &ChunkingConfig) -> Vec<Range<usize>> {
+pub(crate) fn chunk_ranges(content: &str, cfg: &ChunkingConfig) -> Vec<Range<usize>> {
     if content.trim().is_empty() {
         return Vec::new();
     }

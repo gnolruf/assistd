@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::{BranchId, MessageId, Result, SessionId, TurnId};
+use crate::{BranchId, ChunkId, MessageId, Result, SessionId, TurnId};
 
 /// Role of a persisted message, stored as the `messages.role` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -158,6 +158,14 @@ pub struct BranchSummary {
     pub content: String,
 }
 
+/// Result of [`TranscriptStore::append_message_to_branch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendedMessage {
+    pub id: MessageId,
+    /// The chunks stored for embedding, as `(id, chunk text)`; empty for tool results.
+    pub chunks: Vec<(ChunkId, String)>,
+}
+
 /// Result of [`TranscriptStore::undo_last_turn`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UndoOutcome {
@@ -187,14 +195,14 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// Read the current branch pointer for `session`, if any.
     async fn current_branch(&self, session: SessionId) -> Result<Option<BranchId>>;
 
-    /// Append `msg` to `branch` in one transaction; returns its message id.
+    /// Append `msg` to `branch` and its session, chunking user and assistant text for
+    /// embedding, all in one transaction.
     async fn append_message_to_branch(
         &self,
-        session: SessionId,
         branch: BranchId,
         turn: Option<TurnId>,
         msg: PersistedMessage,
-    ) -> Result<MessageId>;
+    ) -> Result<AppendedMessage>;
 
     /// Every branch of every session, most recently active first, then by
     /// branch id.
@@ -293,12 +301,14 @@ impl TranscriptStore for NoTranscriptStore {
 
     async fn append_message_to_branch(
         &self,
-        _session: SessionId,
         _branch: BranchId,
         _turn: Option<TurnId>,
         _msg: PersistedMessage,
-    ) -> Result<MessageId> {
-        Ok(MessageId(0))
+    ) -> Result<AppendedMessage> {
+        Ok(AppendedMessage {
+            id: MessageId(0),
+            chunks: Vec::new(),
+        })
     }
 
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {

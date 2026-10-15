@@ -8,8 +8,8 @@ use assistd_config::Config;
 use assistd_ipc::PresenceTarget;
 use assistd_llm::EchoBackend;
 use assistd_memory::{
-    BranchId, BranchInfo, BranchSummary, HistoryRow, ResumeCandidate, SessionId, TranscriptStore,
-    UndoOutcome,
+    AppendedMessage, BranchId, BranchInfo, BranchSummary, HistoryRow, MessageId, ResumeCandidate,
+    SessionId, TranscriptStore, UndoOutcome,
 };
 use assistd_tools::ToolRegistry;
 
@@ -41,11 +41,10 @@ impl SlowingStore {
 impl TranscriptStore for SlowingStore {
     async fn append_message_to_branch(
         &self,
-        _s: SessionId,
         _b: BranchId,
         _t: Option<TurnId>,
         m: PersistedMessage,
-    ) -> assistd_memory::Result<MessageId> {
+    ) -> assistd_memory::Result<AppendedMessage> {
         let delay = {
             let mut d = self.remaining_delay_ms.lock();
             let taken = *d;
@@ -54,7 +53,10 @@ impl TranscriptStore for SlowingStore {
         };
         tokio::time::sleep(Duration::from_millis(delay)).await;
         self.arrivals.lock().push(m.content);
-        Ok(MessageId(0))
+        Ok(AppendedMessage {
+            id: MessageId(0),
+            chunks: Vec::new(),
+        })
     }
 
     async fn end_session(&self, _s: SessionId) -> assistd_memory::Result<()> {

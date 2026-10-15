@@ -1,16 +1,18 @@
 //! SQLite-backed [`TranscriptStore`] over sessions, turns, branches, and messages.
 
 use std::num::NonZeroUsize;
+use std::ops::Range;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, ValueRef};
 use rusqlite::{OptionalExtension, Row, ToSql, Transaction};
 
+use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
-    BranchId, BranchInfo, BranchSummary, HistoryRow, MemoryError, MessageId, MessageKind,
-    PersistedMessage, PersistedRole, Result, ResumeCandidate, SessionId, ToolOutcome,
-    TranscriptStore, TurnId, UndoOutcome,
+    AppendedMessage, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow, MemoryError,
+    MessageId, MessageKind, PersistedMessage, PersistedRole, Result, ResumeCandidate, SessionId,
+    ToolOutcome, TranscriptStore, TurnId, UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
@@ -170,49 +172,31 @@ impl TranscriptStore for SqliteTranscriptStore {
 
     async fn append_message_to_branch(
         &self,
-        session: SessionId,
         branch: BranchId,
         turn: Option<TurnId>,
         msg: PersistedMessage,
-    ) -> Result<MessageId> {
-        let created_at = now_millis();
-        let role = msg.role();
-        let columns = MessageColumns::from_kind(msg.kind)?;
-        let content = msg.content;
+    ) -> Result<AppendedMessage> {
+        let chunk_bytes = match msg.role() {
+            PersistedRole::User | PersistedRole::Assistant => {
+                chunk_ranges(&msg.content, &ChunkingConfig::default())
+            }
+            PersistedRole::Tool => Vec::new(),
+        };
+        let row = MessageRow::new(msg, now_millis())?;
         self.handle
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
-                let message_id: MessageId = tx.query_row(
-                    "INSERT INTO messages
-                        (session_id, turn_id, created_at, role, content, reasoning, tool_calls,
-                         tool_call_id, tool_name, tool_exit_code, tool_duration_ms)
-                     SELECT id, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
-                     FROM sessions WHERE uuid = ?1
-                     RETURNING id",
-                    rusqlite::params![
-                        session,
-                        turn,
-                        created_at,
-                        role,
-                        content,
-                        columns.reasoning,
-                        columns.tool_calls,
-                        columns.tool_call_id,
-                        columns.tool_name,
-                        columns.tool_exit_code,
-                        columns.tool_duration_ms,
-                    ],
-                    |r| r.get(0),
-                )?;
-                tx.execute(
+                let id = insert_message(&tx, branch, turn, &row)?;
+                tx.prepare_cached(
                     "INSERT INTO branch_messages (branch_id, seq, message_id)
                      SELECT ?1, COALESCE(MAX(seq), -1) + 1, ?2
                      FROM branch_messages WHERE branch_id = ?1",
-                    rusqlite::params![branch, message_id],
-                )?;
+                )?
+                .execute(rusqlite::params![branch, id])?;
+                let chunks = insert_chunks(&tx, id, &row.content, &chunk_bytes)?;
                 tx.commit()?;
-                Ok(message_id)
+                Ok(AppendedMessage { id, chunks })
             })
             .await
             .map_err(MemoryError::sqlite("append_message_to_branch"))
@@ -520,6 +504,25 @@ impl TranscriptStore for SqliteTranscriptStore {
     }
 }
 
+/// One `messages` row ready to insert.
+struct MessageRow {
+    created_at: i64,
+    role: PersistedRole,
+    content: String,
+    columns: MessageColumns,
+}
+
+impl MessageRow {
+    fn new(msg: PersistedMessage, created_at: i64) -> Result<Self> {
+        Ok(Self {
+            created_at,
+            role: msg.role(),
+            content: msg.content,
+            columns: MessageColumns::from_kind(msg.kind)?,
+        })
+    }
+}
+
 /// The role-specific `messages` columns of a [`MessageKind`], `NULL` where the role has none.
 #[derive(Default)]
 struct MessageColumns {
@@ -556,6 +559,64 @@ impl MessageColumns {
             },
         })
     }
+}
+
+/// Insert `row` into `branch`'s session, returning its id.
+fn insert_message(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+    turn: Option<TurnId>,
+    row: &MessageRow,
+) -> rusqlite::Result<MessageId> {
+    let columns = &row.columns;
+    tx.prepare_cached(
+        "INSERT INTO messages
+            (session_id, turn_id, created_at, role, content, reasoning, tool_calls,
+             tool_call_id, tool_name, tool_exit_code, tool_duration_ms)
+         SELECT session_id, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+         FROM branches WHERE id = ?1
+         RETURNING id",
+    )?
+    .query_row(
+        rusqlite::params![
+            branch,
+            turn,
+            row.created_at,
+            row.role,
+            row.content,
+            columns.reasoning,
+            columns.tool_calls,
+            columns.tool_call_id,
+            columns.tool_name,
+            columns.tool_exit_code,
+            columns.tool_duration_ms,
+        ],
+        |r| r.get(0),
+    )
+}
+
+/// Store the chunks of `content` at byte ranges `chunk_bytes`, returning each as
+/// `(id, chunk text)` in the same order.
+fn insert_chunks(
+    tx: &Transaction<'_>,
+    message: MessageId,
+    content: &str,
+    chunk_bytes: &[Range<usize>],
+) -> rusqlite::Result<Vec<(ChunkId, String)>> {
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO message_chunks (message_id, byte_start, byte_end)
+         VALUES (?1, ?2, ?3)
+         RETURNING id",
+    )?;
+    chunk_bytes
+        .iter()
+        .map(|bytes| {
+            let id = insert.query_row(rusqlite::params![message, bytes.start, bytes.end], |r| {
+                r.get(0)
+            })?;
+            Ok((id, content[bytes.clone()].to_string()))
+        })
+        .collect()
 }
 
 fn latest_turn_on_branch(

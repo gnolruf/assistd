@@ -253,13 +253,8 @@ impl SemanticStore for SqliteSemanticStore {
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
                 let model_id = embedding_model_id(&tx, &model)?;
-                for Embedding { target, vector } in &embeddings {
-                    let (upsert, target_id) = upsert_embedding_sql(*target);
-                    tx.prepare_cached(upsert)?.execute(rusqlite::params![
-                        target_id,
-                        model_id,
-                        vector_to_blob(vector)
-                    ])?;
+                for embedding in &embeddings {
+                    upsert_embedding(&tx, model_id, embedding)?;
                 }
                 tx.commit()
             })
@@ -404,36 +399,43 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     similarity.is_finite().then_some(similarity)
 }
 
-/// The upsert for `target`'s embedding table, and the row id it binds as `?1`;
-/// the `SELECT` makes a since-deleted target a no-op rather than a foreign-key error.
-fn upsert_embedding_sql(target: EmbeddingTarget) -> (&'static str, i64) {
-    match target {
-        EmbeddingTarget::Chunk(ChunkId(id)) => (
-            "INSERT INTO chunk_embeddings (chunk_id, model_id, vector)
-             SELECT id, ?2, ?3 FROM message_chunks WHERE id = ?1
-             ON CONFLICT(chunk_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector",
-            id,
-        ),
-        EmbeddingTarget::Memory(MemoryId(id)) => (
-            "INSERT INTO memory_embeddings (memory_id, model_id, vector)
-             SELECT id, ?2, ?3 FROM memories WHERE id = ?1
-             ON CONFLICT(memory_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector",
-            id,
-        ),
+/// Upsert `embedding` into its target's table. The `SELECT` makes a since-deleted
+/// target, or a memory whose value has changed since, a no-op rather than an error
+/// or a vector for the wrong text.
+fn upsert_embedding(
+    tx: &Transaction<'_>,
+    model_id: i64,
+    embedding: &Embedding,
+) -> rusqlite::Result<usize> {
+    let blob = vector_to_blob(&embedding.vector);
+    match embedding.target {
+        EmbeddingTarget::Chunk(id) => tx
+            .prepare_cached(
+                "INSERT INTO chunk_embeddings (chunk_id, model_id, vector)
+                 SELECT id, ?2, ?3 FROM message_chunks WHERE id = ?1
+                 ON CONFLICT(chunk_id) DO UPDATE
+                 SET model_id = excluded.model_id, vector = excluded.vector",
+            )?
+            .execute(rusqlite::params![id, model_id, blob]),
+        EmbeddingTarget::Memory(id) => tx
+            .prepare_cached(
+                "INSERT INTO memory_embeddings (memory_id, model_id, vector)
+                 SELECT id, ?2, ?3 FROM memories WHERE id = ?1 AND value = ?4
+                 ON CONFLICT(memory_id) DO UPDATE
+                 SET model_id = excluded.model_id, vector = excluded.vector",
+            )?
+            .execute(rusqlite::params![id, model_id, blob, embedding.text]),
     }
 }
 
 /// The `embedding_models` id of `name`, inserting the model on first use.
 fn embedding_model_id(tx: &Transaction<'_>, name: &str) -> rusqlite::Result<i64> {
-    tx.execute(
-        "INSERT INTO embedding_models (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-        rusqlite::params![name],
-    )?;
-    tx.query_row(
-        "SELECT id FROM embedding_models WHERE name = ?1",
-        rusqlite::params![name],
-        |r| r.get(0),
-    )
+    tx.prepare_cached(
+        "INSERT INTO embedding_models (name) VALUES (?1)
+         ON CONFLICT(name) DO UPDATE SET name = excluded.name
+         RETURNING id",
+    )?
+    .query_row(rusqlite::params![name], |r| r.get(0))
 }
 
 /// Encode `vector` as the little-endian `f32` BLOB the embedding tables store.

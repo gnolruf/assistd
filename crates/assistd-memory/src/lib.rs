@@ -10,7 +10,6 @@ mod semantic;
 mod sqlite;
 mod transcripts;
 
-pub use chunking::{ChunkingConfig, chunk_ranges};
 pub use error::{MemoryError, Result};
 pub use ids::{BranchId, ChunkId, MemoryId, MessageId, SessionId, TurnId};
 pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore};
@@ -20,6 +19,6 @@ pub use semantic::{
 };
 pub use sqlite::{SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore};
 pub use transcripts::{
-    BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore, PersistedMessage,
-    PersistedRole, ResumeCandidate, ToolOutcome, TranscriptStore, UndoOutcome,
+    AppendedMessage, BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore,
+    PersistedMessage, PersistedRole, ResumeCandidate, ToolOutcome, TranscriptStore, UndoOutcome,
 };

@@ -7,10 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use assistd_embed::{EmbedJob, enqueue_embed_job};
-use assistd_memory::{
-    BranchId, ChunkingConfig, EmbeddingTarget, MessageId, MessageKind, PersistedMessage, SessionId,
-    SqliteHandle, TurnId, chunk_ranges,
-};
+use assistd_memory::{BranchId, ChunkId, EmbeddingTarget, PersistedMessage, SessionId, TurnId};
 
 use super::AppState;
 
@@ -37,8 +34,8 @@ impl AppState {
         Ok((session, branch))
     }
 
-    /// Persist one message on a background task, then chunk and queue
-    /// user or assistant text for embedding (dropped if the queue is full).
+    /// Persist one message on a background task, then queue the chunks the
+    /// store cut from it for embedding (dropped if the queue is full).
     ///
     /// Writes land in call order: each task awaits its predecessor's
     /// completion signal from `runtime.persist_chain` before appending,
@@ -50,14 +47,17 @@ impl AppState {
     ) {
         let transcripts = self.memory.transcripts.clone();
         let session_ctx = self.runtime.session_ctx.clone();
-        let embed_tx = self.memory.embed_tx.clone();
-        let chunk_target = self.chunk_target(&msg);
+        let embed_tx = self
+            .memory
+            .embedding_cfg
+            .enabled
+            .then(|| self.memory.embed_tx.clone());
         let (previous, landed_tx) = self.join_persist_chain();
         self.runtime.persistence_tracker.spawn(async move {
             if let Some(previous) = previous {
                 let _ = previous.await;
             }
-            let (session, branch) = session_ctx.current().await;
+            let (_, branch) = session_ctx.current().await;
             let Some(branch) = branch else {
                 warn!(
                     target: "assistd::memory",
@@ -66,11 +66,11 @@ impl AppState {
                 return;
             };
             let append = transcripts
-                .append_message_to_branch(session, branch, turn, msg)
+                .append_message_to_branch(branch, turn, msg)
                 .await;
             let _ = landed_tx.send(());
-            let message_id = match append {
-                Ok(id) => id,
+            let appended = match append {
+                Ok(appended) => appended,
                 Err(e) => {
                     warn!(
                         target: "assistd::memory",
@@ -80,8 +80,8 @@ impl AppState {
                     return;
                 }
             };
-            if let Some((chunks, content)) = chunk_target {
-                store_and_queue_chunks(&chunks, &embed_tx, message_id, &content).await;
+            if let Some(embed_tx) = embed_tx {
+                queue_chunk_embeddings(&embed_tx, appended.chunks);
             }
         });
     }
@@ -130,16 +130,6 @@ impl AppState {
         (previous, landed_tx)
     }
 
-    /// The chunk store and text to chunk for `msg`, or `None` when it
-    /// should not be embedded.
-    fn chunk_target(&self, msg: &PersistedMessage) -> Option<(SqliteHandle, String)> {
-        let embeddable = self.memory.embedding_cfg.enabled
-            && matches!(msg.kind, MessageKind::User | MessageKind::Assistant { .. })
-            && !msg.content.is_empty();
-        let chunks = self.memory.chunks.clone().filter(|_| embeddable)?;
-        Some((chunks, msg.content.clone()))
-    }
-
     /// Wait, up to 500ms, for every queued persistence task to land.
     /// Hold `agent_turn_lock` across the call so no new tasks spawn
     /// during the wait.
@@ -157,31 +147,13 @@ impl AppState {
     }
 }
 
-async fn store_and_queue_chunks(
-    chunks: &SqliteHandle,
-    embed_tx: &mpsc::Sender<EmbedJob>,
-    message_id: MessageId,
-    content: &str,
-) {
-    let ranges = chunk_ranges(content, &ChunkingConfig::default());
-    let chunk_ids = match chunks.store_chunks(message_id, &ranges).await {
-        Ok(chunk_ids) => chunk_ids,
-        Err(e) => {
-            warn!(
-                target: "assistd::memory",
-                %message_id,
-                error = %e,
-                "failed to persist chunks (continuing)"
-            );
-            return;
-        }
-    };
-    for (chunk_id, bytes) in chunk_ids.into_iter().zip(ranges) {
+fn queue_chunk_embeddings(embed_tx: &mpsc::Sender<EmbedJob>, chunks: Vec<(ChunkId, String)>) {
+    for (chunk_id, text) in chunks {
         enqueue_embed_job(
             embed_tx,
             EmbedJob {
                 target: EmbeddingTarget::Chunk(chunk_id),
-                text: content[bytes].to_string(),
+                text,
             },
         );
     }

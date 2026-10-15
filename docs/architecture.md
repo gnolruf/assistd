@@ -252,10 +252,11 @@ rows after it, so it sees the same prompt it had before; the client
 still gets every row.
 
 The `remember` tool inserts the K/V row and queues an embedding job
-for its value on a `tokio::sync::mpsc` channel; each persisted
-turn queues its transcript chunks on the same channel. A background
-task drains the queue, sends batches to the embedding server (a
-second, smaller llama-server child process configured under
+for its value on a `tokio::sync::mpsc` channel. Each user or assistant
+message is chunked in the transaction that saves it, and its chunks are
+queued on the same channel. A background task drains the queue,
+sends batches to the embedding server (a second, smaller
+llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
 store. The `recall` tool embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search

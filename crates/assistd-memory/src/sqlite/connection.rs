@@ -2,7 +2,6 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,7 +9,7 @@ use std::time::Duration;
 use rusqlite::OpenFlags;
 use tokio_rusqlite::Connection;
 
-use crate::{ChunkId, MemoryError, MessageId, Result, migrations};
+use crate::{MemoryError, Result, migrations};
 
 /// How long a statement waits on a lock held by another process (e.g. a
 /// `sqlite3` shell) before failing with `SQLITE_BUSY`.
@@ -75,44 +74,6 @@ impl SqliteHandle {
 
     pub(super) fn writer(&self) -> &Connection {
         &self.writer
-    }
-
-    /// Persist a message's chunks at byte ranges `ranges` in one transaction and
-    /// return their ids in the same order.
-    pub async fn store_chunks(
-        &self,
-        message_id: MessageId,
-        ranges: &[Range<usize>],
-    ) -> Result<Vec<ChunkId>> {
-        if ranges.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ranges = ranges.to_vec();
-        self.writer
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let chunk_ids = {
-                    let mut upsert = tx.prepare_cached(
-                        "INSERT INTO message_chunks (message_id, byte_start, byte_end)
-                         VALUES (?1, ?2, ?3)
-                         ON CONFLICT(message_id, byte_start) DO UPDATE SET byte_end = excluded.byte_end
-                         RETURNING id",
-                    )?;
-                    ranges
-                        .iter()
-                        .map(|bytes| {
-                            upsert.query_row(
-                                rusqlite::params![message_id, bytes.start, bytes.end],
-                                |r| r.get(0),
-                            )
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()?
-                };
-                tx.commit()?;
-                Ok(chunk_ids)
-            })
-            .await
-            .map_err(MemoryError::sqlite("store_chunks"))
     }
 }
 

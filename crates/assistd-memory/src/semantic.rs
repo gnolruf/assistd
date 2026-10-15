@@ -45,10 +45,11 @@ impl fmt::Display for EmbeddingTarget {
     }
 }
 
-/// An L2-normalised embedding of `target`'s text.
+/// An L2-normalised embedding of `text`, the content of `target` when it was embedded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Embedding {
     pub target: EmbeddingTarget,
+    pub text: String,
     pub vector: Vec<f32>,
 }
 
@@ -113,7 +114,7 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Vec<(ChunkId, String)>>;
 
     /// Upsert `embeddings` under `model` in one transaction, skipping targets
-    /// deleted since they were embedded.
+    /// deleted since they were embedded and memories whose value no longer matches.
     async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()>;
 }
 

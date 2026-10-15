@@ -83,14 +83,15 @@ async fn embed_each(embedder: &dyn Embedder, texts: &[&str]) -> Vec<Result<Vec<f
 
 /// Embed the jobs' texts in one batch, retrying alone any input that fails it, and
 /// return the embeddings; jobs whose embed still fails are logged and dropped.
-pub async fn embed_jobs(embedder: &dyn Embedder, jobs: &[EmbedJob]) -> Vec<Embedding> {
+pub async fn embed_jobs(embedder: &dyn Embedder, jobs: Vec<EmbedJob>) -> Vec<Embedding> {
     let texts: Vec<&str> = jobs.iter().map(|job| job.text.as_str()).collect();
     let results = embed_each(embedder, &texts).await;
-    jobs.iter()
+    jobs.into_iter()
         .zip(results)
         .filter_map(|(job, result)| match result {
             Ok(vector) => Some(Embedding {
                 target: job.target,
+                text: job.text,
                 vector,
             }),
             Err(err) => {

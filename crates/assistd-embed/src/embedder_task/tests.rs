@@ -178,6 +178,7 @@ async fn worker_stores_embedded_job_under_the_embedder_model() {
         embeddings,
         [Embedding {
             target: EmbeddingTarget::Chunk(ChunkId(42)),
+            text: "hello".to_string(),
             vector: vec![1.0, 0.0],
         }]
     );

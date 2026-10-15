@@ -1,6 +1,6 @@
 use super::*;
 use crate::sqlite::{SqliteMemoryStore, SqliteTranscriptStore};
-use crate::{MemoryStore, MessageId, PersistedMessage, PersistedRole, TranscriptStore};
+use crate::{BranchId, MemoryStore, MessageId, PersistedMessage, PersistedRole, TranscriptStore};
 
 /// The returned temp dir must outlive the stores.
 async fn fresh() -> (SqliteHandle, SqliteSemanticStore, tempfile::TempDir) {
@@ -12,18 +12,53 @@ async fn fresh() -> (SqliteHandle, SqliteSemanticStore, tempfile::TempDir) {
     (handle, store, temp)
 }
 
-async fn seed_message(handle: &SqliteHandle, msg: PersistedMessage) -> (SessionId, MessageId) {
-    let store = SqliteTranscriptStore::new(handle.clone());
-    let session = SessionId::new();
-    let branch = store
-        .begin_session_with_main_branch(session, 0)
-        .await
-        .unwrap();
-    let message_id = store
-        .append_message_to_branch(session, branch, None, msg)
-        .await
-        .unwrap();
-    (session, message_id)
+/// One saved session's main branch, to append user messages to.
+struct Transcript {
+    store: SqliteTranscriptStore,
+    session: SessionId,
+    branch: BranchId,
+}
+
+impl Transcript {
+    async fn new(handle: &SqliteHandle) -> Self {
+        let store = SqliteTranscriptStore::new(handle.clone());
+        let session = SessionId::new();
+        let branch = store
+            .begin_session_with_main_branch(session, 0)
+            .await
+            .unwrap();
+        Self {
+            store,
+            session,
+            branch,
+        }
+    }
+
+    /// Append user message `text`, returning its id and stored chunks.
+    async fn append(&self, text: &str) -> (MessageId, Vec<(ChunkId, String)>) {
+        let appended = self
+            .store
+            .append_message_to_branch(self.branch, None, PersistedMessage::user(text))
+            .await
+            .unwrap();
+        (appended.id, appended.chunks)
+    }
+
+    /// Append user message `text`, short enough to be one chunk, and embed that chunk.
+    async fn embedded_chunk(
+        &self,
+        store: &SqliteSemanticStore,
+        text: &str,
+        vector: &[f32],
+        model: &str,
+    ) -> ChunkId {
+        let (_, chunks) = self.append(text).await;
+        let [chunk] = &chunks[..] else {
+            panic!("{text:?} should be one chunk, got {chunks:?}");
+        };
+        embed_chunk(store, chunk, vector, model).await;
+        chunk.0
+    }
 }
 
 /// 2-d unit vector at `angle` radians.
@@ -31,35 +66,23 @@ fn unit_vec(angle: f32) -> Vec<f32> {
     vec![angle.cos(), angle.sin()]
 }
 
-async fn insert_chunk_with_vec(
-    handle: &SqliteHandle,
+async fn embed_chunk(
     store: &SqliteSemanticStore,
-    message_id: MessageId,
-    byte_start: usize,
+    (chunk_id, text): &(ChunkId, String),
     vector: &[f32],
     model: &str,
-) -> ChunkId {
-    let [chunk_id] = handle
-        .store_chunks(
-            message_id,
-            std::slice::from_ref(&(byte_start..byte_start + 1)),
-        )
-        .await
-        .unwrap()[..]
-    else {
-        panic!("one range stores one chunk");
-    };
+) {
     store
         .store_embeddings(
             model,
             vec![Embedding {
-                target: EmbeddingTarget::Chunk(chunk_id),
+                target: EmbeddingTarget::Chunk(*chunk_id),
+                text: text.clone(),
                 vector: vector.to_vec(),
             }],
         )
         .await
         .unwrap();
-    chunk_id
 }
 
 async fn save_memory(handle: &SqliteHandle, key: &str, value: &str) -> MemoryId {
@@ -72,6 +95,7 @@ async fn save_memory(handle: &SqliteHandle, key: &str, value: &str) -> MemoryId 
 async fn embed_memory(
     store: &SqliteSemanticStore,
     memory_id: MemoryId,
+    value: &str,
     vector: &[f32],
     model: &str,
 ) {
@@ -80,6 +104,7 @@ async fn embed_memory(
             model,
             vec![Embedding {
                 target: EmbeddingTarget::Memory(memory_id),
+                text: value.to_string(),
                 vector: vector.to_vec(),
             }],
         )
@@ -90,45 +115,49 @@ async fn embed_memory(
 #[tokio::test]
 async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
     let (handle, store, _temp) = fresh().await;
-    let (session, message_id) = seed_message(&handle, PersistedMessage::user("hello world")).await;
-
-    let c1 = insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "m").await;
-    let c2 = insert_chunk_with_vec(&handle, &store, message_id, 1, &unit_vec(0.3), "m").await;
-    let c3 = insert_chunk_with_vec(&handle, &store, message_id, 2, &unit_vec(1.5), "m").await;
+    let transcript = Transcript::new(&handle).await;
+    let long_text = "word ".repeat(150);
+    let (long_message, long_chunks) = transcript.append(&long_text).await;
+    let [first, second] = &long_chunks[..] else {
+        panic!("expected two chunks, got {}", long_chunks.len());
+    };
+    embed_chunk(&store, first, &unit_vec(0.0), "m").await;
+    embed_chunk(&store, second, &unit_vec(0.3), "m").await;
+    let short = transcript
+        .embedded_chunk(&store, "short", &unit_vec(1.5), "m")
+        .await;
 
     let hits = store
         .nearest_chunks(unit_vec(0.0), 3, "m", None)
         .await
         .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
-    assert_eq!(ids, [c1, c2, c3]);
+    assert_eq!(ids, [first.0, second.0, short]);
     assert!(hits[0].similarity > hits[1].similarity);
     assert!(hits[1].similarity > hits[2].similarity);
     assert!((hits[0].similarity - 1.0).abs() < 1e-4);
+    for hit in &hits[..2] {
+        assert_eq!(hit.message_id, long_message);
+        assert_eq!(hit.content, long_text);
+    }
+    assert_eq!(hits[2].content, "short");
     for hit in &hits {
-        assert_eq!(hit.message_id, message_id);
-        assert_eq!(hit.session_id, session);
+        assert_eq!(hit.session_id, transcript.session);
         assert_eq!(hit.role, PersistedRole::User);
-        assert_eq!(hit.content, "hello world");
     }
 }
 
 #[tokio::test]
 async fn nearest_chunks_keeps_the_best_top_k() {
     let (handle, store, _temp) = fresh().await;
-    let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
+    let transcript = Transcript::new(&handle).await;
     let mut ids = Vec::new();
     for i in 0..10 {
+        let angle = (i as f32) * 0.1;
         ids.push(
-            insert_chunk_with_vec(
-                &handle,
-                &store,
-                message_id,
-                i,
-                &unit_vec((i as f32) * 0.1),
-                "m",
-            )
-            .await,
+            transcript
+                .embedded_chunk(&store, &format!("m{i}"), &unit_vec(angle), "m")
+                .await,
         );
     }
 
@@ -145,12 +174,14 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 #[tokio::test]
 async fn nearest_chunks_can_exclude_one_session() {
     let (handle, store, _temp) = fresh().await;
-    let (past, past_message) = seed_message(&handle, PersistedMessage::user("past")).await;
-    let (current, current_message) = seed_message(&handle, PersistedMessage::user("current")).await;
-    let past_chunk =
-        insert_chunk_with_vec(&handle, &store, past_message, 0, &unit_vec(0.4), "m").await;
-    let current_chunk =
-        insert_chunk_with_vec(&handle, &store, current_message, 0, &unit_vec(0.0), "m").await;
+    let past = Transcript::new(&handle).await;
+    let current = Transcript::new(&handle).await;
+    let past_chunk = past
+        .embedded_chunk(&store, "past", &unit_vec(0.4), "m")
+        .await;
+    let current_chunk = current
+        .embedded_chunk(&store, "current", &unit_vec(0.0), "m")
+        .await;
 
     let all = store
         .nearest_chunks(unit_vec(0.0), 5, "m", None)
@@ -164,20 +195,27 @@ async fn nearest_chunks_can_exclude_one_session() {
     );
 
     let others = store
-        .nearest_chunks(unit_vec(0.0), 5, "m", Some(current))
+        .nearest_chunks(unit_vec(0.0), 5, "m", Some(current.session))
         .await
         .unwrap();
     let other_ids: Vec<(ChunkId, SessionId)> =
         others.iter().map(|h| (h.chunk_id, h.session_id)).collect();
-    assert_eq!(other_ids, [(past_chunk, past)]);
+    assert_eq!(other_ids, [(past_chunk, past.session)]);
 }
 
 #[tokio::test]
 async fn upsert_replaces_memory_embedding_in_place() {
     let (handle, store, _temp) = fresh().await;
     let mem_id = save_memory(&handle, "k", "v").await;
-    embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
-    embed_memory(&store, mem_id, &unit_vec(std::f32::consts::FRAC_PI_2), "m").await;
+    embed_memory(&store, mem_id, "v", &unit_vec(0.0), "m").await;
+    embed_memory(
+        &store,
+        mem_id,
+        "v",
+        &unit_vec(std::f32::consts::FRAC_PI_2),
+        "m",
+    )
+    .await;
 
     assert_eq!(
         store.count_missing("m").await.unwrap(),
@@ -198,15 +236,18 @@ async fn upsert_replaces_memory_embedding_in_place() {
 async fn overwriting_a_memory_value_drops_its_stale_embedding() {
     let (handle, store, _temp) = fresh().await;
     let mem_id = save_memory(&handle, "editor", "vim").await;
-    embed_memory(&store, mem_id, &unit_vec(0.0), "m").await;
+    embed_memory(&store, mem_id, "vim", &unit_vec(0.0), "m").await;
 
     assert_eq!(save_memory(&handle, "editor", "emacs").await, mem_id);
+    embed_memory(&store, mem_id, "vim", &unit_vec(0.0), "m").await;
+
     assert_eq!(
         store.count_missing("m").await.unwrap(),
         UnindexedRows {
             chunks: 0,
             memories: 1
-        }
+        },
+        "neither the trigger nor a late embedding of the old value may leave it indexed"
     );
     assert_eq!(
         store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap(),
@@ -224,11 +265,19 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
 #[tokio::test]
 async fn non_finite_vectors_never_enter_top_k() {
     let (handle, store, _temp) = fresh().await;
-    let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
-    insert_chunk_with_vec(&handle, &store, message_id, 0, &[f32::NAN, 0.0], "m").await;
-    insert_chunk_with_vec(&handle, &store, message_id, 1, &[f32::INFINITY, 0.0], "m").await;
-    let far = insert_chunk_with_vec(&handle, &store, message_id, 2, &unit_vec(1.5), "m").await;
-    let near = insert_chunk_with_vec(&handle, &store, message_id, 3, &unit_vec(0.1), "m").await;
+    let transcript = Transcript::new(&handle).await;
+    transcript
+        .embedded_chunk(&store, "nan", &[f32::NAN, 0.0], "m")
+        .await;
+    transcript
+        .embedded_chunk(&store, "inf", &[f32::INFINITY, 0.0], "m")
+        .await;
+    let far = transcript
+        .embedded_chunk(&store, "far", &unit_vec(1.5), "m")
+        .await;
+    let near = transcript
+        .embedded_chunk(&store, "near", &unit_vec(0.1), "m")
+        .await;
 
     let hits = store
         .nearest_chunks(unit_vec(0.0), 2, "m", None)
@@ -242,18 +291,19 @@ async fn non_finite_vectors_never_enter_top_k() {
 #[tokio::test]
 async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
     let (handle, store, _temp) = fresh().await;
-    let (_, message_id) = seed_message(&handle, PersistedMessage::user("xyz")).await;
+    let transcript = Transcript::new(&handle).await;
 
-    insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "new").await;
-    let old_chunk =
-        insert_chunk_with_vec(&handle, &store, message_id, 1, &unit_vec(0.5), "old").await;
-    let naked_chunk = handle
-        .store_chunks(message_id, std::slice::from_ref(&(2..3)))
-        .await
-        .unwrap()[0];
+    transcript
+        .embedded_chunk(&store, "x", &unit_vec(0.0), "new")
+        .await;
+    let old_chunk = transcript
+        .embedded_chunk(&store, "y", &unit_vec(0.5), "old")
+        .await;
+    let (_, naked) = transcript.append("z").await;
+    let naked_chunk = naked[0].0;
 
     let indexed_mem = save_memory(&handle, "indexed", "v1").await;
-    embed_memory(&store, indexed_mem, &unit_vec(0.0), "new").await;
+    embed_memory(&store, indexed_mem, "v1", &unit_vec(0.0), "new").await;
     let bare_mem = save_memory(&handle, "bare", "v2").await;
 
     assert_eq!(
@@ -285,7 +335,7 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
         [(bare_mem, "v2".to_string())]
     );
 
-    embed_memory(&store, bare_mem, &unit_vec(0.0), "new").await;
+    embed_memory(&store, bare_mem, "v2", &unit_vec(0.0), "new").await;
     assert_eq!(
         store
             .memories_missing_embedding("new", None, 100)
@@ -298,14 +348,20 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
 #[tokio::test]
 async fn count_stale_aggregates_across_chunks_and_memories() {
     let (handle, store, _temp) = fresh().await;
-    let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
+    let transcript = Transcript::new(&handle).await;
 
-    insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "old-A").await;
-    insert_chunk_with_vec(&handle, &store, message_id, 1, &unit_vec(0.5), "old-A").await;
-    insert_chunk_with_vec(&handle, &store, message_id, 2, &unit_vec(1.0), "old-B").await;
-    insert_chunk_with_vec(&handle, &store, message_id, 3, &unit_vec(1.5), "new").await;
+    for (text, angle, model) in [
+        ("a", 0.0, "old-A"),
+        ("b", 0.5, "old-A"),
+        ("c", 1.0, "old-B"),
+        ("d", 1.5, "new"),
+    ] {
+        transcript
+            .embedded_chunk(&store, text, &unit_vec(angle), model)
+            .await;
+    }
     let mem_id = save_memory(&handle, "k", "v").await;
-    embed_memory(&store, mem_id, &unit_vec(0.0), "old-A").await;
+    embed_memory(&store, mem_id, "v", &unit_vec(0.0), "old-A").await;
 
     assert_eq!(
         store.count_stale("new").await.unwrap(),
@@ -338,6 +394,7 @@ async fn batch_skips_targets_deleted_before_it_lands() {
     let embeddings = [deleted, kept]
         .map(|memory_id| Embedding {
             target: EmbeddingTarget::Memory(memory_id),
+            text: "v".to_string(),
             vector: unit_vec(0.0),
         })
         .to_vec();

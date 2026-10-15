@@ -7,8 +7,7 @@ use tokio::sync::mpsc;
 use assistd_config::EmbeddingConfig;
 use assistd_embed::{EmbedJob, EmbedderHandle};
 use assistd_memory::{
-    MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, SemanticStore, SqliteHandle,
-    TranscriptStore,
+    MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, SemanticStore, TranscriptStore,
 };
 use assistd_tools::MemoryOps;
 use assistd_utils::readiness::Readiness;
@@ -23,7 +22,6 @@ pub struct MemoryStack {
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
-    pub chunks: Option<SqliteHandle>,
     pub embedding_cfg: EmbeddingConfig,
 }
 
@@ -45,7 +43,6 @@ impl MemoryStack {
             ))),
             semantic: Arc::new(NoSemanticStore),
             embed_tx,
-            chunks: None,
             embedding_cfg,
         }
     }
@@ -79,13 +76,6 @@ impl MemoryStack {
     /// Replace the embed-job queue sender.
     pub fn with_embed_tx(mut self, tx: mpsc::Sender<EmbedJob>) -> Self {
         self.embed_tx = tx;
-        self
-    }
-
-    /// Attach the SQLite handle new messages are chunked into. Without
-    /// one, persisted messages are never chunked or embedded.
-    pub fn with_chunks(mut self, chunks: SqliteHandle) -> Self {
-        self.chunks = Some(chunks);
         self
     }
 }

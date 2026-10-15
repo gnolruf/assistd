@@ -361,7 +361,8 @@ where
                 text,
             })
             .collect();
-        let embeddings = embed_jobs(embedder, &jobs).await;
+        let job_count = jobs.len();
+        let embeddings = embed_jobs(embedder, jobs).await;
         if let Err(e) = semantic
             .store_embeddings(embedder.model(), embeddings)
             .await
@@ -373,7 +374,7 @@ where
                 "reindex: store embeddings failed"
             );
         }
-        progress.advance(jobs.len()).await;
+        progress.advance(job_count).await;
     }
     Ok(())
 }

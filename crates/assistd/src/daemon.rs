@@ -319,16 +319,12 @@ fn build_memory_stack(
     memory: &MemorySubsystem,
     embed: &EmbeddingHandles,
 ) -> MemoryStack {
-    let stack = MemoryStack::disabled(config.embedding.clone())
+    MemoryStack::disabled(config.embedding.clone())
         .with_memory(memory.memory_store.clone())
         .with_transcripts(memory.transcript_store.clone())
         .with_embedder(embed.embedder.clone())
         .with_semantic(embed.semantic_store.clone())
-        .with_embed_tx(embed.embed_tx.clone());
-    match memory.sqlite_handle.clone() {
-        Some(handle) => stack.with_chunks(handle),
-        None => stack,
-    }
+        .with_embed_tx(embed.embed_tx.clone())
 }
 
 async fn replay_history(chat: &dyn LlmBackend, replay: LlmReplay) {
