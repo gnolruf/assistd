@@ -1,23 +1,24 @@
-//! Conversation persistence: sessions, turns, branches, and messages.
+//! Session transcripts: sessions, turns, branches, and their messages.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::types::Type;
-use rusqlite::{OptionalExtension, Row};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use chrono::{DateTime, Utc};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, ValueRef};
+use rusqlite::{OptionalExtension, Row, ToSql};
 
 use super::connection::SqliteHandle;
-use super::store::like_prefix_pattern;
+use super::ids::{BranchId, MessageId, SessionId, TurnId};
+use super::timestamp::{optional_timestamp_at, timestamp_at};
 use super::writer::{WriteOp, dispatch_write};
 use crate::{MemoryError, Result};
 
 /// Columns [`branch_info`] reads, over `branches b JOIN sessions s`.
 const BRANCH_INFO_SELECT: &str = "
     SELECT  b.id,
-            b.session_id,
+            s.uuid,
             s.started_at,
             s.ended_at,
             s.title,
@@ -29,126 +30,102 @@ const BRANCH_INFO_SELECT: &str = "
             (SELECT COUNT(*) FROM branch_messages bm WHERE bm.branch_id = b.id),
             (b.id = s.current_branch_id) AS is_current,
             MAX(b.created_at, COALESCE(
-                (SELECT c.timestamp
-                 FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
+                (SELECT m.created_at
+                 FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
                  WHERE bm.branch_id = b.id ORDER BY bm.seq DESC LIMIT 1),
                 b.created_at)) AS last_active_at
     FROM branches b JOIN sessions s ON s.id = b.session_id";
 
-/// Session identifier: a UUID string, stable across daemon restarts.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionId(pub String);
-
-impl SessionId {
-    /// A fresh random (v4 UUID) session id.
-    pub fn new() -> Self {
-        Self(Uuid::new_v4().to_string())
-    }
-
-    /// The id as a UUID string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Default for SessionId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for SessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Opaque turn identifier (rowid).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TurnId(pub i64);
-
-/// Opaque branch identifier (rowid in `branches`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BranchId(pub i64);
-
-/// Role of a persisted message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Role of a persisted message, stored as the `messages.role` code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PersistedRole {
-    System,
     User,
     Assistant,
     Tool,
 }
 
 impl PersistedRole {
-    /// Lowercase form stored in the `conversations.role` column.
+    /// The lowercase role name.
     pub fn as_wire(self) -> &'static str {
         match self {
-            PersistedRole::System => "system",
             PersistedRole::User => "user",
             PersistedRole::Assistant => "assistant",
             PersistedRole::Tool => "tool",
         }
     }
 
-    /// Inverse of [`Self::as_wire`]; `None` for unrecognised values.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "system" => Some(PersistedRole::System),
-            "user" => Some(PersistedRole::User),
-            "assistant" => Some(PersistedRole::Assistant),
-            "tool" => Some(PersistedRole::Tool),
-            _ => None,
+    fn code(self) -> i64 {
+        match self {
+            PersistedRole::User => 0,
+            PersistedRole::Assistant => 1,
+            PersistedRole::Tool => 2,
         }
     }
 }
 
-/// One message ready to write to the `conversations` table.
-#[derive(Debug, Clone)]
+impl ToSql for PersistedRole {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.code()))
+    }
+}
+
+impl FromSql for PersistedRole {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_i64()? {
+            0 => Ok(PersistedRole::User),
+            1 => Ok(PersistedRole::Assistant),
+            2 => Ok(PersistedRole::Tool),
+            code => Err(FromSqlError::OutOfRange(code)),
+        }
+    }
+}
+
+/// One message as stored in the `messages` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedMessage {
-    pub role: PersistedRole,
     pub content: String,
-    /// JSON array of `{id, name, arguments}`; only on assistant rows that called tools.
-    pub tool_calls: Option<serde_json::Value>,
-    /// Only on `Tool` rows.
-    pub tool_call_id: Option<String>,
-    /// Only on `Tool` rows.
-    pub tool_name: Option<String>,
+    pub kind: MessageKind,
+}
+
+/// The role of a [`PersistedMessage`] together with the fields only that role carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageKind {
+    User,
+    Assistant {
+        /// The model's reasoning for this step; never empty.
+        reasoning: Option<String>,
+        /// JSON array of `{id, name, arguments}`; only when the step called tools.
+        tool_calls: Option<serde_json::Value>,
+    },
+    Tool {
+        call_id: String,
+        tool_name: String,
+        outcome: ToolOutcome,
+    },
 }
 
 impl PersistedMessage {
     /// A user prompt.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
-            role: PersistedRole::User,
             content: content.into(),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
+            kind: MessageKind::User,
         }
     }
 
-    /// An assistant reply with no tool calls.
-    pub fn assistant_text(content: impl Into<String>) -> Self {
-        Self {
-            role: PersistedRole::Assistant,
-            content: content.into(),
-            tool_calls: None,
-            tool_call_id: None,
-            tool_name: None,
-        }
+    /// An assistant reply with no tool calls; empty `reasoning` is not stored.
+    pub fn assistant_text(content: impl Into<String>, reasoning: String) -> Self {
+        Self::assistant(content.into(), reasoning, None)
     }
 
-    /// A model step that requested tools; `content` is any accompanying text, possibly empty.
-    pub fn assistant_tool_calls(content: impl Into<String>, calls: serde_json::Value) -> Self {
-        Self {
-            role: PersistedRole::Assistant,
-            content: content.into(),
-            tool_calls: Some(calls),
-            tool_call_id: None,
-            tool_name: None,
-        }
+    /// A model step that requested tools; `content` is any accompanying text,
+    /// possibly empty, and empty `reasoning` is not stored.
+    pub fn assistant_tool_calls(
+        content: impl Into<String>,
+        calls: serde_json::Value,
+        reasoning: String,
+    ) -> Self {
+        Self::assistant(content.into(), reasoning, Some(calls))
     }
 
     /// The output of tool call `call_id`, which invoked tool `name`.
@@ -156,80 +133,100 @@ impl PersistedMessage {
         content: impl Into<String>,
         call_id: impl Into<String>,
         name: impl Into<String>,
+        outcome: ToolOutcome,
     ) -> Self {
         Self {
-            role: PersistedRole::Tool,
             content: content.into(),
-            tool_calls: None,
-            tool_call_id: Some(call_id.into()),
-            tool_name: Some(name.into()),
+            kind: MessageKind::Tool {
+                call_id: call_id.into(),
+                tool_name: name.into(),
+                outcome,
+            },
+        }
+    }
+
+    /// The role this message is stored under.
+    pub fn role(&self) -> PersistedRole {
+        match self.kind {
+            MessageKind::User => PersistedRole::User,
+            MessageKind::Assistant { .. } => PersistedRole::Assistant,
+            MessageKind::Tool { .. } => PersistedRole::Tool,
+        }
+    }
+
+    fn assistant(
+        content: String,
+        reasoning: String,
+        tool_calls: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            content,
+            kind: MessageKind::Assistant {
+                reasoning: Some(reasoning).filter(|r| !r.is_empty()),
+                tool_calls,
+            },
         }
     }
 }
 
-/// Coarse summary of one turn.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TurnSummary {
-    pub turn_id: i64,
-    pub session_id: String,
-    pub started_at: String,
-    pub ended_at: Option<String>,
-    pub user_text: String,
-    pub message_count: i64,
+/// How one tool run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolOutcome {
+    pub exit_code: i64,
+    pub duration_ms: u64,
 }
 
 /// Per-branch metadata; `is_current_in_session` marks the session's current branch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchInfo {
     pub branch_id: BranchId,
-    pub session_id: String,
-    pub session_started_at: String,
-    pub session_ended_at: Option<String>,
+    pub session_id: SessionId,
+    pub session_started_at: DateTime<Utc>,
+    pub session_ended_at: Option<DateTime<Utc>>,
     pub session_title: Option<String>,
     pub name: String,
     pub parent_branch_id: Option<BranchId>,
     pub parent_branch_name: Option<String>,
     pub fork_point_seq: Option<i64>,
-    pub created_at: String,
+    pub created_at: DateTime<Utc>,
     pub message_count: i64,
     pub is_current_in_session: bool,
-    /// The later of the branch's creation and its newest message, RFC 3339.
-    pub last_active_at: String,
+    /// The later of the branch's creation and its newest message.
+    pub last_active_at: DateTime<Utc>,
 }
 
 /// One persisted message on a branch, as replayed into the in-memory conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryRow {
-    pub conversation_id: i64,
+    pub message_id: MessageId,
     pub seq: i64,
-    pub role: PersistedRole,
-    pub content: String,
-    /// JSON array of `{id, name, arguments}`; `None` unless the assistant called tools.
-    pub tool_calls: Option<serde_json::Value>,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
+    pub message: PersistedMessage,
 }
 
-/// Result of [`ConversationStore::undo_last_turn`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// The latest compaction summary of a branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchSummary {
+    /// Branch-local seq of the last message the summary stands in for.
+    pub through_seq: i64,
+    pub content: String,
+}
+
+/// Result of [`TranscriptStore::undo_last_turn`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UndoOutcome {
     /// Number of `branch_messages` rows dropped.
     pub removed_messages: u32,
     pub last_user_text: Option<String>,
-    pub removed_turn_id: Option<i64>,
+    pub removed_turn_id: Option<TurnId>,
 }
 
-/// Conversation persistence.
+/// Persistence for session transcripts.
 #[async_trait]
-pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
+pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// Mark `id` as ended by stamping `ended_at`.
     async fn end_session(&self, id: &SessionId) -> Result<()>;
-    /// Open a new turn row inside `session` labelled with `user_text`.
-    async fn begin_turn(&self, session: &SessionId, user_text: &str) -> Result<TurnId>;
-    /// Mark `turn` as ended by stamping `ended_at`.
-    async fn end_turn(&self, turn: TurnId) -> Result<()>;
-    /// Return the `limit` most-recent turns ordered by turn id descending.
-    async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>>;
+    /// Open a new turn inside `session`; its messages are grouped by the id.
+    async fn begin_turn(&self, session: &SessionId) -> Result<TurnId>;
 
     /// Atomically insert `session` and create its `main` branch.
     async fn begin_session_with_main_branch(
@@ -244,14 +241,14 @@ pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
     /// Read the current branch pointer for `session`, if any.
     async fn get_current_branch(&self, session: &SessionId) -> Result<Option<BranchId>>;
 
-    /// Append `msg` to `branch` in one transaction; returns the `conversations.id`.
+    /// Append `msg` to `branch` in one transaction; returns its message id.
     async fn append_message_to_branch(
         &self,
         session: &SessionId,
         branch: BranchId,
         turn: Option<TurnId>,
         msg: PersistedMessage,
-    ) -> Result<i64>;
+    ) -> Result<MessageId>;
 
     /// Every branch of every session, most recently active first, then by
     /// branch id.
@@ -275,13 +272,25 @@ pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
     /// Every message on `branch`, ordered by branch-local seq.
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
 
+    /// Make `summary` the branch's summary of everything before its
+    /// `kept_turns` most recent user messages; a no-op when the branch has
+    /// fewer user messages than that.
+    async fn record_branch_summary(
+        &self,
+        branch: BranchId,
+        summary: String,
+        kept_turns: NonZeroUsize,
+    ) -> Result<()>;
+
+    /// The branch's latest compaction summary, if one is recorded.
+    async fn load_branch_summary(&self, branch: BranchId) -> Result<Option<BranchSummary>>;
+
     /// Branch-local seq of the newest message on `branch`, or `None`
     /// when the branch is empty.
     async fn branch_tail_seq(&self, branch: BranchId) -> Result<Option<i64>>;
 
-    /// RFC3339 timestamp of the newest message on `branch`, or `None`
-    /// when the branch is empty.
-    async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<String>>;
+    /// When the newest message on `branch` was written, or `None` when the branch is empty.
+    async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>>;
 
     /// Drop the latest turn from `branch`, deleting messages and the turn row once
     /// no other branch references them.
@@ -297,32 +306,26 @@ pub trait ConversationStore: fmt::Debug + Send + Sync + 'static {
     async fn set_session_title(&self, session: &SessionId, title: &str) -> Result<()>;
 }
 
-/// Candidate returned by [`ConversationStore::find_resumable_session`].
+/// Candidate returned by [`TranscriptStore::find_resumable_session`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeCandidate {
     pub session_id: SessionId,
     pub current_branch_id: BranchId,
     pub daemon_pid: u32,
-    pub started_at: String,
+    pub started_at: DateTime<Utc>,
 }
 
 /// No-op store: writes are discarded and reads find nothing.
 #[derive(Debug)]
-pub struct NoConversationStore;
+pub struct NoTranscriptStore;
 
 #[async_trait]
-impl ConversationStore for NoConversationStore {
+impl TranscriptStore for NoTranscriptStore {
     async fn end_session(&self, _id: &SessionId) -> Result<()> {
         Ok(())
     }
-    async fn begin_turn(&self, _session: &SessionId, _user_text: &str) -> Result<TurnId> {
+    async fn begin_turn(&self, _session: &SessionId) -> Result<TurnId> {
         Ok(TurnId(0))
-    }
-    async fn end_turn(&self, _turn: TurnId) -> Result<()> {
-        Ok(())
-    }
-    async fn recent_turns(&self, _limit: usize) -> Result<Vec<TurnSummary>> {
-        Ok(Vec::new())
     }
 
     async fn begin_session_with_main_branch(
@@ -347,8 +350,8 @@ impl ConversationStore for NoConversationStore {
         _branch: BranchId,
         _turn: Option<TurnId>,
         _msg: PersistedMessage,
-    ) -> Result<i64> {
-        Ok(0)
+    ) -> Result<MessageId> {
+        Ok(MessageId(0))
     }
 
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
@@ -375,11 +378,24 @@ impl ConversationStore for NoConversationStore {
         Ok(Vec::new())
     }
 
+    async fn record_branch_summary(
+        &self,
+        _branch: BranchId,
+        _summary: String,
+        _kept_turns: NonZeroUsize,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn load_branch_summary(&self, _branch: BranchId) -> Result<Option<BranchSummary>> {
+        Ok(None)
+    }
+
     async fn branch_tail_seq(&self, _branch: BranchId) -> Result<Option<i64>> {
         Ok(None)
     }
 
-    async fn latest_branch_activity(&self, _branch: BranchId) -> Result<Option<String>> {
+    async fn latest_branch_activity(&self, _branch: BranchId) -> Result<Option<DateTime<Utc>>> {
         Ok(None)
     }
 
@@ -400,13 +416,13 @@ impl ConversationStore for NoConversationStore {
     }
 }
 
-/// SQLite-backed [`ConversationStore`].
+/// SQLite-backed [`TranscriptStore`].
 #[derive(Debug, Clone)]
-pub struct SqliteConversationStore {
+pub struct SqliteTranscriptStore {
     handle: Arc<SqliteHandle>,
 }
 
-impl SqliteConversationStore {
+impl SqliteTranscriptStore {
     /// Store over the shared database handle.
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
@@ -414,9 +430,9 @@ impl SqliteConversationStore {
 }
 
 #[async_trait]
-impl ConversationStore for SqliteConversationStore {
+impl TranscriptStore for SqliteTranscriptStore {
     async fn end_session(&self, id: &SessionId) -> Result<()> {
-        let session_id = id.0.clone();
+        let session_id = *id;
         dispatch_write(self.handle.writer(), |ack| WriteOp::EndSession {
             session_id,
             ack,
@@ -424,49 +440,13 @@ impl ConversationStore for SqliteConversationStore {
         .await
     }
 
-    async fn begin_turn(&self, session: &SessionId, user_text: &str) -> Result<TurnId> {
-        let session_id = session.0.clone();
-        let text = user_text.to_string();
+    async fn begin_turn(&self, session: &SessionId) -> Result<TurnId> {
+        let session_id = *session;
         dispatch_write(self.handle.writer(), |ack| WriteOp::BeginTurn {
             session_id,
-            user_text: text,
             ack,
         })
         .await
-    }
-
-    async fn end_turn(&self, turn: TurnId) -> Result<()> {
-        dispatch_write(self.handle.writer(), |ack| WriteOp::EndTurn {
-            turn_id: turn,
-            ack,
-        })
-        .await
-    }
-
-    async fn recent_turns(&self, limit: usize) -> Result<Vec<TurnSummary>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        self.handle
-            .conn()
-            .call(move |c| -> rusqlite::Result<_> {
-                let sql = "
-                    SELECT  t.id,
-                            t.session_id,
-                            t.started_at,
-                            t.ended_at,
-                            t.user_text,
-                            (SELECT count(*) FROM conversations WHERE turn_id = t.id)
-                    FROM turns t
-                    ORDER BY t.id DESC
-                    LIMIT ?1
-                ";
-                let mut stmt = c.prepare(sql)?;
-                let rows = stmt
-                    .query_map(rusqlite::params![limit], turn_summary)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await
-            .map_err(MemoryError::sqlite("recent_turns"))
     }
 
     async fn begin_session_with_main_branch(
@@ -474,7 +454,7 @@ impl ConversationStore for SqliteConversationStore {
         session: &SessionId,
         daemon_pid: u32,
     ) -> Result<BranchId> {
-        let session_id = session.0.clone();
+        let session_id = *session;
         dispatch_write(self.handle.writer(), |ack| {
             WriteOp::BeginSessionWithMainBranch {
                 session_id,
@@ -486,7 +466,7 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn set_current_branch(&self, session: &SessionId, branch: BranchId) -> Result<()> {
-        let session_id = session.0.clone();
+        let session_id = *session;
         dispatch_write(self.handle.writer(), |ack| WriteOp::SetCurrentBranch {
             session_id,
             branch_id: branch,
@@ -496,22 +476,20 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn get_current_branch(&self, session: &SessionId) -> Result<Option<BranchId>> {
-        let session_id = session.0.clone();
-        let id: Option<i64> = self
-            .handle
-            .conn()
+        let session_id = *session;
+        self.handle
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 c.query_row(
-                    "SELECT current_branch_id FROM sessions WHERE id = ?1",
+                    "SELECT current_branch_id FROM sessions WHERE uuid = ?1",
                     rusqlite::params![session_id],
-                    |r| r.get::<_, Option<i64>>(0),
+                    |r| r.get::<_, Option<BranchId>>(0),
                 )
                 .optional()
                 .map(Option::flatten)
             })
             .await
-            .map_err(MemoryError::sqlite("get_current_branch"))?;
-        Ok(id.map(BranchId))
+            .map_err(MemoryError::sqlite("get_current_branch"))
     }
 
     async fn append_message_to_branch(
@@ -520,8 +498,8 @@ impl ConversationStore for SqliteConversationStore {
         branch: BranchId,
         turn: Option<TurnId>,
         msg: PersistedMessage,
-    ) -> Result<i64> {
-        let session_id = session.0.clone();
+    ) -> Result<MessageId> {
+        let session_id = *session;
         dispatch_write(self.handle.writer(), |ack| WriteOp::AppendMessageToBranch {
             session_id,
             branch_id: branch,
@@ -534,7 +512,7 @@ impl ConversationStore for SqliteConversationStore {
 
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
         self.handle
-            .conn()
+            .reader()
             .call(|c| -> rusqlite::Result<_> {
                 let sql = format!("{BRANCH_INFO_SELECT} ORDER BY last_active_at DESC, b.id ASC");
                 let mut stmt = c.prepare(&sql)?;
@@ -549,10 +527,10 @@ impl ConversationStore for SqliteConversationStore {
 
     async fn branch_info(&self, branch: BranchId) -> Result<Option<BranchInfo>> {
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let sql = format!("{BRANCH_INFO_SELECT} WHERE b.id = ?1");
-                c.query_row(&sql, rusqlite::params![branch.0], branch_info)
+                c.query_row(&sql, rusqlite::params![branch], branch_info)
                     .optional()
             })
             .await
@@ -568,17 +546,16 @@ impl ConversationStore for SqliteConversationStore {
             Some((prefix, name)) => (Some(prefix.to_string()), name.to_string()),
             None => (None, target.to_string()),
         };
-        let prefer_session = prefer_session.map(|s| s.0.clone());
-        let row: Option<(String, i64)> = self
-            .handle
-            .conn()
+        let prefer_session = prefer_session.copied();
+        self.handle
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 if let Some(prefix) = session_prefix {
                     return c
                         .query_row(
-                            "SELECT b.session_id, b.id
+                            "SELECT s.uuid, b.id
                              FROM branches b JOIN sessions s ON s.id = b.session_id
-                             WHERE b.name = ?1 AND b.session_id LIKE ?2 ESCAPE '\\'
+                             WHERE b.name = ?1 AND s.uuid LIKE ?2 ESCAPE '\\'
                              ORDER BY s.started_at DESC LIMIT 1",
                             rusqlite::params![name, like_prefix_pattern(&prefix)],
                             branch_ref,
@@ -588,7 +565,9 @@ impl ConversationStore for SqliteConversationStore {
                 if let Some(pref) = prefer_session
                     && let Some(row) = c
                         .query_row(
-                            "SELECT session_id, id FROM branches WHERE name = ?1 AND session_id = ?2",
+                            "SELECT s.uuid, b.id
+                             FROM branches b JOIN sessions s ON s.id = b.session_id
+                             WHERE b.name = ?1 AND s.uuid = ?2",
                             rusqlite::params![name, pref],
                             branch_ref,
                         )
@@ -597,7 +576,7 @@ impl ConversationStore for SqliteConversationStore {
                     return Ok(Some(row));
                 }
                 c.query_row(
-                    "SELECT b.session_id, b.id
+                    "SELECT s.uuid, b.id
                      FROM branches b JOIN sessions s ON s.id = b.session_id
                      WHERE b.name = ?1
                      ORDER BY s.started_at DESC LIMIT 1",
@@ -607,8 +586,7 @@ impl ConversationStore for SqliteConversationStore {
                 .optional()
             })
             .await
-            .map_err(MemoryError::sqlite("resolve_branch"))?;
-        Ok(row.map(|(s, b)| (SessionId(s), BranchId(b))))
+            .map_err(MemoryError::sqlite("resolve_branch"))
     }
 
     async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId> {
@@ -623,23 +601,26 @@ impl ConversationStore for SqliteConversationStore {
 
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>> {
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let sql = "
-                    SELECT  c.id,
+                    SELECT  m.id,
                             bm.seq,
-                            c.role,
-                            c.content,
-                            c.tool_calls,
-                            c.tool_call_id,
-                            c.tool_name
-                    FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
+                            m.role,
+                            m.content,
+                            m.tool_calls,
+                            m.tool_call_id,
+                            m.tool_name,
+                            m.reasoning,
+                            m.tool_exit_code,
+                            m.tool_duration_ms
+                    FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
                     WHERE bm.branch_id = ?1
                     ORDER BY bm.seq ASC
                 ";
                 let mut stmt = c.prepare(sql)?;
                 let rows = stmt
-                    .query_map(rusqlite::params![branch.0], history_row)?
+                    .query_map(rusqlite::params![branch], history_row)?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(rows)
             })
@@ -647,13 +628,48 @@ impl ConversationStore for SqliteConversationStore {
             .map_err(MemoryError::sqlite("load_branch_history"))
     }
 
+    async fn record_branch_summary(
+        &self,
+        branch: BranchId,
+        summary: String,
+        kept_turns: NonZeroUsize,
+    ) -> Result<()> {
+        dispatch_write(self.handle.writer(), |ack| WriteOp::RecordBranchSummary {
+            branch_id: branch,
+            summary,
+            kept_turns,
+            ack,
+        })
+        .await
+    }
+
+    async fn load_branch_summary(&self, branch: BranchId) -> Result<Option<BranchSummary>> {
+        self.handle
+            .reader()
+            .call(move |c| -> rusqlite::Result<_> {
+                c.query_row(
+                    "SELECT through_seq, content FROM branch_summaries WHERE branch_id = ?1",
+                    rusqlite::params![branch],
+                    |r| {
+                        Ok(BranchSummary {
+                            through_seq: r.get(0)?,
+                            content: r.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .map_err(MemoryError::sqlite("load_branch_summary"))
+    }
+
     async fn branch_tail_seq(&self, branch: BranchId) -> Result<Option<i64>> {
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 c.query_row(
                     "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
-                    rusqlite::params![branch.0],
+                    rusqlite::params![branch],
                     |r| r.get::<_, Option<i64>>(0),
                 )
             })
@@ -661,18 +677,18 @@ impl ConversationStore for SqliteConversationStore {
             .map_err(MemoryError::sqlite("branch_tail_seq"))
     }
 
-    async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<String>> {
+    async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>> {
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 c.query_row(
-                    "SELECT c.timestamp
+                    "SELECT m.created_at
                      FROM branch_messages bm
-                     JOIN conversations c ON c.id = bm.conversation_id
+                     JOIN messages m ON m.id = bm.message_id
                      WHERE bm.branch_id = ?1
                      ORDER BY bm.seq DESC LIMIT 1",
-                    rusqlite::params![branch.0],
-                    |r| r.get::<_, String>(0),
+                    rusqlite::params![branch],
+                    |r| timestamp_at(r, 0),
                 )
                 .optional()
             })
@@ -689,12 +705,12 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn get_session_title(&self, session: &SessionId) -> Result<Option<String>> {
-        let session_id = session.0.clone();
+        let session_id = *session;
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 c.query_row(
-                    "SELECT title FROM sessions WHERE id = ?1",
+                    "SELECT title FROM sessions WHERE uuid = ?1",
                     rusqlite::params![session_id],
                     |r| r.get::<_, Option<String>>(0),
                 )
@@ -706,7 +722,7 @@ impl ConversationStore for SqliteConversationStore {
     }
 
     async fn set_session_title(&self, session: &SessionId, title: &str) -> Result<()> {
-        let session_id = session.0.clone();
+        let session_id = *session;
         let title = title.to_string();
         dispatch_write(self.handle.writer(), |ack| WriteOp::SetSessionTitle {
             session_id,
@@ -718,96 +734,96 @@ impl ConversationStore for SqliteConversationStore {
 
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
         self.handle
-            .conn()
+            .reader()
             .call(|c| -> rusqlite::Result<_> {
                 c.query_row(
-                    "SELECT id, current_branch_id, daemon_pid, started_at
+                    "SELECT uuid, current_branch_id, daemon_pid, started_at
                      FROM sessions
                      WHERE ended_at IS NULL AND current_branch_id IS NOT NULL
                      ORDER BY started_at DESC LIMIT 1",
                     [],
                     |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, u32>(2)?,
-                            r.get::<_, String>(3)?,
-                        ))
+                        Ok(ResumeCandidate {
+                            session_id: r.get(0)?,
+                            current_branch_id: r.get(1)?,
+                            daemon_pid: r.get(2)?,
+                            started_at: timestamp_at(r, 3)?,
+                        })
                     },
                 )
                 .optional()
             })
             .await
             .map_err(MemoryError::sqlite("find_resumable_session"))
-            .map(|row| {
-                row.map(|(id, branch, pid, started)| ResumeCandidate {
-                    session_id: SessionId(id),
-                    current_branch_id: BranchId(branch),
-                    daemon_pid: pid,
-                    started_at: started,
-                })
-            })
     }
 }
 
-fn branch_ref(row: &Row<'_>) -> rusqlite::Result<(String, i64)> {
+/// A `LIKE` pattern (escape char `\`) matching values that start with `prefix` literally,
+/// ignoring ASCII case.
+fn like_prefix_pattern(prefix: &str) -> String {
+    let escaped = prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("{escaped}%")
+}
+
+fn branch_ref(row: &Row<'_>) -> rusqlite::Result<(SessionId, BranchId)> {
     Ok((row.get(0)?, row.get(1)?))
 }
 
-fn turn_summary(row: &Row<'_>) -> rusqlite::Result<TurnSummary> {
-    Ok(TurnSummary {
-        turn_id: row.get(0)?,
-        session_id: row.get(1)?,
-        started_at: row.get(2)?,
-        ended_at: row.get(3)?,
-        user_text: row.get(4)?,
-        message_count: row.get(5)?,
-    })
-}
-
 fn branch_info(row: &Row<'_>) -> rusqlite::Result<BranchInfo> {
-    let parent_id: Option<i64> = row.get(6)?;
-    let is_current: i64 = row.get(11)?;
     Ok(BranchInfo {
-        branch_id: BranchId(row.get(0)?),
+        branch_id: row.get(0)?,
         session_id: row.get(1)?,
-        session_started_at: row.get(2)?,
-        session_ended_at: row.get(3)?,
+        session_started_at: timestamp_at(row, 2)?,
+        session_ended_at: optional_timestamp_at(row, 3)?,
         session_title: row.get(4)?,
         name: row.get(5)?,
-        parent_branch_id: parent_id.map(BranchId),
+        parent_branch_id: row.get(6)?,
         parent_branch_name: row.get(7)?,
         fork_point_seq: row.get(8)?,
-        created_at: row.get(9)?,
+        created_at: timestamp_at(row, 9)?,
         message_count: row.get(10)?,
-        is_current_in_session: is_current != 0,
-        last_active_at: row.get(12)?,
+        is_current_in_session: row.get(11)?,
+        last_active_at: timestamp_at(row, 12)?,
     })
 }
 
-/// Unparseable `tool_calls` JSON becomes `Value::Null` rather than failing the load.
 fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
-    let role_str: String = row.get(2)?;
-    let tool_calls_json: Option<String> = row.get(4)?;
-    let role = PersistedRole::parse(&role_str).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            2,
-            Type::Text,
-            Box::new(std::io::Error::other(format!(
-                "unknown role in DB: {role_str}"
-            ))),
-        )
-    })?;
+    let kind = match row.get(2)? {
+        PersistedRole::User => MessageKind::User,
+        PersistedRole::Assistant => MessageKind::Assistant {
+            reasoning: row.get(7)?,
+            tool_calls: tool_calls_at(row, 4)?,
+        },
+        PersistedRole::Tool => MessageKind::Tool {
+            call_id: row.get(5)?,
+            tool_name: row.get(6)?,
+            outcome: ToolOutcome {
+                exit_code: row.get(8)?,
+                duration_ms: row.get(9)?,
+            },
+        },
+    };
     Ok(HistoryRow {
-        conversation_id: row.get(0)?,
+        message_id: row.get(0)?,
         seq: row.get(1)?,
-        role,
-        content: row.get(3)?,
-        tool_calls: tool_calls_json
-            .map(|json| serde_json::from_str(&json).unwrap_or(serde_json::Value::Null)),
-        tool_call_id: row.get(5)?,
-        tool_name: row.get(6)?,
+        message: PersistedMessage {
+            content: row.get(3)?,
+            kind,
+        },
     })
+}
+
+fn tool_calls_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<serde_json::Value>> {
+    row.get::<_, Option<String>>(idx)?
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(e))
+            })
+        })
+        .transpose()
 }
 
 #[cfg(test)]

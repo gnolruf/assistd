@@ -1,35 +1,40 @@
-//! Vector retrieval over `embeddings` (chunk-keyed) and `memory_embeddings`.
+//! Vector retrieval over `chunk_embeddings` and `memory_embeddings`.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt;
+use std::hash::Hash;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+use rusqlite::Row;
+use rusqlite::types::FromSql;
 
 use super::connection::SqliteHandle;
-use super::conversations::{PersistedRole, SessionId};
+use super::ids::{ChunkId, MemoryId, MessageId, SessionId};
+use super::timestamp::timestamp_at;
+use super::transcripts::PersistedRole;
 use super::writer::{WriteOp, dispatch_write};
 use crate::{MemoryError, Result};
 
-/// One conversation-chunk hit. `content` is the full parent message,
+/// One message-chunk hit. `content` is the full parent message,
 /// not the chunk text, since chunks may cut mid-sentence.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingHit {
-    pub conversation_id: i64,
-    pub chunk_id: i64,
-    pub session_id: String,
-    pub timestamp: String,
+    pub message_id: MessageId,
+    pub chunk_id: ChunkId,
+    pub session_id: SessionId,
+    pub timestamp: DateTime<Utc>,
     pub role: PersistedRole,
     pub content: String,
     pub similarity: f32,
 }
 
 /// One saved-memory hit, ranked by cosine similarity to the query.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MemoryHit {
-    pub memory_id: i64,
+    pub memory_id: MemoryId,
     pub key: String,
     pub value: String,
     pub similarity: f32,
@@ -38,7 +43,7 @@ pub struct MemoryHit {
 /// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
-    /// Top-K conversation chunks by cosine to the L2-normalised `query_vector`.
+    /// Top-K message chunks by cosine to the L2-normalised `query_vector`.
     /// `exclude_session`'s chunks are dropped before ranking, so never count toward `top_k`.
     async fn nearest_chunks(
         &self,
@@ -65,39 +70,37 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Rows with no embedding under `current`, as `(chunks, memories)`.
     async fn count_missing(&self, current: &str) -> Result<(i64, i64)>;
 
-    /// Up to `limit` memories with id above `after` and no embedding under
-    /// `current`, in id order, as `(id, value)`.
+    /// Up to `limit` memories after `after` (from the start when `None`) with no
+    /// embedding under `current`, in id order, as `(id, value)`.
     async fn memories_missing_embedding(
         &self,
         current: &str,
-        after: i64,
+        after: Option<MemoryId>,
         limit: usize,
-    ) -> Result<Vec<(i64, String)>>;
+    ) -> Result<Vec<(MemoryId, String)>>;
 
-    /// Up to `limit` conversation chunks with id above `after` and no
-    /// embedding under `current`, in id order, as `(id, content)`.
+    /// Up to `limit` message chunks after `after` (from the start when `None`) with
+    /// no embedding under `current`, in id order, as `(id, chunk text)`.
     async fn chunks_missing_embedding(
         &self,
         current: &str,
-        after: i64,
+        after: Option<ChunkId>,
         limit: usize,
-    ) -> Result<Vec<(i64, String)>>;
+    ) -> Result<Vec<(ChunkId, String)>>;
 
-    /// Upsert the embedding for a `conversation_chunks` row.
+    /// Upsert the embedding for a `message_chunks` row under `model`.
     async fn store_chunk_embedding(
         &self,
-        chunk_id: i64,
+        chunk_id: ChunkId,
         model: String,
-        dim: i64,
         vector: Vec<u8>,
     ) -> Result<()>;
 
-    /// Upsert the embedding for a `memories` row.
+    /// Upsert the embedding for a `memories` row under `model`.
     async fn store_memory_embedding(
         &self,
-        memory_id: i64,
+        memory_id: MemoryId,
         model: String,
-        dim: i64,
         vector: Vec<u8>,
     ) -> Result<()>;
 }
@@ -137,33 +140,31 @@ impl SemanticStore for NoSemanticStore {
     async fn memories_missing_embedding(
         &self,
         _current: &str,
-        _after: i64,
+        _after: Option<MemoryId>,
         _limit: usize,
-    ) -> Result<Vec<(i64, String)>> {
+    ) -> Result<Vec<(MemoryId, String)>> {
         Ok(Vec::new())
     }
     async fn chunks_missing_embedding(
         &self,
         _current: &str,
-        _after: i64,
+        _after: Option<ChunkId>,
         _limit: usize,
-    ) -> Result<Vec<(i64, String)>> {
+    ) -> Result<Vec<(ChunkId, String)>> {
         Ok(Vec::new())
     }
     async fn store_chunk_embedding(
         &self,
-        _chunk_id: i64,
+        _chunk_id: ChunkId,
         _model: String,
-        _dim: i64,
         _vector: Vec<u8>,
     ) -> Result<()> {
         Ok(())
     }
     async fn store_memory_embedding(
         &self,
-        _memory_id: i64,
+        _memory_id: MemoryId,
         _model: String,
-        _dim: i64,
         _vector: Vec<u8>,
     ) -> Result<()> {
         Ok(())
@@ -184,115 +185,43 @@ impl SqliteSemanticStore {
     }
 
     /// Load the parent messages of `ranked` chunks, keeping rank order.
-    async fn hydrate_chunk_hits(&self, ranked: Vec<(i64, f32)>) -> Result<Vec<EmbeddingHit>> {
-        let chunk_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
-        let similarity_by_id: HashMap<i64, f32> = ranked.into_iter().collect();
+    async fn hydrate_chunk_hits(&self, ranked: Vec<(ChunkId, f32)>) -> Result<Vec<EmbeddingHit>> {
         let sql = format!(
-            "SELECT cc.id, c.id, c.session_id, c.timestamp, c.role, c.content
-             FROM conversation_chunks cc
-             JOIN conversations c ON c.id = cc.conversation_id
+            "SELECT cc.id, m.id, s.uuid, m.created_at, m.role, m.content
+             FROM message_chunks cc
+             JOIN messages m ON m.id = cc.message_id
+             JOIN sessions s ON s.id = m.session_id
              WHERE cc.id IN ({})",
-            placeholders(chunk_ids.len())
+            placeholders(ranked.len())
         );
-        let chunk_ids_for_query = chunk_ids.clone();
-        let rows: Vec<(i64, i64, String, String, String, String)> = self
+        let chunk_ids: Vec<ChunkId> = ranked.iter().map(|(id, _)| *id).collect();
+        let hits = self
             .handle
-            .conn()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare(&sql)?;
-                let rows = stmt
-                    .query_map(rusqlite::params_from_iter(chunk_ids_for_query), |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, String>(5)?,
-                        ))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
+            .reader()
+            .call(move |c| query_by_id(c, &sql, chunk_ids, chunk_hit))
             .await
             .map_err(MemoryError::sqlite("nearest_chunks: hydrate winners"))?;
-        let by_id: HashMap<i64, (i64, String, String, String, String)> = rows
-            .into_iter()
-            .map(
-                |(chunk_id, conversation_id, session_id, timestamp, role, content)| {
-                    (
-                        chunk_id,
-                        (conversation_id, session_id, timestamp, role, content),
-                    )
-                },
-            )
-            .collect();
-        let mut hits = Vec::with_capacity(chunk_ids.len());
-        for chunk_id in chunk_ids {
-            let Some((conversation_id, session_id, timestamp, role_str, content)) =
-                by_id.get(&chunk_id)
-            else {
-                continue;
-            };
-            let role = PersistedRole::parse(role_str)
-                .ok_or_else(|| MemoryError::UnknownRole(role_str.clone()))?;
-            hits.push(EmbeddingHit {
-                conversation_id: *conversation_id,
-                chunk_id,
-                session_id: session_id.clone(),
-                timestamp: timestamp.clone(),
-                role,
-                content: content.clone(),
-                similarity: *similarity_by_id.get(&chunk_id).unwrap_or(&0.0),
-            });
-        }
-        Ok(hits)
+        Ok(in_rank_order(ranked, hits, |hit, similarity| {
+            hit.similarity = similarity;
+        }))
     }
 
     /// Load the `ranked` memories, keeping rank order.
-    async fn hydrate_memory_hits(&self, ranked: Vec<(i64, f32)>) -> Result<Vec<MemoryHit>> {
-        let memory_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
-        let similarity_by_id: HashMap<i64, f32> = ranked.into_iter().collect();
+    async fn hydrate_memory_hits(&self, ranked: Vec<(MemoryId, f32)>) -> Result<Vec<MemoryHit>> {
         let sql = format!(
             "SELECT id, key, value FROM memories WHERE id IN ({})",
-            placeholders(memory_ids.len())
+            placeholders(ranked.len())
         );
-        let memory_ids_for_query = memory_ids.clone();
-        let rows: Vec<(i64, String, String)> = self
+        let memory_ids: Vec<MemoryId> = ranked.iter().map(|(id, _)| *id).collect();
+        let hits = self
             .handle
-            .conn()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare(&sql)?;
-                let rows = stmt
-                    .query_map(rusqlite::params_from_iter(memory_ids_for_query), |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
+            .reader()
+            .call(move |c| query_by_id(c, &sql, memory_ids, memory_hit))
             .await
             .map_err(MemoryError::sqlite("nearest_memories: hydrate winners"))?;
-        let by_id: HashMap<i64, (String, String)> = rows
-            .into_iter()
-            .map(|(id, key, value)| (id, (key, value)))
-            .collect();
-        let mut hits = Vec::with_capacity(memory_ids.len());
-        for id in memory_ids {
-            let Some((key, value)) = by_id.get(&id) else {
-                continue;
-            };
-            hits.push(MemoryHit {
-                memory_id: id,
-                key: key.clone(),
-                value: value.clone(),
-                similarity: *similarity_by_id.get(&id).unwrap_or(&0.0),
-            });
-        }
-        Ok(hits)
+        Ok(in_rank_order(ranked, hits, |hit, similarity| {
+            hit.similarity = similarity;
+        }))
     }
 }
 
@@ -309,18 +238,20 @@ impl SemanticStore for SqliteSemanticStore {
             return Ok(Vec::new());
         }
         let model = model.to_string();
-        let excluded = exclude_session.map(|s| s.0.clone());
+        let excluded = exclude_session.copied();
         let ranked = self
             .handle
-            .conn()
+            .reader()
             .call(move |c| {
                 scan_top_k(
                     c,
-                    "SELECT e.conversation_chunk_id, e.vector
-                     FROM embeddings e
-                     JOIN conversation_chunks cc ON cc.id = e.conversation_chunk_id
-                     JOIN conversations conv ON conv.id = cc.conversation_id
-                     WHERE e.model = ?1 AND (?2 IS NULL OR conv.session_id <> ?2)",
+                    "SELECT e.chunk_id, e.vector
+                     FROM chunk_embeddings e
+                     JOIN embedding_models em ON em.id = e.model_id
+                     JOIN message_chunks cc ON cc.id = e.chunk_id
+                     JOIN messages m ON m.id = cc.message_id
+                     WHERE em.name = ?1
+                       AND m.session_id IS NOT (SELECT id FROM sessions WHERE uuid = ?2)",
                     rusqlite::params![model, excluded],
                     &query_vector,
                     top_k,
@@ -346,11 +277,13 @@ impl SemanticStore for SqliteSemanticStore {
         let model = model.to_string();
         let ranked = self
             .handle
-            .conn()
+            .reader()
             .call(move |c| {
                 scan_top_k(
                     c,
-                    "SELECT memory_id, vector FROM memory_embeddings WHERE model = ?1",
+                    "SELECT e.memory_id, e.vector
+                     FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
+                     WHERE m.name = ?1",
                     rusqlite::params![model],
                     &query_vector,
                     top_k,
@@ -369,15 +302,19 @@ impl SemanticStore for SqliteSemanticStore {
     async fn count_for_model(&self, model: &str) -> Result<(i64, i64)> {
         let model = model.to_string();
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let chunks: i64 = c.query_row(
-                    "SELECT count(*) FROM embeddings WHERE model = ?1",
+                    "SELECT count(*)
+                     FROM chunk_embeddings e JOIN embedding_models m ON m.id = e.model_id
+                     WHERE m.name = ?1",
                     rusqlite::params![model],
                     |r| r.get(0),
                 )?;
                 let memories: i64 = c.query_row(
-                    "SELECT count(*) FROM memory_embeddings WHERE model = ?1",
+                    "SELECT count(*)
+                     FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
+                     WHERE m.name = ?1",
                     rusqlite::params![model],
                     |r| r.get(0),
                 )?;
@@ -390,15 +327,17 @@ impl SemanticStore for SqliteSemanticStore {
     async fn count_stale(&self, current: &str) -> Result<(i64, Vec<String>)> {
         let current = current.to_string();
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut total: i64 = 0;
                 let mut models = BTreeSet::new();
-                let sql = "SELECT model, count(*)
-                           FROM embeddings WHERE model != ?1 GROUP BY model
+                let sql = "SELECT m.name, count(*)
+                           FROM chunk_embeddings e JOIN embedding_models m ON m.id = e.model_id
+                           WHERE m.name != ?1 GROUP BY m.name
                            UNION ALL
-                           SELECT model, count(*)
-                           FROM memory_embeddings WHERE model != ?1 GROUP BY model";
+                           SELECT m.name, count(*)
+                           FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
+                           WHERE m.name != ?1 GROUP BY m.name";
                 let mut stmt = c.prepare(sql)?;
                 let rows = stmt.query_map(rusqlite::params![current], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -417,23 +356,27 @@ impl SemanticStore for SqliteSemanticStore {
     async fn count_missing(&self, current: &str) -> Result<(i64, i64)> {
         let current = current.to_string();
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let chunks: i64 = c.query_row(
                     "SELECT count(*)
-                     FROM conversation_chunks cc
-                     LEFT JOIN embeddings e
-                       ON e.conversation_chunk_id = cc.id AND e.model = ?1
-                     WHERE e.id IS NULL",
+                     FROM message_chunks cc
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM chunk_embeddings e
+                         JOIN embedding_models m ON m.id = e.model_id
+                         WHERE e.chunk_id = cc.id AND m.name = ?1
+                     )",
                     rusqlite::params![current],
                     |r| r.get(0),
                 )?;
                 let memories: i64 = c.query_row(
                     "SELECT count(*)
-                     FROM memories m
-                     LEFT JOIN memory_embeddings e
-                       ON e.memory_id = m.id AND e.model = ?1
-                     WHERE e.id IS NULL",
+                     FROM memories mem
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM memory_embeddings e
+                         JOIN embedding_models m ON m.id = e.model_id
+                         WHERE e.memory_id = mem.id AND m.name = ?1
+                     )",
                     rusqlite::params![current],
                     |r| r.get(0),
                 )?;
@@ -446,26 +389,28 @@ impl SemanticStore for SqliteSemanticStore {
     async fn memories_missing_embedding(
         &self,
         current: &str,
-        after: i64,
+        after: Option<MemoryId>,
         limit: usize,
-    ) -> Result<Vec<(i64, String)>> {
+    ) -> Result<Vec<(MemoryId, String)>> {
         let current = current.to_string();
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
-                    "SELECT m.id, m.value
-                     FROM memories m
-                     LEFT JOIN memory_embeddings e
-                       ON e.memory_id = m.id AND e.model = ?1
-                     WHERE e.id IS NULL AND m.id > ?2
-                     ORDER BY m.id
+                    "SELECT mem.id, mem.value
+                     FROM memories mem
+                     WHERE mem.id > ifnull(?2, 0) AND NOT EXISTS (
+                         SELECT 1 FROM memory_embeddings e
+                         JOIN embedding_models m ON m.id = e.model_id
+                         WHERE e.memory_id = mem.id AND m.name = ?1
+                     )
+                     ORDER BY mem.id
                      LIMIT ?3",
                 )?;
                 let rows = stmt
                     .query_map(rusqlite::params![current, after, limit], |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                        Ok((r.get(0)?, r.get(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(rows)
@@ -477,26 +422,31 @@ impl SemanticStore for SqliteSemanticStore {
     async fn chunks_missing_embedding(
         &self,
         current: &str,
-        after: i64,
+        after: Option<ChunkId>,
         limit: usize,
-    ) -> Result<Vec<(i64, String)>> {
+    ) -> Result<Vec<(ChunkId, String)>> {
         let current = current.to_string();
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
-                    "SELECT cc.id, cc.content
-                     FROM conversation_chunks cc
-                     LEFT JOIN embeddings e
-                       ON e.conversation_chunk_id = cc.id AND e.model = ?1
-                     WHERE e.id IS NULL AND cc.id > ?2
+                    "SELECT cc.id,
+                            CAST(substr(CAST(msg.content AS BLOB), cc.byte_start + 1,
+                                        cc.byte_end - cc.byte_start) AS TEXT)
+                     FROM message_chunks cc
+                     JOIN messages msg ON msg.id = cc.message_id
+                     WHERE cc.id > ifnull(?2, 0) AND NOT EXISTS (
+                         SELECT 1 FROM chunk_embeddings e
+                         JOIN embedding_models m ON m.id = e.model_id
+                         WHERE e.chunk_id = cc.id AND m.name = ?1
+                     )
                      ORDER BY cc.id
                      LIMIT ?3",
                 )?;
                 let rows = stmt
                     .query_map(rusqlite::params![current, after, limit], |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                        Ok((r.get(0)?, r.get(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(rows)
@@ -507,15 +457,13 @@ impl SemanticStore for SqliteSemanticStore {
 
     async fn store_chunk_embedding(
         &self,
-        chunk_id: i64,
+        chunk_id: ChunkId,
         model: String,
-        dim: i64,
         vector: Vec<u8>,
     ) -> Result<()> {
         dispatch_write(self.handle.writer(), |ack| WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
-            dim,
             vector,
             ack,
         })
@@ -524,15 +472,13 @@ impl SemanticStore for SqliteSemanticStore {
 
     async fn store_memory_embedding(
         &self,
-        memory_id: i64,
+        memory_id: MemoryId,
         model: String,
-        dim: i64,
         vector: Vec<u8>,
     ) -> Result<()> {
         dispatch_write(self.handle.writer(), |ack| WriteOp::StoreMemoryEmbedding {
             memory_id,
             model,
-            dim,
             vector,
             ack,
         })
@@ -542,67 +488,121 @@ impl SemanticStore for SqliteSemanticStore {
 
 /// Ordered in reverse by similarity so `BinaryHeap` acts as a min-heap. Only finite
 /// similarities are ever pushed, so `total_cmp` agrees with `>` on every entry.
-struct HeapEntry {
+struct HeapEntry<Id> {
     similarity: f32,
-    rowid: i64,
+    id: Id,
 }
 
-impl PartialEq for HeapEntry {
+impl<Id> PartialEq for HeapEntry<Id> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
-impl Eq for HeapEntry {}
-impl PartialOrd for HeapEntry {
+impl<Id> Eq for HeapEntry<Id> {}
+impl<Id> PartialOrd for HeapEntry<Id> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl Ord for HeapEntry {
+impl<Id> Ord for HeapEntry<Id> {
     fn cmp(&self, other: &Self) -> Ordering {
         other.similarity.total_cmp(&self.similarity)
     }
 }
 
-fn scan_top_k(
+fn scan_top_k<Id: FromSql>(
     conn: &rusqlite::Connection,
     sql: &str,
     params: impl rusqlite::Params,
     query: &[f32],
     top_k: usize,
-) -> rusqlite::Result<Vec<(i64, f32)>> {
-    let mut stmt = conn.prepare(sql)?;
+) -> rusqlite::Result<Vec<(Id, f32)>> {
+    let mut stmt = conn.prepare_cached(sql)?;
     let mut heap = BinaryHeap::new();
     let mut rows = stmt.query(params)?;
     while let Some(row) = rows.next()? {
-        let rowid: i64 = row.get(0)?;
-        let bytes: Vec<u8> = row.get(1)?;
-        if let Some(similarity) = score_against(query, &bytes) {
-            push_top_k(&mut heap, top_k, rowid, similarity);
+        let bytes = row.get_ref(1)?.as_blob()?;
+        if let Some(similarity) = score_against(query, bytes) {
+            push_top_k(&mut heap, top_k, row.get(0)?, similarity);
         }
     }
     Ok(heap_to_sorted(heap))
+}
+
+/// Rows of `sql` (whose `IN` list binds `ids`) keyed by the id in column 0.
+fn query_by_id<Id, T>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    ids: Vec<Id>,
+    to_hit: fn(&Row<'_>) -> rusqlite::Result<T>,
+) -> rusqlite::Result<HashMap<Id, T>>
+where
+    Id: FromSql + rusqlite::ToSql + Eq + Hash,
+{
+    let mut stmt = conn.prepare(sql)?;
+    stmt.query_map(rusqlite::params_from_iter(ids), |row| {
+        Ok((row.get(0)?, to_hit(row)?))
+    })?
+    .collect()
+}
+
+/// `hits` reordered to follow `ranked`, each given its score by `set_similarity`;
+/// ids with no hit (deleted since the scan) are skipped.
+fn in_rank_order<Id: Eq + Hash, T>(
+    ranked: Vec<(Id, f32)>,
+    mut hits: HashMap<Id, T>,
+    set_similarity: fn(&mut T, f32),
+) -> Vec<T> {
+    ranked
+        .into_iter()
+        .filter_map(|(id, similarity)| {
+            let mut hit = hits.remove(&id)?;
+            set_similarity(&mut hit, similarity);
+            Some(hit)
+        })
+        .collect()
+}
+
+fn chunk_hit(row: &Row<'_>) -> rusqlite::Result<EmbeddingHit> {
+    Ok(EmbeddingHit {
+        chunk_id: row.get(0)?,
+        message_id: row.get(1)?,
+        session_id: row.get(2)?,
+        timestamp: timestamp_at(row, 3)?,
+        role: row.get(4)?,
+        content: row.get(5)?,
+        similarity: 0.0,
+    })
+}
+
+fn memory_hit(row: &Row<'_>) -> rusqlite::Result<MemoryHit> {
+    Ok(MemoryHit {
+        memory_id: row.get(0)?,
+        key: row.get(1)?,
+        value: row.get(2)?,
+        similarity: 0.0,
+    })
 }
 
 fn placeholders(count: usize) -> String {
     vec!["?"; count].join(",")
 }
 
-fn push_top_k(heap: &mut BinaryHeap<HeapEntry>, top_k: usize, rowid: i64, similarity: f32) {
+fn push_top_k<Id>(heap: &mut BinaryHeap<HeapEntry<Id>>, top_k: usize, id: Id, similarity: f32) {
     if heap.len() < top_k {
-        heap.push(HeapEntry { similarity, rowid });
+        heap.push(HeapEntry { similarity, id });
     } else if let Some(weakest) = heap.peek()
         && similarity > weakest.similarity
     {
         heap.pop();
-        heap.push(HeapEntry { similarity, rowid });
+        heap.push(HeapEntry { similarity, id });
     }
 }
 
-fn heap_to_sorted(heap: BinaryHeap<HeapEntry>) -> Vec<(i64, f32)> {
-    let mut ranked: Vec<(i64, f32)> = heap
+fn heap_to_sorted<Id>(heap: BinaryHeap<HeapEntry<Id>>) -> Vec<(Id, f32)> {
+    let mut ranked: Vec<(Id, f32)> = heap
         .into_iter()
-        .map(|entry| (entry.rowid, entry.similarity))
+        .map(|entry| (entry.id, entry.similarity))
         .collect();
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
     ranked

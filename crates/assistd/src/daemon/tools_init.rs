@@ -72,7 +72,7 @@ pub(super) fn init(
         vision_gate: deps.vision_gate,
         memory_ops: Arc::new(MemoryOps::new(
             deps.memory.memory_store.clone(),
-            deps.memory.conversation_store.clone(),
+            deps.memory.transcript_store.clone(),
         )),
         embedder: deps.embed.embedder.clone(),
         semantic: deps.embed.semantic_store.clone(),

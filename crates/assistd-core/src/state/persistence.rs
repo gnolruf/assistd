@@ -1,5 +1,6 @@
 //! Fire-and-forget message persistence and its bounded drain.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,8 +9,8 @@ use tracing::warn;
 
 use assistd_embed::{EmbedJob, enqueue_embed_job};
 use assistd_memory::{
-    BranchId, ChunkingConfig, PersistedMessage, PersistedRole, SessionId, SqliteHandle, TurnId,
-    chunk_message,
+    BranchId, ChunkingConfig, MessageId, MessageKind, PersistedMessage, SessionId, SqliteHandle,
+    TurnId, chunk_ranges,
 };
 
 use super::AppState;
@@ -17,27 +18,24 @@ use super::AppState;
 const PERSISTENCE_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const PERSISTENCE_DRAIN_POLL: Duration = Duration::from_millis(5);
 
-/// Row id [`assistd_memory::NoConversationStore`] returns for a message it
-/// did not store.
-const UNSTORED_ROW_ID: i64 = 0;
+/// Id [`assistd_memory::NoTranscriptStore`] returns for a message it did not store.
+const UNSTORED_MESSAGE_ID: MessageId = MessageId(0);
 
 impl AppState {
     /// The active session and branch, inserting the session and its `main`
     /// branch first when the session is still unsaved.
-    pub(super) async fn saved_conversation(
-        &self,
-    ) -> assistd_memory::Result<(Arc<SessionId>, BranchId)> {
-        let (session, branch) = self.runtime.conversation_ctx.current().await;
+    pub(super) async fn saved_session(&self) -> assistd_memory::Result<(Arc<SessionId>, BranchId)> {
+        let (session, branch) = self.runtime.session_ctx.current().await;
         if let Some(branch) = branch {
             return Ok((session, branch));
         }
         let branch = self
             .memory
-            .conversations
+            .transcripts
             .begin_session_with_main_branch(&session, std::process::id())
             .await?;
         self.runtime
-            .conversation_ctx
+            .session_ctx
             .replace(session.clone(), Some(branch))
             .await;
         Ok((session, branch))
@@ -54,17 +52,16 @@ impl AppState {
         turn: Option<TurnId>,
         msg: PersistedMessage,
     ) {
-        let conversations = self.memory.conversations.clone();
-        let conversation_ctx = self.runtime.conversation_ctx.clone();
+        let transcripts = self.memory.transcripts.clone();
+        let session_ctx = self.runtime.session_ctx.clone();
         let embed_tx = self.memory.embed_tx.clone();
         let chunk_target = self.chunk_target(&msg);
-        let (landed_tx, landed_rx) = oneshot::channel();
-        let previous = self.runtime.persist_chain.lock().replace(landed_rx);
+        let (previous, landed_tx) = self.join_persist_chain();
         self.runtime.persistence_tracker.spawn(async move {
             if let Some(previous) = previous {
                 let _ = previous.await;
             }
-            let (session, branch) = conversation_ctx.current().await;
+            let (session, branch) = session_ctx.current().await;
             let Some(branch) = branch else {
                 warn!(
                     target: "assistd::memory",
@@ -72,11 +69,11 @@ impl AppState {
                 );
                 return;
             };
-            let append = conversations
+            let append = transcripts
                 .append_message_to_branch(&session, branch, turn, msg)
                 .await;
             let _ = landed_tx.send(());
-            let row_id = match append {
+            let message_id = match append {
                 Ok(id) => id,
                 Err(e) => {
                     warn!(
@@ -88,18 +85,62 @@ impl AppState {
                 }
             };
             if let Some((chunks, content)) = chunk_target
-                && row_id != UNSTORED_ROW_ID
+                && message_id != UNSTORED_MESSAGE_ID
             {
-                store_and_queue_chunks(&chunks, &embed_tx, row_id, &content).await;
+                store_and_queue_chunks(&chunks, &embed_tx, message_id, &content).await;
             }
         });
+    }
+
+    /// Record `summary` as the active branch's compaction summary on a
+    /// background task, ordered after every message persisted before it.
+    pub(super) fn persist_summary_fire_and_forget(
+        &self,
+        summary: String,
+        kept_turns: NonZeroUsize,
+    ) {
+        let transcripts = self.memory.transcripts.clone();
+        let session_ctx = self.runtime.session_ctx.clone();
+        let (previous, landed_tx) = self.join_persist_chain();
+        self.runtime.persistence_tracker.spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            let (_, branch) = session_ctx.current().await;
+            let Some(branch) = branch else {
+                warn!(
+                    target: "assistd::memory",
+                    "session is unsaved; dropping compaction summary"
+                );
+                return;
+            };
+            let record = transcripts
+                .record_branch_summary(branch, summary, kept_turns)
+                .await;
+            let _ = landed_tx.send(());
+            if let Err(e) = record {
+                warn!(
+                    target: "assistd::memory",
+                    error = %e,
+                    "failed to persist compaction summary (continuing)"
+                );
+            }
+        });
+    }
+
+    /// Take the next place in `runtime.persist_chain`: the predecessor's
+    /// completion signal to await, and this write's own to fire once it lands.
+    fn join_persist_chain(&self) -> (Option<oneshot::Receiver<()>>, oneshot::Sender<()>) {
+        let (landed_tx, landed_rx) = oneshot::channel();
+        let previous = self.runtime.persist_chain.lock().replace(landed_rx);
+        (previous, landed_tx)
     }
 
     /// The chunk store and text to chunk for `msg`, or `None` when it
     /// should not be embedded.
     fn chunk_target(&self, msg: &PersistedMessage) -> Option<(Arc<SqliteHandle>, String)> {
         let embeddable = self.memory.embedding_cfg.enabled
-            && matches!(msg.role, PersistedRole::User | PersistedRole::Assistant)
+            && matches!(msg.kind, MessageKind::User | MessageKind::Assistant { .. })
             && !msg.content.is_empty();
         let chunks = self.memory.chunks.clone().filter(|_| embeddable)?;
         Some((chunks, msg.content.clone()))
@@ -125,33 +166,17 @@ impl AppState {
 async fn store_and_queue_chunks(
     chunks: &SqliteHandle,
     embed_tx: &mpsc::Sender<EmbedJob>,
-    row_id: i64,
+    message_id: MessageId,
     content: &str,
 ) {
-    for (idx, chunk) in chunk_message(content, &ChunkingConfig::default())
-        .into_iter()
-        .enumerate()
-    {
-        match chunks
-            .store_chunk(
-                row_id,
-                i64::try_from(idx).unwrap_or(i64::MAX),
-                chunk.clone(),
-                None,
-            )
-            .await
-        {
-            Ok(chunk_id) => enqueue_embed_job(
-                embed_tx,
-                EmbedJob::Chunk {
-                    chunk_id,
-                    text: chunk,
-                },
-            ),
+    for bytes in chunk_ranges(content, &ChunkingConfig::default()) {
+        let text = content[bytes.clone()].to_string();
+        match chunks.store_chunk(message_id, bytes.clone()).await {
+            Ok(chunk_id) => enqueue_embed_job(embed_tx, EmbedJob::Chunk { chunk_id, text }),
             Err(e) => warn!(
                 target: "assistd::memory",
-                conversation_id = row_id,
-                chunk_index = idx,
+                %message_id,
+                byte_start = bytes.start,
                 error = %e,
                 "failed to persist chunk (continuing)"
             ),

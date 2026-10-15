@@ -139,10 +139,7 @@ fn untrusted_text_cannot_carry_chat_template_tokens() {
 #[test]
 fn wire_carries_a_single_leading_system_message() {
     let mut c = Conversation::new("sys".into());
-    c.replace_messages(vec![message(
-        Role::System,
-        &format!("{SUMMARY_PREFIX}earlier talk"),
-    )]);
+    c.replace_messages(Some("earlier talk"), Vec::new());
     c.push_user("one".into());
     c.push_assistant("two".into());
     c.set_transient_context("ctx".into());
@@ -156,6 +153,22 @@ fn wire_carries_a_single_leading_system_message() {
             "sys\n\n[Conversation summary] earlier talk".into()
         ))
     );
+}
+
+#[test]
+fn summary_snapshot_restores_through_replace_messages() {
+    let mut c = Conversation::new("sys".into());
+    c.replace_messages(
+        Some("earlier talk"),
+        vec![
+            message(Role::User, "one"),
+            message(Role::Assistant, "two"),
+            message(Role::User, "three"),
+            message(Role::User, &format!("{TOOL_RESULT_PREFIX}see]\nimage")),
+        ],
+    );
+    let (summary, kept_turns) = c.summary_snapshot().unwrap();
+    assert_eq!((summary, kept_turns.get()), ("earlier talk", 2));
 }
 
 #[test]
@@ -703,6 +716,6 @@ fn calibration_shifts_the_estimate_by_the_measured_error() {
     c.calibrate(c.heuristic_tokens(), 3);
     assert_eq!(c.approx_total_tokens(), 3);
 
-    c.replace_messages(Vec::new());
+    c.replace_messages(None, Vec::new());
     assert_eq!(c.approx_total_tokens(), c.heuristic_tokens());
 }

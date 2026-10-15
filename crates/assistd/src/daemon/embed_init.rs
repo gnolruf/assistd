@@ -299,7 +299,7 @@ async fn warn_if_missing_rows(semantic: &dyn SemanticStore, model_name: &str) {
     match semantic.count_missing(model_name).await {
         Ok((chunks, memories)) if chunks + memories > 0 => {
             tracing::warn!(
-                "embedding: {chunks} conversation chunks and {memories} memories have no \
+                "embedding: {chunks} transcript chunks and {memories} memories have no \
                  {model_name} embedding and are invisible to semantic recall; \
                  run `assistd memory reindex` to index them"
             );

@@ -1,15 +1,18 @@
 //! Single-writer task for the SQLite store: every mutation is a [`WriteOp`]
 //! carrying a `oneshot` ack, executed in order by the one task that owns writes.
 
+use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::time::Duration;
 
-use chrono::Utc;
 use rusqlite::{OptionalExtension, Transaction};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
-use super::conversations::{BranchId, PersistedMessage, TurnId, UndoOutcome};
+use super::ids::{BranchId, ChunkId, MemoryId, MessageId, SessionId, TurnId};
+use super::timestamp::now_millis;
+use super::transcripts::{MessageKind, PersistedMessage, PersistedRole, UndoOutcome};
 use crate::{MemoryError, Result};
 
 const DRAIN_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -18,24 +21,18 @@ const DRAIN_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub enum WriteOp {
     EndSession {
-        session_id: String,
+        session_id: SessionId,
         ack: oneshot::Sender<Result<()>>,
     },
     BeginTurn {
-        session_id: String,
-        user_text: String,
+        session_id: SessionId,
         ack: oneshot::Sender<Result<TurnId>>,
-    },
-    EndTurn {
-        turn_id: TurnId,
-        ack: oneshot::Sender<Result<()>>,
     },
     /// Upsert a memory by key; acks the row id.
     SaveMemory {
         key: String,
         value: String,
-        source_conversation_id: Option<i64>,
-        ack: oneshot::Sender<Result<i64>>,
+        ack: oneshot::Sender<Result<MemoryId>>,
     },
     DeleteMemory {
         key: String,
@@ -43,51 +40,47 @@ pub enum WriteOp {
     },
     /// Delete a memory (and, by cascade, its embedding) by row id; acks the deleted key.
     DeleteMemoryById {
-        id: i64,
+        id: MemoryId,
         ack: oneshot::Sender<Result<Option<String>>>,
     },
-    /// Upsert one chunk of a conversation message; acks the chunk id.
+    /// Upsert the chunk at byte range `bytes` of a message; acks the chunk id.
     StoreChunk {
-        conversation_id: i64,
-        chunk_index: i64,
-        content: String,
-        token_count: Option<i64>,
-        ack: oneshot::Sender<Result<i64>>,
+        message_id: MessageId,
+        bytes: Range<usize>,
+        ack: oneshot::Sender<Result<ChunkId>>,
     },
-    /// Upsert the embedding for a `conversation_chunks` row.
+    /// Upsert the embedding for a `message_chunks` row.
     StoreChunkEmbedding {
-        chunk_id: i64,
+        chunk_id: ChunkId,
         model: String,
-        dim: i64,
         vector: Vec<u8>,
         ack: oneshot::Sender<Result<()>>,
     },
     /// Upsert the embedding for a `memories` row.
     StoreMemoryEmbedding {
-        memory_id: i64,
+        memory_id: MemoryId,
         model: String,
-        dim: i64,
         vector: Vec<u8>,
         ack: oneshot::Sender<Result<()>>,
     },
     /// Begin a session and create its `main` branch in one transaction.
     BeginSessionWithMainBranch {
-        session_id: String,
+        session_id: SessionId,
         daemon_pid: u32,
         ack: oneshot::Sender<Result<BranchId>>,
     },
     SetCurrentBranch {
-        session_id: String,
+        session_id: SessionId,
         branch_id: BranchId,
         ack: oneshot::Sender<Result<()>>,
     },
     /// Append `msg` and reference it from `branch_messages` in one transaction.
     AppendMessageToBranch {
-        session_id: String,
+        session_id: SessionId,
         branch_id: BranchId,
         turn_id: Option<TurnId>,
         msg: PersistedMessage,
-        ack: oneshot::Sender<Result<i64>>,
+        ack: oneshot::Sender<Result<MessageId>>,
     },
     /// Create a branch referencing every message on `src`; acks the new id.
     ForkBranch {
@@ -95,12 +88,20 @@ pub enum WriteOp {
         new_name: String,
         ack: oneshot::Sender<Result<BranchId>>,
     },
+    /// Upsert the branch's summary of everything before its `kept_turns`
+    /// most recent user messages.
+    RecordBranchSummary {
+        branch_id: BranchId,
+        summary: String,
+        kept_turns: NonZeroUsize,
+        ack: oneshot::Sender<Result<()>>,
+    },
     UndoLastTurn {
         branch_id: BranchId,
         ack: oneshot::Sender<Result<UndoOutcome>>,
     },
     SetSessionTitle {
-        session_id: String,
+        session_id: SessionId,
         title: String,
         ack: oneshot::Sender<Result<()>>,
     },
@@ -165,52 +166,32 @@ async fn drain_queue(conn: &Connection, rx: &mut mpsc::Receiver<WriteOp>) {
 async fn execute(conn: &Connection, op: WriteOp) {
     match op {
         WriteOp::EndSession { session_id, ack } => reply(ack, end_session(conn, session_id).await),
-        WriteOp::BeginTurn {
-            session_id,
-            user_text,
-            ack,
-        } => reply(ack, begin_turn(conn, session_id, user_text).await),
-        WriteOp::EndTurn { turn_id, ack } => reply(ack, end_turn(conn, turn_id).await),
-        WriteOp::SaveMemory {
-            key,
-            value,
-            source_conversation_id,
-            ack,
-        } => reply(
-            ack,
-            save_memory(conn, key, value, source_conversation_id).await,
-        ),
+        WriteOp::BeginTurn { session_id, ack } => reply(ack, begin_turn(conn, session_id).await),
+        WriteOp::SaveMemory { key, value, ack } => reply(ack, save_memory(conn, key, value).await),
         WriteOp::DeleteMemory { key, ack } => reply(ack, delete_memory(conn, key).await),
         WriteOp::DeleteMemoryById { id, ack } => reply(ack, delete_memory_by_id(conn, id).await),
         WriteOp::StoreChunk {
-            conversation_id,
-            chunk_index,
-            content,
-            token_count,
+            message_id,
+            bytes,
             ack,
-        } => reply(
-            ack,
-            store_chunk(conn, conversation_id, chunk_index, content, token_count).await,
-        ),
+        } => reply(ack, store_chunk(conn, message_id, bytes).await),
         WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
-            dim,
             vector,
             ack,
         } => reply(
             ack,
-            store_chunk_embedding(conn, chunk_id, model, dim, vector).await,
+            store_embedding(conn, EmbeddingOwner::Chunk(chunk_id), model, vector).await,
         ),
         WriteOp::StoreMemoryEmbedding {
             memory_id,
             model,
-            dim,
             vector,
             ack,
         } => reply(
             ack,
-            store_memory_embedding(conn, memory_id, model, dim, vector).await,
+            store_embedding(conn, EmbeddingOwner::Memory(memory_id), model, vector).await,
         ),
         WriteOp::BeginSessionWithMainBranch {
             session_id,
@@ -240,6 +221,15 @@ async fn execute(conn: &Connection, op: WriteOp) {
             new_name,
             ack,
         } => reply(ack, fork_branch(conn, src_branch_id, new_name).await),
+        WriteOp::RecordBranchSummary {
+            branch_id,
+            summary,
+            kept_turns,
+            ack,
+        } => reply(
+            ack,
+            record_branch_summary(conn, branch_id, summary, kept_turns).await,
+        ),
         WriteOp::UndoLastTurn { branch_id, ack } => {
             reply(ack, undo_last_turn(conn, branch_id).await);
         }
@@ -251,14 +241,36 @@ async fn execute(conn: &Connection, op: WriteOp) {
     }
 }
 
+/// The row an embedding belongs to.
+#[derive(Debug, Clone, Copy)]
+enum EmbeddingOwner {
+    Chunk(ChunkId),
+    Memory(MemoryId),
+}
+
+impl EmbeddingOwner {
+    fn id(self) -> i64 {
+        match self {
+            EmbeddingOwner::Chunk(ChunkId(id)) | EmbeddingOwner::Memory(MemoryId(id)) => id,
+        }
+    }
+
+    fn op_label(self) -> &'static str {
+        match self {
+            EmbeddingOwner::Chunk(_) => "store_chunk_embedding",
+            EmbeddingOwner::Memory(_) => "store_memory_embedding",
+        }
+    }
+}
+
 fn reply<T>(ack: oneshot::Sender<Result<T>>, result: Result<T>) {
     let _ = ack.send(result);
 }
 
-async fn set_session_title(conn: &Connection, session_id: String, title: String) -> Result<()> {
+async fn set_session_title(conn: &Connection, session_id: SessionId, title: String) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
-            "UPDATE sessions SET title = ?1 WHERE id = ?2",
+            "UPDATE sessions SET title = ?1 WHERE uuid = ?2",
             rusqlite::params![title, session_id],
         )?;
         Ok(())
@@ -267,11 +279,11 @@ async fn set_session_title(conn: &Connection, session_id: String, title: String)
     .map_err(MemoryError::sqlite("set_session_title"))
 }
 
-async fn end_session(conn: &Connection, id: String) -> Result<()> {
-    let ended = Utc::now().to_rfc3339();
+async fn end_session(conn: &Connection, id: SessionId) -> Result<()> {
+    let ended = now_millis();
     conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
-            "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+            "UPDATE sessions SET ended_at = ?1 WHERE uuid = ?2",
             rusqlite::params![ended, id],
         )?;
         Ok(())
@@ -280,76 +292,55 @@ async fn end_session(conn: &Connection, id: String) -> Result<()> {
     .map_err(MemoryError::sqlite("end_session"))
 }
 
-async fn begin_turn(conn: &Connection, session: String, user_text: String) -> Result<TurnId> {
-    let started = Utc::now().to_rfc3339();
-    let id = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            c.execute(
-                "INSERT INTO turns (session_id, started_at, user_text) VALUES (?1, ?2, ?3)",
-                rusqlite::params![session, started, user_text],
-            )?;
-            Ok(c.last_insert_rowid())
-        })
-        .await
-        .map_err(MemoryError::sqlite("begin_turn"))?;
-    Ok(TurnId(id))
-}
-
-async fn end_turn(conn: &Connection, turn: TurnId) -> Result<()> {
-    let ended = Utc::now().to_rfc3339();
+async fn begin_turn(conn: &Connection, session: SessionId) -> Result<TurnId> {
     conn.call(move |c| -> rusqlite::Result<_> {
-        c.execute(
-            "UPDATE turns SET ended_at = ?1 WHERE id = ?2",
-            rusqlite::params![ended, turn.0],
-        )?;
-        Ok(())
+        c.query_row(
+            "INSERT INTO turns (session_id)
+             SELECT id FROM sessions WHERE uuid = ?1
+             RETURNING id",
+            rusqlite::params![session],
+            |r| r.get(0),
+        )
     })
     .await
-    .map_err(MemoryError::sqlite("end_turn"))
+    .map_err(MemoryError::sqlite("begin_turn"))
 }
 
-/// Upserts by key; a changed value also drops the row's embedding so the
-/// backfill re-indexes it instead of serving the old value's vector.
-async fn save_memory(
-    conn: &Connection,
-    key: String,
-    value: String,
-    source: Option<i64>,
-) -> Result<i64> {
-    let now = Utc::now().to_rfc3339();
-    let id = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            let tx = c.transaction()?;
-            let previous_value: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM memories WHERE key = ?1",
-                    rusqlite::params![key],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let id: i64 = tx.query_row(
-                "INSERT INTO memories (key, value, source_conversation_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
+/// Upserts by key; a changed value bumps `updated_at` and drops the row's
+/// embedding so the backfill re-indexes it instead of serving the old value's vector.
+async fn save_memory(conn: &Connection, key: String, value: String) -> Result<MemoryId> {
+    let now = now_millis();
+    conn.call(move |c| -> rusqlite::Result<_> {
+        let tx = c.transaction()?;
+        let previous_value: Option<String> = tx
+            .query_row(
+                "SELECT value FROM memories WHERE key = ?1",
+                rusqlite::params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let id: MemoryId = tx.query_row(
+            "INSERT INTO memories (key, value, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)
                  ON CONFLICT(key) DO UPDATE SET
                      value = excluded.value,
-                     source_conversation_id = excluded.source_conversation_id,
-                     updated_at = excluded.updated_at
+                     updated_at = CASE WHEN value = excluded.value
+                                       THEN updated_at
+                                       ELSE MAX(excluded.updated_at, created_at) END
                  RETURNING id",
-                rusqlite::params![key, value, source, now],
-                |r| r.get(0),
+            rusqlite::params![key, value, now],
+            |r| r.get(0),
+        )?;
+        if previous_value.is_some_and(|previous| previous != value) {
+            tx.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+                rusqlite::params![id],
             )?;
-            if previous_value.is_some_and(|previous| previous != value) {
-                tx.execute(
-                    "DELETE FROM memory_embeddings WHERE memory_id = ?1",
-                    rusqlite::params![id],
-                )?;
-            }
-            tx.commit()?;
-            Ok(id)
-        })
-        .await
-        .map_err(MemoryError::sqlite("save_memory"))?;
-    Ok(id)
+        }
+        tx.commit()?;
+        Ok(id)
+    })
+    .await
+    .map_err(MemoryError::sqlite("save_memory"))
 }
 
 async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
@@ -364,7 +355,7 @@ async fn delete_memory(conn: &Connection, key: String) -> Result<()> {
     .map_err(MemoryError::sqlite("delete_memory"))
 }
 
-async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String>> {
+async fn delete_memory_by_id(conn: &Connection, id: MemoryId) -> Result<Option<String>> {
     conn.call(move |c| -> rusqlite::Result<_> {
         let key = c
             .query_row(
@@ -382,121 +373,104 @@ async fn delete_memory_by_id(conn: &Connection, id: i64) -> Result<Option<String
 
 async fn store_chunk(
     conn: &Connection,
-    conversation_id: i64,
-    chunk_index: i64,
-    content: String,
-    token_count: Option<i64>,
-) -> Result<i64> {
-    let id = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            let id: i64 = c.query_row(
-                "INSERT INTO conversation_chunks (conversation_id, chunk_index, content, token_count)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(conversation_id, chunk_index) DO UPDATE SET
-                     content = excluded.content,
-                     token_count = excluded.token_count
-                 RETURNING id",
-                rusqlite::params![conversation_id, chunk_index, content, token_count],
-                |r| r.get(0),
-            )?;
-            Ok(id)
-        })
-        .await
-        .map_err(MemoryError::sqlite("store_chunk"))?;
-    Ok(id)
-}
-
-async fn store_chunk_embedding(
-    conn: &Connection,
-    chunk_id: i64,
-    model: String,
-    dim: i64,
-    vector: Vec<u8>,
-) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
+    message_id: MessageId,
+    bytes: Range<usize>,
+) -> Result<ChunkId> {
+    let byte_start = i64::try_from(bytes.start).unwrap_or(i64::MAX);
+    let byte_end = i64::try_from(bytes.end).unwrap_or(i64::MAX);
     conn.call(move |c| -> rusqlite::Result<_> {
-        c.execute(
-            "INSERT INTO embeddings (conversation_chunk_id, model, dim, vector, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(conversation_chunk_id) DO UPDATE SET
-                 model = excluded.model,
-                 dim = excluded.dim,
-                 vector = excluded.vector,
-                 created_at = excluded.created_at",
-            rusqlite::params![chunk_id, model, dim, vector, now],
-        )?;
-        Ok(())
+        c.query_row(
+            "INSERT INTO message_chunks (message_id, byte_start, byte_end)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(message_id, byte_start) DO UPDATE SET byte_end = excluded.byte_end
+             RETURNING id",
+            rusqlite::params![message_id, byte_start, byte_end],
+            |r| r.get(0),
+        )
     })
     .await
-    .map_err(MemoryError::sqlite("store_chunk_embedding"))
+    .map_err(MemoryError::sqlite("store_chunk"))
 }
 
-async fn store_memory_embedding(
+async fn store_embedding(
     conn: &Connection,
-    memory_id: i64,
+    owner: EmbeddingOwner,
     model: String,
-    dim: i64,
     vector: Vec<u8>,
 ) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
+    let upsert = match owner {
+        EmbeddingOwner::Chunk(_) => {
+            "INSERT INTO chunk_embeddings (chunk_id, model_id, vector) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chunk_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector"
+        }
+        EmbeddingOwner::Memory(_) => {
+            "INSERT INTO memory_embeddings (memory_id, model_id, vector) VALUES (?1, ?2, ?3)
+             ON CONFLICT(memory_id) DO UPDATE SET model_id = excluded.model_id, vector = excluded.vector"
+        }
+    };
     conn.call(move |c| -> rusqlite::Result<_> {
-        c.execute(
-            "INSERT INTO memory_embeddings (memory_id, model, dim, vector, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(memory_id) DO UPDATE SET
-                 model = excluded.model,
-                 dim = excluded.dim,
-                 vector = excluded.vector,
-                 created_at = excluded.created_at",
-            rusqlite::params![memory_id, model, dim, vector, now],
-        )?;
-        Ok(())
+        let tx = c.transaction()?;
+        let model_id = embedding_model_id(&tx, &model)?;
+        tx.execute(upsert, rusqlite::params![owner.id(), model_id, vector])?;
+        tx.commit()
     })
     .await
-    .map_err(MemoryError::sqlite("store_memory_embedding"))
+    .map_err(MemoryError::sqlite(owner.op_label()))
+}
+
+/// The `embedding_models` id of `name`, inserting the model on first use.
+fn embedding_model_id(tx: &Transaction<'_>, name: &str) -> rusqlite::Result<i64> {
+    tx.execute(
+        "INSERT INTO embedding_models (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+        rusqlite::params![name],
+    )?;
+    tx.query_row(
+        "SELECT id FROM embedding_models WHERE name = ?1",
+        rusqlite::params![name],
+        |r| r.get(0),
+    )
 }
 
 async fn begin_session_with_main_branch(
     conn: &Connection,
-    id: String,
+    id: SessionId,
     pid: u32,
 ) -> Result<BranchId> {
-    let started = Utc::now().to_rfc3339();
-    let created = started.clone();
-    let branch_rowid = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            let tx = c.transaction()?;
-            tx.execute(
-                "INSERT INTO sessions (id, started_at, daemon_pid) VALUES (?1, ?2, ?3)",
-                rusqlite::params![id, started, pid],
-            )?;
-            tx.execute(
-                "INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
+    let started = now_millis();
+    conn.call(move |c| -> rusqlite::Result<_> {
+        let tx = c.transaction()?;
+        let session_rowid: i64 = tx.query_row(
+            "INSERT INTO sessions (uuid, started_at, daemon_pid) VALUES (?1, ?2, ?3)
+                 RETURNING id",
+            rusqlite::params![id, started, pid],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
                  VALUES (?1, 'main', NULL, NULL, ?2)",
-                rusqlite::params![id, created],
-            )?;
-            let branch_id = tx.last_insert_rowid();
-            tx.execute(
-                "UPDATE sessions SET current_branch_id = ?1 WHERE id = ?2",
-                rusqlite::params![branch_id, id],
-            )?;
-            tx.commit()?;
-            Ok(branch_id)
-        })
-        .await
-        .map_err(MemoryError::sqlite("begin_session_with_main_branch"))?;
-    Ok(BranchId(branch_rowid))
+            rusqlite::params![session_rowid, started],
+        )?;
+        let branch_id = BranchId(tx.last_insert_rowid());
+        tx.execute(
+            "UPDATE sessions SET current_branch_id = ?1 WHERE id = ?2",
+            rusqlite::params![branch_id, session_rowid],
+        )?;
+        tx.commit()?;
+        Ok(branch_id)
+    })
+    .await
+    .map_err(MemoryError::sqlite("begin_session_with_main_branch"))
 }
 
 async fn set_current_branch(
     conn: &Connection,
-    session_id: String,
+    session_id: SessionId,
     branch_id: BranchId,
 ) -> Result<()> {
     conn.call(move |c| -> rusqlite::Result<_> {
         c.execute(
-            "UPDATE sessions SET current_branch_id = ?1 WHERE id = ?2",
-            rusqlite::params![branch_id.0, session_id],
+            "UPDATE sessions SET current_branch_id = ?1 WHERE uuid = ?2",
+            rusqlite::params![branch_id, session_id],
         )?;
         Ok(())
     })
@@ -506,93 +480,125 @@ async fn set_current_branch(
 
 async fn append_message_to_branch(
     conn: &Connection,
-    session: String,
+    session: SessionId,
     branch_id: BranchId,
-    turn: Option<TurnId>,
+    turn_id: Option<TurnId>,
     msg: PersistedMessage,
-) -> Result<i64> {
-    let timestamp = Utc::now().to_rfc3339();
-    let role = msg.role.as_wire().to_string();
-    let tool_calls_json = match msg.tool_calls {
-        Some(v) => Some(serde_json::to_string(&v)?),
-        None => None,
-    };
-    let turn_id = turn.map(|t| t.0);
-    let id = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            let tx = c.transaction()?;
-            let seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM conversations WHERE session_id = ?1",
-                rusqlite::params![session],
-                |r| r.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO conversations
-                    (session_id, turn_id, seq, timestamp, role, content, tool_calls, tool_call_id, tool_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![
-                    session,
-                    turn_id,
-                    seq,
-                    timestamp,
-                    role,
-                    msg.content,
-                    tool_calls_json,
-                    msg.tool_call_id,
-                    msg.tool_name,
-                ],
-            )?;
-            let conv_id = tx.last_insert_rowid();
-            let branch_seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM branch_messages WHERE branch_id = ?1",
-                rusqlite::params![branch_id.0],
-                |r| r.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO branch_messages (branch_id, seq, conversation_id) VALUES (?1, ?2, ?3)",
-                rusqlite::params![branch_id.0, branch_seq, conv_id],
-            )?;
-            tx.commit()?;
-            Ok(conv_id)
+) -> Result<MessageId> {
+    let created_at = now_millis();
+    let role = msg.role();
+    let columns = MessageColumns::from_kind(msg.kind)?;
+    conn.call(move |c| -> rusqlite::Result<_> {
+        let tx = c.transaction()?;
+        let message_id: MessageId = tx.query_row(
+            "INSERT INTO messages
+                (session_id, turn_id, created_at, role, content, tool_calls, tool_call_id,
+                 tool_name, reasoning, tool_exit_code, tool_duration_ms)
+             SELECT id, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+             FROM sessions WHERE uuid = ?1
+             RETURNING id",
+            rusqlite::params![
+                session,
+                turn_id,
+                created_at,
+                role,
+                msg.content,
+                columns.tool_calls,
+                columns.tool_call_id,
+                columns.tool_name,
+                columns.reasoning,
+                columns.tool_exit_code,
+                columns.tool_duration_ms,
+            ],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO branch_messages (branch_id, seq, message_id)
+             SELECT ?1, COALESCE(MAX(seq), -1) + 1, ?2 FROM branch_messages WHERE branch_id = ?1",
+            rusqlite::params![branch_id, message_id],
+        )?;
+        tx.commit()?;
+        Ok(message_id)
+    })
+    .await
+    .map_err(MemoryError::sqlite("append_message_to_branch"))
+}
+
+/// The role-specific `messages` columns of a [`MessageKind`], `NULL` where the role has none.
+#[derive(Default)]
+struct MessageColumns {
+    reasoning: Option<String>,
+    tool_calls: Option<String>,
+    tool_call_id: Option<String>,
+    tool_name: Option<String>,
+    tool_exit_code: Option<i64>,
+    tool_duration_ms: Option<i64>,
+}
+
+impl MessageColumns {
+    fn from_kind(kind: MessageKind) -> Result<Self> {
+        Ok(match kind {
+            MessageKind::User => Self::default(),
+            MessageKind::Assistant {
+                reasoning,
+                tool_calls,
+            } => Self {
+                reasoning,
+                tool_calls: tool_calls.as_ref().map(serde_json::to_string).transpose()?,
+                ..Self::default()
+            },
+            MessageKind::Tool {
+                call_id,
+                tool_name,
+                outcome,
+            } => Self {
+                tool_call_id: Some(call_id),
+                tool_name: Some(tool_name),
+                tool_exit_code: Some(outcome.exit_code),
+                tool_duration_ms: Some(i64::try_from(outcome.duration_ms).unwrap_or(i64::MAX)),
+                ..Self::default()
+            },
         })
-        .await
-        .map_err(MemoryError::sqlite("append_message_to_branch"))?;
-    Ok(id)
+    }
 }
 
 async fn fork_branch(conn: &Connection, src: BranchId, new_name: String) -> Result<BranchId> {
-    let created = Utc::now().to_rfc3339();
-    let id = conn
-        .call(move |c| -> rusqlite::Result<_> {
-            let tx = c.transaction()?;
-            let session_id: String = tx.query_row(
-                "SELECT session_id FROM branches WHERE id = ?1",
-                rusqlite::params![src.0],
-                |r| r.get(0),
-            )?;
-            let fork_point_seq: Option<i64> = tx.query_row(
-                "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
-                rusqlite::params![src.0],
-                |r| r.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
+    let created = now_millis();
+    conn.call(move |c| -> rusqlite::Result<_> {
+        let tx = c.transaction()?;
+        let session_id: i64 = tx.query_row(
+            "SELECT session_id FROM branches WHERE id = ?1",
+            rusqlite::params![src],
+            |r| r.get(0),
+        )?;
+        let fork_point_seq: Option<i64> = tx.query_row(
+            "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
+            rusqlite::params![src],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO branches (session_id, name, parent_branch_id, fork_point_seq, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![session_id, new_name, src.0, fork_point_seq, created],
-            )?;
-            let new_branch_id = tx.last_insert_rowid();
-            tx.execute(
-                "INSERT INTO branch_messages (branch_id, seq, conversation_id)
-                 SELECT ?1, seq, conversation_id
+            rusqlite::params![session_id, new_name, src, fork_point_seq, created],
+        )?;
+        let new_branch_id = BranchId(tx.last_insert_rowid());
+        tx.execute(
+            "INSERT INTO branch_messages (branch_id, seq, message_id)
+                 SELECT ?1, seq, message_id
                  FROM branch_messages WHERE branch_id = ?2",
-                rusqlite::params![new_branch_id, src.0],
-            )?;
-            tx.commit()?;
-            Ok(new_branch_id)
-        })
-        .await
-        .map_err(MemoryError::sqlite("fork_branch"))?;
-    Ok(BranchId(id))
+            rusqlite::params![new_branch_id, src],
+        )?;
+        tx.execute(
+            "INSERT INTO branch_summaries (branch_id, through_seq, content)
+                 SELECT ?1, through_seq, content
+                 FROM branch_summaries WHERE branch_id = ?2",
+            rusqlite::params![new_branch_id, src],
+        )?;
+        tx.commit()?;
+        Ok(new_branch_id)
+    })
+    .await
+    .map_err(MemoryError::sqlite("fork_branch"))
 }
 
 async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutcome> {
@@ -604,22 +610,22 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
         };
         let last_user_text: Option<String> = tx
             .query_row(
-                "SELECT user_text FROM turns WHERE id = ?1",
-                rusqlite::params![turn_id],
+                "SELECT content FROM messages WHERE turn_id = ?1 AND role = ?2
+                 ORDER BY id LIMIT 1",
+                rusqlite::params![turn_id, PersistedRole::User],
                 |r| r.get(0),
             )
             .optional()?;
-        let orphan_candidates = turn_conversation_ids(&tx, branch, turn_id)?;
+        drop_summary_covering_turn(&tx, branch, turn_id)?;
         let removed: usize = tx.execute(
             "DELETE FROM branch_messages
              WHERE branch_id = ?1
-               AND conversation_id IN (
-                   SELECT id FROM conversations WHERE turn_id = ?2
+               AND message_id IN (
+                   SELECT id FROM messages WHERE turn_id = ?2
                )",
-            rusqlite::params![branch.0, turn_id],
+            rusqlite::params![branch, turn_id],
         )?;
-        delete_unreferenced_conversations(&tx, &orphan_candidates)?;
-        delete_turn_if_unreferenced(&tx, turn_id)?;
+        delete_unreferenced_turn(&tx, turn_id)?;
         tx.commit()?;
         truncate_wal(c)?;
         Ok(UndoOutcome {
@@ -632,63 +638,75 @@ async fn undo_last_turn(conn: &Connection, branch: BranchId) -> Result<UndoOutco
     .map_err(MemoryError::sqlite("undo_last_turn"))
 }
 
-fn latest_turn_on_branch(tx: &Transaction<'_>, branch: BranchId) -> rusqlite::Result<Option<i64>> {
+async fn record_branch_summary(
+    conn: &Connection,
+    branch: BranchId,
+    summary: String,
+    kept_turns: NonZeroUsize,
+) -> Result<()> {
+    let offset = i64::try_from(kept_turns.get() - 1).unwrap_or(i64::MAX);
+    conn.call(move |c| -> rusqlite::Result<_> {
+        c.execute(
+            "INSERT OR REPLACE INTO branch_summaries (branch_id, through_seq, content)
+             SELECT ?1, bm.seq - 1, ?2
+             FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
+             WHERE bm.branch_id = ?1 AND m.role = ?3
+             ORDER BY bm.seq DESC LIMIT 1 OFFSET ?4",
+            rusqlite::params![branch, summary, PersistedRole::User, offset],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(MemoryError::sqlite("record_branch_summary"))
+}
+
+/// Drop the branch's summary once it stands in for any message of `turn_id`.
+fn drop_summary_covering_turn(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+    turn_id: TurnId,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM branch_summaries
+         WHERE branch_id = ?1
+           AND through_seq >= (
+               SELECT MIN(bm.seq)
+               FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
+               WHERE bm.branch_id = ?1 AND m.turn_id = ?2
+           )",
+        rusqlite::params![branch, turn_id],
+    )?;
+    Ok(())
+}
+
+fn latest_turn_on_branch(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+) -> rusqlite::Result<Option<TurnId>> {
     tx.query_row(
-        "SELECT MAX(c.turn_id)
-         FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
-         WHERE bm.branch_id = ?1 AND c.turn_id IS NOT NULL",
-        rusqlite::params![branch.0],
+        "SELECT MAX(m.turn_id)
+         FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
+         WHERE bm.branch_id = ?1 AND m.turn_id IS NOT NULL",
+        rusqlite::params![branch],
         |r| r.get(0),
     )
 }
 
-fn turn_conversation_ids(
-    tx: &Transaction<'_>,
-    branch: BranchId,
-    turn_id: i64,
-) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt = tx.prepare(
-        "SELECT bm.conversation_id
-         FROM branch_messages bm JOIN conversations c ON c.id = bm.conversation_id
-         WHERE bm.branch_id = ?1 AND c.turn_id = ?2",
-    )?;
-    stmt.query_map(rusqlite::params![branch.0, turn_id], |r| r.get(0))?
-        .collect()
-}
-
-fn delete_unreferenced_conversations(
-    tx: &Transaction<'_>,
-    conversation_ids: &[i64],
-) -> rusqlite::Result<()> {
-    for conversation_id in conversation_ids {
-        let still_referenced: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM branch_messages WHERE conversation_id = ?1",
-            rusqlite::params![conversation_id],
-            |r| r.get(0),
-        )?;
-        if still_referenced == 0 {
-            tx.execute(
-                "DELETE FROM conversations WHERE id = ?1",
-                rusqlite::params![conversation_id],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-/// Keeps the turn while a forked sibling branch still references its messages.
-fn delete_turn_if_unreferenced(tx: &Transaction<'_>, turn_id: i64) -> rusqlite::Result<()> {
-    let turn_still_used: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM conversations WHERE turn_id = ?1",
+/// Delete the turn's messages that no branch references any more, then the
+/// turn itself once no message points at it.
+fn delete_unreferenced_turn(tx: &Transaction<'_>, turn_id: TurnId) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM messages
+         WHERE turn_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM branch_messages bm WHERE bm.message_id = messages.id)",
         rusqlite::params![turn_id],
-        |r| r.get(0),
     )?;
-    if turn_still_used == 0 {
-        tx.execute(
-            "DELETE FROM turns WHERE id = ?1",
-            rusqlite::params![turn_id],
-        )?;
-    }
+    tx.execute(
+        "DELETE FROM turns
+         WHERE id = ?1
+           AND NOT EXISTS (SELECT 1 FROM messages WHERE turn_id = ?1)",
+        rusqlite::params![turn_id],
+    )?;
     Ok(())
 }
 

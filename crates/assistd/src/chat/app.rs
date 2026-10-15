@@ -232,7 +232,7 @@ pub(super) struct App {
     /// Set by Esc on the slash popup; cleared when the buffer leaves its
     /// `/` prefix.
     slash_dismissed: bool,
-    /// `/resume` conversation list; `confirmation` takes precedence while
+    /// `/resume` session list; `confirmation` takes precedence while
     /// both are open.
     pub resume_picker: Option<ResumePicker>,
     /// Throttles rewraps for a live block's timer to 1 Hz.
@@ -306,7 +306,7 @@ impl BranchListEntry {
     }
 }
 
-/// Conversation list `/resume` draws in the chat panel, narrowed by a
+/// Session list `/resume` draws in the chat panel, narrowed by a
 /// typed search.
 pub(super) struct ResumePicker {
     entries: Vec<BranchListEntry>,

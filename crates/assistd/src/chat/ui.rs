@@ -181,7 +181,7 @@ fn picker_scroll_start(selected: usize, total: usize, visible: usize) -> usize {
     (selected + 1).saturating_sub(visible).min(total - visible)
 }
 
-/// The conversation title behind a selection pointer, then when it was last
+/// The session title behind a selection pointer, then when it was last
 /// active, its size and its branch.
 fn resume_entry_rows(
     entry: &BranchListEntry,

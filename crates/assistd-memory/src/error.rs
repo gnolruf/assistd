@@ -40,10 +40,6 @@ pub enum MemoryError {
     #[error("serialize tool_calls: {0}")]
     SerializeToolCalls(#[from] serde_json::Error),
 
-    /// A stored `role` column held a value outside the known set.
-    #[error("unknown role in DB: {0}")]
-    UnknownRole(String),
-
     #[error("memory writer task is gone")]
     WriterGone,
 

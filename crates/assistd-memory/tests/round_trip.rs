@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use assistd_memory::{
-    BranchId, ConversationStore, MemoryStore, PersistedMessage, PersistedRole, SessionId,
-    SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
+    BranchId, MemoryStore, PersistedMessage, PersistedRole, SessionId, SqliteHandle,
+    SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
 };
 use tokio::sync::watch;
 
@@ -19,7 +19,7 @@ async fn turn_persists_across_store_reopen() {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
         let handle = Arc::new(handle);
-        let convs = SqliteConversationStore::new(handle.clone());
+        let convs = SqliteTranscriptStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
         let session = SessionId::new();
@@ -29,7 +29,7 @@ async fn turn_persists_across_store_reopen() {
             .unwrap();
         branch = main;
 
-        let turn = convs.begin_turn(&session, "what is rust?").await.unwrap();
+        let turn = convs.begin_turn(&session).await.unwrap();
 
         convs
             .append_message_to_branch(
@@ -48,12 +48,12 @@ async fn turn_persists_across_store_reopen() {
                 Some(turn),
                 PersistedMessage::assistant_text(
                     "Rust is a systems programming language with a strong type system.",
+                    String::new(),
                 ),
             )
             .await
             .unwrap();
 
-        convs.end_turn(turn).await.unwrap();
         convs.end_session(&session).await.unwrap();
 
         mems.save("fact:lang", "rust".into()).await.unwrap();
@@ -68,13 +68,13 @@ async fn turn_persists_across_store_reopen() {
         let (_tx, rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
         let handle = Arc::new(handle);
-        let convs = SqliteConversationStore::new(handle.clone());
+        let convs = SqliteTranscriptStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle);
 
         let history = convs.load_branch_history(branch).await.unwrap();
         let messages: Vec<(PersistedRole, &str)> = history
             .iter()
-            .map(|r| (r.role, r.content.as_str()))
+            .map(|r| (r.message.role(), r.message.content.as_str()))
             .collect();
         assert_eq!(
             messages,
@@ -92,15 +92,6 @@ async fn turn_persists_across_store_reopen() {
             Some("rust")
         );
 
-        let turns: Vec<String> = convs
-            .recent_turns(5)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|t| t.user_text)
-            .collect();
-        assert_eq!(turns, ["what is rust?"]);
-
         drop(convs);
         drop(mems);
         writer.await.unwrap();
@@ -117,7 +108,7 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (handle, writer) = SqliteHandle::open(&path, shutdown_rx).await.unwrap();
         let handle = Arc::new(handle);
-        let convs = SqliteConversationStore::new(handle.clone());
+        let convs = SqliteTranscriptStore::new(handle.clone());
 
         let session = SessionId::new();
         let main = convs
@@ -125,7 +116,7 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
             .await
             .unwrap();
         branch = main;
-        let turn = convs.begin_turn(&session, "drain race").await.unwrap();
+        let turn = convs.begin_turn(&session).await.unwrap();
 
         shutdown_tx.send(true).unwrap();
 
@@ -143,11 +134,10 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
                 &session,
                 main,
                 Some(turn),
-                PersistedMessage::assistant_text("survived the drain"),
+                PersistedMessage::assistant_text("survived the drain", String::new()),
             )
             .await
             .unwrap();
-        convs.end_turn(turn).await.unwrap();
         convs.end_session(&session).await.unwrap();
 
         drop(convs);
@@ -157,13 +147,13 @@ async fn writer_drains_op_enqueued_immediately_after_shutdown_signal() {
     let (_tx, rx) = watch::channel(false);
     let (handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
     let handle = Arc::new(handle);
-    let convs = SqliteConversationStore::new(handle);
+    let convs = SqliteTranscriptStore::new(handle);
     let history: Vec<String> = convs
         .load_branch_history(branch)
         .await
         .unwrap()
         .into_iter()
-        .map(|r| r.content)
+        .map(|r| r.message.content)
         .collect();
     assert_eq!(history, ["drain race", "survived the drain"]);
     drop(convs);

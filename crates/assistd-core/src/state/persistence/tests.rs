@@ -1,10 +1,13 @@
+use std::num::NonZeroUsize;
+
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
 use assistd_config::Config;
 use assistd_ipc::PresenceTarget;
 use assistd_llm::EchoBackend;
 use assistd_memory::{
-    BranchId, BranchInfo, ConversationStore, HistoryRow, ResumeCandidate, SessionId, TurnSummary,
+    BranchId, BranchInfo, BranchSummary, HistoryRow, ResumeCandidate, SessionId, TranscriptStore,
     UndoOutcome,
 };
 use assistd_tools::ToolRegistry;
@@ -12,7 +15,7 @@ use assistd_tools::ToolRegistry;
 use super::*;
 use crate::presence::PresenceManager;
 use crate::state::memory_stack::MemoryStack;
-use crate::state::runtime::{ConversationContext, RuntimeState};
+use crate::state::runtime::{RuntimeState, SessionContext};
 use crate::state::subsystems::Subsystems;
 
 /// Records the order writes arrive in, and makes each write finish
@@ -34,14 +37,14 @@ impl SlowingStore {
 }
 
 #[async_trait::async_trait]
-impl ConversationStore for SlowingStore {
+impl TranscriptStore for SlowingStore {
     async fn append_message_to_branch(
         &self,
         _s: &SessionId,
         _b: BranchId,
         _t: Option<TurnId>,
         m: PersistedMessage,
-    ) -> assistd_memory::Result<i64> {
+    ) -> assistd_memory::Result<MessageId> {
         let delay = {
             let mut d = self.remaining_delay_ms.lock();
             let taken = *d;
@@ -50,20 +53,14 @@ impl ConversationStore for SlowingStore {
         };
         tokio::time::sleep(Duration::from_millis(delay)).await;
         self.arrivals.lock().push(m.content);
-        Ok(0)
+        Ok(MessageId(0))
     }
 
     async fn end_session(&self, _id: &SessionId) -> assistd_memory::Result<()> {
         Ok(())
     }
-    async fn begin_turn(&self, _s: &SessionId, _t: &str) -> assistd_memory::Result<TurnId> {
+    async fn begin_turn(&self, _s: &SessionId) -> assistd_memory::Result<TurnId> {
         Ok(TurnId(0))
-    }
-    async fn end_turn(&self, _t: TurnId) -> assistd_memory::Result<()> {
-        Ok(())
-    }
-    async fn recent_turns(&self, _l: usize) -> assistd_memory::Result<Vec<TurnSummary>> {
-        Ok(Vec::new())
     }
     async fn begin_session_with_main_branch(
         &self,
@@ -97,10 +94,27 @@ impl ConversationStore for SlowingStore {
     async fn load_branch_history(&self, _b: BranchId) -> assistd_memory::Result<Vec<HistoryRow>> {
         Ok(Vec::new())
     }
+    async fn record_branch_summary(
+        &self,
+        _b: BranchId,
+        _summary: String,
+        _kept_turns: NonZeroUsize,
+    ) -> assistd_memory::Result<()> {
+        Ok(())
+    }
+    async fn load_branch_summary(
+        &self,
+        _b: BranchId,
+    ) -> assistd_memory::Result<Option<BranchSummary>> {
+        Ok(None)
+    }
     async fn branch_tail_seq(&self, _b: BranchId) -> assistd_memory::Result<Option<i64>> {
         Ok(None)
     }
-    async fn latest_branch_activity(&self, _b: BranchId) -> assistd_memory::Result<Option<String>> {
+    async fn latest_branch_activity(
+        &self,
+        _b: BranchId,
+    ) -> assistd_memory::Result<Option<DateTime<Utc>>> {
         Ok(None)
     }
     async fn undo_last_turn(&self, _b: BranchId) -> assistd_memory::Result<UndoOutcome> {
@@ -117,9 +131,9 @@ impl ConversationStore for SlowingStore {
     }
 }
 
-fn state_with_store(store: Arc<dyn ConversationStore>) -> Arc<AppState> {
+fn state_with_store(store: Arc<dyn TranscriptStore>) -> Arc<AppState> {
     let config = Config::default();
-    let memory = MemoryStack::disabled(config.embedding.clone()).with_conversations(store);
+    let memory = MemoryStack::disabled(config.embedding.clone()).with_transcripts(store);
     Arc::new(AppState {
         subsystems: Subsystems::new(
             Arc::new(EchoBackend::new()),
@@ -128,7 +142,7 @@ fn state_with_store(store: Arc<dyn ConversationStore>) -> Arc<AppState> {
             assistd_voice::VoiceManager::new(true),
         ),
         memory,
-        runtime: RuntimeState::new().with_conversation_ctx(Arc::new(ConversationContext::new(
+        runtime: RuntimeState::new().with_session_ctx(Arc::new(SessionContext::new(
             SessionId::new(),
             Some(BranchId(1)),
         ))),
@@ -144,7 +158,7 @@ async fn messages_reach_the_store_in_the_order_they_were_queued() {
     for text in ["first", "second", "third", "fourth"] {
         state.persist_message_fire_and_forget(
             None,
-            PersistedMessage::assistant_text(text.to_string()),
+            PersistedMessage::assistant_text(text, String::new()),
         );
     }
     state.runtime.persistence_tracker.close();

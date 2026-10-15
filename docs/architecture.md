@@ -76,7 +76,7 @@ the vocabulary established here.
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
-| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `ConversationStore`, `SemanticStore`.                | none                                                                             |
+| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`.                | none                                                                             |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
@@ -239,18 +239,27 @@ still ask; the denylist still refuses, and nothing is added to the allowlist.
 
 One SQLite database (default: `~/.local/share/assistd/memory.db`)
 holds three schemas: a key/value `MemoryStore` for durable facts, a
-`ConversationStore` for full per-session transcripts (with branching
-+ undo), and a `SemanticStore` for embedding-indexed chunks.
+`TranscriptStore` for full per-session transcripts (with branching
++ undo), and a `SemanticStore` for embedding-indexed chunks. Every
+write goes through one writer task that owns the only read-write
+connection; reads use a separate read-only connection, so a long
+vector scan never holds up a write.
+
+Transcript rows keep each step's reasoning, every tool call's arguments,
+and how each tool run ended. Each branch also keeps its latest
+compaction summary. On resume, the LLM gets that summary plus only the
+rows after it, so it sees the same prompt it had before; the client
+still gets every row.
 
 The `remember` tool inserts the K/V row and queues an embedding job
 for its value on a `tokio::sync::mpsc` channel; each persisted
-conversation turn queues its chunks on the same channel. A background
+turn queues its transcript chunks on the same channel. A background
 task drains the queue, sends batches to the embedding server (a
 second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
 store. The `recall` tool embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
-over conversation chunks from earlier sessions. Like chat requests,
+over transcript chunks from earlier sessions. Like chat requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays unindexed until `assistd memory reindex` picks it up.

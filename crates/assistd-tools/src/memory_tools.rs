@@ -6,7 +6,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
-use assistd_memory::{EmbeddingHit, MemoryHit, SemanticStore, SessionId};
+use assistd_memory::{EmbeddingHit, MemoryHit, MemoryId, SemanticStore, SessionId};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -38,7 +38,7 @@ impl RememberTool {
         Self { ops, embed_tx }
     }
 
-    fn queue_embedding(&self, memory_id: i64, text: String) {
+    fn queue_embedding(&self, memory_id: MemoryId, text: String) {
         enqueue_embed_job(&self.embed_tx, EmbedJob::Memory { memory_id, text });
     }
 }
@@ -101,7 +101,7 @@ impl Tool for RememberTool {
         }
 
         let memory_id = self.ops.save(&key, value.clone()).await?;
-        if memory_id != 0 {
+        if memory_id != MemoryId(0) {
             self.queue_embedding(memory_id, value);
         }
         let duration_ms = start.elapsed().as_millis();
@@ -212,7 +212,7 @@ impl Tool for RecallTool {
     }
 }
 
-/// Semantic search over past conversations, excluding the session in
+/// Semantic search over past session transcripts, excluding the session in
 /// progress because its dialogue is already in the model's context.
 #[derive(Debug)]
 pub struct ReminisceTool {
@@ -354,7 +354,7 @@ fn format_chunks(hits: &[EmbeddingHit]) -> String {
         .map(|hit| {
             format!(
                 "[{} {} sim={:.0}%] {}",
-                hit.timestamp,
+                hit.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
                 hit.role.as_wire(),
                 hit.similarity * 100.0,
                 hit.content.replace('\n', " ")
@@ -383,8 +383,8 @@ fn tool_result(output: &str, duration_ms: u128) -> Value {
 mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        ConversationStore, MemoryError, MemoryStore, NoConversationStore, NoMemoryStore,
-        NoSemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
+        ChunkId, MemoryError, MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore,
+        SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -436,7 +436,7 @@ mod tests {
     /// Records the session `reminisce` asked to leave out.
     #[derive(Debug, Default)]
     struct ExclusionSpy {
-        excluded: parking_lot::Mutex<Option<String>>,
+        excluded: parking_lot::Mutex<Option<SessionId>>,
     }
 
     #[async_trait]
@@ -448,7 +448,7 @@ mod tests {
             _model: &str,
             exclude_session: Option<&SessionId>,
         ) -> Result<Vec<EmbeddingHit>, MemoryError> {
-            *self.excluded.lock() = exclude_session.map(|s| s.0.clone());
+            *self.excluded.lock() = exclude_session.copied();
             Ok(Vec::new())
         }
         async fn nearest_memories(
@@ -471,33 +471,31 @@ mod tests {
         async fn memories_missing_embedding(
             &self,
             _c: &str,
-            _after: i64,
+            _after: Option<MemoryId>,
             _limit: usize,
-        ) -> Result<Vec<(i64, String)>, MemoryError> {
+        ) -> Result<Vec<(MemoryId, String)>, MemoryError> {
             Ok(Vec::new())
         }
         async fn chunks_missing_embedding(
             &self,
             _c: &str,
-            _after: i64,
+            _after: Option<ChunkId>,
             _limit: usize,
-        ) -> Result<Vec<(i64, String)>, MemoryError> {
+        ) -> Result<Vec<(ChunkId, String)>, MemoryError> {
             Ok(Vec::new())
         }
         async fn store_chunk_embedding(
             &self,
-            _chunk_id: i64,
+            _chunk_id: ChunkId,
             _model: String,
-            _dim: i64,
             _vector: Vec<u8>,
         ) -> Result<(), MemoryError> {
             Ok(())
         }
         async fn store_memory_embedding(
             &self,
-            _memory_id: i64,
+            _memory_id: MemoryId,
             _model: String,
-            _dim: i64,
             _vector: Vec<u8>,
         ) -> Result<(), MemoryError> {
             Ok(())
@@ -514,7 +512,7 @@ mod tests {
         tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
             .await
             .unwrap();
-        assert_eq!(spy.excluded.lock().as_deref(), Some(first.0.as_str()));
+        assert_eq!(*spy.excluded.lock(), Some(*first));
 
         let second = Arc::new(SessionId::new());
         session_tx.send_replace(second.clone());
@@ -522,8 +520,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            spy.excluded.lock().as_deref(),
-            Some(second.0.as_str()),
+            *spy.excluded.lock(),
+            Some(*second),
             "the tool must follow a session switch, not pin its first session"
         );
     }
@@ -537,14 +535,14 @@ mod tests {
             .unwrap();
         let handle = Arc::new(handle);
         let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
-        let conv: Arc<dyn ConversationStore> = Arc::new(SqliteConversationStore::new(handle));
+        let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle));
         (Arc::new(MemoryOps::new(mem, conv)), writer, temp)
     }
 
     fn no_ops() -> Arc<MemoryOps> {
         Arc::new(MemoryOps::new(
             Arc::new(NoMemoryStore),
-            Arc::new(NoConversationStore),
+            Arc::new(NoTranscriptStore),
         ))
     }
 
@@ -602,7 +600,10 @@ mod tests {
             .expect("embed job queued before invoke returns")
         {
             EmbedJob::Memory { memory_id, text } => {
-                assert!(memory_id > 0, "expected real rowid, got {memory_id}");
+                assert!(
+                    memory_id > MemoryId(0),
+                    "expected real rowid, got {memory_id}"
+                );
                 assert_eq!(text, "vim is the way");
             }
             EmbedJob::Chunk { .. } => panic!("expected Memory job, got Chunk"),

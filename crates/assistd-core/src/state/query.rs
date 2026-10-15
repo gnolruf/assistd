@@ -13,7 +13,7 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
-use assistd_memory::{PersistedMessage, SessionId, TurnId};
+use assistd_memory::{PersistedMessage, SessionId, ToolOutcome, TurnId};
 use assistd_tools::{Attachment, inherit_confirm_router};
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
@@ -90,6 +90,7 @@ struct TurnTranslator {
     id: String,
     turn_id: Option<TurnId>,
     assistant_accum: String,
+    reasoning_accum: String,
     awaiting_tool_result: bool,
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
@@ -102,6 +103,7 @@ impl TurnTranslator {
             id,
             turn_id,
             assistant_accum: String::new(),
+            reasoning_accum: String::new(),
             awaiting_tool_result: false,
             last_emit_at: Instant::now()
                 .checked_sub(LAST_DELTA_DEBOUNCE)
@@ -125,7 +127,10 @@ impl TurnTranslator {
                 self.accumulate_delta(&state.runtime, &text);
                 (Event::Delta { id, text }, sentences)
             }
-            LlmEvent::ReasoningDelta { text } => (Event::ReasoningDelta { id, text }, Vec::new()),
+            LlmEvent::ReasoningDelta { text } => {
+                self.reasoning_accum.push_str(&text);
+                (Event::ReasoningDelta { id, text }, Vec::new())
+            }
             LlmEvent::ToolCallsRequested { calls } => {
                 self.persist_tool_calls(state, &calls);
                 return None;
@@ -151,7 +156,12 @@ impl TurnTranslator {
                 self.awaiting_tool_result = false;
                 state.persist_message_fire_and_forget(
                     self.turn_id,
-                    PersistedMessage::tool_result(tool_result_body(&result), call_id, name.clone()),
+                    PersistedMessage::tool_result(
+                        tool_result_body(&result),
+                        call_id,
+                        name.clone(),
+                        tool_outcome(&result),
+                    ),
                 );
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
@@ -166,6 +176,7 @@ impl TurnTranslator {
             } => {
                 if matches!(event, StatusKind::Restarting | StatusKind::OutputTruncated) {
                     self.assistant_accum.clear();
+                    self.reasoning_accum.clear();
                     let _ = sentence_buf.finish();
                 }
                 (
@@ -178,6 +189,13 @@ impl TurnTranslator {
                     },
                     Vec::new(),
                 )
+            }
+            LlmEvent::HistoryCompacted {
+                summary,
+                kept_turns,
+            } => {
+                state.persist_summary_fire_and_forget(summary, kept_turns);
+                return None;
             }
             LlmEvent::Done => {
                 let sentences = sentence_buf.finish().into_iter().collect();
@@ -202,10 +220,15 @@ impl TurnTranslator {
         if !narration.is_empty() {
             publish_last_delta(&state.runtime, &self.id, &narration);
         }
-        state.persist_message_fire_and_forget(self.turn_id, tool_calls_message(narration, calls));
+        let reasoning = std::mem::take(&mut self.reasoning_accum);
+        state.persist_message_fire_and_forget(
+            self.turn_id,
+            tool_calls_message(narration, calls, reasoning),
+        );
     }
 
     fn persist_final_text(&mut self, state: &AppState) {
+        let reasoning = std::mem::take(&mut self.reasoning_accum);
         if self.assistant_accum.is_empty() {
             return;
         }
@@ -213,7 +236,7 @@ impl TurnTranslator {
         publish_last_delta(&state.runtime, &self.id, &final_text);
         state.persist_message_fire_and_forget(
             self.turn_id,
-            PersistedMessage::assistant_text(final_text),
+            PersistedMessage::assistant_text(final_text, reasoning),
         );
     }
 }
@@ -298,7 +321,7 @@ impl AppState {
             );
         }
 
-        self.finalize_turn(id, turn_id, agent_result, speech_handle, &tx, done_emitted)
+        self.finalize_turn(id, agent_result, speech_handle, &tx, done_emitted)
             .await
     }
 
@@ -377,9 +400,9 @@ impl AppState {
     }
 
     async fn open_persistence_turn(&self, text: &str) -> (Arc<SessionId>, Option<TurnId>) {
-        let (current_session, turn_id) = match self.saved_conversation().await {
+        let (current_session, turn_id) = match self.saved_session().await {
             Ok((session, _branch)) => {
-                let turn_id = self.begin_persisted_turn(&session, text).await;
+                let turn_id = self.begin_persisted_turn(&session).await;
                 (session, turn_id)
             }
             Err(e) => {
@@ -388,7 +411,7 @@ impl AppState {
                     error = %e,
                     "saving the session failed; turn will not be persisted"
                 );
-                let (session, _branch) = self.runtime.conversation_ctx.current().await;
+                let (session, _branch) = self.runtime.session_ctx.current().await;
                 (session, None)
             }
         };
@@ -396,8 +419,8 @@ impl AppState {
         (current_session, turn_id)
     }
 
-    async fn begin_persisted_turn(&self, session: &SessionId, text: &str) -> Option<TurnId> {
-        match self.memory.conversations.begin_turn(session, text).await {
+    async fn begin_persisted_turn(&self, session: &SessionId) -> Option<TurnId> {
+        match self.memory.transcripts.begin_turn(session).await {
             Ok(turn) if turn.0 != 0 => Some(turn),
             Ok(_) => None,
             Err(e) => {
@@ -569,31 +592,16 @@ impl AppState {
         }
     }
 
-    /// End the persisted turn, wait for speech, and report the agent's
-    /// outcome. Sends `Done` if the stream did not, as a cancelled turn
+    /// Wait for speech and report the agent's outcome. Sends `Done` if the stream did not, as a cancelled turn
     /// ends without one.
     async fn finalize_turn(
         &self,
         id: String,
-        turn_id: Option<TurnId>,
         agent_result: Result<Result<(), LlmError>, JoinError>,
         speech_handle: JoinHandle<()>,
         tx: &mpsc::Sender<Event>,
         done_emitted: bool,
     ) -> Result<(), DispatchError> {
-        if let Some(turn) = turn_id {
-            let conversations = self.memory.conversations.clone();
-            self.runtime.persistence_tracker.spawn(async move {
-                if let Err(e) = conversations.end_turn(turn).await {
-                    warn!(
-                        target: "assistd::memory",
-                        error = %e,
-                        "end_turn failed (continuing)"
-                    );
-                }
-            });
-        }
-
         let _ = speech_handle.await;
 
         match agent_result {
@@ -722,7 +730,11 @@ async fn speak_sentence(
     }
 }
 
-fn tool_calls_message(narration: String, calls: &[ToolCall]) -> PersistedMessage {
+fn tool_calls_message(
+    narration: String,
+    calls: &[ToolCall],
+    reasoning: String,
+) -> PersistedMessage {
     let content = if narration.trim().is_empty() {
         String::new()
     } else {
@@ -732,7 +744,21 @@ fn tool_calls_message(narration: String, calls: &[ToolCall]) -> PersistedMessage
         .iter()
         .map(|call| serde_json::json!({"id": call.id, "name": call.name, "arguments": call.arguments}))
         .collect();
-    PersistedMessage::assistant_tool_calls(content, calls_json)
+    PersistedMessage::assistant_tool_calls(content, calls_json, reasoning)
+}
+
+/// Exit code and duration from a tool's raw result JSON; absent fields read as zero.
+fn tool_outcome(result: &Value) -> ToolOutcome {
+    ToolOutcome {
+        exit_code: result
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        duration_ms: result
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    }
 }
 
 fn tool_result_body(result: &Value) -> String {

@@ -353,7 +353,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     Ok(())
 }
 
-/// Retitle the terminal window after the open conversation when its title
+/// Retitle the terminal window after the open session when its title
 /// differs from `shown`, the title last set. Control characters are dropped
 /// so a model-written title cannot end the escape sequence early.
 fn sync_window_title(shown: &mut String, session_title: Option<&str>) -> io::Result<()> {

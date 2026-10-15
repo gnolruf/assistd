@@ -3,133 +3,113 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1 schema. Applied versions live in `PRAGMA user_version`, not `schema_migrations`;
-/// forked branches share `conversations` rows through `branch_messages`.
+/// V1 schema. Applied versions live in `PRAGMA user_version`. Forked branches
+/// share `messages` rows through `branch_messages`. Timestamps are Unix
+/// milliseconds. `messages`, `message_chunks` and `memories` keep
+/// `AUTOINCREMENT` because their ids travel in queued writes and embed jobs,
+/// which must never land on a newer row that reused a deleted id.
 const V1_SQL: &str = r"
-CREATE TABLE schema_migrations (
-    version    INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
-);
-
 CREATE TABLE sessions (
-    id                 TEXT PRIMARY KEY,
-    started_at         TEXT NOT NULL,
-    ended_at           TEXT,
-    daemon_pid         INTEGER NOT NULL,
-    title              TEXT,
-    current_branch_id  INTEGER
-);
-
-CREATE TABLE turns (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    started_at  TEXT NOT NULL,
-    ended_at    TEXT,
-    user_text   TEXT NOT NULL
-);
-CREATE INDEX idx_turns_session ON turns(session_id);
-
-CREATE TABLE conversations (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    turn_id       INTEGER REFERENCES turns(id) ON DELETE SET NULL,
-    seq           INTEGER NOT NULL,
-    timestamp     TEXT NOT NULL,
-    role          TEXT NOT NULL CHECK (role IN ('system','user','assistant','tool')),
-    content       TEXT NOT NULL,
-    tool_calls    TEXT,
-    tool_call_id  TEXT,
-    tool_name     TEXT
-);
-CREATE INDEX idx_conversations_session_seq ON conversations(session_id, seq);
-CREATE INDEX idx_conversations_turn        ON conversations(turn_id);
-
-CREATE VIRTUAL TABLE conversations_fts USING fts5(
-    content,
-    content='conversations',
-    content_rowid='id'
-);
-CREATE TRIGGER conv_fts_ai AFTER INSERT ON conversations BEGIN
-    INSERT INTO conversations_fts(rowid, content) VALUES (new.id, new.content);
-END;
-CREATE TRIGGER conv_fts_ad AFTER DELETE ON conversations BEGIN
-    INSERT INTO conversations_fts(conversations_fts, rowid, content) VALUES('delete', old.id, old.content);
-END;
-CREATE TRIGGER conv_fts_au AFTER UPDATE ON conversations BEGIN
-    INSERT INTO conversations_fts(conversations_fts, rowid, content) VALUES('delete', old.id, old.content);
-    INSERT INTO conversations_fts(rowid, content) VALUES (new.id, new.content);
-END;
-
-CREATE TABLE memories (
-    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
-    key                    TEXT NOT NULL UNIQUE,
-    value                  TEXT NOT NULL,
-    source_conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
-    created_at             TEXT NOT NULL,
-    updated_at             TEXT NOT NULL
-);
-CREATE INDEX idx_memories_key ON memories(key);
-
-CREATE TABLE memory_embeddings (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    memory_id   INTEGER NOT NULL UNIQUE REFERENCES memories(id) ON DELETE CASCADE,
-    model       TEXT NOT NULL,
-    dim         INTEGER NOT NULL,
-    vector      BLOB NOT NULL,
-    created_at  TEXT NOT NULL
-);
-CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model);
+    id                INTEGER PRIMARY KEY,
+    uuid              TEXT NOT NULL UNIQUE,
+    started_at        INTEGER NOT NULL,
+    ended_at          INTEGER,
+    daemon_pid        INTEGER NOT NULL,
+    title             TEXT,
+    current_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL
+) STRICT;
 
 CREATE TABLE branches (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    name              TEXT NOT NULL,
-    parent_branch_id  INTEGER REFERENCES branches(id) ON DELETE SET NULL,
-    fork_point_seq    INTEGER,
-    created_at        TEXT NOT NULL,
-    UNIQUE(session_id, name)
-);
-CREATE INDEX idx_branches_session ON branches(session_id);
+    id               INTEGER PRIMARY KEY,
+    session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    parent_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL,
+    fork_point_seq   INTEGER,
+    created_at       INTEGER NOT NULL,
+    UNIQUE (session_id, name)
+) STRICT;
+
+CREATE TABLE turns (
+    id         INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE messages (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    turn_id          INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    created_at       INTEGER NOT NULL,
+    role             INTEGER NOT NULL CHECK (role BETWEEN 0 AND 2),
+    content          TEXT NOT NULL,
+    reasoning        TEXT,
+    tool_calls       TEXT,
+    tool_call_id     TEXT,
+    tool_name        TEXT,
+    tool_exit_code   INTEGER,
+    tool_duration_ms INTEGER CHECK (tool_duration_ms >= 0),
+    CHECK (tool_calls IS NULL OR (role = 1 AND json_valid(tool_calls))),
+    CHECK (reasoning IS NULL OR role = 1),
+    CHECK ((role = 2) = (tool_call_id IS NOT NULL)),
+    CHECK ((role = 2) = (tool_name IS NOT NULL)),
+    CHECK ((role = 2) = (tool_exit_code IS NOT NULL)),
+    CHECK ((role = 2) = (tool_duration_ms IS NOT NULL))
+) STRICT;
+CREATE INDEX idx_messages_turn ON messages(turn_id);
 
 CREATE TABLE branch_messages (
-    branch_id       INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
-    seq             INTEGER NOT NULL,
-    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    PRIMARY KEY (branch_id, seq)
-);
-CREATE INDEX idx_branch_messages_branch_seq ON branch_messages(branch_id, seq);
-CREATE INDEX idx_branch_messages_conv ON branch_messages(conversation_id);
+    branch_id  INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    PRIMARY KEY (branch_id, seq),
+    CHECK (seq >= 0)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX idx_branch_messages_message ON branch_messages(message_id);
 
-CREATE TABLE conversation_chunks (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    chunk_index     INTEGER NOT NULL,
-    content         TEXT NOT NULL,
-    token_count     INTEGER,
-    UNIQUE(conversation_id, chunk_index)
-);
-CREATE INDEX idx_chunks_conv ON conversation_chunks(conversation_id);
+CREATE TABLE branch_summaries (
+    branch_id   INTEGER PRIMARY KEY REFERENCES branches(id) ON DELETE CASCADE,
+    through_seq INTEGER NOT NULL,
+    content     TEXT NOT NULL
+) STRICT;
 
-CREATE TABLE embeddings (
-    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_chunk_id INTEGER NOT NULL UNIQUE REFERENCES conversation_chunks(id) ON DELETE CASCADE,
-    model                 TEXT NOT NULL,
-    dim                   INTEGER NOT NULL,
-    vector                BLOB NOT NULL,
-    created_at            TEXT NOT NULL
-);
-CREATE INDEX idx_embeddings_model ON embeddings(model);
-";
+CREATE TABLE memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    key        TEXT NOT NULL UNIQUE,
+    value      TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (updated_at >= created_at)
+) STRICT;
 
-/// V2: zero deleted tokens out of the full-text index instead of leaving them
-/// in its segments until the next merge.
-const V2_SQL: &str = r"
-INSERT INTO conversations_fts(conversations_fts, rank) VALUES('secure-delete', 1);
+CREATE TABLE message_chunks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    byte_start INTEGER NOT NULL,
+    byte_end   INTEGER NOT NULL,
+    CHECK (byte_start >= 0 AND byte_end > byte_start),
+    UNIQUE (message_id, byte_start)
+) STRICT;
+
+CREATE TABLE embedding_models (
+    id   INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+) STRICT;
+
+CREATE TABLE chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES message_chunks(id) ON DELETE CASCADE,
+    model_id INTEGER NOT NULL REFERENCES embedding_models(id),
+    vector   BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+
+CREATE TABLE memory_embeddings (
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    model_id  INTEGER NOT NULL REFERENCES embedding_models(id),
+    vector    BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
 ";
 
 /// The full migration set.
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL)])
+    Migrations::new(vec![M::up(V1_SQL)])
 }
 
 /// Apply all pending migrations to `conn`; a no-op on an up-to-date database.
@@ -155,6 +135,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 1);
     }
 }

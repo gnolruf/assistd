@@ -2,6 +2,7 @@
 //! and the child-process supervisor that keeps llama-server alive.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -117,7 +118,7 @@ pub enum Thinking {
 pub enum LlmEvent {
     /// A streamed chunk of model output.
     Delta { text: String },
-    /// A streamed chunk of the model's reasoning; never persisted or spoken.
+    /// A streamed chunk of the model's reasoning; never spoken.
     ReasoningDelta { text: String },
     /// Every tool call the model requested in one step, in request
     /// order; emitted once, before the first of them runs.
@@ -143,6 +144,12 @@ pub enum LlmEvent {
         component: Component,
         event: StatusKind,
         message: String,
+    },
+    /// History was compacted: everything before the last `kept_turns`
+    /// user turns is now represented by `summary`.
+    HistoryCompacted {
+        summary: String,
+        kept_turns: NonZeroUsize,
     },
     /// The model has finished generating.
     Done,
@@ -198,6 +205,8 @@ pub enum HistoryRole {
 pub struct HistoryEntry {
     pub role: HistoryRole,
     pub content: String,
+    /// The model's reasoning for an assistant step; empty otherwise.
+    pub reasoning: String,
     pub tool_calls_json: Option<Value>,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
@@ -239,9 +248,14 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
         Ok(())
     }
 
-    /// Replace the in-memory conversation with `entries`, preserving the
+    /// Replace the in-memory conversation with `entries`, headed by the
+    /// compaction `summary` of earlier history when given, preserving the
     /// static system prompt.
-    async fn replace_history(&self, _entries: Vec<HistoryEntry>) -> LlmResult<()> {
+    async fn replace_history(
+        &self,
+        _summary: Option<String>,
+        _entries: Vec<HistoryEntry>,
+    ) -> LlmResult<()> {
         Ok(())
     }
 

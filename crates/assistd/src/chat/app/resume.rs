@@ -1,4 +1,4 @@
-//! The `/resume` conversation list and its search.
+//! The `/resume` session list and its search.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, Row};
 
 use crate::{MemoryError, MemoryRecord, MemoryStore, Result};
 
 use super::connection::SqliteHandle;
+use super::ids::MemoryId;
+use super::timestamp::timestamp_at;
 use super::writer::{WriteOp, dispatch_write};
 
 /// SQLite-backed [`MemoryStore`].
@@ -21,35 +23,24 @@ impl SqliteMemoryStore {
     pub fn new(handle: Arc<SqliteHandle>) -> Self {
         Self { handle }
     }
-
-    /// Save a memory linked to the conversation row that produced it; returns the row id.
-    pub async fn save_with_source(
-        &self,
-        key: &str,
-        value: String,
-        source_conversation_id: Option<i64>,
-    ) -> Result<i64> {
-        let key = key.to_string();
-        dispatch_write(self.handle.writer(), |ack| WriteOp::SaveMemory {
-            key,
-            value,
-            source_conversation_id,
-            ack,
-        })
-        .await
-    }
 }
 
 #[async_trait]
 impl MemoryStore for SqliteMemoryStore {
-    async fn save(&self, key: &str, value: String) -> Result<i64> {
-        self.save_with_source(key, value, None).await
+    async fn save(&self, key: &str, value: String) -> Result<MemoryId> {
+        let key = key.to_string();
+        dispatch_write(self.handle.writer(), |ack| WriteOp::SaveMemory {
+            key,
+            value,
+            ack,
+        })
+        .await
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>> {
         let key = key.to_string();
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 c.query_row(
                     "SELECT value FROM memories WHERE key = ?1",
@@ -71,7 +62,7 @@ impl MemoryStore for SqliteMemoryStore {
         .await
     }
 
-    async fn delete_by_id(&self, id: i64) -> Result<Option<String>> {
+    async fn delete_by_id(&self, id: MemoryId) -> Result<Option<String>> {
         dispatch_write(self.handle.writer(), |ack| WriteOp::DeleteMemoryById {
             id,
             ack,
@@ -80,13 +71,12 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        let pattern = like_prefix_pattern(prefix);
+        let pattern = glob_prefix_pattern(prefix);
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare(
-                    "SELECT key FROM memories WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
-                )?;
+                let mut stmt =
+                    c.prepare("SELECT key FROM memories WHERE key GLOB ?1 ORDER BY key")?;
                 let rows = stmt
                     .query_map(rusqlite::params![pattern], |r| r.get::<_, String>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -97,22 +87,16 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
-        let pattern = like_prefix_pattern(prefix);
+        let pattern = glob_prefix_pattern(prefix);
         self.handle
-            .conn()
+            .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare(
-                    "SELECT id, key, value FROM memories \
-                     WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key",
+                    "SELECT id, key, value, created_at, updated_at FROM memories \
+                     WHERE key GLOB ?1 ORDER BY key",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![pattern], |r| {
-                        Ok(MemoryRecord {
-                            id: r.get(0)?,
-                            key: r.get(1)?,
-                            value: r.get(2)?,
-                        })
-                    })?
+                    .query_map(rusqlite::params![pattern], memory_record)?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(rows)
             })
@@ -121,13 +105,31 @@ impl MemoryStore for SqliteMemoryStore {
     }
 }
 
-/// A `LIKE` pattern (escape char `\`) matching values that start with `prefix` literally.
-pub(super) fn like_prefix_pattern(prefix: &str) -> String {
-    let escaped = prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("{escaped}%")
+fn memory_record(row: &Row<'_>) -> rusqlite::Result<MemoryRecord> {
+    Ok(MemoryRecord {
+        id: row.get(0)?,
+        key: row.get(1)?,
+        value: row.get(2)?,
+        created_at: timestamp_at(row, 3)?,
+        updated_at: timestamp_at(row, 4)?,
+    })
+}
+
+/// A case-sensitive `GLOB` pattern matching values that start with `prefix` literally.
+fn glob_prefix_pattern(prefix: &str) -> String {
+    let mut pattern = String::with_capacity(prefix.len() + 1);
+    for ch in prefix.chars() {
+        match ch {
+            '*' | '?' | '[' => {
+                pattern.push('[');
+                pattern.push(ch);
+                pattern.push(']');
+            }
+            _ => pattern.push(ch),
+        }
+    }
+    pattern.push('*');
+    pattern
 }
 
 #[cfg(test)]
@@ -167,22 +169,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prefix_like_metacharacters_match_literally() {
+    async fn prefix_matches_literally_and_case_sensitively() {
         let (store, _guard) = fresh().await;
-        store.save("pref:a", "1".into()).await.unwrap();
-        store.save("prefXa", "X".into()).await.unwrap();
-        store.save("100%:a", "p".into()).await.unwrap();
-        store.save("100x:a", "q".into()).await.unwrap();
-        assert_eq!(store.list("pref_").await.unwrap(), Vec::<String>::new());
-        assert_eq!(store.list("100%").await.unwrap(), ["100%:a"]);
+        for key in [
+            "pref:a", "prefXa", "Pref:b", "a*b:1", "axb:1", "q?:1", "qx:1", "[x]:1",
+        ] {
+            store.save(key, "v".into()).await.unwrap();
+        }
+        assert_eq!(store.list("pref:").await.unwrap(), ["pref:a"]);
+        assert_eq!(store.list("a*").await.unwrap(), ["a*b:1"]);
+        assert_eq!(store.list("q?").await.unwrap(), ["q?:1"]);
+        assert_eq!(store.list("[x]").await.unwrap(), ["[x]:1"]);
         let full: Vec<String> = store
-            .list_full("100%")
+            .list_full("Pref")
             .await
             .unwrap()
             .into_iter()
             .map(|r| r.key)
             .collect();
-        assert_eq!(full, ["100%:a"]);
+        assert_eq!(full, ["Pref:b"]);
     }
 
     #[tokio::test]

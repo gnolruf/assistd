@@ -4,10 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_core::Config;
+use assistd_core::{Config, LlmReplay};
 use assistd_memory::{
-    BranchId, ConversationStore, HistoryRow, MemoryStore, NoConversationStore, NoMemoryStore,
-    SessionId, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
+    BranchId, MemoryStore, NoMemoryStore, NoTranscriptStore, SessionId, SqliteHandle,
+    SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
 };
 use rustix::io::Errno;
 use rustix::process::Pid;
@@ -17,13 +17,13 @@ use tracing::info;
 
 pub(super) struct MemorySubsystem {
     pub memory_store: Arc<dyn MemoryStore>,
-    pub conversation_store: Arc<dyn ConversationStore>,
+    pub transcript_store: Arc<dyn TranscriptStore>,
     pub writer_handle: Option<JoinHandle<()>>,
     pub session_id: Arc<SessionId>,
     /// `None` for an unsaved session, inserted with its first message.
     pub branch_id: Option<BranchId>,
     /// History of the resumed branch, to replay into the LLM.
-    pub resumed_history: Vec<HistoryRow>,
+    pub resumed_history: LlmReplay,
     pub sqlite_handle: Option<Arc<SqliteHandle>>,
 }
 
@@ -31,11 +31,11 @@ impl MemorySubsystem {
     fn disabled() -> Self {
         Self {
             memory_store: Arc::new(NoMemoryStore),
-            conversation_store: Arc::new(NoConversationStore),
+            transcript_store: Arc::new(NoTranscriptStore),
             writer_handle: None,
             session_id: Arc::new(SessionId::new()),
             branch_id: None,
-            resumed_history: Vec::new(),
+            resumed_history: LlmReplay::default(),
             sqlite_handle: None,
         }
     }
@@ -43,7 +43,7 @@ impl MemorySubsystem {
     /// End the session row, then flip `writer_shutdown` and drain the
     /// writer task. Must run after every other writer client has stopped.
     pub(super) async fn shutdown(self, writer_shutdown: &watch::Sender<bool>) {
-        if let Err(e) = self.conversation_store.end_session(&self.session_id).await {
+        if let Err(e) = self.transcript_store.end_session(&self.session_id).await {
             tracing::warn!("memory: end_session failed at shutdown: {e:#}");
         }
         writer_shutdown.send_replace(true);
@@ -75,14 +75,14 @@ pub(super) async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> 
     };
 
     let handle = Arc::new(handle);
-    let conv_store = Arc::new(SqliteConversationStore::new(handle.clone()));
+    let conv_store = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
     let (session_id, branch_id, resumed_history) =
         resume_or_start_unsaved_session(conv_store.as_ref(), &db_path).await;
 
     MemorySubsystem {
         memory_store: mem_store,
-        conversation_store: conv_store,
+        transcript_store: conv_store,
         writer_handle: Some(writer_handle),
         session_id,
         branch_id,
@@ -94,22 +94,16 @@ pub(super) async fn init(config: &Config, shutdown_tx: &watch::Sender<bool>) -> 
 /// Resume the most recent session whose daemon is dead, else start an
 /// unsaved session that is inserted with its first message.
 async fn resume_or_start_unsaved_session(
-    conv_store: &SqliteConversationStore,
+    conv_store: &SqliteTranscriptStore,
     db_path: &Path,
-) -> (Arc<SessionId>, Option<BranchId>, Vec<HistoryRow>) {
+) -> (Arc<SessionId>, Option<BranchId>, LlmReplay) {
     match conv_store.find_resumable_session().await {
         Ok(Some(cand)) if !pid_is_alive(cand.daemon_pid) => {
             info!(
                 "memory: resuming prior session {} (branch={})",
                 cand.session_id, cand.current_branch_id.0
             );
-            let history = match conv_store.load_branch_history(cand.current_branch_id).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::warn!("memory: load_branch_history failed for resume ({e:#})");
-                    Vec::new()
-                }
-            };
+            let history = load_resumed_replay(conv_store, cand.current_branch_id).await;
             (
                 Arc::new(cand.session_id),
                 Some(cand.current_branch_id),
@@ -121,13 +115,30 @@ async fn resume_or_start_unsaved_session(
                 "memory: SQLite ready at {} (new session)",
                 db_path.display()
             );
-            (Arc::new(SessionId::new()), None, Vec::new())
+            (Arc::new(SessionId::new()), None, LlmReplay::default())
         }
         Err(e) => {
             tracing::warn!("memory: find_resumable_session failed: {e:#}; starting fresh");
-            (Arc::new(SessionId::new()), None, Vec::new())
+            (Arc::new(SessionId::new()), None, LlmReplay::default())
         }
     }
+}
+
+/// The resumed branch's history and summary as the LLM replays them; a
+/// failed load replays nothing in its place.
+async fn load_resumed_replay(conv_store: &SqliteTranscriptStore, branch: BranchId) -> LlmReplay {
+    let rows = conv_store
+        .load_branch_history(branch)
+        .await
+        .inspect_err(|e| tracing::warn!("memory: load_branch_history failed for resume ({e:#})"))
+        .unwrap_or_default();
+    let summary = conv_store
+        .load_branch_summary(branch)
+        .await
+        .inspect_err(|e| tracing::warn!("memory: load_branch_summary failed for resume ({e:#})"))
+        .ok()
+        .flatten();
+    LlmReplay::new(&rows, summary)
 }
 
 fn pid_is_alive(pid: u32) -> bool {

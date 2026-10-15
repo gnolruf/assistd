@@ -66,7 +66,7 @@ impl Harness {
         for (chunk_id, text) in (0..).zip(texts) {
             self.jobs
                 .send(EmbedJob::Chunk {
-                    chunk_id,
+                    chunk_id: ChunkId(chunk_id),
                     text: (*text).to_owned(),
                 })
                 .await
@@ -85,7 +85,7 @@ impl Harness {
         for &id in ids {
             match self.next_write().await {
                 WriteOp::StoreChunkEmbedding { chunk_id, ack, .. } => {
-                    assert_eq!(chunk_id, id);
+                    assert_eq!(chunk_id, ChunkId(id));
                     ack.send(Ok(())).unwrap();
                 }
                 _ => panic!("expected StoreChunkEmbedding"),
@@ -112,7 +112,7 @@ async fn worker_routes_chunk_job_to_storechunkembedding() {
     harness
         .jobs
         .send(EmbedJob::Chunk {
-            chunk_id: 42,
+            chunk_id: ChunkId(42),
             text: "hello".into(),
         })
         .await
@@ -122,13 +122,11 @@ async fn worker_routes_chunk_job_to_storechunkembedding() {
         WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
-            dim,
             vector,
             ack,
         } => {
-            assert_eq!(chunk_id, 42);
+            assert_eq!(chunk_id, ChunkId(42));
             assert_eq!(model, "mock");
-            assert_eq!(dim, 2);
             assert_eq!(vector, vector_to_blob(&[1.0, 0.0]));
             ack.send(Ok(())).unwrap();
         }

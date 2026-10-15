@@ -142,10 +142,18 @@ impl Agent {
             iteration = turn.iteration,
             "model requested tools after they were withdrawn; ending turn"
         );
-        let results = calls
-            .iter()
-            .map(|call| cancelled_tool_result(call, "ended; tools are unavailable").0)
-            .collect();
+        let _ = turn
+            .tx
+            .send(LlmEvent::ToolCallsRequested {
+                calls: calls.to_vec(),
+            })
+            .await;
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            let (payload, raw_result) = cancelled_tool_result(call, "ended; tools are unavailable");
+            send_tool_result(turn, &payload, raw_result).await;
+            results.push(payload);
+        }
         self.backend.push_tool_results(results).await?;
         let _ = turn.tx.send(LlmEvent::Done).await;
         Ok(())

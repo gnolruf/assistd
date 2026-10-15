@@ -2,6 +2,7 @@
 //! heuristic, corrected by the prompt size the server last measured.
 
 use std::borrow::Cow;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 
 use assistd_config::{ChatConfig, ModelConfig};
@@ -304,10 +305,14 @@ impl Conversation {
         }
     }
 
-    /// Replace the message list wholesale and clear any pending
-    /// context or note.
-    pub fn replace_messages(&mut self, msgs: Vec<Message>) {
-        self.messages = msgs;
+    /// Replace the message list wholesale, headed by `summary` when given,
+    /// and clear any pending context or note.
+    pub fn replace_messages(&mut self, summary: Option<&str>, msgs: Vec<Message>) {
+        self.messages = summary
+            .map(|text| Message::text(Role::System, format!("{SUMMARY_PREFIX}{text}")))
+            .into_iter()
+            .chain(msgs)
+            .collect();
         self.pending_context = None;
         self.transient_note = None;
         self.calibration = 0;
@@ -347,6 +352,21 @@ impl Conversation {
         let error = i64::from(prompt_tokens) - i64::from(estimated);
         let bounded = error.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
         self.calibration = i32::try_from(bounded).unwrap_or_default();
+    }
+
+    /// The current summary text and how many user turns follow it, or
+    /// `None` when there is no summary or no turn after it.
+    pub fn summary_snapshot(&self) -> Option<(&str, NonZeroUsize)> {
+        let summary = self
+            .messages
+            .first()?
+            .content
+            .strip_prefix(SUMMARY_PREFIX)?;
+        let kept_turns = self.messages[self.summary_insertion_index()..]
+            .iter()
+            .filter(|m| m.role == Role::User && !Self::is_tool_result(m))
+            .count();
+        Some((summary, NonZeroUsize::new(kept_turns)?))
     }
 
     pub fn message_count(&self) -> usize {

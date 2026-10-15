@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use assistd_config::EmbeddingConfig;
 use assistd_embed::{EmbedJob, EmbedderHandle};
 use assistd_memory::{
-    ConversationStore, MemoryStore, NoConversationStore, NoMemoryStore, NoSemanticStore,
-    SemanticStore, SqliteHandle,
+    MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, SemanticStore, SqliteHandle,
+    TranscriptStore,
 };
 use assistd_tools::MemoryOps;
 use assistd_utils::readiness::Readiness;
@@ -18,7 +18,7 @@ use assistd_utils::readiness::Readiness;
 #[derive(Debug)]
 pub struct MemoryStack {
     pub memory: Arc<dyn MemoryStore>,
-    pub conversations: Arc<dyn ConversationStore>,
+    pub transcripts: Arc<dyn TranscriptStore>,
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
@@ -32,13 +32,13 @@ impl MemoryStack {
     /// and the embedder unavailable.
     pub fn disabled(embedding_cfg: EmbeddingConfig) -> Self {
         let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
-        let conversations: Arc<dyn ConversationStore> = Arc::new(NoConversationStore);
-        let memory_ops = Arc::new(MemoryOps::new(memory.clone(), conversations.clone()));
+        let transcripts: Arc<dyn TranscriptStore> = Arc::new(NoTranscriptStore);
+        let memory_ops = Arc::new(MemoryOps::new(memory.clone(), transcripts.clone()));
         let (embed_tx, embed_rx) = mpsc::channel::<EmbedJob>(1);
         drop(embed_rx);
         Self {
             memory,
-            conversations,
+            transcripts,
             memory_ops,
             embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(
                 "embedding not configured".into(),
@@ -53,14 +53,14 @@ impl MemoryStack {
     /// Replace the fact store, rebuilding `memory_ops` over it.
     pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
         self.memory = memory.clone();
-        self.memory_ops = Arc::new(MemoryOps::new(memory, self.conversations.clone()));
+        self.memory_ops = Arc::new(MemoryOps::new(memory, self.transcripts.clone()));
         self
     }
 
-    /// Replace the conversation store, rebuilding `memory_ops` over it.
-    pub fn with_conversations(mut self, conversations: Arc<dyn ConversationStore>) -> Self {
-        self.conversations = conversations.clone();
-        self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), conversations));
+    /// Replace the transcript store, rebuilding `memory_ops` over it.
+    pub fn with_transcripts(mut self, transcripts: Arc<dyn TranscriptStore>) -> Self {
+        self.transcripts = transcripts.clone();
+        self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), transcripts));
         self
     }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::*;
-use crate::sqlite::{ConversationStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore};
+use crate::sqlite::{SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore};
 use crate::{MemoryStore, PersistedMessage};
 
 /// The returned guard keeps the temp dir and the writer's shutdown sender alive.
@@ -22,18 +22,18 @@ async fn fresh() -> (
     (handle, store, (temp, tx))
 }
 
-async fn seed_conversation(handle: &Arc<SqliteHandle>, msg: PersistedMessage) -> (SessionId, i64) {
-    let store = SqliteConversationStore::new(handle.clone());
+async fn seed_message(handle: &Arc<SqliteHandle>, msg: PersistedMessage) -> (SessionId, MessageId) {
+    let store = SqliteTranscriptStore::new(handle.clone());
     let session = SessionId::new();
     let branch = store
         .begin_session_with_main_branch(&session, 0)
         .await
         .unwrap();
-    let conv_id = store
+    let message_id = store
         .append_message_to_branch(&session, branch, None, msg)
         .await
         .unwrap();
-    (session, conv_id)
+    (session, message_id)
 }
 
 /// 2-d unit vector at `angle` radians.
@@ -44,32 +44,37 @@ fn unit_vec(angle: f32) -> Vec<f32> {
 async fn insert_chunk_with_vec(
     handle: &SqliteHandle,
     store: &SqliteSemanticStore,
-    conv_id: i64,
-    chunk_index: i64,
+    message_id: MessageId,
+    byte_start: usize,
     vector: &[f32],
     model: &str,
-) -> i64 {
+) -> ChunkId {
     let chunk_id = handle
-        .store_chunk(conv_id, chunk_index, format!("chunk{chunk_index}"), None)
+        .store_chunk(message_id, byte_start..byte_start + 1)
         .await
         .unwrap();
     store
-        .store_chunk_embedding(chunk_id, model.into(), 2, vector_to_blob(vector))
+        .store_chunk_embedding(chunk_id, model.into(), vector_to_blob(vector))
         .await
         .unwrap();
     chunk_id
 }
 
-async fn save_memory(handle: &Arc<SqliteHandle>, key: &str, value: &str) -> i64 {
+async fn save_memory(handle: &Arc<SqliteHandle>, key: &str, value: &str) -> MemoryId {
     SqliteMemoryStore::new(handle.clone())
         .save(key, value.into())
         .await
         .unwrap()
 }
 
-async fn embed_memory(store: &SqliteSemanticStore, memory_id: i64, vector: &[f32], model: &str) {
+async fn embed_memory(
+    store: &SqliteSemanticStore,
+    memory_id: MemoryId,
+    vector: &[f32],
+    model: &str,
+) {
     store
-        .store_memory_embedding(memory_id, model.into(), 2, vector_to_blob(vector))
+        .store_memory_embedding(memory_id, model.into(), vector_to_blob(vector))
         .await
         .unwrap();
 }
@@ -77,25 +82,24 @@ async fn embed_memory(store: &SqliteSemanticStore, memory_id: i64, vector: &[f32
 #[tokio::test]
 async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
     let (handle, store, _guard) = fresh().await;
-    let (session, conv_id) =
-        seed_conversation(&handle, PersistedMessage::user("hello world")).await;
+    let (session, message_id) = seed_message(&handle, PersistedMessage::user("hello world")).await;
 
-    let c1 = insert_chunk_with_vec(&handle, &store, conv_id, 0, &unit_vec(0.0), "m").await;
-    let c2 = insert_chunk_with_vec(&handle, &store, conv_id, 1, &unit_vec(0.3), "m").await;
-    let c3 = insert_chunk_with_vec(&handle, &store, conv_id, 2, &unit_vec(1.5), "m").await;
+    let c1 = insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "m").await;
+    let c2 = insert_chunk_with_vec(&handle, &store, message_id, 1, &unit_vec(0.3), "m").await;
+    let c3 = insert_chunk_with_vec(&handle, &store, message_id, 2, &unit_vec(1.5), "m").await;
 
     let hits = store
         .nearest_chunks(unit_vec(0.0), 3, "m", None)
         .await
         .unwrap();
-    let ids: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+    let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
     assert_eq!(ids, [c1, c2, c3]);
     assert!(hits[0].similarity > hits[1].similarity);
     assert!(hits[1].similarity > hits[2].similarity);
     assert!((hits[0].similarity - 1.0).abs() < 1e-4);
     for hit in &hits {
-        assert_eq!(hit.conversation_id, conv_id);
-        assert_eq!(hit.session_id, session.0);
+        assert_eq!(hit.message_id, message_id);
+        assert_eq!(hit.session_id, session);
         assert_eq!(hit.role, PersistedRole::User);
         assert_eq!(hit.content, "hello world");
     }
@@ -104,14 +108,14 @@ async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
 #[tokio::test]
 async fn nearest_chunks_keeps_the_best_top_k() {
     let (handle, store, _guard) = fresh().await;
-    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
+    let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
     let mut ids = Vec::new();
     for i in 0..10 {
         ids.push(
             insert_chunk_with_vec(
                 &handle,
                 &store,
-                conv_id,
+                message_id,
                 i,
                 &unit_vec((i as f32) * 0.1),
                 "m",
@@ -125,7 +129,7 @@ async fn nearest_chunks_keeps_the_best_top_k() {
             .nearest_chunks(unit_vec(0.0), top_k, "m", None)
             .await
             .unwrap();
-        let got: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+        let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
         assert_eq!(got, expected, "top_k {top_k}");
     }
 }
@@ -133,19 +137,18 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 #[tokio::test]
 async fn nearest_chunks_can_exclude_one_session() {
     let (handle, store, _guard) = fresh().await;
-    let (past, past_conv) = seed_conversation(&handle, PersistedMessage::user("past")).await;
-    let (current, current_conv) =
-        seed_conversation(&handle, PersistedMessage::user("current")).await;
+    let (past, past_message) = seed_message(&handle, PersistedMessage::user("past")).await;
+    let (current, current_message) = seed_message(&handle, PersistedMessage::user("current")).await;
     let past_chunk =
-        insert_chunk_with_vec(&handle, &store, past_conv, 0, &unit_vec(0.4), "m").await;
+        insert_chunk_with_vec(&handle, &store, past_message, 0, &unit_vec(0.4), "m").await;
     let current_chunk =
-        insert_chunk_with_vec(&handle, &store, current_conv, 0, &unit_vec(0.0), "m").await;
+        insert_chunk_with_vec(&handle, &store, current_message, 0, &unit_vec(0.0), "m").await;
 
     let all = store
         .nearest_chunks(unit_vec(0.0), 5, "m", None)
         .await
         .unwrap();
-    let all_ids: Vec<i64> = all.iter().map(|h| h.chunk_id).collect();
+    let all_ids: Vec<ChunkId> = all.iter().map(|h| h.chunk_id).collect();
     assert_eq!(
         all_ids,
         [current_chunk, past_chunk],
@@ -156,11 +159,9 @@ async fn nearest_chunks_can_exclude_one_session() {
         .nearest_chunks(unit_vec(0.0), 5, "m", Some(&current))
         .await
         .unwrap();
-    let other_ids: Vec<(i64, &str)> = others
-        .iter()
-        .map(|h| (h.chunk_id, h.session_id.as_str()))
-        .collect();
-    assert_eq!(other_ids, [(past_chunk, past.as_str())]);
+    let other_ids: Vec<(ChunkId, SessionId)> =
+        others.iter().map(|h| (h.chunk_id, h.session_id)).collect();
+    assert_eq!(other_ids, [(past_chunk, past)]);
 }
 
 #[tokio::test]
@@ -195,7 +196,10 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
         Vec::<MemoryHit>::new()
     );
     assert_eq!(
-        store.memories_missing_embedding("m", 0, 100).await.unwrap(),
+        store
+            .memories_missing_embedding("m", None, 100)
+            .await
+            .unwrap(),
         [(mem_id, "emacs".to_string())]
     );
 }
@@ -203,63 +207,59 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
 #[tokio::test]
 async fn non_finite_vectors_never_enter_top_k() {
     let (handle, store, _guard) = fresh().await;
-    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
-    insert_chunk_with_vec(&handle, &store, conv_id, 0, &[f32::NAN, 0.0], "m").await;
-    insert_chunk_with_vec(&handle, &store, conv_id, 1, &[f32::INFINITY, 0.0], "m").await;
-    let far = insert_chunk_with_vec(&handle, &store, conv_id, 2, &unit_vec(1.5), "m").await;
-    let near = insert_chunk_with_vec(&handle, &store, conv_id, 3, &unit_vec(0.1), "m").await;
+    let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
+    insert_chunk_with_vec(&handle, &store, message_id, 0, &[f32::NAN, 0.0], "m").await;
+    insert_chunk_with_vec(&handle, &store, message_id, 1, &[f32::INFINITY, 0.0], "m").await;
+    let far = insert_chunk_with_vec(&handle, &store, message_id, 2, &unit_vec(1.5), "m").await;
+    let near = insert_chunk_with_vec(&handle, &store, message_id, 3, &unit_vec(0.1), "m").await;
 
     let hits = store
         .nearest_chunks(unit_vec(0.0), 2, "m", None)
         .await
         .unwrap();
-    let got: Vec<i64> = hits.iter().map(|h| h.chunk_id).collect();
+    let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
     assert_eq!(got, [near, far]);
     assert!(hits.iter().all(|h| h.similarity.is_finite()));
-    assert!(
-        serde_json::to_string(&hits)
-            .unwrap()
-            .contains("\"similarity\":0.9")
-    );
 }
 
 #[tokio::test]
 async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
     let (handle, store, _guard) = fresh().await;
-    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
+    let (_, message_id) = seed_message(&handle, PersistedMessage::user("xyz")).await;
 
-    insert_chunk_with_vec(&handle, &store, conv_id, 0, &unit_vec(0.0), "new").await;
-    let old_chunk = insert_chunk_with_vec(&handle, &store, conv_id, 1, &unit_vec(0.5), "old").await;
-    let naked_chunk = handle
-        .store_chunk(conv_id, 2, "naked-chunk".into(), None)
-        .await
-        .unwrap();
+    insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "new").await;
+    let old_chunk =
+        insert_chunk_with_vec(&handle, &store, message_id, 1, &unit_vec(0.5), "old").await;
+    let naked_chunk = handle.store_chunk(message_id, 2..3).await.unwrap();
 
     let indexed_mem = save_memory(&handle, "indexed", "v1").await;
     embed_memory(&store, indexed_mem, &unit_vec(0.0), "new").await;
     let bare_mem = save_memory(&handle, "bare", "v2").await;
 
     assert_eq!(
-        store.chunks_missing_embedding("new", 0, 100).await.unwrap(),
-        [
-            (old_chunk, "chunk1".to_string()),
-            (naked_chunk, "naked-chunk".to_string())
-        ]
-    );
-    assert_eq!(
-        store.chunks_missing_embedding("new", 0, 1).await.unwrap(),
-        [(old_chunk, "chunk1".to_string())]
-    );
-    assert_eq!(
         store
-            .chunks_missing_embedding("new", old_chunk, 100)
+            .chunks_missing_embedding("new", None, 100)
             .await
             .unwrap(),
-        [(naked_chunk, "naked-chunk".to_string())]
+        [(old_chunk, "y".to_string()), (naked_chunk, "z".to_string())]
     );
     assert_eq!(
         store
-            .memories_missing_embedding("new", 0, 100)
+            .chunks_missing_embedding("new", None, 1)
+            .await
+            .unwrap(),
+        [(old_chunk, "y".to_string())]
+    );
+    assert_eq!(
+        store
+            .chunks_missing_embedding("new", Some(old_chunk), 100)
+            .await
+            .unwrap(),
+        [(naked_chunk, "z".to_string())]
+    );
+    assert_eq!(
+        store
+            .memories_missing_embedding("new", None, 100)
             .await
             .unwrap(),
         [(bare_mem, "v2".to_string())]
@@ -268,22 +268,22 @@ async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
     embed_memory(&store, bare_mem, &unit_vec(0.0), "new").await;
     assert_eq!(
         store
-            .memories_missing_embedding("new", 0, 100)
+            .memories_missing_embedding("new", None, 100)
             .await
             .unwrap(),
-        Vec::<(i64, String)>::new()
+        Vec::<(MemoryId, String)>::new()
     );
 }
 
 #[tokio::test]
 async fn count_stale_aggregates_across_chunks_and_memories() {
     let (handle, store, _guard) = fresh().await;
-    let (_, conv_id) = seed_conversation(&handle, PersistedMessage::user("x")).await;
+    let (_, message_id) = seed_message(&handle, PersistedMessage::user("x")).await;
 
-    insert_chunk_with_vec(&handle, &store, conv_id, 0, &unit_vec(0.0), "old-A").await;
-    insert_chunk_with_vec(&handle, &store, conv_id, 1, &unit_vec(0.5), "old-A").await;
-    insert_chunk_with_vec(&handle, &store, conv_id, 2, &unit_vec(1.0), "old-B").await;
-    insert_chunk_with_vec(&handle, &store, conv_id, 3, &unit_vec(1.5), "new").await;
+    insert_chunk_with_vec(&handle, &store, message_id, 0, &unit_vec(0.0), "old-A").await;
+    insert_chunk_with_vec(&handle, &store, message_id, 1, &unit_vec(0.5), "old-A").await;
+    insert_chunk_with_vec(&handle, &store, message_id, 2, &unit_vec(1.0), "old-B").await;
+    insert_chunk_with_vec(&handle, &store, message_id, 3, &unit_vec(1.5), "new").await;
     let mem_id = save_memory(&handle, "k", "v").await;
     embed_memory(&store, mem_id, &unit_vec(0.0), "old-A").await;
 

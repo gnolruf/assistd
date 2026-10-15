@@ -273,6 +273,14 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
+        if let Some((summary, kept_turns)) = conv.summary_snapshot() {
+            let _ = tx
+                .send(LlmEvent::HistoryCompacted {
+                    summary: summary.to_string(),
+                    kept_turns,
+                })
+                .await;
+        }
         send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
     }
 
@@ -590,13 +598,17 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
-    async fn replace_history(&self, entries: Vec<HistoryEntry>) -> LlmResult<()> {
+    async fn replace_history(
+        &self,
+        summary: Option<String>,
+        entries: Vec<HistoryEntry>,
+    ) -> LlmResult<()> {
         let messages = entries
             .into_iter()
             .map(history_message)
             .collect::<LlmResult<Vec<_>>>()?;
         let mut conv = self.conv.lock().await;
-        conv.replace_messages(messages);
+        conv.replace_messages(summary.as_deref(), messages);
         Ok(())
     }
 
@@ -1001,6 +1013,7 @@ fn history_message(entry: HistoryEntry) -> LlmResult<Message> {
         HistoryRole::User => Message::text(Role::User, entry.content),
         HistoryRole::Assistant => Message {
             tool_calls: parse_tool_calls(entry.tool_calls_json.as_ref())?,
+            reasoning: entry.reasoning,
             ..Message::text(Role::Assistant, entry.content)
         },
         HistoryRole::Tool => match entry.tool_call_id {

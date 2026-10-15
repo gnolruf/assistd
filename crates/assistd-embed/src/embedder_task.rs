@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use assistd_memory::{WriteOp, vector_to_blob};
+use assistd_memory::{ChunkId, MemoryId, WriteOp, vector_to_blob};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -19,8 +19,8 @@ static QUEUE_FULL_WARNINGS: Mutex<DropWarnLimiter> = Mutex::new(DropWarnLimiter:
 /// One row to embed.
 #[derive(Debug)]
 pub enum EmbedJob {
-    Chunk { chunk_id: i64, text: String },
-    Memory { memory_id: i64, text: String },
+    Chunk { chunk_id: ChunkId, text: String },
+    Memory { memory_id: MemoryId, text: String },
 }
 
 impl EmbedJob {
@@ -32,8 +32,8 @@ impl EmbedJob {
 
     fn target(&self) -> (&'static str, i64) {
         match *self {
-            Self::Chunk { chunk_id, .. } => ("chunk", chunk_id),
-            Self::Memory { memory_id, .. } => ("memory", memory_id),
+            Self::Chunk { chunk_id, .. } => ("chunk", chunk_id.0),
+            Self::Memory { memory_id, .. } => ("memory", memory_id.0),
         }
     }
 }
@@ -196,21 +196,18 @@ async fn store_embedding(
         }
     };
     let model = embedder.model().to_string();
-    let dim = i64::try_from(embedder.dim()).unwrap_or(i64::MAX);
     let vector = vector_to_blob(&embedding);
     let (ack_tx, ack_rx) = oneshot::channel();
     let op = match job {
         EmbedJob::Chunk { chunk_id, .. } => WriteOp::StoreChunkEmbedding {
             chunk_id,
             model,
-            dim,
             vector,
             ack: ack_tx,
         },
         EmbedJob::Memory { memory_id, .. } => WriteOp::StoreMemoryEmbedding {
             memory_id,
             model,
-            dim,
             vector,
             ack: ack_tx,
         },

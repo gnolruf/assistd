@@ -577,7 +577,7 @@ pub enum StatusKind {
     HistoryCompacted,
 }
 
-/// Author of a persisted conversation message.
+/// Author of a persisted transcript message.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -682,7 +682,7 @@ pub enum Event {
     /// One search hit; `content` is the full message, `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
         id: String,
-        conversation_id: i64,
+        message_id: i64,
         chunk_id: i64,
         session_id: String,
         timestamp: String,
@@ -779,13 +779,23 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
     },
-    /// One message of branch history.
+    /// One message of branch history. Tool rows carry the call's arguments
+    /// and outcome when known; `last_summarized` marks the newest row the
+    /// branch's compaction summary stands in for.
     HistoryEntry {
         id: String,
         seq: i64,
         role: Role,
         content: String,
         tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_args: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        last_summarized: bool,
     },
     /// Result of `Undo`; `removed_messages == 0` means there was nothing to undo.
     UndoApplied {

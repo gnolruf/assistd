@@ -2,20 +2,28 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use rusqlite::OpenFlags;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_rusqlite::Connection;
 
 use crate::{MemoryError, Result, migrations};
 
+use super::ids::{ChunkId, MessageId};
 use super::writer::{WriteOp, dispatch_write, spawn_writer};
 
 /// Deep enough to absorb one bursty agent step without backpressuring the sender.
 const WRITER_QUEUE_DEPTH: usize = 256;
+
+/// How long a statement waits on a lock held by another process (e.g. a
+/// `sqlite3` shell) before failing with `SQLITE_BUSY`.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Mode for directories created to hold the database.
 const PRIVATE_DIR_MODE: u32 = 0o700;
@@ -27,12 +35,12 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Suffixes SQLite appends to the database path for its sidecar files.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
-/// Cheaply cloneable handle shared by every store: reads hit the connection directly,
-/// writes go through the writer task.
+/// Cheaply cloneable handle shared by every store: reads go to a read-only
+/// connection, writes through the writer task, which owns the only writable one.
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
-    pub(super) conn: Connection,
-    pub(super) writer_tx: Arc<mpsc::Sender<WriteOp>>,
+    reader: Connection,
+    writer_tx: Arc<mpsc::Sender<WriteOp>>,
 }
 
 impl SqliteHandle {
@@ -44,42 +52,23 @@ impl SqliteHandle {
         shutdown: watch::Receiver<bool>,
     ) -> Result<(Self, JoinHandle<()>)> {
         prepare_private_db_file(path).await?;
-
-        let conn = Connection::open(path)
-            .await
-            .map_err(|source| MemoryError::Open {
-                path: path.to_path_buf(),
-                source,
-            })?;
-
-        conn.call(|c| -> rusqlite::Result<_> {
-            c.pragma_update(None, "journal_mode", "WAL")?;
-            c.pragma_update(None, "synchronous", "NORMAL")?;
-            c.pragma_update(None, "foreign_keys", "ON")?;
-            c.pragma_update(None, "secure_delete", "ON")?;
-            Ok(())
-        })
-        .await
-        .map_err(MemoryError::sqlite("apply SQLite pragmas"))?;
-
-        conn.call(migrations::run)
-            .await
-            .map_err(MemoryError::Migration)?;
+        let writer = open_writer(path).await?;
+        let reader = open_reader(path).await?;
 
         let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_DEPTH);
-        let writer_handle = spawn_writer(conn.clone(), writer_rx, shutdown);
+        let writer_handle = spawn_writer(writer, writer_rx, shutdown);
 
         Ok((
             Self {
-                conn,
+                reader,
                 writer_tx: Arc::new(writer_tx),
             },
             writer_handle,
         ))
     }
 
-    pub(super) fn conn(&self) -> &Connection {
-        &self.conn
+    pub(super) fn reader(&self) -> &Connection {
+        &self.reader
     }
 
     pub(super) fn writer(&self) -> &mpsc::Sender<WriteOp> {
@@ -91,23 +80,59 @@ impl SqliteHandle {
         self.writer_tx.clone()
     }
 
-    /// Persist one chunk of a conversation message and return its row id.
-    pub async fn store_chunk(
-        &self,
-        conversation_id: i64,
-        chunk_index: i64,
-        content: String,
-        token_count: Option<i64>,
-    ) -> Result<i64> {
+    /// Persist the chunk at byte range `bytes` of a message and return its id.
+    pub async fn store_chunk(&self, message_id: MessageId, bytes: Range<usize>) -> Result<ChunkId> {
         dispatch_write(self.writer(), |ack| WriteOp::StoreChunk {
-            conversation_id,
-            chunk_index,
-            content,
-            token_count,
+            message_id,
+            bytes,
             ack,
         })
         .await
     }
+}
+
+/// The writable connection: applies pragmas, migrates, and refreshes planner statistics.
+async fn open_writer(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)
+        .await
+        .map_err(|source| MemoryError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    conn.call(|c| -> rusqlite::Result<_> {
+        c.pragma_update(None, "journal_mode", "WAL")?;
+        c.pragma_update(None, "synchronous", "NORMAL")?;
+        c.pragma_update(None, "foreign_keys", "ON")?;
+        c.pragma_update(None, "secure_delete", "ON")?;
+        c.busy_timeout(BUSY_TIMEOUT)
+    })
+    .await
+    .map_err(MemoryError::sqlite("apply SQLite pragmas"))?;
+
+    conn.call(migrations::run)
+        .await
+        .map_err(MemoryError::Migration)?;
+
+    conn.call(|c| c.execute_batch("PRAGMA optimize=0x10002"))
+        .await
+        .map_err(MemoryError::sqlite("optimize query planner statistics"))?;
+    Ok(conn)
+}
+
+/// A read-only connection; opened after the writer has switched the database to WAL.
+async fn open_reader(path: &Path) -> Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags)
+        .await
+        .map_err(|source| MemoryError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    conn.call(|c| c.busy_timeout(BUSY_TIMEOUT))
+        .await
+        .map_err(MemoryError::sqlite("apply SQLite reader pragmas"))?;
+    Ok(conn)
 }
 
 async fn prepare_private_db_file(path: &Path) -> Result<()> {
@@ -214,7 +239,7 @@ mod tests {
         let (_handle, writer) = SqliteHandle::open(&path, rx).await.unwrap();
 
         tx.send(true).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+        tokio::time::timeout(Duration::from_secs(5), writer)
             .await
             .expect("writer exits once its idle drain window passes")
             .unwrap();

@@ -1,23 +1,48 @@
 //! Branch and session handlers, plus the session-title generator.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use assistd_ipc::Event;
 use assistd_llm::{HistoryEntry, HistoryRole, Thinking};
-use assistd_memory::{BranchId, HistoryRow, PersistedRole, SessionId, UndoOutcome};
+use assistd_memory::{BranchId, BranchSummary, HistoryRow, MessageKind, SessionId, UndoOutcome};
 
-use super::{AppState, send_error, wire_role};
+use super::{AppState, send_error, wire_role, wire_timestamp};
 
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_TITLE_PROMPT_CHARS: usize = 1024;
 
+/// A branch's persisted history as the LLM replays it: the compaction
+/// summary, if any, then only the rows after the ones it stands in for.
+#[derive(Debug, Default)]
+pub struct LlmReplay {
+    pub summary: Option<String>,
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl LlmReplay {
+    /// The replay of `rows`, a whole branch, under its `summary`.
+    pub fn new(rows: &[HistoryRow], summary: Option<BranchSummary>) -> Self {
+        let through_seq = summary.as_ref().map_or(i64::MIN, |s| s.through_seq);
+        Self {
+            summary: summary.map(|s| s.content),
+            entries: rows
+                .iter()
+                .filter(|row| row.seq > through_seq)
+                .map(history_entry)
+                .collect(),
+        }
+    }
+}
+
 impl AppState {
     /// `/fork <name>`: snapshot the current branch into a new branch and
-    /// switch to it. The new branch shares conversation rows with its
+    /// switch to it. The new branch shares message rows with its
     /// parent; only the branch membership is copied.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, branch = %name))]
     pub(super) async fn handle_fork(
@@ -33,7 +58,7 @@ impl AppState {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
-        let (session, current_branch) = match self.saved_conversation().await {
+        let (session, current_branch) = match self.saved_session().await {
             Ok(pair) => pair,
             Err(e) => {
                 send_error(&tx, id, format!("/fork: {e}")).await;
@@ -42,7 +67,7 @@ impl AppState {
         };
         let new_branch = match self
             .memory
-            .conversations
+            .transcripts
             .fork_branch(current_branch, &name)
             .await
         {
@@ -54,7 +79,7 @@ impl AppState {
         };
         if let Err(e) = self
             .memory
-            .conversations
+            .transcripts
             .set_current_branch(&session, new_branch)
             .await
         {
@@ -67,7 +92,7 @@ impl AppState {
             return;
         }
         self.runtime
-            .conversation_ctx
+            .session_ctx
             .replace(session.clone(), Some(new_branch))
             .await;
 
@@ -75,7 +100,7 @@ impl AppState {
         let fork_point_seq = self.lookup_branch_tail_seq(current_branch).await;
         let session_title = self
             .memory
-            .conversations
+            .transcripts
             .get_session_title(&session)
             .await
             .ok()
@@ -84,7 +109,7 @@ impl AppState {
             .send(Event::BranchSwitched {
                 id: id.clone(),
                 branch_id: Some(new_branch.0),
-                session_id: session.0.clone(),
+                session_id: session.to_string(),
                 session_title,
                 name,
                 parent_branch_name: parent_name,
@@ -97,35 +122,35 @@ impl AppState {
     /// Enumerate every branch across every session, active session first.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_branches(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        let branches = match self.memory.conversations.list_branches().await {
+        let branches = match self.memory.transcripts.list_branches().await {
             Ok(branches) => branches,
             Err(e) => {
                 send_error(&tx, id, format!("/resume: {e}")).await;
                 return;
             }
         };
-        let (active_session, _) = self.runtime.conversation_ctx.current().await;
+        let (active_session, _) = self.runtime.session_ctx.current().await;
         let (active, other): (Vec<_>, Vec<_>) = branches
             .into_iter()
-            .partition(|branch| branch.session_id == active_session.0);
+            .partition(|branch| branch.session_id == *active_session);
         for branch in active.into_iter().chain(other) {
-            let is_active_session = branch.session_id == active_session.0;
+            let is_active_session = branch.session_id == *active_session;
             let _ = tx
                 .send(Event::BranchInfo {
                     id: id.clone(),
                     branch_id: branch.branch_id.0,
-                    session_id: branch.session_id,
-                    session_started_at: branch.session_started_at,
-                    session_ended_at: branch.session_ended_at,
+                    session_id: branch.session_id.to_string(),
+                    session_started_at: wire_timestamp(branch.session_started_at),
+                    session_ended_at: branch.session_ended_at.map(wire_timestamp),
                     session_title: branch.session_title,
                     name: branch.name,
                     parent_branch_name: branch.parent_branch_name,
                     fork_point_seq: branch.fork_point_seq,
-                    created_at: branch.created_at,
+                    created_at: wire_timestamp(branch.created_at),
                     message_count: branch.message_count,
                     is_current_in_session: branch.is_current_in_session,
                     is_active_session,
-                    last_active_at: branch.last_active_at,
+                    last_active_at: wire_timestamp(branch.last_active_at),
                 })
                 .await;
         }
@@ -148,7 +173,7 @@ impl AppState {
             };
             let _ = self.runtime.events_bus().send(Event::SessionTitle {
                 id,
-                session_id: session.0.clone(),
+                session_id: session.to_string(),
                 title,
             });
         });
@@ -157,7 +182,7 @@ impl AppState {
     /// `session`'s stored title, else a newly generated and saved one.
     /// `None` when any step fails.
     async fn session_title_for_turn(&self, session: &SessionId, user_text: &str) -> Option<String> {
-        match self.memory.conversations.get_session_title(session).await {
+        match self.memory.transcripts.get_session_title(session).await {
             Ok(Some(title)) => return Some(title),
             Ok(None) => {}
             Err(e) => {
@@ -172,7 +197,7 @@ impl AppState {
         let title = self.generate_title(user_text).await?;
         if let Err(e) = self
             .memory
-            .conversations
+            .transcripts
             .set_session_title(session, &title)
             .await
         {
@@ -234,10 +259,10 @@ impl AppState {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
-        let (active_session, _active_branch) = self.runtime.conversation_ctx.current().await;
+        let (active_session, _active_branch) = self.runtime.session_ctx.current().await;
         let (target_session, target_branch) = match self
             .memory
-            .conversations
+            .transcripts
             .resolve_branch(&target, Some(&active_session))
             .await
         {
@@ -254,7 +279,7 @@ impl AppState {
 
         if let Err(e) = self
             .memory
-            .conversations
+            .transcripts
             .set_current_branch(&target_session, target_branch)
             .await
         {
@@ -268,7 +293,7 @@ impl AppState {
         }
         let target_session = Arc::new(target_session);
         self.runtime
-            .conversation_ctx
+            .session_ctx
             .replace(target_session.clone(), Some(target_branch))
             .await;
 
@@ -282,10 +307,10 @@ impl AppState {
     pub(super) async fn handle_undo(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
-        let (_, branch) = self.runtime.conversation_ctx.current().await;
+        let (_, branch) = self.runtime.session_ctx.current().await;
         let outcome = match branch {
             None => UndoOutcome::default(),
-            Some(branch) => match self.memory.conversations.undo_last_turn(branch).await {
+            Some(branch) => match self.memory.transcripts.undo_last_turn(branch).await {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     send_error(&tx, id, format!("/undo: {e}")).await;
@@ -325,19 +350,19 @@ impl AppState {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
-        let (session, branch) = self.runtime.conversation_ctx.current().await;
+        let (session, branch) = self.runtime.session_ctx.current().await;
         let Some(branch) = branch else {
             announce_unsaved_session(id, &session, &tx).await;
             return;
         };
         let latest = self
             .memory
-            .conversations
+            .transcripts
             .latest_branch_activity(branch)
             .await
             .ok()
             .flatten();
-        if is_within_recency(latest.as_deref(), recency_secs) {
+        if is_within_recency(latest, recency_secs) {
             self.replay_branch(id, &session, branch, &tx, "/resume")
                 .await;
         } else {
@@ -363,17 +388,20 @@ impl AppState {
         tx: &mpsc::Sender<Event>,
         label: &str,
     ) {
-        let rows = match self.memory.conversations.load_branch_history(branch).await {
+        let rows = match self.memory.transcripts.load_branch_history(branch).await {
             Ok(rows) => rows,
             Err(e) => {
                 send_error(tx, id, format!("{label}: load_branch_history: {e}")).await;
                 return;
             }
         };
+        let summary = self.load_branch_summary(branch, label).await;
+        let last_summarized = summary.as_ref().map(|s| s.through_seq);
+        let replay = LlmReplay::new(&rows, summary);
         if let Err(e) = self
             .subsystems
             .llm
-            .replace_history(history_entries(&rows))
+            .replace_history(replay.summary, replay.entries)
             .await
         {
             warn!(
@@ -386,7 +414,7 @@ impl AppState {
         let (branch_name, parent_name, fork_point_seq) = self.lookup_branch_meta(branch).await;
         let session_title = self
             .memory
-            .conversations
+            .transcripts
             .get_session_title(session)
             .await
             .ok()
@@ -395,25 +423,61 @@ impl AppState {
             .send(Event::BranchSwitched {
                 id: id.clone(),
                 branch_id: Some(branch.0),
-                session_id: session.0.clone(),
+                session_id: session.to_string(),
                 session_title,
                 name: branch_name.unwrap_or_default(),
                 parent_branch_name: parent_name,
                 fork_point_seq,
             })
             .await;
+        let mut call_arguments = tool_call_arguments(&rows);
         for row in rows {
+            let role = wire_role(row.message.role());
+            let (tool_name, tool_args, outcome) = match row.message.kind {
+                MessageKind::Tool {
+                    call_id,
+                    tool_name,
+                    outcome,
+                } => (
+                    Some(tool_name),
+                    call_arguments.remove(&call_id),
+                    Some(outcome),
+                ),
+                MessageKind::User | MessageKind::Assistant { .. } => (None, None, None),
+            };
             let _ = tx
                 .send(Event::HistoryEntry {
                     id: id.clone(),
                     seq: row.seq,
-                    role: wire_role(row.role),
-                    content: row.content,
-                    tool_name: row.tool_name,
+                    role,
+                    content: row.message.content,
+                    tool_name,
+                    tool_args,
+                    exit_code: outcome.map(|o| o.exit_code),
+                    duration_ms: outcome.map(|o| o.duration_ms),
+                    last_summarized: last_summarized == Some(row.seq),
                 })
                 .await;
         }
         let _ = tx.send(Event::Done { id }).await;
+    }
+
+    /// The branch's compaction summary; `None` when there is none or the
+    /// lookup fails, which only costs a fresh compaction later.
+    async fn load_branch_summary(&self, branch: BranchId, label: &str) -> Option<BranchSummary> {
+        self.memory
+            .transcripts
+            .load_branch_summary(branch)
+            .await
+            .inspect_err(|e| {
+                warn!(
+                    target: "assistd::state",
+                    error = %e,
+                    "load_branch_summary failed during {label}; replaying without it"
+                );
+            })
+            .ok()
+            .flatten()
     }
 
     /// Make a new, unsaved session active, clear the LLM history, and
@@ -422,10 +486,10 @@ impl AppState {
     async fn begin_unsaved_session(&self, id: String, tx: &mpsc::Sender<Event>, label: &str) {
         let new_session = Arc::new(SessionId::new());
         self.runtime
-            .conversation_ctx
+            .session_ctx
             .replace(new_session.clone(), None)
             .await;
-        if let Err(e) = self.subsystems.llm.replace_history(Vec::new()).await {
+        if let Err(e) = self.subsystems.llm.replace_history(None, Vec::new()).await {
             warn!(
                 target: "assistd::state",
                 error = %e,
@@ -437,7 +501,7 @@ impl AppState {
 
     pub(super) async fn lookup_branch_tail_seq(&self, branch: BranchId) -> Option<i64> {
         self.memory
-            .conversations
+            .transcripts
             .branch_tail_seq(branch)
             .await
             .ok()
@@ -450,7 +514,7 @@ impl AppState {
         &self,
         branch: BranchId,
     ) -> (Option<String>, Option<String>, Option<i64>) {
-        let Ok(Some(info)) = self.memory.conversations.branch_info(branch).await else {
+        let Ok(Some(info)) = self.memory.transcripts.branch_info(branch).await else {
             return (None, None, None);
         };
         (
@@ -468,7 +532,7 @@ async fn announce_unsaved_session(id: String, session: &SessionId, tx: &mpsc::Se
         .send(Event::BranchSwitched {
             id: id.clone(),
             branch_id: None,
-            session_id: session.0.clone(),
+            session_id: session.to_string(),
             session_title: None,
             name: "main".to_string(),
             parent_branch_name: None,
@@ -478,26 +542,57 @@ async fn announce_unsaved_session(id: String, session: &SessionId, tx: &mpsc::Se
     let _ = tx.send(Event::Done { id }).await;
 }
 
-/// Rows of a branch, as the LLM backend's history type.
-pub fn history_entries(rows: &[HistoryRow]) -> Vec<HistoryEntry> {
-    rows.iter()
-        .map(|row| HistoryEntry {
-            role: persisted_role_to_history_role(row.role),
-            content: row.content.clone(),
-            tool_calls_json: row.tool_calls.clone(),
-            tool_call_id: row.tool_call_id.clone(),
-            tool_name: row.tool_name.clone(),
-        })
-        .collect()
+fn history_entry(row: &HistoryRow) -> HistoryEntry {
+    let content = row.message.content.clone();
+    match &row.message.kind {
+        MessageKind::User => HistoryEntry {
+            role: HistoryRole::User,
+            content,
+            reasoning: String::new(),
+            tool_calls_json: None,
+            tool_call_id: None,
+            tool_name: None,
+        },
+        MessageKind::Assistant {
+            reasoning,
+            tool_calls,
+        } => HistoryEntry {
+            role: HistoryRole::Assistant,
+            content,
+            reasoning: reasoning.clone().unwrap_or_default(),
+            tool_calls_json: tool_calls.clone(),
+            tool_call_id: None,
+            tool_name: None,
+        },
+        MessageKind::Tool {
+            call_id, tool_name, ..
+        } => HistoryEntry {
+            role: HistoryRole::Tool,
+            content,
+            reasoning: String::new(),
+            tool_calls_json: None,
+            tool_call_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.clone()),
+        },
+    }
 }
 
-fn persisted_role_to_history_role(role: PersistedRole) -> HistoryRole {
-    match role {
-        PersistedRole::System => HistoryRole::System,
-        PersistedRole::User => HistoryRole::User,
-        PersistedRole::Assistant => HistoryRole::Assistant,
-        PersistedRole::Tool => HistoryRole::Tool,
-    }
+/// The arguments of every tool call recorded on `rows`, by call id.
+fn tool_call_arguments(rows: &[HistoryRow]) -> HashMap<String, Value> {
+    rows.iter()
+        .filter_map(|row| match &row.message.kind {
+            MessageKind::Assistant {
+                tool_calls: Some(calls),
+                ..
+            } => calls.as_array(),
+            MessageKind::User | MessageKind::Assistant { .. } | MessageKind::Tool { .. } => None,
+        })
+        .flatten()
+        .filter_map(|call| {
+            let call_id = call.get("id")?.as_str()?.to_string();
+            Some((call_id, call.get("arguments")?.clone()))
+        })
+        .collect()
 }
 
 pub(super) fn clean_generated_title(raw: &str) -> String {
@@ -511,21 +606,18 @@ pub(super) fn clean_generated_title(raw: &str) -> String {
     stripped.chars().take(MAX_TITLE_CHARS).collect::<String>()
 }
 
-/// Whether the RFC 3339 `latest` activity is no older than `recency_secs`.
-/// A branch with no activity counts as recent; an unparsable or
-/// future timestamp does not.
-fn is_within_recency(latest: Option<&str>, recency_secs: u64) -> bool {
+/// Whether the `latest` activity is no older than `recency_secs`.
+/// A branch with no activity counts as recent; a future timestamp does not.
+fn is_within_recency(latest: Option<DateTime<Utc>>, recency_secs: u64) -> bool {
     let window = i64::try_from(recency_secs)
         .ok()
         .and_then(TimeDelta::try_seconds)
         .unwrap_or(TimeDelta::MAX);
     match latest {
         None => true,
-        Some(timestamp) => DateTime::parse_from_rfc3339(timestamp)
-            .ok()
-            .is_some_and(|at| {
-                let age = Utc::now().signed_duration_since(at.with_timezone(&Utc));
-                age >= TimeDelta::zero() && age <= window
-            }),
+        Some(at) => {
+            let age = Utc::now().signed_duration_since(at);
+            age >= TimeDelta::zero() && age <= window
+        }
     }
 }

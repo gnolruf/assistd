@@ -1,5 +1,7 @@
 //! Overlapping character-window chunker applied to messages before embedding.
 
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 /// Chunking policy; `overlap_chars` must be less than `chunk_chars`.
@@ -20,15 +22,16 @@ impl Default for ChunkingConfig {
     }
 }
 
-/// Split `content` into windows of `chunk_chars` characters advancing by
-/// `chunk_chars - overlap_chars`, dropping whitespace-only windows. Short inputs and
-/// invalid configs yield the whole input as one chunk.
-pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
+/// Byte ranges of `content`'s windows of `chunk_chars` characters, advancing by
+/// `chunk_chars - overlap_chars` and dropping whitespace-only windows. Short inputs
+/// and invalid configs yield the whole input as one range.
+pub fn chunk_ranges(content: &str, cfg: &ChunkingConfig) -> Vec<Range<usize>> {
     if content.trim().is_empty() {
         return Vec::new();
     }
+    let whole_message = 0..content.len();
     if cfg.chunk_chars == 0 || cfg.overlap_chars >= cfg.chunk_chars {
-        return vec![content.to_string()];
+        return vec![whole_message];
     }
 
     let boundaries: Vec<usize> = content
@@ -38,7 +41,7 @@ pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
         .collect();
     let total_chars = boundaries.len() - 1;
     if total_chars <= cfg.chunk_chars {
-        return vec![content.to_string()];
+        return vec![whole_message];
     }
 
     let step = cfg.chunk_chars - cfg.overlap_chars;
@@ -46,11 +49,9 @@ pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
     let mut start = 0usize;
     while start < total_chars {
         let end = (start + cfg.chunk_chars).min(total_chars);
-        let byte_start = boundaries[start];
-        let byte_end = boundaries[end];
-        let slice = &content[byte_start..byte_end];
-        if !slice.trim().is_empty() {
-            chunks.push(slice.to_string());
+        let bytes = boundaries[start]..boundaries[end];
+        if !content[bytes.clone()].trim().is_empty() {
+            chunks.push(bytes);
         }
         if end == total_chars {
             break;
@@ -75,6 +76,13 @@ mod tests {
         (b'a'..=b'z').cycle().take(len).map(char::from).collect()
     }
 
+    fn chunks_of<'a>(content: &'a str, cfg: &ChunkingConfig) -> Vec<&'a str> {
+        chunk_ranges(content, cfg)
+            .into_iter()
+            .map(|bytes| &content[bytes])
+            .collect()
+    }
+
     fn char_window(s: &str, start: usize, end: usize) -> String {
         s.chars().skip(start).take(end - start).collect()
     }
@@ -93,7 +101,7 @@ mod tests {
             ),
         ];
         for (label, input, cfg, expected) in cases {
-            assert_eq!(chunk_message(input, &cfg), expected, "{label}");
+            assert_eq!(chunks_of(input, &cfg), expected, "{label}");
         }
     }
 
@@ -119,7 +127,7 @@ mod tests {
                 .into_iter()
                 .map(|(start, end)| char_window(&input, start, end))
                 .collect();
-            assert_eq!(chunk_message(&input, &cfg), expected, "{label}");
+            assert_eq!(chunks_of(&input, &cfg), expected, "{label}");
         }
     }
 }

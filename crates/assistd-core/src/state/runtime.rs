@@ -20,14 +20,14 @@ const EVENTS_BUS_CAPACITY: usize = 256;
 /// The active session and, once its first message is saved, the branch
 /// it lives on; always read and replaced together.
 #[derive(Debug)]
-pub struct ConversationContext {
-    inner: RwLock<ConversationContextInner>,
+pub struct SessionContext {
+    inner: RwLock<SessionContextInner>,
     /// Lets holders that cannot await the lock read the session
     /// synchronously.
     session: watch::Sender<Arc<SessionId>>,
 }
 
-impl ConversationContext {
+impl SessionContext {
     /// Point at `branch_id` of `session_id`; `None` means the session has
     /// no rows yet and is saved with its first message.
     pub fn new(session_id: SessionId, branch_id: Option<BranchId>) -> Self {
@@ -38,7 +38,7 @@ impl ConversationContext {
     pub fn from_arc(session_id: Arc<SessionId>, branch_id: Option<BranchId>) -> Self {
         let (session, _) = watch::channel(session_id.clone());
         Self {
-            inner: RwLock::new(ConversationContextInner {
+            inner: RwLock::new(SessionContextInner {
                 session_id,
                 branch_id,
             }),
@@ -68,7 +68,7 @@ impl ConversationContext {
 }
 
 #[derive(Debug, Clone)]
-struct ConversationContextInner {
+struct SessionContextInner {
     session_id: Arc<SessionId>,
     branch_id: Option<BranchId>,
 }
@@ -82,12 +82,12 @@ pub(in crate::state) struct PttCapture {
     pub(in crate::state) cancel: CancellationToken,
 }
 
-/// Per-process request bookkeeping: the active conversation, turn
+/// Per-process request bookkeeping: the active session, turn
 /// serialisation and cancellation, persistence ordering, and the events
 /// bus.
 #[derive(Debug)]
 pub struct RuntimeState {
-    pub conversation_ctx: Arc<ConversationContext>,
+    pub session_ctx: Arc<SessionContext>,
     /// Serialises whole agent turns.
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
@@ -112,7 +112,7 @@ impl RuntimeState {
     pub fn new() -> Self {
         let (events_bus, _) = broadcast::channel(EVENTS_BUS_CAPACITY);
         Self {
-            conversation_ctx: Arc::new(ConversationContext::new(SessionId::new(), None)),
+            session_ctx: Arc::new(SessionContext::new(SessionId::new(), None)),
             agent_turn_lock: Arc::new(Mutex::new(())),
             persistence_tracker: TaskTracker::new(),
             ptt_capture: Arc::new(Mutex::new(None)),
@@ -124,9 +124,9 @@ impl RuntimeState {
         }
     }
 
-    /// Replace the active-conversation pointer.
-    pub fn with_conversation_ctx(mut self, ctx: Arc<ConversationContext>) -> Self {
-        self.conversation_ctx = ctx;
+    /// Replace the active-session pointer.
+    pub fn with_session_ctx(mut self, ctx: Arc<SessionContext>) -> Self {
+        self.session_ctx = ctx;
         self
     }
 

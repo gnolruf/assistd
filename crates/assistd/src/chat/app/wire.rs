@@ -142,11 +142,8 @@ impl App {
 
     fn on_tool_call(&mut self, name: String, args: &Value) {
         self.output.finish_thinking();
-        let command = args
-            .get("command")
-            .and_then(Value::as_str)
-            .map_or(name, str::to_string);
-        self.output.begin_tool_block(command);
+        self.output
+            .begin_tool_block(tool_block_label(name, Some(args)));
     }
 
     fn on_tool_result(&mut self, result: &Value) {
@@ -285,8 +282,19 @@ impl App {
                 role,
                 content,
                 tool_name,
+                tool_args,
+                exit_code,
+                duration_ms,
+                last_summarized,
                 ..
-            } => self.on_history_entry(role, content, tool_name),
+            } => {
+                let outcome = (exit_code, duration_ms);
+                self.on_history_entry(role, content, tool_name, tool_args.as_ref(), outcome);
+                if last_summarized {
+                    self.output
+                        .push_info("[earlier history was compacted into a summary]");
+                }
+            }
             Event::UndoApplied {
                 removed_messages,
                 last_user_text,
@@ -321,7 +329,15 @@ impl App {
         }
     }
 
-    fn on_history_entry(&mut self, role: Role, content: String, tool_name: Option<String>) {
+    /// `outcome` is the tool row's exit code and duration, when stored.
+    fn on_history_entry(
+        &mut self,
+        role: Role,
+        content: String,
+        tool_name: Option<String>,
+        tool_args: Option<&Value>,
+        outcome: (Option<i64>, Option<u64>),
+    ) {
         match role {
             Role::User => self.output.push_user(&content),
             Role::Assistant => {
@@ -332,8 +348,15 @@ impl App {
                 }
             }
             Role::Tool => {
-                self.output
-                    .push_tool_block(tool_name.unwrap_or_default(), content, 0, 0);
+                let (exit_code, duration_ms) = outcome;
+                self.output.push_tool_block(
+                    tool_block_label(tool_name.unwrap_or_default(), tool_args),
+                    content,
+                    exit_code
+                        .and_then(|code| i32::try_from(code).ok())
+                        .unwrap_or(0),
+                    duration_ms.unwrap_or(0),
+                );
             }
             Role::System => self.output.push_info(&content),
         }
@@ -483,4 +506,12 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
         Event::Transcription { id, text } => (!text.trim().is_empty()).then_some(id.as_str()),
         _ => None,
     }
+}
+
+/// A tool block's header: the `command` argument when the call has one,
+/// else the tool's name.
+fn tool_block_label(name: String, args: Option<&Value>) -> String {
+    args.and_then(|args| args.get("command"))
+        .and_then(Value::as_str)
+        .map_or(name, str::to_string)
 }
