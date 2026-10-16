@@ -9,8 +9,8 @@ use assistd_config::Config;
 use assistd_ipc::PresenceTarget;
 use assistd_llm::EchoBackend;
 use assistd_memory::{
-    AppendedMessage, BranchId, BranchInfo, BranchSummary, HistoryRow, MessageId, ResumeCandidate,
-    SessionId, TranscriptStore, UndoOutcome,
+    AppendedMessage, BranchId, BranchInfo, BranchSummary, HistoryRow, MessageId, OpenedTurn,
+    ResumeCandidate, SessionId, TranscriptStore, UndoOutcome,
 };
 use assistd_tools::ToolRegistry;
 
@@ -36,6 +36,21 @@ impl SlowingStore {
             remaining_delay_ms: Mutex::new(first_delay_ms),
         }
     }
+
+    async fn arrive(&self, msg: PersistedMessage) -> AppendedMessage {
+        let delay = {
+            let mut d = self.remaining_delay_ms.lock();
+            let taken = *d;
+            *d = d.saturating_sub(20);
+            taken
+        };
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        self.arrivals.lock().push(msg.content);
+        AppendedMessage {
+            id: MessageId(0),
+            chunks: Vec::new(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -46,25 +61,21 @@ impl TranscriptStore for SlowingStore {
         _t: TurnId,
         m: PersistedMessage,
     ) -> assistd_memory::Result<AppendedMessage> {
-        let delay = {
-            let mut d = self.remaining_delay_ms.lock();
-            let taken = *d;
-            *d = d.saturating_sub(20);
-            taken
-        };
-        tokio::time::sleep(Duration::from_millis(delay)).await;
-        self.arrivals.lock().push(m.content);
-        Ok(AppendedMessage {
-            id: MessageId(0),
-            chunks: Vec::new(),
-        })
+        Ok(self.arrive(m).await)
     }
 
     async fn end_session(&self, _s: SessionId) -> assistd_memory::Result<()> {
         Ok(())
     }
-    async fn begin_turn(&self, _s: SessionId) -> assistd_memory::Result<TurnId> {
-        Ok(TurnId(0))
+    async fn begin_turn(
+        &self,
+        _b: BranchId,
+        prompt: PersistedMessage,
+    ) -> assistd_memory::Result<OpenedTurn> {
+        Ok(OpenedTurn {
+            turn: TurnId(1),
+            message: self.arrive(prompt).await,
+        })
     }
     async fn begin_session_with_main_branch(
         &self,
@@ -160,12 +171,10 @@ async fn messages_reach_the_store_in_the_order_they_were_queued() {
     let store = Arc::new(SlowingStore::new(60));
     let state = state_with_store(store.clone());
 
-    for text in ["first", "second", "third", "fourth"] {
+    let target = state.open_turn_fire_and_forget(BranchId(1), PersistedMessage::user("first"));
+    for text in ["second", "third", "fourth"] {
         state.persist_message_fire_and_forget(
-            PersistTarget {
-                branch: BranchId(1),
-                turn: TurnId(1),
-            },
+            target.clone(),
             PersistedMessage::assistant_text(text, String::new()),
         );
     }

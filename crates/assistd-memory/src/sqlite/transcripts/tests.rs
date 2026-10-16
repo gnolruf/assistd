@@ -25,7 +25,11 @@ async fn tool_calls_and_tool_results_round_trip() {
         .begin_session_with_main_branch(session, 1)
         .await
         .unwrap();
-    let turn = store.begin_turn(session).await.unwrap();
+    let turn = store
+        .begin_turn(branch, PersistedMessage::user("list files"))
+        .await
+        .unwrap()
+        .turn;
 
     let outcome = ToolOutcome {
         exit_code: 2,
@@ -59,11 +63,11 @@ async fn tool_calls_and_tool_results_round_trip() {
 
     let history = store.load_branch_history(branch).await.unwrap();
     assert_eq!(
-        history,
+        history[1..],
         [
             HistoryRow {
                 message_id: call.id,
-                seq: Seq(0),
+                seq: Seq(1),
                 message: PersistedMessage {
                     content: String::new(),
                     kind: MessageKind::Assistant {
@@ -74,7 +78,7 @@ async fn tool_calls_and_tool_results_round_trip() {
             },
             HistoryRow {
                 message_id: result.id,
-                seq: Seq(1),
+                seq: Seq(2),
                 message: PersistedMessage {
                     content: "file1\nfile2".into(),
                     kind: MessageKind::Tool {
@@ -96,11 +100,11 @@ async fn fork_creates_independent_branch_sharing_history() {
         .begin_session_with_main_branch(session, 1)
         .await
         .unwrap();
-    let turn = store.begin_turn(session).await.unwrap();
-    store
-        .append_message_to_branch(main, turn, PersistedMessage::user("hello"))
+    let turn = store
+        .begin_turn(main, PersistedMessage::user("hello"))
         .await
-        .unwrap();
+        .unwrap()
+        .turn;
     store
         .append_message_to_branch(
             main,
@@ -149,9 +153,8 @@ async fn branches_list_by_newest_message_not_session_start() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    let turn = store.begin_turn(older).await.unwrap();
     store
-        .append_message_to_branch(older_main, turn, PersistedMessage::user("back"))
+        .begin_turn(older_main, PersistedMessage::user("back"))
         .await
         .unwrap();
 
@@ -169,15 +172,13 @@ async fn append_to_one_branch_does_not_show_on_the_other() {
         .begin_session_with_main_branch(session, 1)
         .await
         .unwrap();
-    let turn = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(main, turn, PersistedMessage::user("q"))
+        .begin_turn(main, PersistedMessage::user("q"))
         .await
         .unwrap();
     let fork = store.fork_and_switch(main, "alt").await.unwrap();
-    let alt_turn = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(fork, alt_turn, PersistedMessage::user("alt q"))
+        .begin_turn(fork, PersistedMessage::user("alt q"))
         .await
         .unwrap();
     let main_history = store.load_branch_history(main).await.unwrap();
@@ -197,11 +198,11 @@ async fn undo_removes_only_the_last_turn() {
         .begin_session_with_main_branch(session, 1)
         .await
         .unwrap();
-    let t1 = store.begin_turn(session).await.unwrap();
-    store
-        .append_message_to_branch(main, t1, PersistedMessage::user("first"))
+    let t1 = store
+        .begin_turn(main, PersistedMessage::user("first"))
         .await
-        .unwrap();
+        .unwrap()
+        .turn;
     store
         .append_message_to_branch(
             main,
@@ -211,11 +212,11 @@ async fn undo_removes_only_the_last_turn() {
         .await
         .unwrap();
 
-    let t2 = store.begin_turn(session).await.unwrap();
-    store
-        .append_message_to_branch(main, t2, PersistedMessage::user("second"))
+    let t2 = store
+        .begin_turn(main, PersistedMessage::user("second"))
         .await
-        .unwrap();
+        .unwrap()
+        .turn;
     store
         .append_message_to_branch(
             main,
@@ -243,9 +244,8 @@ async fn undo_removes_only_the_last_turn() {
         ]
     );
 
-    let t3 = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(main, t3, PersistedMessage::user("third"))
+        .begin_turn(main, PersistedMessage::user("third"))
         .await
         .unwrap();
     let seqs: Vec<Seq> = store
@@ -271,16 +271,19 @@ async fn summary_follows_kept_turns_forks_and_undo() {
         .await
         .unwrap();
     for question in ["one", "two", "three"] {
-        let turn = store.begin_turn(session).await.unwrap();
-        for msg in [
-            PersistedMessage::user(question),
-            PersistedMessage::assistant_text("answer", String::new()),
-        ] {
-            store
-                .append_message_to_branch(branch, turn, msg)
-                .await
-                .unwrap();
-        }
+        let turn = store
+            .begin_turn(branch, PersistedMessage::user(question))
+            .await
+            .unwrap()
+            .turn;
+        store
+            .append_message_to_branch(
+                branch,
+                turn,
+                PersistedMessage::assistant_text("answer", String::new()),
+            )
+            .await
+            .unwrap();
     }
     let kept_two = NonZeroUsize::new(2).unwrap();
     store
@@ -350,9 +353,21 @@ async fn current_branch_and_turns_must_belong_to_their_session() {
     let b1 = store.begin_session_with_main_branch(s1, 1).await.unwrap();
     let s2 = SessionId::new();
     let b2 = store.begin_session_with_main_branch(s2, 2).await.unwrap();
-    let s2_turn = store.begin_turn(s2).await.unwrap();
+    let s2_turn = store
+        .begin_turn(b2, PersistedMessage::user("y"))
+        .await
+        .unwrap()
+        .turn;
 
-    assert!(store.set_current_branch(s1, b2).await.is_err());
+    assert!(matches!(
+        store.set_current_branch(s1, b2).await,
+        Err(MemoryError::BranchNotFound(branch)) if branch == b2
+    ));
+    let unsaved = SessionId::new();
+    assert!(matches!(
+        store.set_current_branch(unsaved, b1).await,
+        Err(MemoryError::SessionNotFound(session)) if session == unsaved
+    ));
     assert!(
         store
             .append_message_to_branch(b1, s2_turn, PersistedMessage::user("x"))

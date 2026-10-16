@@ -172,11 +172,19 @@ pub struct AppendedMessage {
     pub chunks: Vec<(ChunkId, String)>,
 }
 
+/// Result of [`TranscriptStore::begin_turn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedTurn {
+    pub turn: TurnId,
+    /// The turn's first message.
+    pub message: AppendedMessage,
+}
+
 /// Result of [`TranscriptStore::undo_last_turn`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UndoOutcome {
     /// Number of `branch_messages` rows dropped.
-    pub removed_messages: u32,
+    pub removed_messages: usize,
     pub last_user_text: Option<String>,
 }
 
@@ -199,15 +207,20 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         daemon_pid: u32,
     ) -> Result<BranchId>;
 
-    /// Mark `session` as ended by stamping `ended_at`.
+    /// Mark `session` as ended by stamping `ended_at`. Errors with
+    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) when
+    /// `session` was never saved.
     async fn end_session(&self, session: SessionId) -> Result<()>;
 
-    /// Open a new turn inside `session`; its messages are grouped by the id.
-    /// Errors with [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound)
-    /// when `session` was never saved.
-    async fn begin_turn(&self, session: SessionId) -> Result<TurnId>;
+    /// Open a new turn in `branch`'s session and append `prompt` to `branch` as its
+    /// first message, as [`append_message_to_branch`](Self::append_message_to_branch)
+    /// does, in one transaction.
+    async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn>;
 
-    /// Update `sessions.current_branch_id` to point at `branch`.
+    /// Make `branch` the current branch of `session`. Errors with
+    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) or, when
+    /// `branch` is not one of the session's,
+    /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound).
     async fn set_current_branch(&self, session: SessionId, branch: BranchId) -> Result<()>;
 
     /// Read the current branch pointer for `session`, if any.
@@ -296,8 +309,14 @@ impl TranscriptStore for NoTranscriptStore {
         Ok(())
     }
 
-    async fn begin_turn(&self, _session: SessionId) -> Result<TurnId> {
-        Ok(TurnId(0))
+    async fn begin_turn(&self, _branch: BranchId, _prompt: PersistedMessage) -> Result<OpenedTurn> {
+        Ok(OpenedTurn {
+            turn: TurnId(0),
+            message: AppendedMessage {
+                id: MessageId(0),
+                chunks: Vec::new(),
+            },
+        })
     }
 
     async fn set_current_branch(&self, _session: SessionId, _branch: BranchId) -> Result<()> {

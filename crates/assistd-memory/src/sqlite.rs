@@ -2,9 +2,9 @@
 //! read-only connection and a single writable one.
 
 mod connection;
-mod ids;
 mod memories;
 mod semantic;
+mod sql_types;
 mod timestamp;
 mod transcripts;
 

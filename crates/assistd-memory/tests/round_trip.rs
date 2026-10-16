@@ -24,12 +24,11 @@ async fn turn_persists_across_store_reopen() {
             .unwrap();
         branch = main;
 
-        let turn = convs.begin_turn(session).await.unwrap();
-
-        convs
-            .append_message_to_branch(main, turn, PersistedMessage::user("what is rust?"))
+        let turn = convs
+            .begin_turn(main, PersistedMessage::user("what is rust?"))
             .await
-            .unwrap();
+            .unwrap()
+            .turn;
 
         convs
             .append_message_to_branch(

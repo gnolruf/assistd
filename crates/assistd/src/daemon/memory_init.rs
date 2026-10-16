@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use assistd_core::{Config, LlmReplay};
 use assistd_memory::{
-    BranchId, MemoryStore, NoMemoryStore, NoTranscriptStore, SessionId, SqliteHandle,
+    BranchId, MemoryError, MemoryStore, NoMemoryStore, NoTranscriptStore, SessionId, SqliteHandle,
     SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
 };
 use rustix::io::Errno;
@@ -36,11 +36,12 @@ impl MemorySubsystem {
         }
     }
 
-    /// End the session row, then close the database once its queued writes
-    /// have run. Must run after every other database client has stopped.
+    /// End the session row, if it was ever saved, then close the database once its
+    /// queued writes have run. Must run after every other database client has stopped.
     pub(super) async fn shutdown(self) {
-        if let Err(e) = self.transcript_store.end_session(self.session_id).await {
-            tracing::warn!("memory: end_session failed at shutdown: {e:#}");
+        match self.transcript_store.end_session(self.session_id).await {
+            Ok(()) | Err(MemoryError::SessionNotFound(_)) => {}
+            Err(e) => tracing::warn!("memory: end_session failed at shutdown: {e:#}"),
         }
         if let Some(handle) = self.sqlite_handle
             && let Err(e) = handle.close().await

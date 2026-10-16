@@ -336,7 +336,8 @@ fn session_chunk_ids(
     let mut stmt = conn.prepare_cached(
         "SELECT cc.id
          FROM sessions s
-         JOIN messages m ON m.session_id = s.id
+         JOIN turns t ON t.session_id = s.id
+         JOIN messages m ON m.turn_id = t.id
          JOIN message_chunks cc ON cc.message_id = m.id
          WHERE s.uuid = ?1",
     )?;

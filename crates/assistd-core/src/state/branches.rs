@@ -317,7 +317,7 @@ impl AppState {
         let _ = tx
             .send(Event::UndoApplied {
                 id: id.clone(),
-                removed_messages: outcome.removed_messages,
+                removed_messages: u32::try_from(outcome.removed_messages).unwrap_or(u32::MAX),
                 last_user_text: outcome.last_user_text,
             })
             .await;

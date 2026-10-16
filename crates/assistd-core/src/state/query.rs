@@ -196,7 +196,7 @@ impl TurnTranslator {
                 summary,
                 kept_turns,
             } => {
-                if let Some(target) = self.persist {
+                if let Some(target) = &self.persist {
                     state.persist_summary_fire_and_forget(target.branch, summary, kept_turns);
                 }
                 return None;
@@ -242,8 +242,8 @@ impl TurnTranslator {
     }
 
     fn persist_message(&self, state: &AppState, msg: PersistedMessage) {
-        if let Some(target) = self.persist {
-            state.persist_message_fire_and_forget(target, msg);
+        if let Some(target) = &self.persist {
+            state.persist_message_fire_and_forget(target.clone(), msg);
         }
     }
 }
@@ -406,30 +406,24 @@ impl AppState {
         })
     }
 
-    /// Save the session if needed, open the turn, and queue the user's prompt;
-    /// the target is `None` when the session or the turn could not be saved.
+    /// Save the session if needed and queue the write opening the turn with
+    /// the user's prompt; the target is `None` when the session could not be saved.
     async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<PersistTarget>) {
-        match self.open_turn_target().await {
-            Ok((session, target)) => {
-                self.persist_message_fire_and_forget(target, PersistedMessage::user(text));
+        match self.saved_session().await {
+            Ok((session, branch)) => {
+                let target = self.open_turn_fire_and_forget(branch, PersistedMessage::user(text));
                 (session, Some(target))
             }
             Err(e) => {
                 warn!(
                     target: "assistd::memory",
                     error = %e,
-                    "saving the session or opening the turn failed; turn will not be persisted"
+                    "saving the session failed; turn will not be persisted"
                 );
                 let (session, _branch) = self.runtime.session_ctx.current().await;
                 (session, None)
             }
         }
-    }
-
-    async fn open_turn_target(&self) -> assistd_memory::Result<(SessionId, PersistTarget)> {
-        let (session, branch) = self.saved_session().await?;
-        let turn = self.memory.transcripts.begin_turn(session).await?;
-        Ok((session, PersistTarget { branch, turn }))
     }
 
     async fn assemble_transient_context(&self, text: &str, origin: TurnOrigin, chat_focused: bool) {

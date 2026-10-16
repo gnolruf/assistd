@@ -1,10 +1,10 @@
-//! SQLite conversions for the typed ids: row ids and seqs as `INTEGER`, session ids
-//! as hyphenated UUID `TEXT`.
+//! SQLite conversions for the typed columns: row ids, seqs, and role codes as
+//! `INTEGER`, session ids as hyphenated UUID `TEXT`.
 
 use rusqlite::ToSql;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 
-use crate::{BranchId, ChunkId, MemoryId, MessageId, Seq, SessionId, TurnId};
+use crate::{BranchId, ChunkId, MemoryId, MessageId, PersistedRole, Seq, SessionId, TurnId};
 
 macro_rules! row_id_sql {
     ($($name:ident),+) => {$(
@@ -36,5 +36,27 @@ impl FromSql for SessionId {
             .as_str()?
             .parse()
             .map_err(|e| FromSqlError::Other(Box::new(e)))
+    }
+}
+
+impl ToSql for PersistedRole {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        let code: i64 = match self {
+            PersistedRole::User => 0,
+            PersistedRole::Assistant => 1,
+            PersistedRole::Tool => 2,
+        };
+        Ok(ToSqlOutput::from(code))
+    }
+}
+
+impl FromSql for PersistedRole {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_i64()? {
+            0 => Ok(PersistedRole::User),
+            1 => Ok(PersistedRole::Assistant),
+            2 => Ok(PersistedRole::Tool),
+            code => Err(FromSqlError::OutOfRange(code)),
+        }
     }
 }

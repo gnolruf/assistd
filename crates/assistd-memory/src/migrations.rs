@@ -3,8 +3,8 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and
-/// every foreign key is indexed. A session's current branch and a message's turn must
+/// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and every
+/// foreign key but `messages.session_id`, reached through its turn, is indexed. A session's current branch and a message's turn must
 /// belong to that same session, and a branch's `next_seq` only grows so undo never
 /// frees a `seq` for reuse. Turn, message, chunk, and memory ids use `AUTOINCREMENT`
 /// so a queued write or embed job never lands on a row that reused a deleted id.
@@ -19,6 +19,8 @@ CREATE TABLE sessions (
     current_branch_id INTEGER,
     FOREIGN KEY (id, current_branch_id) REFERENCES branches(session_id, id)
 ) STRICT;
+CREATE INDEX idx_sessions_resumable ON sessions(started_at)
+    WHERE ended_at IS NULL AND current_branch_id IS NOT NULL;
 
 CREATE TABLE branches (
     id               INTEGER PRIMARY KEY,
@@ -63,7 +65,6 @@ CREATE TABLE messages (
     CHECK ((role = 2) = (tool_duration_ms IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_messages_turn ON messages(turn_id);
-CREATE INDEX idx_messages_session_turn ON messages(session_id, turn_id);
 
 CREATE TABLE branch_messages (
     branch_id  INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,

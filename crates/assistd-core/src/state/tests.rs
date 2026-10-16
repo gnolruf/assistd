@@ -1345,20 +1345,22 @@ async fn fresh_branch_state() -> (Arc<AppState>, Arc<dyn TranscriptStore>, Sessi
 /// Persist one completed turn of `user` then `assistant` on `branch`.
 async fn append_turn(
     conv: &Arc<dyn TranscriptStore>,
-    session: SessionId,
     branch: BranchId,
     user: &str,
     assistant: &str,
 ) {
-    let turn = conv.begin_turn(session).await.unwrap();
-    for msg in [
-        PersistedMessage::user(user),
+    let turn = conv
+        .begin_turn(branch, PersistedMessage::user(user))
+        .await
+        .unwrap()
+        .turn;
+    conv.append_message_to_branch(
+        branch,
+        turn,
         PersistedMessage::assistant_text(assistant, String::new()),
-    ] {
-        conv.append_message_to_branch(branch, turn, msg)
-            .await
-            .unwrap();
-    }
+    )
+    .await
+    .unwrap();
 }
 
 fn history(events: &[Event]) -> Vec<(Role, &str)> {
@@ -1432,8 +1434,8 @@ async fn branches_lists_active_session_first() {
 
 #[tokio::test]
 async fn switch_replays_history_into_event_stream() {
-    let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, session, main_branch, "hello", "world").await;
+    let (state, conv, _, main_branch) = fresh_branch_state().await;
+    append_turn(&conv, main_branch, "hello", "world").await;
     conv.fork_and_switch(main_branch, "alt").await.unwrap();
 
     let (res, events) = dispatch(
@@ -1458,8 +1460,8 @@ async fn switch_replays_history_into_event_stream() {
 
 #[tokio::test]
 async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
-    let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, session, main_branch, "hello", "world").await;
+    let (state, conv, _, main_branch) = fresh_branch_state().await;
+    append_turn(&conv, main_branch, "hello", "world").await;
 
     let (res, events) = dispatch(
         &state,
@@ -1480,9 +1482,9 @@ async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
 
 #[tokio::test]
 async fn undo_drops_last_turn_and_emits_count() {
-    let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, session, main_branch, "first", "a").await;
-    append_turn(&conv, session, main_branch, "second", "b").await;
+    let (state, conv, _, main_branch) = fresh_branch_state().await;
+    append_turn(&conv, main_branch, "first", "a").await;
+    append_turn(&conv, main_branch, "second", "b").await;
 
     let (res, events) = dispatch(&state, Request::Undo { id: "rq".into() }).await;
     res.unwrap();

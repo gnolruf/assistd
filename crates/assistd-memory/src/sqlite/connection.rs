@@ -15,9 +15,9 @@ use crate::{MemoryError, Result, migrations};
 /// `sqlite3` shell) before failing with `SQLITE_BUSY`.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Page size of a newly created database; large enough that a 1024-dimension `f32`
-/// vector stays on its row's leaf page instead of spilling to an overflow page.
-const PAGE_SIZE_BYTES: i64 = 8192;
+/// Page size of a newly created database; packs four 768-dimension or three
+/// 1024-dimension `f32` vectors per leaf page, where 8 KiB fits only one 1024-dimension vector.
+const PAGE_SIZE_BYTES: i64 = 16384;
 
 /// How much of the database file each read-only connection may memory-map.
 const READER_MMAP_BYTES: i64 = 256 * 1024 * 1024;

@@ -36,12 +36,12 @@ impl Transcript {
 
     /// Append user message `text`, returning its id and stored chunks.
     async fn append(&self, text: &str) -> (MessageId, Vec<(ChunkId, String)>) {
-        let turn = self.store.begin_turn(self.session).await.unwrap();
         let appended = self
             .store
-            .append_message_to_branch(self.branch, turn, PersistedMessage::user(text))
+            .begin_turn(self.branch, PersistedMessage::user(text))
             .await
-            .unwrap();
+            .unwrap()
+            .message;
         (appended.id, appended.chunks)
     }
 
