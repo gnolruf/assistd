@@ -178,11 +178,11 @@ impl TranscriptStore for SqliteTranscriptStore {
     ) -> Result<AppendedMessage> {
         let chunk_bytes = match msg.role() {
             PersistedRole::User | PersistedRole::Assistant => {
-                chunk_ranges(&msg.content, &ChunkingConfig::default())
+                chunk_ranges(&msg.content, &ChunkingConfig::MESSAGES)
             }
             PersistedRole::Tool => Vec::new(),
         };
-        let row = MessageRow::new(msg, now_millis())?;
+        let row = MessageRow::new(msg, now_millis());
         self.handle
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
@@ -207,7 +207,7 @@ impl TranscriptStore for SqliteTranscriptStore {
             .reader()
             .call(|c| -> rusqlite::Result<_> {
                 let sql = format!("{BRANCH_INFO_SELECT} ORDER BY last_active_at DESC, b.id ASC");
-                let mut stmt = c.prepare(&sql)?;
+                let mut stmt = c.prepare_cached(&sql)?;
                 let rows: Vec<BranchInfo> = stmt
                     .query_map([], branch_info)?
                     .collect::<std::result::Result<_, _>>()?;
@@ -222,7 +222,8 @@ impl TranscriptStore for SqliteTranscriptStore {
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let sql = format!("{BRANCH_INFO_SELECT} WHERE b.id = ?1");
-                c.query_row(&sql, rusqlite::params![branch], branch_info)
+                c.prepare_cached(&sql)?
+                    .query_row(rusqlite::params![branch], branch_info)
                     .optional()
             })
             .await
@@ -318,7 +319,7 @@ impl TranscriptStore for SqliteTranscriptStore {
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare(
+                let mut stmt = c.prepare_cached(
                     "SELECT  m.id,
                              bm.seq,
                              m.role,
@@ -356,7 +357,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                     "INSERT OR REPLACE INTO branch_summaries (branch_id, through_seq, content)
                      SELECT ?1, bm.seq - 1, ?2
                      FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
-                     WHERE bm.branch_id = ?1 AND m.role = ?3
+                     WHERE bm.branch_id = ?1 AND m.role = ?3 AND bm.seq > 0
                      ORDER BY bm.seq DESC LIMIT 1 OFFSET ?4",
                     rusqlite::params![branch, summary, PersistedRole::User, offset],
                 )
@@ -513,13 +514,13 @@ struct MessageRow {
 }
 
 impl MessageRow {
-    fn new(msg: PersistedMessage, created_at: i64) -> Result<Self> {
-        Ok(Self {
+    fn new(msg: PersistedMessage, created_at: i64) -> Self {
+        Self {
             created_at,
             role: msg.role(),
             content: msg.content,
-            columns: MessageColumns::from_kind(msg.kind)?,
-        })
+            columns: MessageColumns::from_kind(msg.kind),
+        }
     }
 }
 
@@ -535,15 +536,15 @@ struct MessageColumns {
 }
 
 impl MessageColumns {
-    fn from_kind(kind: MessageKind) -> Result<Self> {
-        Ok(match kind {
+    fn from_kind(kind: MessageKind) -> Self {
+        match kind {
             MessageKind::User => Self::default(),
             MessageKind::Assistant {
                 reasoning,
                 tool_calls,
             } => Self {
                 reasoning,
-                tool_calls: tool_calls.as_ref().map(serde_json::to_string).transpose()?,
+                tool_calls: tool_calls.as_ref().map(serde_json::Value::to_string),
                 ..Self::default()
             },
             MessageKind::Tool {
@@ -557,7 +558,7 @@ impl MessageColumns {
                 tool_duration_ms: Some(outcome.duration_ms),
                 ..Self::default()
             },
-        })
+        }
     }
 }
 

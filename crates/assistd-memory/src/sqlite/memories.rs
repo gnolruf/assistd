@@ -69,11 +69,14 @@ impl MemoryStore for SqliteMemoryStore {
         self.handle
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
-                c.execute(
+                let deleted = c.execute(
                     "DELETE FROM memories WHERE key = ?1",
                     rusqlite::params![key],
                 )?;
-                truncate_wal(c)
+                if deleted > 0 {
+                    truncate_wal(c)?;
+                }
+                Ok(())
             })
             .await
             .map_err(MemoryError::sqlite("memory delete"))
@@ -90,7 +93,9 @@ impl MemoryStore for SqliteMemoryStore {
                         |r| r.get::<_, String>(0),
                     )
                     .optional()?;
-                truncate_wal(c)?;
+                if key.is_some() {
+                    truncate_wal(c)?;
+                }
                 Ok(key)
             })
             .await
@@ -103,7 +108,7 @@ impl MemoryStore for SqliteMemoryStore {
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt =
-                    c.prepare("SELECT key FROM memories WHERE key GLOB ?1 ORDER BY key")?;
+                    c.prepare_cached("SELECT key FROM memories WHERE key GLOB ?1 ORDER BY key")?;
                 let rows = stmt
                     .query_map(rusqlite::params![pattern], |r| r.get::<_, String>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -118,7 +123,7 @@ impl MemoryStore for SqliteMemoryStore {
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare(
+                let mut stmt = c.prepare_cached(
                     "SELECT id, key, value, created_at, updated_at FROM memories \
                      WHERE key GLOB ?1 ORDER BY key",
                 )?;

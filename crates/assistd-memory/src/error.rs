@@ -38,9 +38,6 @@ pub enum MemoryError {
         #[source]
         source: tokio_rusqlite::Error,
     },
-
-    #[error("serialize tool_calls: {0}")]
-    SerializeToolCalls(#[from] serde_json::Error),
 }
 
 impl MemoryError {

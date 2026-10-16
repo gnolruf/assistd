@@ -4,8 +4,8 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and
-/// every foreign key is indexed. Ids that travel in embed jobs use
-/// `AUTOINCREMENT` so a job never lands on a row that reused a deleted id.
+/// every foreign key is indexed. Message, chunk, and memory ids use
+/// `AUTOINCREMENT` so a queued embed job never lands on a row that reused a deleted id.
 const V1_SQL: &str = r"
 CREATE TABLE sessions (
     id                INTEGER PRIMARY KEY,
@@ -30,7 +30,7 @@ CREATE TABLE branches (
 CREATE INDEX idx_branches_parent ON branches(parent_branch_id);
 
 CREATE TABLE turns (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX idx_turns_session ON turns(session_id);

@@ -50,10 +50,9 @@ impl SemanticStore for SqliteSemanticStore {
                     c,
                     "SELECT e.chunk_id, e.vector
                      FROM chunk_embeddings e
-                     JOIN embedding_models em ON em.id = e.model_id
                      JOIN message_chunks cc ON cc.id = e.chunk_id
                      JOIN messages m ON m.id = cc.message_id
-                     WHERE em.name = ?1
+                     WHERE e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
                        AND m.session_id IS NOT (SELECT id FROM sessions WHERE uuid = ?2)",
                     rusqlite::params![model, exclude_session],
                     &query_vector,
@@ -90,9 +89,9 @@ impl SemanticStore for SqliteSemanticStore {
             .call(move |c| {
                 let ranked = scan_top_k::<MemoryId>(
                     c,
-                    "SELECT e.memory_id, e.vector
-                     FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
-                     WHERE m.name = ?1",
+                    "SELECT memory_id, vector
+                     FROM memory_embeddings
+                     WHERE model_id = (SELECT id FROM embedding_models WHERE name = ?1)",
                     rusqlite::params![model],
                     &query_vector,
                     top_k,
@@ -123,7 +122,7 @@ impl SemanticStore for SqliteSemanticStore {
                            SELECT m.name, count(*)
                            FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
                            WHERE m.name != ?1 GROUP BY m.name";
-                let mut stmt = c.prepare(sql)?;
+                let mut stmt = c.prepare_cached(sql)?;
                 let model_counts = stmt.query_map(rusqlite::params![current], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
                 })?;
@@ -151,8 +150,8 @@ impl SemanticStore for SqliteSemanticStore {
                      FROM message_chunks cc
                      WHERE NOT EXISTS (
                          SELECT 1 FROM chunk_embeddings e
-                         JOIN embedding_models m ON m.id = e.model_id
-                         WHERE e.chunk_id = cc.id AND m.name = ?1
+                         WHERE e.chunk_id = cc.id
+                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
                      )",
                     rusqlite::params![current],
                     |r| r.get(0),
@@ -162,8 +161,8 @@ impl SemanticStore for SqliteSemanticStore {
                      FROM memories mem
                      WHERE NOT EXISTS (
                          SELECT 1 FROM memory_embeddings e
-                         JOIN embedding_models m ON m.id = e.model_id
-                         WHERE e.memory_id = mem.id AND m.name = ?1
+                         WHERE e.memory_id = mem.id
+                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
                      )",
                     rusqlite::params![current],
                     |r| r.get(0),
@@ -185,13 +184,13 @@ impl SemanticStore for SqliteSemanticStore {
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare(
+                let mut stmt = c.prepare_cached(
                     "SELECT mem.id, mem.value
                      FROM memories mem
                      WHERE mem.id > ifnull(?2, 0) AND NOT EXISTS (
                          SELECT 1 FROM memory_embeddings e
-                         JOIN embedding_models m ON m.id = e.model_id
-                         WHERE e.memory_id = mem.id AND m.name = ?1
+                         WHERE e.memory_id = mem.id
+                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
                      )
                      ORDER BY mem.id
                      LIMIT ?3",
@@ -218,7 +217,7 @@ impl SemanticStore for SqliteSemanticStore {
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare(
+                let mut stmt = c.prepare_cached(
                     "SELECT cc.id,
                             CAST(substr(CAST(msg.content AS BLOB), cc.byte_start + 1,
                                         cc.byte_end - cc.byte_start) AS TEXT)
@@ -226,8 +225,8 @@ impl SemanticStore for SqliteSemanticStore {
                      JOIN messages msg ON msg.id = cc.message_id
                      WHERE cc.id > ifnull(?2, 0) AND NOT EXISTS (
                          SELECT 1 FROM chunk_embeddings e
-                         JOIN embedding_models m ON m.id = e.model_id
-                         WHERE e.chunk_id = cc.id AND m.name = ?1
+                         WHERE e.chunk_id = cc.id
+                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
                      )
                      ORDER BY cc.id
                      LIMIT ?3",
@@ -383,14 +382,10 @@ fn push_top_k<Id>(heap: &mut BinaryHeap<HeapEntry<Id>>, top_k: usize, id: Id, si
 /// Dot product of `query` against the LE-packed f32 BLOB `bytes`, or `None` when
 /// the BLOB is malformed, its dimension differs, or the product is not finite.
 fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
-    if !bytes.len().is_multiple_of(4) {
+    let (words, trailing) = bytes.as_chunks::<4>();
+    if !trailing.is_empty() || words.len() != query.len() {
         return None;
     }
-    let dim = bytes.len() / 4;
-    if dim != query.len() {
-        return None;
-    }
-    let (words, _) = bytes.as_chunks::<4>();
     let similarity: f32 = words
         .iter()
         .zip(query)
