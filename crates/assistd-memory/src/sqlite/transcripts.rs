@@ -6,13 +6,13 @@ use std::ops::Range;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, ValueRef};
-use rusqlite::{OptionalExtension, Row, ToSql, Transaction};
+use rusqlite::{ErrorCode, OptionalExtension, Row, ToSql, Transaction};
 
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
     AppendedMessage, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow, MemoryError,
-    MessageId, MessageKind, PersistedMessage, PersistedRole, Result, ResumeCandidate, SessionId,
-    ToolOutcome, TranscriptStore, TurnId, UndoOutcome,
+    MessageId, MessageKind, PersistedMessage, PersistedRole, PersistedToolCall, Result,
+    ResumeCandidate, SessionId, ToolOutcome, TranscriptStore, TurnId, UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
@@ -104,7 +104,10 @@ impl TranscriptStore for SqliteTranscriptStore {
                 )
             })
             .await
-            .map_err(MemoryError::sqlite("begin_turn"))
+            .map_err(MemoryError::sqlite_or_missing(
+                "begin_turn",
+                MemoryError::SessionNotFound(session),
+            ))
     }
 
     async fn begin_session_with_main_branch(
@@ -199,7 +202,10 @@ impl TranscriptStore for SqliteTranscriptStore {
                 Ok(AppendedMessage { id, chunks })
             })
             .await
-            .map_err(MemoryError::sqlite("append_message_to_branch"))
+            .map_err(MemoryError::sqlite_or_missing(
+                "append_message_to_branch",
+                MemoryError::BranchNotFound(branch),
+            ))
     }
 
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
@@ -258,8 +264,8 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(MemoryError::sqlite("resolve_branch"))
     }
 
-    async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId> {
-        let new_name = new_name.to_string();
+    async fn fork_and_switch(&self, src: BranchId, new_name: &str) -> Result<BranchId> {
+        let name = new_name.to_string();
         let created = now_millis();
         self.handle
             .writer()
@@ -272,7 +278,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                             (SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1), ?3
                      FROM branches WHERE id = ?1
                      RETURNING id",
-                    rusqlite::params![src, new_name, created],
+                    rusqlite::params![src, name, created],
                     |r| r.get(0),
                 )?;
                 tx.execute(
@@ -285,11 +291,16 @@ impl TranscriptStore for SqliteTranscriptStore {
                      SELECT ?1, through_seq, content FROM branch_summaries WHERE branch_id = ?2",
                     rusqlite::params![new_branch, src],
                 )?;
+                tx.execute(
+                    "UPDATE sessions SET current_branch_id = ?1
+                     WHERE id = (SELECT session_id FROM branches WHERE id = ?1)",
+                    rusqlite::params![new_branch],
+                )?;
                 tx.commit()?;
                 Ok(new_branch)
             })
             .await
-            .map_err(MemoryError::sqlite("fork_branch"))
+            .map_err(|e| fork_error(e, src, new_name))
     }
 
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>> {
@@ -362,20 +373,6 @@ impl TranscriptStore for SqliteTranscriptStore {
             })
             .await
             .map_err(MemoryError::sqlite("load_branch_summary"))
-    }
-
-    async fn branch_tail_seq(&self, branch: BranchId) -> Result<Option<i64>> {
-        self.handle
-            .reader()
-            .call(move |c| {
-                c.query_row(
-                    "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
-                    rusqlite::params![branch],
-                    |r| r.get::<_, Option<i64>>(0),
-                )
-            })
-            .await
-            .map_err(MemoryError::sqlite("branch_tail_seq"))
     }
 
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>> {
@@ -501,11 +498,12 @@ impl MessageRow {
     }
 }
 
-/// The role-specific `messages` columns of a [`MessageKind`], `NULL` where the role has none.
+/// The role-specific `messages` columns of a [`MessageKind`], `NULL` where the role has
+/// none; empty reasoning and an empty call list are stored as `NULL` too.
 #[derive(Default)]
 struct MessageColumns {
     reasoning: Option<String>,
-    tool_calls: Option<String>,
+    tool_calls: Vec<PersistedToolCall>,
     tool_call_id: Option<String>,
     tool_name: Option<String>,
     tool_exit_code: Option<i64>,
@@ -520,8 +518,8 @@ impl MessageColumns {
                 reasoning,
                 tool_calls,
             } => Self {
-                reasoning,
-                tool_calls: tool_calls.as_ref().map(serde_json::Value::to_string),
+                reasoning: reasoning.filter(|r| !r.is_empty()),
+                tool_calls,
                 ..Self::default()
             },
             MessageKind::Tool {
@@ -563,7 +561,7 @@ fn insert_message(
             row.role,
             row.content,
             columns.reasoning,
-            columns.tool_calls,
+            tool_calls_json(&columns.tool_calls)?,
             columns.tool_call_id,
             columns.tool_name,
             columns.tool_exit_code,
@@ -595,6 +593,32 @@ fn insert_chunks(
             Ok((id, content[bytes.clone()].to_string()))
         })
         .collect()
+}
+
+/// `calls` as the `messages.tool_calls` JSON array, or `None` when there are none.
+fn tool_calls_json(calls: &[PersistedToolCall]) -> rusqlite::Result<Option<String>> {
+    if calls.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(calls)
+        .map(Some)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+/// Map a failed fork of `src` into `name` to its typed error.
+fn fork_error(error: tokio_rusqlite::Error, src: BranchId, name: &str) -> MemoryError {
+    match &error {
+        tokio_rusqlite::Error::Error(rusqlite::Error::QueryReturnedNoRows) => {
+            MemoryError::BranchNotFound(src)
+        }
+        tokio_rusqlite::Error::Error(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == ErrorCode::ConstraintViolation
+                && failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            MemoryError::BranchNameTaken(name.to_string())
+        }
+        _ => MemoryError::sqlite("fork_and_switch")(error),
+    }
 }
 
 fn latest_turn_on_branch(
@@ -710,14 +734,13 @@ fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
     })
 }
 
-fn tool_calls_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<serde_json::Value>> {
+fn tool_calls_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Vec<PersistedToolCall>> {
     row.get::<_, Option<String>>(idx)?
-        .map(|json| {
+        .map_or(Ok(Vec::new()), |json| {
             serde_json::from_str(&json).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(e))
             })
         })
-        .transpose()
 }
 
 #[cfg(test)]

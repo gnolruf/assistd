@@ -15,6 +15,13 @@ use crate::{MemoryError, Result, migrations};
 /// `sqlite3` shell) before failing with `SQLITE_BUSY`.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Page size of a newly created database; large enough that a 1024-dimension `f32`
+/// vector stays on its row's leaf page instead of spilling to an overflow page.
+const PAGE_SIZE_BYTES: i64 = 8192;
+
+/// How much of the database file each read-only connection may memory-map.
+const READER_MMAP_BYTES: i64 = 256 * 1024 * 1024;
+
 /// Mode for directories created to hold the database.
 const PRIVATE_DIR_MODE: u32 = 0o700;
 
@@ -25,12 +32,13 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Suffixes SQLite appends to the database path for its sidecar files.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
-/// Cheaply cloneable handle shared by every store: reads go to a read-only
-/// connection and writes to the only writable one, each run in submission
-/// order on its connection's own thread.
+/// Cheaply cloneable handle shared by every store: vector scans and other reads go
+/// to separate read-only connections and writes to the only writable one, each run
+/// in submission order on its connection's own thread.
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
     reader: Connection,
+    search_reader: Connection,
     writer: Connection,
 }
 
@@ -41,10 +49,15 @@ impl SqliteHandle {
         prepare_private_db_file(path).await?;
         let writer = open_writer(path).await?;
         let reader = open_reader(path).await?;
-        Ok(Self { reader, writer })
+        let search_reader = open_reader(path).await?;
+        Ok(Self {
+            reader,
+            search_reader,
+            writer,
+        })
     }
 
-    /// Refresh planner statistics and close both connections once every call
+    /// Refresh planner statistics and close every connection once every call
     /// already queued has run; later calls through any clone fail.
     pub async fn close(self) -> Result<()> {
         if let Err(e) = self
@@ -65,11 +78,20 @@ impl SqliteHandle {
         self.reader
             .close()
             .await
-            .map_err(MemoryError::sqlite("close reader connection"))
+            .map_err(MemoryError::sqlite("close reader connection"))?;
+        self.search_reader
+            .close()
+            .await
+            .map_err(MemoryError::sqlite("close search reader connection"))
     }
 
     pub(super) fn reader(&self) -> &Connection {
         &self.reader
+    }
+
+    /// The read-only connection reserved for full vector scans.
+    pub(super) fn search_reader(&self) -> &Connection {
+        &self.search_reader
     }
 
     pub(super) fn writer(&self) -> &Connection {
@@ -87,6 +109,7 @@ async fn open_writer(path: &Path) -> Result<Connection> {
         })?;
 
     conn.call(|c| -> rusqlite::Result<_> {
+        c.pragma_update(None, "page_size", PAGE_SIZE_BYTES)?;
         c.pragma_update(None, "journal_mode", "WAL")?;
         c.pragma_update(None, "synchronous", "NORMAL")?;
         c.pragma_update(None, "foreign_keys", "ON")?;
@@ -115,9 +138,12 @@ async fn open_reader(path: &Path) -> Result<Connection> {
             path: path.to_path_buf(),
             source,
         })?;
-    conn.call(|c| c.busy_timeout(BUSY_TIMEOUT))
-        .await
-        .map_err(MemoryError::sqlite("apply SQLite reader pragmas"))?;
+    conn.call(|c| -> rusqlite::Result<_> {
+        c.pragma_update(None, "mmap_size", READER_MMAP_BYTES)?;
+        c.busy_timeout(BUSY_TIMEOUT)
+    })
+    .await
+    .map_err(MemoryError::sqlite("apply SQLite reader pragmas"))?;
     Ok(conn)
 }
 

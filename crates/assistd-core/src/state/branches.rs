@@ -9,8 +9,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use assistd_ipc::Event;
-use assistd_llm::{HistoryEntry, HistoryRole, Thinking};
-use assistd_memory::{BranchId, BranchSummary, HistoryRow, MessageKind, SessionId, UndoOutcome};
+use assistd_llm::{HistoryEntry, HistoryRole, Thinking, ToolCallRecord};
+use assistd_memory::{
+    BranchId, BranchSummary, HistoryRow, MessageKind, PersistedToolCall, Seq, SessionId,
+    UndoOutcome,
+};
 
 use super::{AppState, send_error, wire_role, wire_timestamp};
 
@@ -28,12 +31,12 @@ pub struct LlmReplay {
 impl LlmReplay {
     /// The replay of `rows`, a whole branch, under its `summary`.
     pub fn new(rows: &[HistoryRow], summary: Option<BranchSummary>) -> Self {
-        let through_seq = summary.as_ref().map_or(i64::MIN, |s| s.through_seq);
+        let through_seq = summary.as_ref().map(|s| s.through_seq);
         Self {
             summary: summary.map(|s| s.content),
             entries: rows
                 .iter()
-                .filter(|row| row.seq > through_seq)
+                .filter(|row| through_seq.is_none_or(|through| row.seq > through))
                 .map(history_entry)
                 .collect(),
         }
@@ -68,7 +71,7 @@ impl AppState {
         let new_branch = match self
             .memory
             .transcripts
-            .fork_branch(current_branch, &name)
+            .fork_and_switch(current_branch, &name)
             .await
         {
             Ok(branch) => branch,
@@ -77,27 +80,12 @@ impl AppState {
                 return;
             }
         };
-        if let Err(e) = self
-            .memory
-            .transcripts
-            .set_current_branch(session, new_branch)
-            .await
-        {
-            send_error(
-                &tx,
-                id,
-                format!("/fork: failed to update current branch: {e}"),
-            )
-            .await;
-            return;
-        }
         self.runtime
             .session_ctx
             .replace(session, Some(new_branch))
             .await;
 
-        let (parent_name, _, _) = self.lookup_branch_meta(current_branch).await;
-        let fork_point_seq = self.lookup_branch_tail_seq(current_branch).await;
+        let (_, parent_name, fork_point_seq) = self.lookup_branch_meta(new_branch).await;
         let session_title = self
             .memory
             .transcripts
@@ -113,7 +101,7 @@ impl AppState {
                 session_title,
                 name,
                 parent_branch_name: parent_name,
-                fork_point_seq,
+                fork_point_seq: fork_point_seq.map(|seq| seq.0),
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;
@@ -145,7 +133,7 @@ impl AppState {
                     session_title: branch.session_title,
                     name: branch.name,
                     parent_branch_name: branch.parent_branch_name,
-                    fork_point_seq: branch.fork_point_seq,
+                    fork_point_seq: branch.fork_point_seq.map(|seq| seq.0),
                     created_at: wire_timestamp(branch.created_at),
                     message_count: branch.message_count,
                     is_current_in_session: branch.is_current_in_session,
@@ -426,7 +414,7 @@ impl AppState {
                 session_title,
                 name: branch_name.unwrap_or_default(),
                 parent_branch_name: parent_name,
-                fork_point_seq,
+                fork_point_seq: fork_point_seq.map(|seq| seq.0),
             })
             .await;
         let mut call_arguments = tool_call_arguments(&rows);
@@ -447,7 +435,7 @@ impl AppState {
             let _ = tx
                 .send(Event::HistoryEntry {
                     id: id.clone(),
-                    seq: row.seq,
+                    seq: row.seq.0,
                     role,
                     content: row.message.content,
                     tool_name,
@@ -495,21 +483,12 @@ impl AppState {
         announce_unsaved_session(id, new_session, tx).await;
     }
 
-    pub(super) async fn lookup_branch_tail_seq(&self, branch: BranchId) -> Option<i64> {
-        self.memory
-            .transcripts
-            .branch_tail_seq(branch)
-            .await
-            .ok()
-            .flatten()
-    }
-
     /// `(name, parent name, fork point)` of `branch`, all `None` when the
     /// lookup fails or the branch is unknown.
     pub(super) async fn lookup_branch_meta(
         &self,
         branch: BranchId,
-    ) -> (Option<String>, Option<String>, Option<i64>) {
+    ) -> (Option<String>, Option<String>, Option<Seq>) {
         let Ok(Some(info)) = self.memory.transcripts.branch_info(branch).await else {
             return (None, None, None);
         };
@@ -545,7 +524,7 @@ fn history_entry(row: &HistoryRow) -> HistoryEntry {
             role: HistoryRole::User,
             content,
             reasoning: String::new(),
-            tool_calls_json: None,
+            tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
         },
@@ -556,7 +535,7 @@ fn history_entry(row: &HistoryRow) -> HistoryEntry {
             role: HistoryRole::Assistant,
             content,
             reasoning: reasoning.clone().unwrap_or_default(),
-            tool_calls_json: tool_calls.clone(),
+            tool_calls: tool_calls.iter().map(tool_call_record).collect(),
             tool_call_id: None,
             tool_name: None,
         },
@@ -566,28 +545,34 @@ fn history_entry(row: &HistoryRow) -> HistoryEntry {
             role: HistoryRole::Tool,
             content,
             reasoning: String::new(),
-            tool_calls_json: None,
+            tool_calls: Vec::new(),
             tool_call_id: Some(call_id.clone()),
             tool_name: Some(tool_name.clone()),
         },
     }
 }
 
+/// `call` as the LLM replays it, with its arguments as the JSON text the model sent.
+fn tool_call_record(call: &PersistedToolCall) -> ToolCallRecord {
+    let arguments = match &call.arguments {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    ToolCallRecord {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        arguments,
+    }
+}
+
 /// The arguments of every tool call recorded on `rows`, by call id.
 fn tool_call_arguments(rows: &[HistoryRow]) -> HashMap<String, Value> {
     rows.iter()
-        .filter_map(|row| match &row.message.kind {
-            MessageKind::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } => calls.as_array(),
-            MessageKind::User | MessageKind::Assistant { .. } | MessageKind::Tool { .. } => None,
+        .flat_map(|row| match &row.message.kind {
+            MessageKind::Assistant { tool_calls, .. } => tool_calls.as_slice(),
+            MessageKind::User | MessageKind::Tool { .. } => &[],
         })
-        .flatten()
-        .filter_map(|call| {
-            let call_id = call.get("id")?.as_str()?.to_string();
-            Some((call_id, call.get("arguments")?.clone()))
-        })
+        .map(|call| (call.id.clone(), call.arguments.clone()))
         .collect()
 }
 

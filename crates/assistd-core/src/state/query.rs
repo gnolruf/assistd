@@ -13,13 +13,14 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
-use assistd_memory::{PersistedMessage, SessionId, ToolOutcome, TurnId};
+use assistd_memory::{PersistedMessage, PersistedToolCall, SessionId, ToolOutcome, TurnId};
 use assistd_tools::{Attachment, inherit_confirm_router};
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
 };
 
 use super::context::combine_context_blocks;
+use super::persistence::PersistTarget;
 use super::wire::decode_wire_attachments;
 use super::{AppState, DispatchError, RuntimeState, send_error};
 use crate::Agent;
@@ -88,7 +89,8 @@ impl SpeechPipeline {
 /// transcript as it goes.
 struct TurnTranslator {
     id: String,
-    turn_id: Option<TurnId>,
+    /// `None` when the session could not be saved, so nothing is persisted.
+    persist: Option<PersistTarget>,
     assistant_accum: String,
     reasoning_accum: String,
     awaiting_tool_result: bool,
@@ -98,10 +100,10 @@ struct TurnTranslator {
 }
 
 impl TurnTranslator {
-    fn new(id: String, turn_id: Option<TurnId>) -> Self {
+    fn new(id: String, persist: Option<PersistTarget>) -> Self {
         Self {
             id,
-            turn_id,
+            persist,
             assistant_accum: String::new(),
             reasoning_accum: String::new(),
             awaiting_tool_result: false,
@@ -154,8 +156,8 @@ impl TurnTranslator {
                 result,
             } => {
                 self.awaiting_tool_result = false;
-                state.persist_message_fire_and_forget(
-                    self.turn_id,
+                self.persist_message(
+                    state,
                     PersistedMessage::tool_result(
                         tool_result_body(&result),
                         call_id,
@@ -194,7 +196,9 @@ impl TurnTranslator {
                 summary,
                 kept_turns,
             } => {
-                state.persist_summary_fire_and_forget(summary, kept_turns);
+                if let Some(target) = self.persist {
+                    state.persist_summary_fire_and_forget(target.branch, summary, kept_turns);
+                }
                 return None;
             }
             LlmEvent::Done => {
@@ -221,10 +225,7 @@ impl TurnTranslator {
             publish_last_delta(&state.runtime, &self.id, &narration);
         }
         let reasoning = std::mem::take(&mut self.reasoning_accum);
-        state.persist_message_fire_and_forget(
-            self.turn_id,
-            tool_calls_message(narration, calls, reasoning),
-        );
+        self.persist_message(state, tool_calls_message(narration, calls, reasoning));
     }
 
     fn persist_final_text(&mut self, state: &AppState) {
@@ -234,10 +235,16 @@ impl TurnTranslator {
         }
         let final_text = std::mem::take(&mut self.assistant_accum);
         publish_last_delta(&state.runtime, &self.id, &final_text);
-        state.persist_message_fire_and_forget(
-            self.turn_id,
+        self.persist_message(
+            state,
             PersistedMessage::assistant_text(final_text, reasoning),
         );
+    }
+
+    fn persist_message(&self, state: &AppState, msg: PersistedMessage) {
+        if let Some(target) = self.persist {
+            state.persist_message_fire_and_forget(target, msg);
+        }
     }
 }
 
@@ -291,7 +298,7 @@ impl AppState {
         }
         self.require_vision_for(&id, &attachments, &tx).await?;
 
-        let (current_session, turn_id) = self.open_persistence_turn(&text).await;
+        let (current_session, persist) = self.open_persistence_turn(&text).await;
         let chat_focused = self.refresh_chat_focus(&id);
         self.assemble_transient_context(&text, origin, chat_focused)
             .await;
@@ -307,7 +314,7 @@ impl AppState {
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
         let done_emitted = self
-            .drive_event_loop(id.clone(), llm_rx, &tx, speech, turn_id, &cancel)
+            .drive_event_loop(id.clone(), llm_rx, &tx, speech, persist, &cancel)
             .await;
 
         let agent_result = agent_task.await;
@@ -399,11 +406,17 @@ impl AppState {
         })
     }
 
-    async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<TurnId>) {
-        let (current_session, turn_id) = match self.saved_session().await {
-            Ok((session, _branch)) => {
-                let turn_id = self.begin_persisted_turn(session).await;
-                (session, turn_id)
+    /// Save the session if needed, open the turn, and queue the user's prompt;
+    /// the target is `None` when the session could not be saved.
+    async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<PersistTarget>) {
+        match self.saved_session().await {
+            Ok((session, branch)) => {
+                let target = PersistTarget {
+                    branch,
+                    turn: self.begin_persisted_turn(session).await,
+                };
+                self.persist_message_fire_and_forget(target, PersistedMessage::user(text));
+                (session, Some(target))
             }
             Err(e) => {
                 warn!(
@@ -414,9 +427,7 @@ impl AppState {
                 let (session, _branch) = self.runtime.session_ctx.current().await;
                 (session, None)
             }
-        };
-        self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.to_string()));
-        (current_session, turn_id)
+        }
     }
 
     async fn begin_persisted_turn(&self, session: SessionId) -> Option<TurnId> {
@@ -539,10 +550,10 @@ impl AppState {
         mut llm_rx: mpsc::Receiver<LlmEvent>,
         tx: &mpsc::Sender<Event>,
         mut speech: SpeechPipeline,
-        turn_id: Option<TurnId>,
+        persist: Option<PersistTarget>,
         cancel: &CancellationToken,
     ) -> bool {
-        let mut translator = TurnTranslator::new(id, turn_id);
+        let mut translator = TurnTranslator::new(id, persist);
         let mut client_connected = true;
         loop {
             let idle_timeout = speech
@@ -739,11 +750,15 @@ fn tool_calls_message(
     } else {
         narration
     };
-    let calls_json = calls
+    let persisted = calls
         .iter()
-        .map(|call| serde_json::json!({"id": call.id, "name": call.name, "arguments": call.arguments}))
+        .map(|call| PersistedToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        })
         .collect();
-    PersistedMessage::assistant_tool_calls(content, calls_json, reasoning)
+    PersistedMessage::assistant_tool_calls(content, persisted, reasoning)
 }
 
 /// Exit code and duration from a tool's raw result JSON; absent fields read as zero.

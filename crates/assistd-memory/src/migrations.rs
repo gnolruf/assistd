@@ -4,8 +4,9 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and
-/// every foreign key is indexed. A session's current branch must be one of its own. Message, chunk, and memory ids use
-/// `AUTOINCREMENT` so a queued embed job never lands on a row that reused a deleted id.
+/// every foreign key is indexed. A session's current branch and a message's turn must
+/// belong to that same session. Turn, message, chunk, and memory ids use `AUTOINCREMENT`
+/// so a queued write or embed job never lands on a row that reused a deleted id.
 const V1_SQL: &str = r"
 CREATE TABLE sessions (
     id                INTEGER PRIMARY KEY,
@@ -25,21 +26,21 @@ CREATE TABLE branches (
     parent_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL,
     fork_point_seq   INTEGER,
     created_at       INTEGER NOT NULL,
-    UNIQUE (session_id, name),
+    UNIQUE (name, session_id),
     UNIQUE (session_id, id)
 ) STRICT;
 CREATE INDEX idx_branches_parent ON branches(parent_branch_id);
 
 CREATE TABLE turns (
-    id         INTEGER PRIMARY KEY,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    UNIQUE (session_id, id)
 ) STRICT;
-CREATE INDEX idx_turns_session ON turns(session_id);
 
 CREATE TABLE messages (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    turn_id          INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    turn_id          INTEGER,
     created_at       INTEGER NOT NULL,
     role             INTEGER NOT NULL CHECK (role BETWEEN 0 AND 2),
     content          TEXT NOT NULL,
@@ -49,15 +50,18 @@ CREATE TABLE messages (
     tool_name        TEXT,
     tool_exit_code   INTEGER,
     tool_duration_ms INTEGER CHECK (tool_duration_ms >= 0),
-    CHECK (tool_calls IS NULL OR (role = 1 AND json_valid(tool_calls))),
-    CHECK (reasoning IS NULL OR role = 1),
+    FOREIGN KEY (session_id, turn_id) REFERENCES turns(session_id, id),
+    CHECK (tool_calls IS NULL OR (role = 1 AND json_valid(tool_calls)
+                                  AND json_type(tool_calls) = 'array'
+                                  AND json_array_length(tool_calls) > 0)),
+    CHECK (reasoning IS NULL OR (role = 1 AND reasoning <> '')),
     CHECK ((role = 2) = (tool_call_id IS NOT NULL)),
     CHECK ((role = 2) = (tool_name IS NOT NULL)),
     CHECK ((role = 2) = (tool_exit_code IS NOT NULL)),
     CHECK ((role = 2) = (tool_duration_ms IS NOT NULL))
 ) STRICT;
 CREATE INDEX idx_messages_turn ON messages(turn_id);
-CREATE INDEX idx_messages_session ON messages(session_id);
+CREATE INDEX idx_messages_session_turn ON messages(session_id, turn_id);
 
 CREATE TABLE branch_messages (
     branch_id  INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,

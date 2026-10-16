@@ -12,8 +12,8 @@ use assistd_ipc::{
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{
-    BranchId, HistoryRow, MessageKind, PersistedMessage, PersistedRole, SessionId, SqliteHandle,
-    SqliteTranscriptStore, TranscriptStore,
+    BranchId, HistoryRow, MessageKind, PersistedMessage, PersistedRole, PersistedToolCall,
+    SessionId, SqliteHandle, SqliteTranscriptStore, TranscriptStore,
 };
 use assistd_tools::{
     CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolsDisabled,
@@ -1408,7 +1408,7 @@ async fn fork_creates_branch_and_switches() {
 #[tokio::test]
 async fn branches_lists_active_session_first() {
     let (state, conv, _session, main_branch) = fresh_branch_state().await;
-    conv.fork_branch(main_branch, "alt").await.unwrap();
+    conv.fork_and_switch(main_branch, "alt").await.unwrap();
     conv.begin_session_with_main_branch(SessionId::new(), 456)
         .await
         .unwrap();
@@ -1434,7 +1434,7 @@ async fn branches_lists_active_session_first() {
 async fn switch_replays_history_into_event_stream() {
     let (state, conv, session, main_branch) = fresh_branch_state().await;
     append_turn(&conv, session, main_branch, "hello", "world").await;
-    conv.fork_branch(main_branch, "alt").await.unwrap();
+    conv.fork_and_switch(main_branch, "alt").await.unwrap();
 
     let (res, events) = dispatch(
         &state,
@@ -1648,13 +1648,11 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
     );
 
     let ids: Vec<_> = tool_calls(&rows[1])
-        .and_then(|v| v.as_array())
-        .expect("step row carries its calls")
         .iter()
-        .map(|c| c["id"].as_str().unwrap())
+        .map(|call| call.id.as_str())
         .collect();
     assert_eq!(ids, ["call-a", "call-b"]);
-    assert!(tool_calls(&rows[4]).is_none());
+    assert!(tool_calls(&rows[4]).is_empty());
 }
 
 fn tool_call_id(row: &HistoryRow) -> Option<&str> {
@@ -1664,9 +1662,9 @@ fn tool_call_id(row: &HistoryRow) -> Option<&str> {
     }
 }
 
-fn tool_calls(row: &HistoryRow) -> Option<&serde_json::Value> {
+fn tool_calls(row: &HistoryRow) -> &[PersistedToolCall] {
     match &row.message.kind {
-        MessageKind::Assistant { tool_calls, .. } => tool_calls.as_ref(),
-        MessageKind::User | MessageKind::Tool { .. } => None,
+        MessageKind::Assistant { tool_calls, .. } => tool_calls,
+        MessageKind::User | MessageKind::Tool { .. } => &[],
     }
 }

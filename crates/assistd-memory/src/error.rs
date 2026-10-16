@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::{BranchId, SessionId};
+
 /// Failures from opening or operating on the memory database.
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -31,6 +33,15 @@ pub enum MemoryError {
     #[error("run migrations: {0}")]
     Migration(#[source] tokio_rusqlite::Error<rusqlite_migration::Error>),
 
+    #[error("no branch with id {0}")]
+    BranchNotFound(BranchId),
+
+    #[error("no saved session {0}")]
+    SessionNotFound(SessionId),
+
+    #[error("this session already has a branch named {0:?}")]
+    BranchNameTaken(String),
+
     /// A SQLite statement issued by `op` failed.
     #[error("{op}: {source}")]
     Sqlite {
@@ -43,6 +54,17 @@ pub enum MemoryError {
 impl MemoryError {
     pub(crate) fn sqlite(op: &'static str) -> impl FnOnce(tokio_rusqlite::Error) -> Self {
         move |source| Self::Sqlite { op, source }
+    }
+
+    /// Like [`MemoryError::sqlite`], but a query that matched no row becomes `missing`.
+    pub(crate) fn sqlite_or_missing(
+        op: &'static str,
+        missing: Self,
+    ) -> impl FnOnce(tokio_rusqlite::Error) -> Self {
+        move |source| match source {
+            tokio_rusqlite::Error::Error(rusqlite::Error::QueryReturnedNoRows) => missing,
+            source => Self::Sqlite { op, source },
+        }
     }
 }
 

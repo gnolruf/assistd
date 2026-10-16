@@ -5,8 +5,9 @@ use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
-use crate::{BranchId, ChunkId, MessageId, Result, SessionId, TurnId};
+use crate::{BranchId, ChunkId, MessageId, Result, Seq, SessionId, TurnId};
 
 /// Role of a persisted message, stored as the `messages.role` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,8 +42,8 @@ pub enum MessageKind {
     Assistant {
         /// The model's reasoning for this step; never empty.
         reasoning: Option<String>,
-        /// JSON array of `{id, name, arguments}`; only when the step called tools.
-        tool_calls: Option<serde_json::Value>,
+        /// The tools this step called, in call order; empty for a plain reply.
+        tool_calls: Vec<PersistedToolCall>,
     },
     Tool {
         call_id: String,
@@ -62,17 +63,17 @@ impl PersistedMessage {
 
     /// An assistant reply with no tool calls; empty `reasoning` is not stored.
     pub fn assistant_text(content: impl Into<String>, reasoning: String) -> Self {
-        Self::assistant(content.into(), reasoning, None)
+        Self::assistant(content.into(), reasoning, Vec::new())
     }
 
     /// A model step that requested tools; `content` is any accompanying text,
     /// possibly empty, and empty `reasoning` is not stored.
     pub fn assistant_tool_calls(
         content: impl Into<String>,
-        calls: serde_json::Value,
+        calls: Vec<PersistedToolCall>,
         reasoning: String,
     ) -> Self {
-        Self::assistant(content.into(), reasoning, Some(calls))
+        Self::assistant(content.into(), reasoning, calls)
     }
 
     /// The output of tool call `call_id`, which invoked tool `name`.
@@ -101,11 +102,7 @@ impl PersistedMessage {
         }
     }
 
-    fn assistant(
-        content: String,
-        reasoning: String,
-        tool_calls: Option<serde_json::Value>,
-    ) -> Self {
+    fn assistant(content: String, reasoning: String, tool_calls: Vec<PersistedToolCall>) -> Self {
         Self {
             content,
             kind: MessageKind::Assistant {
@@ -114,6 +111,15 @@ impl PersistedMessage {
             },
         }
     }
+}
+
+/// One tool call requested by an assistant step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedToolCall {
+    /// Server-assigned call id, matched by the [`MessageKind::Tool`] result.
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
 }
 
 /// How one tool run ended.
@@ -134,7 +140,7 @@ pub struct BranchInfo {
     pub name: String,
     pub parent_branch_id: Option<BranchId>,
     pub parent_branch_name: Option<String>,
-    pub fork_point_seq: Option<i64>,
+    pub fork_point_seq: Option<Seq>,
     pub created_at: DateTime<Utc>,
     pub message_count: i64,
     pub is_current_in_session: bool,
@@ -146,15 +152,15 @@ pub struct BranchInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryRow {
     pub message_id: MessageId,
-    pub seq: i64,
+    pub seq: Seq,
     pub message: PersistedMessage,
 }
 
 /// The latest compaction summary of a branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchSummary {
-    /// Branch-local seq of the last message the summary stands in for.
-    pub through_seq: i64,
+    /// Seq of the last message the summary stands in for.
+    pub through_seq: Seq,
     pub content: String,
 }
 
@@ -197,6 +203,8 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     async fn end_session(&self, session: SessionId) -> Result<()>;
 
     /// Open a new turn inside `session`; its messages are grouped by the id.
+    /// Errors with [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound)
+    /// when `session` was never saved.
     async fn begin_turn(&self, session: SessionId) -> Result<TurnId>;
 
     /// Update `sessions.current_branch_id` to point at `branch`.
@@ -206,7 +214,8 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     async fn current_branch(&self, session: SessionId) -> Result<Option<BranchId>>;
 
     /// Append `msg` to `branch` and its session, chunking user and assistant text for
-    /// embedding, all in one transaction.
+    /// embedding, all in one transaction. Errors with
+    /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound) when `branch` is missing.
     async fn append_message_to_branch(
         &self,
         branch: BranchId,
@@ -229,9 +238,11 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         prefer_session: Option<SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>>;
 
-    /// Copy `src` into a new child branch `new_name` sharing all its messages.
-    /// Errors if `src` is missing or its session already has a branch `new_name`.
-    async fn fork_branch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
+    /// Copy `src` into a new child branch `new_name` sharing all its messages and make it
+    /// its session's current branch, in one transaction. Errors with
+    /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound) or
+    /// [`MemoryError::BranchNameTaken`](crate::MemoryError::BranchNameTaken).
+    async fn fork_and_switch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
 
     /// Every message on `branch`, ordered by branch-local seq.
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
@@ -248,10 +259,6 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
 
     /// The branch's latest compaction summary, if one is recorded.
     async fn load_branch_summary(&self, branch: BranchId) -> Result<Option<BranchSummary>>;
-
-    /// Branch-local seq of the newest message on `branch`, or `None`
-    /// when the branch is empty.
-    async fn branch_tail_seq(&self, branch: BranchId) -> Result<Option<i64>>;
 
     /// When the newest message on `branch` was written, or `None` when the branch is empty.
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>>;
@@ -329,7 +336,7 @@ impl TranscriptStore for NoTranscriptStore {
         Ok(None)
     }
 
-    async fn fork_branch(&self, _src: BranchId, _new_name: &str) -> Result<BranchId> {
+    async fn fork_and_switch(&self, _src: BranchId, _new_name: &str) -> Result<BranchId> {
         Ok(BranchId(0))
     }
 
@@ -347,10 +354,6 @@ impl TranscriptStore for NoTranscriptStore {
     }
 
     async fn load_branch_summary(&self, _branch: BranchId) -> Result<Option<BranchSummary>> {
-        Ok(None)
-    }
-
-    async fn branch_tail_seq(&self, _branch: BranchId) -> Result<Option<i64>> {
         Ok(None)
     }
 

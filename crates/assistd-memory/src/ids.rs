@@ -1,5 +1,5 @@
-//! Typed row identifiers, each a table's integer primary key, plus the
-//! UUID-backed [`SessionId`].
+//! Typed row identifiers, each a table's integer primary key, the branch-local
+//! [`Seq`], and the UUID-backed [`SessionId`].
 
 use std::fmt;
 use std::str::FromStr;
@@ -39,6 +39,10 @@ row_id!(
 row_id!(
     /// Row id in `memories`.
     MemoryId
+);
+row_id!(
+    /// A message's position on its branch, counting up from 0.
+    Seq
 );
 
 /// Session identifier: a v4 UUID, stable across daemon restarts.

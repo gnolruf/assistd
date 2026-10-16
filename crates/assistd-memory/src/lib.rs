@@ -11,7 +11,7 @@ mod sqlite;
 mod transcripts;
 
 pub use error::{MemoryError, Result};
-pub use ids::{BranchId, ChunkId, MemoryId, MessageId, SessionId, TurnId};
+pub use ids::{BranchId, ChunkId, MemoryId, MessageId, Seq, SessionId, TurnId};
 pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore};
 pub use semantic::{
     Embedding, EmbeddingHit, EmbeddingTarget, MemoryHit, NoSemanticStore, SemanticStore,
@@ -20,5 +20,6 @@ pub use semantic::{
 pub use sqlite::{SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore};
 pub use transcripts::{
     AppendedMessage, BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore,
-    PersistedMessage, PersistedRole, ResumeCandidate, ToolOutcome, TranscriptStore, UndoOutcome,
+    PersistedMessage, PersistedRole, PersistedToolCall, ResumeCandidate, ToolOutcome,
+    TranscriptStore, UndoOutcome,
 };

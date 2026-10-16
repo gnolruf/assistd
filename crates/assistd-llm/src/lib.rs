@@ -199,15 +199,15 @@ pub enum HistoryRole {
     Tool,
 }
 
-/// One persisted message replayed into a backend's conversation;
-/// `tool_calls_json` is the stored JSON verbatim.
+/// One persisted message replayed into a backend's conversation.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub role: HistoryRole,
     pub content: String,
     /// The model's reasoning for an assistant step; empty otherwise.
     pub reasoning: String,
-    pub tool_calls_json: Option<Value>,
+    /// The tools an assistant step called; empty otherwise.
+    pub tool_calls: Vec<ToolCallRecord>,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
 }

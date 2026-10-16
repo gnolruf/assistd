@@ -1,4 +1,5 @@
 use super::*;
+use crate::Seq;
 
 /// The returned temp dir must outlive the store.
 async fn fresh_store() -> (SqliteTranscriptStore, tempfile::TempDir) {
@@ -30,7 +31,11 @@ async fn tool_calls_and_tool_results_round_trip() {
         exit_code: 2,
         duration_ms: 41,
     };
-    let calls = serde_json::json!([{"id": "c-1", "name": "run", "arguments": {"command": "ls"}}]);
+    let calls = vec![PersistedToolCall {
+        id: "c-1".into(),
+        name: "run".into(),
+        arguments: serde_json::json!({"command": "ls"}),
+    }];
     let call = store
         .append_message_to_branch(
             branch,
@@ -58,18 +63,18 @@ async fn tool_calls_and_tool_results_round_trip() {
         [
             HistoryRow {
                 message_id: call.id,
-                seq: 0,
+                seq: Seq(0),
                 message: PersistedMessage {
                     content: String::new(),
                     kind: MessageKind::Assistant {
                         reasoning: Some("look first".into()),
-                        tool_calls: Some(calls),
+                        tool_calls: calls,
                     },
                 },
             },
             HistoryRow {
                 message_id: result.id,
-                seq: 1,
+                seq: Seq(1),
                 message: PersistedMessage {
                     content: "file1\nfile2".into(),
                     kind: MessageKind::Tool {
@@ -105,7 +110,12 @@ async fn fork_creates_independent_branch_sharing_history() {
         .await
         .unwrap();
 
-    let fork = store.fork_branch(main, "experiment").await.unwrap();
+    let fork = store.fork_and_switch(main, "experiment").await.unwrap();
+    assert_eq!(store.current_branch(session).await.unwrap(), Some(fork));
+    assert!(matches!(
+        store.fork_and_switch(main, "experiment").await,
+        Err(MemoryError::BranchNameTaken(name)) if name == "experiment"
+    ));
     let main_history = store.load_branch_history(main).await.unwrap();
     let fork_history = store.load_branch_history(fork).await.unwrap();
     assert_eq!(main_history.len(), 2);
@@ -118,7 +128,7 @@ async fn fork_creates_independent_branch_sharing_history() {
     let fork_info = branches.iter().find(|b| b.name == "experiment").unwrap();
     assert_eq!(fork_info.parent_branch_id, Some(main));
     assert_eq!(fork_info.parent_branch_name.as_deref(), Some("main"));
-    assert_eq!(fork_info.fork_point_seq, Some(1));
+    assert_eq!(fork_info.fork_point_seq, Some(Seq(1)));
     assert_eq!(fork_info.message_count, 2);
     assert_eq!(
         fork_info.last_active_at, fork_info.created_at,
@@ -163,7 +173,7 @@ async fn append_to_one_branch_does_not_show_on_the_other() {
         .append_message_to_branch(main, Some(turn), PersistedMessage::user("q"))
         .await
         .unwrap();
-    let fork = store.fork_branch(main, "alt").await.unwrap();
+    let fork = store.fork_and_switch(main, "alt").await.unwrap();
     let alt_turn = store.begin_turn(session).await.unwrap();
     store
         .append_message_to_branch(fork, Some(alt_turn), PersistedMessage::user("alt q"))
@@ -259,12 +269,12 @@ async fn summary_follows_kept_turns_forks_and_undo() {
         .await
         .unwrap();
     let expected = Some(BranchSummary {
-        through_seq: 1,
+        through_seq: Seq(1),
         content: "turn one".into(),
     });
     assert_eq!(store.load_branch_summary(branch).await.unwrap(), expected);
 
-    let fork = store.fork_branch(branch, "alt").await.unwrap();
+    let fork = store.fork_and_switch(branch, "alt").await.unwrap();
     assert_eq!(store.load_branch_summary(fork).await.unwrap(), expected);
 
     store.undo_last_turn(branch).await.unwrap();
@@ -315,12 +325,19 @@ async fn find_resumable_session_returns_unended() {
 }
 
 #[tokio::test]
-async fn current_branch_must_belong_to_its_session() {
+async fn current_branch_and_turns_must_belong_to_their_session() {
     let (store, _temp) = fresh_store().await;
     let s1 = SessionId::new();
-    store.begin_session_with_main_branch(s1, 1).await.unwrap();
+    let b1 = store.begin_session_with_main_branch(s1, 1).await.unwrap();
     let s2 = SessionId::new();
     let b2 = store.begin_session_with_main_branch(s2, 2).await.unwrap();
+    let s2_turn = store.begin_turn(s2).await.unwrap();
 
     assert!(store.set_current_branch(s1, b2).await.is_err());
+    assert!(
+        store
+            .append_message_to_branch(b1, Some(s2_turn), PersistedMessage::user("x"))
+            .await
+            .is_err()
+    );
 }

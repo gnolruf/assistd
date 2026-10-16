@@ -1,5 +1,6 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -91,7 +92,11 @@ impl TranscriptStore for SlowingStore {
     ) -> assistd_memory::Result<Option<(SessionId, BranchId)>> {
         Ok(None)
     }
-    async fn fork_branch(&self, _src: BranchId, _name: &str) -> assistd_memory::Result<BranchId> {
+    async fn fork_and_switch(
+        &self,
+        _src: BranchId,
+        _name: &str,
+    ) -> assistd_memory::Result<BranchId> {
         Ok(BranchId(0))
     }
     async fn load_branch_history(&self, _b: BranchId) -> assistd_memory::Result<Vec<HistoryRow>> {
@@ -109,9 +114,6 @@ impl TranscriptStore for SlowingStore {
         &self,
         _b: BranchId,
     ) -> assistd_memory::Result<Option<BranchSummary>> {
-        Ok(None)
-    }
-    async fn branch_tail_seq(&self, _b: BranchId) -> assistd_memory::Result<Option<i64>> {
         Ok(None)
     }
     async fn latest_branch_activity(
@@ -160,7 +162,10 @@ async fn messages_reach_the_store_in_the_order_they_were_queued() {
 
     for text in ["first", "second", "third", "fourth"] {
         state.persist_message_fire_and_forget(
-            None,
+            PersistTarget {
+                branch: BranchId(1),
+                turn: None,
+            },
             PersistedMessage::assistant_text(text, String::new()),
         );
     }

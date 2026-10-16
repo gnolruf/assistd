@@ -1,10 +1,10 @@
-//! SQLite conversions for the typed ids: row ids as `INTEGER`, session ids as
-//! hyphenated UUID `TEXT`.
+//! SQLite conversions for the typed ids: row ids and seqs as `INTEGER`, session ids
+//! as hyphenated UUID `TEXT`.
 
 use rusqlite::ToSql;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 
-use crate::{BranchId, ChunkId, MemoryId, MessageId, SessionId, TurnId};
+use crate::{BranchId, ChunkId, MemoryId, MessageId, Seq, SessionId, TurnId};
 
 macro_rules! row_id_sql {
     ($($name:ident),+) => {$(
@@ -22,7 +22,7 @@ macro_rules! row_id_sql {
     )+};
 }
 
-row_id_sql!(TurnId, BranchId, MessageId, ChunkId, MemoryId);
+row_id_sql!(TurnId, BranchId, MessageId, ChunkId, MemoryId, Seq);
 
 impl ToSql for SessionId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {

@@ -7,7 +7,7 @@ use std::hash::Hash;
 
 use async_trait::async_trait;
 use rusqlite::types::FromSql;
-use rusqlite::{Row, Transaction};
+use rusqlite::{OptionalExtension, Row, Transaction};
 
 use crate::{
     ChunkId, Embedding, EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit, MemoryId, Result,
@@ -16,6 +16,24 @@ use crate::{
 
 use super::connection::SqliteHandle;
 use super::timestamp::timestamp_at;
+
+/// Every chunk vector under model `?1`.
+const ALL_CHUNK_VECTORS: &str = "
+    SELECT chunk_id, vector
+    FROM chunk_embeddings
+    WHERE model_id = (SELECT id FROM embedding_models WHERE name = ?1)";
+
+/// Chunk vectors under model `?1` outside the session with UUID `?2`.
+const CHUNK_VECTORS_OUTSIDE_SESSION: &str = "
+    SELECT e.chunk_id, e.vector
+    FROM chunk_embeddings e
+    JOIN message_chunks cc ON cc.id = e.chunk_id
+    JOIN messages m ON m.id = cc.message_id
+    WHERE e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
+      AND m.session_id IS NOT (SELECT id FROM sessions WHERE uuid = ?2)";
+
+/// Independent partial sums in the dot product, so the compiler can vectorise it.
+const SCORE_LANES: usize = 8;
 
 /// SQLite-backed [`SemanticStore`]: a linear scan into a bounded min-heap, then one
 /// batched lookup of the winners.
@@ -45,20 +63,24 @@ impl SemanticStore for SqliteSemanticStore {
         }
         let model = model.to_string();
         self.handle
-            .reader()
+            .search_reader()
             .call(move |c| {
-                let ranked = scan_top_k::<ChunkId>(
-                    c,
-                    "SELECT e.chunk_id, e.vector
-                     FROM chunk_embeddings e
-                     JOIN message_chunks cc ON cc.id = e.chunk_id
-                     JOIN messages m ON m.id = cc.message_id
-                     WHERE e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
-                       AND m.session_id IS NOT (SELECT id FROM sessions WHERE uuid = ?2)",
-                    rusqlite::params![model, exclude_session],
-                    &query_vector,
-                    top_k,
-                )?;
+                let ranked = match exclude_session {
+                    None => scan_top_k::<ChunkId>(
+                        c,
+                        ALL_CHUNK_VECTORS,
+                        rusqlite::params![model],
+                        &query_vector,
+                        top_k,
+                    )?,
+                    Some(session) => scan_top_k::<ChunkId>(
+                        c,
+                        CHUNK_VECTORS_OUTSIDE_SESSION,
+                        rusqlite::params![model, session],
+                        &query_vector,
+                        top_k,
+                    )?,
+                };
                 hydrate_in_rank_order(
                     c,
                     "SELECT cc.id, m.id, s.uuid, m.created_at, m.role, m.content
@@ -86,7 +108,7 @@ impl SemanticStore for SqliteSemanticStore {
         }
         let model = model.to_string();
         self.handle
-            .reader()
+            .search_reader()
             .call(move |c| {
                 let ranked = scan_top_k::<MemoryId>(
                     c,
@@ -387,12 +409,24 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     if !trailing.is_empty() || words.len() != query.len() {
         return None;
     }
-    let similarity: f32 = words
+    let (word_blocks, word_tail) = words.as_chunks::<SCORE_LANES>();
+    let (query_blocks, query_tail) = query.as_chunks::<SCORE_LANES>();
+    let mut lanes = [0.0f32; SCORE_LANES];
+    for (word_block, query_block) in word_blocks.iter().zip(query_blocks) {
+        for ((lane, word), q) in lanes.iter_mut().zip(word_block).zip(query_block) {
+            *lane += f32::from_le_bytes(*word) * q;
+        }
+    }
+    let similarity = lanes.iter().sum::<f32>() + dot_le_words(word_tail, query_tail);
+    similarity.is_finite().then_some(similarity)
+}
+
+fn dot_le_words(words: &[[u8; 4]], query: &[f32]) -> f32 {
+    words
         .iter()
         .zip(query)
         .map(|(word, q)| f32::from_le_bytes(*word) * q)
-        .sum();
-    similarity.is_finite().then_some(similarity)
+        .sum()
 }
 
 /// Upsert `embedding` into its target's table. The `SELECT` makes a since-deleted
@@ -426,12 +460,16 @@ fn upsert_embedding(
 
 /// The `embedding_models` id of `name`, inserting the model on first use.
 fn embedding_model_id(tx: &Transaction<'_>, name: &str) -> rusqlite::Result<i64> {
-    tx.prepare_cached(
-        "INSERT INTO embedding_models (name) VALUES (?1)
-         ON CONFLICT(name) DO UPDATE SET name = excluded.name
-         RETURNING id",
-    )?
-    .query_row(rusqlite::params![name], |r| r.get(0))
+    let existing = tx
+        .prepare_cached("SELECT id FROM embedding_models WHERE name = ?1")?
+        .query_row(rusqlite::params![name], |r| r.get(0))
+        .optional()?;
+    match existing {
+        Some(id) => Ok(id),
+        None => tx
+            .prepare_cached("INSERT INTO embedding_models (name) VALUES (?1) RETURNING id")?
+            .query_row(rusqlite::params![name], |r| r.get(0)),
+    }
 }
 
 /// Encode `vector` as the little-endian `f32` BLOB the embedding tables store.
