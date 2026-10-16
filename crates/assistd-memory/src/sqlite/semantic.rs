@@ -1,7 +1,7 @@
 //! SQLite-backed [`SemanticStore`] over `chunk_embeddings` and `memory_embeddings`.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 
@@ -22,15 +22,6 @@ const ALL_CHUNK_VECTORS: &str = "
     SELECT chunk_id, vector
     FROM chunk_embeddings
     WHERE model_id = (SELECT id FROM embedding_models WHERE name = ?1)";
-
-/// Chunk vectors under model `?1` outside the session with UUID `?2`.
-const CHUNK_VECTORS_OUTSIDE_SESSION: &str = "
-    SELECT e.chunk_id, e.vector
-    FROM chunk_embeddings e
-    JOIN message_chunks cc ON cc.id = e.chunk_id
-    JOIN messages m ON m.id = cc.message_id
-    WHERE e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
-      AND m.session_id IS NOT (SELECT id FROM sessions WHERE uuid = ?2)";
 
 /// Independent partial sums in the dot product, so the compiler can vectorise it.
 const SCORE_LANES: usize = 8;
@@ -65,22 +56,18 @@ impl SemanticStore for SqliteSemanticStore {
         self.handle
             .search_reader()
             .call(move |c| {
-                let ranked = match exclude_session {
-                    None => scan_top_k::<ChunkId>(
-                        c,
-                        ALL_CHUNK_VECTORS,
-                        rusqlite::params![model],
-                        &query_vector,
-                        top_k,
-                    )?,
-                    Some(session) => scan_top_k::<ChunkId>(
-                        c,
-                        CHUNK_VECTORS_OUTSIDE_SESSION,
-                        rusqlite::params![model, session],
-                        &query_vector,
-                        top_k,
-                    )?,
+                let excluded = match exclude_session {
+                    None => HashSet::new(),
+                    Some(session) => session_chunk_ids(c, session)?,
                 };
+                let ranked = scan_top_k(
+                    c,
+                    ALL_CHUNK_VECTORS,
+                    rusqlite::params![model],
+                    &query_vector,
+                    top_k,
+                    &excluded,
+                )?;
                 hydrate_in_rank_order(
                     c,
                     "SELECT cc.id, m.id, s.uuid, m.created_at, m.role, m.content
@@ -118,6 +105,7 @@ impl SemanticStore for SqliteSemanticStore {
                     rusqlite::params![model],
                     &query_vector,
                     top_k,
+                    &HashSet::new(),
                 )?;
                 hydrate_in_rank_order(
                     c,
@@ -310,20 +298,27 @@ impl<Id> Ord for HeapEntry<Id> {
     }
 }
 
-fn scan_top_k<Id: FromSql>(
+/// The `top_k` `(id, vector)` rows of `sql` scoring highest against `query`,
+/// best first, skipping ids in `excluded`.
+fn scan_top_k<Id: FromSql + Eq + Hash>(
     conn: &rusqlite::Connection,
     sql: &str,
     params: impl rusqlite::Params,
     query: &[f32],
     top_k: usize,
+    excluded: &HashSet<Id>,
 ) -> rusqlite::Result<Vec<(Id, f32)>> {
     let mut stmt = conn.prepare_cached(sql)?;
     let mut heap = BinaryHeap::new();
     let mut rows = stmt.query(params)?;
     while let Some(row) = rows.next()? {
+        let id = row.get(0)?;
+        if excluded.contains(&id) {
+            continue;
+        }
         let bytes = row.get_ref(1)?.as_blob()?;
         if let Some(similarity) = score_against(query, bytes) {
-            push_top_k(&mut heap, top_k, row.get(0)?, similarity);
+            push_top_k(&mut heap, top_k, id, similarity);
         }
     }
     Ok(heap
@@ -331,6 +326,22 @@ fn scan_top_k<Id: FromSql>(
         .into_iter()
         .map(|entry| (entry.id, entry.similarity))
         .collect())
+}
+
+/// Every chunk of a message in `session`.
+fn session_chunk_ids(
+    conn: &rusqlite::Connection,
+    session: SessionId,
+) -> rusqlite::Result<HashSet<ChunkId>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT cc.id
+         FROM sessions s
+         JOIN messages m ON m.session_id = s.id
+         JOIN message_chunks cc ON cc.message_id = m.id
+         WHERE s.uuid = ?1",
+    )?;
+    stmt.query_map(rusqlite::params![session], |r| r.get(0))?
+        .collect()
 }
 
 /// The rows `select` finds for the `ranked` ids, bound to `?1` as a JSON array and

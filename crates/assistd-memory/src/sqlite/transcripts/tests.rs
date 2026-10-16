@@ -39,7 +39,7 @@ async fn tool_calls_and_tool_results_round_trip() {
     let call = store
         .append_message_to_branch(
             branch,
-            Some(turn),
+            turn,
             PersistedMessage::assistant_tool_calls("", calls.clone(), "look first".into()),
         )
         .await
@@ -47,7 +47,7 @@ async fn tool_calls_and_tool_results_round_trip() {
     let result = store
         .append_message_to_branch(
             branch,
-            Some(turn),
+            turn,
             PersistedMessage::tool_result("file1\nfile2", "c-1", "run", outcome),
         )
         .await
@@ -67,7 +67,7 @@ async fn tool_calls_and_tool_results_round_trip() {
                 message: PersistedMessage {
                     content: String::new(),
                     kind: MessageKind::Assistant {
-                        reasoning: Some("look first".into()),
+                        reasoning: "look first".into(),
                         tool_calls: calls,
                     },
                 },
@@ -98,13 +98,13 @@ async fn fork_creates_independent_branch_sharing_history() {
         .unwrap();
     let turn = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(main, Some(turn), PersistedMessage::user("hello"))
+        .append_message_to_branch(main, turn, PersistedMessage::user("hello"))
         .await
         .unwrap();
     store
         .append_message_to_branch(
             main,
-            Some(turn),
+            turn,
             PersistedMessage::assistant_text("hi", String::new()),
         )
         .await
@@ -149,8 +149,9 @@ async fn branches_list_by_newest_message_not_session_start() {
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let turn = store.begin_turn(older).await.unwrap();
     store
-        .append_message_to_branch(older_main, None, PersistedMessage::user("back"))
+        .append_message_to_branch(older_main, turn, PersistedMessage::user("back"))
         .await
         .unwrap();
 
@@ -170,13 +171,13 @@ async fn append_to_one_branch_does_not_show_on_the_other() {
         .unwrap();
     let turn = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(main, Some(turn), PersistedMessage::user("q"))
+        .append_message_to_branch(main, turn, PersistedMessage::user("q"))
         .await
         .unwrap();
     let fork = store.fork_and_switch(main, "alt").await.unwrap();
     let alt_turn = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(fork, Some(alt_turn), PersistedMessage::user("alt q"))
+        .append_message_to_branch(fork, alt_turn, PersistedMessage::user("alt q"))
         .await
         .unwrap();
     let main_history = store.load_branch_history(main).await.unwrap();
@@ -198,13 +199,13 @@ async fn undo_removes_only_the_last_turn() {
         .unwrap();
     let t1 = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(main, Some(t1), PersistedMessage::user("first"))
+        .append_message_to_branch(main, t1, PersistedMessage::user("first"))
         .await
         .unwrap();
     store
         .append_message_to_branch(
             main,
-            Some(t1),
+            t1,
             PersistedMessage::assistant_text("a", String::new()),
         )
         .await
@@ -212,13 +213,13 @@ async fn undo_removes_only_the_last_turn() {
 
     let t2 = store.begin_turn(session).await.unwrap();
     store
-        .append_message_to_branch(main, Some(t2), PersistedMessage::user("second"))
+        .append_message_to_branch(main, t2, PersistedMessage::user("second"))
         .await
         .unwrap();
     store
         .append_message_to_branch(
             main,
-            Some(t2),
+            t2,
             PersistedMessage::assistant_text("b", String::new()),
         )
         .await
@@ -258,7 +259,7 @@ async fn summary_follows_kept_turns_forks_and_undo() {
             PersistedMessage::assistant_text("answer", String::new()),
         ] {
             store
-                .append_message_to_branch(branch, Some(turn), msg)
+                .append_message_to_branch(branch, turn, msg)
                 .await
                 .unwrap();
         }
@@ -336,7 +337,7 @@ async fn current_branch_and_turns_must_belong_to_their_session() {
     assert!(store.set_current_branch(s1, b2).await.is_err());
     assert!(
         store
-            .append_message_to_branch(b1, Some(s2_turn), PersistedMessage::user("x"))
+            .append_message_to_branch(b1, s2_turn, PersistedMessage::user("x"))
             .await
             .is_err()
     );

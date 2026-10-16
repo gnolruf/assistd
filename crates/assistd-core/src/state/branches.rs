@@ -534,7 +534,7 @@ fn history_entry(row: &HistoryRow) -> HistoryEntry {
         } => HistoryEntry {
             role: HistoryRole::Assistant,
             content,
-            reasoning: reasoning.clone().unwrap_or_default(),
+            reasoning: reasoning.clone(),
             tool_calls: tool_calls.iter().map(tool_call_record).collect(),
             tool_call_id: None,
             tool_name: None,

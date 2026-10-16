@@ -25,7 +25,7 @@ const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
-/// Saves a `(key, value)` pair and queues its value for embedding so
+/// Saves a `(key, value)` pair and queues a new or changed value for embedding so
 /// `recall` can find it by paraphrase.
 #[derive(Debug)]
 pub struct RememberTool {
@@ -108,8 +108,10 @@ impl Tool for RememberTool {
             )));
         }
 
-        let memory_id = self.ops.save(&key, value.clone()).await?;
-        self.queue_embedding(memory_id, value);
+        let saved = self.ops.save(&key, value.clone()).await?;
+        if saved.value_changed {
+            self.queue_embedding(saved.id, value);
+        }
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
             target: "assistd::memory",

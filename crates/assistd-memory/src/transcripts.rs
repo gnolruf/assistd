@@ -40,8 +40,8 @@ pub struct PersistedMessage {
 pub enum MessageKind {
     User,
     Assistant {
-        /// The model's reasoning for this step; never empty.
-        reasoning: Option<String>,
+        /// The model's reasoning for this step; empty when it gave none.
+        reasoning: String,
         /// The tools this step called, in call order; empty for a plain reply.
         tool_calls: Vec<PersistedToolCall>,
     },
@@ -61,13 +61,13 @@ impl PersistedMessage {
         }
     }
 
-    /// An assistant reply with no tool calls; empty `reasoning` is not stored.
+    /// An assistant reply with no tool calls.
     pub fn assistant_text(content: impl Into<String>, reasoning: String) -> Self {
         Self::assistant(content.into(), reasoning, Vec::new())
     }
 
     /// A model step that requested tools; `content` is any accompanying text,
-    /// possibly empty, and empty `reasoning` is not stored.
+    /// possibly empty.
     pub fn assistant_tool_calls(
         content: impl Into<String>,
         calls: Vec<PersistedToolCall>,
@@ -106,7 +106,7 @@ impl PersistedMessage {
         Self {
             content,
             kind: MessageKind::Assistant {
-                reasoning: Some(reasoning).filter(|r| !r.is_empty()),
+                reasoning,
                 tool_calls,
             },
         }
@@ -219,7 +219,7 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     async fn append_message_to_branch(
         &self,
         branch: BranchId,
-        turn: Option<TurnId>,
+        turn: TurnId,
         msg: PersistedMessage,
     ) -> Result<AppendedMessage>;
 
@@ -311,7 +311,7 @@ impl TranscriptStore for NoTranscriptStore {
     async fn append_message_to_branch(
         &self,
         _branch: BranchId,
-        _turn: Option<TurnId>,
+        _turn: TurnId,
         _msg: PersistedMessage,
     ) -> Result<AppendedMessage> {
         Ok(AppendedMessage {

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use assistd_memory::{MemoryError, MemoryId, MemoryStore, TranscriptStore};
+use assistd_memory::{MemoryError, MemoryId, MemoryStore, SavedMemory, TranscriptStore};
 
 pub use assistd_memory::MemoryRecord;
 
@@ -26,8 +26,8 @@ impl MemoryOps {
         Self { store, transcripts }
     }
 
-    /// Save a key/value memory and return its row id.
-    pub async fn save(&self, key: &str, value: String) -> Result<MemoryId> {
+    /// Save a key/value memory.
+    pub async fn save(&self, key: &str, value: String) -> Result<SavedMemory> {
         self.store.save(key, value).await
     }
 

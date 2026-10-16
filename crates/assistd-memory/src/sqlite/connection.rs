@@ -58,7 +58,8 @@ impl SqliteHandle {
     }
 
     /// Refresh planner statistics and close every connection once every call
-    /// already queued has run; later calls through any clone fail.
+    /// already queued has run; later calls through any clone fail. The writer
+    /// closes last so it checkpoints the WAL into the database and removes it.
     pub async fn close(self) -> Result<()> {
         if let Err(e) = self
             .writer
@@ -71,10 +72,6 @@ impl SqliteHandle {
                 "PRAGMA optimize failed before close"
             );
         }
-        self.writer
-            .close()
-            .await
-            .map_err(MemoryError::sqlite("close writer connection"))?;
         self.reader
             .close()
             .await
@@ -82,7 +79,11 @@ impl SqliteHandle {
         self.search_reader
             .close()
             .await
-            .map_err(MemoryError::sqlite("close search reader connection"))
+            .map_err(MemoryError::sqlite("close search reader connection"))?;
+        self.writer
+            .close()
+            .await
+            .map_err(MemoryError::sqlite("close writer connection"))
     }
 
     pub(super) fn reader(&self) -> &Connection {
@@ -232,6 +233,10 @@ mod tests {
         assert_eq!(mode_of(path.parent().unwrap()), PRIVATE_DIR_MODE);
 
         handle.close().await.unwrap();
+        assert!(
+            !path.with_file_name("memory.db-wal").exists(),
+            "close must checkpoint and remove the WAL"
+        );
     }
 
     #[tokio::test]

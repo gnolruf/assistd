@@ -12,7 +12,7 @@ mod transcripts;
 
 pub use error::{MemoryError, Result};
 pub use ids::{BranchId, ChunkId, MemoryId, MessageId, Seq, SessionId, TurnId};
-pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore};
+pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore, SavedMemory};
 pub use semantic::{
     Embedding, EmbeddingHit, EmbeddingTarget, MemoryHit, NoSemanticStore, SemanticStore,
     StaleEmbeddings, UnindexedRows,

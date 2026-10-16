@@ -176,7 +176,7 @@ impl TranscriptStore for SqliteTranscriptStore {
     async fn append_message_to_branch(
         &self,
         branch: BranchId,
-        turn: Option<TurnId>,
+        turn: TurnId,
         msg: PersistedMessage,
     ) -> Result<AppendedMessage> {
         let chunk_bytes = match msg.role() {
@@ -518,7 +518,7 @@ impl MessageColumns {
                 reasoning,
                 tool_calls,
             } => Self {
-                reasoning: reasoning.filter(|r| !r.is_empty()),
+                reasoning: Some(reasoning).filter(|r| !r.is_empty()),
                 tool_calls,
                 ..Self::default()
             },
@@ -541,7 +541,7 @@ impl MessageColumns {
 fn insert_message(
     tx: &Transaction<'_>,
     branch: BranchId,
-    turn: Option<TurnId>,
+    turn: TurnId,
     row: &MessageRow,
 ) -> rusqlite::Result<MessageId> {
     let columns = &row.columns;
@@ -626,12 +626,14 @@ fn latest_turn_on_branch(
     branch: BranchId,
 ) -> rusqlite::Result<Option<TurnId>> {
     tx.query_row(
-        "SELECT MAX(m.turn_id)
+        "SELECT m.turn_id
          FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
-         WHERE bm.branch_id = ?1 AND m.turn_id IS NOT NULL",
+         WHERE bm.branch_id = ?1
+         ORDER BY bm.seq DESC LIMIT 1",
         rusqlite::params![branch],
         |r| r.get(0),
     )
+    .optional()
 }
 
 fn first_user_text_of_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Result<Option<String>> {
@@ -712,7 +714,7 @@ fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
     let kind = match row.get(2)? {
         PersistedRole::User => MessageKind::User,
         PersistedRole::Assistant => MessageKind::Assistant {
-            reasoning: row.get(4)?,
+            reasoning: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
             tool_calls: tool_calls_at(row, 5)?,
         },
         PersistedRole::Tool => MessageKind::Tool {

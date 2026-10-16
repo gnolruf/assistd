@@ -18,12 +18,20 @@ pub struct MemoryRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Result of [`MemoryStore::save`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedMemory {
+    pub id: MemoryId,
+    /// Whether the stored value differs from the previous one; true for a new key.
+    pub value_changed: bool,
+}
+
 /// Persistent string-keyed, string-valued memory.
 #[async_trait]
 pub trait MemoryStore: fmt::Debug + Send + Sync + 'static {
-    /// Persist `value` under `key`, overwriting any existing value; returns the row id.
+    /// Persist `value` under `key`, overwriting any existing value.
     /// A subsequent `load(key)` observes the write.
-    async fn save(&self, key: &str, value: String) -> Result<MemoryId>;
+    async fn save(&self, key: &str, value: String) -> Result<SavedMemory>;
 
     /// Value stored at `key`, or `None` when absent.
     async fn load(&self, key: &str) -> Result<Option<String>>;
@@ -48,9 +56,12 @@ pub struct NoMemoryStore;
 
 #[async_trait]
 impl MemoryStore for NoMemoryStore {
-    async fn save(&self, key: &str, _value: String) -> Result<MemoryId> {
+    async fn save(&self, key: &str, _value: String) -> Result<SavedMemory> {
         tracing::debug!(target: "assistd::memory", key, "save: no backend configured (drop)");
-        Ok(MemoryId(0))
+        Ok(SavedMemory {
+            id: MemoryId(0),
+            value_changed: false,
+        })
     }
 
     async fn load(&self, _key: &str) -> Result<Option<String>> {

@@ -43,7 +43,7 @@ impl TranscriptStore for SlowingStore {
     async fn append_message_to_branch(
         &self,
         _b: BranchId,
-        _t: Option<TurnId>,
+        _t: TurnId,
         m: PersistedMessage,
     ) -> assistd_memory::Result<AppendedMessage> {
         let delay = {
@@ -164,7 +164,7 @@ async fn messages_reach_the_store_in_the_order_they_were_queued() {
         state.persist_message_fire_and_forget(
             PersistTarget {
                 branch: BranchId(1),
-                turn: None,
+                turn: TurnId(1),
             },
             PersistedMessage::assistant_text(text, String::new()),
         );

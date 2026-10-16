@@ -40,7 +40,7 @@ CREATE TABLE turns (
 CREATE TABLE messages (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    turn_id          INTEGER,
+    turn_id          INTEGER NOT NULL,
     created_at       INTEGER NOT NULL,
     role             INTEGER NOT NULL CHECK (role BETWEEN 0 AND 2),
     content          TEXT NOT NULL,

@@ -193,7 +193,6 @@ pub enum StepOutcome {
 /// Role of a persisted message being replayed into a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryRole {
-    System,
     User,
     Assistant,
     Tool,

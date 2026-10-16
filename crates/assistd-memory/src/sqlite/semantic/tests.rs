@@ -36,9 +36,10 @@ impl Transcript {
 
     /// Append user message `text`, returning its id and stored chunks.
     async fn append(&self, text: &str) -> (MessageId, Vec<(ChunkId, String)>) {
+        let turn = self.store.begin_turn(self.session).await.unwrap();
         let appended = self
             .store
-            .append_message_to_branch(self.branch, None, PersistedMessage::user(text))
+            .append_message_to_branch(self.branch, turn, PersistedMessage::user(text))
             .await
             .unwrap();
         (appended.id, appended.chunks)
@@ -90,6 +91,7 @@ async fn save_memory(handle: &SqliteHandle, key: &str, value: &str) -> MemoryId 
         .save(key, value.into())
         .await
         .unwrap()
+        .id
 }
 
 async fn embed_memory(

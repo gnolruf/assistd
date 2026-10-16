@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, Row};
 
-use crate::{MemoryError, MemoryId, MemoryRecord, MemoryStore, Result};
+use crate::{MemoryError, MemoryId, MemoryRecord, MemoryStore, Result, SavedMemory};
 
 use super::connection::{SqliteHandle, truncate_wal};
 use super::timestamp::{now_millis, timestamp_at};
@@ -25,7 +25,7 @@ impl SqliteMemoryStore {
 impl MemoryStore for SqliteMemoryStore {
     /// A changed value bumps `updated_at`, drops the row's embedding (by schema
     /// trigger), and truncates the WAL so the old value leaves no trace.
-    async fn save(&self, key: &str, value: String) -> Result<MemoryId> {
+    async fn save(&self, key: &str, value: String) -> Result<SavedMemory> {
         let key = key.to_string();
         let now = now_millis();
         self.handle
@@ -33,7 +33,7 @@ impl MemoryStore for SqliteMemoryStore {
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
                 let previous_value = value_at(&tx, &key)?;
-                let id = tx.query_row(
+                let id: MemoryId = tx.query_row(
                     "INSERT INTO memories (key, value, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?3)
                      ON CONFLICT(key) DO UPDATE SET
@@ -46,10 +46,11 @@ impl MemoryStore for SqliteMemoryStore {
                     |r| r.get(0),
                 )?;
                 tx.commit()?;
-                if previous_value.is_some_and(|previous| previous != value) {
+                let value_changed = previous_value.as_deref() != Some(value.as_str());
+                if value_changed && previous_value.is_some() {
                     truncate_wal(c)?;
                 }
-                Ok(id)
+                Ok(SavedMemory { id, value_changed })
             })
             .await
             .map_err(MemoryError::sqlite("memory save"))
@@ -189,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn save_overwrites_in_place_and_load_sees_latest_value() {
         let (store, _temp) = fresh().await;
-        let id = store.save("fact:user.name", "Ben".into()).await.unwrap();
+        let id = store.save("fact:user.name", "Ben".into()).await.unwrap().id;
         assert_eq!(
             store.load("fact:user.name").await.unwrap().as_deref(),
             Some("Ben")
@@ -198,7 +199,8 @@ mod tests {
         let resaved = store
             .save("fact:user.name", "Benjamin".into())
             .await
-            .unwrap();
+            .unwrap()
+            .id;
         assert_eq!(resaved, id, "upsert must keep the row id");
         assert_eq!(
             store.load("fact:user.name").await.unwrap().as_deref(),

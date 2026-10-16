@@ -13,7 +13,7 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
-use assistd_memory::{PersistedMessage, PersistedToolCall, SessionId, ToolOutcome, TurnId};
+use assistd_memory::{PersistedMessage, PersistedToolCall, SessionId, ToolOutcome};
 use assistd_tools::{Attachment, inherit_confirm_router};
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
@@ -407,14 +407,10 @@ impl AppState {
     }
 
     /// Save the session if needed, open the turn, and queue the user's prompt;
-    /// the target is `None` when the session could not be saved.
+    /// the target is `None` when the session or the turn could not be saved.
     async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<PersistTarget>) {
-        match self.saved_session().await {
-            Ok((session, branch)) => {
-                let target = PersistTarget {
-                    branch,
-                    turn: self.begin_persisted_turn(session).await,
-                };
+        match self.open_turn_target().await {
+            Ok((session, target)) => {
                 self.persist_message_fire_and_forget(target, PersistedMessage::user(text));
                 (session, Some(target))
             }
@@ -422,7 +418,7 @@ impl AppState {
                 warn!(
                     target: "assistd::memory",
                     error = %e,
-                    "saving the session failed; turn will not be persisted"
+                    "saving the session or opening the turn failed; turn will not be persisted"
                 );
                 let (session, _branch) = self.runtime.session_ctx.current().await;
                 (session, None)
@@ -430,18 +426,10 @@ impl AppState {
         }
     }
 
-    async fn begin_persisted_turn(&self, session: SessionId) -> Option<TurnId> {
-        match self.memory.transcripts.begin_turn(session).await {
-            Ok(turn) => Some(turn),
-            Err(e) => {
-                warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "begin_turn failed; turn will not be persisted"
-                );
-                None
-            }
-        }
+    async fn open_turn_target(&self) -> assistd_memory::Result<(SessionId, PersistTarget)> {
+        let (session, branch) = self.saved_session().await?;
+        let turn = self.memory.transcripts.begin_turn(session).await?;
+        Ok((session, PersistTarget { branch, turn }))
     }
 
     async fn assemble_transient_context(&self, text: &str, origin: TurnOrigin, chat_focused: bool) {

@@ -973,7 +973,6 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
 
 fn history_message(entry: HistoryEntry) -> Message {
     match entry.role {
-        HistoryRole::System => Message::text(Role::System, entry.content),
         HistoryRole::User => Message::text(Role::User, entry.content),
         HistoryRole::Assistant => Message {
             tool_calls: entry.tool_calls,

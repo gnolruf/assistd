@@ -11,11 +11,11 @@ use assistd_memory::{BranchId, ChunkId, EmbeddingTarget, PersistedMessage, Sessi
 use super::AppState;
 
 /// Where a turn's messages are written: the branch current when the turn
-/// opened, and the turn's row unless creating it failed.
+/// opened, and the turn's row.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PersistTarget {
     pub(super) branch: BranchId,
-    pub(super) turn: Option<TurnId>,
+    pub(super) turn: TurnId,
 }
 
 impl AppState {
