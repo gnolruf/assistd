@@ -12,7 +12,7 @@ use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
     AppendedMessage, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow, MemoryError,
     MessageId, MessageKind, PersistedMessage, PersistedRole, PersistedToolCall, Result,
-    ResumeCandidate, SessionId, ToolOutcome, TranscriptStore, TurnId, UndoOutcome,
+    ResumeCandidate, Seq, SessionId, ToolOutcome, TranscriptStore, TurnId, UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
@@ -190,13 +190,12 @@ impl TranscriptStore for SqliteTranscriptStore {
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
-                let id = insert_message(&tx, branch, turn, &row)?;
+                let (session_rowid, seq) = claim_next_seq(&tx, branch)?;
+                let id = insert_message(&tx, session_rowid, turn, &row)?;
                 tx.prepare_cached(
-                    "INSERT INTO branch_messages (branch_id, seq, message_id)
-                     SELECT ?1, COALESCE(MAX(seq), -1) + 1, ?2
-                     FROM branch_messages WHERE branch_id = ?1",
+                    "INSERT INTO branch_messages (branch_id, seq, message_id) VALUES (?1, ?2, ?3)",
                 )?
-                .execute(rusqlite::params![branch, id])?;
+                .execute(rusqlite::params![branch, seq, id])?;
                 let chunks = insert_chunks(&tx, id, &row.content, &chunk_bytes)?;
                 tx.commit()?;
                 Ok(AppendedMessage { id, chunks })
@@ -273,9 +272,10 @@ impl TranscriptStore for SqliteTranscriptStore {
                 let tx = c.transaction()?;
                 let new_branch: BranchId = tx.query_row(
                     "INSERT INTO branches
-                        (session_id, name, parent_branch_id, fork_point_seq, created_at)
+                        (session_id, name, parent_branch_id, fork_point_seq, next_seq, created_at)
                      SELECT session_id, ?2, id,
-                            (SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1), ?3
+                            (SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1),
+                            next_seq, ?3
                      FROM branches WHERE id = ?1
                      RETURNING id",
                     rusqlite::params![src, name, created],
@@ -343,10 +343,15 @@ impl TranscriptStore for SqliteTranscriptStore {
             .call(move |c| {
                 c.execute(
                     "INSERT OR REPLACE INTO branch_summaries (branch_id, through_seq, content)
-                     SELECT ?1, bm.seq - 1, ?2
-                     FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
-                     WHERE bm.branch_id = ?1 AND m.role = ?3 AND bm.seq > 0
-                     ORDER BY bm.seq DESC LIMIT 1 OFFSET ?4",
+                     SELECT ?1, through_seq, ?2
+                     FROM (
+                         SELECT (SELECT MAX(prev.seq) FROM branch_messages prev
+                                 WHERE prev.branch_id = ?1 AND prev.seq < bm.seq) AS through_seq
+                         FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
+                         WHERE bm.branch_id = ?1 AND m.role = ?3
+                         ORDER BY bm.seq DESC LIMIT 1 OFFSET ?4
+                     )
+                     WHERE through_seq IS NOT NULL",
                     rusqlite::params![branch, summary, PersistedRole::User, offset],
                 )
             })
@@ -403,16 +408,18 @@ impl TranscriptStore for SqliteTranscriptStore {
                     return Ok(UndoOutcome::default());
                 };
                 let last_user_text = first_user_text_of_turn(&tx, turn)?;
-                drop_summary_covering_turn(&tx, branch, turn)?;
+                let dropped_summaries = drop_summary_covering_turn(&tx, branch, turn)?;
                 let removed = tx.execute(
                     "DELETE FROM branch_messages
                      WHERE branch_id = ?1
                        AND message_id IN (SELECT id FROM messages WHERE turn_id = ?2)",
                     rusqlite::params![branch, turn],
                 )?;
-                delete_unreferenced_turn(&tx, turn)?;
+                let deleted_messages = delete_unreferenced_turn(&tx, turn)?;
                 tx.commit()?;
-                truncate_wal(c)?;
+                if dropped_summaries + deleted_messages > 0 {
+                    truncate_wal(c)?;
+                }
                 Ok(UndoOutcome {
                     removed_messages: u32::try_from(removed).unwrap_or(u32::MAX),
                     last_user_text,
@@ -537,10 +544,19 @@ impl MessageColumns {
     }
 }
 
-/// Insert `row` into `branch`'s session, returning its id.
+/// Take `branch`'s next `seq`, returning it with the branch's session rowid.
+fn claim_next_seq(tx: &Transaction<'_>, branch: BranchId) -> rusqlite::Result<(i64, Seq)> {
+    tx.prepare_cached(
+        "UPDATE branches SET next_seq = next_seq + 1 WHERE id = ?1
+         RETURNING session_id, next_seq - 1",
+    )?
+    .query_row(rusqlite::params![branch], |r| Ok((r.get(0)?, r.get(1)?)))
+}
+
+/// Insert `row` into the session with rowid `session_rowid`, returning its id.
 fn insert_message(
     tx: &Transaction<'_>,
-    branch: BranchId,
+    session_rowid: i64,
     turn: TurnId,
     row: &MessageRow,
 ) -> rusqlite::Result<MessageId> {
@@ -549,13 +565,12 @@ fn insert_message(
         "INSERT INTO messages
             (session_id, turn_id, created_at, role, content, reasoning, tool_calls,
              tool_call_id, tool_name, tool_exit_code, tool_duration_ms)
-         SELECT session_id, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
-         FROM branches WHERE id = ?1
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          RETURNING id",
     )?
     .query_row(
         rusqlite::params![
-            branch,
+            session_rowid,
             turn,
             row.created_at,
             row.role,
@@ -645,12 +660,13 @@ fn first_user_text_of_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Resu
     .optional()
 }
 
-/// Drop the branch's summary once it stands in for any message of `turn`.
+/// Drop the branch's summary once it stands in for any message of `turn`,
+/// returning how many summaries were dropped.
 fn drop_summary_covering_turn(
     tx: &Transaction<'_>,
     branch: BranchId,
     turn: TurnId,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     tx.execute(
         "DELETE FROM branch_summaries
          WHERE branch_id = ?1
@@ -660,14 +676,13 @@ fn drop_summary_covering_turn(
                WHERE bm.branch_id = ?1 AND m.turn_id = ?2
            )",
         rusqlite::params![branch, turn],
-    )?;
-    Ok(())
+    )
 }
 
 /// Delete the turn's messages that no branch references any more, then the
-/// turn itself once no message points at it.
-fn delete_unreferenced_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Result<()> {
-    tx.execute(
+/// turn itself once no message points at it; returns how many messages were deleted.
+fn delete_unreferenced_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Result<usize> {
+    let deleted = tx.execute(
         "DELETE FROM messages
          WHERE turn_id = ?1
            AND NOT EXISTS (SELECT 1 FROM branch_messages bm WHERE bm.message_id = messages.id)",
@@ -679,7 +694,7 @@ fn delete_unreferenced_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Res
            AND NOT EXISTS (SELECT 1 FROM messages WHERE turn_id = ?1)",
         rusqlite::params![turn],
     )?;
-    Ok(())
+    Ok(deleted)
 }
 
 /// A `LIKE` pattern (escape char `\`) matching values that start with `prefix` literally,

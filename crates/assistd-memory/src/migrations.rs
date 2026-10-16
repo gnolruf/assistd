@@ -5,7 +5,8 @@ use rusqlite_migration::{M, Migrations};
 
 /// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and
 /// every foreign key is indexed. A session's current branch and a message's turn must
-/// belong to that same session. Turn, message, chunk, and memory ids use `AUTOINCREMENT`
+/// belong to that same session, and a branch's `next_seq` only grows so undo never
+/// frees a `seq` for reuse. Turn, message, chunk, and memory ids use `AUTOINCREMENT`
 /// so a queued write or embed job never lands on a row that reused a deleted id.
 const V1_SQL: &str = r"
 CREATE TABLE sessions (
@@ -25,6 +26,7 @@ CREATE TABLE branches (
     name             TEXT NOT NULL,
     parent_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL,
     fork_point_seq   INTEGER,
+    next_seq         INTEGER NOT NULL DEFAULT 0 CHECK (next_seq >= 0),
     created_at       INTEGER NOT NULL,
     UNIQUE (name, session_id),
     UNIQUE (session_id, id)

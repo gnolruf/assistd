@@ -242,6 +242,24 @@ async fn undo_removes_only_the_last_turn() {
             (PersistedRole::Assistant, "a")
         ]
     );
+
+    let t3 = store.begin_turn(session).await.unwrap();
+    store
+        .append_message_to_branch(main, t3, PersistedMessage::user("third"))
+        .await
+        .unwrap();
+    let seqs: Vec<Seq> = store
+        .load_branch_history(main)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.seq)
+        .collect();
+    assert_eq!(
+        seqs,
+        [Seq(0), Seq(1), Seq(4)],
+        "undo must not free a seq for reuse"
+    );
 }
 
 #[tokio::test]
