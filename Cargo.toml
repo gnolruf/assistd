@@ -68,7 +68,7 @@ base64 = "0.23"
 infer = "0.22"
 shlex = "2"
 which = "8.0.2"
-rodio = { version = "0.22", default-features = false, features = ["playback"] }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
 ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
