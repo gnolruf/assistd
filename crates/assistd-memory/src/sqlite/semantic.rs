@@ -2,6 +2,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::fmt;
 use std::hash::Hash;
 
 use async_trait::async_trait;
@@ -64,7 +65,7 @@ impl SemanticStore for SqliteSemanticStore {
                      FROM message_chunks cc
                      JOIN messages m ON m.id = cc.message_id
                      JOIN sessions s ON s.id = m.session_id
-                     WHERE cc.id IN",
+                     WHERE cc.id IN (SELECT value FROM json_each(?1))",
                     ranked,
                     chunk_hit,
                     |hit, similarity| hit.similarity = similarity,
@@ -98,7 +99,7 @@ impl SemanticStore for SqliteSemanticStore {
                 )?;
                 hydrate_in_rank_order(
                     c,
-                    "SELECT id, key, value FROM memories WHERE id IN",
+                    "SELECT id, key, value FROM memories WHERE id IN (SELECT value FROM json_each(?1))",
                     ranked,
                     memory_hit,
                     |hit, similarity| hit.similarity = similarity,
@@ -310,8 +311,8 @@ fn scan_top_k<Id: FromSql>(
         .collect())
 }
 
-/// The rows `select` (ending in `IN`) finds for the `ranked` ids, keyed by column 0,
-/// in rank order and given their scores; ids deleted since the scan are skipped.
+/// The rows `select` finds for the `ranked` ids, bound to `?1` as a JSON array and
+/// keyed by column 0, in rank order and given their scores; ids deleted since the scan are skipped.
 fn hydrate_in_rank_order<Id, T>(
     conn: &rusqlite::Connection,
     select: &str,
@@ -320,18 +321,16 @@ fn hydrate_in_rank_order<Id, T>(
     set_similarity: fn(&mut T, f32),
 ) -> rusqlite::Result<Vec<T>>
 where
-    Id: FromSql + rusqlite::ToSql + Eq + Hash,
+    Id: FromSql + fmt::Display + Eq + Hash,
 {
     if ranked.is_empty() {
         return Ok(Vec::new());
     }
-    let sql = format!("{select} ({})", placeholders(ranked.len()));
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare_cached(select)?;
     let mut hits = stmt
-        .query_map(
-            rusqlite::params_from_iter(ranked.iter().map(|(id, _)| id)),
-            |row| Ok((row.get::<_, Id>(0)?, to_hit(row)?)),
-        )?
+        .query_map(rusqlite::params![json_id_array(&ranked)], |row| {
+            Ok((row.get::<_, Id>(0)?, to_hit(row)?))
+        })?
         .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     Ok(ranked
         .into_iter()
@@ -364,8 +363,10 @@ fn memory_hit(row: &Row<'_>) -> rusqlite::Result<MemoryHit> {
     })
 }
 
-fn placeholders(count: usize) -> String {
-    vec!["?"; count].join(",")
+/// `ranked`'s ids as a JSON array of integers.
+fn json_id_array<Id: fmt::Display>(ranked: &[(Id, f32)]) -> String {
+    let ids: Vec<String> = ranked.iter().map(|(id, _)| id.to_string()).collect();
+    format!("[{}]", ids.join(","))
 }
 
 fn push_top_k<Id>(heap: &mut BinaryHeap<HeapEntry<Id>>, top_k: usize, id: Id, similarity: f32) {

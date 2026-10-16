@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
 /// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and
-/// every foreign key is indexed. Message, chunk, and memory ids use
+/// every foreign key is indexed. A session's current branch must be one of its own. Message, chunk, and memory ids use
 /// `AUTOINCREMENT` so a queued embed job never lands on a row that reused a deleted id.
 const V1_SQL: &str = r"
 CREATE TABLE sessions (
@@ -14,9 +14,9 @@ CREATE TABLE sessions (
     ended_at          INTEGER,
     daemon_pid        INTEGER NOT NULL,
     title             TEXT,
-    current_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL
+    current_branch_id INTEGER,
+    FOREIGN KEY (id, current_branch_id) REFERENCES branches(session_id, id)
 ) STRICT;
-CREATE INDEX idx_sessions_current_branch ON sessions(current_branch_id);
 
 CREATE TABLE branches (
     id               INTEGER PRIMARY KEY,
@@ -25,7 +25,8 @@ CREATE TABLE branches (
     parent_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL,
     fork_point_seq   INTEGER,
     created_at       INTEGER NOT NULL,
-    UNIQUE (session_id, name)
+    UNIQUE (session_id, name),
+    UNIQUE (session_id, id)
 ) STRICT;
 CREATE INDEX idx_branches_parent ON branches(parent_branch_id);
 

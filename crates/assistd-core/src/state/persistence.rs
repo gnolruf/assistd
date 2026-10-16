@@ -1,7 +1,7 @@
 //! Fire-and-forget message persistence and its bounded drain.
 
 use std::num::NonZeroUsize;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
@@ -12,7 +12,6 @@ use assistd_memory::{BranchId, ChunkId, EmbeddingTarget, PersistedMessage, Sessi
 use super::AppState;
 
 const PERSISTENCE_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
-const PERSISTENCE_DRAIN_POLL: Duration = Duration::from_millis(5);
 
 impl AppState {
     /// The active session and branch, inserting the session and its `main`
@@ -130,19 +129,25 @@ impl AppState {
         (previous, landed_tx)
     }
 
-    /// Wait, up to 500ms, for every queued persistence task to land.
-    /// Hold `agent_turn_lock` across the call so no new tasks spawn
-    /// during the wait.
+    /// Wait, up to 500ms, for every queued message and summary write to land.
+    /// Hold `agent_turn_lock` across the call so no new writes queue during the wait.
     pub(super) async fn drain_persistence_inflight(&self) {
-        let deadline = Instant::now() + PERSISTENCE_DRAIN_TIMEOUT;
-        while !self.runtime.persistence_tracker.is_empty() && Instant::now() < deadline {
-            tokio::time::sleep(PERSISTENCE_DRAIN_POLL).await;
-        }
-        if !self.runtime.persistence_tracker.is_empty() {
+        let (previous, landed_tx) = self.join_persist_chain();
+        let Some(mut previous) = previous else {
+            return;
+        };
+        if tokio::time::timeout(PERSISTENCE_DRAIN_TIMEOUT, &mut previous)
+            .await
+            .is_err()
+        {
             warn!(
                 target: "assistd::state",
                 "persistence drain timed out; in-flight writes may race branch op"
             );
+            self.runtime.persistence_tracker.spawn(async move {
+                let _ = previous.await;
+                let _ = landed_tx.send(());
+            });
         }
     }
 }

@@ -313,3 +313,14 @@ async fn find_resumable_session_returns_unended() {
     store.end_session(s).await.unwrap();
     assert_eq!(store.find_resumable_session().await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn current_branch_must_belong_to_its_session() {
+    let (store, _temp) = fresh_store().await;
+    let s1 = SessionId::new();
+    store.begin_session_with_main_branch(s1, 1).await.unwrap();
+    let s2 = SessionId::new();
+    let b2 = store.begin_session_with_main_branch(s2, 2).await.unwrap();
+
+    assert!(store.set_current_branch(s1, b2).await.is_err());
+}

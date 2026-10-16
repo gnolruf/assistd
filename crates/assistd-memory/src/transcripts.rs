@@ -174,20 +174,30 @@ pub struct UndoOutcome {
     pub last_user_text: Option<String>,
 }
 
+/// Candidate returned by [`TranscriptStore::find_resumable_session`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeCandidate {
+    pub session_id: SessionId,
+    pub current_branch_id: BranchId,
+    pub daemon_pid: u32,
+    pub started_at: DateTime<Utc>,
+}
+
 /// Persistence for session transcripts.
 #[async_trait]
 pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
-    /// Mark `session` as ended by stamping `ended_at`.
-    async fn end_session(&self, session: SessionId) -> Result<()>;
-    /// Open a new turn inside `session`; its messages are grouped by the id.
-    async fn begin_turn(&self, session: SessionId) -> Result<TurnId>;
-
     /// Atomically insert `session` and create its `main` branch.
     async fn begin_session_with_main_branch(
         &self,
         session: SessionId,
         daemon_pid: u32,
     ) -> Result<BranchId>;
+
+    /// Mark `session` as ended by stamping `ended_at`.
+    async fn end_session(&self, session: SessionId) -> Result<()>;
+
+    /// Open a new turn inside `session`; its messages are grouped by the id.
+    async fn begin_turn(&self, session: SessionId) -> Result<TurnId>;
 
     /// Update `sessions.current_branch_id` to point at `branch`.
     async fn set_current_branch(&self, session: SessionId, branch: BranchId) -> Result<()>;
@@ -260,15 +270,6 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     async fn set_session_title(&self, session: SessionId, title: &str) -> Result<()>;
 }
 
-/// Candidate returned by [`TranscriptStore::find_resumable_session`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResumeCandidate {
-    pub session_id: SessionId,
-    pub current_branch_id: BranchId,
-    pub daemon_pid: u32,
-    pub started_at: DateTime<Utc>,
-}
-
 /// No-op store: writes are discarded and reads find nothing. Returned ids are
 /// placeholders, meaningful only when passed back to this store.
 #[derive(Debug)]
@@ -276,19 +277,20 @@ pub struct NoTranscriptStore;
 
 #[async_trait]
 impl TranscriptStore for NoTranscriptStore {
-    async fn end_session(&self, _session: SessionId) -> Result<()> {
-        Ok(())
-    }
-    async fn begin_turn(&self, _session: SessionId) -> Result<TurnId> {
-        Ok(TurnId(0))
-    }
-
     async fn begin_session_with_main_branch(
         &self,
         _session: SessionId,
         _daemon_pid: u32,
     ) -> Result<BranchId> {
         Ok(BranchId(0))
+    }
+
+    async fn end_session(&self, _session: SessionId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn begin_turn(&self, _session: SessionId) -> Result<TurnId> {
+        Ok(TurnId(0))
     }
 
     async fn set_current_branch(&self, _session: SessionId, _branch: BranchId) -> Result<()> {

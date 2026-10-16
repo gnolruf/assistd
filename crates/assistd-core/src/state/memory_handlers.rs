@@ -348,21 +348,19 @@ where
     LFut: Future<Output = Result<Vec<(Id, String)>, MemoryError>>,
 {
     let mut after = None;
+    let mut jobs = Vec::with_capacity(BATCH_SIZE);
     while progress.remaining() > 0 {
         let batch = list(after, progress.remaining().min(BATCH_SIZE)).await?;
         let Some(&(last_id, _)) = batch.last() else {
             break;
         };
         after = Some(last_id);
-        let jobs: Vec<EmbedJob> = batch
-            .into_iter()
-            .map(|(id, text)| EmbedJob {
-                target: to_target(id),
-                text,
-            })
-            .collect();
+        jobs.extend(batch.into_iter().map(|(id, text)| EmbedJob {
+            target: to_target(id),
+            text,
+        }));
         let job_count = jobs.len();
-        let embeddings = embed_jobs(embedder, jobs).await;
+        let embeddings = embed_jobs(embedder, jobs.drain(..)).await;
         if let Err(e) = semantic
             .store_embeddings(embedder.model(), embeddings)
             .await

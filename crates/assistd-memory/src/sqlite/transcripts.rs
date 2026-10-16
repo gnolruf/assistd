@@ -31,7 +31,7 @@ const BRANCH_INFO_SELECT: &str = "
             b.fork_point_seq,
             b.created_at,
             (SELECT COUNT(*) FROM branch_messages bm WHERE bm.branch_id = b.id),
-            (b.id = s.current_branch_id) AS is_current,
+            (b.id IS s.current_branch_id) AS is_current,
             MAX(b.created_at, COALESCE(
                 (SELECT m.created_at
                  FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
@@ -235,45 +235,22 @@ impl TranscriptStore for SqliteTranscriptStore {
         target: &str,
         prefer_session: Option<SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>> {
-        let (session_prefix, name) = match target.split_once('/') {
-            Some((prefix, name)) => (Some(prefix.to_string()), name.to_string()),
-            None => (None, target.to_string()),
+        let (session_pattern, name) = match target.split_once('/') {
+            Some((prefix, name)) => (like_prefix_pattern(prefix), name.to_string()),
+            None => ("%".to_string(), target.to_string()),
         };
         self.handle
             .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                if let Some(prefix) = session_prefix {
-                    return c
-                        .query_row(
-                            "SELECT s.uuid, b.id
-                             FROM branches b JOIN sessions s ON s.id = b.session_id
-                             WHERE b.name = ?1 AND s.uuid LIKE ?2 ESCAPE '\\'
-                             ORDER BY s.started_at DESC LIMIT 1",
-                            rusqlite::params![name, like_prefix_pattern(&prefix)],
-                            branch_ref,
-                        )
-                        .optional();
-                }
-                if let Some(pref) = prefer_session
-                    && let Some(row) = c
-                        .query_row(
-                            "SELECT s.uuid, b.id
-                             FROM branches b JOIN sessions s ON s.id = b.session_id
-                             WHERE b.name = ?1 AND s.uuid = ?2",
-                            rusqlite::params![name, pref],
-                            branch_ref,
-                        )
-                        .optional()?
-                {
-                    return Ok(Some(row));
-                }
-                c.query_row(
+            .call(move |c| {
+                c.prepare_cached(
                     "SELECT s.uuid, b.id
                      FROM branches b JOIN sessions s ON s.id = b.session_id
-                     WHERE b.name = ?1
-                     ORDER BY s.started_at DESC LIMIT 1",
-                    rusqlite::params![name],
-                    branch_ref,
+                     WHERE b.name = ?1 AND s.uuid LIKE ?2 ESCAPE '\\'
+                     ORDER BY s.uuid IS ?3 DESC, s.started_at DESC LIMIT 1",
+                )?
+                .query_row(
+                    rusqlite::params![name, session_pattern, prefer_session],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
             })
@@ -687,10 +664,6 @@ fn like_prefix_pattern(prefix: &str) -> String {
         .replace('%', "\\%")
         .replace('_', "\\_");
     format!("{escaped}%")
-}
-
-fn branch_ref(row: &Row<'_>) -> rusqlite::Result<(SessionId, BranchId)> {
-    Ok((row.get(0)?, row.get(1)?))
 }
 
 fn branch_info(row: &Row<'_>) -> rusqlite::Result<BranchInfo> {
