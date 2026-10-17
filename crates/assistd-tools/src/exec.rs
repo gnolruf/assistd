@@ -60,10 +60,9 @@ pub(crate) struct Captured {
 /// A stream passed its byte cap.
 struct Overflow;
 
-/// Spawn `cmd` in its own process group, from `confined` when given, feed it
-/// `stdin` while it runs, and collect up to `max_output` bytes per stream
-/// until it exits or `limit` elapses. The whole group is then killed. `Err`
-/// means the spawn failed.
+/// Spawn `cmd` in its own process group (via `confined` when given), feed it
+/// `stdin`, and collect up to `max_output` bytes per stream until it exits or
+/// `limit` elapses, then kill the group. `Err` means the spawn failed.
 pub(crate) async fn capture(
     mut cmd: ProcCommand,
     confined: Option<&ConfinedSpawner>,

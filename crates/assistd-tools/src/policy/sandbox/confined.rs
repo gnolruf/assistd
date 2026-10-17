@@ -15,19 +15,15 @@ type SpawnRequest = (ProcCommand, Handle, oneshot::Sender<io::Result<Child>>);
 /// Why the confined spawning thread could not start.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfinementError {
-    #[error(
-        "the kernel cannot keep sandboxed commands off abstract sockets such as the X \
-         server's (needs Landlock scoping, Linux 6.12+): {0}"
-    )]
+    #[error("Landlock cannot scope abstract Unix sockets: {0}")]
     Landlock(#[from] RulesetError),
     #[error("cannot start the confined spawning thread: {0}")]
     Thread(#[source] io::Error),
 }
 
-/// Spawns commands from one confined thread, which children inherit the
-/// restriction from. The thread outlives every child it spawns, since
-/// `--die-with-parent` kills a child when its spawning thread exits; it
-/// stops once this is dropped.
+/// Spawns commands from one confined thread whose restriction children
+/// inherit. The thread lives until this is dropped, since `--die-with-parent`
+/// kills a child when its spawning thread exits.
 #[derive(Debug)]
 pub(crate) struct ConfinedSpawner(mpsc::Sender<SpawnRequest>);
 
@@ -36,7 +32,7 @@ impl ConfinedSpawner {
     /// [`ConfinementError`] when the kernel lacks Landlock scoping or the
     /// thread cannot start.
     pub(super) fn start() -> Result<Self, ConfinementError> {
-        let (requests, inbox) = mpsc::channel::<SpawnRequest>();
+        let (requests, inbox) = mpsc::channel();
         let (confined_tx, confined) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("assistd-confined-spawn".into())
