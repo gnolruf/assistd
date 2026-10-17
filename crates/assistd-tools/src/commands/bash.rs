@@ -107,6 +107,7 @@ impl Command for BashCommand {
         let out = supervise(
             "bash",
             cmd,
+            self.policy.sandbox.confined_spawner(),
             input.stdin.as_deref().unwrap_or_default(),
             self.policy.cfg.timeout,
         )

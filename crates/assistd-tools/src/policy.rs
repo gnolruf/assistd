@@ -29,7 +29,7 @@ pub use confirm::{
     inherit_confirm_router,
 };
 pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
-pub(crate) use sandbox::is_within_visible_home_entry;
+pub(crate) use sandbox::{ConfinedSpawner, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
     ToolSandbox, ToolsDisabled, probe_sandbox,

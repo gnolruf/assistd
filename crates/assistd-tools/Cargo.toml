@@ -33,6 +33,7 @@ infer = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
 rustix = { workspace = true }
+landlock = { workspace = true }
 
 [dev-dependencies]
 assistd-tools = { workspace = true, features = ["test-support"] }

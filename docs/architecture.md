@@ -387,7 +387,11 @@ A walk through `assistd query "what files changed this week?"`:
    read-only root with writable entries
    of `$HOME` other than dotfiles and symlinks, fresh `/tmp`, `/dev`,
    `/proc` and `/run`, unshared pid/ipc/uts/network namespaces, and
-   an environment cleared down to locale and terminal variables. The
+   an environment cleared down to locale and terminal variables. With
+   `--share-net` in `bwrap_extra_args`, `bwrap` is spawned from a thread
+   Landlock bars from abstract Unix sockets, such as the X server's, that
+   the shared network namespace would otherwise expose; kernels without
+   Landlock scoping (before 6.12) get no tools in that case. The
    one exception is `tools.scratch.dir`, bound writable at its own
    path so `bash` and the in-process commands share files there (entries
    older than `tools.scratch.retention_days` are pruned at startup), with

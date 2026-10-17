@@ -127,8 +127,10 @@ pub struct ToolsBashConfig {
     pub destructive_patterns: Vec<String>,
     pub sandbox: BashSandboxMode,
     /// Extra bubblewrap arguments, inserted before the trailing `--`: e.g.
-    /// `["--share-net"]` giving `bash` the network (it has none by default),
-    /// or a `--bind` making a dot entry of `$HOME` writable (read-only).
+    /// `["--share-net"]` giving `bash` the network (it has none by default;
+    /// needs Linux 6.12+ Landlock scoping to keep abstract sockets out, or
+    /// tools are disabled), or a `--bind` making a dot entry of `$HOME`
+    /// writable (read-only).
     pub bwrap_extra_args: Vec<String>,
 }
 
