@@ -116,13 +116,7 @@ impl WriteCommand {
         }
         let approval = self
             .gate
-            .confirm(ConfirmationRequest {
-                tool: "write".to_string(),
-                script: confirmation_script(target, content),
-                matched_pattern: "writes a file outside the scratch directory".to_string(),
-                always_allow: Vec::new(),
-                risk: Risk::Routine,
-            })
+            .confirm(confirmation_request(target, content))
             .await;
         approval != Approval::Deny
     }
@@ -420,25 +414,34 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
     )
 }
 
-/// The target and size, then the content: whole when short, otherwise its
-/// head and tail around a count of the characters left out.
-fn confirmation_script(target: &Path, content: &[u8]) -> String {
+/// The quoted target and size, then the content: whole when short,
+/// otherwise its head and tail around a count of the characters left out,
+/// at [`Risk::Elevated`] since the user cannot see all of it.
+fn confirmation_request(target: &Path, content: &[u8]) -> ConfirmationRequest {
     let text = String::from_utf8_lossy(content);
     let mut script = format!(
-        "write {} ({})\n",
-        target.display(),
+        "write {:?} ({})\n",
+        target,
         human_size(u64::try_from(content.len()).unwrap_or(u64::MAX))
     );
     let total = text.chars().count();
-    if total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS {
+    let risk = if total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS {
         script.push_str(&text);
-        return script;
+        Risk::Routine
+    } else {
+        let omitted = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
+        script.extend(text.chars().take(PREVIEW_HEAD_CHARS));
+        script.push_str(&format!("\n… {omitted} characters not shown …\n"));
+        script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
+        Risk::Elevated
+    };
+    ConfirmationRequest {
+        tool: "write".to_string(),
+        script,
+        matched_pattern: "writes a file outside the scratch directory".to_string(),
+        always_allow: Vec::new(),
+        risk,
     }
-    let omitted = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
-    script.extend(text.chars().take(PREVIEW_HEAD_CHARS));
-    script.push_str(&format!("\n… {omitted} characters not shown …\n"));
-    script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
-    script
 }
 
 /// Collapse `.` and `..` components without touching disk. A leading
