@@ -10,11 +10,10 @@ name = "assistd"
 path = "src/main.rs"
 
 [features]
-default = ["chat", "tray", "i3", "sway", "wayland"]
+default = ["chat", "tray", "i3", "sway"]
 cuda = ["assistd-voice/cuda"]
 i3 = ["assistd-wm/i3"]
 sway = ["assistd-wm/sway"]
-wayland = ["assistd-wm/wayland"]
 chat = [
     "dep:ratatui",
     "dep:crossterm",

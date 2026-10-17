@@ -122,7 +122,7 @@ and data-flow walkthrough.
 
 | Crate            | Responsibility                                                                                                                  |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `assistd`        | Binary (`assistd` on `$PATH`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`, `wayland`) are optional features. |
+| `assistd`        | Binary (`assistd` on `$PATH`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`) are optional features. |
 | `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
 | `assistd-core`   | Daemon glue. Owns `AppState`, the per-turn `Agent` loop, the Unix-socket server, the presence state machine, and the `build_tools()` factory that wires every subsystem together. |
 | `assistd-embed`  | Embedding HTTP client + background job queue. Pulls chunks off an mpsc, batches them to the embedding `llama-server`, writes vectors into `assistd-memory`'s semantic store. |
@@ -133,7 +133,7 @@ and data-flow walkthrough.
 | `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
 | `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, capped child-output line forwarding, the `ProcessGroup` kill-on-drop guard, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor (spawn, `/health` poll checked against `/proc` listener ownership, restart, degrade) that both llama-servers run under. No internal deps. |
 | `assistd-voice`  | `VoiceInput` (Whisper STT via `whisper-rs`, push-to-talk and VAD continuous modes), `VoiceOutput` (Piper TTS streamed sentence-by-sentence), adaptive `SpeakDecision`. Feature-gated (`whisper`, `mic`, `listen`, `tts`, `cuda`). |
-| `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback, and restricted Wayland sockets (`wp-security-context-v1`) for sandboxed launches. Backs both the system-prompt active-window injection and the `wm` command. Feature-gated per compositor. |
+| `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback. Backs both the system-prompt active-window injection and the `wm` command, including `wm open`'s launches through the compositor. Feature-gated per compositor. |
 
 **Dependency direction.** Crates lower in the table do not depend on
 crates higher up. If you find yourself wanting `assistd-memory` to

@@ -80,7 +80,7 @@ the vocabulary established here.
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
-| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | `utils`                                                                          |
+| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `utils`                                                                          |
 
 `utils` sits at the bottom with no internal dependencies; `config`
 and `ipc` build only on it, and most other crates build on those
@@ -326,10 +326,6 @@ If neither i3 nor Sway is reachable (no compositor running, or
 running an unsupported one like Hyprland today), `NoWindowManager`
 returns convention-compliant errors so commands fail gracefully
 instead of panicking.
-
-The `wayland` feature adds `RestrictedWaylandSocket`: a socket the
-compositor serves with its privileged protocols hidden, which the
-sandbox binds in place of the real one for `wm open`.
 
 ### MCP (`assistd-mcp`)
 
