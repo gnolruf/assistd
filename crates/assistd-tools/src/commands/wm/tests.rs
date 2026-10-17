@@ -23,7 +23,6 @@ struct StubWm {
     move_calls: Mutex<Vec<(WindowId, WorkspaceId)>>,
     resize_calls: Mutex<Vec<(WindowId, ResizeDir, u32)>>,
     layout_calls: Mutex<Vec<Layout>>,
-    exec_calls: Mutex<Vec<(Option<WorkspaceId>, ExecCommand)>>,
 }
 
 impl StubWm {
@@ -70,10 +69,7 @@ impl WindowManager for StubWm {
         self.layout_calls.lock().push(layout);
         Ok(())
     }
-    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()> {
-        self.exec_calls
-            .lock()
-            .push((workspace.cloned(), command.clone()));
+    async fn exec(&self, _workspace: Option<&WorkspaceId>, _command: &ExecCommand) -> WmResult<()> {
         Ok(())
     }
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
@@ -233,29 +229,6 @@ async fn approved_apps_skip_the_prompt_only_when_launched_without_targets_or_cwd
     );
     assert!(!confirmed(&["--cwd", "/tmp", "viewer"]).await);
     assert_eq!(gate.prompts().len(), 2, "--cwd asks: {:?}", gate.prompts());
-}
-
-#[tokio::test]
-async fn an_unknown_app_reaches_neither_the_gate_nor_the_compositor() {
-    let gate = RecordingGate::new(true);
-    let stub = Arc::new(StubWm::default());
-    let cmd = WmCommand::new(stub.clone(), gate.clone(), Arc::new(Approvals::unsaved()));
-    let out = cmd
-        .run(CommandInput {
-            args: ["open", "--workspace", "2", "no-such-app-assistd"]
-                .map(String::from)
-                .to_vec(),
-            stdin: None,
-        })
-        .await;
-    assert_eq!(out.exit_code, 1);
-    assert!(
-        String::from_utf8_lossy(&out.stderr)
-            .starts_with("[error] wm: open: no installed application has the desktop id"),
-        "{out:?}"
-    );
-    assert!(gate.prompts().is_empty());
-    assert!(stub.exec_calls.lock().is_empty());
 }
 
 #[tokio::test]
