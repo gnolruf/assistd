@@ -13,13 +13,14 @@ use crate::exec::POLICY_DENIED_EXIT;
 mod allowlist;
 mod approvals;
 mod confirm;
-mod desktop;
 mod review;
 mod sandbox;
 mod shell;
 
 pub use allowlist::{APPROVALS_FILE, Allowlist, AllowlistError, SearchPath};
-pub use approvals::{APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals};
+pub use approvals::{
+    APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
@@ -27,11 +28,11 @@ pub use confirm::{
     ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm, Risk,
     inherit_confirm_router,
 };
-pub(crate) use desktop::is_desktop_application;
 pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
+pub(crate) use sandbox::is_within_visible_home_entry;
 pub use sandbox::{
-    LaunchError, Protected, ResolvedSandboxMode, SandboxAccess, SandboxError, SandboxInfo,
-    SandboxRequest, SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
+    Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
+    ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses. A command runs
@@ -95,13 +96,6 @@ impl SubprocessPolicy {
     pub(crate) async fn review_script(&self, script: String) -> Option<Confirmation> {
         let cfg = Arc::clone(&self.cfg);
         on_blocking_pool(move || check_script(&script, &cfg.rules())).await
-    }
-
-    /// [`check_argv`] on the blocking pool, as for
-    /// [`review_script`](Self::review_script).
-    pub(crate) async fn review_argv(&self, argv: Vec<String>) -> Option<Confirmation> {
-        let cfg = Arc::clone(&self.cfg);
-        on_blocking_pool(move || check_argv(&argv, &cfg.rules())).await
     }
 
     /// Refuse `script` when it hits the denylist, or when the review's
@@ -176,9 +170,6 @@ fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput
         }
         Confirmation::Unlisted { programs, .. } => {
             format!("Not on the allowlist: {}", programs.join(", "))
-        }
-        Confirmation::NotDesktopApplication(program) => {
-            format!("Not a desktop application: {program}")
         }
     };
     CommandOutput::failed(

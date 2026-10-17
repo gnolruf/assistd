@@ -1,4 +1,5 @@
 use super::*;
+use crate::UnquotableCommand;
 
 #[test]
 fn escape_for_criteria_handles_quotes_and_backslashes() {
@@ -23,6 +24,26 @@ fn format_workspace_target_by_number_or_quoted_name() {
             format_workspace_target(&workspace),
             expected,
             "{workspace:?}"
+        );
+    }
+}
+
+#[test]
+fn exec_payloads_keep_the_command_inside_one_quoted_string() {
+    let command = ExecCommand::new("cd '/a;b' && exec nvim 'it'\\''s'".into()).expect("quotable");
+    assert_eq!(
+        format_exec(Some(&WorkspaceId::Num(2)), &command),
+        r#"workspace number 2; exec "cd '/a;b' && exec nvim 'it'\''s'""#
+    );
+    assert_eq!(
+        format_exec(None, &command),
+        format!(r#"exec "{}""#, command.as_str())
+    );
+    for unquotable in ["nvim \"; kill", "nvim\n; kill", "nvim\r"] {
+        assert_eq!(
+            ExecCommand::new(unquotable.into()),
+            Err(UnquotableCommand),
+            "{unquotable:?}"
         );
     }
 }

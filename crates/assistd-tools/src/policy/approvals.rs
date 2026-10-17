@@ -1,5 +1,6 @@
 //! Names approved with "always allow" for gates outside the program
-//! allowlist, such as web hosts and MCP tools, kept in a TOML file.
+//! allowlist, such as web hosts, MCP tools and launched applications, kept
+//! in a TOML file.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,10 @@ use super::confirm::{Approval, ConfirmationGate, ConfirmationRequest};
 /// File, beside the config file, that keeps the web hosts `web` may fetch
 /// from without confirmation.
 pub const APPROVED_HOSTS_FILE: &str = "approved_hosts.toml";
+
+/// File, beside the config file, that keeps the desktop entries `wm open`
+/// launches without confirmation.
+pub const APPROVED_APPS_FILE: &str = "approved_apps.toml";
 
 /// File, beside the config file, that keeps the MCP tools that run without
 /// confirmation.

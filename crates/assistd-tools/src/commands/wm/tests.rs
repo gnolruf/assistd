@@ -1,16 +1,14 @@
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
 
 use assistd_wm::{
-    FocusedWindowContext, Layout, OutputInfo, ResizeDir, Window, WindowId, WmResult, WorkspaceId,
-    WorkspaceInfo,
+    ExecCommand, FocusedWindowContext, Layout, OutputInfo, ResizeDir, Window, WindowId, WmResult,
+    WorkspaceId, WorkspaceInfo,
 };
 use parking_lot::Mutex;
 
+use super::desktop_entry::DesktopEntry;
 use super::*;
 use crate::commands::RecordingGate;
-use crate::commands::test_patterns as patterns;
-use crate::exec::{OUTPUT_OVERFLOW_EXIT, POLICY_DENIED_EXIT};
-use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
 fn id(n: u64) -> WindowId {
     WindowId::new(n).expect("test ids are non-zero")
@@ -25,6 +23,7 @@ struct StubWm {
     move_calls: Mutex<Vec<(WindowId, WorkspaceId)>>,
     resize_calls: Mutex<Vec<(WindowId, ResizeDir, u32)>>,
     layout_calls: Mutex<Vec<Layout>>,
+    exec_calls: Mutex<Vec<(Option<WorkspaceId>, ExecCommand)>>,
 }
 
 impl StubWm {
@@ -69,6 +68,12 @@ impl WindowManager for StubWm {
     }
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
         self.layout_calls.lock().push(layout);
+        Ok(())
+    }
+    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()> {
+        self.exec_calls
+            .lock()
+            .push((workspace.cloned(), command.clone()));
         Ok(())
     }
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
@@ -135,211 +140,117 @@ async fn resize_dispatches_typed_args() {
     assert_eq!(*stub.resize_calls.lock(), [(id(42), ResizeDir::Grow, 50)]);
 }
 
-fn policed_wm(cfg: BashPolicyCfg, gate: Arc<dyn ConfirmationGate>) -> WmCommand {
-    WmCommand::new(
-        Arc::new(StubWm::default()),
-        Arc::new(cfg),
-        SandboxInfo::none(),
-        gate,
+fn viewer(exec: &str) -> DesktopEntry {
+    let text = format!("[Desktop Entry]\nType=Application\nName=Viewer\nExec={exec}\n");
+    DesktopEntry::parse(
+        PathBuf::from("/usr/share/applications/viewer.desktop"),
+        "viewer",
+        &text,
     )
+    .expect("launchable entry")
 }
 
-fn rm_rf_is_destructive(gate: Arc<dyn ConfirmationGate>) -> WmCommand {
-    policed_wm(
-        BashPolicyCfg {
-            destructive_patterns: patterns(&["rm -rf"]),
-            ..Default::default()
-        },
-        gate,
-    )
+fn open_args(args: &[&str]) -> OpenArgs {
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+    OpenArgs::parse(&args).expect("parsable")
 }
 
-async fn run_open(cmd: &WmCommand, args: &[&str]) -> CommandOutput {
-    let mut argv = vec!["open".to_string()];
-    argv.extend(args.iter().map(ToString::to_string));
-    cmd.run(CommandInput {
-        args: argv,
-        stdin: None,
-    })
-    .await
-}
-
-#[tokio::test]
-async fn open_denylist_blocks_before_spawn() {
-    let cmd = policed_wm(
-        BashPolicyCfg {
-            denylist: vec!["rm -rf /".into()],
-            ..Default::default()
-        },
-        Arc::new(AlwaysAllowGate),
-    );
-    let out = run_open(&cmd, &["bash", "-c", "rm -rf /"]).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+#[test]
+fn launch_lines_keep_each_target_one_word_and_refuse_option_like_ones() {
+    let launch = |exec: &str, args: &[&str]| {
+        PreparedLaunch::new(viewer(exec), &open_args(args))
+            .map(|launch| launch.command.as_str().to_string())
+    };
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "[error] wm: open denied by policy. Matched denylist pattern: rm -rf /. \
-         Try: a non-destructive alternative\n"
+        launch(
+            "viewer --url -- %U",
+            &[
+                "--cwd",
+                "/",
+                "viewer",
+                "/tmp/a b;c",
+                "/tmp/it's",
+                "https://x.org/?q=1&r=$HOME"
+            ],
+        )
+        .expect("launchable"),
+        "cd / && exec viewer --url -- '/tmp/a b;c' '/tmp/it'\\''s' 'https://x.org/?q=1&r=$HOME'"
     );
+    for (exec, args) in [
+        ("viewer %U", &["viewer", "--help"][..]),
+        ("viewer %U", &["viewer", "notes.txt"]),
+        ("viewer %U", &["viewer", "-x:y"]),
+        ("viewer %F", &["viewer", "https://x.org"]),
+        ("viewer", &["viewer", "/tmp/a"]),
+        ("viewer %u", &["viewer", "/tmp/a", "/tmp/b"]),
+        ("viewer %f", &["viewer", "/tmp/\"; kill"]),
+        ("viewer", &["--cwd", "relative", "viewer"]),
+    ] {
+        assert!(launch(exec, args).is_err(), "{exec} {args:?}");
+    }
+}
+
+#[test]
+fn open_options_must_precede_the_application() {
+    let args = open_args(&["--workspace", "2", "--cwd", "~/src", "nvim", "--cwd"]);
+    assert_eq!(args.workspace, Some(WorkspaceId::Num(2)));
+    assert!(args.has_targets(), "options after the app are targets");
+    for bad in [&["--wrkspace", "2", "nvim"][..], &["--workspace"], &[]] {
+        let bad: Vec<String> = bad.iter().map(ToString::to_string).collect();
+        assert!(OpenArgs::parse(&bad).is_err(), "{bad:?}");
+    }
 }
 
 #[tokio::test]
-async fn open_destructive_argv_consults_gate() {
-    let out = run_open(
-        &rm_rf_is_destructive(Arc::new(DenyAllGate)),
-        &["rm", "-rf", "/tmp/whatever"],
-    )
-    .await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "[error] wm: open cancelled by user. Matched destructive pattern: rm -rf. \
-         Try: a different approach\n"
-    );
-}
-
-#[tokio::test]
-async fn open_destructive_inside_bash_c_argument_consults_gate() {
+async fn approved_apps_skip_the_prompt_only_when_launched_without_targets() {
     let gate = RecordingGate::new(false);
-    let out = run_open(
-        &rm_rf_is_destructive(gate.clone()),
-        &["bash", "-c", "rm -rf /tmp/whatever"],
-    )
-    .await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    let approved = Arc::new(Approvals::unsaved());
+    approved
+        .approve("/usr/share/applications/viewer.desktop")
+        .await
+        .expect("unsaved approvals never fail");
+    let cmd = WmCommand::new(Arc::new(StubWm::default()), gate.clone(), approved);
+    let confirmed = async |args: &[&str]| {
+        let args = open_args(args);
+        let launch = PreparedLaunch::new(viewer("viewer %F"), &args).expect("launchable");
+        cmd.confirmed(&args, &launch).await
+    };
+    assert!(confirmed(&["viewer"]).await);
+    assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());
+    assert!(!confirmed(&["--workspace", "2", "viewer", "/etc/passwd"]).await);
     assert_eq!(
         gate.prompts(),
         [(
             "wm".to_string(),
-            "bash -c 'rm -rf /tmp/whatever'".to_string(),
-            "rm -rf".to_string()
+            "exec viewer /etc/passwd".to_string(),
+            "opens Viewer (/usr/share/applications/viewer.desktop) on workspace 2 as you, \
+             outside the sandbox"
+                .to_string()
         )]
     );
 }
 
 #[tokio::test]
-async fn open_gate_approval_lets_the_process_run() {
+async fn an_unknown_app_reaches_neither_the_gate_nor_the_compositor() {
     let gate = RecordingGate::new(true);
-    let cmd = policed_wm(
-        BashPolicyCfg {
-            destructive_patterns: patterns(&["true"]),
-            ..Default::default()
-        },
-        gate.clone(),
-    );
-    let out = run_open(&cmd, &["true"]).await;
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(
-        gate.prompts(),
-        [("wm".to_string(), "true".to_string(), "true".to_string())]
-    );
-}
-
-#[tokio::test]
-async fn open_leaves_a_surviving_process_running() {
-    let dir = tempfile::tempdir().unwrap();
-    let marker = dir.path().join("finished");
-
-    let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-    let started = Instant::now();
-    let out = run_open(
-        &cmd,
-        &[
-            "bash",
-            "-c",
-            &format!("sleep 1; touch {}", marker.display()),
-        ],
-    )
-    .await;
-
-    assert_eq!(out.exit_code, 0, "surviving launch should report success");
-    assert!(out.stdout.is_empty());
-    assert!(
-        started.elapsed() < Duration::from_millis(900),
-        "launch should return on the probe, not on the child exiting"
-    );
-    assert!(!marker.exists(), "child should not have finished yet");
-
-    let mut finished = false;
-    for _ in 0..100 {
-        if marker.exists() {
-            finished = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        finished,
-        "detached child must keep running after the launch returned"
-    );
-}
-
-#[tokio::test]
-async fn open_reports_a_failed_startup_with_its_output() {
-    let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-    let out = run_open(&cmd, &["bash", "-c", "echo boom >&2; exit 3"]).await;
-    assert_eq!(out.exit_code, 3);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("boom"),
-        "startup failure must surface the child's stderr: {out:?}"
-    );
-}
-
-#[tokio::test]
-async fn open_asks_before_launching_a_program_with_no_desktop_entry() {
-    let gate = RecordingGate::new(false);
-    let cmd = policed_wm(BashPolicyCfg::default(), gate.clone());
-    let out = run_open(&cmd, &["cat", "/dev/urandom"]).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-    assert_eq!(
-        gate.prompts(),
-        [(
-            "wm".to_string(),
-            "cat /dev/urandom".to_string(),
-            "cat is not a desktop application".to_string()
-        )]
-    );
-}
-
-#[tokio::test]
-async fn open_closes_the_pipe_of_a_chatty_launch_at_the_cap() {
-    let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-    let out = run_open(&cmd, &["yes"]).await;
-    assert_eq!(
-        out.exit_code, OUTPUT_OVERFLOW_EXIT,
-        "yes should die of SIGPIPE"
-    );
-    assert_eq!(out.stdout.len(), 64 * 1024);
-}
-
-#[tokio::test]
-async fn open_refuses_once_the_launch_cap_is_reached() {
-    let cmd = policed_wm(BashPolicyCfg::default(), Arc::new(AlwaysAllowGate));
-    for _ in 0..MAX_LAUNCHED {
-        assert_eq!(run_open(&cmd, &["sleep", "5"]).await.exit_code, 0);
-    }
-    let out = run_open(&cmd, &["sleep", "5"]).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
-async fn non_open_subcommands_skip_the_policy() {
-    let gate = RecordingGate::new(false);
-    let cmd = policed_wm(
-        BashPolicyCfg {
-            denylist: vec!["focus".into()],
-            destructive_patterns: patterns(&["focus"]),
-            ..Default::default()
-        },
-        gate.clone(),
-    );
+    let stub = Arc::new(StubWm::default());
+    let cmd = WmCommand::new(stub.clone(), gate.clone(), Arc::new(Approvals::unsaved()));
     let out = cmd
         .run(CommandInput {
-            args: vec!["focus".into(), "42".into()],
+            args: ["open", "--workspace", "2", "no-such-app-assistd"]
+                .map(String::from)
+                .to_vec(),
             stdin: None,
         })
         .await;
-    assert_eq!(out.exit_code, 0);
-    assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .starts_with("[error] wm: open: no installed application has the desktop id"),
+        "{out:?}"
+    );
+    assert!(gate.prompts().is_empty());
+    assert!(stub.exec_calls.lock().is_empty());
 }
 
 #[tokio::test]

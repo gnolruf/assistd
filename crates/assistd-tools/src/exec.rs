@@ -1,20 +1,15 @@
 //! Subprocess spawning: [`supervise`] runs a child to completion under a
-//! timeout, while [`watch_detached`] watches a launch for early failure and
-//! then leaves it running under a bounded supervisor.
+//! timeout.
 
 use std::io;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::pin::{Pin, pin};
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command as ProcCommand};
-use tokio::sync::oneshot;
-use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::chain::OUTPUT_MAX;
@@ -41,17 +36,6 @@ const READ_CHUNK_BYTES: usize = 8192;
 /// executor's pipe-overflow exit.
 pub(crate) const OUTPUT_OVERFLOW_EXIT: i32 = 141;
 
-/// How long [`watch_detached`] watches a child before declaring it launched.
-/// Launch failures worth catching are fast; a slow one reads as success.
-const STARTUP_PROBE: Duration = Duration::from_millis(300);
-
-/// Cap on output read from each stream of a detached launch. Past it the
-/// pipe is closed, so a chatty application gets EPIPE instead of a reader.
-const STARTUP_OUTPUT_MAX: usize = 64 * 1024;
-
-/// Most applications [`watch_detached`] keeps running at once.
-pub(crate) const MAX_LAUNCHED: usize = 8;
-
 /// Bound on waiting for output pipes to reach EOF after the child exits,
 /// since a grandchild can keep the write end open forever.
 const POST_EXIT_DRAIN: Duration = Duration::from_millis(100);
@@ -74,27 +58,6 @@ pub(crate) struct Captured {
 
 /// A stream passed its byte cap.
 struct Overflow;
-
-/// Applications started by [`watch_detached`], each supervised by a task
-/// that lives until it exits; dropping it aborts the tasks without killing
-/// the applications.
-#[derive(Debug, Default)]
-pub(crate) struct Launched(Mutex<JoinSet<()>>);
-
-impl Launched {
-    /// Whether [`MAX_LAUNCHED`] applications are still running.
-    pub(crate) fn is_full(&self) -> bool {
-        let mut set = self.0.lock();
-        while set.try_join_next().is_some() {}
-        set.len() >= MAX_LAUNCHED
-    }
-
-    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
-        let mut set = self.0.lock();
-        while set.try_join_next().is_some() {}
-        set.spawn(task);
-    }
-}
 
 /// Spawn `cmd` in its own process group, feed it `stdin` while it runs, and
 /// collect up to `max_output` bytes per stream until it exits or `limit`
@@ -245,86 +208,6 @@ pub(crate) async fn supervise(
     })
 }
 
-/// Configure `cmd` for [`watch_detached`]: no stdin, piped output, and a
-/// process group of its own.
-pub(crate) fn detach(cmd: &mut ProcCommand) {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    cmd.process_group(0);
-}
-
-/// Watch `child`, spawned from a command [`detach`] configured, for
-/// [`STARTUP_PROBE`]. A child that exits in that window is reported with
-/// its exit code and output; one still alive is reported as exit 0 and left
-/// running under a task in `launched`.
-///
-/// Nothing kills it on drop; bubblewrap's `--die-with-parent` bounds it.
-pub(crate) async fn watch_detached(
-    tool: &'static str,
-    child: Child,
-    launched: &Launched,
-) -> CommandOutput {
-    let (report, startup) = oneshot::channel();
-    launched.spawn(supervise_detached(tool, child, report));
-    startup.await.unwrap_or_else(|_| {
-        CommandOutput::failed(
-            1,
-            error_line(
-                tool,
-                "launch supervisor stopped",
-                Hint::Try,
-                "re-running the command",
-            )
-            .into_bytes(),
-        )
-    })
-}
-
-/// Drain `child`'s output while it runs, sending its startup outcome to
-/// `report`; returns once it exits.
-async fn supervise_detached(
-    tool: &'static str,
-    mut child: Child,
-    report: oneshot::Sender<CommandOutput>,
-) {
-    let stdout = Arc::new(Mutex::new(Vec::new()));
-    let stderr = Arc::new(Mutex::new(Vec::new()));
-    let stdout_pipe = child.stdout.take().expect("stdout was piped");
-    let stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let (drained_tx, drained) = oneshot::channel::<()>();
-    let readers = {
-        let (stdout, stderr) = (stdout.clone(), stderr.clone());
-        async move {
-            tokio::join!(
-                drain_into(stdout_pipe, STARTUP_OUTPUT_MAX, stdout),
-                drain_into(stderr_pipe, STARTUP_OUTPUT_MAX, stderr),
-            );
-            drop(drained_tx);
-            std::future::pending::<()>().await;
-        }
-    };
-    let monitor = async {
-        let Ok(waited) = timeout(STARTUP_PROBE, child.wait()).await else {
-            let _ = report.send(CommandOutput::ok(Vec::new()));
-            let _ = child.wait().await;
-            return;
-        };
-        let _ = timeout(POST_EXIT_DRAIN, drained).await;
-        let stdout = std::mem::take(&mut *stdout.lock());
-        let stderr = std::mem::take(&mut *stderr.lock());
-        let _ = report.send(match waited {
-            Ok(status) => exited(stdout, stderr, status),
-            Err(e) => wait_failed(tool, &e),
-        });
-    };
-    tokio::select! {
-        () = monitor => {}
-        () = readers => {}
-    }
-}
-
 fn exited(stdout: Vec<u8>, stderr: Vec<u8>, status: ExitStatus) -> CommandOutput {
     CommandOutput {
         stdout,
@@ -345,19 +228,6 @@ fn wait_failed(tool: &str, e: &io::Error) -> CommandOutput {
         )
         .into_bytes(),
     )
-}
-
-/// Copy `reader` into `sink` until EOF or `limit` bytes, then drop it.
-async fn drain_into<R: AsyncRead + Unpin>(mut reader: R, limit: usize, sink: Arc<Mutex<Vec<u8>>>) {
-    let mut chunk = vec![0u8; READ_CHUNK_BYTES];
-    while let Ok(read @ 1..) = reader.read(&mut chunk).await {
-        let mut buf = sink.lock();
-        let room = limit.saturating_sub(buf.len());
-        buf.extend_from_slice(&chunk[..read.min(room)]);
-        if read >= room {
-            return;
-        }
-    }
 }
 
 async fn read_capped<R: AsyncRead + Unpin>(

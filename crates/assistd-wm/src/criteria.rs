@@ -1,7 +1,7 @@
 //! Formatting for the `[key="value"] action` command syntax that i3
 //! and Sway share.
 
-use crate::{Layout, ResizeDir, WindowId, WorkspaceId};
+use crate::{ExecCommand, Layout, ResizeDir, WindowId, WorkspaceId};
 
 /// Escape `\` and `"` inside a quoted criteria value. Backslashes go
 /// first so the ones inserted before quotes aren't doubled.
@@ -44,6 +44,16 @@ pub fn format_resize_width(window: &WindowId, direction: ResizeDir, pixels: u32)
 /// Acts on the focused container.
 pub fn format_layout(layout: Layout) -> String {
     format!("layout {}", layout.as_str())
+}
+
+/// Runs `command` with the compositor's shell, after switching to
+/// `workspace` when given.
+pub fn format_exec(workspace: Option<&WorkspaceId>, command: &ExecCommand) -> String {
+    let exec = format!(r#"exec "{}""#, command.as_str());
+    match workspace {
+        Some(workspace) => format!("{}; {exec}", format_workspace_target(workspace)),
+        None => exec,
+    }
 }
 
 #[cfg(test)]
