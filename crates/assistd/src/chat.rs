@@ -51,8 +51,6 @@ const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// How long background tasks get to finish their in-flight requests on exit.
-const BACKGROUND_STOP_TIMEOUT: Duration = Duration::from_secs(1);
 const INSTANCE_LOCK_FILE: &str = "chat.lock";
 const WINDOW_TITLE: &str = "assistd";
 /// xterm window-ops sequences that save and restore the terminal's title.
@@ -211,12 +209,12 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
 
-    let polling_handle = AbortOnDropHandle::new(spawn_status_polling(
+    let _polling_handle = AbortOnDropHandle::new(spawn_status_polling(
         ipc.clone(),
         chat_tx.clone(),
         shutdown_tx.subscribe(),
     ));
-    let bus_handle = AbortOnDropHandle::new(spawn_bus_subscription(
+    let _bus_handle = AbortOnDropHandle::new(spawn_bus_subscription(
         ipc.clone(),
         chat_tx.clone(),
         shutdown_tx.subscribe(),
@@ -241,13 +239,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     .await;
 
     let _ = shutdown_tx.send(true);
-    let background = async { tokio::join!(polling_handle, bus_handle, focus_reporter) };
-    if tokio::time::timeout(BACKGROUND_STOP_TIMEOUT, background)
-        .await
-        .is_err()
-    {
-        info!("background tasks outlived {BACKGROUND_STOP_TIMEOUT:?}; aborting them");
-    }
+    drop(focus_reporter);
     focus::report_closed(&ipc).await;
     info!("assistd chat stopped");
     run_result
