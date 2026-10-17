@@ -233,8 +233,8 @@ mod tests {
     #[tokio::test]
     async fn deleted_and_overwritten_memories_leave_no_trace_in_database_files() {
         let (store, temp) = fresh().await;
-        let deleted = "zq-forgotten-secret-7f3a";
-        let overwritten = "zq-replaced-secret-91c4";
+        let deleted = "zq-forgotten-sentinel-7f3a";
+        let overwritten = "zq-replaced-sentinel-91c4";
         store.save("fact:deleted", deleted.into()).await.unwrap();
         store.delete("fact:deleted").await.unwrap();
         store.save("fact:edited", overwritten.into()).await.unwrap();
@@ -243,10 +243,12 @@ mod tests {
         for entry in std::fs::read_dir(temp.path()).unwrap() {
             let file = entry.unwrap().path();
             let bytes = std::fs::read(&file).unwrap();
-            for secret in [deleted, overwritten] {
+            for sentinel in [deleted, overwritten] {
                 assert!(
-                    !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
-                    "{} still holds {secret}",
+                    !bytes
+                        .windows(sentinel.len())
+                        .any(|w| w == sentinel.as_bytes()),
+                    "{} still holds {sentinel}",
                     file.display()
                 );
             }
