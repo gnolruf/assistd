@@ -48,7 +48,7 @@ impl MemoryStore for SqliteMemoryStore {
                 tx.commit()?;
                 let value_changed = previous_value.as_deref() != Some(value.as_str());
                 if value_changed && previous_value.is_some() {
-                    truncate_wal(c)?;
+                    truncate_wal(c);
                 }
                 Ok(SavedMemory { id, value_changed })
             })
@@ -75,7 +75,7 @@ impl MemoryStore for SqliteMemoryStore {
                     rusqlite::params![key],
                 )?;
                 if deleted > 0 {
-                    truncate_wal(c)?;
+                    truncate_wal(c);
                 }
                 Ok(())
             })
@@ -95,7 +95,7 @@ impl MemoryStore for SqliteMemoryStore {
                     )
                     .optional()?;
                 if key.is_some() {
-                    truncate_wal(c)?;
+                    truncate_wal(c);
                 }
                 Ok(key)
             })

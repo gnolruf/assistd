@@ -11,8 +11,8 @@ use tracing::{debug, warn};
 use assistd_ipc::Event;
 use assistd_llm::{HistoryEntry, HistoryReplay, HistoryRole, Thinking, ToolCallRecord};
 use assistd_memory::{
-    BranchId, BranchSummary, HistoryRow, MessageKind, PersistedToolCall, Seq, SessionId, TurnStats,
-    UndoOutcome,
+    BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageKind,
+    PersistedToolCall, Seq, SessionId, TurnStats, UndoOutcome,
 };
 
 use super::{AppState, send_error, wire_role, wire_timestamp};
@@ -29,7 +29,8 @@ enum ReplayPart {
     Kept,
 }
 
-/// `rows`, a whole branch, as the LLM replays them under its `summary`.
+/// `rows` of a branch, whole or from its summary's cut, as the LLM replays them
+/// under its `summary`.
 pub fn branch_replay(rows: &[HistoryRow], summary: Option<BranchSummary>) -> HistoryReplay {
     let mut folded_steps = Vec::new();
     let mut entries = Vec::new();
@@ -379,14 +380,18 @@ impl AppState {
         tx: &mpsc::Sender<Event>,
         label: &str,
     ) {
-        let rows = match self.memory.transcripts.load_branch_history(branch).await {
-            Ok(rows) => rows,
+        let loaded = self
+            .memory
+            .transcripts
+            .load_branch(branch, HistoryScope::Whole)
+            .await;
+        let BranchHistory { summary, rows } = match loaded {
+            Ok(history) => history,
             Err(e) => {
-                send_error(tx, id, format!("{label}: load_branch_history: {e}")).await;
+                send_error(tx, id, format!("{label}: load_branch: {e}")).await;
                 return;
             }
         };
-        let summary = self.load_branch_summary(branch, label).await;
         let compaction = summary
             .as_ref()
             .and_then(|s| Some((compaction_marker(&rows, s)?, s.duration_ms)));
@@ -456,24 +461,6 @@ impl AppState {
                 .await;
         }
         let _ = tx.send(Event::Done { id }).await;
-    }
-
-    /// The branch's compaction summary; `None` when there is none or the
-    /// lookup fails, which only costs a fresh compaction later.
-    async fn load_branch_summary(&self, branch: BranchId, label: &str) -> Option<BranchSummary> {
-        self.memory
-            .transcripts
-            .load_branch_summary(branch)
-            .await
-            .inspect_err(|e| {
-                warn!(
-                    target: "assistd::state",
-                    error = %e,
-                    "load_branch_summary failed during {label}; replaying without it"
-                );
-            })
-            .ok()
-            .flatten()
     }
 
     /// Make a new, unsaved session active, clear the LLM history, and

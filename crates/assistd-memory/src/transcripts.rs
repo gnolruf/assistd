@@ -154,7 +154,7 @@ pub struct BranchInfo {
     pub parent_branch_name: Option<String>,
     pub fork_point_seq: Option<Seq>,
     pub created_at: DateTime<Utc>,
-    pub message_count: i64,
+    pub message_count: u64,
     pub is_current_in_session: bool,
     /// The later of the branch's creation and its newest message.
     pub last_active_at: DateTime<Utc>,
@@ -194,6 +194,22 @@ pub struct BranchSummary {
     pub duration_ms: u64,
 }
 
+/// Which rows of a branch [`TranscriptStore::load_branch`] returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryScope {
+    Whole,
+    /// From the summary's `kept_from_seq` on, dropping rows it stands in for.
+    Unsummarized,
+}
+
+/// A branch's latest summary and its rows, read from one snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchHistory {
+    pub summary: Option<BranchSummary>,
+    /// Ordered by branch-local seq.
+    pub rows: Vec<HistoryRow>,
+}
+
 /// What a compaction summary leaves of a branch: its `kept_turns` newest user
 /// turns, the oldest of them cut to its `kept_steps` newest tool steps when set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,7 +238,7 @@ pub struct OpenedTurn {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UndoOutcome {
     /// Number of `branch_messages` rows dropped.
-    pub removed_messages: usize,
+    pub removed_messages: u64,
     pub last_user_text: Option<String>,
 }
 
@@ -249,6 +265,11 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) when
     /// `session` was never saved.
     async fn end_session(&self, session: SessionId) -> Result<()>;
+
+    /// Record `daemon_pid` as the daemon now owning `session`. Errors with
+    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) when
+    /// `session` was never saved.
+    async fn claim_session(&self, session: SessionId, daemon_pid: u32) -> Result<()>;
 
     /// Open a new turn in `branch`'s session and append `prompt` to `branch` as its
     /// first message, as [`append_message_to_branch`](Self::append_message_to_branch)
@@ -295,8 +316,8 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// [`MemoryError::BranchNameTaken`](crate::MemoryError::BranchNameTaken).
     async fn fork_and_switch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
 
-    /// Every message on `branch`, ordered by branch-local seq.
-    async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
+    /// `branch`'s summary and the rows `scope` selects; empty when the branch is missing.
+    async fn load_branch(&self, branch: BranchId, scope: HistoryScope) -> Result<BranchHistory>;
 
     /// Make `summary`, which took `duration_ms` to write, the branch's summary of
     /// everything `cut` leaves out; a no-op when the branch has fewer user
@@ -309,10 +330,8 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         duration_ms: u64,
     ) -> Result<()>;
 
-    /// The branch's latest compaction summary, if one is recorded.
-    async fn load_branch_summary(&self, branch: BranchId) -> Result<Option<BranchSummary>>;
-
-    /// Record how finished `turn` ran, replacing any earlier record.
+    /// Record how finished `turn` ran, replacing any earlier record. Errors with
+    /// [`MemoryError::TurnNotFound`](crate::MemoryError::TurnNotFound) when `turn` is missing.
     async fn record_turn_stats(&self, turn: TurnId, stats: TurnStats) -> Result<()>;
 
     /// When the newest message on `branch` was written, or `None` when the branch is empty.
@@ -328,7 +347,9 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// Current `sessions.title`, or `None` when none has been set.
     async fn session_title(&self, session: SessionId) -> Result<Option<String>>;
 
-    /// Set `sessions.title` for `session`.
+    /// Set `sessions.title` for `session`. Errors with
+    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) when
+    /// `session` was never saved.
     async fn set_session_title(&self, session: SessionId, title: &str) -> Result<()>;
 }
 
@@ -348,6 +369,10 @@ impl TranscriptStore for NoTranscriptStore {
     }
 
     async fn end_session(&self, _session: SessionId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn claim_session(&self, _session: SessionId, _daemon_pid: u32) -> Result<()> {
         Ok(())
     }
 
@@ -401,8 +426,8 @@ impl TranscriptStore for NoTranscriptStore {
         Ok(BranchId(0))
     }
 
-    async fn load_branch_history(&self, _branch: BranchId) -> Result<Vec<HistoryRow>> {
-        Ok(Vec::new())
+    async fn load_branch(&self, _branch: BranchId, _scope: HistoryScope) -> Result<BranchHistory> {
+        Ok(BranchHistory::default())
     }
 
     async fn record_branch_summary(
@@ -413,10 +438,6 @@ impl TranscriptStore for NoTranscriptStore {
         _duration_ms: u64,
     ) -> Result<()> {
         Ok(())
-    }
-
-    async fn load_branch_summary(&self, _branch: BranchId) -> Result<Option<BranchSummary>> {
-        Ok(None)
     }
 
     async fn record_turn_stats(&self, _turn: TurnId, _stats: TurnStats) -> Result<()> {

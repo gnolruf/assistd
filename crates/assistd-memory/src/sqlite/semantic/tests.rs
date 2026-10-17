@@ -115,7 +115,7 @@ async fn embed_memory(
 }
 
 #[tokio::test]
-async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
+async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
     let long_text = "word ".repeat(150);
@@ -123,8 +123,8 @@ async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
     let [first, second] = &long_chunks[..] else {
         panic!("expected two chunks, got {}", long_chunks.len());
     };
-    embed_chunk(&store, first, &unit_vec(0.0), "m").await;
-    embed_chunk(&store, second, &unit_vec(0.3), "m").await;
+    embed_chunk(&store, first, &unit_vec(0.3), "m").await;
+    embed_chunk(&store, second, &unit_vec(0.0), "m").await;
     let short = transcript
         .embedded_chunk(&store, "short", &unit_vec(1.5), "m")
         .await;
@@ -134,15 +134,12 @@ async fn nearest_chunks_ranks_by_similarity_and_returns_parent_message() {
         .await
         .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
-    assert_eq!(ids, [first.0, second.0, short]);
-    assert!(hits[0].similarity > hits[1].similarity);
-    assert!(hits[1].similarity > hits[2].similarity);
+    assert_eq!(ids, [second.0, short]);
     assert!((hits[0].similarity - 1.0).abs() < 1e-4);
-    for hit in &hits[..2] {
-        assert_eq!(hit.message_id, long_message);
-        assert_eq!(hit.content, long_text);
-    }
-    assert_eq!(hits[2].content, "short");
+    assert!(hits[0].similarity > hits[1].similarity);
+    assert_eq!(hits[0].message_id, long_message);
+    assert_eq!(hits[0].content, long_text);
+    assert_eq!(hits[1].content, "short");
     for hit in &hits {
         assert_eq!(hit.session_id, transcript.session);
         assert_eq!(hit.role, PersistedRole::User);

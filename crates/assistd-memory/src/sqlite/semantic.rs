@@ -1,7 +1,6 @@
 //! SQLite-backed [`SemanticStore`] over `chunk_embeddings` and `memory_embeddings`.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 
@@ -10,23 +9,29 @@ use rusqlite::types::FromSql;
 use rusqlite::{OptionalExtension, Row, Transaction};
 
 use crate::{
-    ChunkId, Embedding, EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit, MemoryId, Result,
-    SemanticStore, SessionId, StaleEmbeddings, UnindexedRows,
+    ChunkId, Embedding, EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit, MemoryId, MessageId,
+    Result, SemanticStore, SessionId, StaleEmbeddings, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
 use super::timestamp::timestamp_at;
 
-/// Every chunk vector under model `?1`.
+/// Every chunk vector under model `?1`, grouped by its message.
 const ALL_CHUNK_VECTORS: &str = "
-    SELECT chunk_id, vector
-    FROM chunk_embeddings
+    SELECT cc.message_id, e.chunk_id, e.vector
+    FROM chunk_embeddings e JOIN message_chunks cc ON cc.id = e.chunk_id
+    WHERE e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)";
+
+/// Every memory vector under model `?1`, each its own group.
+const ALL_MEMORY_VECTORS: &str = "
+    SELECT memory_id, memory_id, vector
+    FROM memory_embeddings
     WHERE model_id = (SELECT id FROM embedding_models WHERE name = ?1)";
 
 /// Independent partial sums in the dot product, so the compiler can vectorise it.
 const SCORE_LANES: usize = 8;
 
-/// SQLite-backed [`SemanticStore`]: a linear scan into a bounded min-heap, then one
+/// SQLite-backed [`SemanticStore`]: a linear scan into a bounded top-K, then one
 /// batched lookup of the winners.
 #[derive(Debug, Clone)]
 pub struct SqliteSemanticStore {
@@ -58,9 +63,9 @@ impl SemanticStore for SqliteSemanticStore {
             .call(move |c| {
                 let excluded = match exclude_session {
                     None => HashSet::new(),
-                    Some(session) => session_chunk_ids(c, session)?,
+                    Some(session) => session_message_ids(c, session)?,
                 };
-                let ranked = scan_top_k(
+                let ranked = scan_top_k::<MessageId, ChunkId>(
                     c,
                     ALL_CHUNK_VECTORS,
                     rusqlite::params![model],
@@ -97,11 +102,9 @@ impl SemanticStore for SqliteSemanticStore {
         self.handle
             .search_reader()
             .call(move |c| {
-                let ranked = scan_top_k::<MemoryId>(
+                let ranked = scan_top_k::<MemoryId, MemoryId>(
                     c,
-                    "SELECT memory_id, vector
-                     FROM memory_embeddings
-                     WHERE model_id = (SELECT id FROM embedding_models WHERE name = ?1)",
+                    ALL_MEMORY_VECTORS,
                     rusqlite::params![model],
                     &query_vector,
                     top_k,
@@ -273,72 +276,116 @@ impl SemanticStore for SqliteSemanticStore {
     }
 }
 
-/// Ordered in reverse by similarity so `BinaryHeap` acts as a min-heap and
-/// `into_sorted_vec` yields the best match first. Only finite
-/// similarities are ever pushed, so `total_cmp` agrees with `>` on every entry.
-struct HeapEntry<Id> {
-    similarity: f32,
+/// The `capacity` best-scoring ids seen, at most one per group.
+struct TopK<Group, Id> {
+    capacity: usize,
+    entries: Vec<Ranked<Group, Id>>,
+    /// The weakest kept similarity once full; `NEG_INFINITY` until then.
+    floor: f32,
+}
+
+struct Ranked<Group, Id> {
+    group: Group,
     id: Id,
+    similarity: f32,
 }
 
-impl<Id> PartialEq for HeapEntry<Id> {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+impl<Group: PartialEq, Id> TopK<Group, Id> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: Vec::new(),
+            floor: f32::NEG_INFINITY,
+        }
     }
-}
-impl<Id> Eq for HeapEntry<Id> {}
-impl<Id> PartialOrd for HeapEntry<Id> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+
+    /// Keep `id` if it beats `group`'s current best, or when it has none, the
+    /// weakest entry once full.
+    fn offer(&mut self, group: Group, id: Id, similarity: f32) {
+        if similarity <= self.floor {
+            return;
+        }
+        let candidate = Ranked {
+            group,
+            id,
+            similarity,
+        };
+        let same_group = self.entries.iter().position(|e| e.group == candidate.group);
+        match same_group {
+            Some(index) if similarity <= self.entries[index].similarity => return,
+            Some(index) => self.entries[index] = candidate,
+            None if self.entries.len() < self.capacity => self.entries.push(candidate),
+            None => {
+                let weakest = self.weakest_index();
+                self.entries[weakest] = candidate;
+            }
+        }
+        self.refresh_floor();
     }
-}
-impl<Id> Ord for HeapEntry<Id> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.similarity.total_cmp(&self.similarity)
+
+    fn weakest_index(&self) -> usize {
+        self.entries
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.similarity.total_cmp(&b.similarity))
+            .map_or(0, |(index, _)| index)
+    }
+
+    fn refresh_floor(&mut self) {
+        if self.entries.len() == self.capacity {
+            self.floor = self
+                .entries
+                .iter()
+                .map(|e| e.similarity)
+                .fold(f32::INFINITY, f32::min);
+        }
+    }
+
+    /// The kept ids with their scores, best first.
+    fn into_ranked(mut self) -> Vec<(Id, f32)> {
+        self.entries
+            .sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
+        self.entries
+            .into_iter()
+            .map(|e| (e.id, e.similarity))
+            .collect()
     }
 }
 
-/// The `top_k` `(id, vector)` rows of `sql` scoring highest against `query`,
-/// best first, skipping ids in `excluded`.
-fn scan_top_k<Id: FromSql + Eq + Hash>(
+/// The `top_k` best `(group, id, vector)` rows of `sql` against `query`, one per
+/// group, best first, skipping groups in `excluded`.
+fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     conn: &rusqlite::Connection,
     sql: &str,
     params: impl rusqlite::Params,
     query: &[f32],
     top_k: usize,
-    excluded: &HashSet<Id>,
+    excluded: &HashSet<Group>,
 ) -> rusqlite::Result<Vec<(Id, f32)>> {
     let mut stmt = conn.prepare_cached(sql)?;
-    let mut heap = BinaryHeap::new();
+    let mut best = TopK::new(top_k);
     let mut rows = stmt.query(params)?;
     while let Some(row) = rows.next()? {
-        let id = row.get(0)?;
-        if excluded.contains(&id) {
+        let group = row.get(0)?;
+        if excluded.contains(&group) {
             continue;
         }
-        let bytes = row.get_ref(1)?.as_blob()?;
+        let bytes = row.get_ref(2)?.as_blob()?;
         if let Some(similarity) = score_against(query, bytes) {
-            push_top_k(&mut heap, top_k, id, similarity);
+            best.offer(group, row.get(1)?, similarity);
         }
     }
-    Ok(heap
-        .into_sorted_vec()
-        .into_iter()
-        .map(|entry| (entry.id, entry.similarity))
-        .collect())
+    Ok(best.into_ranked())
 }
 
-/// Every chunk of a message in `session`.
-fn session_chunk_ids(
+/// Every message in `session`.
+fn session_message_ids(
     conn: &rusqlite::Connection,
     session: SessionId,
-) -> rusqlite::Result<HashSet<ChunkId>> {
+) -> rusqlite::Result<HashSet<MessageId>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT cc.id
-         FROM sessions s
-         JOIN turns t ON t.session_id = s.id
-         JOIN messages m ON m.turn_id = t.id
-         JOIN message_chunks cc ON cc.message_id = m.id
+        "SELECT m.id
+         FROM sessions s JOIN messages m ON m.session_id = s.id
          WHERE s.uuid = ?1",
     )?;
     stmt.query_map(rusqlite::params![session], |r| r.get(0))?
@@ -401,17 +448,6 @@ fn memory_hit(row: &Row<'_>) -> rusqlite::Result<MemoryHit> {
 fn json_id_array<Id: fmt::Display>(ranked: &[(Id, f32)]) -> String {
     let ids: Vec<String> = ranked.iter().map(|(id, _)| id.to_string()).collect();
     format!("[{}]", ids.join(","))
-}
-
-fn push_top_k<Id>(heap: &mut BinaryHeap<HeapEntry<Id>>, top_k: usize, id: Id, similarity: f32) {
-    if heap.len() < top_k {
-        heap.push(HeapEntry { similarity, id });
-    } else if let Some(weakest) = heap.peek()
-        && similarity > weakest.similarity
-    {
-        heap.pop();
-        heap.push(HeapEntry { similarity, id });
-    }
 }
 
 /// Dot product of `query` against the LE-packed f32 BLOB `bytes`, or `None` when

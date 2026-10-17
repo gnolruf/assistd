@@ -106,7 +106,7 @@ async fn open_writer(path: &Path) -> Result<Connection> {
         .await
         .map_err(|source| MemoryError::Open {
             path: path.to_path_buf(),
-            source,
+            source: source.into(),
         })?;
 
     conn.call(|c| -> rusqlite::Result<_> {
@@ -122,7 +122,7 @@ async fn open_writer(path: &Path) -> Result<Connection> {
 
     conn.call(migrations::run)
         .await
-        .map_err(MemoryError::Migration)?;
+        .map_err(|e| MemoryError::Migration(e.into()))?;
 
     conn.call(|c| c.execute_batch("PRAGMA optimize=0x10002"))
         .await
@@ -137,7 +137,7 @@ async fn open_reader(path: &Path) -> Result<Connection> {
         .await
         .map_err(|source| MemoryError::Open {
             path: path.to_path_buf(),
-            source,
+            source: source.into(),
         })?;
     conn.call(|c| -> rusqlite::Result<_> {
         c.pragma_update(None, "mmap_size", READER_MMAP_BYTES)?;
@@ -198,16 +198,30 @@ async fn restrict_if_present(path: &Path) -> io::Result<()> {
 }
 
 /// Checkpoint and empty the WAL so frames holding deleted or overwritten rows
-/// don't outlive the write.
-pub(super) fn truncate_wal(c: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let busy: bool = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
-    if busy {
-        tracing::warn!(
+/// don't outlive the write. Never waits on readers: a blocked or failed checkpoint
+/// is logged, and the frames go at the next checkpoint or at close.
+pub(super) fn truncate_wal(c: &rusqlite::Connection) {
+    match checkpoint_without_waiting(c) {
+        Ok(true) => tracing::warn!(
             target: "assistd::memory",
-            "WAL checkpoint blocked by another reader; old rows stay in the WAL until the next checkpoint"
-        );
+            "WAL checkpoint blocked by a reader; old rows stay in the WAL until the next checkpoint"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            target: "assistd::memory",
+            error = %e,
+            "WAL checkpoint failed; old rows stay in the WAL until the next checkpoint"
+        ),
     }
-    Ok(())
+}
+
+/// Run a truncating checkpoint with the busy handler off, returning whether a
+/// reader blocked it.
+fn checkpoint_without_waiting(c: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    c.busy_timeout(Duration::ZERO)?;
+    let blocked = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0));
+    c.busy_timeout(BUSY_TIMEOUT)?;
+    blocked
 }
 
 #[cfg(test)]

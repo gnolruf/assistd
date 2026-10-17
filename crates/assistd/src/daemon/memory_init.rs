@@ -7,8 +7,9 @@ use std::sync::Arc;
 use assistd_core::{Config, branch_replay};
 use assistd_llm::HistoryReplay;
 use assistd_memory::{
-    BranchId, MemoryError, MemoryStore, NoMemoryStore, NoTranscriptStore, SessionId, SqliteHandle,
-    SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
+    BranchHistory, BranchId, HistoryScope, MemoryError, MemoryStore, NoMemoryStore,
+    NoTranscriptStore, SessionId, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore,
+    TranscriptStore,
 };
 use rustix::io::Errno;
 use rustix::process::Pid;
@@ -97,8 +98,14 @@ async fn resume_or_start_unsaved_session(
         Ok(Some(cand)) if !pid_is_alive(cand.daemon_pid) => {
             info!(
                 "memory: resuming prior session {} (branch={})",
-                cand.session_id, cand.current_branch_id.0
+                cand.session_id, cand.current_branch_id
             );
+            if let Err(e) = transcripts
+                .claim_session(cand.session_id, std::process::id())
+                .await
+            {
+                tracing::warn!("memory: claim_session failed for resume ({e:#})");
+            }
             let history = load_resumed_replay(transcripts, cand.current_branch_id).await;
             (cand.session_id, Some(cand.current_branch_id), history)
         }
@@ -116,23 +123,17 @@ async fn resume_or_start_unsaved_session(
     }
 }
 
-/// The resumed branch's history and summary as the LLM replays them; a
-/// failed load replays nothing in its place.
+/// The resumed branch's unsummarized history and summary as the LLM replays
+/// them; a failed load replays nothing in its place.
 async fn load_resumed_replay(
     transcripts: &SqliteTranscriptStore,
     branch: BranchId,
 ) -> HistoryReplay {
-    let rows = transcripts
-        .load_branch_history(branch)
+    let BranchHistory { summary, rows } = transcripts
+        .load_branch(branch, HistoryScope::Unsummarized)
         .await
-        .inspect_err(|e| tracing::warn!("memory: load_branch_history failed for resume ({e:#})"))
+        .inspect_err(|e| tracing::warn!("memory: load_branch failed for resume ({e:#})"))
         .unwrap_or_default();
-    let summary = transcripts
-        .load_branch_summary(branch)
-        .await
-        .inspect_err(|e| tracing::warn!("memory: load_branch_summary failed for resume ({e:#})"))
-        .ok()
-        .flatten();
     branch_replay(&rows, summary)
 }
 

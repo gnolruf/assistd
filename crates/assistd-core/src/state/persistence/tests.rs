@@ -8,7 +8,7 @@ use assistd_config::Config;
 use assistd_ipc::PresenceTarget;
 use assistd_llm::EchoBackend;
 use assistd_memory::{
-    AppendedMessage, BranchId, BranchInfo, BranchSummary, HistoryRow, MessageId, OpenedTurn,
+    AppendedMessage, BranchHistory, BranchId, BranchInfo, HistoryScope, MessageId, OpenedTurn,
     ResumeCandidate, SessionId, TranscriptStore, UndoOutcome,
 };
 use assistd_tools::ToolRegistry;
@@ -66,6 +66,9 @@ impl TranscriptStore for SlowingStore {
     async fn end_session(&self, _s: SessionId) -> assistd_memory::Result<()> {
         Ok(())
     }
+    async fn claim_session(&self, _s: SessionId, _pid: u32) -> assistd_memory::Result<()> {
+        Ok(())
+    }
     async fn begin_turn(
         &self,
         _b: BranchId,
@@ -109,8 +112,12 @@ impl TranscriptStore for SlowingStore {
     ) -> assistd_memory::Result<BranchId> {
         Ok(BranchId(0))
     }
-    async fn load_branch_history(&self, _b: BranchId) -> assistd_memory::Result<Vec<HistoryRow>> {
-        Ok(Vec::new())
+    async fn load_branch(
+        &self,
+        _b: BranchId,
+        _scope: HistoryScope,
+    ) -> assistd_memory::Result<BranchHistory> {
+        Ok(BranchHistory::default())
     }
     async fn record_branch_summary(
         &self,
@@ -120,12 +127,6 @@ impl TranscriptStore for SlowingStore {
         _duration_ms: u64,
     ) -> assistd_memory::Result<()> {
         Ok(())
-    }
-    async fn load_branch_summary(
-        &self,
-        _b: BranchId,
-    ) -> assistd_memory::Result<Option<BranchSummary>> {
-        Ok(None)
     }
 
     async fn record_turn_stats(

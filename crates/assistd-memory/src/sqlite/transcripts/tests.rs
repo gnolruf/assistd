@@ -74,7 +74,11 @@ async fn a_tool_turn_round_trips_with_its_stats_on_its_last_row() {
     };
     store.record_turn_stats(turn, stats).await.unwrap();
 
-    let history = store.load_branch_history(branch).await.unwrap();
+    let history = store
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     assert_eq!(
         history[1..],
         [
@@ -131,8 +135,16 @@ async fn fork_creates_independent_branch_sharing_history() {
         store.fork_and_switch(main, "experiment").await,
         Err(MemoryError::BranchNameTaken(name)) if name == "experiment"
     ));
-    let main_history = store.load_branch_history(main).await.unwrap();
-    let fork_history = store.load_branch_history(fork).await.unwrap();
+    let main_history = store
+        .load_branch(main, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
+    let fork_history = store
+        .load_branch(fork, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     assert_eq!(main_history.len(), 2);
     assert_eq!(
         fork_history, main_history,
@@ -192,8 +204,16 @@ async fn append_to_one_branch_does_not_show_on_the_other() {
         .begin_turn(fork, PersistedMessage::user("alt q"))
         .await
         .unwrap();
-    let main_history = store.load_branch_history(main).await.unwrap();
-    let fork_history = store.load_branch_history(fork).await.unwrap();
+    let main_history = store
+        .load_branch(main, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
+    let fork_history = store
+        .load_branch(fork, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     assert_eq!(contents(&main_history), [(PersistedRole::User, "q")]);
     assert_eq!(
         contents(&fork_history),
@@ -238,7 +258,11 @@ async fn undo_removes_only_the_last_turn() {
         }
     );
 
-    let history = store.load_branch_history(main).await.unwrap();
+    let history = store
+        .load_branch(main, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     assert_eq!(
         contents(&history),
         [
@@ -252,9 +276,10 @@ async fn undo_removes_only_the_last_turn() {
         .await
         .unwrap();
     let seqs: Vec<Seq> = store
-        .load_branch_history(main)
+        .load_branch(main, HistoryScope::Whole)
         .await
         .unwrap()
+        .rows
         .iter()
         .map(|row| row.seq)
         .collect();
@@ -303,18 +328,69 @@ async fn summary_follows_kept_turns_forks_and_undo() {
         content: "turn one".into(),
         duration_ms: 4200,
     });
-    assert_eq!(store.load_branch_summary(branch).await.unwrap(), expected);
+    assert_eq!(
+        store
+            .load_branch(branch, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary,
+        expected
+    );
+    let unsummarized: Vec<Seq> = store
+        .load_branch(branch, HistoryScope::Unsummarized)
+        .await
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.seq)
+        .collect();
+    assert_eq!(unsummarized, [Seq(2), Seq(3), Seq(4), Seq(5)]);
 
     let fork = store.fork_and_switch(branch, "alt").await.unwrap();
-    assert_eq!(store.load_branch_summary(fork).await.unwrap(), expected);
+    assert_eq!(
+        store
+            .load_branch(fork, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary,
+        expected
+    );
 
     store.undo_last_turn(branch).await.unwrap();
-    assert_eq!(store.load_branch_summary(branch).await.unwrap(), expected);
+    assert_eq!(
+        store
+            .load_branch(branch, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary,
+        expected
+    );
     store.undo_last_turn(branch).await.unwrap();
-    assert_eq!(store.load_branch_summary(branch).await.unwrap(), expected);
+    assert_eq!(
+        store
+            .load_branch(branch, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary,
+        expected
+    );
     store.undo_last_turn(branch).await.unwrap();
-    assert_eq!(store.load_branch_summary(branch).await.unwrap(), None);
-    assert_eq!(store.load_branch_summary(fork).await.unwrap(), expected);
+    assert_eq!(
+        store
+            .load_branch(branch, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary,
+        None
+    );
+    assert_eq!(
+        store
+            .load_branch(fork, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary,
+        expected
+    );
 }
 
 #[tokio::test]
@@ -350,16 +426,35 @@ async fn summary_folding_steps_of_a_turn_covers_only_that_turns_older_steps() {
         .record_branch_summary(branch, "steps one and two".into(), cut, 900)
         .await
         .unwrap();
-    let summary = store.load_branch_summary(branch).await.unwrap().unwrap();
+    let summary = store
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .summary
+        .unwrap();
     assert_eq!(
         (summary.kept_from_seq, summary.steps_folded_through),
         (Seq(0), Some(Seq(4)))
     );
 
     store.undo_last_turn(branch).await.unwrap();
-    assert!(store.load_branch_summary(branch).await.unwrap().is_some());
+    assert!(
+        store
+            .load_branch(branch, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary
+            .is_some()
+    );
     store.undo_last_turn(branch).await.unwrap();
-    assert_eq!(store.load_branch_summary(branch).await.unwrap(), None);
+    assert_eq!(
+        store
+            .load_branch(branch, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .summary,
+        None
+    );
 }
 
 async fn append_tool_step(
@@ -397,8 +492,7 @@ async fn resolve_branch_prefers_given_session_or_qualified_prefix() {
     let b2 = store.begin_session_with_main_branch(s2, 2).await.unwrap();
     let bare = store.resolve_branch("main", Some(s1)).await.unwrap();
     assert_eq!(bare, Some((s1, b1)));
-    let s2_text = s2.to_string();
-    let prefix = &s2_text[..8];
+    let prefix = s2.to_string()[..8].to_ascii_uppercase();
     let qualified = store
         .resolve_branch(&format!("{prefix}/main"), None)
         .await

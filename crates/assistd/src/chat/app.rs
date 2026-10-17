@@ -274,7 +274,7 @@ pub(super) struct BranchListEntry {
     pub name: String,
     pub parent_branch_name: Option<String>,
     pub fork_point_seq: Option<i64>,
-    pub message_count: i64,
+    pub message_count: u64,
     pub is_current_in_session: bool,
     pub is_active_session: bool,
     pub session_short: String,

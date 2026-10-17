@@ -3,11 +3,9 @@
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 
-/// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms and every
-/// foreign key but `messages.session_id`, reached through its turn, is indexed. A session's current branch and a message's turn must
-/// belong to that same session, and a branch's `next_seq` only grows so undo never
-/// frees a `seq` for reuse. Turn, message, chunk, and memory ids use `AUTOINCREMENT`
-/// so a queued write or embed job never lands on a row that reused a deleted id.
+/// V1 schema, versioned by `PRAGMA user_version`; timestamps are Unix ms. Composite
+/// foreign keys keep each branch, turn, and message inside its session, and
+/// `AUTOINCREMENT` ids never recycle under a queued write or embed job.
 const V1_SQL: &str = r"
 CREATE TABLE sessions (
     id                INTEGER PRIMARY KEY,
@@ -26,14 +24,15 @@ CREATE TABLE branches (
     id               INTEGER PRIMARY KEY,
     session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     name             TEXT NOT NULL,
-    parent_branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL,
-    fork_point_seq   INTEGER,
+    parent_branch_id INTEGER,
+    fork_point_seq   INTEGER CHECK (fork_point_seq IS NULL OR parent_branch_id IS NOT NULL),
     next_seq         INTEGER NOT NULL DEFAULT 0 CHECK (next_seq >= 0),
     created_at       INTEGER NOT NULL,
     UNIQUE (name, session_id),
-    UNIQUE (session_id, id)
+    UNIQUE (session_id, id),
+    FOREIGN KEY (session_id, parent_branch_id) REFERENCES branches(session_id, id)
 ) STRICT;
-CREATE INDEX idx_branches_parent ON branches(parent_branch_id);
+CREATE INDEX idx_branches_parent ON branches(session_id, parent_branch_id);
 
 CREATE TABLE turns (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +68,7 @@ CREATE TABLE messages (
     CHECK ((role = 2) = (tool_exit_code IS NOT NULL)),
     CHECK ((role = 2) = (tool_duration_ms IS NOT NULL))
 ) STRICT;
+CREATE INDEX idx_messages_session ON messages(session_id);
 CREATE INDEX idx_messages_turn ON messages(turn_id);
 
 CREATE TABLE branch_messages (
@@ -84,7 +84,7 @@ CREATE TABLE branch_summaries (
     branch_id            INTEGER PRIMARY KEY REFERENCES branches(id) ON DELETE CASCADE,
     kept_from_seq        INTEGER NOT NULL CHECK (kept_from_seq >= 0),
     steps_folded_through INTEGER CHECK (steps_folded_through > kept_from_seq),
-    compacted_after_seq  INTEGER NOT NULL CHECK (compacted_after_seq >= 0),
+    compacted_after_seq  INTEGER NOT NULL CHECK (compacted_after_seq >= kept_from_seq),
     content              TEXT NOT NULL,
     duration_ms          INTEGER NOT NULL CHECK (duration_ms >= 0)
 ) STRICT;
@@ -117,14 +117,12 @@ CREATE TABLE chunk_embeddings (
     model_id INTEGER NOT NULL REFERENCES embedding_models(id),
     vector   BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
 ) STRICT;
-CREATE INDEX idx_chunk_embeddings_model ON chunk_embeddings(model_id);
 
 CREATE TABLE memory_embeddings (
     memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     model_id  INTEGER NOT NULL REFERENCES embedding_models(id),
     vector    BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
 ) STRICT;
-CREATE INDEX idx_memory_embeddings_model ON memory_embeddings(model_id);
 
 CREATE TRIGGER memory_value_changed AFTER UPDATE OF value ON memories
 WHEN old.value IS NOT new.value

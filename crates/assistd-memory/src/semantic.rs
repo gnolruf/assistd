@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 
 use crate::{ChunkId, MemoryId, MessageId, PersistedRole, Result, SessionId};
 
-/// One message-chunk hit. `content` is the full parent message,
-/// not the chunk text, since chunks may cut mid-sentence.
+/// One message hit through its best-scoring chunk. `content` is the full
+/// message, not the chunk text, since chunks may cut mid-sentence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingHit {
     pub message_id: MessageId,
@@ -71,8 +71,8 @@ pub struct StaleEmbeddings {
 /// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
-    /// Top-K message chunks by cosine to the L2-normalised `query_vector`.
-    /// `exclude_session`'s chunks are dropped before ranking, so never count toward `top_k`.
+    /// Top-K messages by their best chunk's cosine to the L2-normalised `query_vector`.
+    /// `exclude_session`'s messages are dropped before ranking, so never count toward `top_k`.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,

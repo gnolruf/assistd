@@ -10,10 +10,10 @@ use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
-    AppendedMessage, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow, MemoryError,
-    MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,
-    Reasoning, Result, ResumeCandidate, Seq, SessionId, SummaryCut, ToolOutcome, TranscriptStore,
-    TurnId, TurnStats, UndoOutcome,
+    AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow,
+    HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRole,
+    PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq, SessionId, SummaryCut, ToolOutcome,
+    TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
@@ -68,6 +68,21 @@ impl TranscriptStore for SqliteTranscriptStore {
             })
             .await
             .map_err(MemoryError::sqlite("end_session"))?;
+        session_updated(updated, session)
+    }
+
+    async fn claim_session(&self, session: SessionId, daemon_pid: u32) -> Result<()> {
+        let updated = self
+            .handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "UPDATE sessions SET daemon_pid = ?1 WHERE uuid = ?2",
+                    rusqlite::params![daemon_pid, session],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("claim_session"))?;
         session_updated(updated, session)
     }
 
@@ -212,21 +227,20 @@ impl TranscriptStore for SqliteTranscriptStore {
         target: &str,
         prefer_session: Option<SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>> {
-        let (session_pattern, name) = match target.split_once('/') {
-            Some((prefix, name)) => (like_prefix_pattern(prefix), name.to_string()),
-            None => ("%".to_string(), target.to_string()),
-        };
+        let (prefix, name) = target.split_once('/').unwrap_or(("", target));
+        let (uuid_from, uuid_before) = uuid_prefix_bounds(prefix);
+        let name = name.to_string();
         self.handle
             .reader()
             .call(move |c| {
                 c.prepare_cached(
                     "SELECT s.uuid, b.id
                      FROM branches b JOIN sessions s ON s.id = b.session_id
-                     WHERE b.name = ?1 AND s.uuid LIKE ?2 ESCAPE '\\'
-                     ORDER BY s.uuid IS ?3 DESC, s.started_at DESC LIMIT 1",
+                     WHERE b.name = ?1 AND s.uuid >= ?2 AND s.uuid < ?3
+                     ORDER BY s.uuid IS ?4 DESC, s.started_at DESC LIMIT 1",
                 )?
                 .query_row(
-                    rusqlite::params![name, session_pattern, prefer_session],
+                    rusqlite::params![name, uuid_from, uuid_before, prefer_session],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
@@ -279,38 +293,22 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(|e| fork_error(e, src, new_name))
     }
 
-    async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>> {
+    async fn load_branch(&self, branch: BranchId, scope: HistoryScope) -> Result<BranchHistory> {
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare_cached(
-                    "SELECT  m.id,
-                             bm.seq,
-                             m.role,
-                             m.content,
-                             m.reasoning,
-                             m.reasoning_ms,
-                             m.tool_calls,
-                             m.tool_call_id,
-                             m.tool_name,
-                             m.tool_exit_code,
-                             m.tool_duration_ms,
-                             LEAD(m.turn_id) OVER (ORDER BY bm.seq) IS NOT m.turn_id,
-                             t.duration_ms,
-                             t.generated_tokens
-                     FROM branch_messages bm
-                     JOIN messages m ON m.id = bm.message_id
-                     JOIN turns t ON t.id = m.turn_id
-                     WHERE bm.branch_id = ?1
-                     ORDER BY bm.seq ASC",
-                )?;
-                let rows = stmt
-                    .query_map(rusqlite::params![branch], history_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
+                let tx = c.transaction()?;
+                let summary = branch_summary(&tx, branch)?;
+                let from = match (scope, &summary) {
+                    (HistoryScope::Unsummarized, Some(summary)) => summary.kept_from_seq,
+                    _ => Seq(0),
+                };
+                let rows = history_rows(&tx, branch, from)?;
+                tx.commit()?;
+                Ok(BranchHistory { summary, rows })
             })
             .await
-            .map_err(MemoryError::sqlite("load_branch_history"))
+            .map_err(MemoryError::sqlite("load_branch"))
     }
 
     async fn record_branch_summary(
@@ -356,33 +354,9 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(MemoryError::sqlite("record_branch_summary"))
     }
 
-    async fn load_branch_summary(&self, branch: BranchId) -> Result<Option<BranchSummary>> {
-        self.handle
-            .reader()
-            .call(move |c| {
-                c.query_row(
-                    "SELECT kept_from_seq, steps_folded_through, compacted_after_seq, content,
-                            duration_ms
-                     FROM branch_summaries WHERE branch_id = ?1",
-                    rusqlite::params![branch],
-                    |r| {
-                        Ok(BranchSummary {
-                            kept_from_seq: r.get(0)?,
-                            steps_folded_through: r.get(1)?,
-                            compacted_after_seq: r.get(2)?,
-                            content: r.get(3)?,
-                            duration_ms: r.get(4)?,
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .map_err(MemoryError::sqlite("load_branch_summary"))
-    }
-
     async fn record_turn_stats(&self, turn: TurnId, stats: TurnStats) -> Result<()> {
-        self.handle
+        let updated = self
+            .handle
             .writer()
             .call(move |c| {
                 c.execute(
@@ -392,6 +366,9 @@ impl TranscriptStore for SqliteTranscriptStore {
             })
             .await
             .map_err(MemoryError::sqlite("record_turn_stats"))?;
+        if updated == 0 {
+            return Err(MemoryError::TurnNotFound(turn));
+        }
         Ok(())
     }
 
@@ -433,10 +410,10 @@ impl TranscriptStore for SqliteTranscriptStore {
                 let deleted_messages = delete_unreferenced_turn(&tx, turn)?;
                 tx.commit()?;
                 if dropped_summaries + deleted_messages > 0 {
-                    truncate_wal(c)?;
+                    truncate_wal(c);
                 }
                 Ok(UndoOutcome {
-                    removed_messages: removed,
+                    removed_messages: removed as u64,
                     last_user_text,
                 })
             })
@@ -487,7 +464,8 @@ impl TranscriptStore for SqliteTranscriptStore {
 
     async fn set_session_title(&self, session: SessionId, title: &str) -> Result<()> {
         let title = title.to_string();
-        self.handle
+        let updated = self
+            .handle
             .writer()
             .call(move |c| {
                 c.execute(
@@ -497,7 +475,7 @@ impl TranscriptStore for SqliteTranscriptStore {
             })
             .await
             .map_err(MemoryError::sqlite("set_session_title"))?;
-        Ok(())
+        session_updated(updated, session)
     }
 }
 
@@ -771,11 +749,11 @@ fn steps_folded_through(
                  SELECT bm.seq FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
                  WHERE bm.branch_id = ?1 AND bm.seq > ?2
                    AND m.role = ?3 AND m.tool_calls IS NOT NULL
-                   AND bm.seq < COALESCE(
-                       (SELECT MIN(next.seq)
-                        FROM branch_messages next JOIN messages nm ON nm.id = next.message_id
-                        WHERE next.branch_id = ?1 AND next.seq > ?2 AND nm.role = ?4),
-                       9223372036854775807)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM branch_messages next JOIN messages nm ON nm.id = next.message_id
+                       WHERE next.branch_id = ?1 AND next.seq > ?2 AND next.seq < bm.seq
+                         AND nm.role = ?4)
                  ORDER BY bm.seq DESC LIMIT 1 OFFSET ?5
              ) AS step",
             rusqlite::params![
@@ -828,14 +806,65 @@ fn delete_unreferenced_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Res
     Ok(deleted)
 }
 
-/// A `LIKE` pattern (escape char `\`) matching values that start with `prefix` literally,
-/// ignoring ASCII case.
-fn like_prefix_pattern(prefix: &str) -> String {
-    let escaped = prefix
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("{escaped}%")
+/// The half-open range of hyphenated lowercase UUIDs starting with `prefix`, ignoring
+/// ASCII case; every character such a UUID holds sorts below `~`.
+fn uuid_prefix_bounds(prefix: &str) -> (String, String) {
+    let from = prefix.to_ascii_lowercase();
+    let before = format!("{from}~");
+    (from, before)
+}
+
+/// The branch's latest compaction summary, if one is recorded.
+fn branch_summary(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+) -> rusqlite::Result<Option<BranchSummary>> {
+    tx.query_row(
+        "SELECT kept_from_seq, steps_folded_through, compacted_after_seq, content, duration_ms
+         FROM branch_summaries WHERE branch_id = ?1",
+        rusqlite::params![branch],
+        |r| {
+            Ok(BranchSummary {
+                kept_from_seq: r.get(0)?,
+                steps_folded_through: r.get(1)?,
+                compacted_after_seq: r.get(2)?,
+                content: r.get(3)?,
+                duration_ms: r.get(4)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// The messages on `branch` from seq `from` on, ordered by seq.
+fn history_rows(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+    from: Seq,
+) -> rusqlite::Result<Vec<HistoryRow>> {
+    tx.prepare_cached(
+        "SELECT  m.id,
+                 bm.seq,
+                 m.role,
+                 m.content,
+                 m.reasoning,
+                 m.reasoning_ms,
+                 m.tool_calls,
+                 m.tool_call_id,
+                 m.tool_name,
+                 m.tool_exit_code,
+                 m.tool_duration_ms,
+                 LEAD(m.turn_id) OVER (ORDER BY bm.seq) IS NOT m.turn_id,
+                 t.duration_ms,
+                 t.generated_tokens
+         FROM branch_messages bm
+         JOIN messages m ON m.id = bm.message_id
+         JOIN turns t ON t.id = m.turn_id
+         WHERE bm.branch_id = ?1 AND bm.seq >= ?2
+         ORDER BY bm.seq ASC",
+    )?
+    .query_map(rusqlite::params![branch, from], history_row)?
+    .collect()
 }
 
 fn branch_info(row: &Row<'_>) -> rusqlite::Result<BranchInfo> {

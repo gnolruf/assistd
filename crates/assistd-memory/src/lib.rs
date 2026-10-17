@@ -10,7 +10,7 @@ mod semantic;
 mod sqlite;
 mod transcripts;
 
-pub use error::{MemoryError, Result};
+pub use error::{BackendError, MemoryError, Result};
 pub use ids::{BranchId, ChunkId, MemoryId, MessageId, Seq, SessionId, TurnId};
 pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore, SavedMemory};
 pub use semantic::{
@@ -19,7 +19,7 @@ pub use semantic::{
 };
 pub use sqlite::{SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore};
 pub use transcripts::{
-    AppendedMessage, BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore,
-    OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall, Reasoning, ResumeCandidate,
-    SummaryCut, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
+    AppendedMessage, BranchHistory, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
+    MessageKind, NoTranscriptStore, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,
+    Reasoning, ResumeCandidate, SummaryCut, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
 };

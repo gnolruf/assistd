@@ -769,7 +769,7 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
         created_at: String,
-        message_count: i64,
+        message_count: u64,
         is_current_in_session: bool,
         is_active_session: bool,
         /// The later of the branch's creation and its newest message, RFC 3339.

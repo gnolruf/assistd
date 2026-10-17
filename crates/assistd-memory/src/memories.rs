@@ -42,10 +42,10 @@ pub trait MemoryStore: fmt::Debug + Send + Sync + 'static {
     /// Remove the row with `id`; returns its key, or `None` when no row matched.
     async fn delete_by_id(&self, id: MemoryId) -> Result<Option<String>>;
 
-    /// Keys starting with `prefix` (case-sensitive), in unspecified order.
+    /// Keys starting with `prefix` (case-sensitive), sorted.
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
 
-    /// Full rows whose key starts with `prefix` (case-sensitive), in unspecified order.
+    /// Full rows whose key starts with `prefix` (case-sensitive), sorted by key.
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>>;
 }
 

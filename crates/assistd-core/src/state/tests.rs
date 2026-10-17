@@ -12,8 +12,8 @@ use assistd_ipc::{
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{
-    BranchId, HistoryRow, MessageKind, PersistedMessage, PersistedRole, PersistedToolCall,
-    SessionId, SqliteHandle, SqliteTranscriptStore, TranscriptStore,
+    BranchId, HistoryRow, HistoryScope, MessageKind, PersistedMessage, PersistedRole,
+    PersistedToolCall, SessionId, SqliteHandle, SqliteTranscriptStore, TranscriptStore,
 };
 use assistd_tools::{
     CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolsDisabled,
@@ -1096,7 +1096,11 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
     res.unwrap();
     assert_eq!(events.last(), Some(&done("q2")), "{events:?}");
     state.drain_persistence_inflight().await;
-    let rows = conv.load_branch_history(branch).await.unwrap();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     let user_prompts: Vec<_> = rows
         .iter()
         .filter(|r| r.message.role() == PersistedRole::User)
@@ -1204,7 +1208,11 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
     );
     state.drain_persistence_inflight().await;
 
-    let rows = conv.load_branch_history(branch).await.unwrap();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     let shape: Vec<_> = rows
         .iter()
         .map(|r| (r.message.role(), tool_call_id(r)))
@@ -1502,9 +1510,10 @@ async fn undo_drops_last_turn_and_emits_count() {
     assert_eq!(applied, (2, Some("second")));
 
     let remaining: Vec<_> = conv
-        .load_branch_history(main_branch)
+        .load_branch(main_branch, HistoryScope::Whole)
         .await
         .unwrap()
+        .rows
         .into_iter()
         .map(|r| r.message.content)
         .collect();
@@ -1549,7 +1558,11 @@ async fn new_session_writes_no_rows_until_the_first_message() {
         Some(saved_branch)
     );
     assert_eq!(conv.list_branches().await.unwrap().len(), 2);
-    let rows = conv.load_branch_history(saved_branch).await.unwrap();
+    let rows = conv
+        .load_branch(saved_branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     assert_eq!(
         rows.first().map(|row| row.message.content.as_str()),
         Some("hello")
@@ -1600,7 +1613,11 @@ async fn narration_from_a_truncated_step_is_not_persisted() {
     res.unwrap();
     state.drain_persistence_inflight().await;
 
-    let rows = conv.load_branch_history(branch).await.unwrap();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     let shape: Vec<_> = rows
         .iter()
         .map(|r| (r.message.role(), r.message.content.as_str()))
@@ -1629,7 +1646,11 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
     res.unwrap();
     state.drain_persistence_inflight().await;
 
-    let rows = conv.load_branch_history(branch).await.unwrap();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     let shape_ignoring_tool_output: Vec<_> = rows
         .iter()
         .map(|r| {

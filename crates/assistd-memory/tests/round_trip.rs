@@ -1,7 +1,7 @@
 //! Persistence survives closing and reopening the store at the same path.
 
 use assistd_memory::{
-    BranchId, MemoryStore, PersistedMessage, PersistedRole, SessionId, SqliteHandle,
+    BranchId, HistoryScope, MemoryStore, PersistedMessage, PersistedRole, SessionId, SqliteHandle,
     SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
 };
 
@@ -54,7 +54,11 @@ async fn turn_persists_across_store_reopen() {
         let convs = SqliteTranscriptStore::new(handle.clone());
         let mems = SqliteMemoryStore::new(handle.clone());
 
-        let history = convs.load_branch_history(branch).await.unwrap();
+        let history = convs
+            .load_branch(branch, HistoryScope::Whole)
+            .await
+            .unwrap()
+            .rows;
         let messages: Vec<(PersistedRole, &str)> = history
             .iter()
             .map(|r| (r.message.role(), r.message.content.as_str()))
