@@ -12,7 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
@@ -51,8 +51,9 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_status_line(frame, status_area, app);
 }
 
-/// The transcript above the input line or the confirmation prompt, then
-/// the permission-mode line.
+/// The transcript above the input line or the confirmation prompt, the
+/// slash popup over the transcript's bottom rows, then the permission-mode
+/// line.
 fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let [chat_area, mode_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
@@ -62,32 +63,28 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     };
     app.set_output_height(output_area.height);
     render_output(frame, output_area, app);
+    if app.confirmation.is_none() {
+        render_slash_popup(
+            frame,
+            output_area,
+            &app.slash_suggestions(),
+            app.slash_selected(),
+        );
+    }
     render_mode_line(frame, mode_area, app.permission_mode);
 }
 
-/// Draw the slash popup, the input line and its rules at the bottom of
-/// `area`, returning the rows above them for the transcript.
+/// Draw the input line and its rules at the bottom of `area`, returning
+/// the rows above them for the transcript.
 fn render_input_dock(frame: &mut Frame<'_>, area: Rect, app: &App) -> Rect {
     let input_height = compute_input_height(area.width, area.height, app.input.buffer());
-    let suggestions = app.slash_suggestions();
-    let popup_height = saturating_u16(suggestions.len()).min(SLASH_POPUP_MAX_ROWS);
-    let [
-        output_area,
-        popup_area,
-        upper_rule_area,
-        input_area,
-        lower_rule_area,
-    ] = Layout::vertical([
+    let [output_area, upper_rule_area, input_area, lower_rule_area] = Layout::vertical([
         Constraint::Min(3),
-        Constraint::Length(popup_height),
         Constraint::Length(1),
         Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .areas(area);
-    if popup_height > 0 {
-        render_slash_popup(frame, popup_area, &suggestions, app.slash_selected());
-    }
     render_rule(frame, upper_rule_area);
     render_input(frame, input_area, app);
     render_rule(frame, lower_rule_area);
@@ -247,15 +244,25 @@ fn compact_age(secs: u64) -> String {
     }
 }
 
+/// Draw the suggestions over the bottom rows of `area`, clearing what
+/// they cover.
 fn render_slash_popup(
     frame: &mut Frame<'_>,
     area: Rect,
     suggestions: &[&'static (&'static str, &'static str)],
     selected: usize,
 ) {
-    if area.width == 0 || area.height == 0 {
+    let height = saturating_u16(suggestions.len())
+        .min(SLASH_POPUP_MAX_ROWS)
+        .min(area.height);
+    if area.width == 0 || height == 0 {
         return;
     }
+    let area = Rect {
+        y: area.bottom() - height,
+        height,
+        ..area
+    };
     let lines: Vec<Line<'_>> = suggestions
         .iter()
         .enumerate()
@@ -279,6 +286,7 @@ fn render_slash_popup(
             }
         })
         .collect();
+    frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 

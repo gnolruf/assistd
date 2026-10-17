@@ -15,6 +15,7 @@ const MOUSE_WHEEL_STEP: u16 = 3;
 /// `(command, usage_hint)` pairs for the autocomplete popup.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/attach", "<path>"),
+    ("/exit", ""),
     ("/fork", "<name>"),
     ("/new", ""),
     ("/resume", ""),
@@ -118,11 +119,14 @@ impl App {
         match action {
             InputAction::None => {}
             InputAction::Submit(text) => self.submit_typed(text),
-            InputAction::Quit => {
-                self.resolve_confirmation(Approval::Deny);
-                self.quitting = true;
-            }
+            InputAction::Quit => self.quit(),
         }
+    }
+
+    /// Deny any open confirmation and end the event loop.
+    pub(super) fn quit(&mut self) {
+        self.resolve_confirmation(Approval::Deny);
+        self.quitting = true;
     }
 
     fn interrupt_turn(&mut self) {

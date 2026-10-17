@@ -935,6 +935,30 @@ async fn client_disconnect_mid_turn_releases_the_turn_lock() {
     .await;
 }
 
+#[tokio::test]
+async fn client_closing_mid_stream_is_not_a_connection_error() {
+    let (server, client) = UnixStream::pair().unwrap();
+    let (client_read, mut client_write) = client.into_split();
+    client_write
+        .write_all(b"{\"type\":\"query\",\"id\":\"bye\",\"text\":\"go\"}\n")
+        .await
+        .unwrap();
+    let state = state_with_backend_and_grace(Arc::new(FloodBackend), 0);
+    let (_drain_tx, drain_rx) = watch::channel(false);
+    let connection = tokio::spawn(handle_connection(server, state, drain_rx));
+
+    let mut reader = BufReader::new(client_read);
+    assert!(read_event(&mut reader).await.is_some());
+    drop(reader);
+    drop(client_write);
+
+    tokio::time::timeout(Duration::from_secs(5), connection)
+        .await
+        .expect("connection outlived its client")
+        .unwrap()
+        .expect("a client hanging up mid-stream must end the connection cleanly");
+}
+
 #[tokio::test(start_paused = true)]
 async fn write_event_times_out_when_the_client_stops_reading() {
     let (server, _client_never_reads) = UnixStream::pair().unwrap();

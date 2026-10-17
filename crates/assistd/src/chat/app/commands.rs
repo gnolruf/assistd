@@ -8,6 +8,7 @@ use super::{App, BranchOp, PendingAttachment, WireStream};
 /// A typed slash command with its trimmed argument.
 enum SlashCommand {
     Attach(String),
+    Exit,
     Fork(String),
     Undo,
     New,
@@ -25,6 +26,7 @@ impl SlashCommand {
         };
         match verb {
             "/attach" => Some(Self::Attach(arg.to_string())),
+            "/exit" => Some(Self::Exit),
             "/fork" => Some(Self::Fork(arg.to_string())),
             "/undo" => Some(Self::Undo),
             "/new" => Some(Self::New),
@@ -57,6 +59,7 @@ impl App {
                 self.set_notice("/attach: missing path");
             }
             SlashCommand::Attach(path) => self.load_attachment(&path),
+            SlashCommand::Exit => self.quit(),
             SlashCommand::Fork(name) => self.fork_branch(name),
             SlashCommand::Undo => {
                 let id = Uuid::new_v4().to_string();
