@@ -38,7 +38,8 @@ impl Drop for ProcessGroup {
 }
 
 /// Have the kernel SIGTERM the child `cmd` spawns when the daemon dies, even
-/// by SIGKILL. `pre_exec` is the only way to set PDEATHSIG on a spawned child.
+/// by SIGKILL. The signal fires when the spawning *thread* exits, so never
+/// spawn from `spawn_blocking`: an idle blocking-pool thread would kill it.
 #[cfg(target_os = "linux")]
 #[allow(
     unsafe_code,
