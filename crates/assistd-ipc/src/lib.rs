@@ -577,7 +577,7 @@ pub enum StatusKind {
     HistoryCompacted,
 }
 
-/// Author of a persisted conversation message.
+/// Author of a persisted transcript message.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -603,6 +603,14 @@ impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(self.as_str())
     }
+}
+
+/// How long a finished turn ran and the tokens it produced.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnStats {
+    pub duration_ms: u64,
+    /// Tokens the turn added to the conversation.
+    pub tokens: u64,
 }
 
 /// Which table a [`Event::ReindexProgress`] item belongs to.
@@ -682,7 +690,7 @@ pub enum Event {
     /// One search hit; `content` is the full message, `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
         id: String,
-        conversation_id: i64,
+        message_id: i64,
         chunk_id: i64,
         session_id: String,
         timestamp: String,
@@ -761,7 +769,7 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
         created_at: String,
-        message_count: i64,
+        message_count: u64,
         is_current_in_session: bool,
         is_active_session: bool,
         /// The later of the branch's creation and its newest message, RFC 3339.
@@ -779,13 +787,29 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
     },
-    /// One message of branch history.
+    /// One message of branch history, with its reasoning or tool call and outcome.
+    /// `compaction_ms` is set only on the row the branch's latest compaction followed;
+    /// `turn_stats` only on the last row of a finished turn.
     HistoryEntry {
         id: String,
         seq: i64,
         role: Role,
         content: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reasoning: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_ms: Option<u64>,
         tool_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_args: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_stats: Option<TurnStats>,
     },
     /// Result of `Undo`; `removed_messages == 0` means there was nothing to undo.
     UndoApplied {

@@ -33,7 +33,7 @@ pub(super) struct ToolDeps<'a> {
     pub vision_gate: Arc<VisionGate>,
     pub memory: &'a MemorySubsystem,
     pub embed: &'a EmbeddingHandles,
-    pub current_session: watch::Receiver<Arc<SessionId>>,
+    pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
 }
 
@@ -72,7 +72,7 @@ pub(super) fn init(
         vision_gate: deps.vision_gate,
         memory_ops: Arc::new(MemoryOps::new(
             deps.memory.memory_store.clone(),
-            deps.memory.conversation_store.clone(),
+            deps.memory.transcript_store.clone(),
         )),
         embedder: deps.embed.embedder.clone(),
         semantic: deps.embed.semantic_store.clone(),

@@ -10,7 +10,10 @@ use assistd_embed::{
     EmbedJob, EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
-use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, WriteOp};
+use assistd_memory::{
+    NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, StaleEmbeddings,
+    UnindexedRows,
+};
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
 use tokio::sync::{mpsc, watch};
@@ -35,7 +38,6 @@ pub(super) struct EmbeddingStartup {
     config: assistd_config::EmbeddingConfig,
     api_key: ApiKey,
     embed_rx: mpsc::Receiver<EmbedJob>,
-    writer_tx: Arc<mpsc::Sender<WriteOp>>,
 }
 
 /// The shutdown signals the embedding server and worker stop on.
@@ -79,7 +81,7 @@ impl EmbeddingService {
 
     /// Drain queued jobs while the server is still up, abandoning them after
     /// [`EMBED_DRAIN_BUDGET`], then stop it. A start still under way is
-    /// cancelled. The memory writer must still be running.
+    /// cancelled. The memory database must still be open.
     pub(super) async fn shutdown(
         self,
         worker_shutdown: &watch::Sender<bool>,
@@ -126,22 +128,25 @@ async fn join_worker_within_budget(mut worker: JoinHandle<()>) {
     }
 }
 
-/// The handles requests use from startup and, when embedding is enabled,
-/// what starting its server needs.
+/// The handles requests use from startup and, when embedding is enabled and
+/// the memory database is open, what starting its server needs.
 pub(super) fn prepare(
     config: &Config,
     api_key: &ApiKey,
-    sqlite_handle: Option<&Arc<SqliteHandle>>,
+    sqlite_handle: Option<&SqliteHandle>,
 ) -> (EmbeddingHandles, Option<EmbeddingStartup>) {
     if !config.embedding.enabled {
-        info!("embedding: disabled in config (embedding.enabled = false)");
-        return (disabled_handles(), None);
+        const REASON: &str = "disabled in config (embedding.enabled = false)";
+        info!("embedding: {REASON}");
+        return (disabled_handles(REASON), None);
     }
-    let semantic_store: Arc<dyn SemanticStore> = match sqlite_handle {
-        Some(h) => Arc::new(SqliteSemanticStore::new(h.clone())),
-        None => Arc::new(NoSemanticStore),
+    let Some(sqlite_handle) = sqlite_handle else {
+        const REASON: &str = "disabled because the memory database is unavailable";
+        info!("embedding: {REASON}");
+        return (disabled_handles(REASON), None);
     };
-    let writer_tx = sqlite_handle.map_or_else(closed_writer, |h| h.writer_tx());
+    let semantic_store: Arc<dyn SemanticStore> =
+        Arc::new(SqliteSemanticStore::new(sqlite_handle.clone()));
     let (embed_tx, embed_rx) = mpsc::channel(EMBED_QUEUE_CAPACITY);
     let handles = EmbeddingHandles {
         embedder: Arc::new(EmbedderHandle::new(Readiness::Starting)),
@@ -152,27 +157,18 @@ pub(super) fn prepare(
         config: config.embedding.clone(),
         api_key: api_key.clone(),
         embed_rx,
-        writer_tx,
     };
     (handles, Some(startup))
 }
 
-fn disabled_handles() -> EmbeddingHandles {
+fn disabled_handles(reason: &str) -> EmbeddingHandles {
     let (embed_tx, embed_rx) = mpsc::channel(1);
     drop(embed_rx);
     EmbeddingHandles {
-        embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(
-            "disabled in config (embedding.enabled = false)".into(),
-        ))),
+        embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(reason.into()))),
         semantic_store: Arc::new(NoSemanticStore),
         embed_tx,
     }
-}
-
-fn closed_writer() -> Arc<mpsc::Sender<WriteOp>> {
-    let (tx, rx) = mpsc::channel(1);
-    drop(rx);
-    Arc::new(tx)
 }
 
 fn spawn_startup(
@@ -231,7 +227,7 @@ fn serve_embedder(
 ) -> JoinHandle<()> {
     let worker = spawn_embedder_task(
         embedder.clone(),
-        startup.writer_tx,
+        state.memory.semantic.clone(),
         startup.embed_rx,
         worker_shutdown,
     );
@@ -282,9 +278,9 @@ async fn report_unindexed_rows(semantic: &dyn SemanticStore, model_name: &str) {
 
 async fn warn_if_stale_rows(semantic: &dyn SemanticStore, model_name: &str) {
     match semantic.count_stale(model_name).await {
-        Ok((n, models)) if n > 0 => {
+        Ok(StaleEmbeddings { rows, models }) if rows > 0 => {
             tracing::warn!(
-                "embedding: {n} rows exist under non-current model(s) {models:?}; \
+                "embedding: {rows} rows exist under non-current model(s) {models:?}; \
                  run `assistd memory reindex` to rebuild against {model_name}"
             );
         }
@@ -297,9 +293,9 @@ async fn warn_if_stale_rows(semantic: &dyn SemanticStore, model_name: &str) {
 
 async fn warn_if_missing_rows(semantic: &dyn SemanticStore, model_name: &str) {
     match semantic.count_missing(model_name).await {
-        Ok((chunks, memories)) if chunks + memories > 0 => {
+        Ok(UnindexedRows { chunks, memories }) if chunks + memories > 0 => {
             tracing::warn!(
-                "embedding: {chunks} conversation chunks and {memories} memories have no \
+                "embedding: {chunks} transcript chunks and {memories} memories have no \
                  {model_name} embedding and are invisible to semantic recall; \
                  run `assistd memory reindex` to index them"
             );

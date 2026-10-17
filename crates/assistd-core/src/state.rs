@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
@@ -34,10 +35,10 @@ pub(crate) mod subsystems;
 pub(crate) mod voice_handlers;
 pub(crate) mod wire;
 
-pub use self::branches::history_entries;
+pub use self::branches::branch_replay;
 pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
-pub use self::runtime::{BusSubscription, ConversationContext, RuntimeState};
+pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};
 pub use self::subsystems::{McpServerStatus, Subsystems};
 pub use self::wire::AttachmentError;
 
@@ -254,11 +255,15 @@ async fn send_error(tx: &mpsc::Sender<Event>, id: String, message: String) {
 
 fn wire_role(role: PersistedRole) -> Role {
     match role {
-        PersistedRole::System => Role::System,
         PersistedRole::User => Role::User,
         PersistedRole::Assistant => Role::Assistant,
         PersistedRole::Tool => Role::Tool,
     }
+}
+
+/// `at` as the RFC 3339 text (UTC, millisecond precision) the wire protocol carries.
+fn wire_timestamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 #[cfg(test)]

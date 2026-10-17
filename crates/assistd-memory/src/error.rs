@@ -1,6 +1,13 @@
+//! Error type for the memory database.
+
 use std::path::PathBuf;
 
 use thiserror::Error;
+
+use crate::{BranchId, SessionId, TurnId};
+
+/// An error from the SQLite driver, kept opaque so callers don't depend on it.
+pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Failures from opening or operating on the memory database.
 #[derive(Debug, Error)]
@@ -23,37 +30,53 @@ pub enum MemoryError {
     Open {
         path: PathBuf,
         #[source]
-        source: rusqlite::Error,
+        source: BackendError,
     },
 
     #[error("run migrations: {0}")]
-    Migration(#[source] tokio_rusqlite::Error<rusqlite_migration::Error>),
+    Migration(#[source] BackendError),
+
+    #[error("no branch with id {0}")]
+    BranchNotFound(BranchId),
+
+    #[error("no saved session {0}")]
+    SessionNotFound(SessionId),
+
+    #[error("no turn with id {0}")]
+    TurnNotFound(TurnId),
+
+    #[error("this session already has a branch named {0:?}")]
+    BranchNameTaken(String),
 
     /// A SQLite statement issued by `op` failed.
     #[error("{op}: {source}")]
     Sqlite {
         op: &'static str,
         #[source]
-        source: tokio_rusqlite::Error,
+        source: BackendError,
     },
-
-    #[error("serialize tool_calls: {0}")]
-    SerializeToolCalls(#[from] serde_json::Error),
-
-    /// A stored `role` column held a value outside the known set.
-    #[error("unknown role in DB: {0}")]
-    UnknownRole(String),
-
-    #[error("memory writer task is gone")]
-    WriterGone,
-
-    #[error("memory writer task dropped ack channel")]
-    AckDropped,
 }
 
 impl MemoryError {
     pub(crate) fn sqlite(op: &'static str) -> impl FnOnce(tokio_rusqlite::Error) -> Self {
-        move |source| Self::Sqlite { op, source }
+        move |source| Self::Sqlite {
+            op,
+            source: source.into(),
+        }
+    }
+
+    /// Like [`MemoryError::sqlite`], but a query that matched no row becomes `missing`.
+    pub(crate) fn sqlite_or_missing(
+        op: &'static str,
+        missing: Self,
+    ) -> impl FnOnce(tokio_rusqlite::Error) -> Self {
+        move |source| match source {
+            tokio_rusqlite::Error::Error(rusqlite::Error::QueryReturnedNoRows) => missing,
+            source => Self::Sqlite {
+                op,
+                source: source.into(),
+            },
+        }
     }
 }
 

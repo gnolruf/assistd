@@ -6,12 +6,12 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use assistd_embed::{BATCH_SIZE, EmbedError, Embedder, embed_each};
+use assistd_embed::{BATCH_SIZE, EmbedJob, Embedder, embed_jobs};
 use assistd_ipc::{Event, ReindexKind};
-use assistd_memory::{MemoryError, vector_to_blob};
+use assistd_memory::{EmbeddingTarget, MemoryError, MemoryId, SemanticStore};
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
-use super::{AppState, DispatchError, send_error, wire_role};
+use super::{AppState, DispatchError, send_error, wire_role, wire_timestamp};
 
 impl AppState {
     pub(super) async fn handle_memory_semantic_search(
@@ -51,10 +51,10 @@ impl AppState {
                     let _ = tx
                         .send(Event::SemanticHit {
                             id: id.clone(),
-                            conversation_id: hit.conversation_id,
-                            chunk_id: hit.chunk_id,
-                            session_id: hit.session_id,
-                            timestamp: hit.timestamp,
+                            message_id: hit.message_id.0,
+                            chunk_id: hit.chunk_id.0,
+                            session_id: hit.session_id.to_string(),
+                            timestamp: wire_timestamp(hit.timestamp),
                             role: wire_role(hit.role),
                             content: hit.content,
                             similarity: hit.similarity,
@@ -175,7 +175,7 @@ impl AppState {
                     let _ = tx
                         .send(Event::MemoryRow {
                             id: id.clone(),
-                            memory_id: row.id,
+                            memory_id: row.id.0,
                             key: row.key,
                             value: row.value,
                         })
@@ -197,7 +197,7 @@ impl AppState {
         memory_id: i64,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        match self.memory.memory_ops.forget(memory_id).await {
+        match self.memory.memory_ops.forget(MemoryId(memory_id)).await {
             Ok(removed) => {
                 let _ = tx
                     .send(Event::MemoryForgetResult {
@@ -232,18 +232,16 @@ impl AppState {
             }
         };
         let model = embedder.model().to_string();
-        let dim = i64::try_from(embedder.dim()).unwrap_or(i64::MAX);
 
-        let (chunks_total, memories_total) = match self.memory.semantic.count_missing(&model).await
-        {
-            Ok(counts) => counts,
+        let unindexed = match self.memory.semantic.count_missing(&model).await {
+            Ok(unindexed) => unindexed,
             Err(e) => {
                 send_error(&tx, id, format!("reindex: count missing rows: {e}")).await;
                 return Err(e.into());
             }
         };
-        let chunks_total = u32::try_from(chunks_total).unwrap_or(u32::MAX);
-        let memories_total = u32::try_from(memories_total).unwrap_or(u32::MAX);
+        let chunks_total = u32::try_from(unindexed.chunks).unwrap_or(u32::MAX);
+        let memories_total = u32::try_from(unindexed.memories).unwrap_or(u32::MAX);
 
         let _ = tx
             .send(Event::ReindexProgress {
@@ -262,13 +260,14 @@ impl AppState {
             })
             .await;
 
-        let semantic = &self.memory.semantic;
+        let semantic = self.memory.semantic.as_ref();
         let embedder = embedder.as_ref();
         let chunks = reindex_items(
             embedder,
+            semantic,
             KindProgress::new(&id, &tx, ReindexKind::Chunks, chunks_total),
             |after, limit| semantic.chunks_missing_embedding(&model, after, limit),
-            |chunk_id, blob| semantic.store_chunk_embedding(chunk_id, model.clone(), dim, blob),
+            EmbeddingTarget::Chunk,
         )
         .await;
         if let Err(e) = chunks {
@@ -277,9 +276,10 @@ impl AppState {
         }
         let memories = reindex_items(
             embedder,
+            semantic,
             KindProgress::new(&id, &tx, ReindexKind::Memories, memories_total),
             |after, limit| semantic.memories_missing_embedding(&model, after, limit),
-            |memory_id, blob| semantic.store_memory_embedding(memory_id, model.clone(), dim, blob),
+            EmbeddingTarget::Memory,
         )
         .await;
         if let Err(e) = memories {
@@ -317,8 +317,10 @@ impl<'a> KindProgress<'a> {
         usize::try_from(self.total - self.done).unwrap_or(usize::MAX)
     }
 
-    async fn advance(&mut self) {
-        self.done += 1;
+    async fn advance(&mut self, rows: usize) {
+        self.done = self
+            .done
+            .saturating_add(u32::try_from(rows).unwrap_or(u32::MAX));
         let _ = self
             .tx
             .send(Event::ReindexProgress {
@@ -332,65 +334,45 @@ impl<'a> KindProgress<'a> {
 }
 
 /// Embed and store up to `progress.total` rows, listed a page at a time in
-/// id order. Per-item failures are logged; a listing failure aborts.
-async fn reindex_items<L, LFut, S, SFut>(
+/// id order. Failed embeds and stores are logged; a listing failure aborts.
+async fn reindex_items<Id, L, LFut>(
     embedder: &dyn Embedder,
+    semantic: &dyn SemanticStore,
     mut progress: KindProgress<'_>,
     list: L,
-    store: S,
+    to_target: fn(Id) -> EmbeddingTarget,
 ) -> Result<(), MemoryError>
 where
-    L: Fn(i64, usize) -> LFut,
-    LFut: Future<Output = Result<Vec<(i64, String)>, MemoryError>>,
-    S: Fn(i64, Vec<u8>) -> SFut,
-    SFut: Future<Output = Result<(), MemoryError>>,
+    Id: Copy,
+    L: Fn(Option<Id>, usize) -> LFut,
+    LFut: Future<Output = Result<Vec<(Id, String)>, MemoryError>>,
 {
-    let mut after = 0;
+    let mut after = None;
+    let mut jobs = Vec::with_capacity(BATCH_SIZE);
     while progress.remaining() > 0 {
         let batch = list(after, progress.remaining().min(BATCH_SIZE)).await?;
         let Some(&(last_id, _)) = batch.last() else {
             break;
         };
-        after = last_id;
-        let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
-        let results = embed_each(embedder, &texts).await;
-        for (&(item_id, _), result) in batch.iter().zip(results) {
-            store_embedding(progress.kind, item_id, result, &store).await;
-            progress.advance().await;
-        }
-    }
-    Ok(())
-}
-
-async fn store_embedding<S, SFut>(
-    kind: ReindexKind,
-    item_id: i64,
-    embedded: Result<Vec<f32>, EmbedError>,
-    store: &S,
-) where
-    S: Fn(i64, Vec<u8>) -> SFut,
-    SFut: Future<Output = Result<(), MemoryError>>,
-{
-    let embedding = match embedded {
-        Ok(embedding) => embedding,
-        Err(e) => {
+        after = Some(last_id);
+        jobs.extend(batch.into_iter().map(|(id, text)| EmbedJob {
+            target: to_target(id),
+            text,
+        }));
+        let job_count = jobs.len();
+        let embeddings = embed_jobs(embedder, jobs.drain(..)).await;
+        if let Err(e) = semantic
+            .store_embeddings(embedder.model(), embeddings)
+            .await
+        {
             warn!(
                 target: "assistd::memory",
-                kind = kind.as_str(),
-                item_id,
+                kind = progress.kind.as_str(),
                 error = %e,
-                "reindex: embed failed"
+                "reindex: store embeddings failed"
             );
-            return;
         }
-    };
-    if let Err(e) = store(item_id, vector_to_blob(&embedding)).await {
-        warn!(
-            target: "assistd::memory",
-            kind = kind.as_str(),
-            item_id,
-            error = %e,
-            "reindex: store embedding failed"
-        );
+        progress.advance(job_count).await;
     }
+    Ok(())
 }

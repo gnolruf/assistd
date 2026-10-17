@@ -6,7 +6,9 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
-use assistd_memory::{EmbeddingHit, MemoryHit, SemanticStore, SessionId};
+use assistd_memory::{
+    EmbeddingHit, EmbeddingTarget, MemoryHit, MemoryId, SemanticStore, SessionId,
+};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -23,7 +25,7 @@ const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
-/// Saves a `(key, value)` pair and queues its value for embedding so
+/// Saves a `(key, value)` pair and queues a new or changed value for embedding so
 /// `recall` can find it by paraphrase.
 #[derive(Debug)]
 pub struct RememberTool {
@@ -38,8 +40,14 @@ impl RememberTool {
         Self { ops, embed_tx }
     }
 
-    fn queue_embedding(&self, memory_id: i64, text: String) {
-        enqueue_embed_job(&self.embed_tx, EmbedJob::Memory { memory_id, text });
+    fn queue_embedding(&self, memory_id: MemoryId, text: String) {
+        enqueue_embed_job(
+            &self.embed_tx,
+            EmbedJob {
+                target: EmbeddingTarget::Memory(memory_id),
+                text,
+            },
+        );
     }
 }
 
@@ -100,9 +108,9 @@ impl Tool for RememberTool {
             )));
         }
 
-        let memory_id = self.ops.save(&key, value.clone()).await?;
-        if memory_id != 0 {
-            self.queue_embedding(memory_id, value);
+        let saved = self.ops.save(&key, value.clone()).await?;
+        if saved.value_changed {
+            self.queue_embedding(saved.id, value);
         }
         let duration_ms = start.elapsed().as_millis();
         tracing::info!(
@@ -212,13 +220,13 @@ impl Tool for RecallTool {
     }
 }
 
-/// Semantic search over past conversations, excluding the session in
+/// Semantic search over past session transcripts, excluding the session in
 /// progress because its dialogue is already in the model's context.
 #[derive(Debug)]
 pub struct ReminisceTool {
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
-    current_session: watch::Receiver<Arc<SessionId>>,
+    current_session: watch::Receiver<SessionId>,
 }
 
 impl ReminisceTool {
@@ -227,7 +235,7 @@ impl ReminisceTool {
     pub fn new(
         embedder: Arc<EmbedderHandle>,
         semantic: Arc<dyn SemanticStore>,
-        current_session: watch::Receiver<Arc<SessionId>>,
+        current_session: watch::Receiver<SessionId>,
     ) -> Self {
         Self {
             embedder,
@@ -307,10 +315,10 @@ impl Tool for ReminisceTool {
                 ));
             }
         };
-        let current = self.current_session.borrow().clone();
+        let current = *self.current_session.borrow();
         let hits = self
             .semantic
-            .nearest_chunks(query_vec, limit, embedder.model(), Some(&current))
+            .nearest_chunks(query_vec, limit, embedder.model(), Some(current))
             .await?;
 
         let output = format_chunks(&hits);
@@ -354,7 +362,7 @@ fn format_chunks(hits: &[EmbeddingHit]) -> String {
         .map(|hit| {
             format!(
                 "[{} {} sim={:.0}%] {}",
-                hit.timestamp,
+                hit.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
                 hit.role.as_wire(),
                 hit.similarity * 100.0,
                 hit.content.replace('\n', " ")
@@ -383,12 +391,12 @@ fn tool_result(output: &str, duration_ms: u128) -> Value {
 mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        ConversationStore, MemoryError, MemoryStore, NoConversationStore, NoMemoryStore,
-        NoSemanticStore, SqliteConversationStore, SqliteHandle, SqliteMemoryStore,
+        ChunkId, Embedding, MemoryError, MemoryStore, NoMemoryStore, NoSemanticStore,
+        NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, StaleEmbeddings,
+        TranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
-    use tokio::task::JoinHandle;
 
     use super::*;
 
@@ -436,7 +444,7 @@ mod tests {
     /// Records the session `reminisce` asked to leave out.
     #[derive(Debug, Default)]
     struct ExclusionSpy {
-        excluded: parking_lot::Mutex<Option<String>>,
+        excluded: parking_lot::Mutex<Option<SessionId>>,
     }
 
     #[async_trait]
@@ -446,9 +454,9 @@ mod tests {
             _q: Vec<f32>,
             _k: usize,
             _model: &str,
-            exclude_session: Option<&SessionId>,
+            exclude_session: Option<SessionId>,
         ) -> Result<Vec<EmbeddingHit>, MemoryError> {
-            *self.excluded.lock() = exclude_session.map(|s| s.0.clone());
+            *self.excluded.lock() = exclude_session;
             Ok(Vec::new())
         }
         async fn nearest_memories(
@@ -459,46 +467,32 @@ mod tests {
         ) -> Result<Vec<MemoryHit>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn count_for_model(&self, _model: &str) -> Result<(i64, i64), MemoryError> {
-            Ok((0, 0))
+        async fn count_stale(&self, _current: &str) -> Result<StaleEmbeddings, MemoryError> {
+            Ok(StaleEmbeddings::default())
         }
-        async fn count_stale(&self, _current: &str) -> Result<(i64, Vec<String>), MemoryError> {
-            Ok((0, Vec::new()))
-        }
-        async fn count_missing(&self, _current: &str) -> Result<(i64, i64), MemoryError> {
-            Ok((0, 0))
+        async fn count_missing(&self, _current: &str) -> Result<UnindexedRows, MemoryError> {
+            Ok(UnindexedRows::default())
         }
         async fn memories_missing_embedding(
             &self,
             _c: &str,
-            _after: i64,
+            _after: Option<MemoryId>,
             _limit: usize,
-        ) -> Result<Vec<(i64, String)>, MemoryError> {
+        ) -> Result<Vec<(MemoryId, String)>, MemoryError> {
             Ok(Vec::new())
         }
         async fn chunks_missing_embedding(
             &self,
             _c: &str,
-            _after: i64,
+            _after: Option<ChunkId>,
             _limit: usize,
-        ) -> Result<Vec<(i64, String)>, MemoryError> {
+        ) -> Result<Vec<(ChunkId, String)>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn store_chunk_embedding(
+        async fn store_embeddings(
             &self,
-            _chunk_id: i64,
-            _model: String,
-            _dim: i64,
-            _vector: Vec<u8>,
-        ) -> Result<(), MemoryError> {
-            Ok(())
-        }
-        async fn store_memory_embedding(
-            &self,
-            _memory_id: i64,
-            _model: String,
-            _dim: i64,
-            _vector: Vec<u8>,
+            _model: &str,
+            _embeddings: Vec<Embedding>,
         ) -> Result<(), MemoryError> {
             Ok(())
         }
@@ -507,44 +501,42 @@ mod tests {
     #[tokio::test]
     async fn reminisce_excludes_the_session_in_progress() {
         let spy = Arc::new(ExclusionSpy::default());
-        let first = Arc::new(SessionId::new());
-        let (session_tx, session_rx) = watch::channel(first.clone());
+        let first = SessionId::new();
+        let (session_tx, session_rx) = watch::channel(first);
         let tool = ReminisceTool::new(ready(Arc::new(FixedEmbedder)), spy.clone(), session_rx);
 
         tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
             .await
             .unwrap();
-        assert_eq!(spy.excluded.lock().as_deref(), Some(first.0.as_str()));
+        assert_eq!(*spy.excluded.lock(), Some(first));
 
-        let second = Arc::new(SessionId::new());
-        session_tx.send_replace(second.clone());
+        let second = SessionId::new();
+        session_tx.send_replace(second);
         tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
             .await
             .unwrap();
         assert_eq!(
-            spy.excluded.lock().as_deref(),
-            Some(second.0.as_str()),
+            *spy.excluded.lock(),
+            Some(second),
             "the tool must follow a session switch, not pin its first session"
         );
     }
 
-    /// A SQLite-backed `MemoryOps`; hold the writer and tempdir for the test.
-    async fn fresh_ops() -> (Arc<MemoryOps>, JoinHandle<()>, TempDir) {
+    /// A SQLite-backed `MemoryOps`; hold the tempdir for the test.
+    async fn fresh_ops() -> (Arc<MemoryOps>, TempDir) {
         let temp = tempfile::tempdir().unwrap();
-        let (_tx, rx) = watch::channel(false);
-        let (handle, writer) = SqliteHandle::open(&temp.path().join("memory.db"), rx)
+        let handle = SqliteHandle::open(&temp.path().join("memory.db"))
             .await
             .unwrap();
-        let handle = Arc::new(handle);
         let mem: Arc<dyn MemoryStore> = Arc::new(SqliteMemoryStore::new(handle.clone()));
-        let conv: Arc<dyn ConversationStore> = Arc::new(SqliteConversationStore::new(handle));
-        (Arc::new(MemoryOps::new(mem, conv)), writer, temp)
+        let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle));
+        (Arc::new(MemoryOps::new(mem, conv)), temp)
     }
 
     fn no_ops() -> Arc<MemoryOps> {
         Arc::new(MemoryOps::new(
             Arc::new(NoMemoryStore),
-            Arc::new(NoConversationStore),
+            Arc::new(NoTranscriptStore),
         ))
     }
 
@@ -557,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn remember_dedups_by_key() {
-        let (ops, _w, _dir) = fresh_ops().await;
+        let (ops, _dir) = fresh_ops().await;
         let tool = RememberTool::new(ops.clone(), closed_embed_tx());
         tool.invoke(json!({"key": "editor_preference", "value": "vim"}))
             .await
@@ -591,22 +583,23 @@ mod tests {
 
     #[tokio::test]
     async fn remember_enqueues_embed_job_with_value_text() {
-        let (ops, _w, _dir) = fresh_ops().await;
+        let (ops, _dir) = fresh_ops().await;
         let (etx, mut erx) = live_embed_tx();
         let tool = RememberTool::new(ops.clone(), etx);
         tool.invoke(json!({"key": "editor_preference", "value": "vim is the way"}))
             .await
             .unwrap();
-        match erx
+        let job = erx
             .try_recv()
-            .expect("embed job queued before invoke returns")
-        {
-            EmbedJob::Memory { memory_id, text } => {
-                assert!(memory_id > 0, "expected real rowid, got {memory_id}");
-                assert_eq!(text, "vim is the way");
-            }
-            EmbedJob::Chunk { .. } => panic!("expected Memory job, got Chunk"),
-        }
+            .expect("embed job queued before invoke returns");
+        let EmbeddingTarget::Memory(memory_id) = job.target else {
+            panic!("expected a memory job, got {job:?}");
+        };
+        assert!(
+            memory_id > MemoryId(0),
+            "expected real rowid, got {memory_id}"
+        );
+        assert_eq!(job.text, "vim is the way");
     }
 
     /// Strict mode requires every declared property to be listed as
@@ -619,7 +612,7 @@ mod tests {
             Box::new(ReminisceTool::new(
                 no_embedder(),
                 no_semantic(),
-                watch::channel(Arc::new(SessionId::new())).1,
+                watch::channel(SessionId::new()).1,
             )),
         ];
         for tool in tools {

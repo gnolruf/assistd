@@ -5,7 +5,7 @@
 use super::{Conversation, Message, ToolCallRecord, truncate_utf8};
 
 /// Most folded calls a turn keeps; older entries fall off the front.
-pub(super) const MAX_LOGGED_CALLS: usize = 24;
+const MAX_LOGGED_CALLS: usize = 24;
 const LOGGED_CALL_BYTES: usize = 200;
 const LOGGED_FAILURE_BYTES: usize = 160;
 const STDERR_MARKER: &str = "[stderr] ";
@@ -44,6 +44,14 @@ pub(super) fn records(steps: &[Message]) -> Vec<StepRecord> {
         rest = after;
     }
     out
+}
+
+/// Add `records` to the end of `log`, dropping its oldest entries past
+/// [`MAX_LOGGED_CALLS`].
+pub(super) fn append(log: &mut Vec<StepRecord>, records: Vec<StepRecord>) {
+    log.extend(records);
+    let excess = log.len().saturating_sub(MAX_LOGGED_CALLS);
+    log.drain(..excess);
 }
 
 /// The log as rendered after the question's text.

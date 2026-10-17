@@ -1,5 +1,5 @@
-//! Per-turn token count. llama.cpp emits roughly one SSE chunk per token,
-//! so streamed chunks approximate generated tokens.
+//! Per-turn token count from a turn's streamed events. llama.cpp emits roughly
+//! one SSE chunk per token, so streamed chunks approximate generated tokens.
 
 /// The daemon's latest conversation sizes and the chunk count when they arrived.
 #[derive(Debug, Clone, Copy)]
@@ -9,8 +9,9 @@ struct ContextSnapshot {
     chunks_at: u64,
 }
 
+/// Tokens a turn has added to the conversation, and the conversation's size.
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct TokenCounter {
+pub struct TokenCounter {
     chunk_count: u64,
     /// Turn tokens that never streamed as chunks, such as tool calls and their results.
     unstreamed: u64,
@@ -18,7 +19,7 @@ pub(super) struct TokenCounter {
 }
 
 impl TokenCounter {
-    pub(super) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             chunk_count: 0,
             unstreamed: 0,
@@ -26,12 +27,13 @@ impl TokenCounter {
         }
     }
 
-    pub(super) fn on_delta(&mut self) {
+    /// Count one streamed text or reasoning chunk.
+    pub fn on_delta(&mut self) {
         self.chunk_count += 1;
     }
 
     /// Tokens the turn has added to the conversation since the last reset.
-    pub(super) const fn tokens(&self) -> u64 {
+    pub const fn tokens(&self) -> u64 {
         self.chunk_count + self.unstreamed
     }
 
@@ -39,7 +41,7 @@ impl TokenCounter {
     /// what it holds now, and its `total` counting what compaction removed.
     /// Growth beyond the chunks streamed since the previous size counts toward
     /// the turn; shrinkage from compaction does not.
-    pub(super) fn on_context_size(&mut self, tokens: u32, total: u32) {
+    pub fn on_context_size(&mut self, tokens: u32, total: u32) {
         if let Some(expected) = self.context_tokens() {
             self.unstreamed += u64::from(tokens).saturating_sub(expected);
         }
@@ -51,12 +53,12 @@ impl TokenCounter {
     }
 
     /// Conversation tokens: the latest request's size plus chunks streamed since.
-    pub(super) fn context_tokens(&self) -> Option<u64> {
+    pub fn context_tokens(&self) -> Option<u64> {
         self.context.map(|c| c.tokens + self.streamed_since(c))
     }
 
     /// Tokens the conversation has held in all, compacted ones included.
-    pub(super) fn total_tokens(&self) -> Option<u64> {
+    pub fn total_tokens(&self) -> Option<u64> {
         self.context.map(|c| c.total + self.streamed_since(c))
     }
 
@@ -64,7 +66,8 @@ impl TokenCounter {
         self.chunk_count - context.chunks_at
     }
 
-    pub(super) fn reset(&mut self) {
+    /// Start counting a new turn.
+    pub fn reset(&mut self) {
         *self = Self::new();
     }
 }

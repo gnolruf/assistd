@@ -1,35 +1,41 @@
 //! Overlapping character-window chunker applied to messages before embedding.
 
-use serde::{Deserialize, Serialize};
+use std::ops::Range;
 
-/// Chunking policy; `overlap_chars` must be less than `chunk_chars`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChunkingConfig {
+/// Chunking policy; construction guarantees `overlap_chars < chunk_chars`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChunkingConfig {
     /// Maximum number of Unicode characters per chunk.
-    pub chunk_chars: usize,
+    chunk_chars: usize,
     /// Number of characters shared between consecutive chunks.
-    pub overlap_chars: usize,
+    overlap_chars: usize,
 }
 
-impl Default for ChunkingConfig {
-    fn default() -> Self {
+impl ChunkingConfig {
+    /// The policy applied to stored user and assistant messages.
+    pub(crate) const MESSAGES: Self = Self::new(512, 64);
+
+    /// Panics, at compile time when used in a const, unless `overlap_chars < chunk_chars`.
+    pub(crate) const fn new(chunk_chars: usize, overlap_chars: usize) -> Self {
+        assert!(
+            overlap_chars < chunk_chars,
+            "chunk overlap must be shorter than the chunk"
+        );
         Self {
-            chunk_chars: 512,
-            overlap_chars: 64,
+            chunk_chars,
+            overlap_chars,
         }
     }
 }
 
-/// Split `content` into windows of `chunk_chars` characters advancing by
-/// `chunk_chars - overlap_chars`, dropping whitespace-only windows. Short inputs and
-/// invalid configs yield the whole input as one chunk.
-pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
+/// Byte ranges of `content`'s windows of `chunk_chars` characters, advancing by
+/// `chunk_chars - overlap_chars` and dropping whitespace-only windows. Short inputs
+/// yield the whole input as one range.
+pub(crate) fn chunk_ranges(content: &str, cfg: &ChunkingConfig) -> Vec<Range<usize>> {
     if content.trim().is_empty() {
         return Vec::new();
     }
-    if cfg.chunk_chars == 0 || cfg.overlap_chars >= cfg.chunk_chars {
-        return vec![content.to_string()];
-    }
+    let whole_message = 0..content.len();
 
     let boundaries: Vec<usize> = content
         .char_indices()
@@ -38,7 +44,7 @@ pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
         .collect();
     let total_chars = boundaries.len() - 1;
     if total_chars <= cfg.chunk_chars {
-        return vec![content.to_string()];
+        return vec![whole_message];
     }
 
     let step = cfg.chunk_chars - cfg.overlap_chars;
@@ -46,11 +52,9 @@ pub fn chunk_message(content: &str, cfg: &ChunkingConfig) -> Vec<String> {
     let mut start = 0usize;
     while start < total_chars {
         let end = (start + cfg.chunk_chars).min(total_chars);
-        let byte_start = boundaries[start];
-        let byte_end = boundaries[end];
-        let slice = &content[byte_start..byte_end];
-        if !slice.trim().is_empty() {
-            chunks.push(slice.to_string());
+        let bytes = boundaries[start]..boundaries[end];
+        if !content[bytes.clone()].trim().is_empty() {
+            chunks.push(bytes);
         }
         if end == total_chars {
             break;
@@ -65,14 +69,18 @@ mod tests {
     use super::*;
 
     fn cfg(chunk_chars: usize, overlap: usize) -> ChunkingConfig {
-        ChunkingConfig {
-            chunk_chars,
-            overlap_chars: overlap,
-        }
+        ChunkingConfig::new(chunk_chars, overlap)
     }
 
     fn alphabet(len: usize) -> String {
         (b'a'..=b'z').cycle().take(len).map(char::from).collect()
+    }
+
+    fn chunks_of<'a>(content: &'a str, cfg: &ChunkingConfig) -> Vec<&'a str> {
+        chunk_ranges(content, cfg)
+            .into_iter()
+            .map(|bytes| &content[bytes])
+            .collect()
     }
 
     fn char_window(s: &str, start: usize, end: usize) -> String {
@@ -80,20 +88,13 @@ mod tests {
     }
 
     #[test]
-    fn inputs_that_fit_or_cannot_be_split_come_back_whole_or_empty() {
-        let a50 = "a".repeat(50);
+    fn inputs_that_fit_come_back_whole_or_empty() {
         let cases = [
             ("whitespace only", "   \n\t  ", cfg(64, 8), vec![]),
             ("short", "hello world", cfg(64, 8), vec!["hello world"]),
-            (
-                "overlap >= chunk",
-                a50.as_str(),
-                cfg(10, 10),
-                vec![a50.as_str()],
-            ),
         ];
         for (label, input, cfg, expected) in cases {
-            assert_eq!(chunk_message(input, &cfg), expected, "{label}");
+            assert_eq!(chunks_of(input, &cfg), expected, "{label}");
         }
     }
 
@@ -119,7 +120,7 @@ mod tests {
                 .into_iter()
                 .map(|(start, end)| char_window(&input, start, end))
                 .collect();
-            assert_eq!(chunk_message(&input, &cfg), expected, "{label}");
+            assert_eq!(chunks_of(&input, &cfg), expected, "{label}");
         }
     }
 }

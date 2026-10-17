@@ -26,8 +26,8 @@ use super::sse::{SseEvent, SseLineReader};
 use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
-    HistoryEntry, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult,
-    ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
+    HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
+    LlmResult, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -250,6 +250,7 @@ impl LlamaChatClient {
             return;
         }
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
+        let started_at = Instant::now();
         let before = (conv.message_count(), conv.approx_total_tokens());
         let summarizer = ContinuationSummarizer {
             client: self,
@@ -273,6 +274,15 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
+        if let Some((summary, cut)) = conv.summary_snapshot() {
+            let _ = tx
+                .send(LlmEvent::HistoryCompacted {
+                    summary: summary.to_string(),
+                    cut,
+                    elapsed: started_at.elapsed(),
+                })
+                .await;
+        }
         send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
     }
 
@@ -590,13 +600,15 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
-    async fn replace_history(&self, entries: Vec<HistoryEntry>) -> LlmResult<()> {
-        let messages = entries
+    async fn replace_history(&self, replay: HistoryReplay) -> LlmResult<()> {
+        let folded_steps: Vec<_> = replay
+            .folded_steps
             .into_iter()
             .map(history_message)
-            .collect::<LlmResult<Vec<_>>>()?;
+            .collect();
+        let messages = replay.entries.into_iter().map(history_message).collect();
         let mut conv = self.conv.lock().await;
-        conv.replace_messages(messages);
+        conv.replace_messages(replay.summary.as_deref(), &folded_steps, messages);
         Ok(())
     }
 
@@ -919,39 +931,6 @@ async fn forward(
     Ok(())
 }
 
-fn parse_tool_calls(json: Option<&Value>) -> LlmResult<Vec<ToolCallRecord>> {
-    let Some(value) = json else {
-        return Ok(Vec::new());
-    };
-    let Some(arr) = value.as_array() else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(arr.len());
-    for entry in arr {
-        let id = entry
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let name = entry
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| LlmError::ToolCallParse("history tool_call missing name".into()))?
-            .to_string();
-        let arguments = match entry.get("arguments") {
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => other.to_string(),
-            None => "{}".to_string(),
-        };
-        out.push(ToolCallRecord {
-            id,
-            name,
-            arguments,
-        });
-    }
-    Ok(out)
-}
-
 /// Record the step in `conv`. Tool calls from a stream that ended before
 /// the model's finish chunk are discarded rather than run half-built, and a
 /// response cut off at the token limit is not recorded at all.
@@ -995,12 +974,12 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
     Ok(StepOutcome::ToolCalls(parsed))
 }
 
-fn history_message(entry: HistoryEntry) -> LlmResult<Message> {
-    Ok(match entry.role {
-        HistoryRole::System => Message::text(Role::System, entry.content),
+fn history_message(entry: HistoryEntry) -> Message {
+    match entry.role {
         HistoryRole::User => Message::text(Role::User, entry.content),
         HistoryRole::Assistant => Message {
-            tool_calls: parse_tool_calls(entry.tool_calls_json.as_ref())?,
+            tool_calls: entry.tool_calls,
+            reasoning: entry.reasoning,
             ..Message::text(Role::Assistant, entry.content)
         },
         HistoryRole::Tool => match entry.tool_call_id {
@@ -1016,7 +995,7 @@ fn history_message(entry: HistoryEntry) -> LlmResult<Message> {
                 )
             }
         },
-    })
+    }
 }
 
 async fn flush_splitter(accum: &mut StreamAccum, tx: &mpsc::Sender<LlmEvent>) {

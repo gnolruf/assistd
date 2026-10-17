@@ -17,7 +17,7 @@ pub mod chat;
 pub mod llama_server;
 
 pub use assistd_utils::child_server::ReadyState;
-pub use chat::conversation::ToolCallRecord;
+pub use chat::conversation::{CompactionCut, ToolCallRecord};
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaServerSpec, VisionState, probe_capabilities_routed,
@@ -117,7 +117,7 @@ pub enum Thinking {
 pub enum LlmEvent {
     /// A streamed chunk of model output.
     Delta { text: String },
-    /// A streamed chunk of the model's reasoning; never persisted or spoken.
+    /// A streamed chunk of the model's reasoning; never spoken.
     ReasoningDelta { text: String },
     /// Every tool call the model requested in one step, in request
     /// order; emitted once, before the first of them runs.
@@ -143,6 +143,13 @@ pub enum LlmEvent {
         component: Component,
         event: StatusKind,
         message: String,
+    },
+    /// History was compacted: everything `cut` leaves out is now represented
+    /// by `summary`, which took `elapsed` to make.
+    HistoryCompacted {
+        summary: String,
+        cut: CompactionCut,
+        elapsed: Duration,
     },
     /// The model has finished generating.
     Done,
@@ -186,21 +193,32 @@ pub enum StepOutcome {
 /// Role of a persisted message being replayed into a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryRole {
-    System,
     User,
     Assistant,
     Tool,
 }
 
-/// One persisted message replayed into a backend's conversation;
-/// `tool_calls_json` is the stored JSON verbatim.
+/// One persisted message replayed into a backend's conversation.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub role: HistoryRole,
     pub content: String,
-    pub tool_calls_json: Option<Value>,
+    /// The model's reasoning for an assistant step; empty otherwise.
+    pub reasoning: String,
+    /// The tools an assistant step called; empty otherwise.
+    pub tool_calls: Vec<ToolCallRecord>,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
+}
+
+/// Persisted history to load into a backend's conversation.
+#[derive(Debug, Default)]
+pub struct HistoryReplay {
+    /// Compaction summary of the history before `entries`.
+    pub summary: Option<String>,
+    /// Tool steps folded out of the first entry's turn, replayed as its call log.
+    pub folded_steps: Vec<HistoryEntry>,
+    pub entries: Vec<HistoryEntry>,
 }
 
 /// A language model holding one in-memory conversation. Optional
@@ -239,9 +257,9 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
         Ok(())
     }
 
-    /// Replace the in-memory conversation with `entries`, preserving the
+    /// Replace the in-memory conversation with `replay`, preserving the
     /// static system prompt.
-    async fn replace_history(&self, _entries: Vec<HistoryEntry>) -> LlmResult<()> {
+    async fn replace_history(&self, _replay: HistoryReplay) -> LlmResult<()> {
         Ok(())
     }
 

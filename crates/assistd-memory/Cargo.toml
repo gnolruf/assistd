@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt", "macros", "fs", "time"] }
+tokio = { workspace = true, features = ["fs"] }
 tracing = { workspace = true }
 rusqlite = { workspace = true }
 tokio-rusqlite = { workspace = true }

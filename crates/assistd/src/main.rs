@@ -96,8 +96,8 @@ enum Commands {
     #[cfg(feature = "tray")]
     Tray(tray::TrayArgs),
 
-    /// Inspect or mutate persistent memory: search conversation
-    /// history, save / load / list / forget / delete key-value
+    /// Inspect or mutate persistent memory: search session
+    /// transcripts, save / load / list / forget / delete key-value
     /// memories.
     Memory(memory::MemoryArgs),
 }

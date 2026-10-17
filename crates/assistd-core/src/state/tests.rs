@@ -12,8 +12,8 @@ use assistd_ipc::{
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{
-    BranchId, ConversationStore, PersistedMessage, PersistedRole, SessionId,
-    SqliteConversationStore, SqliteHandle,
+    BranchId, HistoryRow, HistoryScope, MessageKind, PersistedMessage, PersistedRole,
+    PersistedToolCall, SessionId, SqliteHandle, SqliteTranscriptStore, TranscriptStore,
 };
 use assistd_tools::{
     CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolsDisabled,
@@ -1096,11 +1096,15 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
     res.unwrap();
     assert_eq!(events.last(), Some(&done("q2")), "{events:?}");
     state.drain_persistence_inflight().await;
-    let rows = conv.load_branch_history(branch).await.unwrap();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     let user_prompts: Vec<_> = rows
         .iter()
-        .filter(|r| r.role == PersistedRole::User)
-        .map(|r| r.content.as_str())
+        .filter(|r| r.message.role() == PersistedRole::User)
+        .map(|r| r.message.content.as_str())
         .collect();
     assert_eq!(user_prompts, ["kept"]);
 }
@@ -1204,10 +1208,14 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
     );
     state.drain_persistence_inflight().await;
 
-    let rows = conv.load_branch_history(branch).await.unwrap();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     let shape: Vec<_> = rows
         .iter()
-        .map(|r| (r.role, r.tool_call_id.as_deref()))
+        .map(|r| (r.message.role(), tool_call_id(r)))
         .collect();
     assert_eq!(
         shape,
@@ -1219,14 +1227,20 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
         ]
     );
     assert!(
-        rows[2].content.contains("cancelled during dispatch"),
+        rows[2]
+            .message
+            .content
+            .contains("cancelled during dispatch"),
         "{}",
-        rows[2].content
+        rows[2].message.content
     );
     assert!(
-        rows[3].content.contains("cancelled before dispatch"),
+        rows[3]
+            .message
+            .content
+            .contains("cancelled before dispatch"),
         "{}",
-        rows[3].content
+        rows[3].message.content
     );
 }
 
@@ -1293,30 +1307,23 @@ fn format_window_context_block_flattens_forged_delimiter_in_title() {
     assert!(block.chars().all(|c| c == '\n' || !c.is_control()));
 }
 
-/// An `AppState` over a fresh on-disk conversation store, positioned on
+/// An `AppState` over a fresh on-disk transcript store, positioned on
 /// the `main` branch of a new session.
 async fn branch_state_with(
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
-) -> (
-    Arc<AppState>,
-    Arc<dyn ConversationStore>,
-    SessionId,
-    BranchId,
-) {
+) -> (Arc<AppState>, Arc<dyn TranscriptStore>, SessionId, BranchId) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory.db");
     std::mem::forget(temp);
-    let (_tx, rx) = watch::channel(false);
-    let (handle, _writer_handle) = SqliteHandle::open(&path, rx).await.unwrap();
-    let handle = Arc::new(handle);
-    let conv: Arc<dyn ConversationStore> = Arc::new(SqliteConversationStore::new(handle.clone()));
+    let handle = SqliteHandle::open(&path).await.unwrap();
+    let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let session = SessionId::new();
     let branch = conv
-        .begin_session_with_main_branch(&session, 123)
+        .begin_session_with_main_branch(session, 123)
         .await
         .unwrap();
-    let ctx = Arc::new(ConversationContext::new(session.clone(), Some(branch)));
+    let ctx = Arc::new(SessionContext::new(session, Some(branch)));
     let config = Config::default();
     let subsystems = Subsystems::new(
         backend,
@@ -1324,8 +1331,8 @@ async fn branch_state_with(
         tools,
         assistd_voice::VoiceManager::new(true),
     );
-    let memory = MemoryStack::disabled(config.embedding.clone()).with_conversations(conv.clone());
-    let runtime = RuntimeState::new().with_conversation_ctx(ctx);
+    let memory = MemoryStack::disabled(config.embedding.clone()).with_transcripts(conv.clone());
+    let runtime = RuntimeState::new().with_session_ctx(ctx);
     let state = Arc::new(AppState {
         config,
         subsystems,
@@ -1335,12 +1342,7 @@ async fn branch_state_with(
     (state, conv, session, branch)
 }
 
-async fn fresh_branch_state() -> (
-    Arc<AppState>,
-    Arc<dyn ConversationStore>,
-    SessionId,
-    BranchId,
-) {
+async fn fresh_branch_state() -> (Arc<AppState>, Arc<dyn TranscriptStore>, SessionId, BranchId) {
     branch_state_with(
         Arc::new(EchoBackend::new()),
         Arc::new(ToolRegistry::default()),
@@ -1350,22 +1352,23 @@ async fn fresh_branch_state() -> (
 
 /// Persist one completed turn of `user` then `assistant` on `branch`.
 async fn append_turn(
-    conv: &Arc<dyn ConversationStore>,
-    session: &SessionId,
+    conv: &Arc<dyn TranscriptStore>,
     branch: BranchId,
     user: &str,
     assistant: &str,
 ) {
-    let turn = conv.begin_turn(session, user).await.unwrap();
-    for msg in [
-        PersistedMessage::user(user),
-        PersistedMessage::assistant_text(assistant),
-    ] {
-        conv.append_message_to_branch(session, branch, Some(turn), msg)
-            .await
-            .unwrap();
-    }
-    conv.end_turn(turn).await.unwrap();
+    let turn = conv
+        .begin_turn(branch, PersistedMessage::user(user))
+        .await
+        .unwrap()
+        .turn;
+    conv.append_message_to_branch(
+        branch,
+        turn,
+        PersistedMessage::assistant_text(assistant, None),
+    )
+    .await
+    .unwrap();
 }
 
 fn history(events: &[Event]) -> Vec<(Role, &str)> {
@@ -1392,12 +1395,12 @@ async fn fork_creates_branch_and_switches() {
     res.unwrap();
     assert_eq!(events.last(), Some(&done("rq")));
 
-    let (active_session, active_branch) = state.runtime.conversation_ctx.current().await;
-    assert_eq!(active_session.0, session.0);
+    let (active_session, active_branch) = state.runtime.session_ctx.current().await;
+    assert_eq!(active_session, session);
     let active_branch = active_branch.expect("fork lands on a saved branch");
     assert_ne!(active_branch, main_branch);
     assert_eq!(
-        conv.get_current_branch(&session).await.unwrap(),
+        conv.current_branch(session).await.unwrap(),
         Some(active_branch)
     );
     assert!(
@@ -1415,8 +1418,8 @@ async fn fork_creates_branch_and_switches() {
 #[tokio::test]
 async fn branches_lists_active_session_first() {
     let (state, conv, _session, main_branch) = fresh_branch_state().await;
-    conv.fork_branch(main_branch, "alt").await.unwrap();
-    conv.begin_session_with_main_branch(&SessionId::new(), 456)
+    conv.fork_and_switch(main_branch, "alt").await.unwrap();
+    conv.begin_session_with_main_branch(SessionId::new(), 456)
         .await
         .unwrap();
 
@@ -1439,9 +1442,9 @@ async fn branches_lists_active_session_first() {
 
 #[tokio::test]
 async fn switch_replays_history_into_event_stream() {
-    let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, &session, main_branch, "hello", "world").await;
-    conv.fork_branch(main_branch, "alt").await.unwrap();
+    let (state, conv, _, main_branch) = fresh_branch_state().await;
+    append_turn(&conv, main_branch, "hello", "world").await;
+    conv.fork_and_switch(main_branch, "alt").await.unwrap();
 
     let (res, events) = dispatch(
         &state,
@@ -1465,8 +1468,8 @@ async fn switch_replays_history_into_event_stream() {
 
 #[tokio::test]
 async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
-    let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, &session, main_branch, "hello", "world").await;
+    let (state, conv, _, main_branch) = fresh_branch_state().await;
+    append_turn(&conv, main_branch, "hello", "world").await;
 
     let (res, events) = dispatch(
         &state,
@@ -1487,9 +1490,9 @@ async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
 
 #[tokio::test]
 async fn undo_drops_last_turn_and_emits_count() {
-    let (state, conv, session, main_branch) = fresh_branch_state().await;
-    append_turn(&conv, &session, main_branch, "first", "a").await;
-    append_turn(&conv, &session, main_branch, "second", "b").await;
+    let (state, conv, _, main_branch) = fresh_branch_state().await;
+    append_turn(&conv, main_branch, "first", "a").await;
+    append_turn(&conv, main_branch, "second", "b").await;
 
     let (res, events) = dispatch(&state, Request::Undo { id: "rq".into() }).await;
     res.unwrap();
@@ -1507,11 +1510,12 @@ async fn undo_drops_last_turn_and_emits_count() {
     assert_eq!(applied, (2, Some("second")));
 
     let remaining: Vec<_> = conv
-        .load_branch_history(main_branch)
+        .load_branch(main_branch, HistoryScope::Whole)
         .await
         .unwrap()
+        .rows
         .into_iter()
-        .map(|r| r.content)
+        .map(|r| r.message.content)
         .collect();
     assert_eq!(remaining, ["first", "a"]);
 }
@@ -1522,8 +1526,8 @@ async fn new_session_writes_no_rows_until_the_first_message() {
     let (res, events) = dispatch(&state, Request::NewSession { id: "rq".into() }).await;
     res.unwrap();
 
-    let (unsaved_session, unsaved_branch) = state.runtime.conversation_ctx.current().await;
-    assert_ne!(unsaved_session.0, session.0);
+    let (unsaved_session, unsaved_branch) = state.runtime.session_ctx.current().await;
+    assert_ne!(unsaved_session, session);
     assert_eq!(unsaved_branch, None);
     assert_eq!(
         events,
@@ -1531,7 +1535,7 @@ async fn new_session_writes_no_rows_until_the_first_message() {
             Event::BranchSwitched {
                 id: "rq".into(),
                 branch_id: None,
-                session_id: unsaved_session.0.clone(),
+                session_id: unsaved_session.to_string(),
                 session_title: None,
                 name: "main".into(),
                 parent_branch_name: None,
@@ -1546,16 +1550,23 @@ async fn new_session_writes_no_rows_until_the_first_message() {
     res.unwrap();
     state.drain_persistence_inflight().await;
 
-    let (saved_session, saved_branch) = state.runtime.conversation_ctx.current().await;
-    assert_eq!(saved_session.0, unsaved_session.0);
+    let (saved_session, saved_branch) = state.runtime.session_ctx.current().await;
+    assert_eq!(saved_session, unsaved_session);
     let saved_branch = saved_branch.expect("the first message saves the session");
     assert_eq!(
-        conv.get_current_branch(&saved_session).await.unwrap(),
+        conv.current_branch(saved_session).await.unwrap(),
         Some(saved_branch)
     );
     assert_eq!(conv.list_branches().await.unwrap().len(), 2);
-    let rows = conv.load_branch_history(saved_branch).await.unwrap();
-    assert_eq!(rows.first().map(|row| row.content.as_str()), Some("hello"));
+    let rows = conv
+        .load_branch(saved_branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(
+        rows.first().map(|row| row.message.content.as_str()),
+        Some("hello")
+    );
 }
 
 #[tokio::test]
@@ -1563,7 +1574,7 @@ async fn resume_or_new_keeps_an_unsaved_session() {
     let (state, conv, _session, _branch) = fresh_branch_state().await;
     let (res, _) = dispatch(&state, Request::NewSession { id: "new".into() }).await;
     res.unwrap();
-    let (unsaved_session, _) = state.runtime.conversation_ctx.current().await;
+    let (unsaved_session, _) = state.runtime.session_ctx.current().await;
 
     let (res, events) = dispatch(
         &state,
@@ -1575,14 +1586,14 @@ async fn resume_or_new_keeps_an_unsaved_session() {
     .await;
     res.unwrap();
 
-    let (session, branch) = state.runtime.conversation_ctx.current().await;
-    assert_eq!(session.0, unsaved_session.0);
+    let (session, branch) = state.runtime.session_ctx.current().await;
+    assert_eq!(session, unsaved_session);
     assert_eq!(branch, None);
     assert!(
         matches!(
             events.first(),
             Some(Event::BranchSwitched { branch_id: None, session_id, .. })
-                if *session_id == unsaved_session.0
+                if *session_id == unsaved_session.to_string()
         ),
         "{events:?}"
     );
@@ -1602,8 +1613,15 @@ async fn narration_from_a_truncated_step_is_not_persisted() {
     res.unwrap();
     state.drain_persistence_inflight().await;
 
-    let rows = conv.load_branch_history(branch).await.unwrap();
-    let shape: Vec<_> = rows.iter().map(|r| (r.role, r.content.as_str())).collect();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
+    let shape: Vec<_> = rows
+        .iter()
+        .map(|r| (r.message.role(), r.message.content.as_str()))
+        .collect();
     assert_eq!(
         shape,
         [
@@ -1628,12 +1646,17 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
     res.unwrap();
     state.drain_persistence_inflight().await;
 
-    let rows = conv.load_branch_history(branch).await.unwrap();
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
     let shape_ignoring_tool_output: Vec<_> = rows
         .iter()
         .map(|r| {
-            let content = (r.role != PersistedRole::Tool).then_some(r.content.as_str());
-            (r.role, content, r.tool_call_id.as_deref())
+            let role = r.message.role();
+            let content = (role != PersistedRole::Tool).then_some(r.message.content.as_str());
+            (role, content, tool_call_id(r))
         })
         .collect();
     assert_eq!(
@@ -1647,14 +1670,24 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
         ]
     );
 
-    let ids: Vec<_> = rows[1]
-        .tool_calls
-        .as_ref()
-        .and_then(|v| v.as_array())
-        .expect("step row carries its calls")
+    let ids: Vec<_> = tool_calls(&rows[1])
         .iter()
-        .map(|c| c["id"].as_str().unwrap())
+        .map(|call| call.id.as_str())
         .collect();
     assert_eq!(ids, ["call-a", "call-b"]);
-    assert!(rows[4].tool_calls.is_none());
+    assert!(tool_calls(&rows[4]).is_empty());
+}
+
+fn tool_call_id(row: &HistoryRow) -> Option<&str> {
+    match &row.message.kind {
+        MessageKind::Tool { call_id, .. } => Some(call_id),
+        MessageKind::User | MessageKind::Assistant { .. } => None,
+    }
+}
+
+fn tool_calls(row: &HistoryRow) -> &[PersistedToolCall] {
+    match &row.message.kind {
+        MessageKind::Assistant { tool_calls, .. } => tool_calls,
+        MessageKind::User | MessageKind::Tool { .. } => &[],
+    }
 }

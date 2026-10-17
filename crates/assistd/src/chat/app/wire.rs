@@ -1,9 +1,9 @@
 //! Reducer for daemon events. Several streams feed it at once, so reply
 //! events are gated on the turn that owns the output pane.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity};
+use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity, TurnStats};
 use assistd_tools::{ConfirmationRequest, Risk};
 use serde_json::Value;
 
@@ -142,11 +142,8 @@ impl App {
 
     fn on_tool_call(&mut self, name: String, args: &Value) {
         self.output.finish_thinking();
-        let command = args
-            .get("command")
-            .and_then(Value::as_str)
-            .map_or(name, str::to_string);
-        self.output.begin_tool_block(command);
+        self.output
+            .begin_tool_block(tool_block_label(name, Some(args)));
     }
 
     fn on_tool_result(&mut self, result: &Value) {
@@ -284,9 +281,32 @@ impl App {
             Event::HistoryEntry {
                 role,
                 content,
+                reasoning,
+                reasoning_ms,
                 tool_name,
+                tool_args,
+                exit_code,
+                duration_ms,
+                compaction_ms,
+                turn_stats,
                 ..
-            } => self.on_history_entry(role, content, tool_name),
+            } => {
+                if let Some(ms) = reasoning_ms
+                    && !reasoning.is_empty()
+                {
+                    self.output
+                        .push_replayed_thinking(reasoning, Duration::from_millis(ms));
+                }
+                let outcome = (exit_code, duration_ms);
+                self.on_history_entry(role, content, tool_name, tool_args.as_ref(), outcome);
+                if let Some(ms) = compaction_ms {
+                    self.output
+                        .push_replayed_compaction(Duration::from_millis(ms));
+                }
+                if let Some(stats) = turn_stats {
+                    self.output.push_turn_summary(turn_summary(&stats));
+                }
+            }
             Event::UndoApplied {
                 removed_messages,
                 last_user_text,
@@ -321,7 +341,15 @@ impl App {
         }
     }
 
-    fn on_history_entry(&mut self, role: Role, content: String, tool_name: Option<String>) {
+    /// `outcome` is the tool row's exit code and duration, when stored.
+    fn on_history_entry(
+        &mut self,
+        role: Role,
+        content: String,
+        tool_name: Option<String>,
+        tool_args: Option<&Value>,
+        outcome: (Option<i64>, Option<u64>),
+    ) {
         match role {
             Role::User => self.output.push_user(&content),
             Role::Assistant => {
@@ -332,8 +360,15 @@ impl App {
                 }
             }
             Role::Tool => {
-                self.output
-                    .push_tool_block(tool_name.unwrap_or_default(), content, 0, 0);
+                let (exit_code, duration_ms) = outcome;
+                self.output.push_tool_block(
+                    tool_block_label(tool_name.unwrap_or_default(), tool_args),
+                    content,
+                    exit_code
+                        .and_then(|code| i32::try_from(code).ok())
+                        .unwrap_or(0),
+                    duration_ms.unwrap_or(0),
+                );
             }
             Role::System => self.output.push_info(&content),
         }
@@ -439,9 +474,12 @@ impl App {
         let started_at = self.reply_started_at;
         self.finish_reply();
         if let Some(started_at) = started_at {
-            let elapsed_secs = now.duration_since(started_at).as_secs();
-            self.output
-                .push_turn_summary(turn_summary(elapsed_secs, self.tokens.tokens()));
+            let elapsed = now.duration_since(started_at);
+            let stats = TurnStats {
+                duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                tokens: self.tokens.tokens(),
+            };
+            self.output.push_turn_summary(turn_summary(&stats));
         }
     }
 
@@ -483,4 +521,12 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
         Event::Transcription { id, text } => (!text.trim().is_empty()).then_some(id.as_str()),
         _ => None,
     }
+}
+
+/// A tool block's header: the `command` argument when the call has one,
+/// else the tool's name.
+fn tool_block_label(name: String, args: Option<&Value>) -> String {
+    args.and_then(|args| args.get("command"))
+        .and_then(Value::as_str)
+        .map_or(name, str::to_string)
 }
