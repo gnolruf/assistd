@@ -20,7 +20,13 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # zbus 5's split-out crates, merged into zbus 6. ksni (tray) still pins
+    # zbus 5; drop these once a ksni release moves to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant via zbus 5, pinned by ksni" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names via zbus 5, pinned by ksni" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via zbus 5, pinned by ksni" },
+]
 
 # ---------------------------------------------------------------------------
 # Licenses: keep the dependency set Apache-2.0-compatible.
