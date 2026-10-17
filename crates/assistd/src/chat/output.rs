@@ -2,7 +2,7 @@
 //! thinking blocks and thumbnails, wrapped to the viewport width on render.
 
 use std::ops::Range;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -68,14 +68,47 @@ pub(super) struct ThumbnailItem {
     pub protocol: StatefulProtocol,
 }
 
+/// When a thinking block or compaction line ran.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum BlockTiming {
+    Live { started_at: Instant },
+    Finished { elapsed: Duration },
+}
+
+impl BlockTiming {
+    fn live() -> Self {
+        Self::Live {
+            started_at: Instant::now(),
+        }
+    }
+
+    fn live_since(self) -> Option<Instant> {
+        match self {
+            Self::Live { started_at } => Some(started_at),
+            Self::Finished { .. } => None,
+        }
+    }
+
+    fn is_live(self) -> bool {
+        self.live_since().is_some()
+    }
+
+    /// Stop the clock; a block that is not live keeps its timing.
+    fn finish(&mut self) {
+        if let Self::Live { started_at } = *self {
+            *self = Self::Finished {
+                elapsed: started_at.elapsed(),
+            };
+        }
+    }
+}
+
 /// One reasoning phase, shown as an expandable block that auto-collapses
 /// when it finishes.
 #[derive(Debug, Clone)]
 pub(super) struct ThinkingBlock {
     pub text: String,
-    pub started_at: Instant,
-    /// `None` while still receiving deltas.
-    pub ended_at: Option<Instant>,
+    pub timing: BlockTiming,
     pub expanded: bool,
     /// Animation step of the live header's glyph.
     pub glyph_frame: u64,
@@ -84,9 +117,7 @@ pub(super) struct ThinkingBlock {
 /// One history compaction, shown as a single timed line.
 #[derive(Debug, Clone)]
 pub(super) struct CompactionBlock {
-    pub started_at: Instant,
-    /// `None` while the daemon is still compacting.
-    pub ended_at: Option<Instant>,
+    pub timing: BlockTiming,
     /// Animation step of the live line's glyph.
     pub glyph_frame: u64,
 }
@@ -168,10 +199,18 @@ impl OutputPane {
 
     /// Open a live compaction line.
     pub(super) fn begin_compaction(&mut self) {
+        self.push_compaction(BlockTiming::live());
+    }
+
+    /// Mark where stored history was compacted, which took `elapsed`.
+    pub(super) fn push_replayed_compaction(&mut self, elapsed: Duration) {
+        self.push_compaction(BlockTiming::Finished { elapsed });
+    }
+
+    fn push_compaction(&mut self, timing: BlockTiming) {
         self.close_open_assistant();
         self.items.push(OutputItem::Compaction(CompactionBlock {
-            started_at: Instant::now(),
-            ended_at: None,
+            timing,
             glyph_frame: 0,
         }));
         self.items.push(OutputItem::Text(Line::from("")));
@@ -182,7 +221,7 @@ impl OutputPane {
         if let Some(idx) = self.live_compaction_index()
             && let Some(OutputItem::Compaction(c)) = self.items.get_mut(idx)
         {
-            c.ended_at = Some(Instant::now());
+            c.timing.finish();
             self.wrap.invalidate(idx);
         }
     }
@@ -316,11 +355,20 @@ impl OutputPane {
 
     /// Open a collapsed thinking block.
     pub(super) fn begin_thinking(&mut self) {
+        self.push_thinking(String::new(), BlockTiming::live());
+    }
+
+    /// Append a finished, collapsed thinking block from stored history that
+    /// ran for `elapsed`.
+    pub(super) fn push_replayed_thinking(&mut self, text: String, elapsed: Duration) {
+        self.push_thinking(text, BlockTiming::Finished { elapsed });
+    }
+
+    fn push_thinking(&mut self, text: String, timing: BlockTiming) {
         self.close_open_assistant();
         self.items.push(OutputItem::Thinking(ThinkingBlock {
-            text: String::new(),
-            started_at: Instant::now(),
-            ended_at: None,
+            text,
+            timing,
             expanded: false,
             glyph_frame: 0,
         }));
@@ -331,7 +379,7 @@ impl OutputPane {
     pub(super) fn append_thinking(&mut self, delta: &str) {
         let needs_new = !matches!(
             self.items.last(),
-            Some(OutputItem::Thinking(t)) if t.ended_at.is_none()
+            Some(OutputItem::Thinking(t)) if t.timing.is_live()
         );
         if needs_new {
             self.begin_thinking();
@@ -347,8 +395,8 @@ impl OutputPane {
     pub(super) fn finish_thinking(&mut self) {
         for (idx, item) in self.items.iter_mut().enumerate().rev() {
             if let OutputItem::Thinking(t) = item {
-                if t.ended_at.is_none() {
-                    t.ended_at = Some(Instant::now());
+                if t.timing.is_live() {
+                    t.timing.finish();
                     t.expanded = false;
                     self.wrap.invalidate(idx);
                 }
@@ -395,7 +443,7 @@ impl OutputPane {
     fn live_compaction_index(&self) -> Option<usize> {
         self.items
             .iter()
-            .rposition(|item| matches!(item, OutputItem::Compaction(c) if c.ended_at.is_none()))
+            .rposition(|item| matches!(item, OutputItem::Compaction(c) if c.timing.is_live()))
     }
 
     fn live_thinking_index(&self) -> Option<usize> {
@@ -408,7 +456,7 @@ impl OutputPane {
                 OutputItem::Thinking(t) => Some((idx, t)),
                 _ => None,
             })?;
-        t.ended_at.is_none().then_some(idx)
+        t.timing.is_live().then_some(idx)
     }
 
     fn live_block(&self) -> Option<(usize, Instant)> {
@@ -417,8 +465,8 @@ impl OutputPane {
             .enumerate()
             .rev()
             .find_map(|(idx, item)| match item {
-                OutputItem::Thinking(t) if t.ended_at.is_none() => Some((idx, t.started_at)),
-                OutputItem::Compaction(c) if c.ended_at.is_none() => Some((idx, c.started_at)),
+                OutputItem::Thinking(t) => t.timing.live_since().map(|at| (idx, at)),
+                OutputItem::Compaction(c) => c.timing.live_since().map(|at| (idx, at)),
                 OutputItem::Tool(ToolBlock {
                     state: ToolState::Running { started_at },
                     ..
@@ -671,7 +719,7 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
         OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t),
         OutputItem::Thinking(t) => render_thinking_block(out, t, width, verbose),
         OutputItem::Compaction(c) => {
-            push_live_header(out, &compaction_text(c), c.ended_at.is_some(), width);
+            push_live_header(out, &compaction_text(c), !c.timing.is_live(), width);
         }
     }
 }
@@ -748,7 +796,7 @@ fn render_thinking_block(
     width: u16,
     verbose: bool,
 ) {
-    push_live_header(out, &thinking_header_text(t), t.ended_at.is_some(), width);
+    push_live_header(out, &thinking_header_text(t), !t.timing.is_live(), width);
     if (t.expanded || verbose) && !t.text.is_empty() {
         let bar = Span::styled("▎ ", thinking_bar_style());
         let inner_w = width.saturating_sub(2).max(1);
@@ -777,32 +825,28 @@ fn push_live_header(out: &mut Vec<Line<'static>>, text: &str, done: bool, width:
 }
 
 fn thinking_header_text(t: &ThinkingBlock) -> String {
-    let elapsed = elapsed_text(t.started_at, t.ended_at);
-    if t.ended_at.is_some() {
-        format!("Thought for {elapsed}")
-    } else {
-        format!("{} Thinking… ({elapsed})", thinking_glyph(t.glyph_frame))
+    match t.timing {
+        BlockTiming::Live { started_at } => format!(
+            "{} Thinking… ({})",
+            thinking_glyph(t.glyph_frame),
+            elapsed_text(started_at.elapsed())
+        ),
+        BlockTiming::Finished { elapsed } => format!("Thought for {}", elapsed_text(elapsed)),
     }
 }
 
 fn compaction_text(c: &CompactionBlock) -> String {
-    let elapsed = elapsed_text(c.started_at, c.ended_at);
-    if c.ended_at.is_some() {
-        format!("Compacted in {elapsed}")
-    } else {
-        format!(
-            "{} Compacting… ({elapsed})",
-            compaction_glyph(c.glyph_frame)
-        )
+    match c.timing {
+        BlockTiming::Live { started_at } => format!(
+            "{} Compacting… ({})",
+            compaction_glyph(c.glyph_frame),
+            elapsed_text(started_at.elapsed())
+        ),
+        BlockTiming::Finished { elapsed } => format!("Compacted in {}", elapsed_text(elapsed)),
     }
 }
 
-/// Time from `started_at` to `ended_at`, or to now while still running.
-fn elapsed_text(started_at: Instant, ended_at: Option<Instant>) -> String {
-    let elapsed = match ended_at {
-        Some(end) => end.saturating_duration_since(started_at),
-        None => started_at.elapsed(),
-    };
+fn elapsed_text(elapsed: Duration) -> String {
     compact_duration(elapsed.as_secs())
 }
 

@@ -50,7 +50,7 @@ pub enum ToolError {
     /// the offending argument.
     #[error("{0}")]
     InvalidArgs(String),
-    /// A memory, conversation, or semantic store call failed.
+    /// A memory, transcript, or semantic store call failed.
     #[error(transparent)]
     Store(#[from] assistd_memory::MemoryError),
 }

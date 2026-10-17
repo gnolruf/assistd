@@ -64,8 +64,8 @@ pub use assistd_wm::{NoWindowManager, WindowManager};
 
 pub use presence::{PresenceError, PresenceManager, RequestGuard};
 pub use state::{
-    AppState, ConversationContext, DispatchError, McpServerStatus, MemoryStack, RuntimeState,
-    Subsystems, TurnOrigin, history_entries,
+    AppState, DispatchError, McpServerStatus, MemoryStack, RuntimeState, SessionContext,
+    Subsystems, TurnOrigin, branch_replay,
 };
 
 /// Mode for the spill and scratch directories and any parents created for
@@ -129,7 +129,7 @@ pub struct BuildToolsDeps<'a> {
     pub semantic: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
     /// The active session, which `reminisce` excludes from its results.
-    pub current_session: watch::Receiver<Arc<SessionId>>,
+    pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
 }
 

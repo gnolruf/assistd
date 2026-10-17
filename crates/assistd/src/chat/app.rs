@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use assistd_core::PresenceState;
 use assistd_ipc::{Event, IpcClient, PermissionMode, Request, VoiceCaptureState};
 use assistd_tools::{Approval, Attachment, ConfirmationRequest};
+use assistd_utils::token_counter::TokenCounter;
 use chrono::{DateTime, Utc};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -16,7 +17,6 @@ use tokio::task::JoinSet;
 
 use super::input::InputLine;
 use super::output::OutputPane;
-use super::tokens::TokenCounter;
 
 mod attach;
 mod commands;
@@ -232,7 +232,7 @@ pub(super) struct App {
     /// Set by Esc on the slash popup; cleared when the buffer leaves its
     /// `/` prefix.
     slash_dismissed: bool,
-    /// `/resume` conversation list; `confirmation` takes precedence while
+    /// `/resume` session list; `confirmation` takes precedence while
     /// both are open.
     pub resume_picker: Option<ResumePicker>,
     /// Throttles rewraps for a live block's timer to 1 Hz.
@@ -274,7 +274,7 @@ pub(super) struct BranchListEntry {
     pub name: String,
     pub parent_branch_name: Option<String>,
     pub fork_point_seq: Option<i64>,
-    pub message_count: i64,
+    pub message_count: u64,
     pub is_current_in_session: bool,
     pub is_active_session: bool,
     pub session_short: String,
@@ -306,7 +306,7 @@ impl BranchListEntry {
     }
 }
 
-/// Conversation list `/resume` draws in the chat panel, narrowed by a
+/// Session list `/resume` draws in the chat panel, narrowed by a
 /// typed search.
 pub(super) struct ResumePicker {
     entries: Vec<BranchListEntry>,

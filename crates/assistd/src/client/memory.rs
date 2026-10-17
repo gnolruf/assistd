@@ -20,7 +20,7 @@ pub(crate) struct MemoryArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum MemoryAction {
-    /// Semantic search over persisted conversation content. Embeds the
+    /// Semantic search over persisted session transcripts. Embeds the
     /// query and ranks past messages by cosine similarity, so
     /// paraphrased phrasings still hit. Requires the embedding
     /// subsystem; with embeddings disabled it returns no hits.
@@ -48,7 +48,7 @@ pub(crate) enum MemoryAction {
     Forget { id: i64 },
     /// Remove `key` from the store. No-op if absent.
     Delete { key: String },
-    /// Re-embed every memory and conversation chunk that has no
+    /// Re-embed every memory and transcript chunk that has no
     /// embedding under the daemon's currently-configured model.
     /// Recovers from a model swap or from runs where the embedding
     /// subsystem was unavailable. Prints one progress line per kind
@@ -93,7 +93,7 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
     run_one_shot(req, |event| {
         match event {
             Event::SemanticHit {
-                conversation_id,
+                message_id,
                 session_id,
                 timestamp,
                 role,
@@ -106,7 +106,7 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                 let single_line = escape_controls_single_line(&flattened);
                 writeln!(
                     io::stdout(),
-                    "{timestamp}  {role:9}  conv={conversation_id:<6}  sess={session_short}  sim={similarity:.2}  {single_line}"
+                    "{timestamp}  {role:9}  msg={message_id:<6}  sess={session_short}  sim={similarity:.2}  {single_line}"
                 )?;
             }
             Event::MemoryValue { key, value, .. } => match value {

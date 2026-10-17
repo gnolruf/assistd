@@ -13,13 +13,17 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
-use assistd_memory::{PersistedMessage, SessionId, TurnId};
+use assistd_memory::{
+    PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
+};
 use assistd_tools::{Attachment, inherit_confirm_router};
+use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
 };
 
 use super::context::combine_context_blocks;
+use super::persistence::PersistTarget;
 use super::wire::decode_wire_attachments;
 use super::{AppState, DispatchError, RuntimeState, send_error};
 use crate::Agent;
@@ -84,29 +88,67 @@ impl SpeechPipeline {
     }
 }
 
+/// Reasoning streamed so far for the current step.
+struct ReasoningTrace {
+    text: String,
+    started_at: Instant,
+    last_delta_at: Instant,
+}
+
+impl ReasoningTrace {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            text: String::new(),
+            started_at: now,
+            last_delta_at: now,
+        }
+    }
+
+    fn push(&mut self, delta: &str) {
+        self.text.push_str(delta);
+        self.last_delta_at = Instant::now();
+    }
+
+    fn into_reasoning(self) -> Reasoning {
+        let elapsed = self.last_delta_at.duration_since(self.started_at);
+        Reasoning {
+            text: self.text,
+            duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
 /// Translates one turn's agent events into wire events, persisting the
 /// transcript as it goes.
 struct TurnTranslator {
     id: String,
-    turn_id: Option<TurnId>,
+    /// `None` when the session could not be saved, so nothing is persisted.
+    persist: Option<PersistTarget>,
     assistant_accum: String,
+    reasoning: Option<ReasoningTrace>,
     awaiting_tool_result: bool,
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
     done_emitted: bool,
+    started_at: Instant,
+    tokens: TokenCounter,
 }
 
 impl TurnTranslator {
-    fn new(id: String, turn_id: Option<TurnId>) -> Self {
+    fn new(id: String, persist: Option<PersistTarget>) -> Self {
         Self {
             id,
-            turn_id,
+            persist,
             assistant_accum: String::new(),
+            reasoning: None,
             awaiting_tool_result: false,
             last_emit_at: Instant::now()
                 .checked_sub(LAST_DELTA_DEBOUNCE)
                 .unwrap_or_else(Instant::now),
             done_emitted: false,
+            started_at: Instant::now(),
+            tokens: TokenCounter::new(),
         }
     }
 
@@ -121,11 +163,18 @@ impl TurnTranslator {
         let id = self.id.clone();
         let translated = match event {
             LlmEvent::Delta { text } => {
+                self.tokens.on_delta();
                 let sentences = sentence_buf.push(&text);
                 self.accumulate_delta(&state.runtime, &text);
                 (Event::Delta { id, text }, sentences)
             }
-            LlmEvent::ReasoningDelta { text } => (Event::ReasoningDelta { id, text }, Vec::new()),
+            LlmEvent::ReasoningDelta { text } => {
+                self.tokens.on_delta();
+                self.reasoning
+                    .get_or_insert_with(ReasoningTrace::new)
+                    .push(&text);
+                (Event::ReasoningDelta { id, text }, Vec::new())
+            }
             LlmEvent::ToolCallsRequested { calls } => {
                 self.persist_tool_calls(state, &calls);
                 return None;
@@ -149,13 +198,19 @@ impl TurnTranslator {
                 result,
             } => {
                 self.awaiting_tool_result = false;
-                state.persist_message_fire_and_forget(
-                    self.turn_id,
-                    PersistedMessage::tool_result(tool_result_body(&result), call_id, name.clone()),
+                self.persist_message(
+                    state,
+                    PersistedMessage::tool_result(
+                        tool_result_body(&result),
+                        call_id,
+                        name.clone(),
+                        tool_outcome(&result),
+                    ),
                 );
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
             LlmEvent::ContextSize { tokens, total } => {
+                self.tokens.on_context_size(tokens, total);
                 (Event::ContextSize { id, tokens, total }, Vec::new())
             }
             LlmEvent::Status {
@@ -166,6 +221,7 @@ impl TurnTranslator {
             } => {
                 if matches!(event, StatusKind::Restarting | StatusKind::OutputTruncated) {
                     self.assistant_accum.clear();
+                    self.reasoning = None;
                     let _ = sentence_buf.finish();
                 }
                 (
@@ -178,6 +234,20 @@ impl TurnTranslator {
                     },
                     Vec::new(),
                 )
+            }
+            LlmEvent::HistoryCompacted {
+                summary,
+                cut,
+                elapsed,
+            } => {
+                if let Some(target) = &self.persist {
+                    let cut = SummaryCut {
+                        kept_turns: cut.kept_turns,
+                        kept_steps: cut.kept_steps,
+                    };
+                    state.persist_summary_fire_and_forget(target.branch, summary, cut, elapsed);
+                }
+                return None;
             }
             LlmEvent::Done => {
                 let sentences = sentence_buf.finish().into_iter().collect();
@@ -202,19 +272,44 @@ impl TurnTranslator {
         if !narration.is_empty() {
             publish_last_delta(&state.runtime, &self.id, &narration);
         }
-        state.persist_message_fire_and_forget(self.turn_id, tool_calls_message(narration, calls));
+        let reasoning = self.take_reasoning();
+        self.persist_message(state, tool_calls_message(narration, calls, reasoning));
     }
 
     fn persist_final_text(&mut self, state: &AppState) {
+        let reasoning = self.take_reasoning();
         if self.assistant_accum.is_empty() {
             return;
         }
         let final_text = std::mem::take(&mut self.assistant_accum);
         publish_last_delta(&state.runtime, &self.id, &final_text);
-        state.persist_message_fire_and_forget(
-            self.turn_id,
-            PersistedMessage::assistant_text(final_text),
+        self.persist_message(
+            state,
+            PersistedMessage::assistant_text(final_text, reasoning),
         );
+    }
+
+    /// Record how long the turn ran and the tokens it produced.
+    fn persist_turn_stats(&self, state: &AppState) {
+        let Some(target) = &self.persist else {
+            return;
+        };
+        let elapsed = self.started_at.elapsed();
+        let stats = TurnStats {
+            duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            generated_tokens: self.tokens.tokens(),
+        };
+        state.persist_turn_stats_fire_and_forget(target.clone(), stats);
+    }
+
+    fn take_reasoning(&mut self) -> Option<Reasoning> {
+        self.reasoning.take().map(ReasoningTrace::into_reasoning)
+    }
+
+    fn persist_message(&self, state: &AppState, msg: PersistedMessage) {
+        if let Some(target) = &self.persist {
+            state.persist_message_fire_and_forget(target.clone(), msg);
+        }
     }
 }
 
@@ -268,7 +363,7 @@ impl AppState {
         }
         self.require_vision_for(&id, &attachments, &tx).await?;
 
-        let (current_session, turn_id) = self.open_persistence_turn(&text).await;
+        let (current_session, persist) = self.open_persistence_turn(&text).await;
         let chat_focused = self.refresh_chat_focus(&id);
         self.assemble_transient_context(&text, origin, chat_focused)
             .await;
@@ -284,7 +379,7 @@ impl AppState {
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
         let done_emitted = self
-            .drive_event_loop(id.clone(), llm_rx, &tx, speech, turn_id, &cancel)
+            .drive_event_loop(id.clone(), llm_rx, &tx, speech, persist, &cancel)
             .await;
 
         let agent_result = agent_task.await;
@@ -298,7 +393,7 @@ impl AppState {
             );
         }
 
-        self.finalize_turn(id, turn_id, agent_result, speech_handle, &tx, done_emitted)
+        self.finalize_turn(id, agent_result, speech_handle, &tx, done_emitted)
             .await
     }
 
@@ -376,11 +471,13 @@ impl AppState {
         })
     }
 
-    async fn open_persistence_turn(&self, text: &str) -> (Arc<SessionId>, Option<TurnId>) {
-        let (current_session, turn_id) = match self.saved_conversation().await {
-            Ok((session, _branch)) => {
-                let turn_id = self.begin_persisted_turn(&session, text).await;
-                (session, turn_id)
+    /// Save the session if needed and queue the write opening the turn with
+    /// the user's prompt; the target is `None` when the session could not be saved.
+    async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<PersistTarget>) {
+        match self.saved_session().await {
+            Ok((session, branch)) => {
+                let target = self.open_turn_fire_and_forget(branch, PersistedMessage::user(text));
+                (session, Some(target))
             }
             Err(e) => {
                 warn!(
@@ -388,25 +485,8 @@ impl AppState {
                     error = %e,
                     "saving the session failed; turn will not be persisted"
                 );
-                let (session, _branch) = self.runtime.conversation_ctx.current().await;
+                let (session, _branch) = self.runtime.session_ctx.current().await;
                 (session, None)
-            }
-        };
-        self.persist_message_fire_and_forget(turn_id, PersistedMessage::user(text.to_string()));
-        (current_session, turn_id)
-    }
-
-    async fn begin_persisted_turn(&self, session: &SessionId, text: &str) -> Option<TurnId> {
-        match self.memory.conversations.begin_turn(session, text).await {
-            Ok(turn) if turn.0 != 0 => Some(turn),
-            Ok(_) => None,
-            Err(e) => {
-                warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "begin_turn failed; turn will not be persisted"
-                );
-                None
             }
         }
     }
@@ -517,10 +597,10 @@ impl AppState {
         mut llm_rx: mpsc::Receiver<LlmEvent>,
         tx: &mpsc::Sender<Event>,
         mut speech: SpeechPipeline,
-        turn_id: Option<TurnId>,
+        persist: Option<PersistTarget>,
         cancel: &CancellationToken,
     ) -> bool {
-        let mut translator = TurnTranslator::new(id, turn_id);
+        let mut translator = TurnTranslator::new(id, persist);
         let mut client_connected = true;
         loop {
             let idle_timeout = speech
@@ -554,6 +634,7 @@ impl AppState {
             }
             speech.speak(sentences).await;
         }
+        translator.persist_turn_stats(self);
         translator.done_emitted
     }
 
@@ -569,31 +650,16 @@ impl AppState {
         }
     }
 
-    /// End the persisted turn, wait for speech, and report the agent's
-    /// outcome. Sends `Done` if the stream did not, as a cancelled turn
-    /// ends without one.
+    /// Wait for speech and report the agent's outcome. Sends `Done` if the
+    /// stream did not, as a cancelled turn ends without one.
     async fn finalize_turn(
         &self,
         id: String,
-        turn_id: Option<TurnId>,
         agent_result: Result<Result<(), LlmError>, JoinError>,
         speech_handle: JoinHandle<()>,
         tx: &mpsc::Sender<Event>,
         done_emitted: bool,
     ) -> Result<(), DispatchError> {
-        if let Some(turn) = turn_id {
-            let conversations = self.memory.conversations.clone();
-            self.runtime.persistence_tracker.spawn(async move {
-                if let Err(e) = conversations.end_turn(turn).await {
-                    warn!(
-                        target: "assistd::memory",
-                        error = %e,
-                        "end_turn failed (continuing)"
-                    );
-                }
-            });
-        }
-
         let _ = speech_handle.await;
 
         match agent_result {
@@ -722,17 +788,39 @@ async fn speak_sentence(
     }
 }
 
-fn tool_calls_message(narration: String, calls: &[ToolCall]) -> PersistedMessage {
+fn tool_calls_message(
+    narration: String,
+    calls: &[ToolCall],
+    reasoning: Option<Reasoning>,
+) -> PersistedMessage {
     let content = if narration.trim().is_empty() {
         String::new()
     } else {
         narration
     };
-    let calls_json = calls
+    let persisted = calls
         .iter()
-        .map(|call| serde_json::json!({"id": call.id, "name": call.name, "arguments": call.arguments}))
+        .map(|call| PersistedToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        })
         .collect();
-    PersistedMessage::assistant_tool_calls(content, calls_json)
+    PersistedMessage::assistant_tool_calls(content, persisted, reasoning)
+}
+
+/// Exit code and duration from a tool's raw result JSON; absent fields read as zero.
+fn tool_outcome(result: &Value) -> ToolOutcome {
+    ToolOutcome {
+        exit_code: result
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        duration_ms: result
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    }
 }
 
 fn tool_result_body(result: &Value) -> String {

@@ -10,12 +10,11 @@ use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, Config, ConversationContext, MemoryStack, PresenceManager, RuntimeState, Subsystems,
+    AppState, Config, MemoryStack, PresenceManager, RuntimeState, SessionContext, Subsystems,
     VisionRevalidator, VoiceManager,
 };
 use assistd_ipc::IpcClient;
-use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
-use assistd_memory::HistoryRow;
+use assistd_llm::{HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
@@ -136,15 +135,12 @@ async fn start(
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
-    let mut memory = memory_init::init(&config, &stages.memory_writer).await;
+    let mut memory = memory_init::init(&config).await;
     let (embed, embed_startup) =
         embed_init::prepare(&config, &api_key, memory.sqlite_handle.as_ref());
     let window = wm_init::init(&config, &stages.tools).await;
 
-    let conversation_ctx = Arc::new(ConversationContext::from_arc(
-        memory.session_id.clone(),
-        memory.branch_id,
-    ));
+    let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
 
     let tools = tools_init::init(
         &config,
@@ -153,14 +149,14 @@ async fn start(
             vision_gate: vision_revalidator.gate(),
             memory: &memory,
             embed: &embed,
-            current_session: conversation_ctx.session_updates(),
+            current_session: session_ctx.session_updates(),
             window_manager: window.manager.clone(),
         },
     )?;
 
     let chat = build_chat_backend(&config, &api_key, health_probe)?;
     let resumed_history = std::mem::take(&mut memory.resumed_history);
-    replay_history(chat.as_ref(), &resumed_history).await;
+    replay_history(chat.as_ref(), resumed_history).await;
 
     let subsystems = Subsystems::new(chat, presence.clone(), tools.registry, voice.clone())
         .with_window_manager(window.manager.clone())
@@ -173,7 +169,7 @@ async fn start(
         config,
         subsystems,
         memory: memory_stack,
-        runtime: RuntimeState::new().with_conversation_ctx(conversation_ctx),
+        runtime: RuntimeState::new().with_session_ctx(session_ctx),
     });
     let persistence_tracker = state.runtime.persistence_tracker_handle();
     let background = spawn_background_starts(
@@ -323,27 +319,20 @@ fn build_memory_stack(
     memory: &MemorySubsystem,
     embed: &EmbeddingHandles,
 ) -> MemoryStack {
-    let stack = MemoryStack::disabled(config.embedding.clone())
+    MemoryStack::disabled(config.embedding.clone())
         .with_memory(memory.memory_store.clone())
-        .with_conversations(memory.conversation_store.clone())
+        .with_transcripts(memory.transcript_store.clone())
         .with_embedder(embed.embedder.clone())
         .with_semantic(embed.semantic_store.clone())
-        .with_embed_tx(embed.embed_tx.clone());
-    match memory.sqlite_handle.clone() {
-        Some(handle) => stack.with_chunks(handle),
-        None => stack,
-    }
+        .with_embed_tx(embed.embed_tx.clone())
 }
 
-async fn replay_history(chat: &dyn LlmBackend, rows: &[HistoryRow]) {
-    if rows.is_empty() {
+async fn replay_history(chat: &dyn LlmBackend, replay: HistoryReplay) {
+    if replay.entries.is_empty() {
         return;
     }
-    let count = rows.len();
-    if let Err(e) = chat
-        .replace_history(assistd_core::history_entries(rows))
-        .await
-    {
+    let count = replay.entries.len();
+    if let Err(e) = chat.replace_history(replay).await {
         tracing::warn!("memory: resume replay failed: {e:#}");
     } else {
         info!("memory: resumed {count} message(s) from prior branch");

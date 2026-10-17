@@ -20,56 +20,50 @@ const EVENTS_BUS_CAPACITY: usize = 256;
 /// The active session and, once its first message is saved, the branch
 /// it lives on; always read and replaced together.
 #[derive(Debug)]
-pub struct ConversationContext {
-    inner: RwLock<ConversationContextInner>,
+pub struct SessionContext {
+    inner: RwLock<SessionContextInner>,
     /// Lets holders that cannot await the lock read the session
     /// synchronously.
-    session: watch::Sender<Arc<SessionId>>,
+    session: watch::Sender<SessionId>,
 }
 
-impl ConversationContext {
+impl SessionContext {
     /// Point at `branch_id` of `session_id`; `None` means the session has
     /// no rows yet and is saved with its first message.
     pub fn new(session_id: SessionId, branch_id: Option<BranchId>) -> Self {
-        Self::from_arc(Arc::new(session_id), branch_id)
-    }
-
-    /// [`Self::new`] for an already shared session id.
-    pub fn from_arc(session_id: Arc<SessionId>, branch_id: Option<BranchId>) -> Self {
-        let (session, _) = watch::channel(session_id.clone());
         Self {
-            inner: RwLock::new(ConversationContextInner {
+            inner: RwLock::new(SessionContextInner {
                 session_id,
                 branch_id,
             }),
-            session,
+            session: watch::channel(session_id).0,
         }
     }
 
     /// Watch the active session id.
-    pub fn session_updates(&self) -> watch::Receiver<Arc<SessionId>> {
+    pub fn session_updates(&self) -> watch::Receiver<SessionId> {
         self.session.subscribe()
     }
 
     /// The active session and its branch, `None` while the session is unsaved.
-    pub async fn current(&self) -> (Arc<SessionId>, Option<BranchId>) {
+    pub async fn current(&self) -> (SessionId, Option<BranchId>) {
         let active = self.inner.read().await;
-        (active.session_id.clone(), active.branch_id)
+        (active.session_id, active.branch_id)
     }
 
     /// Make `branch_id` of `session_id` active and notify
     /// [`Self::session_updates`] watchers.
-    pub async fn replace(&self, session_id: Arc<SessionId>, branch_id: Option<BranchId>) {
+    pub async fn replace(&self, session_id: SessionId, branch_id: Option<BranchId>) {
         let mut active = self.inner.write().await;
-        active.session_id = session_id.clone();
+        active.session_id = session_id;
         active.branch_id = branch_id;
         self.session.send_replace(session_id);
     }
 }
 
-#[derive(Debug, Clone)]
-struct ConversationContextInner {
-    session_id: Arc<SessionId>,
+#[derive(Debug, Clone, Copy)]
+struct SessionContextInner {
+    session_id: SessionId,
     branch_id: Option<BranchId>,
 }
 
@@ -82,12 +76,12 @@ pub(in crate::state) struct PttCapture {
     pub(in crate::state) cancel: CancellationToken,
 }
 
-/// Per-process request bookkeeping: the active conversation, turn
+/// Per-process request bookkeeping: the active session, turn
 /// serialisation and cancellation, persistence ordering, and the events
 /// bus.
 #[derive(Debug)]
 pub struct RuntimeState {
-    pub conversation_ctx: Arc<ConversationContext>,
+    pub session_ctx: Arc<SessionContext>,
     /// Serialises whole agent turns.
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
@@ -112,7 +106,7 @@ impl RuntimeState {
     pub fn new() -> Self {
         let (events_bus, _) = broadcast::channel(EVENTS_BUS_CAPACITY);
         Self {
-            conversation_ctx: Arc::new(ConversationContext::new(SessionId::new(), None)),
+            session_ctx: Arc::new(SessionContext::new(SessionId::new(), None)),
             agent_turn_lock: Arc::new(Mutex::new(())),
             persistence_tracker: TaskTracker::new(),
             ptt_capture: Arc::new(Mutex::new(None)),
@@ -124,9 +118,9 @@ impl RuntimeState {
         }
     }
 
-    /// Replace the active-conversation pointer.
-    pub fn with_conversation_ctx(mut self, ctx: Arc<ConversationContext>) -> Self {
-        self.conversation_ctx = ctx;
+    /// Replace the active-session pointer.
+    pub fn with_session_ctx(mut self, ctx: Arc<SessionContext>) -> Self {
+        self.session_ctx = ctx;
         self
     }
 

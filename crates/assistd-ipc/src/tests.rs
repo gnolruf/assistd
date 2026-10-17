@@ -336,7 +336,7 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
         (
             Event::SemanticHit {
                 id: id(),
-                conversation_id: 42,
+                message_id: 42,
                 chunk_id: 7,
                 session_id: "s".into(),
                 timestamp: "2026-04-28T00:00:00Z".into(),
@@ -344,7 +344,7 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
                 content: "the rust embeddings daemon".into(),
                 similarity: 0.5,
             },
-            r#"{"type":"semantic_hit","id":"r","conversation_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5}"#,
+            r#"{"type":"semantic_hit","id":"r","message_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5}"#,
         ),
         (
             Event::MemoryValue {
@@ -482,9 +482,36 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 seq: 3,
                 role: Role::Assistant,
                 content: "hello".into(),
+                reasoning: "greet back".into(),
+                reasoning_ms: Some(1500),
                 tool_name: None,
+                tool_args: None,
+                exit_code: None,
+                duration_ms: None,
+                compaction_ms: None,
+                turn_stats: None,
             },
-            r#"{"type":"history_entry","id":"r","seq":3,"role":"assistant","content":"hello","tool_name":null}"#,
+            r#"{"type":"history_entry","id":"r","seq":3,"role":"assistant","content":"hello","reasoning":"greet back","reasoning_ms":1500,"tool_name":null}"#,
+        ),
+        (
+            Event::HistoryEntry {
+                id: id(),
+                seq: 4,
+                role: Role::Tool,
+                content: "out".into(),
+                reasoning: String::new(),
+                reasoning_ms: None,
+                tool_name: Some("run".into()),
+                tool_args: Some(serde_json::json!({"command": "ls"})),
+                exit_code: Some(1),
+                duration_ms: Some(7),
+                compaction_ms: Some(4200),
+                turn_stats: Some(TurnStats {
+                    duration_ms: 5300,
+                    tokens: 812,
+                }),
+            },
+            r#"{"type":"history_entry","id":"r","seq":4,"role":"tool","content":"out","tool_name":"run","tool_args":{"command":"ls"},"exit_code":1,"duration_ms":7,"compaction_ms":4200,"turn_stats":{"duration_ms":5300,"tokens":812}}"#,
         ),
         (
             Event::UndoApplied {

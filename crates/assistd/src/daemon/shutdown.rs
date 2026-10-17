@@ -26,7 +26,6 @@ pub(super) struct ShutdownStages {
     pub(super) tools: watch::Sender<bool>,
     pub(super) embed_worker: watch::Sender<bool>,
     pub(super) embed_server: watch::Sender<bool>,
-    pub(super) memory_writer: watch::Sender<bool>,
 }
 
 impl ShutdownStages {
@@ -37,7 +36,6 @@ impl ShutdownStages {
             tools: watch::channel(false).0,
             embed_worker: watch::channel(false).0,
             embed_server: watch::channel(false).0,
-            memory_writer: watch::channel(false).0,
         }
     }
 
@@ -49,7 +47,6 @@ impl ShutdownStages {
             &self.tools,
             &self.embed_worker,
             &self.embed_server,
-            &self.memory_writer,
         ] {
             stage.send_replace(true);
         }
@@ -86,7 +83,7 @@ impl DaemonShutdown {
         self.embed
             .shutdown(&stages.embed_worker, &stages.embed_server)
             .await;
-        self.memory.shutdown(&stages.memory_writer).await;
+        self.memory.shutdown().await;
     }
 }
 

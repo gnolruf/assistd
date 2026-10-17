@@ -1,9 +1,9 @@
 //! CRUD façade over [`assistd_memory::MemoryStore`] and
-//! [`assistd_memory::ConversationStore`].
+//! [`assistd_memory::TranscriptStore`].
 
 use std::sync::Arc;
 
-use assistd_memory::{ConversationStore, MemoryError, MemoryStore};
+use assistd_memory::{MemoryError, MemoryId, MemoryStore, SavedMemory, TranscriptStore};
 
 pub use assistd_memory::MemoryRecord;
 
@@ -12,25 +12,22 @@ type Result<T> = std::result::Result<T, MemoryError>;
 /// Result cap applied when a search passes `limit = 0`.
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 
-/// Combined handle over the key/value store and conversation history.
+/// Combined handle over the key/value store and session transcripts.
 /// Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct MemoryOps {
     pub store: Arc<dyn MemoryStore>,
-    pub conversations: Arc<dyn ConversationStore>,
+    pub transcripts: Arc<dyn TranscriptStore>,
 }
 
 impl MemoryOps {
     /// Bundle the two stores into one handle.
-    pub fn new(store: Arc<dyn MemoryStore>, conversations: Arc<dyn ConversationStore>) -> Self {
-        Self {
-            store,
-            conversations,
-        }
+    pub fn new(store: Arc<dyn MemoryStore>, transcripts: Arc<dyn TranscriptStore>) -> Self {
+        Self { store, transcripts }
     }
 
-    /// Save a key/value memory and return its row id.
-    pub async fn save(&self, key: &str, value: String) -> Result<i64> {
+    /// Save a key/value memory.
+    pub async fn save(&self, key: &str, value: String) -> Result<SavedMemory> {
         self.store.save(key, value).await
     }
 
@@ -50,11 +47,11 @@ impl MemoryOps {
     }
 
     /// Delete a memory by row id, returning its key on a hit.
-    pub async fn forget(&self, id: i64) -> Result<Option<String>> {
+    pub async fn forget(&self, id: MemoryId) -> Result<Option<String>> {
         self.store.delete_by_id(id).await
     }
 
-    /// Full `(id, key, value)` rows under `prefix`, in backend order.
+    /// Full rows under `prefix`, in backend order.
     pub async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
         self.store.list_full(prefix).await
     }

@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use assistd_core::{PresenceState, VoiceCaptureState};
-use assistd_ipc::PermissionMode;
+use assistd_ipc::{PermissionMode, TurnStats};
 use assistd_tools::ConfirmationRequest;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -181,7 +181,7 @@ fn picker_scroll_start(selected: usize, total: usize, visible: usize) -> usize {
     (selected + 1).saturating_sub(visible).min(total - visible)
 }
 
-/// The conversation title behind a selection pointer, then when it was last
+/// The session title behind a selection pointer, then when it was last
 /// active, its size and its branch.
 fn resume_entry_rows(
     entry: &BranchListEntry,
@@ -563,9 +563,9 @@ fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at
 }
 
 /// `Worked for 1m 5s (1.2k tokens)`, closing a finished reply.
-pub(super) fn turn_summary(elapsed_secs: u64, tokens: u64) -> String {
-    let elapsed = compact_duration(elapsed_secs);
-    match tokens {
+pub(super) fn turn_summary(stats: &TurnStats) -> String {
+    let elapsed = compact_duration(stats.duration_ms / 1000);
+    match stats.tokens {
         0 => format!("Worked for {elapsed}"),
         tokens => format!("Worked for {elapsed} ({} tokens)", compact_count(tokens)),
     }
