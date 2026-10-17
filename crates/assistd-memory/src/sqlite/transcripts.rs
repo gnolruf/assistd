@@ -11,8 +11,9 @@ use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
     AppendedMessage, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow, MemoryError,
-    MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall, Result,
-    ResumeCandidate, Seq, SessionId, ToolOutcome, TranscriptStore, TurnId, UndoOutcome,
+    MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,
+    Reasoning, Result, ResumeCandidate, Seq, SessionId, ToolOutcome, TranscriptStore, TurnId,
+    UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
@@ -258,8 +259,9 @@ impl TranscriptStore for SqliteTranscriptStore {
                     rusqlite::params![new_branch, src],
                 )?;
                 tx.execute(
-                    "INSERT INTO branch_summaries (branch_id, through_seq, content)
-                     SELECT ?1, through_seq, content FROM branch_summaries WHERE branch_id = ?2",
+                    "INSERT INTO branch_summaries (branch_id, through_seq, content, duration_ms)
+                     SELECT ?1, through_seq, content, duration_ms
+                     FROM branch_summaries WHERE branch_id = ?2",
                     rusqlite::params![new_branch, src],
                 )?;
                 tx.execute(
@@ -284,6 +286,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                              m.role,
                              m.content,
                              m.reasoning,
+                             m.reasoning_ms,
                              m.tool_calls,
                              m.tool_call_id,
                              m.tool_name,
@@ -307,14 +310,16 @@ impl TranscriptStore for SqliteTranscriptStore {
         branch: BranchId,
         summary: String,
         kept_turns: NonZeroUsize,
+        duration_ms: u64,
     ) -> Result<()> {
         let offset = kept_turns.get() - 1;
         self.handle
             .writer()
             .call(move |c| {
                 c.execute(
-                    "INSERT OR REPLACE INTO branch_summaries (branch_id, through_seq, content)
-                     SELECT ?1, through_seq, ?2
+                    "INSERT OR REPLACE INTO branch_summaries
+                         (branch_id, through_seq, content, duration_ms)
+                     SELECT ?1, through_seq, ?2, ?5
                      FROM (
                          SELECT (SELECT MAX(prev.seq) FROM branch_messages prev
                                  WHERE prev.branch_id = ?1 AND prev.seq < bm.seq) AS through_seq
@@ -323,7 +328,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                          ORDER BY bm.seq DESC LIMIT 1 OFFSET ?4
                      )
                      WHERE through_seq IS NOT NULL",
-                    rusqlite::params![branch, summary, PersistedRole::User, offset],
+                    rusqlite::params![branch, summary, PersistedRole::User, offset, duration_ms],
                 )
             })
             .await
@@ -336,12 +341,14 @@ impl TranscriptStore for SqliteTranscriptStore {
             .reader()
             .call(move |c| {
                 c.query_row(
-                    "SELECT through_seq, content FROM branch_summaries WHERE branch_id = ?1",
+                    "SELECT through_seq, content, duration_ms
+                     FROM branch_summaries WHERE branch_id = ?1",
                     rusqlite::params![branch],
                     |r| {
                         Ok(BranchSummary {
                             through_seq: r.get(0)?,
                             content: r.get(1)?,
+                            duration_ms: r.get(2)?,
                         })
                     },
                 )
@@ -498,6 +505,7 @@ struct BranchSlot {
 #[derive(Default)]
 struct MessageColumns {
     reasoning: Option<String>,
+    reasoning_ms: Option<u64>,
     tool_calls: Vec<PersistedToolCall>,
     tool_call_id: Option<String>,
     tool_name: Option<String>,
@@ -512,11 +520,15 @@ impl MessageColumns {
             MessageKind::Assistant {
                 reasoning,
                 tool_calls,
-            } => Self {
-                reasoning: Some(reasoning).filter(|r| !r.is_empty()),
-                tool_calls,
-                ..Self::default()
-            },
+            } => {
+                let reasoning = reasoning.filter(|r| !r.text.is_empty());
+                Self {
+                    reasoning_ms: reasoning.as_ref().map(|r| r.duration_ms),
+                    reasoning: reasoning.map(|r| r.text),
+                    tool_calls,
+                    ..Self::default()
+                }
+            }
             MessageKind::Tool {
                 call_id,
                 tool_name,
@@ -573,9 +585,9 @@ fn insert_message(
     let columns = &row.columns;
     tx.prepare_cached(
         "INSERT INTO messages
-            (session_id, turn_id, created_at, role, content, reasoning, tool_calls,
-             tool_call_id, tool_name, tool_exit_code, tool_duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            (session_id, turn_id, created_at, role, content, reasoning, reasoning_ms,
+             tool_calls, tool_call_id, tool_name, tool_exit_code, tool_duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          RETURNING id",
     )?
     .query_row(
@@ -586,6 +598,7 @@ fn insert_message(
             row.role,
             row.content,
             columns.reasoning,
+            columns.reasoning_ms,
             tool_calls_json(&columns.tool_calls)?,
             columns.tool_call_id,
             columns.tool_name,
@@ -758,15 +771,15 @@ fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
     let kind = match row.get(2)? {
         PersistedRole::User => MessageKind::User,
         PersistedRole::Assistant => MessageKind::Assistant {
-            reasoning: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            tool_calls: tool_calls_at(row, 5)?,
+            reasoning: reasoning_at(row, 4)?,
+            tool_calls: tool_calls_at(row, 6)?,
         },
         PersistedRole::Tool => MessageKind::Tool {
-            call_id: row.get(6)?,
-            tool_name: row.get(7)?,
+            call_id: row.get(7)?,
+            tool_name: row.get(8)?,
             outcome: ToolOutcome {
-                exit_code: row.get(8)?,
-                duration_ms: row.get(9)?,
+                exit_code: row.get(9)?,
+                duration_ms: row.get(10)?,
             },
         },
     };
@@ -778,6 +791,15 @@ fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
             kind,
         },
     })
+}
+
+/// The reasoning text at `idx` and its duration at `idx + 1`; the schema sets both or neither.
+fn reasoning_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<Reasoning>> {
+    let text: Option<String> = row.get(idx)?;
+    let duration_ms: Option<u64> = row.get(idx + 1)?;
+    Ok(text
+        .zip(duration_ms)
+        .map(|(text, duration_ms)| Reasoning { text, duration_ms }))
 }
 
 fn tool_calls_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Vec<PersistedToolCall>> {

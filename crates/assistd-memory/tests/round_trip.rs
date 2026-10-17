@@ -36,7 +36,7 @@ async fn turn_persists_across_store_reopen() {
                 turn,
                 PersistedMessage::assistant_text(
                     "Rust is a systems programming language with a strong type system.",
-                    String::new(),
+                    None,
                 ),
             )
             .await

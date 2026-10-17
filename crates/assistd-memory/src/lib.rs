@@ -20,6 +20,6 @@ pub use semantic::{
 pub use sqlite::{SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore};
 pub use transcripts::{
     AppendedMessage, BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore,
-    OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall, ResumeCandidate, ToolOutcome,
-    TranscriptStore, UndoOutcome,
+    OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall, Reasoning, ResumeCandidate,
+    ToolOutcome, TranscriptStore, UndoOutcome,
 };

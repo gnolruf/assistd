@@ -17,12 +17,12 @@ fn item_text(it: &OutputItem) -> String {
         OutputItem::Thumbnail(t) => format!("[thumb:{}]", t.name),
         OutputItem::Thinking(t) => format!(
             "[thinking:{}:{}]",
-            if t.ended_at.is_some() { "done" } else { "live" },
+            if t.timing.is_live() { "live" } else { "done" },
             t.text
         ),
         OutputItem::Compaction(c) => format!(
             "[compaction:{}]",
-            if c.ended_at.is_some() { "done" } else { "live" }
+            if c.timing.is_live() { "live" } else { "done" }
         ),
     }
 }
@@ -196,7 +196,9 @@ fn incremental_rewrap_matches_full_rewrap() {
         (40, |p| p.append_thinking("let me look ")),
         (40, |p| {
             p.append_thinking("at the directory\n\nwith ls");
-            last_thinking(p).started_at -= Duration::from_millis(5500);
+            if let BlockTiming::Live { started_at } = &mut last_thinking(p).timing {
+                *started_at -= Duration::from_millis(5500);
+            }
         }),
         (40, |p| p.refresh_live_block()),
         (40, |p| assert!(p.toggle_last_expandable())),

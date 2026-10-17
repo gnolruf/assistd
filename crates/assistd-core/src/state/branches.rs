@@ -383,7 +383,7 @@ impl AppState {
             }
         };
         let summary = self.load_branch_summary(branch, label).await;
-        let last_summarized = summary.as_ref().map(|s| s.through_seq);
+        let compaction = summary.as_ref().map(|s| (s.through_seq, s.duration_ms));
         let replay = LlmReplay::new(&rows, summary);
         if let Err(e) = self
             .subsystems
@@ -420,29 +420,36 @@ impl AppState {
         let mut call_arguments = tool_call_arguments(&rows);
         for row in rows {
             let role = wire_role(row.message.role());
-            let (tool_name, tool_args, outcome) = match row.message.kind {
+            let (reasoning, tool_name, tool_args, outcome) = match row.message.kind {
                 MessageKind::Tool {
                     call_id,
                     tool_name,
                     outcome,
                 } => (
+                    None,
                     Some(tool_name),
                     call_arguments.remove(&call_id),
                     Some(outcome),
                 ),
-                MessageKind::User | MessageKind::Assistant { .. } => (None, None, None),
+                MessageKind::Assistant { reasoning, .. } => (reasoning, None, None, None),
+                MessageKind::User => (None, None, None, None),
             };
+            let reasoning_ms = reasoning.as_ref().map(|r| r.duration_ms);
             let _ = tx
                 .send(Event::HistoryEntry {
                     id: id.clone(),
                     seq: row.seq.0,
                     role,
                     content: row.message.content,
+                    reasoning: reasoning.map(|r| r.text).unwrap_or_default(),
+                    reasoning_ms,
                     tool_name,
                     tool_args,
                     exit_code: outcome.map(|o| o.exit_code),
                     duration_ms: outcome.map(|o| o.duration_ms),
-                    last_summarized: last_summarized == Some(row.seq),
+                    compaction_ms: compaction
+                        .filter(|(through_seq, _)| *through_seq == row.seq)
+                        .map(|(_, duration_ms)| duration_ms),
                 })
                 .await;
         }
@@ -534,7 +541,10 @@ fn history_entry(row: &HistoryRow) -> HistoryEntry {
         } => HistoryEntry {
             role: HistoryRole::Assistant,
             content,
-            reasoning: reasoning.clone(),
+            reasoning: reasoning
+                .as_ref()
+                .map(|r| r.text.clone())
+                .unwrap_or_default(),
             tool_calls: tool_calls.iter().map(tool_call_record).collect(),
             tool_call_id: None,
             tool_name: None,

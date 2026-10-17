@@ -49,6 +49,7 @@ CREATE TABLE messages (
     role             INTEGER NOT NULL CHECK (role BETWEEN 0 AND 2),
     content          TEXT NOT NULL,
     reasoning        TEXT,
+    reasoning_ms     INTEGER CHECK (reasoning_ms >= 0),
     tool_calls       TEXT,
     tool_call_id     TEXT,
     tool_name        TEXT,
@@ -59,6 +60,7 @@ CREATE TABLE messages (
                                   AND json_type(tool_calls) = 'array'
                                   AND json_array_length(tool_calls) > 0)),
     CHECK (reasoning IS NULL OR (role = 1 AND reasoning <> '')),
+    CHECK ((reasoning IS NULL) = (reasoning_ms IS NULL)),
     CHECK ((role = 2) = (tool_call_id IS NOT NULL)),
     CHECK ((role = 2) = (tool_name IS NOT NULL)),
     CHECK ((role = 2) = (tool_exit_code IS NOT NULL)),
@@ -78,7 +80,8 @@ CREATE INDEX idx_branch_messages_message ON branch_messages(message_id);
 CREATE TABLE branch_summaries (
     branch_id   INTEGER PRIMARY KEY REFERENCES branches(id) ON DELETE CASCADE,
     through_seq INTEGER NOT NULL,
-    content     TEXT NOT NULL
+    content     TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0)
 ) STRICT;
 
 CREATE TABLE memories (

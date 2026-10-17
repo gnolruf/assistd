@@ -40,8 +40,8 @@ pub struct PersistedMessage {
 pub enum MessageKind {
     User,
     Assistant {
-        /// The model's reasoning for this step; empty when it gave none.
-        reasoning: String,
+        /// The model's reasoning for this step; `None` when it gave none.
+        reasoning: Option<Reasoning>,
         /// The tools this step called, in call order; empty for a plain reply.
         tool_calls: Vec<PersistedToolCall>,
     },
@@ -62,7 +62,7 @@ impl PersistedMessage {
     }
 
     /// An assistant reply with no tool calls.
-    pub fn assistant_text(content: impl Into<String>, reasoning: String) -> Self {
+    pub fn assistant_text(content: impl Into<String>, reasoning: Option<Reasoning>) -> Self {
         Self::assistant(content.into(), reasoning, Vec::new())
     }
 
@@ -71,7 +71,7 @@ impl PersistedMessage {
     pub fn assistant_tool_calls(
         content: impl Into<String>,
         calls: Vec<PersistedToolCall>,
-        reasoning: String,
+        reasoning: Option<Reasoning>,
     ) -> Self {
         Self::assistant(content.into(), reasoning, calls)
     }
@@ -102,7 +102,11 @@ impl PersistedMessage {
         }
     }
 
-    fn assistant(content: String, reasoning: String, tool_calls: Vec<PersistedToolCall>) -> Self {
+    fn assistant(
+        content: String,
+        reasoning: Option<Reasoning>,
+        tool_calls: Vec<PersistedToolCall>,
+    ) -> Self {
         Self {
             content,
             kind: MessageKind::Assistant {
@@ -111,6 +115,14 @@ impl PersistedMessage {
             },
         }
     }
+}
+
+/// The reasoning an assistant step streamed before answering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reasoning {
+    pub text: String,
+    /// Time from the first reasoning token to the last.
+    pub duration_ms: u64,
 }
 
 /// One tool call requested by an assistant step.
@@ -162,6 +174,8 @@ pub struct BranchSummary {
     /// Seq of the last message the summary stands in for.
     pub through_seq: Seq,
     pub content: String,
+    /// Time the compaction that wrote it took.
+    pub duration_ms: u64,
 }
 
 /// Result of [`TranscriptStore::append_message_to_branch`].
@@ -260,14 +274,15 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// Every message on `branch`, ordered by branch-local seq.
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
 
-    /// Make `summary` the branch's summary of everything before its
-    /// `kept_turns` most recent user messages; a no-op when the branch has
-    /// fewer user messages than that.
+    /// Make `summary`, which took `duration_ms` to write, the branch's summary of
+    /// everything before its `kept_turns` most recent user messages; a no-op when
+    /// the branch has fewer user messages than that.
     async fn record_branch_summary(
         &self,
         branch: BranchId,
         summary: String,
         kept_turns: NonZeroUsize,
+        duration_ms: u64,
     ) -> Result<()>;
 
     /// The branch's latest compaction summary, if one is recorded.
@@ -368,6 +383,7 @@ impl TranscriptStore for NoTranscriptStore {
         _branch: BranchId,
         _summary: String,
         _kept_turns: NonZeroUsize,
+        _duration_ms: u64,
     ) -> Result<()> {
         Ok(())
     }

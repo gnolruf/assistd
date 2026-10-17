@@ -1,7 +1,7 @@
 //! Reducer for daemon events. Several streams feed it at once, so reply
 //! events are gated on the turn that owns the output pane.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity};
 use assistd_tools::{ConfirmationRequest, Risk};
@@ -281,18 +281,26 @@ impl App {
             Event::HistoryEntry {
                 role,
                 content,
+                reasoning,
+                reasoning_ms,
                 tool_name,
                 tool_args,
                 exit_code,
                 duration_ms,
-                last_summarized,
+                compaction_ms,
                 ..
             } => {
+                if let Some(ms) = reasoning_ms
+                    && !reasoning.is_empty()
+                {
+                    self.output
+                        .push_replayed_thinking(reasoning, Duration::from_millis(ms));
+                }
                 let outcome = (exit_code, duration_ms);
                 self.on_history_entry(role, content, tool_name, tool_args.as_ref(), outcome);
-                if last_summarized {
+                if let Some(ms) = compaction_ms {
                     self.output
-                        .push_info("[earlier history was compacted into a summary]");
+                        .push_replayed_compaction(Duration::from_millis(ms));
                 }
             }
             Event::UndoApplied {

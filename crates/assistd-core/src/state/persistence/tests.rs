@@ -118,6 +118,7 @@ impl TranscriptStore for SlowingStore {
         _b: BranchId,
         _summary: String,
         _kept_turns: NonZeroUsize,
+        _duration_ms: u64,
     ) -> assistd_memory::Result<()> {
         Ok(())
     }
@@ -175,7 +176,7 @@ async fn messages_reach_the_store_in_the_order_they_were_queued() {
     for text in ["second", "third", "fourth"] {
         state.persist_message_fire_and_forget(
             target.clone(),
-            PersistedMessage::assistant_text(text, String::new()),
+            PersistedMessage::assistant_text(text, None),
         );
     }
     state.runtime.persistence_tracker.close();

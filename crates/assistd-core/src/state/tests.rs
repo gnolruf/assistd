@@ -1357,7 +1357,7 @@ async fn append_turn(
     conv.append_message_to_branch(
         branch,
         turn,
-        PersistedMessage::assistant_text(assistant, String::new()),
+        PersistedMessage::assistant_text(assistant, None),
     )
     .await
     .unwrap();

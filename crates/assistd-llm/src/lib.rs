@@ -146,10 +146,11 @@ pub enum LlmEvent {
         message: String,
     },
     /// History was compacted: everything before the last `kept_turns`
-    /// user turns is now represented by `summary`.
+    /// user turns is now represented by `summary`, which took `elapsed` to make.
     HistoryCompacted {
         summary: String,
         kept_turns: NonZeroUsize,
+        elapsed: Duration,
     },
     /// The model has finished generating.
     Done,

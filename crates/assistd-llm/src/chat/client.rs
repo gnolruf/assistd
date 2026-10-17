@@ -250,6 +250,7 @@ impl LlamaChatClient {
             return;
         }
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
+        let started_at = Instant::now();
         let before = (conv.message_count(), conv.approx_total_tokens());
         let summarizer = ContinuationSummarizer {
             client: self,
@@ -278,6 +279,7 @@ impl LlamaChatClient {
                 .send(LlmEvent::HistoryCompacted {
                     summary: summary.to_string(),
                     kept_turns,
+                    elapsed: started_at.elapsed(),
                 })
                 .await;
         }

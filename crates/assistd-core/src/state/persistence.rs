@@ -2,6 +2,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
@@ -108,11 +109,13 @@ impl AppState {
         branch: BranchId,
         summary: String,
         kept_turns: NonZeroUsize,
+        elapsed: Duration,
     ) {
         let transcripts = self.memory.transcripts.clone();
+        let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         self.spawn_in_persist_chain(async move {
             if let Err(e) = transcripts
-                .record_branch_summary(branch, summary, kept_turns)
+                .record_branch_summary(branch, summary, kept_turns, duration_ms)
                 .await
             {
                 warn!(

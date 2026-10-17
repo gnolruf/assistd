@@ -779,14 +779,19 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
     },
-    /// One message of branch history. Tool rows carry the call's arguments
-    /// and outcome when known; `last_summarized` marks the newest row the
-    /// branch's compaction summary stands in for.
+    /// One message of branch history. Assistant rows carry the model's reasoning and
+    /// how long it took, empty and `None` when it gave none; tool rows carry the call's
+    /// arguments and outcome when known; `compaction_ms` is set only on the newest row
+    /// the branch's compaction summary stands in for, to how long that compaction took.
     HistoryEntry {
         id: String,
         seq: i64,
         role: Role,
         content: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reasoning: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_ms: Option<u64>,
         tool_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_args: Option<serde_json::Value>,
@@ -794,8 +799,8 @@ pub enum Event {
         exit_code: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        last_summarized: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction_ms: Option<u64>,
     },
     /// Result of `Undo`; `removed_messages == 0` means there was nothing to undo.
     UndoApplied {

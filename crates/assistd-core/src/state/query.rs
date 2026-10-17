@@ -13,7 +13,7 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
-use assistd_memory::{PersistedMessage, PersistedToolCall, SessionId, ToolOutcome};
+use assistd_memory::{PersistedMessage, PersistedToolCall, Reasoning, SessionId, ToolOutcome};
 use assistd_tools::{Attachment, inherit_confirm_router};
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
@@ -85,6 +85,37 @@ impl SpeechPipeline {
     }
 }
 
+/// Reasoning streamed so far for the current step.
+struct ReasoningTrace {
+    text: String,
+    started_at: Instant,
+    last_delta_at: Instant,
+}
+
+impl ReasoningTrace {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            text: String::new(),
+            started_at: now,
+            last_delta_at: now,
+        }
+    }
+
+    fn push(&mut self, delta: &str) {
+        self.text.push_str(delta);
+        self.last_delta_at = Instant::now();
+    }
+
+    fn into_reasoning(self) -> Reasoning {
+        let elapsed = self.last_delta_at.duration_since(self.started_at);
+        Reasoning {
+            text: self.text,
+            duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
 /// Translates one turn's agent events into wire events, persisting the
 /// transcript as it goes.
 struct TurnTranslator {
@@ -92,7 +123,7 @@ struct TurnTranslator {
     /// `None` when the session could not be saved, so nothing is persisted.
     persist: Option<PersistTarget>,
     assistant_accum: String,
-    reasoning_accum: String,
+    reasoning: Option<ReasoningTrace>,
     awaiting_tool_result: bool,
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
@@ -105,7 +136,7 @@ impl TurnTranslator {
             id,
             persist,
             assistant_accum: String::new(),
-            reasoning_accum: String::new(),
+            reasoning: None,
             awaiting_tool_result: false,
             last_emit_at: Instant::now()
                 .checked_sub(LAST_DELTA_DEBOUNCE)
@@ -130,7 +161,9 @@ impl TurnTranslator {
                 (Event::Delta { id, text }, sentences)
             }
             LlmEvent::ReasoningDelta { text } => {
-                self.reasoning_accum.push_str(&text);
+                self.reasoning
+                    .get_or_insert_with(ReasoningTrace::new)
+                    .push(&text);
                 (Event::ReasoningDelta { id, text }, Vec::new())
             }
             LlmEvent::ToolCallsRequested { calls } => {
@@ -178,7 +211,7 @@ impl TurnTranslator {
             } => {
                 if matches!(event, StatusKind::Restarting | StatusKind::OutputTruncated) {
                     self.assistant_accum.clear();
-                    self.reasoning_accum.clear();
+                    self.reasoning = None;
                     let _ = sentence_buf.finish();
                 }
                 (
@@ -195,9 +228,15 @@ impl TurnTranslator {
             LlmEvent::HistoryCompacted {
                 summary,
                 kept_turns,
+                elapsed,
             } => {
                 if let Some(target) = &self.persist {
-                    state.persist_summary_fire_and_forget(target.branch, summary, kept_turns);
+                    state.persist_summary_fire_and_forget(
+                        target.branch,
+                        summary,
+                        kept_turns,
+                        elapsed,
+                    );
                 }
                 return None;
             }
@@ -224,12 +263,12 @@ impl TurnTranslator {
         if !narration.is_empty() {
             publish_last_delta(&state.runtime, &self.id, &narration);
         }
-        let reasoning = std::mem::take(&mut self.reasoning_accum);
+        let reasoning = self.take_reasoning();
         self.persist_message(state, tool_calls_message(narration, calls, reasoning));
     }
 
     fn persist_final_text(&mut self, state: &AppState) {
-        let reasoning = std::mem::take(&mut self.reasoning_accum);
+        let reasoning = self.take_reasoning();
         if self.assistant_accum.is_empty() {
             return;
         }
@@ -239,6 +278,10 @@ impl TurnTranslator {
             state,
             PersistedMessage::assistant_text(final_text, reasoning),
         );
+    }
+
+    fn take_reasoning(&mut self) -> Option<Reasoning> {
+        self.reasoning.take().map(ReasoningTrace::into_reasoning)
     }
 
     fn persist_message(&self, state: &AppState, msg: PersistedMessage) {
@@ -725,7 +768,7 @@ async fn speak_sentence(
 fn tool_calls_message(
     narration: String,
     calls: &[ToolCall],
-    reasoning: String,
+    reasoning: Option<Reasoning>,
 ) -> PersistedMessage {
     let content = if narration.trim().is_empty() {
         String::new()

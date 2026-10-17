@@ -10,6 +10,13 @@ async fn fresh_store() -> (SqliteTranscriptStore, tempfile::TempDir) {
     (SqliteTranscriptStore::new(handle), temp)
 }
 
+fn look_first() -> Reasoning {
+    Reasoning {
+        text: "look first".into(),
+        duration_ms: 1200,
+    }
+}
+
 fn contents(history: &[HistoryRow]) -> Vec<(PersistedRole, &str)> {
     history
         .iter()
@@ -44,7 +51,7 @@ async fn tool_calls_and_tool_results_round_trip() {
         .append_message_to_branch(
             branch,
             turn,
-            PersistedMessage::assistant_tool_calls("", calls.clone(), "look first".into()),
+            PersistedMessage::assistant_tool_calls("", calls.clone(), Some(look_first())),
         )
         .await
         .unwrap();
@@ -71,7 +78,7 @@ async fn tool_calls_and_tool_results_round_trip() {
                 message: PersistedMessage {
                     content: String::new(),
                     kind: MessageKind::Assistant {
-                        reasoning: "look first".into(),
+                        reasoning: Some(look_first()),
                         tool_calls: calls,
                     },
                 },
@@ -106,11 +113,7 @@ async fn fork_creates_independent_branch_sharing_history() {
         .unwrap()
         .turn;
     store
-        .append_message_to_branch(
-            main,
-            turn,
-            PersistedMessage::assistant_text("hi", String::new()),
-        )
+        .append_message_to_branch(main, turn, PersistedMessage::assistant_text("hi", None))
         .await
         .unwrap();
 
@@ -204,11 +207,7 @@ async fn undo_removes_only_the_last_turn() {
         .unwrap()
         .turn;
     store
-        .append_message_to_branch(
-            main,
-            t1,
-            PersistedMessage::assistant_text("a", String::new()),
-        )
+        .append_message_to_branch(main, t1, PersistedMessage::assistant_text("a", None))
         .await
         .unwrap();
 
@@ -218,11 +217,7 @@ async fn undo_removes_only_the_last_turn() {
         .unwrap()
         .turn;
     store
-        .append_message_to_branch(
-            main,
-            t2,
-            PersistedMessage::assistant_text("b", String::new()),
-        )
+        .append_message_to_branch(main, t2, PersistedMessage::assistant_text("b", None))
         .await
         .unwrap();
 
@@ -280,19 +275,20 @@ async fn summary_follows_kept_turns_forks_and_undo() {
             .append_message_to_branch(
                 branch,
                 turn,
-                PersistedMessage::assistant_text("answer", String::new()),
+                PersistedMessage::assistant_text("answer", None),
             )
             .await
             .unwrap();
     }
     let kept_two = NonZeroUsize::new(2).unwrap();
     store
-        .record_branch_summary(branch, "turn one".into(), kept_two)
+        .record_branch_summary(branch, "turn one".into(), kept_two, 4200)
         .await
         .unwrap();
     let expected = Some(BranchSummary {
         through_seq: Seq(1),
         content: "turn one".into(),
+        duration_ms: 4200,
     });
     assert_eq!(store.load_branch_summary(branch).await.unwrap(), expected);
 
