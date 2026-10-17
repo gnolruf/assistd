@@ -650,8 +650,8 @@ impl AppState {
         }
     }
 
-    /// Wait for speech and report the agent's outcome. Sends `Done` if the stream did not, as a cancelled turn
-    /// ends without one.
+    /// Wait for speech and report the agent's outcome. Sends `Done` if the
+    /// stream did not, as a cancelled turn ends without one.
     async fn finalize_turn(
         &self,
         id: String,

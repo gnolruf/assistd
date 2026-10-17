@@ -393,7 +393,8 @@ fn session_message_ids(
 }
 
 /// The rows `select` finds for the `ranked` ids, bound to `?1` as a JSON array and
-/// keyed by column 0, in rank order and given their scores; ids deleted since the scan are skipped.
+/// keyed by column 0, in rank order and given their scores; ids deleted since the
+/// scan are skipped.
 fn hydrate_in_rank_order<Id, T>(
     conn: &rusqlite::Connection,
     select: &str,

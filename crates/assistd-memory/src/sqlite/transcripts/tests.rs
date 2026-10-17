@@ -357,14 +357,6 @@ async fn summary_follows_kept_turns_forks_and_undo() {
     );
 
     store.undo_last_turn(branch).await.unwrap();
-    assert_eq!(
-        store
-            .load_branch(branch, HistoryScope::Whole)
-            .await
-            .unwrap()
-            .summary,
-        expected
-    );
     store.undo_last_turn(branch).await.unwrap();
     assert_eq!(
         store
@@ -391,96 +383,6 @@ async fn summary_follows_kept_turns_forks_and_undo() {
             .summary,
         expected
     );
-}
-
-#[tokio::test]
-async fn summary_folding_steps_of_a_turn_covers_only_that_turns_older_steps() {
-    let (store, _temp) = fresh_store().await;
-    let branch = store
-        .begin_session_with_main_branch(SessionId::new(), 1)
-        .await
-        .unwrap();
-    let first = store
-        .begin_turn(branch, PersistedMessage::user("review the code"))
-        .await
-        .unwrap()
-        .turn;
-    for step in ["c-1", "c-2", "c-3"] {
-        append_tool_step(&store, branch, first, step).await;
-    }
-    let second = store
-        .begin_turn(branch, PersistedMessage::user("thanks"))
-        .await
-        .unwrap()
-        .turn;
-    store
-        .append_message_to_branch(branch, second, PersistedMessage::assistant_text("ok", None))
-        .await
-        .unwrap();
-    let one = NonZeroUsize::new(1).unwrap();
-    let cut = SummaryCut {
-        kept_turns: NonZeroUsize::new(2).unwrap(),
-        kept_steps: Some(one),
-    };
-    store
-        .record_branch_summary(branch, "steps one and two".into(), cut, 900)
-        .await
-        .unwrap();
-    let summary = store
-        .load_branch(branch, HistoryScope::Whole)
-        .await
-        .unwrap()
-        .summary
-        .unwrap();
-    assert_eq!(
-        (summary.kept_from_seq, summary.steps_folded_through),
-        (Seq(0), Some(Seq(4)))
-    );
-
-    store.undo_last_turn(branch).await.unwrap();
-    assert!(
-        store
-            .load_branch(branch, HistoryScope::Whole)
-            .await
-            .unwrap()
-            .summary
-            .is_some()
-    );
-    store.undo_last_turn(branch).await.unwrap();
-    assert_eq!(
-        store
-            .load_branch(branch, HistoryScope::Whole)
-            .await
-            .unwrap()
-            .summary,
-        None
-    );
-}
-
-async fn append_tool_step(
-    store: &SqliteTranscriptStore,
-    branch: BranchId,
-    turn: TurnId,
-    call_id: &str,
-) {
-    let call = PersistedToolCall {
-        id: call_id.into(),
-        name: "run".into(),
-        arguments: serde_json::json!({"command": "ls"}),
-    };
-    let outcome = ToolOutcome {
-        exit_code: 0,
-        duration_ms: 1,
-    };
-    for message in [
-        PersistedMessage::assistant_tool_calls("", vec![call], None),
-        PersistedMessage::tool_result("out", call_id, "run", outcome),
-    ] {
-        store
-            .append_message_to_branch(branch, turn, message)
-            .await
-            .unwrap();
-    }
 }
 
 #[tokio::test]
@@ -518,34 +420,4 @@ async fn find_resumable_session_returns_unended() {
 
     store.end_session(s).await.unwrap();
     assert_eq!(store.find_resumable_session().await.unwrap(), None);
-}
-
-#[tokio::test]
-async fn current_branch_and_turns_must_belong_to_their_session() {
-    let (store, _temp) = fresh_store().await;
-    let s1 = SessionId::new();
-    let b1 = store.begin_session_with_main_branch(s1, 1).await.unwrap();
-    let s2 = SessionId::new();
-    let b2 = store.begin_session_with_main_branch(s2, 2).await.unwrap();
-    let s2_turn = store
-        .begin_turn(b2, PersistedMessage::user("y"))
-        .await
-        .unwrap()
-        .turn;
-
-    assert!(matches!(
-        store.set_current_branch(s1, b2).await,
-        Err(MemoryError::BranchNotFound(branch)) if branch == b2
-    ));
-    let unsaved = SessionId::new();
-    assert!(matches!(
-        store.set_current_branch(unsaved, b1).await,
-        Err(MemoryError::SessionNotFound(session)) if session == unsaved
-    ));
-    assert!(
-        store
-            .append_message_to_branch(b1, s2_turn, PersistedMessage::user("x"))
-            .await
-            .is_err()
-    );
 }

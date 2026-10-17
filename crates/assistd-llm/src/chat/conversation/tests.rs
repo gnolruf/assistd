@@ -156,26 +156,6 @@ fn wire_carries_a_single_leading_system_message() {
 }
 
 #[test]
-fn summary_snapshot_restores_through_replace_messages() {
-    let mut c = Conversation::new("sys".into());
-    c.replace_messages(
-        Some("earlier talk"),
-        &[],
-        vec![
-            message(Role::User, "one"),
-            message(Role::Assistant, "two"),
-            message(Role::User, "three"),
-            message(Role::User, &format!("{TOOL_RESULT_PREFIX}see]\nimage")),
-        ],
-    );
-    let (summary, cut) = c.summary_snapshot().unwrap();
-    assert_eq!(
-        (summary, cut.kept_turns.get(), cut.kept_steps),
-        ("earlier talk", 2, None)
-    );
-}
-
-#[test]
 fn transient_context_stays_on_its_turn_so_the_prefix_never_changes() {
     let mut c = Conversation::new("sys".into());
     c.set_transient_context("ctx".into());

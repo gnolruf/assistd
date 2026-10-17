@@ -787,11 +787,9 @@ pub enum Event {
         parent_branch_name: Option<String>,
         fork_point_seq: Option<i64>,
     },
-    /// One message of branch history. Assistant rows carry the model's reasoning and
-    /// how long it took, empty and `None` when it gave none; tool rows carry the call's
-    /// arguments and outcome when known; `compaction_ms` is set only on the row the
-    /// branch's latest compaction ran after, to how long it took; `turn_stats` only on
-    /// the last row of a finished turn.
+    /// One message of branch history, with its reasoning or tool call and outcome.
+    /// `compaction_ms` is set only on the row the branch's latest compaction followed;
+    /// `turn_stats` only on the last row of a finished turn.
     HistoryEntry {
         id: String,
         seq: i64,
