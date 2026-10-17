@@ -14,6 +14,10 @@ use tracing::{info, warn};
 use super::allowlist::SearchPath;
 use super::on_blocking_pool;
 
+mod confined;
+
+pub(crate) use confined::ConfinedSpawner;
+
 /// The `PATH` sandboxed commands run with, and the fallback when the
 /// daemon has no usable one.
 const SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
@@ -60,6 +64,12 @@ pub enum ToolsDisabled {
         "tools are disabled: bubblewrap (`bwrap`) was not found on PATH; install it to enable them"
     )]
     BwrapMissing,
+    #[error(
+        "tools are disabled: tools.bash.bwrap_extra_args shares the network, and the kernel \
+         cannot keep sandboxed commands off abstract sockets such as the X server's (needs \
+         Landlock scoping, Linux 6.12+); drop --share-net to enable them"
+    )]
+    AbstractSocketsReachable,
 }
 
 /// How subprocesses are wrapped, as resolved once by [`probe_sandbox`].
@@ -83,6 +93,9 @@ pub struct SandboxInfo {
     pub shared: SharedDirs,
     /// Absolute directories unsandboxed commands look programs up in.
     host_path: Vec<PathBuf>,
+    /// Set when `extra_args` shares the network namespace, which abstract
+    /// Unix sockets such as the X server's belong to.
+    confined: Option<ConfinedSpawner>,
 }
 
 /// Paths commands must not change, even inside the sandbox's writable
@@ -116,6 +129,7 @@ impl SandboxInfo {
             protected: Protected::default(),
             shared: SharedDirs::default(),
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
+            confined: None,
         })
     }
 
@@ -132,7 +146,14 @@ impl SandboxInfo {
                 read_only: Vec::new(),
             },
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
+            confined: None,
         })
+    }
+
+    /// The spawner commands built by [`SandboxInfo::command`] must start
+    /// from, if any.
+    pub(crate) fn confined_spawner(&self) -> Option<&ConfinedSpawner> {
+        self.confined.as_ref()
     }
 
     /// Where commands run under this configuration look up bare program
@@ -715,18 +736,49 @@ fn probe_sandbox_with_path(
         (SandboxRequest::None, _) => ToolsDisabled::ByConfig,
         (SandboxRequest::Auto, None) => ToolsDisabled::BwrapMissing,
         (SandboxRequest::Auto | SandboxRequest::Bwrap, Some(bwrap)) => {
-            announce_bwrap(&bwrap);
-            return Ok(ToolSandbox::Bwrap(Arc::new(SandboxInfo {
-                mode: ResolvedSandboxMode::Bwrap { path: bwrap },
-                extra_args,
-                protected,
-                shared,
-                host_path: host_path(path_env),
-            })));
+            match confined_spawner(&bwrap, &extra_args) {
+                Ok(confined) => {
+                    announce_bwrap(&bwrap);
+                    return Ok(ToolSandbox::Bwrap(Arc::new(SandboxInfo {
+                        mode: ResolvedSandboxMode::Bwrap { path: bwrap },
+                        extra_args,
+                        protected,
+                        shared,
+                        host_path: host_path(path_env),
+                        confined,
+                    })));
+                }
+                Err(disabled) => disabled,
+            }
         }
     };
     warn!(target: "assistd::policy", "{disabled}");
     Ok(ToolSandbox::Disabled(disabled))
+}
+
+/// The spawner that keeps commands off abstract sockets, needed only when
+/// `extra_args` shares the network namespace they belong to.
+fn confined_spawner(
+    bwrap: &Path,
+    extra_args: &[String],
+) -> Result<Option<ConfinedSpawner>, ToolsDisabled> {
+    if !extra_args.iter().any(|arg| arg == "--share-net") {
+        return Ok(None);
+    }
+    let spawner = ConfinedSpawner::start().map_err(|error| {
+        warn!(target: "assistd::policy", %error, "cannot confine networked sandboxed commands");
+        ToolsDisabled::AbstractSocketsReachable
+    })?;
+    if is_setuid(bwrap) {
+        warn!(
+            target: "assistd::policy",
+            path = %bwrap.display(),
+            "bwrap is setuid, but --share-net runs it with no_new_privs (Landlock requires \
+             it), so it gets no root privileges: commands fail unless unprivileged user \
+             namespaces are enabled"
+        );
+    }
+    Ok(Some(spawner))
 }
 
 fn announce_bwrap(bwrap: &Path) {
@@ -768,6 +820,16 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
+#[cfg(unix)]
+fn is_setuid(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|md| md.permissions().mode() & 0o4000 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_setuid(_path: &Path) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,6 +843,7 @@ mod tests {
             protected: Protected::default(),
             shared: SharedDirs::default(),
             host_path: Vec::new(),
+            confined: None,
         }
     }
 

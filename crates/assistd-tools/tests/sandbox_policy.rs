@@ -1,6 +1,8 @@
 //! The bash command's denylist, confirmation gate and bwrap sandbox.
 //! Bwrap tests return early when `bwrap` is not on PATH.
 
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::{SocketAddr, UnixListener};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,9 +71,13 @@ fn input(script: &str) -> CommandInput {
 }
 
 fn bwrap_or_none() -> Option<Arc<SandboxInfo>> {
+    bwrap_with(Vec::new())
+}
+
+fn bwrap_with(extra_args: Vec<String>) -> Option<Arc<SandboxInfo>> {
     match probe_sandbox(
         SandboxRequest::Bwrap,
-        Vec::new(),
+        extra_args,
         Protected::default(),
         SharedDirs::default(),
     )
@@ -341,6 +347,29 @@ async fn bwrap_unshares_network_namespace() {
         "unexpected namespace link {inside:?}"
     );
     assert_ne!(Path::new(&inside), host);
+}
+
+/// Returns early without `python3` or Landlock scoping.
+#[tokio::test]
+async fn networked_bwrap_cannot_reach_abstract_sockets() {
+    if !Path::new("/usr/bin/python3").exists() {
+        return;
+    }
+    let Some(sandbox) = bwrap_with(vec!["--share-net".into()]) else {
+        return;
+    };
+    let name = format!("assistd-abstract-test-{}", std::process::id());
+    let addr = SocketAddr::from_abstract_name(&name).expect("abstract address");
+    let _listener = UnixListener::bind_addr(&addr).expect("abstract listener");
+    let probe = format!(
+        "python3 -I -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"\\0{name}\"); \
+         print(\"connected\")'"
+    );
+    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd.run(input(&probe)).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.stdout.is_empty(), "reached the host's abstract socket");
+    assert!(stderr.contains("Operation not permitted"), "{stderr}");
 }
 
 #[tokio::test]

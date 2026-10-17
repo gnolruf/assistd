@@ -14,6 +14,7 @@ use tokio::time::timeout;
 
 use crate::chain::OUTPUT_MAX;
 use crate::command::{CommandOutput, Hint, error_line};
+use crate::policy::ConfinedSpawner;
 
 /// Exit code for policy denial (POSIX "found but not executable").
 pub(crate) const POLICY_DENIED_EXIT: i32 = 126;
@@ -59,11 +60,13 @@ pub(crate) struct Captured {
 /// A stream passed its byte cap.
 struct Overflow;
 
-/// Spawn `cmd` in its own process group, feed it `stdin` while it runs, and
-/// collect up to `max_output` bytes per stream until it exits or `limit`
-/// elapses. The whole group is then killed. `Err` means the spawn failed.
+/// Spawn `cmd` in its own process group, from `confined` when given, feed it
+/// `stdin` while it runs, and collect up to `max_output` bytes per stream
+/// until it exits or `limit` elapses. The whole group is then killed. `Err`
+/// means the spawn failed.
 pub(crate) async fn capture(
     mut cmd: ProcCommand,
+    confined: Option<&ConfinedSpawner>,
     stdin: &[u8],
     limit: Duration,
     max_output: usize,
@@ -75,7 +78,10 @@ pub(crate) async fn capture(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let mut child = cmd.spawn()?;
+    let mut child = match confined {
+        Some(spawner) => spawner.spawn(cmd).await?,
+        None => cmd.spawn()?,
+    };
     let pgid = child.id();
     let stdin_pipe = child.stdin.take();
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
@@ -168,6 +174,7 @@ async fn wait_feeding(
 pub(crate) async fn supervise(
     tool: &str,
     cmd: ProcCommand,
+    confined: Option<&ConfinedSpawner>,
     stdin: &[u8],
     limit: Duration,
 ) -> io::Result<CommandOutput> {
@@ -176,7 +183,7 @@ pub(crate) async fn supervise(
         stdout,
         stderr,
         outcome,
-    } = capture(cmd, stdin, limit, OUTPUT_BUF_MAX).await?;
+    } = capture(cmd, confined, stdin, limit, OUTPUT_BUF_MAX).await?;
 
     Ok(match outcome {
         WaitOutcome::Exited(status) => exited(stdout, stderr, status),
