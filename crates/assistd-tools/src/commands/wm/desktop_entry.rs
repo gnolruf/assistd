@@ -29,6 +29,8 @@ pub(super) struct DesktopEntry {
     pub(super) path: PathBuf,
     pub(super) name: String,
     pub(super) terminal: bool,
+    /// Listed in the `TerminalEmulator` category.
+    pub(super) is_terminal_emulator: bool,
     icon: Option<String>,
     /// `Exec` split into arguments, quoting removed and field codes kept.
     exec: Vec<String>,
@@ -95,6 +97,8 @@ impl DesktopEntry {
         Ok(Self {
             name: key("Name").unwrap_or(stem).to_string(),
             terminal: key("Terminal") == Some("true"),
+            is_terminal_emulator: key("Categories")
+                .is_some_and(|categories| categories.split(';').any(|c| c == "TerminalEmulator")),
             icon: key("Icon").map(str::to_string),
             exec,
             path,

@@ -80,6 +80,8 @@ pub(super) enum OpenError {
     Entry(#[from] EntryError),
     #[error("{0} takes no files or URLs")]
     NoTargets(String),
+    #[error("{0} is a terminal emulator, which wm open starts without a command")]
+    TerminalCommand(String),
     #[error("{0} takes only one file or URL")]
     OneTarget(String),
     #[error("'{0}' is not an absolute path")]
@@ -114,6 +116,13 @@ impl OpenError {
                     .into(),
             ),
             Self::NoTargets(_) | Self::OneTarget(_) => (Hint::Use, "fewer files, or none".into()),
+            Self::TerminalCommand(_) => (
+                Hint::Use,
+                "the program's own desktop id, which opens in a terminal by itself \
+                 (wm open --cwd ~/project nvim), or the terminal alone for a shell there \
+                 (wm open --cwd ~/project kitty)"
+                    .into(),
+            ),
             Self::NotAPath(_) => (Hint::Use, "an absolute or ~/ path".into()),
             Self::NotAPathOrUrl(_) => (Hint::Use, "an absolute or ~/ path, or a URL".into()),
             Self::NotADirectory(_) => (Hint::Use, "an existing absolute or ~/ directory".into()),
@@ -160,6 +169,9 @@ impl PreparedLaunch {
 fn resolve_targets(entry: &DesktopEntry, raw: &[String]) -> Result<Vec<String>, OpenError> {
     let (urls, many) = match entry.targets() {
         Targets::None if raw.is_empty() => return Ok(Vec::new()),
+        Targets::None if entry.is_terminal_emulator => {
+            return Err(OpenError::TerminalCommand(entry.name.clone()));
+        }
         Targets::None => return Err(OpenError::NoTargets(entry.name.clone())),
         Targets::Files { many } => (false, many),
         Targets::Urls { many } => (true, many),

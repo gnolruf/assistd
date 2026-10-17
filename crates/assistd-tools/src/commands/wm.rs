@@ -184,8 +184,10 @@ impl Command for WmCommand {
          Subcommands:\n  \
            focus <id>                             focus the window with this con_id\n  \
            move <id> <workspace>                  move window to workspace\n  \
-           open <app> [file|url...]               launch an installed application, e.g. on\n                                          \
-         a workspace: wm open --workspace 2 firefox\n  \
+           open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]\n                                          \
+         launch an installed application by desktop id (e.g. firefox);\n                                          \
+         terminal programs such as nvim open in a terminal by themselves:\n                                          \
+         wm open --workspace 2 --cwd ~/project nvim\n  \
            active                                 TSV: id, app of the focused window\n  \
            resize <id> <grow|shrink> <px>         width-only resize\n  \
            list                                   TSV: id, app, workspace, title\n  \
