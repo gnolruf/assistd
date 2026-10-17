@@ -139,7 +139,7 @@ fn untrusted_text_cannot_carry_chat_template_tokens() {
 #[test]
 fn wire_carries_a_single_leading_system_message() {
     let mut c = Conversation::new("sys".into());
-    c.replace_messages(Some("earlier talk"), Vec::new());
+    c.replace_messages(Some("earlier talk"), &[], Vec::new());
     c.push_user("one".into());
     c.push_assistant("two".into());
     c.set_transient_context("ctx".into());
@@ -160,6 +160,7 @@ fn summary_snapshot_restores_through_replace_messages() {
     let mut c = Conversation::new("sys".into());
     c.replace_messages(
         Some("earlier talk"),
+        &[],
         vec![
             message(Role::User, "one"),
             message(Role::Assistant, "two"),
@@ -167,8 +168,11 @@ fn summary_snapshot_restores_through_replace_messages() {
             message(Role::User, &format!("{TOOL_RESULT_PREFIX}see]\nimage")),
         ],
     );
-    let (summary, kept_turns) = c.summary_snapshot().unwrap();
-    assert_eq!((summary, kept_turns.get()), ("earlier talk", 2));
+    let (summary, cut) = c.summary_snapshot().unwrap();
+    assert_eq!(
+        (summary, cut.kept_turns.get(), cut.kept_steps),
+        ("earlier talk", 2, None)
+    );
 }
 
 #[test]
@@ -665,6 +669,30 @@ async fn a_long_tool_loop_folds_its_oldest_steps_into_the_summary_and_a_call_log
     );
 }
 
+#[tokio::test]
+async fn replaying_a_tool_loop_compacted_mid_turn_renders_what_the_model_saw() {
+    let mut c = Conversation::new("sys".into());
+    c.push_user("only question".into());
+    push_tool_steps(&mut c, 25);
+    let persisted = c.messages.clone();
+    let fake = FakeSummarizer::new("summary");
+    let (chat, model) = spec(3000, 2, 10_000);
+    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+
+    let (summary, cut) = c.summary_snapshot().unwrap();
+    let kept_steps = cut.kept_steps.unwrap().get();
+    assert_eq!(cut.kept_turns.get(), 1);
+    let first_kept = persisted.len() - 2 * kept_steps;
+    let entries = std::iter::once(persisted[0].clone())
+        .chain(persisted[first_kept..].iter().cloned())
+        .collect();
+    let mut resumed = Conversation::new("sys".into());
+    resumed.replace_messages(Some(summary), &persisted[1..first_kept], entries);
+
+    let wire = |c: &Conversation| serde_json::to_string(&c.as_wire_messages()).unwrap();
+    assert_eq!(wire(&resumed), wire(&c));
+}
+
 #[test]
 fn folded_steps_keep_the_error_line_of_a_failure() {
     let mut c = Conversation::new("sys".into());
@@ -716,6 +744,6 @@ fn calibration_shifts_the_estimate_by_the_measured_error() {
     c.calibrate(c.heuristic_tokens(), 3);
     assert_eq!(c.approx_total_tokens(), 3);
 
-    c.replace_messages(None, Vec::new());
+    c.replace_messages(None, &[], Vec::new());
     assert_eq!(c.approx_total_tokens(), c.heuristic_tokens());
 }

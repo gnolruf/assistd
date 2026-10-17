@@ -41,7 +41,6 @@ mod focus;
 mod input;
 mod markdown;
 mod output;
-mod tokens;
 mod ui;
 
 const CHAT_CHANNEL_CAPACITY: usize = 64;

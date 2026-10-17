@@ -35,7 +35,7 @@ pub(crate) mod subsystems;
 pub(crate) mod voice_handlers;
 pub(crate) mod wire;
 
-pub use self::branches::LlmReplay;
+pub use self::branches::branch_replay;
 pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};

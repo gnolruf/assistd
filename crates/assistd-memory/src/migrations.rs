@@ -36,9 +36,12 @@ CREATE TABLE branches (
 CREATE INDEX idx_branches_parent ON branches(parent_branch_id);
 
 CREATE TABLE turns (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    UNIQUE (session_id, id)
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    duration_ms      INTEGER CHECK (duration_ms >= 0),
+    generated_tokens INTEGER CHECK (generated_tokens >= 0),
+    UNIQUE (session_id, id),
+    CHECK ((duration_ms IS NULL) = (generated_tokens IS NULL))
 ) STRICT;
 
 CREATE TABLE messages (
@@ -78,10 +81,12 @@ CREATE TABLE branch_messages (
 CREATE INDEX idx_branch_messages_message ON branch_messages(message_id);
 
 CREATE TABLE branch_summaries (
-    branch_id   INTEGER PRIMARY KEY REFERENCES branches(id) ON DELETE CASCADE,
-    through_seq INTEGER NOT NULL,
-    content     TEXT NOT NULL,
-    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0)
+    branch_id            INTEGER PRIMARY KEY REFERENCES branches(id) ON DELETE CASCADE,
+    kept_from_seq        INTEGER NOT NULL CHECK (kept_from_seq >= 0),
+    steps_folded_through INTEGER CHECK (steps_folded_through > kept_from_seq),
+    compacted_after_seq  INTEGER NOT NULL CHECK (compacted_after_seq >= 0),
+    content              TEXT NOT NULL,
+    duration_ms          INTEGER NOT NULL CHECK (duration_ms >= 0)
 ) STRICT;
 
 CREATE TABLE memories (

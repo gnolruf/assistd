@@ -2,7 +2,6 @@
 //! and the child-process supervisor that keeps llama-server alive.
 
 use std::fmt;
-use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,7 +17,7 @@ pub mod chat;
 pub mod llama_server;
 
 pub use assistd_utils::child_server::ReadyState;
-pub use chat::conversation::ToolCallRecord;
+pub use chat::conversation::{CompactionCut, ToolCallRecord};
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaServerSpec, VisionState, probe_capabilities_routed,
@@ -145,11 +144,11 @@ pub enum LlmEvent {
         event: StatusKind,
         message: String,
     },
-    /// History was compacted: everything before the last `kept_turns`
-    /// user turns is now represented by `summary`, which took `elapsed` to make.
+    /// History was compacted: everything `cut` leaves out is now represented
+    /// by `summary`, which took `elapsed` to make.
     HistoryCompacted {
         summary: String,
-        kept_turns: NonZeroUsize,
+        cut: CompactionCut,
         elapsed: Duration,
     },
     /// The model has finished generating.
@@ -212,6 +211,16 @@ pub struct HistoryEntry {
     pub tool_name: Option<String>,
 }
 
+/// Persisted history to load into a backend's conversation.
+#[derive(Debug, Default)]
+pub struct HistoryReplay {
+    /// Compaction summary of the history before `entries`.
+    pub summary: Option<String>,
+    /// Tool steps folded out of the first entry's turn, replayed as its call log.
+    pub folded_steps: Vec<HistoryEntry>,
+    pub entries: Vec<HistoryEntry>,
+}
+
 /// A language model holding one in-memory conversation. Optional
 /// capabilities have default implementations that do nothing, or that
 /// fail with [`LlmError::Unavailable`] where a result is required.
@@ -248,14 +257,9 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
         Ok(())
     }
 
-    /// Replace the in-memory conversation with `entries`, headed by the
-    /// compaction `summary` of earlier history when given, preserving the
+    /// Replace the in-memory conversation with `replay`, preserving the
     /// static system prompt.
-    async fn replace_history(
-        &self,
-        _summary: Option<String>,
-        _entries: Vec<HistoryEntry>,
-    ) -> LlmResult<()> {
+    async fn replace_history(&self, _replay: HistoryReplay) -> LlmResult<()> {
         Ok(())
     }
 

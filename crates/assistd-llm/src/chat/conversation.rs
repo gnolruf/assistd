@@ -10,6 +10,7 @@ use assistd_tools::Attachment;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::error::ChatClientError;
@@ -160,6 +161,15 @@ impl Message {
     }
 }
 
+/// What a compaction summary leaves of the conversation: its `kept_turns`
+/// newest user turns, the oldest of them cut to its `kept_steps` newest tool
+/// steps when its earlier steps were folded into its call log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionCut {
+    pub kept_turns: NonZeroUsize,
+    pub kept_steps: Option<NonZeroUsize>,
+}
+
 /// A summary to write by continuing the conversation itself, so the server
 /// can reuse the prompt it already holds and read only the instruction.
 #[derive(Debug)]
@@ -306,8 +316,19 @@ impl Conversation {
     }
 
     /// Replace the message list wholesale, headed by `summary` when given,
-    /// and clear any pending context or note.
-    pub fn replace_messages(&mut self, summary: Option<&str>, msgs: Vec<Message>) {
+    /// and clear any pending context or note. `folded_steps`, tool steps
+    /// already folded out of the first message's turn, become its call log.
+    pub fn replace_messages(
+        &mut self,
+        summary: Option<&str>,
+        folded_steps: &[Message],
+        mut msgs: Vec<Message>,
+    ) {
+        if !folded_steps.is_empty()
+            && let Some(question) = msgs.first_mut()
+        {
+            step_log::append(&mut question.earlier_steps, step_log::records(folded_steps));
+        }
         self.messages = summary
             .map(|text| Message::text(Role::System, format!("{SUMMARY_PREFIX}{text}")))
             .into_iter()
@@ -354,19 +375,36 @@ impl Conversation {
         self.calibration = i32::try_from(bounded).unwrap_or_default();
     }
 
-    /// The current summary text and how many user turns follow it, or
-    /// `None` when there is no summary or no turn after it.
-    pub fn summary_snapshot(&self) -> Option<(&str, NonZeroUsize)> {
+    /// The current summary text and what it leaves in place, or `None` when
+    /// there is no summary or no turn after it.
+    pub fn summary_snapshot(&self) -> Option<(&str, CompactionCut)> {
         let summary = self
             .messages
             .first()?
             .content
             .strip_prefix(SUMMARY_PREFIX)?;
-        let kept_turns = self.messages[self.summary_insertion_index()..]
+        let kept = &self.messages[self.summary_insertion_index()..];
+        let kept_turns = kept.iter().filter(|m| Self::is_real_user(m)).count();
+        let cut = CompactionCut {
+            kept_turns: NonZeroUsize::new(kept_turns)?,
+            kept_steps: Self::kept_steps_of_folded_turn(kept),
+        };
+        Some((summary, cut))
+    }
+
+    /// Tool steps left in the turn opening `kept` when that turn's earlier
+    /// steps were folded into its call log.
+    fn kept_steps_of_folded_turn(kept: &[Message]) -> Option<NonZeroUsize> {
+        let (question, rest) = kept.split_first()?;
+        if question.earlier_steps.is_empty() {
+            return None;
+        }
+        let steps = rest
             .iter()
-            .filter(|m| m.role == Role::User && !Self::is_tool_result(m))
+            .take_while(|m| !Self::is_real_user(m))
+            .filter(|m| is_tool_step(m))
             .count();
-        Some((summary, NonZeroUsize::new(kept_turns)?))
+        NonZeroUsize::new(steps)
     }
 
     pub fn message_count(&self) -> usize {
@@ -559,12 +597,7 @@ impl Conversation {
         self.messages.drain(steps);
         let turn_start = self.current_turn_start();
         if let Some(question) = self.messages.get_mut(turn_start) {
-            question.earlier_steps.extend(records);
-            let excess = question
-                .earlier_steps
-                .len()
-                .saturating_sub(step_log::MAX_LOGGED_CALLS);
-            question.earlier_steps.drain(..excess);
+            step_log::append(&mut question.earlier_steps, records);
         }
     }
 
@@ -623,6 +656,11 @@ impl Conversation {
             0
         };
         idx..idx + 1 + results
+    }
+
+    /// True for a user message that is not a tool result.
+    fn is_real_user(m: &Message) -> bool {
+        m.role == Role::User && !Self::is_tool_result(m)
     }
 
     /// True for a [`Role::Tool`] message or a [`TOOL_RESULT_PREFIX`] user message.

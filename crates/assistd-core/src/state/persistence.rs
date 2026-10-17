@@ -1,6 +1,5 @@
 //! Fire-and-forget message persistence and its drain.
 
-use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -8,7 +7,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use assistd_embed::{EmbedJob, enqueue_embed_job};
-use assistd_memory::{BranchId, ChunkId, EmbeddingTarget, PersistedMessage, SessionId, TurnId};
+use assistd_memory::{
+    BranchId, ChunkId, EmbeddingTarget, PersistedMessage, SessionId, SummaryCut, TurnId, TurnStats,
+};
 
 use super::AppState;
 
@@ -102,20 +103,42 @@ impl AppState {
         });
     }
 
+    /// Record `stats` on `target`'s turn on a background task, ordered after
+    /// its messages. Dropped when the turn's opening write failed.
+    pub(super) fn persist_turn_stats_fire_and_forget(
+        &self,
+        target: PersistTarget,
+        stats: TurnStats,
+    ) {
+        let transcripts = self.memory.transcripts.clone();
+        self.spawn_in_persist_chain(async move {
+            let Some(&turn) = target.turn.get() else {
+                return;
+            };
+            if let Err(e) = transcripts.record_turn_stats(turn, stats).await {
+                warn!(
+                    target: "assistd::memory",
+                    error = %e,
+                    "failed to persist turn stats (continuing)"
+                );
+            }
+        });
+    }
+
     /// Record `summary` as `branch`'s compaction summary on a background
     /// task, ordered after every message persisted before it.
     pub(super) fn persist_summary_fire_and_forget(
         &self,
         branch: BranchId,
         summary: String,
-        kept_turns: NonZeroUsize,
+        cut: SummaryCut,
         elapsed: Duration,
     ) {
         let transcripts = self.memory.transcripts.clone();
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         self.spawn_in_persist_chain(async move {
             if let Err(e) = transcripts
-                .record_branch_summary(branch, summary, kept_turns, duration_ms)
+                .record_branch_summary(branch, summary, cut, duration_ms)
                 .await
             {
                 warn!(

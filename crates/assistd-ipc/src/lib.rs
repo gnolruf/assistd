@@ -605,6 +605,14 @@ impl fmt::Display for Role {
     }
 }
 
+/// How long a finished turn ran and the tokens it produced.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnStats {
+    pub duration_ms: u64,
+    /// Tokens the turn added to the conversation.
+    pub tokens: u64,
+}
+
 /// Which table a [`Event::ReindexProgress`] item belongs to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -781,8 +789,9 @@ pub enum Event {
     },
     /// One message of branch history. Assistant rows carry the model's reasoning and
     /// how long it took, empty and `None` when it gave none; tool rows carry the call's
-    /// arguments and outcome when known; `compaction_ms` is set only on the newest row
-    /// the branch's compaction summary stands in for, to how long that compaction took.
+    /// arguments and outcome when known; `compaction_ms` is set only on the row the
+    /// branch's latest compaction ran after, to how long it took; `turn_stats` only on
+    /// the last row of a finished turn.
     HistoryEntry {
         id: String,
         seq: i64,
@@ -801,6 +810,8 @@ pub enum Event {
         duration_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compaction_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_stats: Option<TurnStats>,
     },
     /// Result of `Undo`; `removed_messages == 0` means there was nothing to undo.
     UndoApplied {

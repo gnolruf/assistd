@@ -25,7 +25,7 @@ fn contents(history: &[HistoryRow]) -> Vec<(PersistedRole, &str)> {
 }
 
 #[tokio::test]
-async fn tool_calls_and_tool_results_round_trip() {
+async fn a_tool_turn_round_trips_with_its_stats_on_its_last_row() {
     let (store, _temp) = fresh_store().await;
     let session = SessionId::new();
     let branch = store
@@ -68,6 +68,12 @@ async fn tool_calls_and_tool_results_round_trip() {
         "tool results are never chunked for embedding"
     );
 
+    let stats = TurnStats {
+        duration_ms: 5300,
+        generated_tokens: 812,
+    };
+    store.record_turn_stats(turn, stats).await.unwrap();
+
     let history = store.load_branch_history(branch).await.unwrap();
     assert_eq!(
         history[1..],
@@ -82,6 +88,7 @@ async fn tool_calls_and_tool_results_round_trip() {
                         tool_calls: calls,
                     },
                 },
+                turn_stats: None,
             },
             HistoryRow {
                 message_id: result.id,
@@ -94,6 +101,7 @@ async fn tool_calls_and_tool_results_round_trip() {
                         outcome,
                     },
                 },
+                turn_stats: Some(stats),
             },
         ]
     );
@@ -280,13 +288,18 @@ async fn summary_follows_kept_turns_forks_and_undo() {
             .await
             .unwrap();
     }
-    let kept_two = NonZeroUsize::new(2).unwrap();
+    let cut = SummaryCut {
+        kept_turns: NonZeroUsize::new(2).unwrap(),
+        kept_steps: None,
+    };
     store
-        .record_branch_summary(branch, "turn one".into(), kept_two, 4200)
+        .record_branch_summary(branch, "turn one".into(), cut, 4200)
         .await
         .unwrap();
     let expected = Some(BranchSummary {
-        through_seq: Seq(1),
+        kept_from_seq: Seq(2),
+        steps_folded_through: None,
+        compacted_after_seq: Seq(5),
         content: "turn one".into(),
         duration_ms: 4200,
     });
@@ -302,6 +315,77 @@ async fn summary_follows_kept_turns_forks_and_undo() {
     store.undo_last_turn(branch).await.unwrap();
     assert_eq!(store.load_branch_summary(branch).await.unwrap(), None);
     assert_eq!(store.load_branch_summary(fork).await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn summary_folding_steps_of_a_turn_covers_only_that_turns_older_steps() {
+    let (store, _temp) = fresh_store().await;
+    let branch = store
+        .begin_session_with_main_branch(SessionId::new(), 1)
+        .await
+        .unwrap();
+    let first = store
+        .begin_turn(branch, PersistedMessage::user("review the code"))
+        .await
+        .unwrap()
+        .turn;
+    for step in ["c-1", "c-2", "c-3"] {
+        append_tool_step(&store, branch, first, step).await;
+    }
+    let second = store
+        .begin_turn(branch, PersistedMessage::user("thanks"))
+        .await
+        .unwrap()
+        .turn;
+    store
+        .append_message_to_branch(branch, second, PersistedMessage::assistant_text("ok", None))
+        .await
+        .unwrap();
+    let one = NonZeroUsize::new(1).unwrap();
+    let cut = SummaryCut {
+        kept_turns: NonZeroUsize::new(2).unwrap(),
+        kept_steps: Some(one),
+    };
+    store
+        .record_branch_summary(branch, "steps one and two".into(), cut, 900)
+        .await
+        .unwrap();
+    let summary = store.load_branch_summary(branch).await.unwrap().unwrap();
+    assert_eq!(
+        (summary.kept_from_seq, summary.steps_folded_through),
+        (Seq(0), Some(Seq(4)))
+    );
+
+    store.undo_last_turn(branch).await.unwrap();
+    assert!(store.load_branch_summary(branch).await.unwrap().is_some());
+    store.undo_last_turn(branch).await.unwrap();
+    assert_eq!(store.load_branch_summary(branch).await.unwrap(), None);
+}
+
+async fn append_tool_step(
+    store: &SqliteTranscriptStore,
+    branch: BranchId,
+    turn: TurnId,
+    call_id: &str,
+) {
+    let call = PersistedToolCall {
+        id: call_id.into(),
+        name: "run".into(),
+        arguments: serde_json::json!({"command": "ls"}),
+    };
+    let outcome = ToolOutcome {
+        exit_code: 0,
+        duration_ms: 1,
+    };
+    for message in [
+        PersistedMessage::assistant_tool_calls("", vec![call], None),
+        PersistedMessage::tool_result("out", call_id, "run", outcome),
+    ] {
+        store
+            .append_message_to_branch(branch, turn, message)
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]

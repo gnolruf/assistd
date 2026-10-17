@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use assistd_core::PresenceState;
 use assistd_ipc::{Event, IpcClient, PermissionMode, Request, VoiceCaptureState};
 use assistd_tools::{Approval, Attachment, ConfirmationRequest};
+use assistd_utils::token_counter::TokenCounter;
 use chrono::{DateTime, Utc};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -16,7 +17,6 @@ use tokio::task::JoinSet;
 
 use super::input::InputLine;
 use super::output::OutputPane;
-use super::tokens::TokenCounter;
 
 mod attach;
 mod commands;

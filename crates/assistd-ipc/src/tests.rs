@@ -489,6 +489,7 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 exit_code: None,
                 duration_ms: None,
                 compaction_ms: None,
+                turn_stats: None,
             },
             r#"{"type":"history_entry","id":"r","seq":3,"role":"assistant","content":"hello","reasoning":"greet back","reasoning_ms":1500,"tool_name":null}"#,
         ),
@@ -505,8 +506,12 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 exit_code: Some(1),
                 duration_ms: Some(7),
                 compaction_ms: Some(4200),
+                turn_stats: Some(TurnStats {
+                    duration_ms: 5300,
+                    tokens: 812,
+                }),
             },
-            r#"{"type":"history_entry","id":"r","seq":4,"role":"tool","content":"out","tool_name":"run","tool_args":{"command":"ls"},"exit_code":1,"duration_ms":7,"compaction_ms":4200}"#,
+            r#"{"type":"history_entry","id":"r","seq":4,"role":"tool","content":"out","tool_name":"run","tool_args":{"command":"ls"},"exit_code":1,"duration_ms":7,"compaction_ms":4200,"turn_stats":{"duration_ms":5300,"tokens":812}}"#,
         ),
         (
             Event::UndoApplied {

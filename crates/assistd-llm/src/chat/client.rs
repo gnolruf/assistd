@@ -26,8 +26,8 @@ use super::sse::{SseEvent, SseLineReader};
 use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
-    HistoryEntry, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult,
-    ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
+    HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
+    LlmResult, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -274,11 +274,11 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
-        if let Some((summary, kept_turns)) = conv.summary_snapshot() {
+        if let Some((summary, cut)) = conv.summary_snapshot() {
             let _ = tx
                 .send(LlmEvent::HistoryCompacted {
                     summary: summary.to_string(),
-                    kept_turns,
+                    cut,
                     elapsed: started_at.elapsed(),
                 })
                 .await;
@@ -600,14 +600,15 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
-    async fn replace_history(
-        &self,
-        summary: Option<String>,
-        entries: Vec<HistoryEntry>,
-    ) -> LlmResult<()> {
-        let messages = entries.into_iter().map(history_message).collect();
+    async fn replace_history(&self, replay: HistoryReplay) -> LlmResult<()> {
+        let folded_steps: Vec<_> = replay
+            .folded_steps
+            .into_iter()
+            .map(history_message)
+            .collect();
+        let messages = replay.entries.into_iter().map(history_message).collect();
         let mut conv = self.conv.lock().await;
-        conv.replace_messages(summary.as_deref(), messages);
+        conv.replace_messages(replay.summary.as_deref(), &folded_steps, messages);
         Ok(())
     }
 

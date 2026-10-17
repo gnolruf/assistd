@@ -166,16 +166,40 @@ pub struct HistoryRow {
     pub message_id: MessageId,
     pub seq: Seq,
     pub message: PersistedMessage,
+    /// Set on the last message of its turn on the branch once that turn finished.
+    pub turn_stats: Option<TurnStats>,
 }
 
-/// The latest compaction summary of a branch.
+/// How long a finished turn ran and the tokens it produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnStats {
+    pub duration_ms: u64,
+    /// Tokens the turn added to the conversation.
+    pub generated_tokens: u64,
+}
+
+/// The latest compaction summary of a branch. It stands in for every message
+/// before `kept_from_seq` and for those after it through `steps_folded_through`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchSummary {
-    /// Seq of the last message the summary stands in for.
-    pub through_seq: Seq,
+    /// Seq of the user message that opens the history kept word for word.
+    pub kept_from_seq: Seq,
+    /// Last seq of that user message's turn whose tool steps were folded into
+    /// its call log; `None` when its turn is kept whole.
+    pub steps_folded_through: Option<Seq>,
+    /// Seq of the newest message on the branch when the compaction ran.
+    pub compacted_after_seq: Seq,
     pub content: String,
     /// Time the compaction that wrote it took.
     pub duration_ms: u64,
+}
+
+/// What a compaction summary leaves of a branch: its `kept_turns` newest user
+/// turns, the oldest of them cut to its `kept_steps` newest tool steps when set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SummaryCut {
+    pub kept_turns: NonZeroUsize,
+    pub kept_steps: Option<NonZeroUsize>,
 }
 
 /// Result of [`TranscriptStore::append_message_to_branch`].
@@ -275,18 +299,21 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     async fn load_branch_history(&self, branch: BranchId) -> Result<Vec<HistoryRow>>;
 
     /// Make `summary`, which took `duration_ms` to write, the branch's summary of
-    /// everything before its `kept_turns` most recent user messages; a no-op when
-    /// the branch has fewer user messages than that.
+    /// everything `cut` leaves out; a no-op when the branch has fewer user
+    /// messages than `cut` keeps.
     async fn record_branch_summary(
         &self,
         branch: BranchId,
         summary: String,
-        kept_turns: NonZeroUsize,
+        cut: SummaryCut,
         duration_ms: u64,
     ) -> Result<()>;
 
     /// The branch's latest compaction summary, if one is recorded.
     async fn load_branch_summary(&self, branch: BranchId) -> Result<Option<BranchSummary>>;
+
+    /// Record how finished `turn` ran, replacing any earlier record.
+    async fn record_turn_stats(&self, turn: TurnId, stats: TurnStats) -> Result<()>;
 
     /// When the newest message on `branch` was written, or `None` when the branch is empty.
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>>;
@@ -382,7 +409,7 @@ impl TranscriptStore for NoTranscriptStore {
         &self,
         _branch: BranchId,
         _summary: String,
-        _kept_turns: NonZeroUsize,
+        _cut: SummaryCut,
         _duration_ms: u64,
     ) -> Result<()> {
         Ok(())
@@ -390,6 +417,10 @@ impl TranscriptStore for NoTranscriptStore {
 
     async fn load_branch_summary(&self, _branch: BranchId) -> Result<Option<BranchSummary>> {
         Ok(None)
+    }
+
+    async fn record_turn_stats(&self, _turn: TurnId, _stats: TurnStats) -> Result<()> {
+        Ok(())
     }
 
     async fn latest_branch_activity(&self, _branch: BranchId) -> Result<Option<DateTime<Utc>>> {

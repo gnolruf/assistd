@@ -10,11 +10,11 @@ use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, Config, LlmReplay, MemoryStack, PresenceManager, RuntimeState, SessionContext,
-    Subsystems, VisionRevalidator, VoiceManager,
+    AppState, Config, MemoryStack, PresenceManager, RuntimeState, SessionContext, Subsystems,
+    VisionRevalidator, VoiceManager,
 };
 use assistd_ipc::IpcClient;
-use assistd_llm::{LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
+use assistd_llm::{HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
@@ -327,12 +327,12 @@ fn build_memory_stack(
         .with_embed_tx(embed.embed_tx.clone())
 }
 
-async fn replay_history(chat: &dyn LlmBackend, replay: LlmReplay) {
+async fn replay_history(chat: &dyn LlmBackend, replay: HistoryReplay) {
     if replay.entries.is_empty() {
         return;
     }
     let count = replay.entries.len();
-    if let Err(e) = chat.replace_history(replay.summary, replay.entries).await {
+    if let Err(e) = chat.replace_history(replay).await {
         tracing::warn!("memory: resume replay failed: {e:#}");
     } else {
         info!("memory: resumed {count} message(s) from prior branch");

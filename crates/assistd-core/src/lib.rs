@@ -64,8 +64,8 @@ pub use assistd_wm::{NoWindowManager, WindowManager};
 
 pub use presence::{PresenceError, PresenceManager, RequestGuard};
 pub use state::{
-    AppState, DispatchError, LlmReplay, McpServerStatus, MemoryStack, RuntimeState, SessionContext,
-    Subsystems, TurnOrigin,
+    AppState, DispatchError, McpServerStatus, MemoryStack, RuntimeState, SessionContext,
+    Subsystems, TurnOrigin, branch_replay,
 };
 
 /// Mode for the spill and scratch directories and any parents created for

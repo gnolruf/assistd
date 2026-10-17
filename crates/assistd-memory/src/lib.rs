@@ -21,5 +21,5 @@ pub use sqlite::{SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTra
 pub use transcripts::{
     AppendedMessage, BranchInfo, BranchSummary, HistoryRow, MessageKind, NoTranscriptStore,
     OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall, Reasoning, ResumeCandidate,
-    ToolOutcome, TranscriptStore, UndoOutcome,
+    SummaryCut, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
 };

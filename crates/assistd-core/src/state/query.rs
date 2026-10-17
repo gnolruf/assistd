@@ -13,8 +13,11 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
 use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
-use assistd_memory::{PersistedMessage, PersistedToolCall, Reasoning, SessionId, ToolOutcome};
+use assistd_memory::{
+    PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
+};
 use assistd_tools::{Attachment, inherit_confirm_router};
+use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
 };
@@ -128,6 +131,8 @@ struct TurnTranslator {
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
     done_emitted: bool,
+    started_at: Instant,
+    tokens: TokenCounter,
 }
 
 impl TurnTranslator {
@@ -142,6 +147,8 @@ impl TurnTranslator {
                 .checked_sub(LAST_DELTA_DEBOUNCE)
                 .unwrap_or_else(Instant::now),
             done_emitted: false,
+            started_at: Instant::now(),
+            tokens: TokenCounter::new(),
         }
     }
 
@@ -156,11 +163,13 @@ impl TurnTranslator {
         let id = self.id.clone();
         let translated = match event {
             LlmEvent::Delta { text } => {
+                self.tokens.on_delta();
                 let sentences = sentence_buf.push(&text);
                 self.accumulate_delta(&state.runtime, &text);
                 (Event::Delta { id, text }, sentences)
             }
             LlmEvent::ReasoningDelta { text } => {
+                self.tokens.on_delta();
                 self.reasoning
                     .get_or_insert_with(ReasoningTrace::new)
                     .push(&text);
@@ -201,6 +210,7 @@ impl TurnTranslator {
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
             LlmEvent::ContextSize { tokens, total } => {
+                self.tokens.on_context_size(tokens, total);
                 (Event::ContextSize { id, tokens, total }, Vec::new())
             }
             LlmEvent::Status {
@@ -227,16 +237,15 @@ impl TurnTranslator {
             }
             LlmEvent::HistoryCompacted {
                 summary,
-                kept_turns,
+                cut,
                 elapsed,
             } => {
                 if let Some(target) = &self.persist {
-                    state.persist_summary_fire_and_forget(
-                        target.branch,
-                        summary,
-                        kept_turns,
-                        elapsed,
-                    );
+                    let cut = SummaryCut {
+                        kept_turns: cut.kept_turns,
+                        kept_steps: cut.kept_steps,
+                    };
+                    state.persist_summary_fire_and_forget(target.branch, summary, cut, elapsed);
                 }
                 return None;
             }
@@ -278,6 +287,19 @@ impl TurnTranslator {
             state,
             PersistedMessage::assistant_text(final_text, reasoning),
         );
+    }
+
+    /// Record how long the turn ran and the tokens it produced.
+    fn persist_turn_stats(&self, state: &AppState) {
+        let Some(target) = &self.persist else {
+            return;
+        };
+        let elapsed = self.started_at.elapsed();
+        let stats = TurnStats {
+            duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            generated_tokens: self.tokens.tokens(),
+        };
+        state.persist_turn_stats_fire_and_forget(target.clone(), stats);
     }
 
     fn take_reasoning(&mut self) -> Option<Reasoning> {
@@ -612,6 +634,7 @@ impl AppState {
             }
             speech.speak(sentences).await;
         }
+        translator.persist_turn_stats(self);
         translator.done_emitted
     }
 

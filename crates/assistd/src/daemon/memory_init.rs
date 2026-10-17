@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_core::{Config, LlmReplay};
+use assistd_core::{Config, branch_replay};
+use assistd_llm::HistoryReplay;
 use assistd_memory::{
     BranchId, MemoryError, MemoryStore, NoMemoryStore, NoTranscriptStore, SessionId, SqliteHandle,
     SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
@@ -20,7 +21,7 @@ pub(super) struct MemorySubsystem {
     /// `None` for an unsaved session, inserted with its first message.
     pub branch_id: Option<BranchId>,
     /// History of the resumed branch, to replay into the LLM.
-    pub resumed_history: LlmReplay,
+    pub resumed_history: HistoryReplay,
     pub sqlite_handle: Option<SqliteHandle>,
 }
 
@@ -31,7 +32,7 @@ impl MemorySubsystem {
             transcript_store: Arc::new(NoTranscriptStore),
             session_id: SessionId::new(),
             branch_id: None,
-            resumed_history: LlmReplay::default(),
+            resumed_history: HistoryReplay::default(),
             sqlite_handle: None,
         }
     }
@@ -91,7 +92,7 @@ pub(super) async fn init(config: &Config) -> MemorySubsystem {
 async fn resume_or_start_unsaved_session(
     transcripts: &SqliteTranscriptStore,
     db_path: &Path,
-) -> (SessionId, Option<BranchId>, LlmReplay) {
+) -> (SessionId, Option<BranchId>, HistoryReplay) {
     match transcripts.find_resumable_session().await {
         Ok(Some(cand)) if !pid_is_alive(cand.daemon_pid) => {
             info!(
@@ -106,18 +107,21 @@ async fn resume_or_start_unsaved_session(
                 "memory: SQLite ready at {} (new session)",
                 db_path.display()
             );
-            (SessionId::new(), None, LlmReplay::default())
+            (SessionId::new(), None, HistoryReplay::default())
         }
         Err(e) => {
             tracing::warn!("memory: find_resumable_session failed: {e:#}; starting fresh");
-            (SessionId::new(), None, LlmReplay::default())
+            (SessionId::new(), None, HistoryReplay::default())
         }
     }
 }
 
 /// The resumed branch's history and summary as the LLM replays them; a
 /// failed load replays nothing in its place.
-async fn load_resumed_replay(transcripts: &SqliteTranscriptStore, branch: BranchId) -> LlmReplay {
+async fn load_resumed_replay(
+    transcripts: &SqliteTranscriptStore,
+    branch: BranchId,
+) -> HistoryReplay {
     let rows = transcripts
         .load_branch_history(branch)
         .await
@@ -129,7 +133,7 @@ async fn load_resumed_replay(transcripts: &SqliteTranscriptStore, branch: Branch
         .inspect_err(|e| tracing::warn!("memory: load_branch_summary failed for resume ({e:#})"))
         .ok()
         .flatten();
-    LlmReplay::new(&rows, summary)
+    branch_replay(&rows, summary)
 }
 
 fn pid_is_alive(pid: u32) -> bool {

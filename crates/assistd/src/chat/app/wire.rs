@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity};
+use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity, TurnStats};
 use assistd_tools::{ConfirmationRequest, Risk};
 use serde_json::Value;
 
@@ -288,6 +288,7 @@ impl App {
                 exit_code,
                 duration_ms,
                 compaction_ms,
+                turn_stats,
                 ..
             } => {
                 if let Some(ms) = reasoning_ms
@@ -301,6 +302,9 @@ impl App {
                 if let Some(ms) = compaction_ms {
                     self.output
                         .push_replayed_compaction(Duration::from_millis(ms));
+                }
+                if let Some(stats) = turn_stats {
+                    self.output.push_turn_summary(turn_summary(&stats));
                 }
             }
             Event::UndoApplied {
@@ -470,9 +474,12 @@ impl App {
         let started_at = self.reply_started_at;
         self.finish_reply();
         if let Some(started_at) = started_at {
-            let elapsed_secs = now.duration_since(started_at).as_secs();
-            self.output
-                .push_turn_summary(turn_summary(elapsed_secs, self.tokens.tokens()));
+            let elapsed = now.duration_since(started_at);
+            let stats = TurnStats {
+                duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                tokens: self.tokens.tokens(),
+            };
+            self.output.push_turn_summary(turn_summary(&stats));
         }
     }
 

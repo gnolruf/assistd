@@ -9,9 +9,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use assistd_ipc::Event;
-use assistd_llm::{HistoryEntry, HistoryRole, Thinking, ToolCallRecord};
+use assistd_llm::{HistoryEntry, HistoryReplay, HistoryRole, Thinking, ToolCallRecord};
 use assistd_memory::{
-    BranchId, BranchSummary, HistoryRow, MessageKind, PersistedToolCall, Seq, SessionId,
+    BranchId, BranchSummary, HistoryRow, MessageKind, PersistedToolCall, Seq, SessionId, TurnStats,
     UndoOutcome,
 };
 
@@ -20,26 +20,30 @@ use super::{AppState, send_error, wire_role, wire_timestamp};
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_TITLE_PROMPT_CHARS: usize = 1024;
 
-/// A branch's persisted history as the LLM replays it: the compaction
-/// summary, if any, then only the rows after the ones it stands in for.
-#[derive(Debug, Default)]
-pub struct LlmReplay {
-    pub summary: Option<String>,
-    pub entries: Vec<HistoryEntry>,
+/// Where a branch row lands when its history is replayed into the LLM.
+enum ReplayPart {
+    /// Stood in for by the summary.
+    Summarized,
+    /// A tool step of the kept turn, folded into its question's call log.
+    FoldedStep,
+    Kept,
 }
 
-impl LlmReplay {
-    /// The replay of `rows`, a whole branch, under its `summary`.
-    pub fn new(rows: &[HistoryRow], summary: Option<BranchSummary>) -> Self {
-        let through_seq = summary.as_ref().map(|s| s.through_seq);
-        Self {
-            summary: summary.map(|s| s.content),
-            entries: rows
-                .iter()
-                .filter(|row| through_seq.is_none_or(|through| row.seq > through))
-                .map(history_entry)
-                .collect(),
+/// `rows`, a whole branch, as the LLM replays them under its `summary`.
+pub fn branch_replay(rows: &[HistoryRow], summary: Option<BranchSummary>) -> HistoryReplay {
+    let mut folded_steps = Vec::new();
+    let mut entries = Vec::new();
+    for row in rows {
+        match replay_part(summary.as_ref(), row.seq) {
+            ReplayPart::Summarized => {}
+            ReplayPart::FoldedStep => folded_steps.push(history_entry(row)),
+            ReplayPart::Kept => entries.push(history_entry(row)),
         }
+    }
+    HistoryReplay {
+        summary: summary.map(|s| s.content),
+        folded_steps,
+        entries,
     }
 }
 
@@ -383,14 +387,11 @@ impl AppState {
             }
         };
         let summary = self.load_branch_summary(branch, label).await;
-        let compaction = summary.as_ref().map(|s| (s.through_seq, s.duration_ms));
-        let replay = LlmReplay::new(&rows, summary);
-        if let Err(e) = self
-            .subsystems
-            .llm
-            .replace_history(replay.summary, replay.entries)
-            .await
-        {
+        let compaction = summary
+            .as_ref()
+            .and_then(|s| Some((compaction_marker(&rows, s)?, s.duration_ms)));
+        let replay = branch_replay(&rows, summary);
+        if let Err(e) = self.subsystems.llm.replace_history(replay).await {
             warn!(
                 target: "assistd::state",
                 error = %e,
@@ -448,8 +449,9 @@ impl AppState {
                     exit_code: outcome.map(|o| o.exit_code),
                     duration_ms: outcome.map(|o| o.duration_ms),
                     compaction_ms: compaction
-                        .filter(|(through_seq, _)| *through_seq == row.seq)
+                        .filter(|(marker_seq, _)| *marker_seq == row.seq)
                         .map(|(_, duration_ms)| duration_ms),
+                    turn_stats: row.turn_stats.map(wire_turn_stats),
                 })
                 .await;
         }
@@ -480,7 +482,8 @@ impl AppState {
     async fn begin_unsaved_session(&self, id: String, tx: &mpsc::Sender<Event>, label: &str) {
         let new_session = SessionId::new();
         self.runtime.session_ctx.replace(new_session, None).await;
-        if let Err(e) = self.subsystems.llm.replace_history(None, Vec::new()).await {
+        let empty = HistoryReplay::default();
+        if let Err(e) = self.subsystems.llm.replace_history(empty).await {
             warn!(
                 target: "assistd::state",
                 error = %e,
@@ -522,6 +525,36 @@ async fn announce_unsaved_session(id: String, session: SessionId, tx: &mpsc::Sen
         })
         .await;
     let _ = tx.send(Event::Done { id }).await;
+}
+
+fn replay_part(summary: Option<&BranchSummary>, seq: Seq) -> ReplayPart {
+    let Some(summary) = summary else {
+        return ReplayPart::Kept;
+    };
+    let kept_from = summary.kept_from_seq;
+    if seq < kept_from {
+        ReplayPart::Summarized
+    } else if seq > kept_from && summary.steps_folded_through.is_some_and(|end| seq <= end) {
+        ReplayPart::FoldedStep
+    } else {
+        ReplayPart::Kept
+    }
+}
+
+/// The row the compaction line follows: the newest one left of those on the
+/// branch when it ran.
+fn compaction_marker(rows: &[HistoryRow], summary: &BranchSummary) -> Option<Seq> {
+    rows.iter()
+        .map(|row| row.seq)
+        .take_while(|seq| *seq <= summary.compacted_after_seq)
+        .last()
+}
+
+fn wire_turn_stats(stats: TurnStats) -> assistd_ipc::TurnStats {
+    assistd_ipc::TurnStats {
+        duration_ms: stats.duration_ms,
+        tokens: stats.generated_tokens,
+    }
 }
 
 fn history_entry(row: &HistoryRow) -> HistoryEntry {

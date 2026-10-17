@@ -12,8 +12,8 @@ use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
     AppendedMessage, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow, MemoryError,
     MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,
-    Reasoning, Result, ResumeCandidate, Seq, SessionId, ToolOutcome, TranscriptStore, TurnId,
-    UndoOutcome,
+    Reasoning, Result, ResumeCandidate, Seq, SessionId, SummaryCut, ToolOutcome, TranscriptStore,
+    TurnId, TurnStats, UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
@@ -259,8 +259,11 @@ impl TranscriptStore for SqliteTranscriptStore {
                     rusqlite::params![new_branch, src],
                 )?;
                 tx.execute(
-                    "INSERT INTO branch_summaries (branch_id, through_seq, content, duration_ms)
-                     SELECT ?1, through_seq, content, duration_ms
+                    "INSERT INTO branch_summaries
+                         (branch_id, kept_from_seq, steps_folded_through, compacted_after_seq,
+                          content, duration_ms)
+                     SELECT ?1, kept_from_seq, steps_folded_through, compacted_after_seq,
+                            content, duration_ms
                      FROM branch_summaries WHERE branch_id = ?2",
                     rusqlite::params![new_branch, src],
                 )?;
@@ -291,8 +294,13 @@ impl TranscriptStore for SqliteTranscriptStore {
                              m.tool_call_id,
                              m.tool_name,
                              m.tool_exit_code,
-                             m.tool_duration_ms
-                     FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
+                             m.tool_duration_ms,
+                             LEAD(m.turn_id) OVER (ORDER BY bm.seq) IS NOT m.turn_id,
+                             t.duration_ms,
+                             t.generated_tokens
+                     FROM branch_messages bm
+                     JOIN messages m ON m.id = bm.message_id
+                     JOIN turns t ON t.id = m.turn_id
                      WHERE bm.branch_id = ?1
                      ORDER BY bm.seq ASC",
                 )?;
@@ -309,31 +317,43 @@ impl TranscriptStore for SqliteTranscriptStore {
         &self,
         branch: BranchId,
         summary: String,
-        kept_turns: NonZeroUsize,
+        cut: SummaryCut,
         duration_ms: u64,
     ) -> Result<()> {
-        let offset = kept_turns.get() - 1;
         self.handle
             .writer()
-            .call(move |c| {
-                c.execute(
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let Some(kept_from) = nth_newest_user_seq(&tx, branch, cut.kept_turns)? else {
+                    return Ok(());
+                };
+                let folded_through = match cut.kept_steps {
+                    Some(kept_steps) => steps_folded_through(&tx, branch, kept_from, kept_steps)?,
+                    None => None,
+                };
+                let newest: Seq = tx.query_row(
+                    "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
+                    rusqlite::params![branch],
+                    |r| r.get(0),
+                )?;
+                tx.execute(
                     "INSERT OR REPLACE INTO branch_summaries
-                         (branch_id, through_seq, content, duration_ms)
-                     SELECT ?1, through_seq, ?2, ?5
-                     FROM (
-                         SELECT (SELECT MAX(prev.seq) FROM branch_messages prev
-                                 WHERE prev.branch_id = ?1 AND prev.seq < bm.seq) AS through_seq
-                         FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
-                         WHERE bm.branch_id = ?1 AND m.role = ?3
-                         ORDER BY bm.seq DESC LIMIT 1 OFFSET ?4
-                     )
-                     WHERE through_seq IS NOT NULL",
-                    rusqlite::params![branch, summary, PersistedRole::User, offset, duration_ms],
-                )
+                         (branch_id, kept_from_seq, steps_folded_through, compacted_after_seq,
+                          content, duration_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        branch,
+                        kept_from,
+                        folded_through,
+                        newest,
+                        summary,
+                        duration_ms
+                    ],
+                )?;
+                tx.commit()
             })
             .await
-            .map_err(MemoryError::sqlite("record_branch_summary"))?;
-        Ok(())
+            .map_err(MemoryError::sqlite("record_branch_summary"))
     }
 
     async fn load_branch_summary(&self, branch: BranchId) -> Result<Option<BranchSummary>> {
@@ -341,14 +361,17 @@ impl TranscriptStore for SqliteTranscriptStore {
             .reader()
             .call(move |c| {
                 c.query_row(
-                    "SELECT through_seq, content, duration_ms
+                    "SELECT kept_from_seq, steps_folded_through, compacted_after_seq, content,
+                            duration_ms
                      FROM branch_summaries WHERE branch_id = ?1",
                     rusqlite::params![branch],
                     |r| {
                         Ok(BranchSummary {
-                            through_seq: r.get(0)?,
-                            content: r.get(1)?,
-                            duration_ms: r.get(2)?,
+                            kept_from_seq: r.get(0)?,
+                            steps_folded_through: r.get(1)?,
+                            compacted_after_seq: r.get(2)?,
+                            content: r.get(3)?,
+                            duration_ms: r.get(4)?,
                         })
                     },
                 )
@@ -356,6 +379,20 @@ impl TranscriptStore for SqliteTranscriptStore {
             })
             .await
             .map_err(MemoryError::sqlite("load_branch_summary"))
+    }
+
+    async fn record_turn_stats(&self, turn: TurnId, stats: TurnStats) -> Result<()> {
+        self.handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "UPDATE turns SET duration_ms = ?2, generated_tokens = ?3 WHERE id = ?1",
+                    rusqlite::params![turn, stats.duration_ms, stats.generated_tokens],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("record_turn_stats"))?;
+        Ok(())
     }
 
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>> {
@@ -702,6 +739,58 @@ fn first_user_text_of_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Resu
     .optional()
 }
 
+/// Seq of the `n`th newest user message on `branch`, counting from 1.
+fn nth_newest_user_seq(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+    n: NonZeroUsize,
+) -> rusqlite::Result<Option<Seq>> {
+    tx.query_row(
+        "SELECT bm.seq FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
+         WHERE bm.branch_id = ?1 AND m.role = ?2
+         ORDER BY bm.seq DESC LIMIT 1 OFFSET ?3",
+        rusqlite::params![branch, PersistedRole::User, n.get() - 1],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Last seq of the turn opened at `question` that falls before its
+/// `kept_steps` newest tool steps; `None` when no step comes before them.
+fn steps_folded_through(
+    tx: &Transaction<'_>,
+    branch: BranchId,
+    question: Seq,
+    kept_steps: NonZeroUsize,
+) -> rusqlite::Result<Option<Seq>> {
+    let folded_through: Option<Option<Seq>> = tx
+        .query_row(
+            "SELECT (SELECT MAX(prev.seq) FROM branch_messages prev
+                     WHERE prev.branch_id = ?1 AND prev.seq > ?2 AND prev.seq < step.seq)
+             FROM (
+                 SELECT bm.seq FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
+                 WHERE bm.branch_id = ?1 AND bm.seq > ?2
+                   AND m.role = ?3 AND m.tool_calls IS NOT NULL
+                   AND bm.seq < COALESCE(
+                       (SELECT MIN(next.seq)
+                        FROM branch_messages next JOIN messages nm ON nm.id = next.message_id
+                        WHERE next.branch_id = ?1 AND next.seq > ?2 AND nm.role = ?4),
+                       9223372036854775807)
+                 ORDER BY bm.seq DESC LIMIT 1 OFFSET ?5
+             ) AS step",
+            rusqlite::params![
+                branch,
+                question,
+                PersistedRole::Assistant,
+                PersistedRole::User,
+                kept_steps.get() - 1
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(folded_through.flatten())
+}
+
 /// Drop the branch's summary once it stands in for any message of `turn`,
 /// returning how many summaries were dropped.
 fn drop_summary_covering_turn(
@@ -712,7 +801,7 @@ fn drop_summary_covering_turn(
     tx.execute(
         "DELETE FROM branch_summaries
          WHERE branch_id = ?1
-           AND through_seq >= (
+           AND COALESCE(steps_folded_through, kept_from_seq - 1) >= (
                SELECT MIN(bm.seq)
                FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
                WHERE bm.branch_id = ?1 AND m.turn_id = ?2
@@ -790,7 +879,22 @@ fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {
             content: row.get(3)?,
             kind,
         },
+        turn_stats: turn_stats_at(row, 11)?,
     })
+}
+
+/// The turn's stats when the flag at `idx` marks the row as its turn's last,
+/// read from the two columns after it.
+fn turn_stats_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<TurnStats>> {
+    let ends_turn: bool = row.get(idx)?;
+    let duration_ms: Option<u64> = row.get(idx + 1)?;
+    let generated_tokens: Option<u64> = row.get(idx + 2)?;
+    Ok(duration_ms.zip(generated_tokens).filter(|_| ends_turn).map(
+        |(duration_ms, generated_tokens)| TurnStats {
+            duration_ms,
+            generated_tokens,
+        },
+    ))
 }
 
 /// The reasoning text at `idx` and its duration at `idx + 1`; the schema sets both or neither.

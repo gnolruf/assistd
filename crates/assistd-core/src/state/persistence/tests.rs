@@ -1,4 +1,3 @@
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -117,7 +116,7 @@ impl TranscriptStore for SlowingStore {
         &self,
         _b: BranchId,
         _summary: String,
-        _kept_turns: NonZeroUsize,
+        _cut: SummaryCut,
         _duration_ms: u64,
     ) -> assistd_memory::Result<()> {
         Ok(())
@@ -127,6 +126,14 @@ impl TranscriptStore for SlowingStore {
         _b: BranchId,
     ) -> assistd_memory::Result<Option<BranchSummary>> {
         Ok(None)
+    }
+
+    async fn record_turn_stats(
+        &self,
+        _turn: TurnId,
+        _stats: TurnStats,
+    ) -> assistd_memory::Result<()> {
+        Ok(())
     }
     async fn latest_branch_activity(
         &self,
