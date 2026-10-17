@@ -28,6 +28,6 @@ pkgbase = assistd
 	options = !lto
 	backup = etc/assistd/config.toml
 	source = assistd-1.4.0.tar.gz::https://github.com/gnolruf/assistd/archive/refs/tags/v1.4.0.tar.gz
-	sha256sums = d7d90864e7147220948a765e470affcf2bb781f9c555a25fb93e86a8a7482b71
+	sha256sums = SKIP
 
 pkgname = assistd

@@ -1,6 +1,8 @@
 name: AUR release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -25,9 +27,10 @@ concurrency:
   group: aur-release
   cancel-in-progress: false
 
+# A tag push has no inputs: it packages the pushed tag at pkgrel 1.
 env:
-  TAG: ${{ inputs.tag }}
-  PKGREL: ${{ inputs.pkgrel }}
+  TAG: ${{ inputs.tag || github.ref_name }}
+  PKGREL: ${{ inputs.pkgrel || '1' }}
 
 defaults:
   run:
@@ -71,6 +74,8 @@ jobs:
             | sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p')
           [[ "$cargo_version" == "${TAG#v}" ]] \
             || { echo "::error::$TAG has workspace version '$cargo_version'"; exit 1; }
+          git merge-base --is-ancestor "$TAG" origin/main \
+            || { echo "::error::$TAG is not on main"; exit 1; }
 
       - name: Stamp pkgver and pkgrel
         run: |
@@ -116,7 +121,7 @@ jobs:
   publish:
     name: Push to the AUR
     needs: build
-    if: inputs.publish && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' || (inputs.publish && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: aur
