@@ -546,7 +546,8 @@ async fn read_request_frame(
 
 /// Write every dispatched event to the client, teeing it onto the bus
 /// unless this connection is itself a bus subscriber. Returns early,
-/// dropping the event receiver, once the client hangs up.
+/// dropping the event receiver, once the client hangs up or a write finds
+/// it gone.
 async fn forward_events(
     mut rx: mpsc::Receiver<Event>,
     mut write_half: OwnedWriteHalf,
@@ -563,7 +564,12 @@ async fn forward_events(
                 if !is_subscribe {
                     state.runtime.publish(&event);
                 }
-                write_event(&mut write_half, &event).await?;
+                match write_event(&mut write_half, &event).await {
+                    Err(SocketError::Io(e)) if is_peer_gone(&e) => {
+                        return Ok(ForwardEnd::PeerHungUp);
+                    }
+                    result => result?,
+                }
             }
             _ = hangup_poll.tick() => {
                 if peer_hung_up(write_half.as_ref()) {
@@ -585,6 +591,14 @@ fn peer_hung_up(stream: &UnixStream) -> bool {
             false
         }
     }
+}
+
+/// Whether a write failed because the client already closed its socket.
+fn is_peer_gone(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+    )
 }
 
 /// Route mid-stream `ConfirmResponse` and `SetPermissionMode` frames to
