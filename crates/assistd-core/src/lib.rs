@@ -16,10 +16,10 @@ use assistd_embed::{EmbedJob, EmbedderHandle};
 use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_tools::{
-    APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
-    ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps, OutputCap,
-    PresentSpec, Protected, RecallTool, RememberTool, ReminisceTool, RunTool, SandboxError,
-    SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
+    APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
+    AllowlistError, ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps,
+    OutputCap, PresentSpec, Protected, RecallTool, RememberTool, ReminisceTool, RunTool,
+    SandboxError, SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -291,6 +291,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         bash_cfg,
         write_cfg,
         approved_hosts: Arc::new(Approvals::load(config_dir.join(APPROVED_HOSTS_FILE))?),
+        approved_apps: Arc::new(Approvals::load(config_dir.join(APPROVED_APPS_FILE))?),
         screenshot_cfg: Arc::new(screenshot_policy(config.tools.screenshot.backend)),
         sandbox,
         confirmation_gate,
@@ -318,6 +319,7 @@ struct BuiltinCommandDeps {
     bash_cfg: Arc<BashPolicyCfg>,
     write_cfg: Arc<WritePolicyCfg>,
     approved_hosts: Arc<Approvals>,
+    approved_apps: Arc<Approvals>,
     screenshot_cfg: Arc<ScreenshotPolicyCfg>,
     sandbox: Arc<SandboxInfo>,
     confirmation_gate: Arc<dyn ConfirmationGate>,
@@ -330,6 +332,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
         bash_cfg,
         write_cfg,
         approved_hosts,
+        approved_apps,
         screenshot_cfg,
         sandbox,
         confirmation_gate,
@@ -365,9 +368,8 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     ));
     commands.register(WmCommand::new(
         window_manager,
-        bash_cfg,
-        sandbox,
         confirmation_gate,
+        approved_apps,
     ));
     commands
 }

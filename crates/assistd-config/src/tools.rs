@@ -98,14 +98,14 @@ pub enum BashSandboxMode {
     None,
 }
 
-/// Policy for every spawned command (`bash` and `wm open`). A command runs
+/// Policy for the scripts `bash` runs. A script runs
 /// without confirmation only when every program it can run is allowed and
 /// it matches no destructive pattern; the denylist refuses outright.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsBashConfig {
     /// `bash` timeout in seconds; on expiry the process group is killed
-    /// (exit 137). Does not apply to `wm open`.
+    /// (exit 137).
     pub timeout_secs: NonZeroU64,
     /// Case-insensitive substrings that reject a script before spawn (exit
     /// 126). An entry ending in a non-alphanumeric must also end a shell

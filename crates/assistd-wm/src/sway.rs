@@ -12,12 +12,14 @@ use swayipc_async::{
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::criteria::{format_focus, format_layout, format_move_to_workspace, format_resize_width};
+use crate::criteria::{
+    format_exec, format_focus, format_layout, format_move_to_workspace, format_resize_width,
+};
 use crate::ipc_backend::{IpcBackend, IpcEvent, IpcProtocol, NodeIdentity, OpLabels};
 use crate::snapshot::WindowChangeKind;
 use crate::{
-    FocusedWindowContext, Layout, OutputInfo, ResizeDir, TransportError, Window, WindowId,
-    WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
+    ExecCommand, FocusedWindowContext, Layout, OutputInfo, ResizeDir, TransportError, Window,
+    WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
 /// [`WindowManager`] over a single Sway IPC command socket.
@@ -100,6 +102,10 @@ impl WindowManager for SwayBackend {
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
         self.ipc.run_command(&format_layout(layout)).await
+    }
+
+    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()> {
+        self.ipc.run_command(&format_exec(workspace, command)).await
     }
 
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {

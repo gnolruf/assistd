@@ -15,12 +15,14 @@ use tokio_i3ipc::{
     reply,
 };
 
-use crate::criteria::{format_focus, format_layout, format_move_to_workspace, format_resize_width};
+use crate::criteria::{
+    format_exec, format_focus, format_layout, format_move_to_workspace, format_resize_width,
+};
 use crate::ipc_backend::{IpcBackend, IpcEvent, IpcProtocol, NodeIdentity, OpLabels};
 use crate::snapshot::WindowChangeKind;
 use crate::{
-    FocusedWindowContext, Layout, ResizeDir, TransportError, Window, WindowId, WindowManager,
-    WmError, WmResult, WorkspaceId, WorkspaceInfo,
+    ExecCommand, FocusedWindowContext, Layout, ResizeDir, TransportError, Window, WindowId,
+    WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
 /// [`WindowManager`] over a single i3 IPC command socket.
@@ -97,6 +99,10 @@ impl WindowManager for I3Backend {
 
     async fn set_layout(&self, layout: Layout) -> WmResult<()> {
         self.ipc.run_command(&format_layout(layout)).await
+    }
+
+    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()> {
+        self.ipc.run_command(&format_exec(workspace, command)).await
     }
 
     fn is_connected(&self) -> bool {

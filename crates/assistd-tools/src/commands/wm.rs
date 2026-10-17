@@ -1,22 +1,23 @@
 //! `wm <subcommand> [args]`: drive the active [`WindowManager`] from the
 //! LLM's `run` tool.
 
-use std::borrow::Cow;
 use std::fmt::{Display, Write};
-use std::io;
 use std::sync::Arc;
 
 use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
-use crate::exec::{
-    Launched, MAX_LAUNCHED, POLICY_DENIED_EXIT, SPAWN_FAILED_EXIT, detach, watch_detached,
-};
+use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    BashPolicyCfg, Confirmation, ConfirmationGate, LaunchError, SandboxInfo, SubprocessPolicy,
-    is_desktop_application,
+    Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, Risk,
+    on_blocking_pool,
 };
+
+mod desktop_entry;
+mod open;
+
+use open::{OpenArgs, OpenError, PreparedLaunch};
 
 const NAME: &str = "wm";
 const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, workspaces, etc.)";
@@ -33,23 +34,24 @@ const MOVE_HELP: &str = "usage: wm move <id> <workspace>\n\
     Numeric workspace identifiers (e.g. `3`) match by number; \
     non-numeric identifiers match by exact name.\n";
 
-const OPEN_HELP: &str = "usage: wm open <app> [args...]\n\
+const OPEN_HELP: &str = "usage: wm open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]\n\
     \n\
-    Launch an application. <app> is resolved through PATH; remaining \
-    arguments are forwarded to the spawned process.\n\
+    Launch an installed application, as the user would from their app \
+    menu. <app> is a desktop id: the name of a .desktop file in \
+    /usr/share/applications or ~/.local/share/applications without the \
+    extension (e.g. firefox, nvim, org.gnome.Nautilus). Applications that \
+    run in a terminal, such as nvim, open in a terminal emulator.\n\
     \n\
-    Runs under the same policy as `bash`: denylist, allowlist and \
-    destructive-pattern confirmation, and the bubblewrap sandbox. A program \
-    with no desktop entry always needs confirmation. The sandbox is widened \
-    only to share the network and reach the compositor through a restricted Wayland socket. X11, D-Bus and \
-    other session sockets stay unreachable, so launching needs a Wayland session.\n\
+    --workspace switches to that workspace (number or name) first, so the \
+    window opens there. --cwd sets the application's working directory. \
+    Files (absolute or ~/ paths) and URLs are accepted only by applications \
+    whose desktop entry takes them.\n\
     \n\
-    The application is briefly watched, then left running. If it exits \
-    during that window its exit code and output are returned, which is \
-    how a failed launch surfaces; if it is still alive, exit 0 with no \
-    output means the launch succeeded. Stdin is not forwarded, and no \
-    timeout applies once it is running, but only a few launched \
-    applications may run at once.\n";
+    The application runs as the user, outside the sandbox, so the user \
+    confirms the launch unless they chose \"always allow\" for that \
+    application; a launch with files or URLs always asks. It starts in the \
+    background: success means the compositor accepted the launch, not that a \
+    window appeared, so check with `wm list`.\n";
 
 const RESIZE_HELP: &str = "usage: wm resize <id> <grow|shrink> <px>\n\
     \n\
@@ -67,53 +69,84 @@ const LAYOUT_HELP: &str = "usage: wm layout <default|tabbed|stacking|splith|spli
 #[derive(Debug)]
 pub struct WmCommand {
     wm: Arc<dyn WindowManager>,
-    policy: SubprocessPolicy,
-    launched: Launched,
+    gate: Arc<dyn ConfirmationGate>,
+    /// Desktop entries, by path, that `wm open` launches without asking.
+    apps: ApprovalGate,
 }
 
 impl WmCommand {
-    /// A `wm` command driving `wm`; `wm open` runs under the same `cfg`,
-    /// `sandbox` and `gate` as `bash`.
+    /// A `wm` command driving `wm`; `wm open` asks `gate` before launching
+    /// an application `approved_apps` lacks.
     pub fn new(
         wm: Arc<dyn WindowManager>,
-        cfg: Arc<BashPolicyCfg>,
-        sandbox: Arc<SandboxInfo>,
         gate: Arc<dyn ConfirmationGate>,
+        approved_apps: Arc<Approvals>,
     ) -> Self {
-        Self {
-            wm,
-            policy: SubprocessPolicy { cfg, sandbox, gate },
-            launched: Launched::default(),
-        }
+        let apps = ApprovalGate::new(Arc::clone(&gate), approved_apps);
+        Self { wm, gate, apps }
     }
 
     async fn open(&self, args: &[String]) -> CommandOutput {
-        let Some((app, extra)) = args.split_first() else {
+        if args.is_empty() {
             return CommandOutput::usage(OPEN_HELP.to_string());
+        }
+        let args = match OpenArgs::parse(args) {
+            Ok(args) => args,
+            Err(what) => {
+                return CommandOutput::usage_error(
+                    NAME,
+                    format_args!("open: {what}"),
+                    "wm open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]",
+                );
+            }
         };
-        if self.launched.is_full() {
-            return too_many_launched();
+        let (args, prepared) = on_blocking_pool(move || {
+            let prepared = PreparedLaunch::find(&args);
+            (args, prepared)
+        })
+        .await;
+        let launch = match prepared {
+            Ok(launch) => launch,
+            Err(e) => return open_failed(&e),
+        };
+        if !self.confirmed(&args, &launch).await {
+            return open_cancelled();
         }
-        let argv = shell_quoted(args);
-        let review = self.policy.review_argv(args.to_vec()).await;
-        let confirmation = launch_confirmation(app, review).await;
-        if let Err(denied) = self
-            .policy
-            .authorize(NAME, "open", &argv, confirmation)
-            .await
-        {
-            return denied;
+        match self.wm.exec(args.workspace.as_ref(), &launch.command).await {
+            Ok(()) => opened(&launch, args.workspace.as_ref()),
+            Err(e) => wm_error(format_args!("open {}", launch.entry.name), &e),
         }
+    }
 
-        match self
-            .policy
-            .sandbox
-            .spawn_graphical(app, extra, detach)
-            .await
-        {
-            Ok(child) => watch_detached(NAME, child, &self.launched).await,
-            Err(LaunchError::Spawn(e)) => spawn_failed(app, &e),
-            Err(refusal) => launch_refused(&refusal),
+    /// Whether the user lets `launch` run. Approvals cover a launch with no
+    /// files, URLs, or `--cwd`; one with any of them always asks.
+    async fn confirmed(&self, args: &OpenArgs, launch: &PreparedLaunch) -> bool {
+        let entry = &launch.entry;
+        let key = entry.path.to_string_lossy().into_owned();
+        let has_targets = args.has_targets_or_cwd();
+        let request = || ConfirmationRequest {
+            tool: NAME.to_string(),
+            script: launch.command.as_str().to_string(),
+            matched_pattern: format!(
+                "opens {} ({key}) {} as you, outside the sandbox",
+                entry.name,
+                workspace_phrase(args.workspace.as_ref())
+            ),
+            always_allow: if has_targets {
+                Vec::new()
+            } else {
+                vec![key.clone()]
+            },
+            risk: if has_targets {
+                Risk::Elevated
+            } else {
+                Risk::Routine
+            },
+        };
+        if has_targets {
+            self.gate.confirm(request()).await != Approval::Deny
+        } else {
+            self.apps.confirm(&key, request).await
         }
     }
 }
@@ -123,9 +156,8 @@ impl WmCommand {
     pub(crate) fn for_test(wm: Arc<dyn WindowManager>) -> Self {
         Self::new(
             wm,
-            Arc::new(BashPolicyCfg::default()),
-            SandboxInfo::none(),
             Arc::new(crate::policy::AlwaysAllowGate),
+            Arc::new(Approvals::unsaved()),
         )
     }
 }
@@ -152,7 +184,10 @@ impl Command for WmCommand {
          Subcommands:\n  \
            focus <id>                             focus the window with this con_id\n  \
            move <id> <workspace>                  move window to workspace\n  \
-           open <app> [args...]                   launch an application (policy-gated)\n  \
+           open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]\n                                          \
+         launch an installed application by desktop id (e.g. firefox);\n                                          \
+         terminal programs such as nvim open in a terminal by themselves:\n                                          \
+         wm open --workspace 2 --cwd ~/project nvim\n  \
            active                                 TSV: id, app of the focused window\n  \
            resize <id> <grow|shrink> <px>         width-only resize\n  \
            list                                   TSV: id, app, workspace, title\n  \
@@ -250,84 +285,6 @@ async fn move_window(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
         Ok(()) => CommandOutput::ok(Vec::new()),
         Err(e) => wm_error(format_args!("move {id_arg} to '{workspace_arg}'"), &e),
     }
-}
-
-fn spawn_failed(app: &str, err: &io::Error) -> CommandOutput {
-    let line = if err.kind() == io::ErrorKind::NotFound {
-        error_line(
-            NAME,
-            format_args!("open: binary '{app}' not found on PATH"),
-            Hint::Check,
-            format_args!("which {app}"),
-        )
-    } else {
-        error_line(
-            NAME,
-            format_args!("open '{app}' failed: {err}"),
-            Hint::Try,
-            "a different binary or absolute path",
-        )
-    };
-    CommandOutput::failed(SPAWN_FAILED_EXIT, line.into_bytes())
-}
-
-/// `review` for launching `app`, which also needs confirmation when `app`
-/// is not a desktop application; a destructive pattern still outranks that.
-async fn launch_confirmation(app: &str, review: Option<Confirmation>) -> Option<Confirmation> {
-    match review {
-        Some(Confirmation::Pattern(_)) => review,
-        _ if !is_desktop_application(app).await => {
-            Some(Confirmation::NotDesktopApplication(app.to_string()))
-        }
-        _ => review,
-    }
-}
-
-/// `args` as a shell would need them typed, so one argument holding spaces
-/// or newlines cannot pass for several.
-fn shell_quoted(args: &[String]) -> String {
-    args.iter()
-        .map(|arg| quote_word(arg))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn quote_word(word: &str) -> Cow<'_, str> {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
-    if plain {
-        Cow::Borrowed(word)
-    } else {
-        Cow::Owned(format!("'{}'", word.replace('\'', r"'\''")))
-    }
-}
-
-fn too_many_launched() -> CommandOutput {
-    CommandOutput::failed(
-        POLICY_DENIED_EXIT,
-        error_line(
-            NAME,
-            format_args!("open refused: {MAX_LAUNCHED} launched applications are still running"),
-            Hint::Note,
-            "the user must close one before another can be opened",
-        )
-        .into_bytes(),
-    )
-}
-
-fn launch_refused(err: &LaunchError) -> CommandOutput {
-    CommandOutput::failed(
-        POLICY_DENIED_EXIT,
-        error_line(
-            NAME,
-            format_args!("open refused: {err}"),
-            Hint::Note,
-            "the user must fix the session or kernel; retrying will not help",
-        )
-        .into_bytes(),
-    )
 }
 
 async fn active(wm: &dyn WindowManager) -> CommandOutput {
@@ -505,6 +462,44 @@ async fn layout(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
         Ok(()) => CommandOutput::ok(Vec::new()),
         Err(e) => wm_error(format_args!("layout '{layout}'"), &e),
     }
+}
+
+fn opened(launch: &PreparedLaunch, workspace: Option<&WorkspaceId>) -> CommandOutput {
+    let line = format!(
+        "opened {} {}; it starts in the background, so run `wm list` to see its window \
+         once it appears\n",
+        launch.entry.name,
+        workspace_phrase(workspace)
+    );
+    CommandOutput::ok(line.into_bytes())
+}
+
+fn workspace_phrase(workspace: Option<&WorkspaceId>) -> String {
+    match workspace {
+        Some(workspace) => format!("on workspace {workspace}"),
+        None => "on the focused workspace".to_string(),
+    }
+}
+
+fn open_failed(err: &OpenError) -> CommandOutput {
+    let (hint, recovery) = err.recovery();
+    CommandOutput::failed(
+        1,
+        error_line(NAME, format_args!("open: {err}"), hint, recovery).into_bytes(),
+    )
+}
+
+fn open_cancelled() -> CommandOutput {
+    CommandOutput::failed(
+        POLICY_DENIED_EXIT,
+        error_line(
+            NAME,
+            "open cancelled by user",
+            Hint::Try,
+            "a different approach",
+        )
+        .into_bytes(),
+    )
 }
 
 /// The `[error] wm: <op> failed: …` line for a backend error, with the

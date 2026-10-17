@@ -8,16 +8,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use rustix::fs::Access;
-use tokio::process::{Child, Command as ProcCommand};
+use tokio::process::Command as ProcCommand;
 use tracing::{info, warn};
 
 use super::allowlist::SearchPath;
 use super::on_blocking_pool;
-
-mod session;
-
-pub use session::LaunchError;
-use session::{SharedDisplay, spawn_without_abstract_sockets};
 
 /// The `PATH` sandboxed commands run with, and the fallback when the
 /// daemon has no usable one.
@@ -26,14 +21,6 @@ const SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 /// Variables sandboxed commands inherit, besides `LC_*`; the rest, such as
 /// agent sockets and tokens, are cleared.
 const KEPT_ENV: &[&str] = &["LANG", "LANGUAGE", "LOGNAME", "TERM", "TZ", "USER"];
-
-/// Variables [`SandboxAccess::Session`] also keeps, locating the display.
-const SESSION_ENV: &[&str] = &[
-    "WAYLAND_DISPLAY",
-    "XDG_CURRENT_DESKTOP",
-    "XDG_RUNTIME_DIR",
-    "XDG_SESSION_TYPE",
-];
 
 /// The bwrap flags that mount a host path at their second argument.
 const BIND_FLAGS: &[&str] = &[
@@ -96,7 +83,6 @@ pub struct SandboxInfo {
     pub shared: SharedDirs,
     /// Absolute directories unsandboxed commands look programs up in.
     host_path: Vec<PathBuf>,
-    display: SharedDisplay,
 }
 
 /// Paths commands must not change, even inside the sandbox's writable
@@ -110,29 +96,14 @@ pub struct Protected {
     pub sockets: Vec<PathBuf>,
 }
 
-/// Host directories [`SandboxAccess::Default`] commands see at their own
-/// paths, over the sandbox's private mounts.
+/// Host directories sandboxed commands see at their own paths, over the
+/// sandbox's private mounts.
 #[derive(Debug, Clone, Default)]
 pub struct SharedDirs {
     /// Writable: where files cross between `bash` and the other commands.
     pub scratch: Option<PathBuf>,
     /// Read-only, such as the directory truncated output is spilled to.
     pub read_only: Vec<PathBuf>,
-}
-
-/// Session resources a sandboxed command needs beyond the default profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxAccess<'a> {
-    /// No network, and nothing of the session: `/tmp` and `/run` are fresh
-    /// tmpfs mounts.
-    Default,
-    /// Shares the network and binds `restricted`, a socket over which the
-    /// compositor withholds privileged protocols, at `display`, where
-    /// clients look for the compositor.
-    Session {
-        restricted: &'a Path,
-        display: &'a Path,
-    },
 }
 
 impl SandboxInfo {
@@ -145,7 +116,6 @@ impl SandboxInfo {
             protected: Protected::default(),
             shared: SharedDirs::default(),
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
-            display: SharedDisplay::default(),
         })
     }
 
@@ -162,7 +132,6 @@ impl SandboxInfo {
                 read_only: Vec::new(),
             },
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
-            display: SharedDisplay::default(),
         })
     }
 
@@ -223,19 +192,19 @@ impl SandboxInfo {
         }
     }
 
-    /// The [`ProcCommand`] that runs `program` with `args` under the default
-    /// access, wrapped in bubblewrap when the mode is
+    /// The [`ProcCommand`] that runs `program` with `args`, wrapped in
+    /// bubblewrap when the mode is
     /// [`ResolvedSandboxMode::Bwrap`]. Unwrapped, `PATH` is limited to the
     /// directories [`SandboxInfo::search_path`] reports.
     pub async fn command(self: &Arc<Self>, program: &str, args: Vec<String>) -> ProcCommand {
         let info = Arc::clone(self);
         let program = program.to_owned();
-        on_blocking_pool(move || info.build_command(SandboxAccess::Default, &program, args)).await
+        on_blocking_pool(move || info.build_command(&program, args)).await
     }
 
     /// Reads `$HOME` and the command directories to build the bwrap
     /// profile, so it blocks on the filesystem.
-    fn build_command<I, S>(&self, access: SandboxAccess<'_>, program: &str, args: I) -> ProcCommand
+    fn build_command<I, S>(&self, program: &str, args: I) -> ProcCommand
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -243,36 +212,9 @@ impl SandboxInfo {
         match &self.mode {
             ResolvedSandboxMode::None => self.unwrapped_command(program, args),
             ResolvedSandboxMode::Bwrap { path } => {
-                self.bwrap_command(path, std::env::var("HOME").ok(), access, program, args)
+                self.bwrap_command(path, std::env::var("HOME").ok(), program, args)
             }
         }
-    }
-
-    /// Spawn `program` as a graphical application once `configure` has set
-    /// up its command. Under bwrap it reaches the compositor only through a
-    /// restricted socket and no abstract Unix socket, and is refused when
-    /// either protection is unavailable.
-    pub(crate) async fn spawn_graphical(
-        self: &Arc<Self>,
-        program: &str,
-        args: &[String],
-        configure: fn(&mut ProcCommand),
-    ) -> Result<Child, LaunchError> {
-        let ResolvedSandboxMode::Bwrap { .. } = &self.mode else {
-            let mut cmd = self.unwrapped_command(program, args);
-            configure(&mut cmd);
-            return cmd.spawn().map_err(LaunchError::Spawn);
-        };
-        let display = self.display.get().await?;
-        let info = Arc::clone(self);
-        let program = program.to_owned();
-        let args = args.to_vec();
-        spawn_without_abstract_sockets(move || {
-            let mut cmd = info.build_command(display.access(), &program, args);
-            configure(&mut cmd);
-            cmd
-        })
-        .await
     }
 
     fn unwrapped_command<I, S>(&self, program: &str, args: I) -> ProcCommand
@@ -289,15 +231,13 @@ impl SandboxInfo {
     }
 
     /// Flag order is load-bearing: the profile, then the self-binds that
-    /// pin command directories' ancestors, then the `access` binds (after
-    /// `--tmpfs /run`) or shared directories, then the read-only mounts over
-    /// `home`'s command directories and the protections, then the
-    /// operator's `extra_args` so they win.
+    /// pin command directories' ancestors, then the shared directories,
+    /// then the read-only mounts over `home`'s command directories and the
+    /// protections, then the operator's `extra_args` so they win.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
         home: Option<String>,
-        access: SandboxAccess<'_>,
         program: &str,
         args: I,
     ) -> ProcCommand
@@ -311,22 +251,14 @@ impl SandboxInfo {
             .map(|home| home.command_dirs(&self.host_path, &self.protected.dirs))
             .unwrap_or_default();
         let mut cmd = ProcCommand::new(bwrap);
-        cmd.env_clear().envs(kept_env(std::env::vars_os(), access));
+        cmd.env_clear().envs(kept_env(std::env::vars_os()));
         cmd.args(
-            default_bwrap_flags_for(home.as_ref(), access)
+            default_bwrap_flags_for(home.as_ref())
                 .iter()
                 .map(OsStr::new),
         );
         cmd.args(command_dirs.rename_guard_flags());
-        if let SandboxAccess::Session {
-            restricted,
-            display,
-        } = access
-        {
-            cmd.arg("--ro-bind").arg(restricted).arg(display);
-        } else {
-            cmd.args(shared_flags(&self.shared));
-        }
+        cmd.args(shared_flags(&self.shared));
         cmd.args(command_dirs.lock_flags());
         let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         cmd.args(protection_flags(&self.protected, &writable));
@@ -673,7 +605,7 @@ fn protection_flags(protected: &Protected, writable: &[PathBuf]) -> Vec<PathBuf>
 
 /// Whether `dir` is `real_home`, whose visible files the profile binds
 /// writable, or lies under one of its visible entries.
-fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool {
+pub(crate) fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool {
     dir.strip_prefix(real_home).is_ok_and(|rest| {
         rest.components()
             .next()
@@ -682,10 +614,10 @@ fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool {
 }
 
 /// Read-only root with (when bindable) the visible entries of `$HOME`
-/// writable, fresh `/tmp`, `/dev`, `/proc` and `/run`, isolated pid/ipc/uts
-/// namespaces, and for [`SandboxAccess::Default`] no network; the operator
-/// restores it with `--share-net` in `bwrap_extra_args`.
-fn default_bwrap_flags_for(home: Option<&SandboxHome>, access: SandboxAccess<'_>) -> Vec<String> {
+/// writable, fresh `/tmp`, `/dev`, `/proc` and `/run`, isolated
+/// pid/ipc/uts namespaces, and no network; the operator restores it with
+/// `--share-net` in `bwrap_extra_args`.
+fn default_bwrap_flags_for(home: Option<&SandboxHome>) -> Vec<String> {
     let mut flags: Vec<String> = ["--ro-bind", "/", "/", "--tmpfs", "/tmp"]
         .map(String::from)
         .into();
@@ -708,13 +640,12 @@ fn default_bwrap_flags_for(home: Option<&SandboxHome>, access: SandboxAccess<'_>
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
+            "--unshare-net",
+            "--new-session",
+            "--die-with-parent",
         ]
         .map(String::from),
     );
-    if access == SandboxAccess::Default {
-        flags.push("--unshare-net".into());
-    }
-    flags.extend(["--new-session", "--die-with-parent"].map(String::from));
     if let Some(home) = home {
         flags.extend(["--setenv".into(), "HOME".into(), home.dir.clone()]);
     }
@@ -746,20 +677,13 @@ fn can_create_in(dir: &Path) -> bool {
     dir.is_dir() && rustix::fs::access(dir, Access::WRITE_OK | Access::EXEC_OK).is_ok()
 }
 
-/// The `access` subset of `vars`: [`KEPT_ENV`], `LC_*`, and for
-/// [`SandboxAccess::Session`] also [`SESSION_ENV`].
-fn kept_env(
-    vars: impl IntoIterator<Item = (OsString, OsString)>,
-    access: SandboxAccess<'_>,
-) -> Vec<(OsString, OsString)> {
-    let session = matches!(access, SandboxAccess::Session { .. });
-    let kept = |name: &str| {
-        KEPT_ENV.contains(&name)
-            || name.starts_with("LC_")
-            || (session && SESSION_ENV.contains(&name))
-    };
+/// The subset of `vars` sandboxed commands keep: [`KEPT_ENV`] and `LC_*`.
+fn kept_env(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<(OsString, OsString)> {
     vars.into_iter()
-        .filter(|(name, _)| name.to_str().is_some_and(kept))
+        .filter(|(name, _)| {
+            name.to_str()
+                .is_some_and(|name| KEPT_ENV.contains(&name) || name.starts_with("LC_"))
+        })
         .collect()
 }
 
@@ -798,7 +722,6 @@ fn probe_sandbox_with_path(
                 protected,
                 shared,
                 host_path: host_path(path_env),
-                display: SharedDisplay::default(),
             })));
         }
     };
@@ -812,15 +735,6 @@ fn announce_bwrap(bwrap: &Path) {
         path = %bwrap.display(),
         "bash sandbox: bubblewrap enabled"
     );
-    if is_setuid(bwrap) {
-        warn!(
-            target: "assistd::policy",
-            path = %bwrap.display(),
-            "bwrap is setuid, but `wm open` runs it with no_new_privs (Landlock requires it), \
-             so it gets no root privileges: launches fail unless unprivileged user namespaces \
-             are enabled"
-        );
-    }
 }
 
 /// The absolute directories of `path_env`, or [`SANDBOX_PATH`]'s when it
@@ -854,26 +768,9 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-#[cfg(unix)]
-fn is_setuid(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|md| md.permissions().mode() & 0o4000 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_setuid(_path: &Path) -> bool {
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn session() -> SandboxAccess<'static> {
-        SandboxAccess::Session {
-            restricted: Path::new("/run/user/1000/assistd-wayland.sock"),
-            display: Path::new("/run/user/1000/wayland-1"),
-        }
-    }
 
     fn bwrap_info(extra_args: Vec<String>) -> SandboxInfo {
         SandboxInfo {
@@ -884,7 +781,6 @@ mod tests {
             protected: Protected::default(),
             shared: SharedDirs::default(),
             host_path: Vec::new(),
-            display: SharedDisplay::default(),
         }
     }
 
@@ -904,50 +800,19 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_argv_is_profile_then_access_binds_then_extra_args_then_program() {
+    fn bwrap_argv_is_profile_then_extra_args_then_program() {
         let home_dir = tempfile::tempdir().expect("tempdir");
         let home = Some(home_dir.path().to_string_lossy().into_owned());
         let info = bwrap_info(vec!["--share-net".into()]);
-        let tail = ["--share-net", "--", "firefox", "--new-window"].map(String::from);
-        let session_binds = [
-            "--ro-bind",
-            "/run/user/1000/assistd-wayland.sock",
-            "/run/user/1000/wayland-1",
-        ]
-        .map(String::from);
-        for (access, binds) in [
-            (SandboxAccess::Default, Vec::new()),
-            (session(), session_binds.to_vec()),
-        ] {
-            let profile = default_bwrap_flags_for(SandboxHome::read(home.clone()).as_ref(), access);
-            assert!(profile.windows(2).any(|w| w == ["--tmpfs", "/run"]));
-            let cmd = info.bwrap_command(
-                Path::new("/usr/bin/bwrap"),
-                home.clone(),
-                access,
-                "firefox",
-                ["--new-window"],
-            );
-            assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
-            let expected = [profile, binds, tail.to_vec()].concat();
-            assert_eq!(argv_of(&cmd), expected, "{access:?}");
+        let tail = ["--share-net", "--", "make", "-j4"].map(String::from);
+        let profile = default_bwrap_flags_for(SandboxHome::read(home.clone()).as_ref());
+        for private in [["--tmpfs", "/tmp"], ["--tmpfs", "/run"]] {
+            assert!(profile.windows(2).any(|w| w == private), "{private:?}");
         }
-    }
-
-    #[test]
-    fn only_the_default_access_loses_the_network_and_both_get_a_private_tmp() {
-        for (access, unshares_net) in [(SandboxAccess::Default, true), (session(), false)] {
-            let flags = default_bwrap_flags_for(None, access);
-            assert_eq!(
-                flags.iter().any(|f| f == "--unshare-net"),
-                unshares_net,
-                "{access:?}"
-            );
-            assert!(
-                flags.windows(2).any(|w| w == ["--tmpfs", "/tmp"]),
-                "{access:?}"
-            );
-        }
+        assert!(profile.iter().any(|flag| flag == "--unshare-net"));
+        let cmd = info.bwrap_command(Path::new("/usr/bin/bwrap"), home, "make", ["-j4"]);
+        assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
+        assert_eq!(argv_of(&cmd), [profile, tail.to_vec()].concat());
     }
 
     fn mounts_of(flags: &[&str]) -> Mounts {
@@ -992,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_dirs_are_bound_for_default_access_only_and_are_not_private() {
+    async fn shared_dirs_are_bound_and_are_not_private() {
         let info = Arc::new(SandboxInfo {
             shared: SharedDirs {
                 scratch: Some(PathBuf::from("/run/user/1000/assistd/scratch")),
@@ -1008,12 +873,8 @@ mod tests {
             "/tmp/assistd-output",
             "/tmp/assistd-output",
         ];
-        let has_binds = |access| {
-            let argv = argv_of(&info.build_command(access, "true", [""; 0]));
-            argv.windows(binds.len()).any(|w| w == binds)
-        };
-        assert!(has_binds(SandboxAccess::Default));
-        assert!(!has_binds(session()));
+        let argv = argv_of(&info.build_command("true", [""; 0]));
+        assert!(argv.windows(binds.len()).any(|w| w == binds), "{argv:?}");
         for shared in [
             "/run/user/1000/assistd/scratch/out.txt",
             "/tmp/assistd-output/cmd-1.txt",
@@ -1032,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_keeps_only_locale_terminal_and_wayland_variables() {
+    fn environment_keeps_only_locale_and_terminal_variables() {
         let vars = [
             ("LANG", "C.UTF-8"),
             ("LC_TIME", "en_GB.UTF-8"),
@@ -1045,21 +906,18 @@ mod tests {
             ("XAUTHORITY", "/run/user/1000/xauth"),
         ]
         .map(|(name, value)| (OsString::from(name), OsString::from(value)));
-        let names = |access| {
-            kept_env(vars.clone(), access)
-                .into_iter()
-                .map(|(name, _)| name.into_string().expect("utf-8"))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(names(SandboxAccess::Default), ["LANG", "LC_TIME"]);
-        assert_eq!(names(session()), ["LANG", "LC_TIME", "WAYLAND_DISPLAY"]);
+        let names: Vec<String> = kept_env(vars)
+            .into_iter()
+            .map(|(name, _)| name.into_string().expect("utf-8"))
+            .collect();
+        assert_eq!(names, ["LANG", "LC_TIME"]);
     }
 
     #[test]
     fn bwrap_process_starts_from_a_cleared_environment() {
         let info = bwrap_info(Vec::new());
-        let cmd = info.build_command(SandboxAccess::Default, "true", Vec::<String>::new());
-        let expected: Vec<_> = kept_env(std::env::vars_os(), SandboxAccess::Default)
+        let cmd = info.build_command("true", Vec::<String>::new());
+        let expected: Vec<_> = kept_env(std::env::vars_os())
             .into_iter()
             .map(|(name, value)| (name, Some(value)))
             .collect();
@@ -1121,8 +979,7 @@ mod tests {
         let dir_str = home.path().to_string_lossy().into_owned();
         let entry = |name: &str| home.path().join(name).to_string_lossy().into_owned();
 
-        let flags =
-            default_bwrap_flags_for(Some(&sandbox_home(home.path())), SandboxAccess::Default);
+        let flags = default_bwrap_flags_for(Some(&sandbox_home(home.path())));
         assert!(
             flags
                 .windows(3)
@@ -1224,7 +1081,6 @@ mod tests {
         let argv = argv_of(&info.bwrap_command(
             Path::new("/usr/bin/bwrap"),
             Some(home.to_string_lossy().into_owned()),
-            SandboxAccess::Default,
             "true",
             [""; 0],
         ));
@@ -1387,7 +1243,6 @@ mod tests {
         let argv = argv_of(&info.bwrap_command(
             Path::new("/usr/bin/bwrap"),
             Some(path_of("")),
-            SandboxAccess::Default,
             "true",
             [""; 0],
         ));
@@ -1441,7 +1296,7 @@ mod tests {
         ] {
             let sandbox_home = SandboxHome::read(home.map(str::to_string));
             assert!(sandbox_home.is_none(), "HOME={home:?} must be unusable");
-            let flags = default_bwrap_flags_for(sandbox_home.as_ref(), SandboxAccess::Default);
+            let flags = default_bwrap_flags_for(sandbox_home.as_ref());
             assert!(
                 writable_binds(&flags).is_empty(),
                 "HOME={home:?} must leave nothing of the host writable: {flags:?}"

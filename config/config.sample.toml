@@ -99,7 +99,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # overflow_dir = "/run/user/1000/assistd/output"
 
 [tools.bash]
-# Policy for every command `bash` or `wm open` spawns.
+# Policy for the scripts `bash` runs.
 # timeout_secs = 30
 # Substrings refused outright.
 # denylist = [

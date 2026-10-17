@@ -80,7 +80,7 @@ the vocabulary established here.
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
-| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; restricted Wayland sockets. | `utils`                                                                          |
+| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `utils`                                                                          |
 
 `utils` sits at the bottom with no internal dependencies; `config`
 and `ipc` build only on it, and most other crates build on those
@@ -209,20 +209,21 @@ and can "always allow" the programs it named. A redirection that writes
 outside `/tmp` and `tools.scratch.dir` also needs confirmation. It then runs in the bubblewrap
 sandbox; tools never run unsandboxed, so when `bwrap` is missing (or
 `tools.bash.sandbox = "none"`) the model is offered no tools at all and
-clients are told why. `wm open`
-spawns model-chosen argv and so shares that same `[tools.bash]` policy,
-widened only to share the network and reach the compositor through a
-restricted Wayland socket (`wp-security-context-v1`, which withholds
-virtual input, screen capture and similar protocols), with Landlock
-barring abstract sockets such as the X server's; the launch is refused
-when either protection is unavailable, and left running once it survives
-a startup probe; `write` restricts targets to a
+clients are told why. `wm open` is the one way out of the sandbox: it
+launches an installed desktop entry as the user, through the compositor's
+`exec` (optionally on a given workspace), so the model picks only which
+entry, a working directory, and the files or URLs the entry's `Exec`
+field codes accept, never a command line. Entries under a visible
+`$HOME` entry, where sandboxed commands can write, are refused; the user
+confirms each launch unless they chose "always allow" for that entry,
+and one with files or URLs always asks; `write` restricts targets to a
 configured allowlist, refuses dot entries at any depth below it, and asks
 before writing outside `tools.scratch.dir`; `web` asks before fetching from a host not
 yet approved and follows redirects only to the same or an approved host;
 `see` and `screenshot` refuse with an error when the loaded model has no
-vision projector. "Always allow" for a web host or an MCP tool is saved
-beside the config in `approved_hosts.toml` or `approved_mcp_tools.toml`.
+vision projector. "Always allow" for a web host, an MCP tool or an application is saved
+beside the config in `approved_hosts.toml`, `approved_mcp_tools.toml` or
+`approved_apps.toml`.
 Clients that cannot answer prompts (`assistd query`, push-to-talk) deny
 them, so there only approved hosts, tools and programs run.
 
@@ -230,7 +231,7 @@ A query connection starts in manual mode, where every prompt goes to the
 client. A client can switch it to accept-commands mode with a mid-stream
 `Request::SetPermissionMode` (the TUI's Shift+Tab). That mode approves once,
 without asking, the prompts rated `Risk::Routine`: programs off the allowlist
-that "always allow" could cover, `wm open` of an app with no desktop entry,
+that "always allow" could cover, `wm open` of an app with no files or URLs,
 and `write` outside the scratch directory. Destructive patterns, scripts no
 check can fully see, protected paths, new web hosts and unapproved MCP tools
 still ask; the denylist still refuses, and nothing is added to the allowlist.
@@ -325,10 +326,6 @@ If neither i3 nor Sway is reachable (no compositor running, or
 running an unsupported one like Hyprland today), `NoWindowManager`
 returns convention-compliant errors so commands fail gracefully
 instead of panicking.
-
-The `wayland` feature adds `RestrictedWaylandSocket`: a socket the
-compositor serves with its privileged protocols hidden, which the
-sandbox binds in place of the real one for `wm open`.
 
 ### MCP (`assistd-mcp`)
 

@@ -258,9 +258,6 @@ pub enum Confirmation {
         programs: Vec<String>,
         approvable: bool,
     },
-    /// It launches this program in the background, and no desktop entry
-    /// marks it as a windowed application.
-    NotDesktopApplication(String),
 }
 
 impl Confirmation {
@@ -275,14 +272,13 @@ impl Confirmation {
         }
     }
 
-    /// Routine when only the allowlist or the desktop-application check
-    /// objects and "always allow" could cover every program named.
+    /// Routine when only the allowlist objects and "always allow" could
+    /// cover every program named.
     pub fn risk(&self) -> Risk {
         match self {
             Self::Unlisted {
                 approvable: true, ..
-            }
-            | Self::NotDesktopApplication(_) => Risk::Routine,
+            } => Risk::Routine,
             Self::Pattern(_) | Self::Unverifiable(_) | Self::Unlisted { .. } => Risk::Elevated,
         }
     }
@@ -295,9 +291,6 @@ impl fmt::Display for Confirmation {
             Self::Unverifiable(why) => f.write_str(why),
             Self::Unlisted { programs, .. } => {
                 write!(f, "not on the allowlist: {}", programs.join(", "))
-            }
-            Self::NotDesktopApplication(program) => {
-                write!(f, "{program} is not a desktop application")
             }
         }
     }
@@ -933,12 +926,6 @@ fn wrapper_operands(word: &Word, next: Option<&Word>) -> Option<usize> {
         .iter()
         .find(|&&(w, _)| w == program)
         .map(|&(_, operands)| operands)
-}
-
-/// Whether `word` names a builtin or wrapper that runs another command.
-pub(super) fn runs_another_command(word: &str) -> bool {
-    let program = program(word);
-    WRAPPERS.iter().any(|&(wrapper, _)| wrapper == program)
 }
 
 /// A literal word holding a whole command line (`env -S 'rm -rf ~'`),

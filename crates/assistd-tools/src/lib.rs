@@ -27,9 +27,9 @@ pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegis
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
 pub use policy::{
-    APPROVALS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist, AllowlistError,
-    Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter,
-    ConfirmationGate, ConfirmationRequest, DestructivePattern, IpcConfirmationGate,
+    APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
+    AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT,
+    ConfirmRouter, ConfirmationGate, ConfirmationRequest, DestructivePattern, IpcConfirmationGate,
     NoPendingConfirm, Protected, Risk, SandboxError, SandboxInfo, SandboxRequest, SearchPath,
     SharedDirs, ToolSandbox, ToolsDisabled, inherit_confirm_router, probe_sandbox,
 };

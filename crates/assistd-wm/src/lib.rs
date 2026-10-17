@@ -1,6 +1,5 @@
-//! Window manager integration: the [`WindowManager`] trait, the i3 and Sway
-//! backends that implement it over their IPC sockets, and restricted
-//! Wayland sockets for sandboxed clients.
+//! Window manager integration: the [`WindowManager`] trait, and the i3 and
+//! Sway backends that implement it over their IPC sockets.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -16,7 +15,6 @@ pub mod error;
 pub mod i3;
 #[cfg(any(feature = "i3", feature = "sway"))]
 mod ipc_backend;
-pub mod security_context;
 #[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
@@ -25,7 +23,6 @@ pub mod sway;
 pub use error::{TransportError, WmError, WmResult};
 #[cfg(feature = "i3")]
 pub use i3::{I3Backend, I3Handle};
-pub use security_context::{RestrictedWaylandSocket, SecurityContextError};
 #[cfg(feature = "sway")]
 pub use sway::{SwayBackend, SwayHandle};
 
@@ -193,6 +190,34 @@ impl From<u32> for WorkspaceId {
         WorkspaceId::Num(n)
     }
 }
+
+/// A shell command line a compositor's `exec` can carry: it holds no `"`,
+/// which would end the quoted payload, and no control character.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecCommand(String);
+
+impl ExecCommand {
+    /// # Errors
+    /// [`UnquotableCommand`] when `command` holds a `"` or a control
+    /// character.
+    pub fn new(command: String) -> Result<Self, UnquotableCommand> {
+        if command.chars().any(|c| c == '"' || c.is_control()) {
+            Err(UnquotableCommand)
+        } else {
+            Ok(Self(command))
+        }
+    }
+
+    /// The command line, as the compositor's shell receives it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A command line holding a `"` or a control character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a double quote or control character cannot be passed through the compositor")]
+pub struct UnquotableCommand;
 
 /// One row of [`WindowManager::list_windows`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,6 +404,10 @@ pub trait WindowManager: fmt::Debug + Send + Sync + 'static {
     /// Set the layout of the focused container.
     async fn set_layout(&self, layout: Layout) -> WmResult<()>;
 
+    /// Run `command` through the compositor's shell, detached from this
+    /// process, after switching to `workspace` when given.
+    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()>;
+
     /// Enumerate outputs; [`WmError::Unsupported`] when the backend
     /// cannot.
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
@@ -425,6 +454,9 @@ impl WindowManager for NoWindowManager {
         Err(WmError::Disconnected)
     }
     async fn set_layout(&self, _layout: Layout) -> WmResult<()> {
+        Err(WmError::Disconnected)
+    }
+    async fn exec(&self, _workspace: Option<&WorkspaceId>, _command: &ExecCommand) -> WmResult<()> {
         Err(WmError::Disconnected)
     }
     async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
