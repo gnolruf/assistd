@@ -119,11 +119,11 @@ impl WmCommand {
     }
 
     /// Whether the user lets `launch` run. Approvals cover a launch with no
-    /// files or URLs; one with them always asks.
+    /// files, URLs, or `--cwd`; one with any of them always asks.
     async fn confirmed(&self, args: &OpenArgs, launch: &PreparedLaunch) -> bool {
         let entry = &launch.entry;
         let key = entry.path.to_string_lossy().into_owned();
-        let has_targets = args.has_targets();
+        let has_targets = args.has_targets_or_cwd();
         let request = || ConfirmationRequest {
             tool: NAME.to_string(),
             script: launch.command.as_str().to_string(),

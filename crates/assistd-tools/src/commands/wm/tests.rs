@@ -194,7 +194,10 @@ fn launch_lines_keep_each_target_one_word_and_refuse_option_like_ones() {
 fn open_options_must_precede_the_application() {
     let args = open_args(&["--workspace", "2", "--cwd", "~/src", "nvim", "--cwd"]);
     assert_eq!(args.workspace, Some(WorkspaceId::Num(2)));
-    assert!(args.has_targets(), "options after the app are targets");
+    assert!(
+        args.has_targets_or_cwd(),
+        "options after the app are targets"
+    );
     for bad in [&["--wrkspace", "2", "nvim"][..], &["--workspace"], &[]] {
         let bad: Vec<String> = bad.iter().map(ToString::to_string).collect();
         assert!(OpenArgs::parse(&bad).is_err(), "{bad:?}");
@@ -202,7 +205,7 @@ fn open_options_must_precede_the_application() {
 }
 
 #[tokio::test]
-async fn approved_apps_skip_the_prompt_only_when_launched_without_targets() {
+async fn approved_apps_skip_the_prompt_only_when_launched_without_targets_or_cwd() {
     let gate = RecordingGate::new(false);
     let approved = Arc::new(Approvals::unsaved());
     approved
@@ -228,6 +231,8 @@ async fn approved_apps_skip_the_prompt_only_when_launched_without_targets() {
                 .to_string()
         )]
     );
+    assert!(!confirmed(&["--cwd", "/tmp", "viewer"]).await);
+    assert_eq!(gate.prompts().len(), 2, "--cwd asks: {:?}", gate.prompts());
 }
 
 #[tokio::test]

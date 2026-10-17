@@ -68,8 +68,10 @@ impl OpenArgs {
         }
     }
 
-    pub(super) fn has_targets(&self) -> bool {
-        !self.targets.is_empty()
+    /// Whether the launch names a file, URL, or working directory, any of
+    /// which the sandbox may have planted.
+    pub(super) fn has_targets_or_cwd(&self) -> bool {
+        !self.targets.is_empty() || self.cwd.is_some()
     }
 }
 
