@@ -238,7 +238,8 @@ and undo), and a `SemanticStore` for embedding-indexed chunks. Every
 write runs in order on the only read-write connection. Vector scans
 and other reads each get their own read-only connection, so a long
 scan holds up neither a write nor a history load. Shutdown closes the
-database once queued writes have run.
+database once queued writes have run. [database.md](database.md) maps
+the tables.
 
 Transcript rows keep each step's reasoning, every tool call's arguments,
 and how each tool run ended. Each branch also keeps its latest
