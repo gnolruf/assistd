@@ -1,8 +1,6 @@
 # Maintainer: gnolruf <112510094+gnolruf@users.noreply.github.com>
 
 pkgname=assistd
-# The AUR release workflow stamps pkgver and sha256sums from the release
-# tag, so neither needs bumping here.
 pkgver=1.4.0
 pkgrel=1
 pkgdesc="A local-model agent daemon for Linux (LLM + voice + tools + WM integration)"
