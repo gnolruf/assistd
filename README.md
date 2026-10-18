@@ -7,8 +7,6 @@
   <a href="https://github.com/gnolruf/assistd/actions/workflows/codeql.yml"><img src="https://github.com/gnolruf/assistd/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
   <a href="https://github.com/gnolruf/assistd/releases/latest"><img src="https://img.shields.io/github/v/release/gnolruf/assistd" alt="Latest release"></a>
   <a href="https://aur.archlinux.org/packages/assistd"><img src="https://img.shields.io/aur/version/assistd" alt="AUR version"></a>
-  <img src="https://img.shields.io/badge/rust-1.98%2B-orange?logo=rust" alt="MSRV 1.98">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/gnolruf/assistd" alt="License"></a>
 </p>
 
 A model agent daemon for Linux system management. `assistd` runs and manages an inference server,
