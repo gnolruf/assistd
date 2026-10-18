@@ -1,5 +1,5 @@
 //! Supervises a child process that serves HTTP: spawn it in its own process
-//! group, poll `/health`, restart with backoff, and park once restart limits trip.
+//! group, poll its health endpoint, restart with backoff, and park once restart limits trip.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -29,9 +29,14 @@ pub trait ChildServerSpec: Send + Sync + 'static {
     /// signal are set by the supervisor.
     fn command(&self) -> Command;
 
-    /// Address whose `/health` endpoint signals readiness.
+    /// Address the child serves HTTP on, including its health endpoint.
     fn listen_addr(&self) -> SocketAddr;
 
-    /// Longest a freshly spawned child may take to pass `/health`.
+    /// Path whose 200 response marks the child ready.
+    fn health_path(&self) -> &'static str {
+        "/health"
+    }
+
+    /// Longest a freshly spawned child may take to pass its health check.
     fn ready_timeout(&self) -> Duration;
 }

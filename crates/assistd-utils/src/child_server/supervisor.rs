@@ -23,7 +23,7 @@ const TERM_TIMEOUT: Duration = Duration::from_secs(10);
 /// What happened during one supervisor cycle.
 enum CycleResult {
     ShutdownRequested,
-    /// Child exited before `/health` ever returned 200.
+    /// Child exited before its health check ever returned 200.
     FailedToStart {
         status: ExitStatus,
     },
@@ -179,12 +179,7 @@ impl<S: ChildServerSpec> Supervisor<S> {
     async fn supervise_once(&mut self) -> Result<CycleResult, ChildServerError> {
         let mut child = ChildProcess::spawn(&self.spec)?;
         *self.pid.lock() = child.pid();
-        let health = HealthChecker::new(
-            self.spec.name(),
-            self.spec.listen_addr(),
-            child.process_group(),
-            self.spec.ready_timeout(),
-        )?;
+        let health = HealthChecker::new(&self.spec, child.process_group())?;
 
         match wait_for_startup(&mut child, &health, &mut self.shutdown_rx).await {
             StartupOutcome::Ready => {}

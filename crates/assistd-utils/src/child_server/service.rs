@@ -12,9 +12,9 @@ use crate::backoff::MAX_CONSECUTIVE_FAILURES;
 /// State broadcast by the supervisor as the child moves through its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadyState {
-    /// A spawn attempt is in progress but the child has not yet passed `/health`.
+    /// A spawn attempt is in progress but the child has not yet passed its health check.
     Starting,
-    /// The child has reported 200 OK on `/health`.
+    /// The child has reported 200 OK on its health path.
     Ready,
     /// The last spawn attempt failed; a restart is scheduled after `attempt`
     /// consecutive failures.
