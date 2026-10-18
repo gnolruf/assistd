@@ -1,4 +1,6 @@
-# assistd
+<h1 align="center">
+  <img src="docs/assets/logo.svg" alt="assistd" width="380">
+</h1>
 
 A local-model agent daemon for Linux. `assistd` runs a LLM under
 [`llama.cpp`](https://github.com/ggerganov/llama.cpp), exposes a
