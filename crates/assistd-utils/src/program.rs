@@ -134,7 +134,7 @@ mod tests {
             })
         );
         fs::set_permissions(&locked, Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(find("runnable"), Ok(first.join("runnable")),);
+        assert_eq!(find("runnable"), Ok(first.join("runnable")));
         assert_eq!(find("absent"), Err(ProgramError::NotOnPath));
     }
 }

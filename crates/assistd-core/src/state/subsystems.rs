@@ -52,7 +52,7 @@ pub struct Subsystems {
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub mcp_servers: Vec<McpServerStatus>,
-    /// The SearXNG instance web search goes through, once it is serving.
+    /// Readiness of the SearXNG instance web search goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub tools_disabled: Option<ToolsDisabled>,
 }
