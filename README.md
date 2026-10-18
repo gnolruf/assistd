@@ -146,16 +146,3 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd voice-skip`     | Abort the current spoken response.                            |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |
 | `assistd tray`           | System tray icon and desktop notifications.                   |
-
-## Documentation
-
-- [Architecture](docs/architecture.md) — crate map, data flow, and
-  how the subsystems fit together.
-- [Sample config](config/config.sample.toml) — every key, one line
-  each.
-- [Window-manager setup](docs/wm/README.md), with [i3](docs/wm/i3.md)
-  and [Sway](docs/wm/sway.md) keybinds for push-to-talk, presence,
-  and the chat scratchpad.
-- [Echo cancellation](docs/voice/echo-cancellation.md) — let
-  PipeWire or PulseAudio cancel TTS echo so continuous listening can
-  be interrupted mid-reply.
