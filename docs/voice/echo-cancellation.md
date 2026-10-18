@@ -18,7 +18,8 @@ Two conditions must hold for this to work:
   from the echo-cancel **source**. The easiest way is to make both the
   system defaults and leave `voice.mic_device` and
   `voice.synthesis.output_device` unset; `assistd` opens the default
-  ALSA device, which the sound server routes to its defaults.
+  ALSA device, which the sound server routes to its defaults (this needs
+  `pipewire-alsa` or `pulseaudio-alsa`).
 - Speakers and mic sit on the same sound server. A Bluetooth headset
   in headset (HFP) mode usually cancels echo in hardware already and
   needs none of this.

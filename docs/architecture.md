@@ -1,68 +1,55 @@
 # Architecture
 
 `assistd` is a Rust workspace split into eleven library crates plus a
-thin binary. This page maps the crates, the external processes the daemon
+binary. This page maps the crates, the external processes the daemon
 supervises, and the path a user query takes from keypress to spoken
-reply. Read it once before contributing; the rest of `docs/` assumes
-the vocabulary established here.
+reply.
 
-## Workspace at a glance
+## System overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                              CLIENTS                                │
-│   assistd query        assistd chat (TUI)        compositor hooks   │
-│   assistd ptt-start    assistd cycle             (i3 / Sway exec)   │
-└────────────────┬────────────────────────────────────────────────────┘
-                 │
-                 │  Unix socket  ($XDG_RUNTIME_DIR/assistd.sock)
-                 │  line-delimited JSON (Request / Event tagged unions)
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  assistd  (binary; `daemon` subcommand)                             │
-│  CLI parsing, subsystem init, lifecycle                             │
-└────────────────┬─────────────────────────────────────────┬──────────┘
-                 │                                         │
-                 ▼                                         │
-┌───────────────────────────────────────────────────┐      │
-│  assistd-core                                     │      │
-│  AppState · Agent (per-turn loop) · socket server │      │
-│  · presence                                       │      │
-└──┬───────────┬─────────────┬──────────────┬───────┘      │
-   │           │             │              │              │
-   ▼           ▼             ▼              ▼              ▼
-┌──────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
-│ llm  │  │  tools   │  │  voice   │  │    wm    │  │   mcp    │
-│      │  │          │  │          │  │          │  │          │
-│chat  │  │ run +    │  │ Whisper  │  │ i3 IPC   │  │ stdio    │
-│loop  │  │ commands │  │ + Piper  │  │ + Sway   │  │ (rmcp)   │
-└──┬───┘  └─┬────┬───┘  └────┬─────┘  └────┬─────┘  └────┬─────┘
-   │        │    │           │             │             │
-   │        │    └────► ipc (wire types, shared by clients + daemon)
-   │        │
-   │        ▼
-   │   ┌─────────┐    ┌──────────┐
-   │   │ memory  │◄───│  embed   │   (SQLite + embedding queue)
-   │   │ SQLite  │    │ HTTP cli │
-   │   └─────────┘    └─────┬────┘
-   │                        │
-   │   config (TOML schema, consumed by most crates above)
-   │                        │
-   ▼                        ▼
-┌──────────────┐   ┌────────────────┐    External processes
-│ llama-server │   │ embedding      │    spawned and supervised
-│ HTTP :8385   │   │ llama-server   │    by the daemon.
-│ /v1/chat/    │   │ HTTP :8386     │
-│ completions  │   │ /v1/embeddings │
-└──────────────┘   └────────────────┘
+```mermaid
+flowchart TB
+    subgraph clients["Clients"]
+        direction LR
+        query["assistd query"]
+        chat["assistd chat (TUI)"]
+        ptt["assistd ptt-start / cycle"]
+        hooks["Compositor hooks<br/>(i3 / Sway exec)"]
+    end
 
-┌──────────────┐   ┌────────────────┐    ┌────────────────┐
-│ whisper.cpp  │   │ Piper TTS      │    │ MCP servers    │
-│ (whisper-rs) │   │ (piper binary) │    │ (user-defined) │
-└──────────────┘   └────────────────┘    └────────────────┘
-       ▲                   ▲                     ▲
-       └─ assistd-voice ───┘                     └─ assistd-mcp
+    subgraph daemon["assistd daemon"]
+        bin["<b>assistd</b><br/>CLI parsing · subsystem init · lifecycle"]
+        core["<b>assistd-core</b><br/>AppState · Agent loop · socket server · presence"]
+        llm["<b>assistd-llm</b><br/>chat client · router spec"]
+        tools["<b>assistd-tools</b><br/>run tool · commands · policy gates"]
+        voice["<b>assistd-voice</b><br/>Whisper STT · Piper TTS"]
+        wm["<b>assistd-wm</b><br/>i3 / Sway IPC"]
+        mcp["<b>assistd-mcp</b><br/>stdio client (rmcp)"]
+        memory[("<b>assistd-memory</b><br/>SQLite stores")]
+        embed["<b>assistd-embed</b><br/>embedding queue"]
+    end
+
+    subgraph external["Supervised child processes"]
+        direction LR
+        llama["llama-server<br/>:8385 /v1/chat/completions"]
+        embedsrv["embedding llama-server<br/>:8386 /v1/embeddings"]
+        piper["piper"]
+        mcpsrv["MCP servers<br/>(user-defined)"]
+    end
+
+    clients -- "Unix socket · line-delimited JSON<br/>Request / Event" --> bin
+    bin --> core
+    bin --> mcp
+    core --> llm & tools & voice & wm & memory & embed
+    tools --> memory & wm
+    mcp --> tools
+    embed --> memory
+    tools --> embed
+
+    llm --> llama
+    embed --> embedsrv
+    voice --> piper
+    mcp --> mcpsrv
 ```
 
 ## Crate map
@@ -85,8 +72,7 @@ the vocabulary established here.
 `utils` sits at the bottom with no internal dependencies; `config`
 and `ipc` build only on it, and most other crates build on those
 three. `core` sits at the top because it's where every subsystem is
-wired into a working daemon. The binary itself is intentionally thin:
-parse argv, load config, build `AppState`, hand off.
+wired into a working daemon.
 
 The same binary also ships several client subcommands that speak the
 Unix-socket IPC: `query`, `chat`, `cycle` / `sleep` / `wake` /
@@ -135,6 +121,12 @@ control-plane requests are sent only while the supervisor is `Ready` with
 a live child, so nothing reaches the port between a crash and the next
 verified start.
 
+Presence decides whether the model is loaded: `Active` has it loaded,
+`Drowsy` keeps `llama-server` running with the weights unloaded, and
+`Sleeping` stops the server. The daemon starts `Sleeping` and reports
+`Waking` while it loads the model. The idle timers and GPU monitor
+under `[sleep]` move it down, and a query wakes it.
+
 If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the
 supervisor restarts it with exponential backoff and the in-flight
 agent turn surfaces an `LlmError::ServerRestarting`. The agent
@@ -162,7 +154,9 @@ One per-query state machine, single-threaded per turn. The loop:
    tools` to llama-server, stream tokens.
 3. The response is either text (`StepOutcome::Final` → emit
    `Event::Delta` per token, then `Event::Done`) or tool calls
-   (`StepOutcome::ToolCalls` → step 4).
+   (`StepOutcome::ToolCalls` → step 4). A response cut off at the
+   output-token limit (`StepOutcome::Truncated`) is retried up to
+   twice with a note to the model, then the turn fails.
 4. For each tool call: `tools.get(name).invoke(arguments)`. Emit
    `Event::ToolCall` before, `Event::ToolResult` after. Push results
    back via `backend.push_tool_results(...)`, which appends them as
@@ -198,8 +192,7 @@ LLM-facing tools with their own JSON schemas.
 
 Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
 `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`,
-`write`. See [tools.md](tools.md) for the trait definitions and a
-complete worked example of adding your own.
+`write`.
 
 Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
 intercept the dangerous paths: a `bash` script runs without asking only
@@ -241,8 +234,7 @@ still ask; the denylist still refuses, and nothing is added to the allowlist.
 One SQLite database (default: `~/.local/share/assistd/memory.db`)
 holds three schemas: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
-
-+ undo), and a `SemanticStore` for embedding-indexed chunks. Every
+and undo), and a `SemanticStore` for embedding-indexed chunks. Every
 write runs in order on the only read-write connection. Vector scans
 and other reads each get their own read-only connection, so a long
 scan holds up neither a write nor a history load. Shutdown closes the
@@ -292,15 +284,17 @@ loaded once at startup). Transcripts feed back into the agent loop
 as if the user had typed them.
 
 Continuous mode (`MicContinuousListener`) keeps the mic open and uses
-WebRTC VAD plus a Whisper-resident silence detector to decide when
-to chop the stream into utterances. While `VoiceOutputController`
+WebRTC VAD to chop the stream into utterances. Separately, whisper.cpp's
+Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
+every recording before decoding. While `VoiceOutputController`
 reports that a reply is being spoken (plus a short hangover), a
 `PlaybackGate` discards mic frames and resets the VAD so the daemon
 never transcribes its own TTS; `voice.continuous.playback_gate = false`
 removes the gate for setups whose sound server already cancels echo.
 To avoid GPU thrashing during
-chat generation, the `QueuedTranscriber` defers Whisper inference
-when the LLM is mid-stream.
+chat generation, the `QueuedTranscriber` waits for the LLM to go idle
+before running Whisper, falling back to a CPU Whisper if the wait
+times out or another process holds the GPU.
 
 TTS: model output flows through a `SentenceBuffer` that segments the
 stream into speakable units, each handed to `PiperVoiceOutput`,
@@ -417,9 +411,10 @@ A walk through `assistd query "what files changed this week?"`:
 8. **Client output.** `assistd query` prints deltas as they arrive,
    exits 0 on `Done` or non-zero on `Error`.
 
-For voice queries the only difference is step 1: the request
-originates from `assistd ptt-stop` after the daemon ran the
-recorded audio through Whisper. Steps 2–7 are identical.
+For push-to-talk, `assistd ptt-stop` sends `Request::PttStop`
+instead; `dispatch` routes it to `handle_ptt_stop`, which transcribes
+the recording, emits `Event::Transcription`, and runs the turn from
+step 3 on.
 
 For `assistd chat`, the TUI is a long-lived client but not a single
 connection: each turn opens its own connection, kept writable so the

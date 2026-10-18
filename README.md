@@ -11,22 +11,23 @@ window-manager bindings), and integrates with the running compositor for context
 - **Tools and pipelines.** A single `run` tool exposes shell-shaped
   commands (`cat`, `grep`, `wc`, `head`, `tail`, `sort`, `uniq`, `bash`,
   `see`, `screenshot`, `web`, `wm`, …) the model composes with `|`,
-  `&&`, `;`, plus `~` and glob expansion. Alongside it, `remember`
-  saves facts for later turns and `reminisce` searches transcripts
-  from earlier sessions.
+  `&&`, `||`, `;`, plus `~` and glob expansion. Alongside it, `remember`
+  and `recall` save and look up facts, and `reminisce` searches
+  transcripts from earlier sessions.
 - **Voice in/out.** Push-to-talk and continuous listening via
   `whisper.cpp`; spoken responses via Piper TTS, streamed sentence by
   sentence so playback starts before the model has finished.
 - **Vision when the model has it.** `see photo.png` and `screenshot`
   attach images to the next turn whenever the loaded model has a
   vision projector; capability is detected at runtime.
-- **MCP-compatible.** Connect remote or local
+- **MCP-compatible.** Connect stdio
   [Model Context Protocol](https://modelcontextprotocol.io) servers
   under `[[mcp.servers]]`; their tools register into the same registry
   the LLM sees, namespaced as `mcp__<server>__<tool>`.
-- **Coarse presence.** `Active → Drowsy → Sleeping`. The daemon watches VRAM and drops to `Sleeping` when another process
+- **Coarse presence.** `Active → Drowsy → Sleeping`. On NVIDIA GPUs
+  the daemon watches VRAM and drops to `Sleeping` when another process
   (a game, a second model runner) claims the GPU, freeing all of its
-  VRAM; it can wake again once that process exits.
+  VRAM; with `[sleep] gpu_auto_wake` it wakes once that process exits.
 - **Compositor-aware.** Native i3 and Sway backends; active-window
   context can be injected automatically into every turn.
 - **Persistent memory.** SQLite-backed conversation history plus
@@ -36,9 +37,18 @@ window-manager bindings), and integrates with the running compositor for context
 
 - Rust toolchain, stable channel (selected by `rust-toolchain.toml`;
   rustup installs it automatically on first build).
-- `llama-server` from `llama.cpp` on your `$PATH`. the daemon will spawn it as a child process.
+- `cmake`, `clang`, `pkg-config` and the ALSA headers (`alsa-lib` /
+  `libasound2-dev`) to build. With GCC 15 or newer, build with
+  `CXXFLAGS=-fpermissive` until the bundled whisper.cpp is fixed.
+- `llama-server` from `llama.cpp` on your `$PATH`. The daemon spawns it
+  as a child process.
+- `bubblewrap`. Without it the model gets no tools.
 
-Optional but recommended for the full feature set: `bubblewrap` (without it the model gets no tools), `piper` for TTS, and `grim` (Wayland) or `maim` (X11) for screenshots.
+Optional: `piper` for TTS, and `grim` (Wayland) or `maim` (X11) for
+screenshots.
+
+On Arch, the `assistd` and `assistd-git` AUR packages install the
+binary and a systemd user unit (`systemctl --user enable --now assistd`).
 
 ### 1. Build
 
@@ -55,16 +65,15 @@ assistd init-config
 This writes a working config to `~/.config/assistd/config.toml`. The
 defaults are runnable as-is. Open the file if you want to:
 
-- swap `[model] name` for a different HuggingFace GGUF id (the
-  string is passed to llama-server's `--hf` flag),
+- swap `[model] name` for a different Hugging Face GGUF
+  (`owner/repo:quant`),
 - change `[model] gpu_layers` if VRAM is tight, or pass extra server
   flags through `[model] custom_args`,
 - enable voice (`[voice] enabled = true`) or TTS
   (`[voice.synthesis] enabled = true`).
 
-The [annotated sample config](config/config.sample.toml) documents
-every field and is the canonical reference; `assistd init-config`
-emits a subset with the defaults inline.
+`init-config` refuses to overwrite an existing file. The
+[sample config](config/config.sample.toml) lists every key.
 
 ### 3. Run the daemon
 
@@ -72,10 +81,9 @@ emits a subset with the defaults inline.
 assistd daemon
 ```
 
-First launch downloads the model and waits for `llama-server` to
-report healthy before accepting IPC. Subsequent starts are
-sub-second. Logs stream to stderr; they're verbose by default and
-reduce to warnings once the daemon is steady-state.
+The socket opens at once; the model downloads (first launch only) and
+loads in the background, and queries wait for it. Logs go to stdout at
+`info`; set `RUST_LOG` to change that.
 
 ### 4. First query
 
@@ -83,23 +91,17 @@ reduce to warnings once the daemon is steady-state.
 assistd query "what time is it?"
 ```
 
-You should see status text, then the streamed reply, then the
-process exits 0. If the model decides to call a tool, you'll see
-the tool call and result inline before the final reply.
+The reply streams to stdout, with a line for each tool call, and the
+process exits 0:
 
 ```text
-status: thinking
-The current time is 14:32 PDT (2026-05-09).
-```
-
-Or, with a tool call:
-
-```text
-status: thinking
-tool: run "date"
-result: Sat May  9 14:32:11 PDT 2026
+[tool call: run date]
+[tool result: run exit:0]
 The current time is 14:32 PDT.
 ```
+
+`query` cannot answer confirmation prompts, so a command that needs
+one is denied; use `chat` for those.
 
 ### 5. Open the chat TUI
 
@@ -116,10 +118,8 @@ drives the daemon's single conversation.
 
 The bindings that make `assistd` feel native (push-to-talk, presence
 toggling, the TUI scratchpad) live in your compositor config rather
-than the daemon. Compositor-specific guides:
-
-- [i3](docs/wm/i3.md)
-- [Sway](docs/wm/sway.md)
+than the daemon. Start with the [shared setup page](docs/wm/README.md),
+then the [i3](docs/wm/i3.md) or [Sway](docs/wm/sway.md) guide.
 
 ## CLI surface
 
@@ -132,24 +132,23 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd query <text>`   | One-shot query; prints the streamed response and exits.       |
 | `assistd chat`           | Interactive ratatui TUI.                                      |
 | `assistd cycle`          | Step `Active → Drowsy → Sleeping → Active`.                   |
-| `assistd sleep` / `wake` | Jump to a specific presence state.                            |
+| `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |
 | `assistd ptt-start/stop` | Push-to-talk start/stop, for window-manager bindings.         |
 | `assistd listen-toggle`  | Toggle hands-free continuous listening.                       |
 | `assistd voice-toggle`   | Toggle Piper TTS playback.                                    |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |
+| `assistd tray`           | System tray icon and desktop notifications.                   |
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — crate map, data flow, and
   how the subsystems fit together.
-- [Adding a tool](docs/tools.md) — extending the tool registry with
-  a complete worked example.
-- [Sample config](config/config.sample.toml) — every tunable with
-  prose explaining when to change it.
-- [i3 setup](docs/wm/i3.md) and [Sway setup](docs/wm/sway.md) —
-  copy-paste keybinds for push-to-talk, presence, and the TUI
-  scratchpad.
+- [Sample config](config/config.sample.toml) — every key, one line
+  each.
+- [Window-manager setup](docs/wm/README.md), with [i3](docs/wm/i3.md)
+  and [Sway](docs/wm/sway.md) keybinds for push-to-talk, presence,
+  and the chat scratchpad.
 - [Echo cancellation](docs/voice/echo-cancellation.md) — let
   PipeWire or PulseAudio cancel TTS echo so continuous listening can
   be interrupted mid-reply.

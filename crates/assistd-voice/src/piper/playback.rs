@@ -122,10 +122,15 @@ impl Drop for RodioPlaybackWorker {
     }
 }
 
-fn describe(device: &cpal::Device) -> String {
-    device
-        .description()
-        .map_or_else(|_| "<no-description>".into(), |d| d.to_string())
+fn device_name(device: &cpal::Device) -> String {
+    device.description().map_or_else(
+        |_| "<unknown>".into(),
+        |description| {
+            description
+                .driver()
+                .map_or_else(|| description.name().to_string(), str::to_string)
+        },
+    )
 }
 
 /// Log the available outputs, then pick the named one or the default.
@@ -134,8 +139,8 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
     let devices: Vec<(cpal::Device, String)> = match host.output_devices() {
         Ok(devices) => devices
             .map(|device| {
-                let description = describe(&device);
-                (device, description)
+                let name = device_name(&device);
+                (device, name)
             })
             .collect(),
         Err(err) => {
@@ -149,7 +154,7 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
     };
     let names: Vec<&str> = devices
         .iter()
-        .map(|(_, description)| description.as_str())
+        .map(|(_, device_name)| device_name.as_str())
         .collect();
     tracing::info!(
         target: "assistd::voice::piper",
@@ -162,7 +167,7 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
     };
     match devices
         .into_iter()
-        .find(|(_, description)| description == name)
+        .find(|(_, device_name)| device_name == name)
     {
         Some((device, _)) => {
             tracing::info!(
@@ -188,7 +193,7 @@ fn default_output_device(host: &cpal::Host) -> Option<cpal::Device> {
     match &device {
         Some(device) => tracing::info!(
             target: "assistd::voice::piper",
-            device = %describe(device),
+            device = %device_name(device),
             "cpal default output device"
         ),
         None => tracing::warn!(
