@@ -28,12 +28,12 @@ to the issue. Branches are deleted when their pull request merges.
 
 ## Releases
 
-1. Open a PR that bumps `version` in the root `Cargo.toml` and
-   `pkgver` in `dist/aur/assistd/PKGBUILD`, and merge it.
+1. Open a PR that bumps `version` in the root `Cargo.toml` (and
+   `Cargo.lock`), and merge it. Leave `dist/aur/assistd/` alone.
 2. Tag the merge commit and push the tag:
    `git tag -a v1.2.0 -m v1.2.0 && git push origin v1.2.0`.
-3. Run the **AUR release** workflow from the Actions tab with that tag.
-   It fills in the checksum, regenerates `.SRCINFO`, test-builds the
+3. The tag push starts the **AUR release** workflow. It stamps `pkgver`,
+   fills in the checksum, regenerates `.SRCINFO`, test-builds the
    package in an Arch container and pushes it to the AUR after approval.
-   For a packaging-only fix to a release that is already out, run it again
-   with the same tag and a higher `pkgrel`.
+   For a packaging-only fix to a release that is already out, run it
+   from the Actions tab with the same tag and a higher `pkgrel`.

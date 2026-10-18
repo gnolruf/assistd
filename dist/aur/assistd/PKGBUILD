@@ -38,7 +38,7 @@ makedepends=(
 backup=('etc/assistd/config.toml')
 install=assistd.install
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('30611516b6325135c60beee3f10e204a131a89eeb85db2dc9cc7542634429141')
+sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
