@@ -51,13 +51,12 @@ impl Transcript {
         store: &SqliteSemanticStore,
         text: &str,
         vector: &[f32],
-        model: &str,
     ) -> ChunkId {
         let (_, chunks) = self.append(text).await;
         let [chunk] = &chunks[..] else {
             panic!("{text:?} should be one chunk, got {chunks:?}");
         };
-        embed_chunk(store, chunk, vector, model).await;
+        embed_chunk(store, chunk, vector).await;
         chunk.0
     }
 }
@@ -71,17 +70,13 @@ async fn embed_chunk(
     store: &SqliteSemanticStore,
     (chunk_id, text): &(ChunkId, String),
     vector: &[f32],
-    model: &str,
 ) {
     store
-        .store_embeddings(
-            model,
-            vec![Embedding {
-                target: EmbeddingTarget::Chunk(*chunk_id),
-                text: text.clone(),
-                vector: vector.to_vec(),
-            }],
-        )
+        .store_embeddings(vec![Embedding {
+            target: EmbeddingTarget::Chunk(*chunk_id),
+            text: text.clone(),
+            vector: vector.to_vec(),
+        }])
         .await
         .unwrap();
 }
@@ -99,17 +94,13 @@ async fn embed_memory(
     memory_id: MemoryId,
     value: &str,
     vector: &[f32],
-    model: &str,
 ) {
     store
-        .store_embeddings(
-            model,
-            vec![Embedding {
-                target: EmbeddingTarget::Memory(memory_id),
-                text: value.to_string(),
-                vector: vector.to_vec(),
-            }],
-        )
+        .store_embeddings(vec![Embedding {
+            target: EmbeddingTarget::Memory(memory_id),
+            text: value.to_string(),
+            vector: vector.to_vec(),
+        }])
         .await
         .unwrap();
 }
@@ -123,16 +114,13 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     let [first, second] = &long_chunks[..] else {
         panic!("expected two chunks, got {}", long_chunks.len());
     };
-    embed_chunk(&store, first, &unit_vec(0.3), "m").await;
-    embed_chunk(&store, second, &unit_vec(0.0), "m").await;
+    embed_chunk(&store, first, &unit_vec(0.3)).await;
+    embed_chunk(&store, second, &unit_vec(0.0)).await;
     let short = transcript
-        .embedded_chunk(&store, "short", &unit_vec(1.5), "m")
+        .embedded_chunk(&store, "short", &unit_vec(1.5))
         .await;
 
-    let hits = store
-        .nearest_chunks(unit_vec(0.0), 3, "m", None)
-        .await
-        .unwrap();
+    let hits = store.nearest_chunks(unit_vec(0.0), 3, None).await.unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
     assert_eq!(ids, [second.0, short]);
     assert!((hits[0].similarity - 1.0).abs() < 1e-4);
@@ -155,14 +143,14 @@ async fn nearest_chunks_keeps_the_best_top_k() {
         let angle = (i as f32) * 0.1;
         ids.push(
             transcript
-                .embedded_chunk(&store, &format!("m{i}"), &unit_vec(angle), "m")
+                .embedded_chunk(&store, &format!("m{i}"), &unit_vec(angle))
                 .await,
         );
     }
 
     for (top_k, expected) in [(3, &ids[..3]), (usize::MAX, &ids[..])] {
         let hits = store
-            .nearest_chunks(unit_vec(0.0), top_k, "m", None)
+            .nearest_chunks(unit_vec(0.0), top_k, None)
             .await
             .unwrap();
         let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -175,17 +163,12 @@ async fn nearest_chunks_can_exclude_one_session() {
     let (handle, store, _temp) = fresh().await;
     let past = Transcript::new(&handle).await;
     let current = Transcript::new(&handle).await;
-    let past_chunk = past
-        .embedded_chunk(&store, "past", &unit_vec(0.4), "m")
-        .await;
+    let past_chunk = past.embedded_chunk(&store, "past", &unit_vec(0.4)).await;
     let current_chunk = current
-        .embedded_chunk(&store, "current", &unit_vec(0.0), "m")
+        .embedded_chunk(&store, "current", &unit_vec(0.0))
         .await;
 
-    let all = store
-        .nearest_chunks(unit_vec(0.0), 5, "m", None)
-        .await
-        .unwrap();
+    let all = store.nearest_chunks(unit_vec(0.0), 5, None).await.unwrap();
     let all_ids: Vec<ChunkId> = all.iter().map(|h| h.chunk_id).collect();
     assert_eq!(
         all_ids,
@@ -194,7 +177,7 @@ async fn nearest_chunks_can_exclude_one_session() {
     );
 
     let others = store
-        .nearest_chunks(unit_vec(0.0), 5, "m", Some(current.session))
+        .nearest_chunks(unit_vec(0.0), 5, Some(current.session))
         .await
         .unwrap();
     let other_ids: Vec<(ChunkId, SessionId)> =
@@ -206,21 +189,14 @@ async fn nearest_chunks_can_exclude_one_session() {
 async fn upsert_replaces_memory_embedding_in_place() {
     let (handle, store, _temp) = fresh().await;
     let mem_id = save_memory(&handle, "k", "v").await;
-    embed_memory(&store, mem_id, "v", &unit_vec(0.0), "m").await;
-    embed_memory(
-        &store,
-        mem_id,
-        "v",
-        &unit_vec(std::f32::consts::FRAC_PI_2),
-        "m",
-    )
-    .await;
+    embed_memory(&store, mem_id, "v", &unit_vec(0.0)).await;
+    embed_memory(&store, mem_id, "v", &unit_vec(std::f32::consts::FRAC_PI_2)).await;
 
     assert_eq!(
-        store.count_missing("m").await.unwrap(),
+        store.count_missing().await.unwrap(),
         UnindexedRows::default()
     );
-    let hits = store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap();
+    let hits = store.nearest_memories(unit_vec(0.0), 5).await.unwrap();
     let [hit] = hits.as_slice() else {
         panic!("expected one hit, got {hits:?}");
     };
@@ -235,13 +211,13 @@ async fn upsert_replaces_memory_embedding_in_place() {
 async fn overwriting_a_memory_value_drops_its_stale_embedding() {
     let (handle, store, _temp) = fresh().await;
     let mem_id = save_memory(&handle, "editor", "vim").await;
-    embed_memory(&store, mem_id, "vim", &unit_vec(0.0), "m").await;
+    embed_memory(&store, mem_id, "vim", &unit_vec(0.0)).await;
 
     assert_eq!(save_memory(&handle, "editor", "emacs").await, mem_id);
-    embed_memory(&store, mem_id, "vim", &unit_vec(0.0), "m").await;
+    embed_memory(&store, mem_id, "vim", &unit_vec(0.0)).await;
 
     assert_eq!(
-        store.count_missing("m").await.unwrap(),
+        store.count_missing().await.unwrap(),
         UnindexedRows {
             chunks: 0,
             memories: 1
@@ -249,14 +225,11 @@ async fn overwriting_a_memory_value_drops_its_stale_embedding() {
         "neither the trigger nor a late embedding of the old value may leave it indexed"
     );
     assert_eq!(
-        store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap(),
+        store.nearest_memories(unit_vec(0.0), 5).await.unwrap(),
         Vec::<MemoryHit>::new()
     );
     assert_eq!(
-        store
-            .memories_missing_embedding("m", None, 100)
-            .await
-            .unwrap(),
+        store.memories_missing_embedding(None, 100).await.unwrap(),
         [(mem_id, "emacs".to_string())]
     );
 }
@@ -266,117 +239,117 @@ async fn non_finite_vectors_never_enter_top_k() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
     transcript
-        .embedded_chunk(&store, "nan", &[f32::NAN, 0.0], "m")
+        .embedded_chunk(&store, "nan", &[f32::NAN, 0.0])
         .await;
     transcript
-        .embedded_chunk(&store, "inf", &[f32::INFINITY, 0.0], "m")
+        .embedded_chunk(&store, "inf", &[f32::INFINITY, 0.0])
         .await;
     let far = transcript
-        .embedded_chunk(&store, "far", &unit_vec(1.5), "m")
+        .embedded_chunk(&store, "far", &unit_vec(1.5))
         .await;
     let near = transcript
-        .embedded_chunk(&store, "near", &unit_vec(0.1), "m")
+        .embedded_chunk(&store, "near", &unit_vec(0.1))
         .await;
 
-    let hits = store
-        .nearest_chunks(unit_vec(0.0), 2, "m", None)
-        .await
-        .unwrap();
+    let hits = store.nearest_chunks(unit_vec(0.0), 2, None).await.unwrap();
     let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
     assert_eq!(got, [near, far]);
     assert!(hits.iter().all(|h| h.similarity.is_finite()));
 }
 
 #[tokio::test]
-async fn missing_embedding_lists_only_unindexed_rows_for_current_model() {
+async fn missing_embedding_lists_only_unindexed_rows() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
 
-    transcript
-        .embedded_chunk(&store, "x", &unit_vec(0.0), "new")
-        .await;
-    let old_chunk = transcript
-        .embedded_chunk(&store, "y", &unit_vec(0.5), "old")
-        .await;
-    let (_, naked) = transcript.append("z").await;
-    let naked_chunk = naked[0].0;
+    transcript.embedded_chunk(&store, "x", &unit_vec(0.0)).await;
+    let (_, first) = transcript.append("y").await;
+    let first_bare = first[0].0;
+    let (_, second) = transcript.append("z").await;
+    let second_bare = second[0].0;
 
     let indexed_mem = save_memory(&handle, "indexed", "v1").await;
-    embed_memory(&store, indexed_mem, "v1", &unit_vec(0.0), "new").await;
+    embed_memory(&store, indexed_mem, "v1", &unit_vec(0.0)).await;
     let bare_mem = save_memory(&handle, "bare", "v2").await;
 
     assert_eq!(
-        store
-            .chunks_missing_embedding("new", None, 100)
-            .await
-            .unwrap(),
-        [(old_chunk, "y".to_string()), (naked_chunk, "z".to_string())]
+        store.chunks_missing_embedding(None, 100).await.unwrap(),
+        [
+            (first_bare, "y".to_string()),
+            (second_bare, "z".to_string())
+        ]
+    );
+    assert_eq!(
+        store.chunks_missing_embedding(None, 1).await.unwrap(),
+        [(first_bare, "y".to_string())]
     );
     assert_eq!(
         store
-            .chunks_missing_embedding("new", None, 1)
+            .chunks_missing_embedding(Some(first_bare), 100)
             .await
             .unwrap(),
-        [(old_chunk, "y".to_string())]
+        [(second_bare, "z".to_string())]
     );
     assert_eq!(
-        store
-            .chunks_missing_embedding("new", Some(old_chunk), 100)
-            .await
-            .unwrap(),
-        [(naked_chunk, "z".to_string())]
-    );
-    assert_eq!(
-        store
-            .memories_missing_embedding("new", None, 100)
-            .await
-            .unwrap(),
+        store.memories_missing_embedding(None, 100).await.unwrap(),
         [(bare_mem, "v2".to_string())]
     );
 
-    embed_memory(&store, bare_mem, "v2", &unit_vec(0.0), "new").await;
+    embed_memory(&store, bare_mem, "v2", &unit_vec(0.0)).await;
     assert_eq!(
-        store
-            .memories_missing_embedding("new", None, 100)
-            .await
-            .unwrap(),
+        store.memories_missing_embedding(None, 100).await.unwrap(),
         Vec::<(MemoryId, String)>::new()
     );
 }
 
 #[tokio::test]
-async fn count_stale_aggregates_across_chunks_and_memories() {
+async fn adopting_another_model_drops_every_vector() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
-
-    for (text, angle, model) in [
-        ("a", 0.0, "old-A"),
-        ("b", 0.5, "old-A"),
-        ("c", 1.0, "old-B"),
-        ("d", 1.5, "new"),
-    ] {
-        transcript
-            .embedded_chunk(&store, text, &unit_vec(angle), model)
-            .await;
-    }
+    assert_eq!(
+        store.adopt_model("old").await.unwrap(),
+        ModelAdoption::Recorded
+    );
+    transcript.embedded_chunk(&store, "a", &unit_vec(0.0)).await;
     let mem_id = save_memory(&handle, "k", "v").await;
-    embed_memory(&store, mem_id, "v", &unit_vec(0.0), "old-A").await;
+    embed_memory(&store, mem_id, "v", &unit_vec(0.0)).await;
 
     assert_eq!(
-        store.count_stale("new").await.unwrap(),
-        StaleEmbeddings {
-            rows: 4,
-            models: vec!["old-A".to_string(), "old-B".to_string()]
-        },
-        "2 old-A chunks + 1 old-B chunk + 1 old-A memory"
+        store.adopt_model("old").await.unwrap(),
+        ModelAdoption::Unchanged
     );
     assert_eq!(
-        store.count_stale("old-A").await.unwrap(),
-        StaleEmbeddings {
-            rows: 2,
-            models: vec!["new".to_string(), "old-B".to_string()]
-        },
-        "the old-B chunk + the new chunk"
+        store.count_missing().await.unwrap(),
+        UnindexedRows::default()
+    );
+
+    assert_eq!(
+        store.adopt_model("new").await.unwrap(),
+        ModelAdoption::Replaced {
+            previous: "old".to_string(),
+            dropped: 2
+        }
+    );
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows {
+            chunks: 1,
+            memories: 1
+        }
+    );
+    assert!(
+        store
+            .nearest_chunks(unit_vec(0.0), 5, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .nearest_memories(unit_vec(0.0), 5)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -397,9 +370,9 @@ async fn batch_skips_targets_deleted_before_it_lands() {
             vector: unit_vec(0.0),
         })
         .to_vec();
-    store.store_embeddings("m", embeddings).await.unwrap();
+    store.store_embeddings(embeddings).await.unwrap();
 
-    let hits = store.nearest_memories(unit_vec(0.0), 5, "m").await.unwrap();
+    let hits = store.nearest_memories(unit_vec(0.0), 5).await.unwrap();
     let hit_ids: Vec<MemoryId> = hits.iter().map(|hit| hit.memory_id).collect();
     assert_eq!(hit_ids, [kept]);
 }

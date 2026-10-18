@@ -132,8 +132,7 @@ pub struct RecallTool {
 }
 
 impl RecallTool {
-    /// A tool ranking memories in `semantic` by vectors from `embedder`,
-    /// matching only vectors from the same model.
+    /// A tool ranking memories in `semantic` by vectors from `embedder`.
     pub fn new(embedder: Arc<EmbedderHandle>, semantic: Arc<dyn SemanticStore>) -> Self {
         Self { embedder, semantic }
     }
@@ -147,7 +146,7 @@ impl RecallTool {
         match embedder.embed(query).await {
             Ok(query_vec) => Ok(self
                 .semantic
-                .nearest_memories(query_vec, RECALL_LIMIT, embedder.model())
+                .nearest_memories(query_vec, RECALL_LIMIT)
                 .await?),
             Err(e) => {
                 tracing::debug!(
@@ -318,7 +317,7 @@ impl Tool for ReminisceTool {
         let current = *self.current_session.borrow();
         let hits = self
             .semantic
-            .nearest_chunks(query_vec, limit, embedder.model(), Some(current))
+            .nearest_chunks(query_vec, limit, Some(current))
             .await?;
 
         let output = format_chunks(&hits);
@@ -391,8 +390,8 @@ fn tool_result(output: &str, duration_ms: u128) -> Value {
 mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        ChunkId, Embedding, MemoryError, MemoryStore, NoMemoryStore, NoSemanticStore,
-        NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, StaleEmbeddings,
+        ChunkId, Embedding, MemoryError, MemoryStore, ModelAdoption, NoMemoryStore,
+        NoSemanticStore, NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore,
         TranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
@@ -453,7 +452,6 @@ mod tests {
             &self,
             _q: Vec<f32>,
             _k: usize,
-            _model: &str,
             exclude_session: Option<SessionId>,
         ) -> Result<Vec<EmbeddingHit>, MemoryError> {
             *self.excluded.lock() = exclude_session;
@@ -463,19 +461,17 @@ mod tests {
             &self,
             _q: Vec<f32>,
             _k: usize,
-            _model: &str,
         ) -> Result<Vec<MemoryHit>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn count_stale(&self, _current: &str) -> Result<StaleEmbeddings, MemoryError> {
-            Ok(StaleEmbeddings::default())
+        async fn adopt_model(&self, _model: &str) -> Result<ModelAdoption, MemoryError> {
+            Ok(ModelAdoption::Unchanged)
         }
-        async fn count_missing(&self, _current: &str) -> Result<UnindexedRows, MemoryError> {
+        async fn count_missing(&self) -> Result<UnindexedRows, MemoryError> {
             Ok(UnindexedRows::default())
         }
         async fn memories_missing_embedding(
             &self,
-            _c: &str,
             _after: Option<MemoryId>,
             _limit: usize,
         ) -> Result<Vec<(MemoryId, String)>, MemoryError> {
@@ -483,17 +479,12 @@ mod tests {
         }
         async fn chunks_missing_embedding(
             &self,
-            _c: &str,
             _after: Option<ChunkId>,
             _limit: usize,
         ) -> Result<Vec<(ChunkId, String)>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn store_embeddings(
-            &self,
-            _model: &str,
-            _embeddings: Vec<Embedding>,
-        ) -> Result<(), MemoryError> {
+        async fn store_embeddings(&self, _embeddings: Vec<Embedding>) -> Result<(), MemoryError> {
             Ok(())
         }
     }

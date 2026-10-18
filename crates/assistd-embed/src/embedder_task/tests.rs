@@ -4,8 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use assistd_memory::{
-    ChunkId, Embedding, EmbeddingHit, MemoryHit, MemoryId, Result as MemoryResult, SessionId,
-    StaleEmbeddings, UnindexedRows,
+    ChunkId, Embedding, EmbeddingHit, MemoryHit, MemoryId, ModelAdoption, Result as MemoryResult,
+    SessionId, UnindexedRows,
 };
 
 use super::*;
@@ -44,7 +44,7 @@ impl Embedder for MockEmbedder {
 /// Forwards every `store_embeddings` call to the test; nothing else is used by the worker.
 #[derive(Debug)]
 struct RecordingStore {
-    stored: mpsc::UnboundedSender<(String, Vec<Embedding>)>,
+    stored: mpsc::UnboundedSender<Vec<Embedding>>,
 }
 
 #[async_trait]
@@ -53,7 +53,6 @@ impl SemanticStore for RecordingStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _model: &str,
         _exclude_session: Option<SessionId>,
     ) -> MemoryResult<Vec<EmbeddingHit>> {
         Ok(Vec::new())
@@ -62,19 +61,17 @@ impl SemanticStore for RecordingStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _model: &str,
     ) -> MemoryResult<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn count_stale(&self, _current: &str) -> MemoryResult<StaleEmbeddings> {
-        Ok(StaleEmbeddings::default())
+    async fn adopt_model(&self, _model: &str) -> MemoryResult<ModelAdoption> {
+        Ok(ModelAdoption::Unchanged)
     }
-    async fn count_missing(&self, _current: &str) -> MemoryResult<UnindexedRows> {
+    async fn count_missing(&self) -> MemoryResult<UnindexedRows> {
         Ok(UnindexedRows::default())
     }
     async fn memories_missing_embedding(
         &self,
-        _current: &str,
         _after: Option<MemoryId>,
         _limit: usize,
     ) -> MemoryResult<Vec<(MemoryId, String)>> {
@@ -82,14 +79,13 @@ impl SemanticStore for RecordingStore {
     }
     async fn chunks_missing_embedding(
         &self,
-        _current: &str,
         _after: Option<ChunkId>,
         _limit: usize,
     ) -> MemoryResult<Vec<(ChunkId, String)>> {
         Ok(Vec::new())
     }
-    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> MemoryResult<()> {
-        self.stored.send((model.to_owned(), embeddings)).unwrap();
+    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> MemoryResult<()> {
+        self.stored.send(embeddings).unwrap();
         Ok(())
     }
 }
@@ -97,7 +93,7 @@ impl SemanticStore for RecordingStore {
 struct Harness {
     embedder: Arc<MockEmbedder>,
     jobs: mpsc::Sender<EmbedJob>,
-    stored: mpsc::UnboundedReceiver<(String, Vec<Embedding>)>,
+    stored: mpsc::UnboundedReceiver<Vec<Embedding>>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -132,7 +128,7 @@ impl Harness {
     async fn stored_targets(&mut self, count: usize) -> Vec<EmbeddingTarget> {
         let mut targets = Vec::new();
         while targets.len() < count {
-            let (_, embeddings) = tokio::time::timeout(Duration::from_secs(2), self.stored.recv())
+            let embeddings = tokio::time::timeout(Duration::from_secs(2), self.stored.recv())
                 .await
                 .expect("embeddings stored in time")
                 .expect("store still open");
@@ -168,12 +164,11 @@ fn chunk_targets(ids: &[i64]) -> Vec<EmbeddingTarget> {
 }
 
 #[tokio::test]
-async fn worker_stores_embedded_job_under_the_embedder_model() {
+async fn worker_stores_embedded_job() {
     let mut harness = Harness::spawn(vec![1.0, 0.0]);
     harness.jobs.send(chunk_job(42, "hello")).await.unwrap();
 
-    let (model, embeddings) = harness.stored.recv().await.unwrap();
-    assert_eq!(model, "mock");
+    let embeddings = harness.stored.recv().await.unwrap();
     assert_eq!(
         embeddings,
         [Embedding {

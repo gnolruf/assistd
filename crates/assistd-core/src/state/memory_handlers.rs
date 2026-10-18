@@ -43,7 +43,7 @@ impl AppState {
         match self
             .memory
             .semantic
-            .nearest_chunks(embedding, limit, embedder.model(), None)
+            .nearest_chunks(embedding, limit, None)
             .await
         {
             Ok(hits) => {
@@ -231,9 +231,7 @@ impl AppState {
                 return Err(e.into());
             }
         };
-        let model = embedder.model().to_string();
-
-        let unindexed = match self.memory.semantic.count_missing(&model).await {
+        let unindexed = match self.memory.semantic.count_missing().await {
             Ok(unindexed) => unindexed,
             Err(e) => {
                 send_error(&tx, id, format!("reindex: count missing rows: {e}")).await;
@@ -266,7 +264,7 @@ impl AppState {
             embedder,
             semantic,
             KindProgress::new(&id, &tx, ReindexKind::Chunks, chunks_total),
-            |after, limit| semantic.chunks_missing_embedding(&model, after, limit),
+            |after, limit| semantic.chunks_missing_embedding(after, limit),
             EmbeddingTarget::Chunk,
         )
         .await;
@@ -278,7 +276,7 @@ impl AppState {
             embedder,
             semantic,
             KindProgress::new(&id, &tx, ReindexKind::Memories, memories_total),
-            |after, limit| semantic.memories_missing_embedding(&model, after, limit),
+            |after, limit| semantic.memories_missing_embedding(after, limit),
             EmbeddingTarget::Memory,
         )
         .await;
@@ -361,10 +359,7 @@ where
         }));
         let job_count = jobs.len();
         let embeddings = embed_jobs(embedder, jobs.drain(..)).await;
-        if let Err(e) = semantic
-            .store_embeddings(embedder.model(), embeddings)
-            .await
-        {
+        if let Err(e) = semantic.store_embeddings(embeddings).await {
             warn!(
                 target: "assistd::memory",
                 kind = progress.kind.as_str(),

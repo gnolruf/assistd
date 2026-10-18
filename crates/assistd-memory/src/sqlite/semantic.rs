@@ -1,6 +1,6 @@
 //! SQLite-backed [`SemanticStore`] over `chunk_embeddings` and `memory_embeddings`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 
@@ -10,23 +10,19 @@ use rusqlite::{OptionalExtension, Row, Transaction};
 
 use crate::{
     ChunkId, Embedding, EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit, MemoryId, MessageId,
-    Result, SemanticStore, SessionId, StaleEmbeddings, UnindexedRows,
+    ModelAdoption, Result, SemanticStore, SessionId, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
 use super::timestamp::timestamp_at;
 
-/// Every chunk vector under model `?1`, grouped by its message.
+/// Every chunk vector, grouped by its message.
 const ALL_CHUNK_VECTORS: &str = "
     SELECT cc.message_id, e.chunk_id, e.vector
-    FROM chunk_embeddings e JOIN message_chunks cc ON cc.id = e.chunk_id
-    WHERE e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)";
+    FROM chunk_embeddings e JOIN message_chunks cc ON cc.id = e.chunk_id";
 
-/// Every memory vector under model `?1`, each its own group.
-const ALL_MEMORY_VECTORS: &str = "
-    SELECT memory_id, memory_id, vector
-    FROM memory_embeddings
-    WHERE model_id = (SELECT id FROM embedding_models WHERE name = ?1)";
+/// Every memory vector, each its own group.
+const ALL_MEMORY_VECTORS: &str = "SELECT memory_id, memory_id, vector FROM memory_embeddings";
 
 /// Independent partial sums in the dot product, so the compiler can vectorise it.
 const SCORE_LANES: usize = 8;
@@ -51,13 +47,11 @@ impl SemanticStore for SqliteSemanticStore {
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        model: &str,
         exclude_session: Option<SessionId>,
     ) -> Result<Vec<EmbeddingHit>> {
         if top_k == 0 || query_vector.is_empty() {
             return Ok(Vec::new());
         }
-        let model = model.to_string();
         self.handle
             .search_reader()
             .call(move |c| {
@@ -68,7 +62,6 @@ impl SemanticStore for SqliteSemanticStore {
                 let ranked = scan_top_k::<MessageId, ChunkId>(
                     c,
                     ALL_CHUNK_VECTORS,
-                    rusqlite::params![model],
                     &query_vector,
                     top_k,
                     &excluded,
@@ -93,19 +86,16 @@ impl SemanticStore for SqliteSemanticStore {
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        model: &str,
     ) -> Result<Vec<MemoryHit>> {
         if top_k == 0 || query_vector.is_empty() {
             return Ok(Vec::new());
         }
-        let model = model.to_string();
         self.handle
             .search_reader()
             .call(move |c| {
                 let ranked = scan_top_k::<MemoryId, MemoryId>(
                     c,
                     ALL_MEMORY_VECTORS,
-                    rusqlite::params![model],
                     &query_vector,
                     top_k,
                     &HashSet::new(),
@@ -122,63 +112,36 @@ impl SemanticStore for SqliteSemanticStore {
             .map_err(MemoryError::sqlite("nearest_memories"))
     }
 
-    async fn count_stale(&self, current: &str) -> Result<StaleEmbeddings> {
-        let current = current.to_string();
+    async fn adopt_model(&self, model: &str) -> Result<ModelAdoption> {
+        let model = model.to_string();
         self.handle
-            .reader()
+            .writer()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut rows: u64 = 0;
-                let mut models = BTreeSet::new();
-                let sql = "SELECT m.name, count(*)
-                           FROM chunk_embeddings e JOIN embedding_models m ON m.id = e.model_id
-                           WHERE m.name != ?1 GROUP BY m.name
-                           UNION ALL
-                           SELECT m.name, count(*)
-                           FROM memory_embeddings e JOIN embedding_models m ON m.id = e.model_id
-                           WHERE m.name != ?1 GROUP BY m.name";
-                let mut stmt = c.prepare_cached(sql)?;
-                let model_counts = stmt.query_map(rusqlite::params![current], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
-                })?;
-                for model_count in model_counts {
-                    let (model, count) = model_count?;
-                    rows += count;
-                    models.insert(model);
-                }
-                Ok(StaleEmbeddings {
-                    rows,
-                    models: models.into_iter().collect(),
-                })
+                let tx = c.transaction()?;
+                let adoption = reconcile_model(&tx, &model)?;
+                tx.commit()?;
+                Ok(adoption)
             })
             .await
-            .map_err(MemoryError::sqlite("count_stale"))
+            .map_err(MemoryError::sqlite("adopt_model"))
     }
 
-    async fn count_missing(&self, current: &str) -> Result<UnindexedRows> {
-        let current = current.to_string();
+    async fn count_missing(&self) -> Result<UnindexedRows> {
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let chunks = c.query_row(
                     "SELECT count(*)
                      FROM message_chunks cc
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM chunk_embeddings e
-                         WHERE e.chunk_id = cc.id
-                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
-                     )",
-                    rusqlite::params![current],
+                     WHERE NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = cc.id)",
+                    [],
                     |r| r.get(0),
                 )?;
                 let memories = c.query_row(
                     "SELECT count(*)
                      FROM memories mem
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM memory_embeddings e
-                         WHERE e.memory_id = mem.id
-                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
-                     )",
-                    rusqlite::params![current],
+                     WHERE NOT EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = mem.id)",
+                    [],
                     |r| r.get(0),
                 )?;
                 Ok(UnindexedRows { chunks, memories })
@@ -189,11 +152,9 @@ impl SemanticStore for SqliteSemanticStore {
 
     async fn memories_missing_embedding(
         &self,
-        current: &str,
         after: Option<MemoryId>,
         limit: usize,
     ) -> Result<Vec<(MemoryId, String)>> {
-        let current = current.to_string();
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
             .reader()
@@ -201,16 +162,14 @@ impl SemanticStore for SqliteSemanticStore {
                 let mut stmt = c.prepare_cached(
                     "SELECT mem.id, mem.value
                      FROM memories mem
-                     WHERE mem.id > ifnull(?2, 0) AND NOT EXISTS (
-                         SELECT 1 FROM memory_embeddings e
-                         WHERE e.memory_id = mem.id
-                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
+                     WHERE mem.id > ifnull(?1, 0) AND NOT EXISTS (
+                         SELECT 1 FROM memory_embeddings e WHERE e.memory_id = mem.id
                      )
                      ORDER BY mem.id
-                     LIMIT ?3",
+                     LIMIT ?2",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![current, after, limit], |r| {
+                    .query_map(rusqlite::params![after, limit], |r| {
                         Ok((r.get(0)?, r.get(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -222,11 +181,9 @@ impl SemanticStore for SqliteSemanticStore {
 
     async fn chunks_missing_embedding(
         &self,
-        current: &str,
         after: Option<ChunkId>,
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>> {
-        let current = current.to_string();
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
             .reader()
@@ -237,16 +194,14 @@ impl SemanticStore for SqliteSemanticStore {
                                         cc.byte_end - cc.byte_start) AS TEXT)
                      FROM message_chunks cc
                      JOIN messages msg ON msg.id = cc.message_id
-                     WHERE cc.id > ifnull(?2, 0) AND NOT EXISTS (
-                         SELECT 1 FROM chunk_embeddings e
-                         WHERE e.chunk_id = cc.id
-                           AND e.model_id = (SELECT id FROM embedding_models WHERE name = ?1)
+                     WHERE cc.id > ifnull(?1, 0) AND NOT EXISTS (
+                         SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = cc.id
                      )
                      ORDER BY cc.id
-                     LIMIT ?3",
+                     LIMIT ?2",
                 )?;
                 let rows = stmt
-                    .query_map(rusqlite::params![current, after, limit], |r| {
+                    .query_map(rusqlite::params![after, limit], |r| {
                         Ok((r.get(0)?, r.get(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -256,18 +211,16 @@ impl SemanticStore for SqliteSemanticStore {
             .map_err(MemoryError::sqlite("chunks_missing_embedding"))
     }
 
-    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()> {
+    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> Result<()> {
         if embeddings.is_empty() {
             return Ok(());
         }
-        let model = model.to_string();
         self.handle
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
-                let model_id = embedding_model_id(&tx, &model)?;
                 for embedding in &embeddings {
-                    upsert_embedding(&tx, model_id, embedding)?;
+                    upsert_embedding(&tx, embedding)?;
                 }
                 tx.commit()
             })
@@ -357,14 +310,13 @@ impl<Group: PartialEq, Id> TopK<Group, Id> {
 fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     conn: &rusqlite::Connection,
     sql: &str,
-    params: impl rusqlite::Params,
     query: &[f32],
     top_k: usize,
     excluded: &HashSet<Group>,
 ) -> rusqlite::Result<Vec<(Id, f32)>> {
     let mut stmt = conn.prepare_cached(sql)?;
     let mut best = TopK::new(top_k);
-    let mut rows = stmt.query(params)?;
+    let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let group = row.get(0)?;
         if excluded.contains(&group) {
@@ -481,44 +433,49 @@ fn dot_le_words(words: &[[u8; 4]], query: &[f32]) -> f32 {
 /// Upsert `embedding` into its target's table. The `SELECT` makes a since-deleted
 /// target, or a memory whose value has changed since, a no-op rather than an error
 /// or a vector for the wrong text.
-fn upsert_embedding(
-    tx: &Transaction<'_>,
-    model_id: i64,
-    embedding: &Embedding,
-) -> rusqlite::Result<usize> {
+fn upsert_embedding(tx: &Transaction<'_>, embedding: &Embedding) -> rusqlite::Result<usize> {
     let blob = vector_to_blob(&embedding.vector);
     match embedding.target {
         EmbeddingTarget::Chunk(id) => tx
             .prepare_cached(
-                "INSERT INTO chunk_embeddings (chunk_id, model_id, vector)
-                 SELECT id, ?2, ?3 FROM message_chunks WHERE id = ?1
-                 ON CONFLICT(chunk_id) DO UPDATE
-                 SET model_id = excluded.model_id, vector = excluded.vector",
+                "INSERT INTO chunk_embeddings (chunk_id, vector)
+                 SELECT id, ?2 FROM message_chunks WHERE id = ?1
+                 ON CONFLICT(chunk_id) DO UPDATE SET vector = excluded.vector",
             )?
-            .execute(rusqlite::params![id, model_id, blob]),
+            .execute(rusqlite::params![id, blob]),
         EmbeddingTarget::Memory(id) => tx
             .prepare_cached(
-                "INSERT INTO memory_embeddings (memory_id, model_id, vector)
-                 SELECT id, ?2, ?3 FROM memories WHERE id = ?1 AND value = ?4
-                 ON CONFLICT(memory_id) DO UPDATE
-                 SET model_id = excluded.model_id, vector = excluded.vector",
+                "INSERT INTO memory_embeddings (memory_id, vector)
+                 SELECT id, ?2 FROM memories WHERE id = ?1 AND value = ?3
+                 ON CONFLICT(memory_id) DO UPDATE SET vector = excluded.vector",
             )?
-            .execute(rusqlite::params![id, model_id, blob, embedding.text]),
+            .execute(rusqlite::params![id, blob, embedding.text]),
     }
 }
 
-/// The `embedding_models` id of `name`, inserting the model on first use.
-fn embedding_model_id(tx: &Transaction<'_>, name: &str) -> rusqlite::Result<i64> {
-    let existing = tx
-        .prepare_cached("SELECT id FROM embedding_models WHERE name = ?1")?
-        .query_row(rusqlite::params![name], |r| r.get(0))
+/// Record `model` in `embedding_model`, deleting every vector unless it is
+/// already the recorded model.
+fn reconcile_model(tx: &Transaction<'_>, model: &str) -> rusqlite::Result<ModelAdoption> {
+    let previous: Option<String> = tx
+        .query_row("SELECT name FROM embedding_model", [], |r| r.get(0))
         .optional()?;
-    match existing {
-        Some(id) => Ok(id),
-        None => tx
-            .prepare_cached("INSERT INTO embedding_models (name) VALUES (?1) RETURNING id")?
-            .query_row(rusqlite::params![name], |r| r.get(0)),
+    if previous.as_deref() == Some(model) {
+        return Ok(ModelAdoption::Unchanged);
     }
+    let dropped = tx.execute("DELETE FROM chunk_embeddings", [])?
+        + tx.execute("DELETE FROM memory_embeddings", [])?;
+    tx.execute(
+        "INSERT INTO embedding_model (id, name) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+        rusqlite::params![model],
+    )?;
+    Ok(match previous {
+        None => ModelAdoption::Recorded,
+        Some(previous) => ModelAdoption::Replaced {
+            previous,
+            dropped: u64::try_from(dropped).unwrap_or(u64::MAX),
+        },
+    })
 }
 
 /// Encode `vector` as the little-endian `f32` BLOB the embedding tables store.

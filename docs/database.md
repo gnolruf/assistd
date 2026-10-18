@@ -20,8 +20,6 @@ erDiagram
     messages ||--o{ message_chunks : "split into"
     message_chunks ||--o| chunk_embeddings : "embedded as"
     memories ||--o| memory_embeddings : "embedded as"
-    embedding_models ||--o{ chunk_embeddings : "produced"
-    embedding_models ||--o{ memory_embeddings : "produced"
 
     sessions {
         int id PK
@@ -88,18 +86,16 @@ erDiagram
         int byte_start
         int byte_end
     }
-    embedding_models {
-        int id PK
-        text name UK
+    embedding_model {
+        int id PK "always 1"
+        text name
     }
     chunk_embeddings {
         int chunk_id PK, FK
-        int model_id FK
         blob vector
     }
     memory_embeddings {
         int memory_id PK, FK
-        int model_id FK
         blob vector
     }
 ```
@@ -159,18 +155,20 @@ never outlives the text it was computed from.
   transaction that saves the message. Each chunk is a byte range into
   `messages.content`, so the text itself is never stored twice. Tool
   results are not chunked.
-- **`embedding_models`**: one row per embedding model name seen, so
-  each vector records which model produced it.
+- **`embedding_model`**: a single row naming the model every stored
+  vector came from. When the daemon's embedder comes up under a
+  different `embedding.model`, every vector is deleted in the same
+  transaction that records the new name, before any search or write
+  can use it, so vectors from two models are never compared.
 - **`chunk_embeddings`** / **`memory_embeddings`**: at most one vector
   per chunk or memory, stored as a BLOB of little-endian `f32`s,
   L2-normalised by the embedder so a dot product is cosine similarity.
   Vectors are written by the background embedding queue; a memory's
   vector is only stored if its value hasn't changed since the job was
-  queued. Rows with no vector for the configured model, or a vector
-  from a different model, are what `assistd memory reindex` fills in.
+  queued. Rows with no vector are what `assistd memory reindex` fills
+  in.
 
-Search (`recall`, `reminisce`) scans every vector for the current model
-on a dedicated read-only connection and keeps the top matches; there
+Search (`recall`, `reminisce`) scans every vector on a dedicated read-only connection and keeps the top matches; there
 is no vector index. `reminisce` leaves out the current session's
 messages.
 

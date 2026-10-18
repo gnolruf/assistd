@@ -32,12 +32,11 @@ impl AppState {
             return Ok(None);
         };
         let embedding = embedder.embed(query.to_string()).await?;
-        let model = embedder.model();
         let top_k = self.memory.embedding_cfg.top_k.get() as usize;
         let hits = self
             .memory
             .semantic
-            .nearest_chunks(embedding, top_k, model, None)
+            .nearest_chunks(embedding, top_k, None)
             .await?;
         if hits.is_empty() {
             return Ok(None);
