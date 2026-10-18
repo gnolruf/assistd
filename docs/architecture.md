@@ -241,6 +241,7 @@ still ask; the denylist still refuses, and nothing is added to the allowlist.
 One SQLite database (default: `~/.local/share/assistd/memory.db`)
 holds three schemas: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
+
 + undo), and a `SemanticStore` for embedding-indexed chunks. Every
 write runs in order on the only read-write connection. Vector scans
 and other reads each get their own read-only connection, so a long
@@ -425,11 +426,3 @@ connection: each turn opens its own connection, kept writable so the
 TUI can answer confirmation prompts with `Request::ConfirmResponse`,
 while separate long-lived `Request::Subscribe` connections carry
 broadcast events such as session titles.
-
-## Where to look next
-
-- [Adding a tool](tools.md) — full code-level walkthrough of
-  extending the registry.
-- [Sample config](../config/config.sample.toml) — every tunable
-  with prose explaining when to change it.
-- [i3](wm/i3.md) and [Sway](wm/sway.md) — keybind recipes.

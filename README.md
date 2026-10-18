@@ -14,8 +14,6 @@ window-manager bindings), and integrates with the running compositor for context
   `&&`, `;`, plus `~` and glob expansion. Alongside it, `remember`
   saves facts for later turns and `reminisce` searches transcripts
   from earlier sessions.
-  - Adding your own command is a single Rust file plus one
-    registration line — see [docs/tools.md](docs/tools.md).
 - **Voice in/out.** Push-to-talk and continuous listening via
   `whisper.cpp`; spoken responses via Piper TTS, streamed sentence by
   sentence so playback starts before the model has finished.

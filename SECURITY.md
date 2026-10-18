@@ -15,8 +15,7 @@ another local user do something assistd is meant to stop, for example:
 - crashing or wedging the daemon from model output or IPC input
 
 Include the version (`assistd --version`), a reproduction, and what an
-attacker gains. Expect an acknowledgement within a week. Fixes are
-developed in a private fork attached to the advisory and disclosed when
+attacker gains. Fixes are developed in a private fork attached to the advisory and disclosed when
 the patched release is out.
 
 ## Supported versions
