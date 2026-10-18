@@ -14,6 +14,7 @@ test-support = []
 assistd-config = { workspace = true }
 assistd-embed = { workspace = true }
 assistd-memory = { workspace = true }
+assistd-search = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-wm = { workspace = true }
 assistd-utils = { workspace = true }

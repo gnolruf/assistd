@@ -154,6 +154,7 @@ async fn start(
             embed: &embed,
             current_session: session_ctx.session_updates(),
             window_manager: window.manager.clone(),
+            web_search: web_search.clone(),
         },
     )?;
 

@@ -61,9 +61,9 @@ fn allowing() -> WebCommand {
     loopback_only(allowing_gate())
 }
 
-async fn run_web(cmd: &WebCommand, args: &[&str]) -> CommandOutput {
+async fn fetch(cmd: &WebCommand, url: &str) -> CommandOutput {
     cmd.run(CommandInput {
-        args: args.iter().map(ToString::to_string).collect(),
+        args: vec!["fetch".to_string(), url.to_string()],
         stdin: None,
     })
     .await
@@ -75,22 +75,22 @@ fn stderr(out: &CommandOutput) -> String {
 
 #[tokio::test]
 async fn rejects_non_http_scheme() {
-    let out = run_web(&allowing(), &["file:///etc/hostname"]).await;
+    let out = fetch(&allowing(), "file:///etc/hostname").await;
     assert_eq!(out.exit_code, 2);
     assert_eq!(
         stderr(&out),
         "[error] web: only http(s):// URLs are allowed: file:///etc/hostname. \
-         Use: web https://... or web http://...\n"
+         Use: web fetch https://... or web fetch http://...\n"
     );
 }
 
 #[tokio::test]
 async fn declined_fetch_exits_126_without_connecting() {
-    let cmd = WebCommand::new(ApprovalGate::new(
-        Arc::new(DenyAllGate),
-        Arc::new(Approvals::unsaved()),
-    ));
-    let out = run_web(&cmd, &["http://example.com/?secret=x"]).await;
+    let cmd = WebCommand::new(
+        ApprovalGate::new(Arc::new(DenyAllGate), Arc::new(Approvals::unsaved())),
+        None,
+    );
+    let out = fetch(&cmd, "http://example.com/?secret=x").await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(
         stderr(&out),
@@ -105,9 +105,9 @@ async fn approved_host_is_fetched_without_asking() {
     hosts.approve("127.0.0.1").await.expect("unsaved approve");
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
     let gate = RecordingGate::answering(Approval::Deny);
-    let out = run_web(
+    let out = fetch(
         &loopback_only(ApprovalGate::new(gate.clone(), hosts)),
-        &[&format!("http://{addr}/")],
+        &format!("http://{addr}/"),
     )
     .await;
     server.await.unwrap();
@@ -122,7 +122,7 @@ async fn always_answer_approves_the_host_for_good() {
     let cmd = loopback_only(ApprovalGate::new(gate.clone(), Arc::clone(&hosts)));
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
     let url = format!("http://{addr}/page");
-    let out = run_web(&cmd, &[&url]).await;
+    let out = fetch(&cmd, &url).await;
     server.await.unwrap();
     assert_eq!(out.exit_code, 0, "{}", stderr(&out));
     assert!(hosts.contains("127.0.0.1"));
@@ -131,7 +131,7 @@ async fn always_answer_approves_the_host_for_good() {
         panic!("expected one prompt, got {asked:?}");
     };
     assert_eq!(request.tool, "web");
-    assert_eq!(request.script, format!("web {url}"));
+    assert_eq!(request.script, format!("web fetch {url}"));
     assert_eq!(request.always_allow, ["127.0.0.1"]);
 }
 
@@ -146,7 +146,7 @@ async fn redirect_within_the_same_host_is_followed() {
             response("HTTP/1.1 200 OK", b"landed"),
         ],
     );
-    let out = run_web(&allowing(), &[&format!("http://{addr}/")]).await;
+    let out = fetch(&allowing(), &format!("http://{addr}/")).await;
     server.await.unwrap();
     assert_eq!(out.exit_code, 0, "{}", stderr(&out));
     assert_eq!(out.stdout, b"landed");
@@ -155,7 +155,7 @@ async fn redirect_within_the_same_host_is_followed() {
 #[tokio::test]
 async fn redirect_to_an_unapproved_host_is_refused() {
     let (addr, server) = serve(vec![redirect_to("http://localhost:1/?leak=x")]).await;
-    let out = run_web(&allowing(), &[&format!("http://{addr}/")]).await;
+    let out = fetch(&allowing(), &format!("http://{addr}/")).await;
     server.await.unwrap();
     assert_eq!(out.exit_code, 1);
     assert!(
@@ -168,7 +168,7 @@ async fn redirect_to_an_unapproved_host_is_refused() {
 #[tokio::test]
 async fn redirect_to_a_non_public_address_is_refused() {
     let (addr, server) = serve(vec![redirect_to("http://10.0.0.1/")]).await;
-    let out = run_web(&allowing(), &[&format!("http://{addr}/")]).await;
+    let out = fetch(&allowing(), &format!("http://{addr}/")).await;
     server.await.unwrap();
     assert_eq!(out.exit_code, 1);
     assert!(
@@ -181,11 +181,11 @@ async fn redirect_to_a_non_public_address_is_refused() {
 #[tokio::test]
 async fn non_public_literal_is_denied_without_asking() {
     let gate = RecordingGate::answering(Approval::Always);
-    let cmd = WebCommand::new(ApprovalGate::new(
-        gate.clone(),
-        Arc::new(Approvals::unsaved()),
-    ));
-    let out = run_web(&cmd, &["http://[::ffff:169.254.169.254]/latest/"]).await;
+    let cmd = WebCommand::new(
+        ApprovalGate::new(gate.clone(), Arc::new(Approvals::unsaved())),
+        None,
+    );
+    let out = fetch(&cmd, "http://[::ffff:169.254.169.254]/latest/").await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(
         stderr(&out),
@@ -197,8 +197,8 @@ async fn non_public_literal_is_denied_without_asking() {
 
 #[tokio::test]
 async fn name_resolving_only_to_loopback_is_refused() {
-    let cmd = WebCommand::new(allowing_gate());
-    let out = run_web(&cmd, &["http://localhost:1/"]).await;
+    let cmd = WebCommand::new(allowing_gate(), None);
+    let out = fetch(&cmd, "http://localhost:1/").await;
     assert_eq!(out.exit_code, 1);
     assert!(
         stderr(&out).contains("localhost resolves only to non-public addresses"),
@@ -247,7 +247,7 @@ async fn undeclared_oversized_body_stops_at_the_cap() {
     let mut raw = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
     raw.resize(raw.len() + BODY_MAX + 1, b'x');
     let (addr, server) = serve(vec![raw]).await;
-    let out = run_web(&allowing(), &[&format!("http://{addr}/")]).await;
+    let out = fetch(&allowing(), &format!("http://{addr}/")).await;
     server.abort();
     assert_eq!(out.exit_code, 1);
     assert!(

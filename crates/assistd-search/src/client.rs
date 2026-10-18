@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Url;
@@ -9,6 +10,7 @@ use serde::{Deserialize, Deserializer};
 
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::http::{BodyError, read_capped};
+use assistd_utils::readiness::{NotReady, ReadinessCell};
 
 use crate::error::SearchError;
 
@@ -25,7 +27,7 @@ const BODY_MAX: usize = 512 * 1024;
 pub struct SearxngClient {
     client: reqwest::Client,
     search_url: Url,
-    server: ChildServerStatus,
+    server: Arc<ReadinessCell<ChildServerStatus>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -77,8 +79,12 @@ enum WireAnswer {
 }
 
 impl SearxngClient {
-    /// A client for the instance listening on `addr`, gated on `server`.
-    pub fn new(addr: SocketAddr, server: ChildServerStatus) -> Result<Self, SearchError> {
+    /// A client for the instance listening on `addr`, gated on the
+    /// readiness of the server `server` tracks.
+    pub fn new(
+        addr: SocketAddr,
+        server: Arc<ReadinessCell<ChildServerStatus>>,
+    ) -> Result<Self, SearchError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -94,12 +100,11 @@ impl SearxngClient {
         })
     }
 
-    /// Fails with [`SearchError::NotServing`], without sending, while the
-    /// instance is not serving.
+    /// Fails without sending with [`SearchError::NotServing`] while the
+    /// instance is starting or not serving, and [`SearchError::Unavailable`]
+    /// when it never started.
     pub async fn search(&self, query: &SearchQuery<'_>) -> Result<SearchResults, SearchError> {
-        if !self.server.is_serving() {
-            return Err(SearchError::NotServing);
-        }
+        self.ensure_serving()?;
         let response = self
             .client
             .get(self.request_url(query))
@@ -115,6 +120,14 @@ impl SearxngClient {
             BodyError::Read(source) => SearchError::Transport(source),
         })?;
         serde_json::from_slice(&body).map_err(SearchError::Decode)
+    }
+
+    fn ensure_serving(&self) -> Result<(), SearchError> {
+        match self.server.get() {
+            Ok(status) if status.is_serving() => Ok(()),
+            Ok(_) | Err(NotReady::Starting) => Err(SearchError::NotServing),
+            Err(NotReady::Unavailable(reason)) => Err(SearchError::Unavailable(reason)),
+        }
     }
 
     fn request_url(&self, query: &SearchQuery<'_>) -> Url {

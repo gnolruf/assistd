@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use reqwest::StatusCode;
 use thiserror::Error;
@@ -23,6 +24,9 @@ pub enum SearchServerError {
 pub enum SearchError {
     #[error("search server is not ready; request not sent")]
     NotServing,
+
+    #[error("search server is unavailable: {0}")]
+    Unavailable(Arc<str>),
 
     #[error("build search reqwest client: {0}")]
     Client(#[source] reqwest::Error),

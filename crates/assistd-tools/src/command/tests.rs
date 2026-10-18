@@ -96,11 +96,11 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
         (
             "web",
             run_cmd(
-                WebCommand::new(ApprovalGate::new(
-                    Arc::new(AlwaysAllowGate),
-                    Arc::new(Approvals::unsaved()),
-                )),
-                vec!["file:///etc/passwd".into()],
+                WebCommand::new(
+                    ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
+                    None,
+                ),
+                vec!["fetch".into(), "file:///etc/passwd".into()],
             )
             .await,
         ),

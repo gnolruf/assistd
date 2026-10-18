@@ -15,6 +15,7 @@ assistd-embed = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-llm = { workspace = true }
 assistd-memory = { workspace = true }
+assistd-search = { workspace = true }
 assistd-tools = { workspace = true }
 assistd-utils = { workspace = true }
 assistd-voice = { workspace = true }
