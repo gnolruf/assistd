@@ -20,6 +20,7 @@ use crate::mcp::McpConfig;
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
 use crate::presence::PresenceConfig;
+use crate::search::SearchConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::{ToolsConfig, ToolsOutputConfig};
@@ -51,6 +52,7 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub memory: MemoryConfig,
     pub embedding: EmbeddingConfig,
+    pub search: SearchConfig,
     pub mcp: McpConfig,
     #[serde(skip)]
     pub timeouts: TimeoutsConfig,
@@ -70,6 +72,7 @@ impl Config {
         validate_tool_output_share(&mut errors, &self.tools.output, &self.chat);
         validate_memory(&mut errors, &self.memory);
         validate_embedding(&mut errors, &self.embedding, &self.model);
+        validate_search(&mut errors, &self.search, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
         validate_tray_icons(&mut errors, &self.tray.icons);
         validate_tray_notifications(&mut errors, &self.tray.notifications);
@@ -447,6 +450,24 @@ fn validate_embedding(errors: &mut Vec<String>, embedding: &EmbeddingConfig, mod
         embedding.top_k,
         MAX_EMBEDDING_TOP_K,
     );
+}
+
+fn validate_search(
+    errors: &mut Vec<String>,
+    search: &SearchConfig,
+    embedding: &EmbeddingConfig,
+    model: &ModelConfig,
+) {
+    if !search.enabled {
+        return;
+    }
+    require_loopback(errors, "search.host", search.host);
+    if search.port == model.port {
+        errors.push("search.port must differ from model.port (the chat server)".into());
+    }
+    if embedding.enabled && search.port == embedding.port {
+        errors.push("search.port must differ from embedding.port (the embedding server)".into());
+    }
 }
 
 fn require_at_most(errors: &mut Vec<String>, key: &str, value: NonZeroU32, max: u32) {

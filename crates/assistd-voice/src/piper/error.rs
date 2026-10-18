@@ -26,8 +26,11 @@ pub enum PiperError {
         source: std::io::Error,
     },
 
-    #[error("piper binary '{binary}' not found on PATH")]
-    BinaryMissing { binary: PathBuf },
+    #[error("cannot run piper binary '{}': {reason}", binary.display())]
+    BinaryMissing {
+        binary: PathBuf,
+        reason: assistd_utils::program::ProgramError,
+    },
 
     #[error("failed to spawn piper at {binary}: {source}")]
     Spawn {

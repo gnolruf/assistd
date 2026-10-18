@@ -19,7 +19,7 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) {
-        if let Some(disabled) = self.subsystems.tools_disabled {
+        if let Some(disabled) = &self.subsystems.tools_disabled {
             let _ = tx
                 .send(Event::Status {
                     id: id.clone(),

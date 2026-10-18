@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_config::SynthesisConfig;
+use assistd_utils::program::find_program;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
@@ -117,8 +118,12 @@ impl PiperVoiceOutput {
     /// Resolve the voice files, open the audio device, and run a
     /// health-check synthesis.
     pub async fn start(config: SynthesisConfig) -> Result<Self, PiperError> {
-        which::which(&config.binary_path).map_err(|_| PiperError::BinaryMissing {
-            binary: config.binary_path.clone(),
+        let path_env = std::env::var_os("PATH").unwrap_or_default();
+        find_program(&config.binary_path, &path_env).map_err(|reason| {
+            PiperError::BinaryMissing {
+                binary: config.binary_path.clone(),
+                reason,
+            }
         })?;
 
         let cache_dir = config

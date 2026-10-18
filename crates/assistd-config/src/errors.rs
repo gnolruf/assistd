@@ -62,6 +62,16 @@ pub enum CustomArgsError {
     Exposing(String),
 }
 
+/// Why a `search.command` string was refused.
+#[derive(Debug, Error)]
+pub enum SearchCommandError {
+    #[error("unterminated quote or trailing backslash")]
+    Unparseable,
+
+    #[error("names no program")]
+    Empty,
+}
+
 fn format_validation_errors(errors: &[String]) -> String {
     let mut report = format!("configuration has {} error(s):", errors.len());
     for (i, error) in errors.iter().enumerate() {

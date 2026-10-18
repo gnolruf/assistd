@@ -1,6 +1,6 @@
 //! Daemon entrypoint: bring up the subsystems, serve the IPC socket while
-//! the model, voice, embedding and MCP servers start in the background,
-//! tear down in order.
+//! the model, voice, embedding, search and MCP servers start in the
+//! background, tear down in order.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -27,6 +27,7 @@ use crate::ipc_voice_proxy::IpcVoiceProxy;
 use embed_init::{EmbeddingHandles, EmbeddingService, EmbeddingStages, EmbeddingStartup};
 use mcp_init::{McpService, McpStartup};
 use memory_init::MemorySubsystem;
+use search_init::{SearchService, SearchStartup};
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 use tools_init::ToolDeps;
 use warmup::Warmup;
@@ -37,6 +38,7 @@ mod idle_monitor;
 mod listen_dispatcher;
 mod mcp_init;
 mod memory_init;
+mod search_init;
 mod shutdown;
 mod tools_init;
 mod voice_init;
@@ -138,6 +140,7 @@ async fn start(
     let mut memory = memory_init::init(&config).await;
     let (embed, embed_startup) =
         embed_init::prepare(&config, &api_key, memory.sqlite_handle.as_ref());
+    let (web_search, search_startup) = search_init::prepare(&config);
     let window = wm_init::init(&config, &stages.tools).await;
 
     let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
@@ -162,6 +165,7 @@ async fn start(
         .with_window_manager(window.manager.clone())
         .with_vision_revalidator(vision_revalidator.clone())
         .with_mcp_servers(tools.mcp_servers)
+        .with_web_search(web_search)
         .with_tools_disabled(tools.disabled);
     let memory_stack = build_memory_stack(&config, &memory, &embed);
 
@@ -177,6 +181,7 @@ async fn start(
         BackgroundStarts {
             vision: vision_revalidator,
             embed: embed_startup,
+            search: search_startup,
             mcp: tools.mcp_startup,
         },
         stages,
@@ -189,6 +194,7 @@ async fn start(
             presence,
             memory,
             embed: background.embed,
+            search: background.search,
             window,
             mcp: background.mcp,
             intake_tasks: IntakeTasks {
@@ -204,17 +210,19 @@ async fn start(
 struct BackgroundStarts {
     vision: Arc<VisionRevalidator>,
     embed: Option<EmbeddingStartup>,
+    search: Option<SearchStartup>,
     mcp: Option<McpStartup>,
 }
 
 struct BackgroundServices {
     warmup: JoinHandle<()>,
     embed: EmbeddingService,
+    search: SearchService,
     mcp: McpService,
 }
 
-/// Start the MCP servers at once, and the embedding server once the model
-/// load has settled so the two never load onto the GPU together.
+/// Start the search and MCP servers at once, and the embedding server once
+/// the model load has settled so the two never load onto the GPU together.
 fn spawn_background_starts(
     state: &Arc<AppState>,
     starts: BackgroundStarts,
@@ -241,10 +249,20 @@ fn spawn_background_starts(
                 },
             )
         });
+    let search = starts
+        .search
+        .map_or_else(SearchService::disabled, |startup| {
+            startup.spawn(state.clone(), stages.search.subscribe())
+        });
     let mcp = starts.mcp.map_or_else(McpService::disabled, |startup| {
         startup.spawn(state.clone(), stages.tools.subscribe())
     });
-    BackgroundServices { warmup, embed, mcp }
+    BackgroundServices {
+        warmup,
+        embed,
+        search,
+        mcp,
+    }
 }
 
 /// Write a default config file to the platform config directory.

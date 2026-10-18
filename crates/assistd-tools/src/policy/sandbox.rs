@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use assistd_utils::program::{ProgramError, find_program};
 use rustix::fs::Access;
 use tokio::process::Command as ProcCommand;
 use tracing::{info, warn};
@@ -56,14 +57,12 @@ pub enum ToolSandbox {
 }
 
 /// Why the model gets no tools.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ToolsDisabled {
     #[error("tools are disabled: tools.bash.sandbox = \"none\" leaves them unsandboxed")]
     ByConfig,
-    #[error(
-        "tools are disabled: bubblewrap (`bwrap`) was not found on PATH; install it to enable them"
-    )]
-    BwrapMissing,
+    #[error("tools are disabled: cannot run bubblewrap (`bwrap`): {0}; install it to enable them")]
+    BwrapMissing(ProgramError),
     #[error(
         "tools are disabled: tools.bash.bwrap_extra_args shares the network, and the kernel \
          cannot keep sandboxed commands off abstract sockets such as the X server's (needs \
@@ -294,10 +293,10 @@ impl SandboxInfo {
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     #[error(
-        "tools.bash.sandbox = \"bwrap\" but `bwrap` was not found on PATH. \
+        "tools.bash.sandbox = \"bwrap\" but `bwrap` cannot be run: {0}. \
          Install bubblewrap, or set sandbox to \"auto\" to start with tools disabled."
     )]
-    BwrapNotFound,
+    BwrapNotFound(ProgramError),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -731,11 +730,11 @@ fn probe_sandbox_with_path(
     shared: SharedDirs,
     path_env: &OsStr,
 ) -> Result<ToolSandbox, SandboxError> {
-    let disabled = match (request, find_executable("bwrap", path_env)) {
-        (SandboxRequest::Bwrap, None) => return Err(SandboxError::BwrapNotFound),
+    let disabled = match (request, find_program(Path::new("bwrap"), path_env)) {
+        (SandboxRequest::Bwrap, Err(reason)) => return Err(SandboxError::BwrapNotFound(reason)),
         (SandboxRequest::None, _) => ToolsDisabled::ByConfig,
-        (SandboxRequest::Auto, None) => ToolsDisabled::BwrapMissing,
-        (SandboxRequest::Auto | SandboxRequest::Bwrap, Some(bwrap)) => {
+        (SandboxRequest::Auto, Err(reason)) => ToolsDisabled::BwrapMissing(reason),
+        (SandboxRequest::Auto | SandboxRequest::Bwrap, Ok(bwrap)) => {
             match confined_spawner(&bwrap, &extra_args) {
                 Ok(confined) => {
                     announce_bwrap(&bwrap);
@@ -801,23 +800,6 @@ fn host_path(path_env: &OsStr) -> Vec<PathBuf> {
     } else {
         dirs
     }
-}
-
-fn find_executable(name: &str, path_env: &OsStr) -> Option<PathBuf> {
-    std::env::split_paths(path_env)
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable_file(candidate))
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|md| md.is_file() && md.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 #[cfg(unix)]
@@ -1377,7 +1359,10 @@ mod tests {
     fn probe_sandbox_disables_tools_when_disabled_or_bwrap_is_absent() {
         for (request, expected) in [
             (SandboxRequest::None, ToolsDisabled::ByConfig),
-            (SandboxRequest::Auto, ToolsDisabled::BwrapMissing),
+            (
+                SandboxRequest::Auto,
+                ToolsDisabled::BwrapMissing(ProgramError::NotOnPath),
+            ),
         ] {
             let probed = probe_sandbox_with_path(
                 request,
@@ -1388,7 +1373,7 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("{request:?}: {e}"));
             assert!(
-                matches!(probed, ToolSandbox::Disabled(reason) if reason == expected),
+                matches!(&probed, ToolSandbox::Disabled(reason) if *reason == expected),
                 "{request:?}: {probed:?}"
             );
         }
