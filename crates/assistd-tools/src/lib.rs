@@ -25,7 +25,7 @@ pub use attachment::{LoadImageError, load_image_attachment};
 pub use catalog::ToolCatalog;
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
-pub use memory_tools::{RecallTool, RememberTool, ReminisceTool};
+pub use memory_tools::{RememberTool, ReminisceTool};
 pub use policy::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
     AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT,

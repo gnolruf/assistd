@@ -186,8 +186,8 @@ Rust handlers. So `cat /etc/hosts | grep -v '^#'` is one tool call
 that fans out into two in-process commands chained by a byte-level
 pipe.
 
-Three additional `Tool`s sit alongside `run`: `remember`, `recall`,
-`reminisce`. They don't fit the shell mold, so they're regular
+Two additional `Tool`s sit alongside `run`: `remember` (save or
+search facts) and `reminisce`. They don't fit the shell mold, so they're regular
 LLM-facing tools with their own JSON schemas.
 
 Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
@@ -247,14 +247,14 @@ compaction summary. On resume, the LLM gets that summary plus only the
 rows after it, so it sees the same prompt it had before; the client
 still gets every row.
 
-The `remember` tool inserts the K/V row and queues an embedding job
+Saving through the `remember` tool inserts the K/V row and queues an embedding job
 for its value on a `tokio::sync::mpsc` channel. Each user or assistant
 message is chunked in the transaction that saves it, and its chunks are
 queued on the same channel. A background task drains the queue,
 sends batches to the embedding server (a second, smaller
 llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
-store. The `recall` tool embeds its query and ranks saved memories by
+store. A `remember` search embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
 over transcript chunks from earlier sessions. Like chat requests,
 embedding requests are sent only while the embedding server's
@@ -264,8 +264,8 @@ meantime stays unindexed until `assistd memory reindex` picks it up.
 The queue and the semantic store exist from daemon start, but the
 embedder sits behind an `EmbedderHandle` that is `Starting` until the
 embedding server answers. Jobs queued before then wait in the channel and
-are embedded once the worker starts. Semantic search, reindex, `recall`
-and `reminisce` report "embedding is still starting" (or why it is
+are embedded once the worker starts. Semantic search, reindex, `remember`
+searches and `reminisce` report "embedding is still starting" (or why it is
 unavailable) until then, and per-turn context injection skips recall.
 
 ### Voice (`assistd-voice`)

@@ -1,14 +1,12 @@
-//! LLM-callable memory tools. `remember` and `recall` work on saved
-//! key/value facts; `reminisce` searches past dialogue.
+//! LLM-callable memory tools. `remember` saves and searches key/value
+//! facts; `reminisce` searches past dialogue.
 
 use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
-use assistd_memory::{
-    EmbeddingHit, EmbeddingTarget, MemoryHit, MemoryId, SemanticStore, SessionId,
-};
+use assistd_memory::{EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -17,7 +15,7 @@ use tokio::sync::{mpsc, watch};
 use crate::memory::MemoryOps;
 use crate::{Tool, ToolError};
 
-const RECALL_LIMIT: usize = 50;
+const SEARCH_LIMIT: usize = 50;
 
 /// Keys reject whitespace and uppercase so one concept keeps one spelling;
 /// hyphens allow ISO dates (`standup.2026-09-11`).
@@ -25,116 +23,84 @@ const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
-/// Saves a `(key, value)` pair and queues a new or changed value for embedding so
-/// `recall` can find it by paraphrase.
+/// Saves `(key, value)` facts about the user, queueing each new or changed
+/// value for embedding, and searches them by semantic similarity to a query.
 #[derive(Debug)]
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
     /// Closed when embedding is disabled; the memory still saves unindexed.
     embed_tx: mpsc::Sender<EmbedJob>,
-}
-
-impl RememberTool {
-    /// A tool saving through `ops` and queueing each value on `embed_tx`.
-    pub fn new(ops: Arc<MemoryOps>, embed_tx: mpsc::Sender<EmbedJob>) -> Self {
-        Self { ops, embed_tx }
-    }
-
-    fn queue_embedding(&self, memory_id: MemoryId, text: String) {
-        enqueue_embed_job(
-            &self.embed_tx,
-            EmbedJob {
-                target: EmbeddingTarget::Memory(memory_id),
-                text,
-            },
-        );
-    }
-}
-
-#[async_trait]
-impl Tool for RememberTool {
-    fn name(&self) -> &'static str {
-        "remember"
-    }
-
-    fn description(&self) -> Cow<'_, str> {
-        "Save a fact or preference about the user across conversations. \
-         Call this whenever the user states a stable preference, fact about \
-         themselves, or anything they say they want remembered. Examples: \
-         \"I prefer vim over emacs\" -> remember(key=\"editor_preference\", \
-         value=\"vim\"); \"my name is Ben\" -> remember(key=\"user.name\", \
-         value=\"Ben\"); \"I work in PST\" -> remember(key=\"user.timezone\", \
-         value=\"PST\"). Use snake_case keys with optional dots for \
-         namespacing and hyphens where they read naturally (e.g. \
-         user.name, editor_preference, standup.2026-09-11). \
-         Calling remember with an existing key overwrites the previous \
-         value. Do NOT call this for ephemeral context within a single \
-         conversation; only durable user-facts."
-            .into()
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "key": {
-                    "type": "string",
-                    "description": "snake_case identifier with optional dot \
-                                    namespacing (e.g. user.name, \
-                                    editor_preference, standup.2026-09-11). \
-                                    Must match ^[a-z0-9._-]+$."
-                },
-                "value": {
-                    "type": "string",
-                    "description": "the fact or preference text to store"
-                }
-            },
-            "required": ["key", "value"]
-        })
-    }
-
-    #[tracing::instrument(skip(self, args), fields(key = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
-        let start = Instant::now();
-        let key = required_str(&args, "key")?.to_string();
-        let value = required_str(&args, "value")?.to_string();
-        tracing::Span::current().record("key", key.as_str());
-
-        if !KEY_RE.is_match(&key) {
-            return Err(ToolError::InvalidArgs(format!(
-                "`key` must match {KEY_PATTERN} (snake_case + dot \
-                 namespacing, e.g. editor_preference or user.name)"
-            )));
-        }
-
-        let saved = self.ops.save(&key, value.clone()).await?;
-        if saved.value_changed {
-            self.queue_embedding(saved.id, value);
-        }
-        let duration_ms = start.elapsed().as_millis();
-        tracing::info!(
-            target: "assistd::memory",
-            key = %key,
-            duration_ms = duration_ms,
-            "remember saved"
-        );
-        Ok(tool_result(&format!("remembered {key}"), duration_ms))
-    }
-}
-
-/// Returns saved memories ranked by semantic similarity to a query, as
-/// `<key>: <value>` lines.
-#[derive(Debug)]
-pub struct RecallTool {
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
 }
 
-impl RecallTool {
-    /// A tool ranking memories in `semantic` by vectors from `embedder`.
-    pub fn new(embedder: Arc<EmbedderHandle>, semantic: Arc<dyn SemanticStore>) -> Self {
-        Self { embedder, semantic }
+/// One validated `remember` call.
+#[derive(Debug)]
+enum RememberRequest {
+    Save { key: String, value: String },
+    Search { query: String },
+}
+
+impl RememberRequest {
+    fn parse(args: &Value) -> Result<Self, ToolError> {
+        let text = required_str(args, "text")?.to_string();
+        match required_str(args, "action")? {
+            "save" => Ok(Self::Save {
+                key: valid_key(args)?,
+                value: text,
+            }),
+            "search" => Ok(Self::Search { query: text }),
+            other => Err(ToolError::InvalidArgs(format!(
+                "`action` must be \"save\" or \"search\" (got {other:?})"
+            ))),
+        }
+    }
+}
+
+impl RememberTool {
+    /// A tool saving through `ops`, queueing each value on `embed_tx`, and
+    /// searching memories in `semantic` by vectors from `embedder`.
+    pub fn new(
+        ops: Arc<MemoryOps>,
+        embed_tx: mpsc::Sender<EmbedJob>,
+        embedder: Arc<EmbedderHandle>,
+        semantic: Arc<dyn SemanticStore>,
+    ) -> Self {
+        Self {
+            ops,
+            embed_tx,
+            embedder,
+            semantic,
+        }
+    }
+
+    async fn save(&self, key: &str, value: String) -> Result<String, ToolError> {
+        let saved = self.ops.save(key, value.clone()).await?;
+        if saved.value_changed {
+            enqueue_embed_job(
+                &self.embed_tx,
+                EmbedJob {
+                    target: EmbeddingTarget::Memory(saved.id),
+                    text: value,
+                },
+            );
+        }
+        tracing::info!(target: "assistd::memory", key = %key, "remember saved");
+        Ok(format!("remembered {key}"))
+    }
+
+    async fn search(&self, query: String) -> Result<String, ToolError> {
+        let embedder = match self.embedder.get() {
+            Ok(embedder) => embedder,
+            Err(e) => return Ok(format!("(saved memories cannot be searched: {e})")),
+        };
+        let hits = self.nearest_memories(embedder.as_ref(), query).await?;
+        tracing::info!(
+            target: "assistd::memory",
+            returned = hits.len(),
+            "remember search returned"
+        );
+        Ok(format_memories(&hits))
     }
 
     /// Memories nearest `query`; empty when the embed fails.
@@ -146,13 +112,13 @@ impl RecallTool {
         match embedder.embed(query).await {
             Ok(query_vec) => Ok(self
                 .semantic
-                .nearest_memories(query_vec, RECALL_LIMIT)
+                .nearest_memories(query_vec, SEARCH_LIMIT)
                 .await?),
             Err(e) => {
                 tracing::debug!(
                     target: "assistd::embed",
                     error = %e,
-                    "recall embed failed; returning empty"
+                    "remember search embed failed; returning empty"
                 );
                 Ok(Vec::new())
             }
@@ -161,20 +127,26 @@ impl RecallTool {
 }
 
 #[async_trait]
-impl Tool for RecallTool {
+impl Tool for RememberTool {
     fn name(&self) -> &'static str {
-        "recall"
+        "remember"
     }
 
     fn description(&self) -> Cow<'_, str> {
-        "Retrieve previously remembered facts and preferences about the user. \
-         Call this when prior context might help (e.g. answering \"what editor \
-         should I use?\", personalizing a response, or whenever the user \
-         references something they told you before). Embeds `query` and ranks \
-         memories by semantic similarity, so paraphrased questions still match \
-         the stored fact (e.g. \"what editor do I prefer?\" finds an \
-         `editor_preference` memory). Returns up to 50 `<key>: <value>` lines. \
-         If no memories match, the output is `(no memories)`."
+        "Save or look up durable facts and preferences about the user. \
+         action=\"save\": call whenever the user states a stable preference, \
+         a fact about themselves, or anything they want remembered; `key` \
+         names the fact and `text` is its value. Saving an existing key \
+         overwrites it. Examples: \"I prefer vim over emacs\" -> \
+         remember(action=\"save\", key=\"editor_preference\", text=\"vim\"); \
+         \"my name is Ben\" -> remember(action=\"save\", key=\"user.name\", \
+         text=\"Ben\"). Do NOT save ephemeral context from the current \
+         conversation. action=\"search\": call when prior context might help \
+         (personalizing an answer, or the user refers to something they told \
+         you before); `text` is a natural-language question and `key` is \
+         null. Matching is by meaning, so \"what editor do I prefer?\" finds \
+         `editor_preference`. Search returns up to 50 `<key>: <value>` \
+         lines, or `(no memories)`."
             .into()
     }
 
@@ -183,39 +155,38 @@ impl Tool for RecallTool {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "query": {
+                "action": {
                     "type": "string",
-                    "description": "Natural-language question. The model embeds \
-                                    this and ranks memories by cosine similarity \
-                                    against their stored values."
+                    "enum": ["save", "search"],
+                    "description": "\"save\" stores `text` under `key`; \
+                                    \"search\" finds saved memories similar \
+                                    in meaning to `text`."
+                },
+                "key": {
+                    "type": ["string", "null"],
+                    "description": "For save: snake_case identifier with \
+                                    optional dot namespacing (e.g. user.name, \
+                                    editor_preference, standup.2026-09-11), \
+                                    matching ^[a-z0-9._-]+$. For search: null."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "For save: the fact or preference to store. \
+                                    For search: a natural-language question."
                 }
             },
-            "required": ["query"]
+            "required": ["action", "key", "text"]
         })
     }
 
     #[tracing::instrument(skip(self, args))]
     async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
-        let query = required_str(&args, "query")?.to_string();
-        let embedder = match self.embedder.get() {
-            Ok(embedder) => embedder,
-            Err(e) => {
-                let note = format!("(saved memories cannot be searched: {e})");
-                return Ok(tool_result(&note, start.elapsed().as_millis()));
-            }
+        let output = match RememberRequest::parse(&args)? {
+            RememberRequest::Save { key, value } => self.save(&key, value).await?,
+            RememberRequest::Search { query } => self.search(query).await?,
         };
-        let hits = self.nearest_memories(embedder.as_ref(), query).await?;
-        let output = format_memories(&hits);
-
-        let duration_ms = start.elapsed().as_millis();
-        tracing::info!(
-            target: "assistd::memory",
-            returned = hits.len(),
-            duration_ms = duration_ms,
-            "recall returned"
-        );
-        Ok(tool_result(&output, duration_ms))
+        Ok(tool_result(&output, start.elapsed().as_millis()))
     }
 }
 
@@ -253,7 +224,7 @@ impl Tool for ReminisceTool {
     fn description(&self) -> Cow<'_, str> {
         "Search *earlier* conversations — every session except the one \
          in progress, which is already in context — for messages similar \
-         in meaning to a query. Complement to `recall`: `recall` looks \
+         in meaning to a query. Complement to `remember`: its search looks \
          up *saved facts* (key/value), `reminisce` searches *past \
          dialogue text*; use it when the user references something they \
          'discussed before' or 'worked on last month'. Robust to \
@@ -371,6 +342,19 @@ fn format_chunks(hits: &[EmbeddingHit]) -> String {
         .join("\n")
 }
 
+fn valid_key(args: &Value) -> Result<String, ToolError> {
+    let key = args.get("key").and_then(Value::as_str).ok_or_else(|| {
+        ToolError::InvalidArgs("`key` (string) is required when `action` is \"save\"".into())
+    })?;
+    if !KEY_RE.is_match(key) {
+        return Err(ToolError::InvalidArgs(format!(
+            "`key` must match {KEY_PATTERN} (snake_case + dot \
+             namespacing, e.g. editor_preference or user.name)"
+        )));
+    }
+    Ok(key.to_string())
+}
+
 fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
     args.get(name)
         .and_then(Value::as_str)
@@ -390,7 +374,7 @@ fn tool_result(output: &str, duration_ms: u128) -> Value {
 mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        ChunkId, Embedding, MemoryError, MemoryStore, NoMemoryStore, NoSemanticStore,
+        ChunkId, Embedding, MemoryError, MemoryId, MemoryStore, NoMemoryStore, NoSemanticStore,
         NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
         UnindexedRows,
     };
@@ -535,6 +519,10 @@ mod tests {
         ))
     }
 
+    fn remember_tool(ops: Arc<MemoryOps>, embed_tx: mpsc::Sender<EmbedJob>) -> RememberTool {
+        RememberTool::new(ops, embed_tx, no_embedder(), no_semantic())
+    }
+
     fn invalid_args(err: ToolError) -> String {
         match err {
             ToolError::InvalidArgs(msg) => msg,
@@ -545,11 +533,11 @@ mod tests {
     #[tokio::test]
     async fn remember_dedups_by_key() {
         let (ops, _dir) = fresh_ops().await;
-        let tool = RememberTool::new(ops.clone(), closed_embed_tx());
-        tool.invoke(json!({"key": "editor_preference", "value": "vim"}))
+        let tool = remember_tool(ops.clone(), closed_embed_tx());
+        tool.invoke(json!({"action": "save", "key": "editor_preference", "text": "vim"}))
             .await
             .unwrap();
-        tool.invoke(json!({"key": "editor_preference", "value": "neovim"}))
+        tool.invoke(json!({"action": "save", "key": "editor_preference", "text": "neovim"}))
             .await
             .unwrap();
         let keys = ops.list("").await.unwrap();
@@ -562,10 +550,10 @@ mod tests {
 
     #[tokio::test]
     async fn remember_rejects_invalid_key() {
-        let tool = RememberTool::new(no_ops(), closed_embed_tx());
+        let tool = remember_tool(no_ops(), closed_embed_tx());
         for bad in ["has spaces", "Editor_Pref", "trailing!", "slash/ed", ""] {
             let err = tool
-                .invoke(json!({"key": bad, "value": "x"}))
+                .invoke(json!({"action": "save", "key": bad, "text": "x"}))
                 .await
                 .unwrap_err();
             let msg = invalid_args(err);
@@ -577,13 +565,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remember_save_needs_a_key_but_search_does_not() {
+        let tool = remember_tool(no_ops(), closed_embed_tx());
+        let err = tool
+            .invoke(json!({"action": "save", "key": null, "text": "vim"}))
+            .await
+            .unwrap_err();
+        assert!(invalid_args(err).starts_with("`key` (string) is required"));
+        let found = tool
+            .invoke(json!({"action": "search", "key": null, "text": "my editor?"}))
+            .await
+            .unwrap();
+        assert!(
+            found["output"]
+                .as_str()
+                .unwrap()
+                .starts_with("(saved memories cannot be searched"),
+            "{found}"
+        );
+    }
+
+    #[tokio::test]
     async fn remember_enqueues_embed_job_with_value_text() {
         let (ops, _dir) = fresh_ops().await;
         let (etx, mut erx) = live_embed_tx();
-        let tool = RememberTool::new(ops.clone(), etx);
-        tool.invoke(json!({"key": "editor_preference", "value": "vim is the way"}))
-            .await
-            .unwrap();
+        let tool = remember_tool(ops.clone(), etx);
+        tool.invoke(
+            json!({"action": "save", "key": "editor_preference", "text": "vim is the way"}),
+        )
+        .await
+        .unwrap();
         let job = erx
             .try_recv()
             .expect("embed job queued before invoke returns");
@@ -601,9 +612,8 @@ mod tests {
     /// required and no others to be accepted.
     #[test]
     fn schemas_satisfy_strict_mode() {
-        let tools: [Box<dyn Tool>; 3] = [
-            Box::new(RememberTool::new(no_ops(), closed_embed_tx())),
-            Box::new(RecallTool::new(no_embedder(), no_semantic())),
+        let tools: [Box<dyn Tool>; 2] = [
+            Box::new(remember_tool(no_ops(), closed_embed_tx())),
             Box::new(ReminisceTool::new(
                 no_embedder(),
                 no_semantic(),

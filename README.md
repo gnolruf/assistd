@@ -19,7 +19,7 @@ window-manager bindings), and integrates with the running compositor for context
   commands (`cat`, `grep`, `wc`, `head`, `tail`, `sort`, `uniq`, `bash`,
   `see`, `screenshot`, `web`, `wm`, …) the model composes with `|`,
   `&&`, `||`, `;`, plus `~` and glob expansion. Alongside it, `remember`
-  and `recall` save and look up facts, and `reminisce` searches
+  saves and looks up facts, and `reminisce` searches
   transcripts from earlier sessions.
 - **Voice in/out.** Push-to-talk and continuous listening via
   `whisper.cpp`; spoken responses via Piper TTS, streamed sentence by
