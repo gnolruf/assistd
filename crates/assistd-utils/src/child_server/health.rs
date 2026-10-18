@@ -6,13 +6,14 @@ use rustix::process::Pid;
 use tokio::sync::watch;
 use tracing::{debug, warn};
 
+use super::ChildServerSpec;
 use super::error::ChildServerError;
 use super::ownership::is_listening_in_group;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Polls `/health` until the child reports ready or a timeout elapses.
+/// Polls the spec's health path until the child reports ready or a timeout elapses.
 /// A 200 only counts when the listener belongs to the child's process group.
 pub(super) struct HealthChecker {
     server: &'static str,
@@ -24,25 +25,21 @@ pub(super) struct HealthChecker {
 }
 
 impl HealthChecker {
-    /// Checker for `http://{addr}/health` served by process group `owner`;
-    /// `ready_timeout` bounds each [`Self::wait_ready`].
-    pub(super) fn new(
-        server: &'static str,
-        addr: SocketAddr,
-        owner: Pid,
-        ready_timeout: Duration,
-    ) -> Result<Self, ChildServerError> {
+    /// Checker for `spec`'s health URL served by process group `owner`;
+    /// the spec's ready timeout bounds each [`Self::wait_ready`].
+    pub(super) fn new(spec: &impl ChildServerSpec, owner: Pid) -> Result<Self, ChildServerError> {
+        let addr = spec.listen_addr();
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(PROBE_TIMEOUT)
             .build()?;
         Ok(Self {
-            server,
+            server: spec.name(),
             client,
             addr,
             owner,
-            url: format!("http://{addr}/health"),
-            ready_timeout,
+            url: format!("http://{addr}{}", spec.health_path()),
+            ready_timeout: spec.ready_timeout(),
         })
     }
 
