@@ -2,6 +2,15 @@
   <img src="docs/assets/logo.svg" alt="assistd" width="380">
 </h1>
 
+<p align="center">
+  <a href="https://github.com/gnolruf/assistd/actions/workflows/ci.yml"><img src="https://github.com/gnolruf/assistd/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/gnolruf/assistd/actions/workflows/codeql.yml"><img src="https://github.com/gnolruf/assistd/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
+  <a href="https://github.com/gnolruf/assistd/releases/latest"><img src="https://img.shields.io/github/v/release/gnolruf/assistd" alt="Latest release"></a>
+  <a href="https://aur.archlinux.org/packages/assistd"><img src="https://img.shields.io/aur/version/assistd" alt="AUR version"></a>
+  <img src="https://img.shields.io/badge/rust-1.98%2B-orange?logo=rust" alt="MSRV 1.98">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/gnolruf/assistd" alt="License"></a>
+</p>
+
 A model agent daemon for Linux system management. `assistd` runs and manages an inference server,
 exposes a Unix-socket IPC protocol to clients (one-shot CLI, ratatui chat TUI,
 window-manager bindings), and integrates with the running compositor for context-aware behavior.
