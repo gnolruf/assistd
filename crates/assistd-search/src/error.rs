@@ -21,7 +21,6 @@ pub enum SearchServerError {
 /// Why a search returned no results page.
 #[derive(Debug, Error)]
 pub enum SearchError {
-    /// The instance was not serving, so nothing was sent.
     #[error("search server is not ready; request not sent")]
     NotServing,
 

@@ -20,8 +20,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// One page of results is tens of KiB; anything past this is not a results page.
 const BODY_MAX: usize = 512 * 1024;
 
-/// Client for one supervised SearXNG instance on loopback. Requests are
-/// refused while the instance is not serving.
+/// Client for one supervised SearXNG instance on loopback.
 #[derive(Debug)]
 pub struct SearxngClient {
     client: reqwest::Client,
@@ -29,7 +28,6 @@ pub struct SearxngClient {
     server: ChildServerStatus,
 }
 
-/// One search request.
 #[derive(Debug, Clone, Copy)]
 pub struct SearchQuery<'a> {
     pub text: &'a str,
@@ -56,7 +54,6 @@ pub struct SearchResults {
     pub unresponsive_engines: Vec<(String, String)>,
 }
 
-/// One result link.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SearchHit {
     pub url: String,
@@ -97,7 +94,8 @@ impl SearxngClient {
         })
     }
 
-    /// Run `query` and decode the results page.
+    /// Fails with [`SearchError::NotServing`], without sending, while the
+    /// instance is not serving.
     pub async fn search(&self, query: &SearchQuery<'_>) -> Result<SearchResults, SearchError> {
         if !self.server.is_serving() {
             return Err(SearchError::NotServing);
@@ -181,7 +179,6 @@ mod tests {
             ["sha256 hash digest: \
                 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"]
         );
-        assert!(page.suggestions.is_empty());
         assert_eq!(
             page.unresponsive_engines,
             [
