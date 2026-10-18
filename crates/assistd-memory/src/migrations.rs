@@ -131,26 +131,23 @@ BEGIN
 END;
 ";
 
-/// V2: vectors no longer carry a model; the single `embedding_model` row names the
-/// model every stored vector came from. Existing vectors are dropped for re-embedding.
+/// V2: each vector names its model directly instead of through `embedding_models`.
+/// Existing vectors are dropped for re-embedding.
 const V2_SQL: &str = r"
 DROP TRIGGER memory_value_changed;
 DROP TABLE chunk_embeddings;
 DROP TABLE memory_embeddings;
 DROP TABLE embedding_models;
 
-CREATE TABLE embedding_model (
-    id   INTEGER PRIMARY KEY CHECK (id = 1),
-    name TEXT NOT NULL
-) STRICT;
-
 CREATE TABLE chunk_embeddings (
     chunk_id INTEGER PRIMARY KEY REFERENCES message_chunks(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
     vector   BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
 ) STRICT;
 
 CREATE TABLE memory_embeddings (
     memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    model     TEXT NOT NULL,
     vector    BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
 ) STRICT;
 

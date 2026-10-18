@@ -60,17 +60,6 @@ pub struct UnindexedRows {
     pub memories: u64,
 }
 
-/// How [`SemanticStore::adopt_model`] reconciled the stored vectors with a model.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelAdoption {
-    /// The stored vectors already came from this model.
-    Unchanged,
-    /// No model was recorded; any vectors present were dropped and this model recorded.
-    Recorded,
-    /// `previous`'s `dropped` vectors were deleted and this model recorded in its place.
-    Replaced { previous: String, dropped: u64 },
-}
-
 /// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
@@ -90,10 +79,10 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         top_k: usize,
     ) -> Result<Vec<MemoryHit>>;
 
-    /// Record `model` as the source of every stored vector, deleting all vectors in
-    /// the same transaction unless they already came from it. Must complete before
-    /// anything embedded by `model` is stored or searched.
-    async fn adopt_model(&self, model: &str) -> Result<ModelAdoption>;
+    /// Delete every vector not embedded by `model`, returning how many. Must complete
+    /// before anything embedded by `model` is searched, so searches never compare
+    /// vectors from two models.
+    async fn drop_other_models(&self, model: &str) -> Result<u64>;
 
     /// Rows with no embedding.
     async fn count_missing(&self) -> Result<UnindexedRows>;
@@ -114,9 +103,9 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>>;
 
-    /// Upsert `embeddings` in one transaction, skipping targets deleted since they
-    /// were embedded and memories whose value no longer matches.
-    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> Result<()>;
+    /// Upsert `embeddings` from `model` in one transaction, skipping targets deleted
+    /// since they were embedded and memories whose value no longer matches.
+    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()>;
 }
 
 /// No-op store: writes are discarded and searches find nothing.
@@ -140,8 +129,8 @@ impl SemanticStore for NoSemanticStore {
     ) -> Result<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn adopt_model(&self, _model: &str) -> Result<ModelAdoption> {
-        Ok(ModelAdoption::Unchanged)
+    async fn drop_other_models(&self, _model: &str) -> Result<u64> {
+        Ok(0)
     }
     async fn count_missing(&self) -> Result<UnindexedRows> {
         Ok(UnindexedRows::default())
@@ -160,7 +149,7 @@ impl SemanticStore for NoSemanticStore {
     ) -> Result<Vec<(ChunkId, String)>> {
         Ok(Vec::new())
     }
-    async fn store_embeddings(&self, _embeddings: Vec<Embedding>) -> Result<()> {
+    async fn store_embeddings(&self, _model: &str, _embeddings: Vec<Embedding>) -> Result<()> {
         Ok(())
     }
 }

@@ -148,7 +148,7 @@ async fn embed_and_store_batch(
 ) {
     let embeddings = embed_jobs(embedder, batch.drain(..)).await;
     let rows = embeddings.len();
-    if let Err(err) = store.store_embeddings(embeddings).await {
+    if let Err(err) = store.store_embeddings(embedder.model(), embeddings).await {
         tracing::warn!(
             target: "assistd::embed",
             rows,

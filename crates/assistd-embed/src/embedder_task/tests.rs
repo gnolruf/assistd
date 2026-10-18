@@ -4,8 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use assistd_memory::{
-    ChunkId, Embedding, EmbeddingHit, MemoryHit, MemoryId, ModelAdoption, Result as MemoryResult,
-    SessionId, UnindexedRows,
+    ChunkId, Embedding, EmbeddingHit, MemoryHit, MemoryId, Result as MemoryResult, SessionId,
+    UnindexedRows,
 };
 
 use super::*;
@@ -44,7 +44,7 @@ impl Embedder for MockEmbedder {
 /// Forwards every `store_embeddings` call to the test; nothing else is used by the worker.
 #[derive(Debug)]
 struct RecordingStore {
-    stored: mpsc::UnboundedSender<Vec<Embedding>>,
+    stored: mpsc::UnboundedSender<(String, Vec<Embedding>)>,
 }
 
 #[async_trait]
@@ -64,8 +64,8 @@ impl SemanticStore for RecordingStore {
     ) -> MemoryResult<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn adopt_model(&self, _model: &str) -> MemoryResult<ModelAdoption> {
-        Ok(ModelAdoption::Unchanged)
+    async fn drop_other_models(&self, _model: &str) -> MemoryResult<u64> {
+        Ok(0)
     }
     async fn count_missing(&self) -> MemoryResult<UnindexedRows> {
         Ok(UnindexedRows::default())
@@ -84,8 +84,8 @@ impl SemanticStore for RecordingStore {
     ) -> MemoryResult<Vec<(ChunkId, String)>> {
         Ok(Vec::new())
     }
-    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> MemoryResult<()> {
-        self.stored.send(embeddings).unwrap();
+    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> MemoryResult<()> {
+        self.stored.send((model.to_owned(), embeddings)).unwrap();
         Ok(())
     }
 }
@@ -93,7 +93,7 @@ impl SemanticStore for RecordingStore {
 struct Harness {
     embedder: Arc<MockEmbedder>,
     jobs: mpsc::Sender<EmbedJob>,
-    stored: mpsc::UnboundedReceiver<Vec<Embedding>>,
+    stored: mpsc::UnboundedReceiver<(String, Vec<Embedding>)>,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -128,7 +128,7 @@ impl Harness {
     async fn stored_targets(&mut self, count: usize) -> Vec<EmbeddingTarget> {
         let mut targets = Vec::new();
         while targets.len() < count {
-            let embeddings = tokio::time::timeout(Duration::from_secs(2), self.stored.recv())
+            let (_, embeddings) = tokio::time::timeout(Duration::from_secs(2), self.stored.recv())
                 .await
                 .expect("embeddings stored in time")
                 .expect("store still open");
@@ -164,11 +164,12 @@ fn chunk_targets(ids: &[i64]) -> Vec<EmbeddingTarget> {
 }
 
 #[tokio::test]
-async fn worker_stores_embedded_job() {
+async fn worker_stores_embedded_job_under_the_embedder_model() {
     let mut harness = Harness::spawn(vec![1.0, 0.0]);
     harness.jobs.send(chunk_job(42, "hello")).await.unwrap();
 
-    let embeddings = harness.stored.recv().await.unwrap();
+    let (model, embeddings) = harness.stored.recv().await.unwrap();
+    assert_eq!(model, "mock");
     assert_eq!(
         embeddings,
         [Embedding {

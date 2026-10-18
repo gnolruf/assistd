@@ -86,16 +86,14 @@ erDiagram
         int byte_start
         int byte_end
     }
-    embedding_model {
-        int id PK "always 1"
-        text name
-    }
     chunk_embeddings {
         int chunk_id PK, FK
+        text model
         blob vector
     }
     memory_embeddings {
         int memory_id PK, FK
+        text model
         blob vector
     }
 ```
@@ -155,14 +153,13 @@ never outlives the text it was computed from.
   transaction that saves the message. Each chunk is a byte range into
   `messages.content`, so the text itself is never stored twice. Tool
   results are not chunked.
-- **`embedding_model`**: a single row naming the model every stored
-  vector came from. When the daemon's embedder comes up under a
-  different `embedding.model`, every vector is deleted in the same
-  transaction that records the new name, before any search or write
-  can use it, so vectors from two models are never compared.
 - **`chunk_embeddings`** / **`memory_embeddings`**: at most one vector
   per chunk or memory, stored as a BLOB of little-endian `f32`s,
-  L2-normalised by the embedder so a dot product is cosine similarity.
+  L2-normalised by the embedder so a dot product is cosine similarity,
+  and tagged with the `embedding.model` that produced it. When the
+  embedder comes up, vectors from any other model are deleted before
+  anything can search or write, so vectors from two models are never
+  compared.
   Vectors are written by the background embedding queue; a memory's
   vector is only stored if its value hasn't changed since the job was
   queued. Rows with no vector are what `assistd memory reindex` fills

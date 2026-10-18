@@ -11,7 +11,7 @@ use assistd_embed::{
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_memory::{
-    ModelAdoption, NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, UnindexedRows,
+    NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, UnindexedRows,
 };
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
@@ -188,7 +188,8 @@ fn spawn_startup(
                     embedder.dim(),
                     startup.config.port,
                 );
-                let worker = adopt_model_then_serve(&state, embedder, startup, stages.worker).await;
+                let worker =
+                    drop_other_models_then_serve(&state, embedder, startup, stages.worker).await;
                 Some(RunningEmbedding { server, worker })
             }
             Err(failure) => {
@@ -214,16 +215,16 @@ fn spawn_startup(
     })
 }
 
-/// Record the embedder's model against the stored vectors, then start the worker
-/// and mark the embedder ready. When recording fails the embedder stays unavailable.
-async fn adopt_model_then_serve(
+/// Drop vectors from other models, then start the worker and mark the embedder
+/// ready. When dropping fails the embedder stays unavailable.
+async fn drop_other_models_then_serve(
     state: &AppState,
     embedder: Arc<dyn Embedder>,
     startup: EmbeddingStartup,
     worker_shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     let semantic = state.memory.semantic.as_ref();
-    if let Err(reason) = adopt_model(semantic, embedder.model()).await {
+    if let Err(reason) = drop_other_models(semantic, embedder.model()).await {
         tracing::warn!("embedding: {reason}; semantic search disabled this run");
         state
             .memory
@@ -288,16 +289,14 @@ async fn start_server(
     }
 }
 
-async fn adopt_model(semantic: &dyn SemanticStore, model_name: &str) -> Result<(), String> {
-    match semantic.adopt_model(model_name).await {
-        Ok(ModelAdoption::Replaced { previous, dropped }) => {
-            info!(
-                "embedding: model changed from {previous} to {model_name}; dropped {dropped} vectors"
-            );
+async fn drop_other_models(semantic: &dyn SemanticStore, model_name: &str) -> Result<(), String> {
+    match semantic.drop_other_models(model_name).await {
+        Ok(0) => Ok(()),
+        Ok(dropped) => {
+            info!("embedding: dropped {dropped} vectors from models other than {model_name}");
             Ok(())
         }
-        Ok(ModelAdoption::Unchanged | ModelAdoption::Recorded) => Ok(()),
-        Err(e) => Err(format!("recording the embedding model failed: {e}")),
+        Err(e) => Err(format!("dropping other models' vectors failed: {e}")),
     }
 }
 

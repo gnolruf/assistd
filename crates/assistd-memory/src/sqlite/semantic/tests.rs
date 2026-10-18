@@ -2,6 +2,9 @@ use super::*;
 use crate::sqlite::{SqliteMemoryStore, SqliteTranscriptStore};
 use crate::{BranchId, MemoryStore, MessageId, PersistedMessage, PersistedRole, TranscriptStore};
 
+/// The model every helper stores vectors under.
+const MODEL: &str = "m";
+
 /// The returned temp dir must outlive the stores.
 async fn fresh() -> (SqliteHandle, SqliteSemanticStore, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
@@ -72,11 +75,14 @@ async fn embed_chunk(
     vector: &[f32],
 ) {
     store
-        .store_embeddings(vec![Embedding {
-            target: EmbeddingTarget::Chunk(*chunk_id),
-            text: text.clone(),
-            vector: vector.to_vec(),
-        }])
+        .store_embeddings(
+            MODEL,
+            vec![Embedding {
+                target: EmbeddingTarget::Chunk(*chunk_id),
+                text: text.clone(),
+                vector: vector.to_vec(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -96,11 +102,14 @@ async fn embed_memory(
     vector: &[f32],
 ) {
     store
-        .store_embeddings(vec![Embedding {
-            target: EmbeddingTarget::Memory(memory_id),
-            text: value.to_string(),
-            vector: vector.to_vec(),
-        }])
+        .store_embeddings(
+            MODEL,
+            vec![Embedding {
+                target: EmbeddingTarget::Memory(memory_id),
+                text: value.to_string(),
+                vector: vector.to_vec(),
+            }],
+        )
         .await
         .unwrap();
 }
@@ -303,33 +312,35 @@ async fn missing_embedding_lists_only_unindexed_rows() {
 }
 
 #[tokio::test]
-async fn adopting_another_model_drops_every_vector() {
+async fn dropping_other_models_keeps_only_the_current_models_vectors() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
-    assert_eq!(
-        store.adopt_model("old").await.unwrap(),
-        ModelAdoption::Recorded
-    );
-    transcript.embedded_chunk(&store, "a", &unit_vec(0.0)).await;
+    let (_, old_chunks) = transcript.append("old").await;
     let mem_id = save_memory(&handle, "k", "v").await;
-    embed_memory(&store, mem_id, "v", &unit_vec(0.0)).await;
+    store
+        .store_embeddings(
+            "old",
+            vec![
+                Embedding {
+                    target: EmbeddingTarget::Chunk(old_chunks[0].0),
+                    text: "old".to_string(),
+                    vector: unit_vec(0.0),
+                },
+                Embedding {
+                    target: EmbeddingTarget::Memory(mem_id),
+                    text: "v".to_string(),
+                    vector: unit_vec(0.0),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let current = transcript
+        .embedded_chunk(&store, "current", &unit_vec(0.5))
+        .await;
 
-    assert_eq!(
-        store.adopt_model("old").await.unwrap(),
-        ModelAdoption::Unchanged
-    );
-    assert_eq!(
-        store.count_missing().await.unwrap(),
-        UnindexedRows::default()
-    );
-
-    assert_eq!(
-        store.adopt_model("new").await.unwrap(),
-        ModelAdoption::Replaced {
-            previous: "old".to_string(),
-            dropped: 2
-        }
-    );
+    assert_eq!(store.drop_other_models(MODEL).await.unwrap(), 2);
+    assert_eq!(store.drop_other_models(MODEL).await.unwrap(), 0);
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
@@ -337,13 +348,9 @@ async fn adopting_another_model_drops_every_vector() {
             memories: 1
         }
     );
-    assert!(
-        store
-            .nearest_chunks(unit_vec(0.0), 5, None)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let hits = store.nearest_chunks(unit_vec(0.0), 5, None).await.unwrap();
+    let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
+    assert_eq!(ids, [current]);
     assert!(
         store
             .nearest_memories(unit_vec(0.0), 5)
@@ -370,7 +377,7 @@ async fn batch_skips_targets_deleted_before_it_lands() {
             vector: unit_vec(0.0),
         })
         .to_vec();
-    store.store_embeddings(embeddings).await.unwrap();
+    store.store_embeddings(MODEL, embeddings).await.unwrap();
 
     let hits = store.nearest_memories(unit_vec(0.0), 5).await.unwrap();
     let hit_ids: Vec<MemoryId> = hits.iter().map(|hit| hit.memory_id).collect();

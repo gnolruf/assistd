@@ -390,9 +390,9 @@ fn tool_result(output: &str, duration_ms: u128) -> Value {
 mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        ChunkId, Embedding, MemoryError, MemoryStore, ModelAdoption, NoMemoryStore,
-        NoSemanticStore, NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore,
-        TranscriptStore, UnindexedRows,
+        ChunkId, Embedding, MemoryError, MemoryStore, NoMemoryStore, NoSemanticStore,
+        NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
+        UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -464,8 +464,8 @@ mod tests {
         ) -> Result<Vec<MemoryHit>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn adopt_model(&self, _model: &str) -> Result<ModelAdoption, MemoryError> {
-            Ok(ModelAdoption::Unchanged)
+        async fn drop_other_models(&self, _model: &str) -> Result<u64, MemoryError> {
+            Ok(0)
         }
         async fn count_missing(&self) -> Result<UnindexedRows, MemoryError> {
             Ok(UnindexedRows::default())
@@ -484,7 +484,11 @@ mod tests {
         ) -> Result<Vec<(ChunkId, String)>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn store_embeddings(&self, _embeddings: Vec<Embedding>) -> Result<(), MemoryError> {
+        async fn store_embeddings(
+            &self,
+            _model: &str,
+            _embeddings: Vec<Embedding>,
+        ) -> Result<(), MemoryError> {
             Ok(())
         }
     }

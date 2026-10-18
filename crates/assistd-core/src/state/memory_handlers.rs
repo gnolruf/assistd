@@ -359,7 +359,10 @@ where
         }));
         let job_count = jobs.len();
         let embeddings = embed_jobs(embedder, jobs.drain(..)).await;
-        if let Err(e) = semantic.store_embeddings(embeddings).await {
+        if let Err(e) = semantic
+            .store_embeddings(embedder.model(), embeddings)
+            .await
+        {
             warn!(
                 target: "assistd::memory",
                 kind = progress.kind.as_str(),
