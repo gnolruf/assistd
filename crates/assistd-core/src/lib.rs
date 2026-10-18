@@ -18,8 +18,8 @@ use assistd_memory::{SemanticStore, SessionId};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
     AllowlistError, ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps,
-    OutputCap, PresentSpec, Protected, RecallTool, RememberTool, ReminisceTool, RunTool,
-    SandboxError, SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
+    OutputCap, PresentSpec, Protected, RememberTool, ReminisceTool, RunTool, SandboxError,
+    SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
@@ -309,8 +309,12 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         Some(scratch_dir) => run.with_scratch_dir(scratch_dir),
         None => run,
     });
-    tools.register(RememberTool::new(memory_ops, embed_tx));
-    tools.register(RecallTool::new(embedder.clone(), semantic.clone()));
+    tools.register(RememberTool::new(
+        memory_ops,
+        embed_tx,
+        embedder.clone(),
+        semantic.clone(),
+    ));
     tools.register(ReminisceTool::new(embedder, semantic, current_session));
     Ok(Arc::new(tools))
 }
