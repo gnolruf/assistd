@@ -1,14 +1,12 @@
 # Contributing
 
-Code rules and the required local checks live in [AGENTS.md](AGENTS.md).
-This file covers the workflow around them.
+Code rules and the required local checks (for humans and coding agents alike) live in [AGENTS.md](AGENTS.md).
 
 ## Issues
 
 Open issues with the bug or feature form. Title bugs with the symptom
 ("Chat TUI panics on a link containing a line break"), not the fix.
-Security problems go through [SECURITY.md](SECURITY.md), never a public
-issue.
+Security problems go through [SECURITY.md](SECURITY.md), never a public issue.
 
 ## Branches
 
@@ -25,15 +23,3 @@ to the issue. Branches are deleted when their pull request merges.
 - Put `Closes #<issue>` in the description.
 - PRs are squash-merged, so the PR title becomes the commit on `main`.
 - CI must pass before merging.
-
-## Releases
-
-1. Open a PR that bumps `version` in the root `Cargo.toml` (and
-   `Cargo.lock`), and merge it. Leave `dist/aur/assistd/` alone.
-2. Tag the merge commit and push the tag:
-   `git tag -a v1.2.0 -m v1.2.0 && git push origin v1.2.0`.
-3. The tag push starts the **AUR release** workflow. It stamps `pkgver`,
-   fills in the checksum, regenerates `.SRCINFO`, test-builds the
-   package in an Arch container and pushes it to the AUR after approval.
-   For a packaging-only fix to a release that is already out, run it
-   from the Actions tab with the same tag and a higher `pkgrel`.

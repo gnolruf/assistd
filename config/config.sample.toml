@@ -1,5 +1,5 @@
 # assistd configuration. Copy to ~/.config/assistd/config.toml.
-# Every key is optional; commented keys show a default or an example. Unknown keys are ignored with a warning.
+# Every key is optional unless marked required; commented keys show a default or an example. Unknown keys are ignored with a warning.
 # Units, ranges and validation rules are documented on the assistd-config schema types.
 
 [model]
@@ -68,7 +68,7 @@ enabled = false
 # use_cuda = false
 # toggle_hotkey = ""  # toggles TTS
 # skip_hotkey = ""  # stops the current reply
-# output_device = "pipewire"  # as listed by `aplay -L`; unset uses the audio host default
+# output_device = "pipewire"  # as listed by `aplay -L`; unset uses the default
 
 [compositor]
 type = "auto"  # auto | i3 | sway | hyprland
@@ -172,8 +172,8 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 # enabled = false
 #
 # [[mcp.servers]]
-# name = "filesystem"
-# command = "npx"
+# name = "filesystem"  # required
+# command = "npx"  # required
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"]
 # env = { API_TOKEN = "..." }  # only PATH, HOME, locale and a few basics are inherited
 # request_timeout_secs = 30

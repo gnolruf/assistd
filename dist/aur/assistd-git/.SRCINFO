@@ -23,7 +23,7 @@ pkgbase = assistd-git
 	optdepends = sway: Wayland focused-window screenshot via swaymsg
 	optdepends = hyprland: Wayland focused-window screenshot via hyprctl
 	optdepends = bubblewrap: sandboxed bash command tool
-	optdepends = pipewire-pulse: PulseAudio routing for audio playback (otherwise raw ALSA)
+	optdepends = pipewire-alsa: route audio through PipeWire (otherwise raw ALSA)
 	optdepends = notification-daemon: desktop notifications from the tray
 	provides = assistd=1.0.0.r246.g9199320
 	conflicts = assistd

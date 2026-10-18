@@ -25,7 +25,7 @@ optdepends=(
   'sway: Wayland focused-window screenshot via swaymsg'
   'hyprland: Wayland focused-window screenshot via hyprctl'
   'bubblewrap: sandboxed bash command tool'
-  'pipewire-pulse: PulseAudio routing for audio playback (otherwise raw ALSA)'
+  'pipewire-alsa: route audio through PipeWire (otherwise raw ALSA)'
   'notification-daemon: desktop notifications from the tray'
 )
 makedepends=(
@@ -81,7 +81,6 @@ package() {
 
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 docs/architecture.md "$pkgdir/usr/share/doc/$pkgname/architecture.md"
-  install -Dm644 docs/tools.md "$pkgdir/usr/share/doc/$pkgname/tools.md"
   cp -r docs/wm "$pkgdir/usr/share/doc/$pkgname/wm"
   install -Dm644 config/config.sample.toml \
     "$pkgdir/usr/share/doc/$pkgname/config.sample.toml"

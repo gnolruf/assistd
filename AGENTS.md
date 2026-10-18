@@ -87,25 +87,27 @@ Guidelines for AI agents (and humans) working in this repository.
 
 Any change to Rust code — new logic, bug fix, refactor, even a test
 update — must pass these in order. Run them from the workspace root.
+`$FEATURES` below is `assistd-llm/test-support,assistd-voice/test-support`,
+which CI enables so test-only code is linted and run too.
 
 1. **Format.** `cargo fmt --all` (or `cargo fmt --all -- --check` to
    verify). `rustfmt.toml` pins us to defaults; don't fight it.
-2. **Lint.** `cargo clippy --workspace --all-targets --
-   -D warnings`. Treat every warning as an error. The workspace
-   already warns on `clippy::all` and `rust_2018_idioms` and denies
-   `dbg_macro` — leftover `dbg!` will fail the build.
+2. **Lint.** `cargo clippy --workspace --all-targets --features
+   $FEATURES -- -D warnings`, then `cargo clippy -p assistd-cli
+   --all-targets --no-default-features -- -D warnings`. Treat every
+   warning as an error. The workspace already warns on `clippy::all`
+   and `rust_2018_idioms` and denies `dbg_macro` — leftover `dbg!`
+   will fail the build.
 3. **Docs and deps.** `RUSTDOCFLAGS="-D warnings" cargo doc
-   --workspace --no-deps`; public docs must not link to private
-   items. If you touched a `Cargo.toml`, also run `cargo machete`.
+   --workspace --no-deps --features $FEATURES`; public docs must not
+   link to private items. If you touched a `Cargo.toml`, also run
+   `cargo machete`.
 4. **Targeted tests.** Run the existing test suite for whichever
    crate(s) you touched: `cargo test -p assistd-<crate>`. Running
    tests is required; writing new ones is not. For test fixes
    specifically, also run the originally failing test in isolation
    with `--nocapture` to confirm the fix is real, not flaky timing.
-5. **Full suite.** `cargo test --workspace`. Some crates have
-   feature-gated code paths; if your change touches one, also run
-   with the relevant features (e.g. `cargo test -p assistd-voice
-   --features test-support`).
+5. **Full suite.** `cargo test --workspace --features $FEATURES`.
 
 If a check fails, fix the underlying issue. Do not paper over with
 `#[allow]`, `#[ignore]`, or `--no-verify`. If a test is genuinely
@@ -122,14 +124,14 @@ and data-flow walkthrough.
 
 | Crate            | Responsibility                                                                                                                  |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `assistd`        | Binary (`assistd` on `$PATH`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`) are optional features. |
+| `assistd`        | Binary (`assistd` on `$PATH`; package `assistd-cli`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`) are optional features. |
 | `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
 | `assistd-core`   | Daemon glue. Owns `AppState`, the per-turn `Agent` loop, the Unix-socket server, the presence state machine, and the `build_tools()` factory that wires every subsystem together. |
 | `assistd-embed`  | Embedding HTTP client + background job queue. Pulls chunks off an mpsc, batches them to the embedding `llama-server`, writes vectors into `assistd-memory`'s semantic store. |
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light; depends only on `assistd-utils`. |
 | `assistd-llm`    | `LlmBackend` trait, `LlamaChatClient` (HTTP/SSE to `llama-server`), the router-mode launch spec run by the shared child-server supervisor, the HTTP control plane, and vision-capability detection. |
 | `assistd-mcp`    | MCP client for stdio servers on top of `rmcp`: process spawning, restart on the next call with backoff, and `McpToolAdapter` which exposes discovered tools through the `Tool` trait under `mcp__<server>__<tool>`. |
-| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore` (K/V facts), `ConversationStore` (transcripts with branching/undo), `SemanticStore` (embedding-indexed chunks). Uses `tokio-rusqlite` + `rusqlite_migration`. |
+| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore` (K/V facts), `TranscriptStore` (transcripts with branching/undo), `SemanticStore` (embedding-indexed chunks). Uses `tokio-rusqlite` + `rusqlite_migration`. |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
 | `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, capped child-output line forwarding, the `ProcessGroup` kill-on-drop guard, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor (spawn, `/health` poll checked against `/proc` listener ownership, restart, degrade) that both llama-servers run under. No internal deps. |
 | `assistd-voice`  | `VoiceInput` (Whisper STT via `whisper-rs`, push-to-talk and VAD continuous modes), `VoiceOutput` (Piper TTS streamed sentence-by-sentence), adaptive `SpeakDecision`. Feature-gated (`whisper`, `mic`, `listen`, `tts`, `cuda`). |
