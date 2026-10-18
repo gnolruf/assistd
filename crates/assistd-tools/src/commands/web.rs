@@ -3,10 +3,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::{Attempt, Policy};
-use reqwest::{Response, Url};
 use url::Host;
+
+use assistd_utils::http::{BodyError, read_capped};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
@@ -127,9 +129,9 @@ impl WebCommand {
                 UNREACHABLE,
             );
         }
-        match read_capped(response).await {
+        match read_capped(response, BODY_MAX).await {
             Ok(body) => CommandOutput::ok(body),
-            Err(BodyError::TooLarge) => fetch_failed(
+            Err(BodyError::TooLarge { .. }) => fetch_failed(
                 format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
                 "a URL path that returns less content",
             ),
@@ -216,13 +218,6 @@ impl Command for WebCommand {
         }
         self.fetch(url).await
     }
-}
-
-/// Why a response body was not read in full.
-#[derive(Debug)]
-enum BodyError {
-    TooLarge,
-    Read(reqwest::Error),
 }
 
 /// Resolves names with the system resolver, keeping only addresses `reachable` accepts.
@@ -323,23 +318,6 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
 fn in_v6_prefix(ip: Ipv6Addr, (network, prefix_len): (Ipv6Addr, u32)) -> bool {
     let mask = u128::MAX << (128 - prefix_len);
     u128::from(ip) & mask == u128::from(network)
-}
-
-async fn read_capped(mut response: Response) -> Result<Vec<u8>, BodyError> {
-    if response
-        .content_length()
-        .is_some_and(|len| usize::try_from(len).map_or(true, |len| len > BODY_MAX))
-    {
-        return Err(BodyError::TooLarge);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(BodyError::Read)? {
-        if body.len() + chunk.len() > BODY_MAX {
-            return Err(BodyError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 fn error_chain(err: &dyn std::error::Error) -> String {
