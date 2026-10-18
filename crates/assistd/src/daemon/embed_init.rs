@@ -11,8 +11,7 @@ use assistd_embed::{
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_memory::{
-    NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, StaleEmbeddings,
-    UnindexedRows,
+    NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, UnindexedRows,
 };
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
@@ -189,12 +188,9 @@ fn spawn_startup(
                     embedder.dim(),
                     startup.config.port,
                 );
-                let worker = serve_embedder(&state, embedder.clone(), startup, stages.worker);
-                report_unindexed_rows(state.memory.semantic.as_ref(), embedder.model()).await;
-                Some(RunningEmbedding {
-                    server,
-                    worker: Some(worker),
-                })
+                let worker =
+                    drop_other_models_then_serve(&state, embedder, startup, stages.worker).await;
+                Some(RunningEmbedding { server, worker })
             }
             Err(failure) => {
                 tracing::warn!(
@@ -217,6 +213,28 @@ fn spawn_startup(
         );
         running
     })
+}
+
+/// Drop vectors from other models, then start the worker and mark the embedder
+/// ready. When dropping fails the embedder stays unavailable.
+async fn drop_other_models_then_serve(
+    state: &AppState,
+    embedder: Arc<dyn Embedder>,
+    startup: EmbeddingStartup,
+    worker_shutdown: watch::Receiver<bool>,
+) -> Option<JoinHandle<()>> {
+    let semantic = state.memory.semantic.as_ref();
+    if let Err(reason) = drop_other_models(semantic, embedder.model()).await {
+        tracing::warn!("embedding: {reason}; semantic search disabled this run");
+        state
+            .memory
+            .embedder
+            .set(Readiness::Unavailable(reason.into()));
+        return None;
+    }
+    let worker = serve_embedder(state, embedder.clone(), startup, worker_shutdown);
+    warn_if_missing_rows(semantic, embedder.model()).await;
+    Some(worker)
 }
 
 fn serve_embedder(
@@ -271,28 +289,19 @@ async fn start_server(
     }
 }
 
-async fn report_unindexed_rows(semantic: &dyn SemanticStore, model_name: &str) {
-    warn_if_stale_rows(semantic, model_name).await;
-    warn_if_missing_rows(semantic, model_name).await;
-}
-
-async fn warn_if_stale_rows(semantic: &dyn SemanticStore, model_name: &str) {
-    match semantic.count_stale(model_name).await {
-        Ok(StaleEmbeddings { rows, models }) if rows > 0 => {
-            tracing::warn!(
-                "embedding: {rows} rows exist under non-current model(s) {models:?}; \
-                 run `assistd memory reindex` to rebuild against {model_name}"
-            );
+async fn drop_other_models(semantic: &dyn SemanticStore, model_name: &str) -> Result<(), String> {
+    match semantic.drop_other_models(model_name).await {
+        Ok(0) => Ok(()),
+        Ok(dropped) => {
+            info!("embedding: dropped {dropped} vectors from models other than {model_name}");
+            Ok(())
         }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::debug!("embedding: count_stale check failed ({e:#}); skipping diagnostic");
-        }
+        Err(e) => Err(format!("dropping other models' vectors failed: {e}")),
     }
 }
 
 async fn warn_if_missing_rows(semantic: &dyn SemanticStore, model_name: &str) {
-    match semantic.count_missing(model_name).await {
+    match semantic.count_missing().await {
         Ok(UnindexedRows { chunks, memories }) if chunks + memories > 0 => {
             tracing::warn!(
                 "embedding: {chunks} transcript chunks and {memories} memories have no \

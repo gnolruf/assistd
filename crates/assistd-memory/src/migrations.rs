@@ -131,9 +131,36 @@ BEGIN
 END;
 ";
 
+/// V2: each vector names its model directly instead of through `embedding_models`.
+/// Existing vectors are dropped for re-embedding.
+const V2_SQL: &str = r"
+DROP TRIGGER memory_value_changed;
+DROP TABLE chunk_embeddings;
+DROP TABLE memory_embeddings;
+DROP TABLE embedding_models;
+
+CREATE TABLE chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES message_chunks(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    vector   BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+
+CREATE TABLE memory_embeddings (
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    model     TEXT NOT NULL,
+    vector    BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+
+CREATE TRIGGER memory_value_changed AFTER UPDATE OF value ON memories
+WHEN old.value IS NOT new.value
+BEGIN
+    DELETE FROM memory_embeddings WHERE memory_id = new.id;
+END;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1_SQL)])
+    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL)])
 }
 
 /// Apply all pending migrations to `conn`; a no-op on an up-to-date database.
@@ -159,6 +186,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 }

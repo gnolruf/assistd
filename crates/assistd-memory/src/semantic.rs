@@ -53,19 +53,11 @@ pub struct Embedding {
     pub vector: Vec<f32>,
 }
 
-/// Rows with no embedding under a given model, by table.
+/// Rows with no embedding, by table.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnindexedRows {
     pub chunks: u64,
     pub memories: u64,
-}
-
-/// Rows embedded under models other than the current one.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StaleEmbeddings {
-    pub rows: u64,
-    /// The other models' names, sorted.
-    pub models: Vec<String>,
 }
 
 /// Top-K vector retrieval over embedded chunks and memories.
@@ -77,7 +69,6 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        model: &str,
         exclude_session: Option<SessionId>,
     ) -> Result<Vec<EmbeddingHit>>;
 
@@ -86,35 +77,34 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        model: &str,
     ) -> Result<Vec<MemoryHit>>;
 
-    /// Rows embedded under a model other than `current`.
-    async fn count_stale(&self, current: &str) -> Result<StaleEmbeddings>;
+    /// Delete every vector not embedded by `model`, returning how many. Must complete
+    /// before anything embedded by `model` is searched, so searches never compare
+    /// vectors from two models.
+    async fn drop_other_models(&self, model: &str) -> Result<u64>;
 
-    /// Rows with no embedding under `current`.
-    async fn count_missing(&self, current: &str) -> Result<UnindexedRows>;
+    /// Rows with no embedding.
+    async fn count_missing(&self) -> Result<UnindexedRows>;
 
     /// Up to `limit` memories after `after` (from the start when `None`) with no
-    /// embedding under `current`, in id order, as `(id, value)`.
+    /// embedding, in id order, as `(id, value)`.
     async fn memories_missing_embedding(
         &self,
-        current: &str,
         after: Option<MemoryId>,
         limit: usize,
     ) -> Result<Vec<(MemoryId, String)>>;
 
     /// Up to `limit` message chunks after `after` (from the start when `None`) with
-    /// no embedding under `current`, in id order, as `(id, chunk text)`.
+    /// no embedding, in id order, as `(id, chunk text)`.
     async fn chunks_missing_embedding(
         &self,
-        current: &str,
         after: Option<ChunkId>,
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>>;
 
-    /// Upsert `embeddings` under `model` in one transaction, skipping targets
-    /// deleted since they were embedded and memories whose value no longer matches.
+    /// Upsert `embeddings` from `model` in one transaction, skipping targets deleted
+    /// since they were embedded and memories whose value no longer matches.
     async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()>;
 }
 
@@ -128,7 +118,6 @@ impl SemanticStore for NoSemanticStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _model: &str,
         _exclude_session: Option<SessionId>,
     ) -> Result<Vec<EmbeddingHit>> {
         Ok(Vec::new())
@@ -137,19 +126,17 @@ impl SemanticStore for NoSemanticStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _model: &str,
     ) -> Result<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn count_stale(&self, _current: &str) -> Result<StaleEmbeddings> {
-        Ok(StaleEmbeddings::default())
+    async fn drop_other_models(&self, _model: &str) -> Result<u64> {
+        Ok(0)
     }
-    async fn count_missing(&self, _current: &str) -> Result<UnindexedRows> {
+    async fn count_missing(&self) -> Result<UnindexedRows> {
         Ok(UnindexedRows::default())
     }
     async fn memories_missing_embedding(
         &self,
-        _current: &str,
         _after: Option<MemoryId>,
         _limit: usize,
     ) -> Result<Vec<(MemoryId, String)>> {
@@ -157,7 +144,6 @@ impl SemanticStore for NoSemanticStore {
     }
     async fn chunks_missing_embedding(
         &self,
-        _current: &str,
         _after: Option<ChunkId>,
         _limit: usize,
     ) -> Result<Vec<(ChunkId, String)>> {

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use assistd_memory::{
     ChunkId, Embedding, EmbeddingHit, MemoryHit, MemoryId, Result as MemoryResult, SessionId,
-    StaleEmbeddings, UnindexedRows,
+    UnindexedRows,
 };
 
 use super::*;
@@ -53,7 +53,6 @@ impl SemanticStore for RecordingStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _model: &str,
         _exclude_session: Option<SessionId>,
     ) -> MemoryResult<Vec<EmbeddingHit>> {
         Ok(Vec::new())
@@ -62,19 +61,17 @@ impl SemanticStore for RecordingStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _model: &str,
     ) -> MemoryResult<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn count_stale(&self, _current: &str) -> MemoryResult<StaleEmbeddings> {
-        Ok(StaleEmbeddings::default())
+    async fn drop_other_models(&self, _model: &str) -> MemoryResult<u64> {
+        Ok(0)
     }
-    async fn count_missing(&self, _current: &str) -> MemoryResult<UnindexedRows> {
+    async fn count_missing(&self) -> MemoryResult<UnindexedRows> {
         Ok(UnindexedRows::default())
     }
     async fn memories_missing_embedding(
         &self,
-        _current: &str,
         _after: Option<MemoryId>,
         _limit: usize,
     ) -> MemoryResult<Vec<(MemoryId, String)>> {
@@ -82,7 +79,6 @@ impl SemanticStore for RecordingStore {
     }
     async fn chunks_missing_embedding(
         &self,
-        _current: &str,
         _after: Option<ChunkId>,
         _limit: usize,
     ) -> MemoryResult<Vec<(ChunkId, String)>> {
