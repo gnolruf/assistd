@@ -20,7 +20,6 @@ tts = [
     "dep:rodio",
     "dep:serde",
     "dep:serde_json",
-    "dep:which",
 ]
 cuda = ["whisper", "whisper-rs/cuda"]
 test-support = ["whisper", "mic", "listen", "tts"]
@@ -55,7 +54,6 @@ webrtc-vad = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-which = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

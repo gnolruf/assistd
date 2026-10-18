@@ -59,7 +59,6 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
-which = { workspace = true }
 
 chrono           = { workspace = true, optional = true }
 ratatui          = { workspace = true, optional = true }

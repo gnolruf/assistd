@@ -161,7 +161,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
- "which",
  "zbus",
 ]
 
@@ -387,7 +386,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webrtc-vad",
- "which",
  "whisper-rs",
 ]
 
@@ -4470,15 +4468,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39a1e40fd6ca90be95459152a2537f2ba4286ee1b13073f7ebcaa74fc94e3008"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "which"
-version = "8.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
-dependencies = [
- "libc",
 ]
 
 [[package]]

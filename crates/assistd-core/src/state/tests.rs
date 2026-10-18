@@ -19,6 +19,7 @@ use assistd_tools::{
     CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolsDisabled,
     commands::EchoCommand,
 };
+use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     ContinuousListener, ListenError, VoiceCapture, VoiceInput, VoiceInputError, VoiceManager,
@@ -199,7 +200,7 @@ async fn assert_request_events(cases: Vec<(PresenceTarget, Request, Vec<Event>, 
 #[tokio::test]
 async fn capabilities_report_disabled_tools_before_the_model() {
     let mut state = Arc::into_inner(default_state()).expect("sole owner");
-    state.subsystems.tools_disabled = Some(ToolsDisabled::BwrapMissing);
+    state.subsystems.tools_disabled = Some(ToolsDisabled::BwrapMissing(ProgramError::NotOnPath));
     let (result, events) = dispatch(
         &Arc::new(state),
         Request::GetCapabilities { id: "c".into() },
@@ -216,7 +217,7 @@ async fn capabilities_report_disabled_tools_before_the_model() {
             severity: StatusSeverity::Error,
             component: Component::Agent,
             event: StatusKind::StartupFailed,
-            message: ToolsDisabled::BwrapMissing.to_string(),
+            message: ToolsDisabled::BwrapMissing(ProgramError::NotOnPath).to_string(),
         }
     );
 }

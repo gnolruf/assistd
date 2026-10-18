@@ -1,6 +1,7 @@
 //! Web search wiring for the daemon: the SearXNG instance starts in the
 //! background as soon as the socket opens, since it needs no GPU.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use assistd_config::SearchConfig;
@@ -8,6 +9,7 @@ use assistd_core::{AppState, Config};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_search::SearxngServerSpec;
 use assistd_utils::child_server::{ChildServer, ChildServerStatus};
+use assistd_utils::program::find_program;
 use assistd_utils::readiness::{Readiness, ReadinessCell};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -111,7 +113,9 @@ async fn start_server(
     shutdown: watch::Receiver<bool>,
 ) -> Result<ChildServer, String> {
     let program = config.command.program();
-    which::which(program).map_err(|e| format!("cannot run search.command `{program}`: {e}"))?;
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+    find_program(Path::new(program), &path_env)
+        .map_err(|e| format!("cannot run search.command `{program}`: {e}"))?;
     let spec = SearxngServerSpec::prepare(config).map_err(|e| e.to_string())?;
     ChildServer::start(spec, shutdown)
         .await
