@@ -18,12 +18,9 @@ use crate::errors::SearchCommandError;
 pub struct SearchConfig {
     /// When `false`, no instance starts and web search is unavailable.
     pub enabled: bool,
-    /// The entry point to run. It must read its settings from
-    /// `SEARXNG_SETTINGS_PATH` and the `SEARXNG_*` variables assistd sets
-    /// (every SearXNG build does), serve on `host:port` in the foreground
-    /// without daemonising, and answer `GET /healthz` with 200. uWSGI,
-    /// Granian and containers need a wrapper script that forwards those
-    /// variables into their own flags.
+    /// The entry point to run. It must honour the `SEARXNG_*` variables assistd
+    /// sets, serve `host:port` in the foreground, and answer `GET /healthz`
+    /// with 200; uWSGI, Granian and containers need a wrapper that does so.
     pub command: SearchCommand,
     /// Bind host. Must be loopback: the instance has no authentication.
     pub host: IpAddr,
@@ -48,10 +45,9 @@ impl Default for SearchConfig {
     }
 }
 
-/// A program and its arguments written as one string, e.g.
-/// `/opt/searxng/bin/python -m searx.webapp`. Split with POSIX shell quoting
-/// but never run through a shell, so `$VAR`, `~` and globs stay literal.
-/// Always names a program.
+/// A program and its arguments as one string, e.g. `python -m searx.webapp`,
+/// split with POSIX shell quoting but never run through a shell, so `$VAR`,
+/// `~` and globs stay literal. Always names a program.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct SearchCommand {

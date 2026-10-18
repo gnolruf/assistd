@@ -39,8 +39,6 @@ pub(crate) fn write_settings() -> Result<PathBuf, SearchServerError> {
     Ok(path)
 }
 
-/// `$XDG_RUNTIME_DIR/assistd/searxng`, or `$XDG_CACHE_HOME/assistd/searxng`,
-/// or `$HOME/.cache/assistd/searxng`.
 fn settings_dir() -> PathBuf {
     dirs::runtime_dir()
         .or_else(dirs::cache_dir)
@@ -60,7 +58,6 @@ fn replace_file(dir: &Path, path: &Path) -> io::Result<()> {
         .permissions(Permissions::from_mode(SETTINGS_FILE_MODE))
         .tempfile_in(dir)?;
     file.write_all(SETTINGS.as_bytes())?;
-    file.as_file().sync_all()?;
     file.persist(path).map_err(|e| e.error)?;
     Ok(())
 }

@@ -170,7 +170,7 @@ hotkey = "Super+Escape"  # cycles presence; X11 only, empty disables
 [search]
 # A local SearXNG instance the web command searches through.
 # enabled = false
-# command = "searxng-run"  # shell-quoted, no shell runs; see the field doc for what it must do
+# command = "searxng-run"  # shell-quoted, never run through a shell
 # host = "127.0.0.1"
 # port = 8387  # must differ from model.port and embedding.port
 # ready_timeout_secs = 60

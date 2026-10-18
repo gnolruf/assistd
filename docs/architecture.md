@@ -102,8 +102,8 @@ child process in the background, reporting `PresenceState::Waking` until
 the model has loaded (queries wait for it; requests that need no model
 are served at once). Voice and the embedding server start after the
 model, so neither loads onto the GPU while it does, and the SearXNG
-instance and MCP servers start straight away; none of them holds up the socket. `Request::GetReadiness`
-reports how far each has got as one `Event::Readiness` per subsystem, and
+instance and MCP servers start straight away; none of them holds up the
+socket. `Request::GetReadiness` reports how far each has got as one `Event::Readiness` per subsystem, and
 the daemon broadcasts the same event as each one settles. The chat names
 whatever is still starting, and the tray tooltip lists every subsystem's
 state. The server takes
