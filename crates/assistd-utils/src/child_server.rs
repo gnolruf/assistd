@@ -15,7 +15,7 @@ mod process;
 mod service;
 mod supervisor;
 
-pub use api_key::ApiKey;
+pub use api_key::{ApiKey, random_secret};
 pub use error::ChildServerError;
 pub use llama_env::remove_llama_env;
 pub use service::{ChildServer, ChildServerStatus, ReadyState};

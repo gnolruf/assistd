@@ -1,6 +1,6 @@
 # Architecture
 
-`assistd` is a Rust workspace split into eleven library crates plus a
+`assistd` is a Rust workspace split into twelve library crates plus a
 binary. This page maps the crates, the external processes the daemon
 supervises, and the path a user query takes from keypress to spoken
 reply.
@@ -27,19 +27,21 @@ flowchart TB
         mcp["<b>assistd-mcp</b><br/>stdio client (rmcp)"]
         memory[("<b>assistd-memory</b><br/>SQLite stores")]
         embed["<b>assistd-embed</b><br/>embedding queue"]
+        search["<b>assistd-search</b><br/>SearXNG launch spec"]
     end
 
     subgraph external["Supervised child processes"]
         direction LR
         llama["llama-server<br/>:8385 /v1/chat/completions"]
         embedsrv["embedding llama-server<br/>:8386 /v1/embeddings"]
+        searxng["SearXNG<br/>:8387 /search"]
         piper["piper"]
         mcpsrv["MCP servers<br/>(user-defined)"]
     end
 
     clients -- "Unix socket · line-delimited JSON<br/>Request / Event" --> bin
     bin --> core
-    bin --> mcp
+    bin --> mcp & search
     core --> llm & tools & voice & wm & memory & embed
     tools --> memory & wm
     mcp --> tools
@@ -48,6 +50,7 @@ flowchart TB
 
     llm --> llama
     embed --> embedsrv
+    search --> searxng
     voice --> piper
     mcp --> mcpsrv
 ```
@@ -64,6 +67,7 @@ flowchart TB
 | `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`.                | none                                                                             |
+| `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search.       | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `wm`, `utils`                                |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
@@ -97,8 +101,8 @@ The daemon opens its socket first and then spawns `llama-server` as a
 child process in the background, reporting `PresenceState::Waking` until
 the model has loaded (queries wait for it; requests that need no model
 are served at once). Voice and the embedding server start after the
-model, so neither loads onto the GPU while it does, and MCP servers start
-straight away; none of them holds up the socket. `Request::GetReadiness`
+model, so neither loads onto the GPU while it does, and the SearXNG
+instance and MCP servers start straight away; none of them holds up the socket. `Request::GetReadiness`
 reports how far each has got as one `Event::Readiness` per subsystem, and
 the daemon broadcasts the same event as each one settles. The chat names
 whatever is still starting, and the tray tooltip lists every subsystem's

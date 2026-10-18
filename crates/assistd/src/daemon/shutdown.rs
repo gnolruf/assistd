@@ -14,6 +14,7 @@ use tracing::info;
 use super::embed_init::EmbeddingService;
 use super::mcp_init::McpService;
 use super::memory_init::MemorySubsystem;
+use super::search_init::SearchService;
 use super::wm_init::WindowSubsystem;
 
 const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
@@ -24,6 +25,7 @@ pub(super) struct ShutdownStages {
     pub(super) intake: watch::Sender<bool>,
     pub(super) llm: watch::Sender<bool>,
     pub(super) tools: watch::Sender<bool>,
+    pub(super) search: watch::Sender<bool>,
     pub(super) embed_worker: watch::Sender<bool>,
     pub(super) embed_server: watch::Sender<bool>,
 }
@@ -34,6 +36,7 @@ impl ShutdownStages {
             intake: watch::channel(false).0,
             llm: watch::channel(false).0,
             tools: watch::channel(false).0,
+            search: watch::channel(false).0,
             embed_worker: watch::channel(false).0,
             embed_server: watch::channel(false).0,
         }
@@ -45,6 +48,7 @@ impl ShutdownStages {
             &self.intake,
             &self.llm,
             &self.tools,
+            &self.search,
             &self.embed_worker,
             &self.embed_server,
         ] {
@@ -58,6 +62,7 @@ pub(super) struct DaemonShutdown {
     pub(super) presence: Arc<PresenceManager>,
     pub(super) memory: MemorySubsystem,
     pub(super) embed: EmbeddingService,
+    pub(super) search: SearchService,
     pub(super) window: WindowSubsystem,
     pub(super) mcp: McpService,
     pub(super) intake_tasks: IntakeTasks,
@@ -79,6 +84,9 @@ impl DaemonShutdown {
         stages.tools.send_replace(true);
         self.window.shutdown().await;
         self.mcp.shutdown().await;
+
+        stages.search.send_replace(true);
+        self.search.shutdown().await;
 
         self.embed
             .shutdown(&stages.embed_worker, &stages.embed_server)

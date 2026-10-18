@@ -251,6 +251,12 @@ async fn readiness_lists_every_background_subsystem() {
             readiness(StartupComponent::VoiceInput, ComponentReadiness::Ready),
             readiness(StartupComponent::Speech, ComponentReadiness::Ready),
             readiness(StartupComponent::Embedding, ComponentReadiness::Starting),
+            readiness(
+                StartupComponent::WebSearch,
+                ComponentReadiness::Unavailable {
+                    reason: "not configured".into()
+                }
+            ),
             readiness(mcp("fs"), ComponentReadiness::Starting),
             readiness(
                 mcp("git"),

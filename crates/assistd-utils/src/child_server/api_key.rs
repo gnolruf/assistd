@@ -27,7 +27,7 @@ impl ApiKey {
     /// Draw a fresh key from the kernel's CSPRNG and write it to a mode-0600
     /// file under `$XDG_RUNTIME_DIR`, or the temp dir when that is unset.
     pub fn generate() -> io::Result<Self> {
-        let secret: Arc<str> = random_hex()?.into();
+        let secret: Arc<str> = random_secret()?.into();
         let file = write_key_file(&secret)?;
         Ok(Self {
             secret,
@@ -58,7 +58,8 @@ impl fmt::Debug for ApiKey {
     }
 }
 
-fn random_hex() -> io::Result<String> {
+/// A 256-bit secret from the kernel's CSPRNG, hex-encoded.
+pub fn random_secret() -> io::Result<String> {
     let mut bytes = [0u8; KEY_BYTES];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())

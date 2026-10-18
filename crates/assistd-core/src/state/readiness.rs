@@ -13,11 +13,15 @@ const STARTUP_EVENT_ID: &str = "startup";
 
 impl AppState {
     /// Every background subsystem with its current readiness: voice,
-    /// embedding, then each configured MCP server.
+    /// embedding, web search, then each configured MCP server.
     pub fn startup_readiness(&self) -> Vec<(StartupComponent, ComponentReadiness)> {
         let embedding = (
             StartupComponent::Embedding,
             self.memory.embedder.readiness().into(),
+        );
+        let web_search = (
+            StartupComponent::WebSearch,
+            self.subsystems.web_search.get().into(),
         );
         let mcp = self.subsystems.mcp_servers.iter().map(|server| {
             (
@@ -31,7 +35,7 @@ impl AppState {
             .voice
             .readiness()
             .into_iter()
-            .chain([embedding])
+            .chain([embedding, web_search])
             .chain(mcp)
             .collect()
     }

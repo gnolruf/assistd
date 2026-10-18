@@ -109,6 +109,13 @@ pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
 pub const DEFAULT_EMBEDDING_TOP_K: NonZeroU32 = nz32(5);
 pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
 
+pub const DEFAULT_SEARCH_ENABLED: bool = false;
+/// The console script upstream SearXNG installs.
+pub const DEFAULT_SEARCH_COMMAND: &str = "searxng-run";
+pub const DEFAULT_SEARCH_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+pub const DEFAULT_SEARCH_PORT: NonZeroU16 = nz16(8387);
+pub const DEFAULT_SEARCH_READY_TIMEOUT_SECS: NonZeroU64 = nz64(60);
+
 pub const DEFAULT_MCP_ENABLED: bool = false;
 pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 

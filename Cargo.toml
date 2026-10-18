@@ -9,6 +9,7 @@ members = [
     "crates/assistd-llm",
     "crates/assistd-mcp",
     "crates/assistd-memory",
+    "crates/assistd-search",
     "crates/assistd-voice",
     "crates/assistd-tools",
     "crates/assistd-utils",
@@ -30,6 +31,7 @@ assistd-ipc    = { version = "1.1", path = "crates/assistd-ipc" }
 assistd-llm    = { version = "1.1", path = "crates/assistd-llm" }
 assistd-mcp    = { version = "1.1", path = "crates/assistd-mcp" }
 assistd-memory = { version = "1.1", path = "crates/assistd-memory" }
+assistd-search = { version = "1.1", path = "crates/assistd-search" }
 assistd-voice  = { version = "1.1", path = "crates/assistd-voice" }
 assistd-tools  = { version = "1.1", path = "crates/assistd-tools" }
 assistd-utils  = { version = "1.1", path = "crates/assistd-utils", default-features = false }

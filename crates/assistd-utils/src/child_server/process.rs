@@ -55,13 +55,7 @@ impl ChildProcess {
         let stdout_task = tokio::spawn(forward_stdout(server, stdout));
         let stderr_task = tokio::spawn(forward_stderr(server, stderr));
 
-        info!(
-            target: "assistd::child_server",
-            server,
-            pid = child.id(),
-            "spawned {server}: {:?}",
-            cmd.as_std(),
-        );
+        log_spawned(server, child.id(), cmd.as_std());
 
         Ok(Self {
             server,
@@ -127,6 +121,21 @@ impl ChildProcess {
 
         Ok(())
     }
+}
+
+/// Names the environment variables the command sets or removes but never
+/// their values, which may be secrets.
+fn log_spawned(server: &'static str, pid: Option<u32>, cmd: &std::process::Command) {
+    let env: Vec<_> = cmd.get_envs().map(|(name, _)| name).collect();
+    info!(
+        target: "assistd::child_server",
+        server,
+        pid,
+        ?env,
+        "spawned {server}: {:?} {:?}",
+        cmd.get_program(),
+        cmd.get_args().collect::<Vec<_>>(),
+    );
 }
 
 async fn forward_stdout(server: &'static str, stream: ChildStdout) {

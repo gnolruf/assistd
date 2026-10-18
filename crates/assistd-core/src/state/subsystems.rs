@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use assistd_llm::LlmBackend;
 use assistd_tools::{ToolCatalog, ToolRegistry, ToolsDisabled};
+use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use assistd_voice::VoiceManager;
 use assistd_wm::{NoWindowManager, WindowManager};
@@ -51,12 +52,14 @@ pub struct Subsystems {
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub mcp_servers: Vec<McpServerStatus>,
+    /// The SearXNG instance web search goes through, once it is serving.
+    pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub tools_disabled: Option<ToolsDisabled>,
 }
 
 impl Subsystems {
     /// Bundle the required subsystems, with no window manager, no vision
-    /// revalidator, and no MCP servers.
+    /// revalidator, no MCP servers, and no web search.
     pub fn new(
         llm: Arc<dyn LlmBackend>,
         presence: Arc<PresenceManager>,
@@ -71,6 +74,9 @@ impl Subsystems {
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
             mcp_servers: Vec::new(),
+            web_search: Arc::new(ReadinessCell::new(Readiness::Unavailable(
+                "not configured".into(),
+            ))),
             tools_disabled: None,
         }
     }
@@ -90,6 +96,12 @@ impl Subsystems {
     /// Track the configured MCP servers' startup.
     pub fn with_mcp_servers(mut self, servers: Vec<McpServerStatus>) -> Self {
         self.mcp_servers = servers;
+        self
+    }
+
+    /// Track the web search instance's startup.
+    pub fn with_web_search(mut self, web_search: Arc<ReadinessCell<ChildServerStatus>>) -> Self {
+        self.web_search = web_search;
         self
     }
 

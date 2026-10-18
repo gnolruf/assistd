@@ -131,6 +131,7 @@ dependencies = [
  "assistd-llm",
  "assistd-mcp",
  "assistd-memory",
+ "assistd-search",
  "assistd-tools",
  "assistd-utils",
  "assistd-voice",
@@ -160,6 +161,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "which",
  "zbus",
 ]
 
@@ -294,6 +296,18 @@ dependencies = [
  "tokio-rusqlite",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "assistd-search"
+version = "1.4.0"
+dependencies = [
+ "assistd-config",
+ "assistd-utils",
+ "dirs",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

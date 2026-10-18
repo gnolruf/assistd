@@ -124,6 +124,8 @@ pub enum StartupComponent {
     Speech,
     /// The embedding server behind semantic recall.
     Embedding,
+    /// The SearXNG instance behind web search.
+    WebSearch,
     Mcp {
         server: String,
     },
@@ -135,6 +137,7 @@ impl fmt::Display for StartupComponent {
             StartupComponent::VoiceInput => f.write_str("voice input"),
             StartupComponent::Speech => f.write_str("speech"),
             StartupComponent::Embedding => f.write_str("semantic memory"),
+            StartupComponent::WebSearch => f.write_str("web search"),
             StartupComponent::Mcp { server } => write!(f, "MCP {server}"),
         }
     }
