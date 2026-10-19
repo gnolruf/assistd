@@ -34,7 +34,7 @@ const ACCEPT_READABLE: &str =
     "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5";
 
 /// Locale variables consulted for `Accept-Language`, highest precedence first.
-const LOCALE_VARS: [&str; 2] = ["LC_ALL", "LANG"];
+const LOCALE_VARS: [&str; 3] = ["LC_ALL", "LC_MESSAGES", "LANG"];
 
 /// Columns HTML pages are wrapped to once rendered as text.
 const TEXT_WIDTH: usize = 100;
@@ -356,8 +356,6 @@ fn system_locale() -> Option<String> {
         .find_map(|var| std::env::var(var).ok().filter(|value| !value.is_empty()))
 }
 
-/// The `Accept-Language` value for a POSIX locale such as `en_GB.UTF-8`,
-/// falling back to English at lower weight; `C`, `POSIX` and unset mean `en`.
 fn accept_language(locale: Option<&str>) -> String {
     match locale.and_then(language_tag) {
         Some(tag) if tag != "en" => format!("{tag},en;q=0.5"),
@@ -367,10 +365,9 @@ fn accept_language(locale: Option<&str>) -> String {
 
 fn language_tag(locale: &str) -> Option<String> {
     let name = locale.split(['.', '@']).next()?;
-    let (language, region) = match name.split_once('_') {
-        Some((language, region)) => (language, Some(region)),
-        None => (name, None),
-    };
+    let (language, region) = name
+        .split_once('_')
+        .map_or((name, None), |(language, region)| (language, Some(region)));
     if !is_subtag(language, u8::is_ascii_alphabetic) {
         return None;
     }

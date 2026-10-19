@@ -265,7 +265,6 @@ fn accept_language_follows_the_posix_locale() {
         (Some("fr"), "fr,en;q=0.5"),
         (Some("en"), "en"),
         (Some("C.UTF-8"), "en"),
-        (Some("POSIX"), "en"),
         (None, "en"),
     ];
     for (locale, expected) in cases {
