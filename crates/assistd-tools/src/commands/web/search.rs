@@ -36,7 +36,6 @@ const HELP: &str = "usage: web search [-n N] [--lang <tag>] <query...>\n\
     search is disabled, the search server is not running, or the search \
     fails; exit 2 on usage errors.\n";
 
-/// The arguments of one `web search`.
 #[derive(Debug, PartialEq, Eq)]
 struct SearchArgs<'a> {
     limit: usize,
@@ -45,7 +44,6 @@ struct SearchArgs<'a> {
 }
 
 impl<'a> SearchArgs<'a> {
-    /// Leading options, then every remaining word joined into the query.
     fn parse(args: &'a [String]) -> Result<Self, String> {
         let mut limit = DEFAULT_HITS;
         let mut language = None;
@@ -81,7 +79,6 @@ impl<'a> SearchArgs<'a> {
     }
 }
 
-/// Run `web search` with `args`; `client` is `None` when search is disabled.
 pub(super) async fn run(client: Option<&SearxngClient>, args: &[String]) -> CommandOutput {
     if args.is_empty() {
         return CommandOutput::usage(HELP.to_string());
@@ -164,7 +161,6 @@ fn tsv(results: &SearchResults, limit: usize) -> String {
     out
 }
 
-/// `engine (reason), ...`, or `None` when every engine answered.
 fn unresponsive_engines(results: &SearchResults) -> Option<String> {
     (!results.unresponsive_engines.is_empty()).then(|| {
         results

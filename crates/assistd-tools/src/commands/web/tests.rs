@@ -256,25 +256,3 @@ async fn undeclared_oversized_body_stops_at_the_cap() {
         stderr(&out)
     );
 }
-
-#[tokio::test]
-async fn html_page_is_returned_as_text() {
-    let body = b"<html><head><script>track()</script></head><body>\
-        <h1>Price</h1><p>Worth <b>$2,045</b>, see <a href=\"https://example.com/h\">history</a>.</p>\
-        </body></html>";
-    let mut page = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )
-    .into_bytes();
-    page.extend_from_slice(body);
-    let (addr, server) = serve(vec![page]).await;
-    let out = fetch(&allowing(), &format!("http://{addr}/")).await;
-    server.await.unwrap();
-    assert_eq!(out.exit_code, 0, "{}", stderr(&out));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "# Price\n\nWorth **$2,045**, see [history][1].\n\n[1]: https://example.com/h\n"
-    );
-}

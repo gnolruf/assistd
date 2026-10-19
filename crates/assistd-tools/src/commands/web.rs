@@ -343,7 +343,6 @@ fn is_html(response: &reqwest::Response) -> bool {
         })
 }
 
-/// `html` rendered as wrapped plain text, or unchanged if it cannot be.
 fn html_as_text(html: Vec<u8>) -> Vec<u8> {
     html2text::config::plain()
         .allow_width_overflow()
@@ -353,7 +352,6 @@ fn html_as_text(html: Vec<u8>) -> Vec<u8> {
         .map_or(html, String::into_bytes)
 }
 
-/// `raw` as a URL `web fetch` accepts: http(s) with a host.
 fn web_url(raw: &str) -> Option<Url> {
     Url::parse(raw)
         .ok()

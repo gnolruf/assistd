@@ -75,7 +75,6 @@ impl SearchEngine {
         }
     }
 
-    /// The key file, for an engine that takes an API key.
     pub fn api_key_file(&self) -> Option<&Path> {
         match self {
             SearchEngine::Named(_) => None,

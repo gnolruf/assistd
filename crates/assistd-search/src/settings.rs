@@ -29,7 +29,6 @@ search:
   formats: [json]
 ";
 
-/// One engine as the settings file names it, with its API key if it takes one.
 struct EngineEntry<'a> {
     name: &'a str,
     api_key: Option<String>,
