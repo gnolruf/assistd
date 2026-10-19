@@ -17,6 +17,17 @@ pub enum SearchServerError {
         #[source]
         source: io::Error,
     },
+
+    #[error("failed to read the {engine} API key from {}: {source}", path.display())]
+    ApiKey {
+        engine: String,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("the {engine} API key file {} is empty", path.display())]
+    EmptyApiKey { engine: String, path: PathBuf },
 }
 
 /// Why a search returned no results page.

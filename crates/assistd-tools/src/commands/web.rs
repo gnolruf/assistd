@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::header::CONTENT_TYPE;
 use reqwest::redirect::{Attempt, Policy};
 use url::Host;
 
@@ -16,7 +17,7 @@ use assistd_utils::http::{BodyError, read_capped};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{ApprovalGate, ConfirmationRequest, Risk};
+use crate::policy::{ApprovalGate, ConfirmationRequest, Risk, on_blocking_pool};
 
 mod search;
 
@@ -27,6 +28,9 @@ pub const BODY_MAX: usize = 10 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 
 const NAME: &str = "web";
+
+/// Columns HTML pages are wrapped to once rendered as text.
+const TEXT_WIDTH: usize = 100;
 
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
@@ -40,6 +44,10 @@ const FETCH_HELP: &str = "usage: web fetch <URL>\n\
     and redirects are followed only to the same or an approved host. \
     Loopback, private, link-local, and other non-public addresses are \
     never fetched.\n\
+    \n\
+    HTML pages come back as plain text: headings marked with #, tables \
+    as aligned columns, and each link as [n] with its URL listed at the \
+    end. Other content types come back as sent.\n\
     \n\
     Non-2xx statuses exit 1 so `||` fallbacks fire; transport errors, \
     including a host resolving only to non-public addresses, also exit 1. \
@@ -199,7 +207,9 @@ impl WebCommand {
                 UNREACHABLE,
             );
         }
+        let is_html = is_html(&response);
         match read_capped(response, BODY_MAX).await {
+            Ok(body) if is_html => CommandOutput::ok(on_blocking_pool(|| html_as_text(body)).await),
             Ok(body) => CommandOutput::ok(body),
             Err(BodyError::TooLarge { .. }) => fetch_failed(
                 format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
@@ -227,14 +237,13 @@ impl Command for WebCommand {
         "usage: web <search|fetch> [args...]\n\
          \n\
          Subcommands:\n  \
-           search [-n N] [--category <c>] [--lang <tag>] <query...>\n          \
-         search the web through the local SearXNG instance; TSV: rank, title, url, snippet\n  \
+           search [-n N] [--lang <tag>] <query...>\n          \
+         search the web; TSV: rank, title, url, snippet\n  \
            fetch <URL>\n          \
          HTTP GET a public http(s) URL and return the body as stdout\n\
          \n\
          When you do not have a URL, search first, then `web fetch` the most \
-         relevant result. Prefer `-n 5` for simple questions; use \
-         `--category it` for programming questions.\n\
+         relevant result. Prefer `-n 5` for simple questions.\n\
          \n\
          Call either subcommand with no arguments to see its parameter help.\n"
             .to_string()
@@ -255,15 +264,10 @@ impl Command for WebCommand {
             bare if rest.is_empty() && web_url(bare).is_some() => {
                 self.fetch_command(&input.args).await
             }
-            other => CommandOutput::failed(
-                2,
-                error_line(
-                    NAME,
-                    format_args!("unknown subcommand '{other}'"),
-                    Hint::Available,
-                    "search, fetch",
-                )
-                .into_bytes(),
+            other => CommandOutput::usage_error(
+                NAME,
+                format_args!("unknown subcommand '{other}'"),
+                "web search <words...> to search, or web fetch <URL> to read a page",
             ),
         }
     }
@@ -324,6 +328,29 @@ fn follow_redirect(
     } else {
         attempt.error(UnapprovedRedirect(target))
     }
+}
+
+fn is_html(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| {
+            let mime = mime.trim();
+            mime.eq_ignore_ascii_case("text/html")
+                || mime.eq_ignore_ascii_case("application/xhtml+xml")
+        })
+}
+
+/// `html` rendered as wrapped plain text, or unchanged if it cannot be.
+fn html_as_text(html: Vec<u8>) -> Vec<u8> {
+    html2text::config::plain()
+        .allow_width_overflow()
+        .no_link_wrapping()
+        .no_table_borders()
+        .string_from_read(html.as_slice(), TEXT_WIDTH)
+        .map_or(html, String::into_bytes)
 }
 
 /// `raw` as a URL `web fetch` accepts: http(s) with a host.

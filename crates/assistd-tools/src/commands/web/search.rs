@@ -14,13 +14,13 @@ const DEFAULT_HITS: usize = 8;
 
 const MAX_HITS: usize = 20;
 
-const USAGE: &str = "web search [-n N] [--category <c>] [--lang <tag>] <query...>";
+const USAGE: &str = "web search [-n N] [--lang <tag>] <query...>";
 
 const FETCH_KNOWN: &str = "web fetch <URL> with a URL you already know";
 
-const HELP: &str = "usage: web search [-n N] [--category <c>] [--lang <tag>] <query...>\n\
+const HELP: &str = "usage: web search [-n N] [--lang <tag>] <query...>\n\
     \n\
-    Search the web through the local SearXNG instance. The words after the \
+    Search the web. The words after the \
     options form one query, so quoting is not needed: \
     web search sway 1.11 release notes\n\
     \n\
@@ -30,8 +30,6 @@ const HELP: &str = "usage: web search [-n N] [--category <c>] [--lang <tag>] <qu
     \n\
     Options:\n  \
       -n N              at most N hits (default 8, max 20); -n 5 suits simple questions\n  \
-      --category <c>    SearXNG categories, comma-separated: general, it, news, science, ...\n                    \
-    use --category it for programming questions\n  \
       --lang <tag>      result language, e.g. en-US\n\
     \n\
     No results exits 0 with empty stdout and a note on stderr. Exit 1 when \
@@ -42,7 +40,6 @@ const HELP: &str = "usage: web search [-n N] [--category <c>] [--lang <tag>] <qu
 #[derive(Debug, PartialEq, Eq)]
 struct SearchArgs<'a> {
     limit: usize,
-    categories: Option<&'a str>,
     language: Option<&'a str>,
     text: String,
 }
@@ -51,7 +48,6 @@ impl<'a> SearchArgs<'a> {
     /// Leading options, then every remaining word joined into the query.
     fn parse(args: &'a [String]) -> Result<Self, String> {
         let mut limit = DEFAULT_HITS;
-        let mut categories = None;
         let mut language = None;
         let mut rest = args;
         loop {
@@ -60,15 +56,11 @@ impl<'a> SearchArgs<'a> {
                     limit = parse_limit(value)?;
                     rest = tail;
                 }
-                [flag, value, tail @ ..] if flag == "--category" => {
-                    categories = Some(value.as_str());
-                    rest = tail;
-                }
                 [flag, value, tail @ ..] if flag == "--lang" => {
                     language = Some(value.as_str());
                     rest = tail;
                 }
-                [flag] if matches!(flag.as_str(), "-n" | "--category" | "--lang") => {
+                [flag] if matches!(flag.as_str(), "-n" | "--lang") => {
                     return Err(format!("{flag} needs a value"));
                 }
                 [flag, tail @ ..] if flag == "--" => {
@@ -83,7 +75,6 @@ impl<'a> SearchArgs<'a> {
         }
         Ok(Self {
             limit,
-            categories,
             language,
             text: rest.join(" "),
         })
@@ -106,7 +97,6 @@ pub(super) async fn run(client: Option<&SearxngClient>, args: &[String]) -> Comm
     };
     let query = SearchQuery {
         text: &args.text,
-        categories: args.categories,
         language: args.language,
         page: NonZeroU32::MIN,
     };
@@ -129,17 +119,41 @@ fn parse_limit(raw: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("-n takes a count from 1 to {MAX_HITS}, got '{raw}'"))
 }
 
-/// Answers, then the first `limit` hits, as TSV on stdout; engines that
-/// did not answer, and an empty result, as notes on stderr.
+/// Answers, then the first `limit` hits, as TSV on stdout. Engines that did
+/// not answer are logged, and reach the model only to explain an empty result.
 fn listed(results: &SearchResults, limit: usize) -> CommandOutput {
-    let mut stdout = String::new();
+    let stdout = tsv(results, limit);
+    let unresponsive = unresponsive_engines(results);
+    if let Some(engines) = &unresponsive {
+        tracing::warn!("web search: engines that did not answer: {engines}");
+    }
+    let stderr = if stdout.is_empty() {
+        let why = unresponsive
+            .map(|engines| format!("; engines that did not answer: {engines}"))
+            .unwrap_or_default();
+        format!(
+            "[note] {NAME}: no results{why}. {}: fewer or different words\n",
+            Hint::Try
+        )
+    } else {
+        String::new()
+    };
+    CommandOutput {
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+        ..CommandOutput::default()
+    }
+}
+
+fn tsv(results: &SearchResults, limit: usize) -> String {
+    let mut out = String::new();
     for answer in &results.answers {
         let answer = answer.split_whitespace().collect::<Vec<_>>().join(" ");
-        let _ = writeln!(stdout, "answer\t{answer}");
+        let _ = writeln!(out, "answer\t{answer}");
     }
     for (rank, hit) in results.results.iter().take(limit).enumerate() {
         let _ = writeln!(
-            stdout,
+            out,
             "{}\t{}\t{}\t{}",
             rank + 1,
             hit.title,
@@ -147,31 +161,19 @@ fn listed(results: &SearchResults, limit: usize) -> CommandOutput {
             hit.content
         );
     }
-    let mut stderr = String::new();
-    if !results.unresponsive_engines.is_empty() {
-        let engines = results
+    out
+}
+
+/// `engine (reason), ...`, or `None` when every engine answered.
+fn unresponsive_engines(results: &SearchResults) -> Option<String> {
+    (!results.unresponsive_engines.is_empty()).then(|| {
+        results
             .unresponsive_engines
             .iter()
             .map(|(engine, reason)| format!("{engine} ({reason})"))
             .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(
-            stderr,
-            "[note] {NAME}: engines that did not answer: {engines}"
-        );
-    }
-    if stdout.is_empty() {
-        let _ = writeln!(
-            stderr,
-            "[note] {NAME}: no results. {}: fewer or different words",
-            Hint::Try
-        );
-    }
-    CommandOutput {
-        stdout: stdout.into_bytes(),
-        stderr: stderr.into_bytes(),
-        ..CommandOutput::default()
-    }
+            .join(", ")
+    })
 }
 
 fn search_failed(what: impl Display, recovery: &str) -> CommandOutput {
@@ -204,9 +206,6 @@ mod tests {
              1\tA title\thttps://a.example/\tline one line two\n\
              2\tB\thttps://b.example/\t\n"
         );
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            "[note] web: engines that did not answer: brave (too many requests)\n"
-        );
+        assert!(out.stderr.is_empty(), "{:?}", out.stderr);
     }
 }

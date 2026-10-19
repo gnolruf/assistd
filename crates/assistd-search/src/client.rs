@@ -33,8 +33,6 @@ pub struct SearxngClient {
 #[derive(Debug, Clone, Copy)]
 pub struct SearchQuery<'a> {
     pub text: &'a str,
-    /// Comma-separated SearXNG categories such as `general`, `it` or `news`.
-    pub categories: Option<&'a str>,
     /// A locale such as `en-US`; `None` lets SearXNG pick.
     pub language: Option<&'a str>,
     pub page: NonZeroU32,
@@ -138,9 +136,6 @@ impl SearxngClient {
                 .append_pair("q", query.text)
                 .append_pair("format", "json")
                 .append_pair("pageno", &query.page.to_string());
-            if let Some(categories) = query.categories {
-                pairs.append_pair("categories", categories);
-            }
             if let Some(language) = query.language {
                 pairs.append_pair("language", language);
             }
