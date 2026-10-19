@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
 use reqwest::redirect::{Attempt, Policy};
 use url::Host;
 
@@ -19,7 +19,10 @@ use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{ApprovalGate, ConfirmationRequest, Risk, on_blocking_pool};
 
+mod page;
 mod search;
+
+use page::HtmlPage;
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
@@ -36,14 +39,13 @@ const ACCEPT_READABLE: &str =
 /// Locale variables consulted for `Accept-Language`, highest precedence first.
 const LOCALE_VARS: [&str; 3] = ["LC_ALL", "LC_MESSAGES", "LANG"];
 
-/// Columns HTML pages are wrapped to once rendered as text.
-const TEXT_WIDTH: usize = 100;
-
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
-const FETCH_USAGE: &str = "web fetch <URL>";
+const FETCH_USAGE: &str = "web fetch [--raw] <URL>";
 
-const FETCH_HELP: &str = "usage: web fetch <URL>\n\
+const RAW_FLAG: &str = "--raw";
+
+const FETCH_HELP: &str = "usage: web fetch [--raw] <URL>\n\
     \n\
     HTTP GET the URL (http or https only) and return the response body \
     as stdout. 30-second timeout; response body capped at 10 MiB. The \
@@ -52,9 +54,10 @@ const FETCH_HELP: &str = "usage: web fetch <URL>\n\
     Loopback, private, link-local, and other non-public addresses are \
     never fetched.\n\
     \n\
-    HTML pages come back as plain text: headings marked with #, tables \
-    as aligned columns, and each link as [n] with its URL listed at the \
-    end. Other content types come back as sent.\n\
+    HTML pages come back as plain text: the page title first, headings \
+    marked with #, list items with -, tables as aligned columns, and each \
+    link as `text (absolute-url)`. --raw returns the HTML markup instead. \
+    Other content types always come back as sent.\n\
     \n\
     Non-2xx statuses exit 1 so `||` fallbacks fire; transport errors, \
     including a host resolving only to non-public addresses, also exit 1. \
@@ -87,6 +90,13 @@ const TEREDO_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 
 
 /// 6to4 addresses carry the IPv4 endpoint in bits 16..48.
 const SIX_TO_FOUR_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16);
+
+/// How a fetched HTML body is returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rendering {
+    Text,
+    Raw,
+}
 
 /// `web <search|fetch>`: search through SearXNG, or HTTP GET a URL and
 /// return the body as stdout. Hosts not yet approved for good are fetched
@@ -151,7 +161,13 @@ impl WebCommand {
     }
 
     async fn fetch_command(&self, args: &[String]) -> CommandOutput {
-        let raw = match args {
+        let rendering = if args.iter().any(|arg| arg == RAW_FLAG) {
+            Rendering::Raw
+        } else {
+            Rendering::Text
+        };
+        let targets: Vec<&String> = args.iter().filter(|arg| *arg != RAW_FLAG).collect();
+        let raw = match targets.as_slice() {
             [] => return CommandOutput::usage(FETCH_HELP.to_string()),
             [raw] => raw,
             _ => {
@@ -193,10 +209,10 @@ impl WebCommand {
                 .into_bytes(),
             );
         }
-        self.fetch(url).await
+        self.fetch(url, rendering).await
     }
 
-    async fn fetch(&self, url: Url) -> CommandOutput {
+    async fn fetch(&self, url: Url, rendering: Rendering) -> CommandOutput {
         let response = match self.client.get(url.clone()).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -217,10 +233,15 @@ impl WebCommand {
                 UNREACHABLE,
             );
         }
-        let is_html = is_html(&response);
+        let html_page = match rendering {
+            Rendering::Text => HtmlPage::of(&response),
+            Rendering::Raw => None,
+        };
         match read_capped(response, BODY_MAX).await {
-            Ok(body) if is_html => CommandOutput::ok(on_blocking_pool(|| html_as_text(body)).await),
-            Ok(body) => CommandOutput::ok(body),
+            Ok(body) => match html_page {
+                Some(page) => CommandOutput::ok(on_blocking_pool(move || page.render(body)).await),
+                None => CommandOutput::ok(body),
+            },
             Err(BodyError::TooLarge { .. }) => fetch_failed(
                 format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
                 "a URL path that returns less content",
@@ -249,7 +270,7 @@ impl Command for WebCommand {
          Subcommands:\n  \
            search [-n N] [--lang <tag>] <query...>\n          \
          search the web; TSV: rank, title, url, snippet\n  \
-           fetch <URL>\n          \
+           fetch [--raw] <URL>\n          \
          HTTP GET a public http(s) URL and return the body as stdout\n\
          \n\
          When you do not have a URL, search first, then `web fetch` the most \
@@ -383,28 +404,6 @@ fn language_tag(locale: &str) -> Option<String> {
 
 fn is_subtag(part: &str, allowed: fn(&u8) -> bool) -> bool {
     (2..=3).contains(&part.len()) && part.bytes().all(|byte| allowed(&byte))
-}
-
-fn is_html(response: &reqwest::Response) -> bool {
-    response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|mime| {
-            let mime = mime.trim();
-            mime.eq_ignore_ascii_case("text/html")
-                || mime.eq_ignore_ascii_case("application/xhtml+xml")
-        })
-}
-
-fn html_as_text(html: Vec<u8>) -> Vec<u8> {
-    html2text::config::plain()
-        .allow_width_overflow()
-        .no_link_wrapping()
-        .no_table_borders()
-        .string_from_read(html.as_slice(), TEXT_WIDTH)
-        .map_or(html, String::into_bytes)
 }
 
 fn web_url(raw: &str) -> Option<Url> {

@@ -271,3 +271,71 @@ fn accept_language_follows_the_posix_locale() {
         assert_eq!(accept_language(locale), expected, "{locale:?}");
     }
 }
+
+/// Fetches `page`, served as `content_type`, once per entry of `flag_sets`.
+async fn fetch_page(content_type: &str, page: &[u8], flag_sets: &[&[&str]]) -> Vec<String> {
+    let html = response(
+        &format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}"),
+        page,
+    );
+    let (addr, server) = serve(vec![html; flag_sets.len()]).await;
+    let mut bodies = Vec::new();
+    for flags in flag_sets {
+        let args = std::iter::once("fetch")
+            .chain(flags.iter().copied())
+            .map(String::from)
+            .chain([format!("http://{addr}/blog/post")])
+            .collect();
+        let out = allowing().run(CommandInput { args, stdin: None }).await;
+        assert_eq!(out.exit_code, 0, "{}", stderr(&out));
+        bodies.push(String::from_utf8_lossy(&out.stdout).replace(&addr.to_string(), "HOST"));
+    }
+    server.await.unwrap();
+    bodies
+}
+
+#[tokio::test]
+async fn html_page_is_read_as_text_unless_raw() {
+    const PAGE: &str = "<!doctype html><html><head><title>Rust &amp; You</title>\
+        <style>body { color: red }</style><script>trackVisitor()</script></head>\
+        <body><h1>Intro</h1><p>Read <a href=\"/docs/guide?x=1\">the guide</a> \
+        or <a href=\"#top\">jump up</a>.</p><ul><li>one</li></ul></body></html>";
+    let [text, raw] = fetch_page(
+        "text/html; charset=utf-8",
+        PAGE.as_bytes(),
+        &[&[], &["--raw"]],
+    )
+    .await
+    .try_into()
+    .unwrap();
+    assert_eq!(
+        text,
+        "Rust & You\n\n# Intro\n\nRead the guide (http://HOST/docs/guide?x=1) or jump up.\n- one\n"
+    );
+    assert_eq!(raw, PAGE);
+}
+
+#[tokio::test]
+async fn legacy_charsets_are_decoded() {
+    let cases: [(&str, &[u8], &str); 3] = [
+        ("text/html; Charset=ISO-8859-1", b"<p>caf\xe9</p>", "café"),
+        (
+            "text/html",
+            b"<meta charset=\"windows-1252\"><p>caf\xe9</p>",
+            "café",
+        ),
+        (
+            "text/html",
+            b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=Shift_JIS\">\
+              <p>\x93\xfa\x96\x7b</p>",
+            "日本",
+        ),
+    ];
+    for (content_type, page, expected) in cases {
+        let [text] = fetch_page(content_type, page, &[&[]])
+            .await
+            .try_into()
+            .unwrap();
+        assert_eq!(text.trim(), expected, "{content_type}");
+    }
+}
