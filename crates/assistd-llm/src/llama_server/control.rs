@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_utils::child_server::ApiKey;
+use assistd_utils::http::local_client_builder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::debug;
@@ -35,8 +36,7 @@ impl LlamaServerControl {
         api_key: Option<&ApiKey>,
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, LlamaServerError> {
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = local_client_builder()
             .default_headers(
                 api_key
                     .map(ApiKey::authorization_headers)

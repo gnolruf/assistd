@@ -11,6 +11,7 @@ use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
 use assistd_utils::child_server::ApiKey;
+use assistd_utils::http::local_client_builder;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -70,8 +71,7 @@ impl LlamaChatClient {
         api_key: Option<&ApiKey>,
         health: Option<Arc<dyn LlmHealthProbe>>,
     ) -> Result<Self, ChatClientError> {
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = local_client_builder()
             .default_headers(
                 api_key
                     .map(ApiKey::authorization_headers)

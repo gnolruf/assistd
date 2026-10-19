@@ -9,7 +9,7 @@ use reqwest::Url;
 use serde::{Deserialize, Deserializer};
 
 use assistd_utils::child_server::ChildServerStatus;
-use assistd_utils::http::{BodyError, read_capped};
+use assistd_utils::http::{BodyError, local_client_builder, read_capped};
 use assistd_utils::readiness::{NotReady, ReadinessCell};
 
 use crate::error::SearchError;
@@ -83,8 +83,7 @@ impl SearxngClient {
         addr: SocketAddr,
         server: Arc<ReadinessCell<ChildServerStatus>>,
     ) -> Result<Self, SearchError> {
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = local_client_builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()

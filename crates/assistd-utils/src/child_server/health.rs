@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 use super::ChildServerSpec;
 use super::error::ChildServerError;
 use super::ownership::is_listening_in_group;
+use crate::http::local_client_builder;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -29,8 +30,7 @@ impl HealthChecker {
     /// the spec's ready timeout bounds each [`Self::wait_ready`].
     pub(super) fn new(spec: &impl ChildServerSpec, owner: Pid) -> Result<Self, ChildServerError> {
         let addr = spec.listen_addr();
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = local_client_builder()
             .connect_timeout(PROBE_TIMEOUT)
             .build()?;
         Ok(Self {

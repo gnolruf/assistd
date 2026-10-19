@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use assistd_utils::child_server::{ApiKey, ChildServerStatus};
+use assistd_utils::http::local_client_builder;
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -51,8 +52,7 @@ impl LlamaEmbedder {
         api_key: Option<&ApiKey>,
         server: Option<ChildServerStatus>,
     ) -> Result<Self, EmbedError> {
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = local_client_builder()
             .default_headers(
                 api_key
                     .map(ApiKey::authorization_headers)
