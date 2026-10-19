@@ -1,11 +1,10 @@
-//! The `User-Agent` assistd identifies itself with, and reading HTTP
-//! response bodies under a size cap.
+//! HTTP client builders for local and remote servers, and reading response
+//! bodies under a size cap.
 
-use reqwest::Response;
+use reqwest::{Client, ClientBuilder, Response};
 use thiserror::Error;
 
-/// `User-Agent` sent on requests to hosts outside the machine.
-pub const USER_AGENT: &str = concat!(
+const USER_AGENT: &str = concat!(
     "assistd/",
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/gnolruf/assistd)"
@@ -19,6 +18,20 @@ pub enum BodyError {
 
     #[error("failed to read response body: {0}")]
     Read(#[source] reqwest::Error),
+}
+
+/// A client builder for servers on this machine: no proxy, no compression.
+pub fn local_client_builder() -> ClientBuilder {
+    Client::builder().no_proxy().no_gzip().no_brotli()
+}
+
+/// A client builder for hosts outside the machine: identifies as assistd and
+/// takes bodies as sent, so callers wanting compressed transfer re-enable it.
+pub fn remote_client_builder() -> ClientBuilder {
+    Client::builder()
+        .user_agent(USER_AGENT)
+        .no_gzip()
+        .no_brotli()
 }
 
 /// Read the whole body of `response`, failing as soon as it is known to

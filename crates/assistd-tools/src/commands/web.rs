@@ -13,7 +13,7 @@ use reqwest::redirect::{Attempt, Policy};
 use url::Host;
 
 use assistd_search::SearxngClient;
-use assistd_utils::http::{BodyError, USER_AGENT, read_capped};
+use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
@@ -116,8 +116,9 @@ impl WebCommand {
         timeout: Duration,
     ) -> Self {
         let redirect_hosts = hosts.clone();
-        let client = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
+        let client = remote_client_builder()
+            .gzip(true)
+            .brotli(true)
             .default_headers(request_headers())
             .no_proxy()
             .dns_resolver(FilteredResolver { reachable })

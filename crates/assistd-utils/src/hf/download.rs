@@ -10,7 +10,7 @@ use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 
 use super::{HfFileId, InvalidHfId};
-use crate::http::USER_AGENT;
+use crate::http::remote_client_builder;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest wait for the next chunk before a download counts as stalled.
@@ -138,8 +138,7 @@ pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError
 }
 
 fn download_client(read_timeout: Duration) -> reqwest::Result<Client> {
-    Client::builder()
-        .user_agent(USER_AGENT)
+    remote_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(read_timeout)
         .build()
