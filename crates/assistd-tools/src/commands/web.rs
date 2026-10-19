@@ -8,12 +8,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::redirect::{Attempt, Policy};
 use url::Host;
 
 use assistd_search::SearxngClient;
-use assistd_utils::http::{BodyError, read_capped};
+use assistd_utils::http::{BodyError, USER_AGENT, read_capped};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
@@ -28,6 +28,13 @@ pub const BODY_MAX: usize = 10 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 
 const NAME: &str = "web";
+
+/// Asks for readable content first; anything else is still returned as sent.
+const ACCEPT_READABLE: &str =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5";
+
+/// Locale variables consulted for `Accept-Language`, highest precedence first.
+const LOCALE_VARS: [&str; 2] = ["LC_ALL", "LANG"];
 
 /// Columns HTML pages are wrapped to once rendered as text.
 const TEXT_WIDTH: usize = 100;
@@ -110,6 +117,8 @@ impl WebCommand {
     ) -> Self {
         let redirect_hosts = hosts.clone();
         let client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .default_headers(request_headers())
             .no_proxy()
             .dns_resolver(FilteredResolver { reachable })
             .connect_timeout(Duration::from_secs(10))
@@ -328,6 +337,54 @@ fn follow_redirect(
     } else {
         attempt.error(UnapprovedRedirect(target))
     }
+}
+
+fn request_headers() -> HeaderMap {
+    let language = accept_language(system_locale().as_deref());
+    HeaderMap::from_iter([
+        (ACCEPT, HeaderValue::from_static(ACCEPT_READABLE)),
+        (
+            ACCEPT_LANGUAGE,
+            HeaderValue::try_from(language).unwrap_or(HeaderValue::from_static("en")),
+        ),
+    ])
+}
+
+fn system_locale() -> Option<String> {
+    LOCALE_VARS
+        .iter()
+        .find_map(|var| std::env::var(var).ok().filter(|value| !value.is_empty()))
+}
+
+/// The `Accept-Language` value for a POSIX locale such as `en_GB.UTF-8`,
+/// falling back to English at lower weight; `C`, `POSIX` and unset mean `en`.
+fn accept_language(locale: Option<&str>) -> String {
+    match locale.and_then(language_tag) {
+        Some(tag) if tag != "en" => format!("{tag},en;q=0.5"),
+        _ => "en".to_string(),
+    }
+}
+
+fn language_tag(locale: &str) -> Option<String> {
+    let name = locale.split(['.', '@']).next()?;
+    let (language, region) = match name.split_once('_') {
+        Some((language, region)) => (language, Some(region)),
+        None => (name, None),
+    };
+    if !is_subtag(language, u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let language = language.to_ascii_lowercase();
+    Some(
+        match region.filter(|region| is_subtag(region, u8::is_ascii_alphanumeric)) {
+            Some(region) => format!("{language}-{}", region.to_ascii_uppercase()),
+            None => language,
+        },
+    )
+}
+
+fn is_subtag(part: &str, allowed: fn(&u8) -> bool) -> bool {
+    (2..=3).contains(&part.len()) && part.bytes().all(|byte| allowed(&byte))
 }
 
 fn is_html(response: &reqwest::Response) -> bool {

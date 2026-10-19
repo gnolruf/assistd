@@ -1,7 +1,15 @@
-//! Reading HTTP response bodies under a size cap.
+//! The `User-Agent` assistd identifies itself with, and reading HTTP
+//! response bodies under a size cap.
 
 use reqwest::Response;
 use thiserror::Error;
+
+/// `User-Agent` sent on requests to hosts outside the machine.
+pub const USER_AGENT: &str = concat!(
+    "assistd/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/gnolruf/assistd)"
+);
 
 /// Why a response body was not read in full.
 #[derive(Debug, Error)]

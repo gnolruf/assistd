@@ -256,3 +256,19 @@ async fn undeclared_oversized_body_stops_at_the_cap() {
         stderr(&out)
     );
 }
+
+#[test]
+fn accept_language_follows_the_posix_locale() {
+    let cases = [
+        (Some("en_GB.UTF-8"), "en-GB,en;q=0.5"),
+        (Some("de_DE@euro"), "de-DE,en;q=0.5"),
+        (Some("fr"), "fr,en;q=0.5"),
+        (Some("en"), "en"),
+        (Some("C.UTF-8"), "en"),
+        (Some("POSIX"), "en"),
+        (None, "en"),
+    ];
+    for (locale, expected) in cases {
+        assert_eq!(accept_language(locale), expected, "{locale:?}");
+    }
+}
