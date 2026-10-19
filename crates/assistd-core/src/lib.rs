@@ -3,6 +3,7 @@
 //! subsystem crates so dependents need only this one.
 
 use std::fs::{DirBuilder, DirEntry, Permissions};
+use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use tracing::{info, warn};
 use assistd_embed::{EmbedJob, EmbedderHandle};
 use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
+use assistd_search::{SearchError, SearxngClient};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
     AllowlistError, ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps,
@@ -28,7 +30,9 @@ use assistd_tools::{
     presentation::is_spill_file_name,
     probe_sandbox,
 };
+use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::path::expand_tilde_from_env;
+use assistd_utils::readiness::ReadinessCell;
 
 pub mod agent;
 pub mod presence;
@@ -110,6 +114,9 @@ pub enum BuildToolsError {
          fix ~/.config/assistd/config.toml"
     )]
     NoWritablePaths,
+
+    #[error(transparent)]
+    SearchClient(#[from] SearchError),
 }
 
 /// Subsystem handles [`build_tools`] wires into the tool registry.
@@ -131,6 +138,8 @@ pub struct BuildToolsDeps<'a> {
     /// The active session, which `reminisce` excludes from its results.
     pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
+    /// Readiness of the SearXNG instance `web search` goes through.
+    pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
 }
 
 /// Keeps a [`VisionGate`] in step with the model llama-server has loaded.
@@ -258,6 +267,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         embed_tx,
         current_session,
         window_manager,
+        web_search,
     } = deps;
 
     clear_overflow_dir(&overflow_dir)?;
@@ -287,6 +297,14 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
             .protecting(protected_dirs),
     );
 
+    let search = config
+        .search
+        .enabled
+        .then(|| {
+            let addr = SocketAddr::new(config.search.host, config.search.port.get());
+            SearxngClient::new(addr, web_search)
+        })
+        .transpose()?;
     let commands = builtin_commands(BuiltinCommandDeps {
         bash_cfg,
         write_cfg,
@@ -297,6 +315,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         confirmation_gate,
         vision_gate,
         window_manager,
+        search,
     });
 
     let output_cap = Arc::new(OutputCap::new(PresentSpec::from_config(
@@ -329,6 +348,7 @@ struct BuiltinCommandDeps {
     confirmation_gate: Arc<dyn ConfirmationGate>,
     vision_gate: Arc<VisionGate>,
     window_manager: Arc<dyn WindowManager>,
+    search: Option<SearxngClient>,
 }
 
 fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
@@ -342,6 +362,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
         confirmation_gate,
         vision_gate,
         window_manager,
+        search,
     } = deps;
 
     let mut commands = CommandRegistry::new();
@@ -361,10 +382,10 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     ));
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
-    commands.register(WebCommand::new(ApprovalGate::new(
-        confirmation_gate.clone(),
-        approved_hosts,
-    )));
+    commands.register(WebCommand::new(
+        ApprovalGate::new(confirmation_gate.clone(), approved_hosts),
+        search,
+    ));
     commands.register(BashCommand::new(
         bash_cfg.clone(),
         sandbox.clone(),

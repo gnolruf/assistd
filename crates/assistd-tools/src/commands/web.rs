@@ -1,3 +1,6 @@
+//! `web <search|fetch>`: search the web through the supervised SearXNG
+//! instance, or HTTP GET a public URL.
+
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -5,14 +8,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use reqwest::header::CONTENT_TYPE;
 use reqwest::redirect::{Attempt, Policy};
 use url::Host;
 
+use assistd_search::SearxngClient;
 use assistd_utils::http::{BodyError, read_capped};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{ApprovalGate, ConfirmationRequest, Risk};
+use crate::policy::{ApprovalGate, ConfirmationRequest, Risk, on_blocking_pool};
+
+mod search;
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
@@ -20,7 +27,32 @@ pub const BODY_MAX: usize = 10 * 1024 * 1024;
 /// Redirects followed before a fetch fails.
 const MAX_REDIRECTS: usize = 10;
 
+const NAME: &str = "web";
+
+/// Columns HTML pages are wrapped to once rendered as text.
+const TEXT_WIDTH: usize = 100;
+
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
+
+const FETCH_USAGE: &str = "web fetch <URL>";
+
+const FETCH_HELP: &str = "usage: web fetch <URL>\n\
+    \n\
+    HTTP GET the URL (http or https only) and return the response body \
+    as stdout. 30-second timeout; response body capped at 10 MiB. The \
+    user is asked before fetching from a host they have not approved, \
+    and redirects are followed only to the same or an approved host. \
+    Loopback, private, link-local, and other non-public addresses are \
+    never fetched.\n\
+    \n\
+    HTML pages come back as plain text: headings marked with #, tables \
+    as aligned columns, and each link as [n] with its URL listed at the \
+    end. Other content types come back as sent.\n\
+    \n\
+    Non-2xx statuses exit 1 so `||` fallbacks fire; transport errors, \
+    including a host resolving only to non-public addresses, also exit 1. \
+    Exit 2 on usage errors (wrong arg count, non-http scheme), 126 when \
+    the URL names a non-public address or the user declines.\n";
 
 /// IPv4 ranges that are not globally routable unicast, as (network, prefix length).
 const NON_PUBLIC_V4: [(Ipv4Addr, u32); 13] = [
@@ -49,27 +81,26 @@ const TEREDO_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 
 /// 6to4 addresses carry the IPv4 endpoint in bits 16..48.
 const SIX_TO_FOUR_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16);
 
-/// `web URL`: HTTP GET a URL and return the response body as stdout. Hosts
-/// not yet approved for good are fetched only once the user confirms, and
-/// only public addresses are ever connected to.
+/// `web <search|fetch>`: search through SearXNG, or HTTP GET a URL and
+/// return the body as stdout. Hosts not yet approved for good are fetched
+/// only once the user confirms, and only public addresses are connected to.
 #[derive(Debug)]
 pub struct WebCommand {
     client: reqwest::Client,
     hosts: ApprovalGate,
     reachable: fn(IpAddr) -> bool,
+    search: Option<SearxngClient>,
 }
 
 impl WebCommand {
-    /// A command with a 30-second request timeout that asks before fetching
-    /// from a host `hosts` has not approved.
-    pub fn new(hosts: ApprovalGate) -> Self {
-        Self::with_timeout(hosts, Duration::from_secs(30))
-    }
-
-    /// [`WebCommand::new`] with requests timing out after `timeout`, and
-    /// connecting capped at 10 seconds.
-    pub fn with_timeout(hosts: ApprovalGate, timeout: Duration) -> Self {
-        Self::connecting_to(is_public, hosts, timeout)
+    /// A command with a 30-second fetch timeout that asks before fetching
+    /// from a host `hosts` has not approved; `search` is `None` when web
+    /// search is disabled.
+    pub fn new(hosts: ApprovalGate, search: Option<SearxngClient>) -> Self {
+        Self {
+            search,
+            ..Self::connecting_to(is_public, hosts, Duration::from_secs(30))
+        }
     }
 
     fn connecting_to(
@@ -92,6 +123,7 @@ impl WebCommand {
             client,
             hosts,
             reachable,
+            search: None,
         }
     }
 
@@ -99,13 +131,59 @@ impl WebCommand {
         let host = url.host_str().unwrap_or_default();
         self.hosts
             .confirm(host, || ConfirmationRequest {
-                tool: "web".to_string(),
-                script: format!("web {url}"),
+                tool: NAME.to_string(),
+                script: format!("web fetch {url}"),
                 matched_pattern: format!("fetches from {host}, which is not yet approved"),
                 always_allow: vec![host.to_string()],
                 risk: Risk::Elevated,
             })
             .await
+    }
+
+    async fn fetch_command(&self, args: &[String]) -> CommandOutput {
+        let raw = match args {
+            [] => return CommandOutput::usage(FETCH_HELP.to_string()),
+            [raw] => raw,
+            _ => {
+                return CommandOutput::usage_error(
+                    NAME,
+                    "fetch expects exactly one URL argument",
+                    FETCH_USAGE,
+                );
+            }
+        };
+        let Some(url) = web_url(raw) else {
+            return CommandOutput::usage_error(
+                NAME,
+                format_args!("only http(s):// URLs are allowed: {raw}"),
+                "web fetch https://... or web fetch http://...",
+            );
+        };
+        if let Some(refusal) = unreachable_literal(&url, self.reachable) {
+            return CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    NAME,
+                    format_args!("fetch denied by policy: {refusal}"),
+                    Hint::Try,
+                    "a URL on the public internet",
+                )
+                .into_bytes(),
+            );
+        }
+        if !self.confirmed(&url).await {
+            return CommandOutput::failed(
+                POLICY_DENIED_EXIT,
+                error_line(
+                    NAME,
+                    format_args!("fetch cancelled by user: {url}"),
+                    Hint::Try,
+                    "answering without this page",
+                )
+                .into_bytes(),
+            );
+        }
+        self.fetch(url).await
     }
 
     async fn fetch(&self, url: Url) -> CommandOutput {
@@ -129,7 +207,9 @@ impl WebCommand {
                 UNREACHABLE,
             );
         }
+        let is_html = is_html(&response);
         match read_capped(response, BODY_MAX).await {
+            Ok(body) if is_html => CommandOutput::ok(on_blocking_pool(|| html_as_text(body)).await),
             Ok(body) => CommandOutput::ok(body),
             Err(BodyError::TooLarge { .. }) => fetch_failed(
                 format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
@@ -146,77 +226,50 @@ impl WebCommand {
 #[async_trait]
 impl Command for WebCommand {
     fn name(&self) -> &'static str {
-        "web"
+        NAME
     }
 
     fn summary(&self) -> &'static str {
-        "HTTP GET a URL and return the body as stdout (http/https only)"
+        "search the web, or HTTP GET a URL and return the body (http/https only)"
     }
 
     fn help(&self) -> String {
-        "usage: web URL\n\
+        "usage: web <search|fetch> [args...]\n\
          \n\
-         HTTP GET the URL (http or https only) and return the response body \
-         as stdout. 30-second timeout; response body capped at 10 MiB. The \
-         user is asked before fetching from a host they have not approved, \
-         and redirects are followed only to the same or an approved host. \
-         Loopback, private, link-local, and other non-public addresses are \
-         never fetched.\n\
+         Subcommands:\n  \
+           search [-n N] [--lang <tag>] <query...>\n          \
+         search the web; TSV: rank, title, url, snippet\n  \
+           fetch <URL>\n          \
+         HTTP GET a public http(s) URL and return the body as stdout\n\
          \n\
-         Non-2xx statuses exit 1 so `||` fallbacks fire; transport errors, \
-         including a host resolving only to non-public addresses, also exit 1. \
-         Exit 2 on usage errors (wrong arg count, non-http scheme), 126 when \
-         the URL names a non-public address or the user declines.\n"
+         When you do not have a URL, search first, then `web fetch` the most \
+         relevant result. Prefer `-n 5` for simple questions.\n\
+         \n\
+         Call either subcommand with no arguments to see its parameter help.\n"
             .to_string()
     }
 
+    /// URLs and search queries never name files, so `?` and `*` stay literal.
+    fn expands_args(&self) -> bool {
+        false
+    }
+
     async fn run(&self, input: CommandInput) -> CommandOutput {
-        if input.args.is_empty() {
+        let Some((subcommand, rest)) = input.args.split_first() else {
             return CommandOutput::usage(self.help());
-        }
-        if input.args.len() != 1 {
-            return CommandOutput::usage_error(
-                "web",
-                "expects exactly one URL argument",
-                "web <URL>",
-            );
-        }
-        let raw = &input.args[0];
-        let url = match Url::parse(raw) {
-            Ok(url) if matches!(url.scheme(), "http" | "https") && url.has_host() => url,
-            _ => {
-                return CommandOutput::usage_error(
-                    "web",
-                    format_args!("only http(s):// URLs are allowed: {raw}"),
-                    "web https://... or web http://...",
-                );
-            }
         };
-        if let Some(refusal) = unreachable_literal(&url, self.reachable) {
-            return CommandOutput::failed(
-                POLICY_DENIED_EXIT,
-                error_line(
-                    "web",
-                    format_args!("fetch denied by policy: {refusal}"),
-                    Hint::Try,
-                    "a URL on the public internet",
-                )
-                .into_bytes(),
-            );
+        match subcommand.as_str() {
+            "search" => search::run(self.search.as_ref(), rest).await,
+            "fetch" => self.fetch_command(rest).await,
+            bare if rest.is_empty() && web_url(bare).is_some() => {
+                self.fetch_command(&input.args).await
+            }
+            other => CommandOutput::usage_error(
+                NAME,
+                format_args!("unknown subcommand '{other}'"),
+                "web search <words...> to search, or web fetch <URL> to read a page",
+            ),
         }
-        if !self.confirmed(&url).await {
-            return CommandOutput::failed(
-                POLICY_DENIED_EXIT,
-                error_line(
-                    "web",
-                    format_args!("fetch cancelled by user: {url}"),
-                    Hint::Try,
-                    "answering without this page",
-                )
-                .into_bytes(),
-            );
-        }
-        self.fetch(url).await
     }
 }
 
@@ -277,6 +330,34 @@ fn follow_redirect(
     }
 }
 
+fn is_html(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| {
+            let mime = mime.trim();
+            mime.eq_ignore_ascii_case("text/html")
+                || mime.eq_ignore_ascii_case("application/xhtml+xml")
+        })
+}
+
+fn html_as_text(html: Vec<u8>) -> Vec<u8> {
+    html2text::config::plain()
+        .allow_width_overflow()
+        .no_link_wrapping()
+        .no_table_borders()
+        .string_from_read(html.as_slice(), TEXT_WIDTH)
+        .map_or(html, String::into_bytes)
+}
+
+fn web_url(raw: &str) -> Option<Url> {
+    Url::parse(raw)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+}
+
 fn unreachable_literal(url: &Url, reachable: fn(IpAddr) -> bool) -> Option<NonPublic> {
     let ip = match url.host()? {
         Host::Ipv4(ip) => IpAddr::V4(ip),
@@ -328,7 +409,7 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 }
 
 fn fetch_failed(what: impl Display, recovery: &str) -> CommandOutput {
-    CommandOutput::failed(1, error_line("web", what, Hint::Try, recovery).into_bytes())
+    CommandOutput::failed(1, error_line(NAME, what, Hint::Try, recovery).into_bytes())
 }
 
 #[cfg(test)]

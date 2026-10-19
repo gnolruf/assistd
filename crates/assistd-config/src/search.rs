@@ -2,13 +2,14 @@
 
 use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU64};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
-    DEFAULT_SEARCH_COMMAND, DEFAULT_SEARCH_ENABLED, DEFAULT_SEARCH_HOST, DEFAULT_SEARCH_PORT,
-    DEFAULT_SEARCH_READY_TIMEOUT_SECS,
+    DEFAULT_SEARCH_COMMAND, DEFAULT_SEARCH_ENABLED, DEFAULT_SEARCH_ENGINES, DEFAULT_SEARCH_HOST,
+    DEFAULT_SEARCH_PORT, DEFAULT_SEARCH_READY_TIMEOUT_SECS,
 };
 use crate::errors::SearchCommandError;
 
@@ -29,6 +30,10 @@ pub struct SearchConfig {
     /// Longest, in seconds, a freshly spawned instance may take to answer
     /// its health check before the attempt counts as failed.
     pub ready_timeout_secs: NonZeroU64,
+    /// SearXNG engines to search with; only these load, each enabled even if
+    /// SearXNG ships it disabled or inactive. Must not be empty; a name
+    /// SearXNG does not know is logged and skipped.
+    pub engines: Vec<SearchEngine>,
 }
 
 impl Default for SearchConfig {
@@ -41,6 +46,39 @@ impl Default for SearchConfig {
             host: DEFAULT_SEARCH_HOST,
             port: DEFAULT_SEARCH_PORT,
             ready_timeout_secs: DEFAULT_SEARCH_READY_TIMEOUT_SECS,
+            engines: DEFAULT_SEARCH_ENGINES
+                .map(|name| SearchEngine::Named(name.to_owned()))
+                .to_vec(),
+        }
+    }
+}
+
+/// One `search.engines` entry: an engine name as SearXNG's `settings.yml`
+/// spells it, or a table naming an engine and the file holding its API key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SearchEngine {
+    Named(String),
+    Keyed {
+        name: String,
+        /// File whose contents, trimmed of surrounding whitespace, are the
+        /// key; read at each launch so it never sits in this config.
+        #[serde(deserialize_with = "crate::home_path::deserialize")]
+        api_key_file: PathBuf,
+    },
+}
+
+impl SearchEngine {
+    pub fn name(&self) -> &str {
+        match self {
+            SearchEngine::Named(name) | SearchEngine::Keyed { name, .. } => name,
+        }
+    }
+
+    pub fn api_key_file(&self) -> Option<&Path> {
+        match self {
+            SearchEngine::Named(_) => None,
+            SearchEngine::Keyed { api_key_file, .. } => Some(api_key_file),
         }
     }
 }

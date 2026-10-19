@@ -11,6 +11,8 @@ use assistd_tools::{
     ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, ToolSandbox, ToolsDisabled,
     VisionGate,
 };
+use assistd_utils::child_server::ChildServerStatus;
+use assistd_utils::readiness::ReadinessCell;
 use tokio::sync::watch;
 use tracing::info;
 
@@ -35,6 +37,7 @@ pub(super) struct ToolDeps<'a> {
     pub embed: &'a EmbeddingHandles,
     pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
+    pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
 }
 
 /// Probe the sandbox, then build the registry and prepare the MCP
@@ -79,6 +82,7 @@ pub(super) fn init(
         embed_tx: deps.embed.embed_tx.clone(),
         current_session: deps.current_session,
         window_manager: deps.window_manager,
+        web_search: deps.web_search,
     })?;
     info!(
         "tools: registered {} (overflow dir {})",

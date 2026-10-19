@@ -34,10 +34,10 @@ pub(crate) fn test_registry() -> CommandRegistry {
     registry.register(WriteCommand::permissive_for_tests());
     registry.register(SeeCommand::default());
     registry.register(ScreenshotCommand::default());
-    registry.register(WebCommand::new(ApprovalGate::new(
-        Arc::new(AlwaysAllowGate),
-        Arc::new(Approvals::unsaved()),
-    )));
+    registry.register(WebCommand::new(
+        ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
+        None,
+    ));
     registry.register(BashCommand::default());
     registry.register(WmCommand::for_test(Arc::new(NoWindowManager)));
     registry

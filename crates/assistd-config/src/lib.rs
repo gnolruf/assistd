@@ -32,7 +32,7 @@ pub use mcp::{McpConfig, McpServerConfig};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
 pub use presence::PresenceConfig;
-pub use search::{SearchCommand, SearchConfig};
+pub use search::{SearchCommand, SearchConfig, SearchEngine};
 pub use sleep::SleepConfig;
 pub use timeouts::TimeoutsConfig;
 pub use tools::{

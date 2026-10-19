@@ -115,6 +115,9 @@ pub const DEFAULT_SEARCH_COMMAND: &str = "searxng-run";
 pub const DEFAULT_SEARCH_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_SEARCH_PORT: NonZeroU16 = nz16(8387);
 pub const DEFAULT_SEARCH_READY_TIMEOUT_SECS: NonZeroU64 = nz64(60);
+/// The engines that answer automated queries from a home connection; most
+/// others meet them with CAPTCHAs, rate limits or outright refusals.
+pub const DEFAULT_SEARCH_ENGINES: [&str; 2] = ["bing", "yahoo"];
 
 pub const DEFAULT_MCP_ENABLED: bool = false;
 pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(30);

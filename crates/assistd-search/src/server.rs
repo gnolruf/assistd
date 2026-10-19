@@ -28,7 +28,7 @@ impl SearxngServerSpec {
     /// Draw a fresh secret and write the settings file the instance loads.
     pub fn prepare(cfg: SearchConfig) -> Result<Self, SearchServerError> {
         let secret = random_secret().map_err(SearchServerError::Secret)?;
-        let settings_path = write_settings()?;
+        let settings_path = write_settings(&cfg.engines)?;
         Ok(Self {
             cfg,
             settings_path,

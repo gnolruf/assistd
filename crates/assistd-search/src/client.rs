@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Url;
@@ -9,6 +10,7 @@ use serde::{Deserialize, Deserializer};
 
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::http::{BodyError, read_capped};
+use assistd_utils::readiness::{NotReady, ReadinessCell};
 
 use crate::error::SearchError;
 
@@ -25,14 +27,12 @@ const BODY_MAX: usize = 512 * 1024;
 pub struct SearxngClient {
     client: reqwest::Client,
     search_url: Url,
-    server: ChildServerStatus,
+    server: Arc<ReadinessCell<ChildServerStatus>>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SearchQuery<'a> {
     pub text: &'a str,
-    /// Comma-separated SearXNG categories such as `general`, `it` or `news`.
-    pub categories: Option<&'a str>,
     /// A locale such as `en-US`; `None` lets SearXNG pick.
     pub language: Option<&'a str>,
     pub page: NonZeroU32,
@@ -77,8 +77,12 @@ enum WireAnswer {
 }
 
 impl SearxngClient {
-    /// A client for the instance listening on `addr`, gated on `server`.
-    pub fn new(addr: SocketAddr, server: ChildServerStatus) -> Result<Self, SearchError> {
+    /// A client for the instance listening on `addr`, gated on the
+    /// readiness of the server `server` tracks.
+    pub fn new(
+        addr: SocketAddr,
+        server: Arc<ReadinessCell<ChildServerStatus>>,
+    ) -> Result<Self, SearchError> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -94,12 +98,11 @@ impl SearxngClient {
         })
     }
 
-    /// Fails with [`SearchError::NotServing`], without sending, while the
-    /// instance is not serving.
+    /// Fails without sending with [`SearchError::NotServing`] while the
+    /// instance is starting or not serving, and [`SearchError::Unavailable`]
+    /// when it never started.
     pub async fn search(&self, query: &SearchQuery<'_>) -> Result<SearchResults, SearchError> {
-        if !self.server.is_serving() {
-            return Err(SearchError::NotServing);
-        }
+        self.ensure_serving()?;
         let response = self
             .client
             .get(self.request_url(query))
@@ -117,6 +120,14 @@ impl SearxngClient {
         serde_json::from_slice(&body).map_err(SearchError::Decode)
     }
 
+    fn ensure_serving(&self) -> Result<(), SearchError> {
+        match self.server.get() {
+            Ok(status) if status.is_serving() => Ok(()),
+            Ok(_) | Err(NotReady::Starting) => Err(SearchError::NotServing),
+            Err(NotReady::Unavailable(reason)) => Err(SearchError::Unavailable(reason)),
+        }
+    }
+
     fn request_url(&self, query: &SearchQuery<'_>) -> Url {
         let mut url = self.search_url.clone();
         {
@@ -125,9 +136,6 @@ impl SearxngClient {
                 .append_pair("q", query.text)
                 .append_pair("format", "json")
                 .append_pair("pageno", &query.page.to_string());
-            if let Some(categories) = query.categories {
-                pairs.append_pair("categories", categories);
-            }
             if let Some(language) = query.language {
                 pairs.append_pair("language", language);
             }

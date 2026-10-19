@@ -468,6 +468,16 @@ fn validate_search(
     if embedding.enabled && search.port == embedding.port {
         errors.push("search.port must differ from embedding.port (the embedding server)".into());
     }
+    if search.engines.is_empty() {
+        errors.push("search.engines must name at least one SearXNG engine".into());
+    }
+    if search
+        .engines
+        .iter()
+        .any(|engine| engine.name().trim().is_empty())
+    {
+        errors.push("search.engines must not contain blank names".into());
+    }
 }
 
 fn require_at_most(errors: &mut Vec<String>, key: &str, value: NonZeroU32, max: u32) {

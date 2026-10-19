@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use reqwest::StatusCode;
 use thiserror::Error;
@@ -16,6 +17,17 @@ pub enum SearchServerError {
         #[source]
         source: io::Error,
     },
+
+    #[error("failed to read the {engine} API key from {}: {source}", path.display())]
+    ApiKey {
+        engine: String,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("the {engine} API key file {} is empty", path.display())]
+    EmptyApiKey { engine: String, path: PathBuf },
 }
 
 /// Why a search returned no results page.
@@ -23,6 +35,9 @@ pub enum SearchServerError {
 pub enum SearchError {
     #[error("search server is not ready; request not sent")]
     NotServing,
+
+    #[error("search server is unavailable: {0}")]
+    Unavailable(Arc<str>),
 
     #[error("build search reqwest client: {0}")]
     Client(#[source] reqwest::Error),
