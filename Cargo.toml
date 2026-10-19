@@ -70,6 +70,7 @@ base64 = "0.23"
 infer = "0.22"
 shlex = "2"
 html2text = "0.17.4"
+encoding_rs = "0.8.42"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
