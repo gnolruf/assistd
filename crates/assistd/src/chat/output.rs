@@ -22,7 +22,6 @@ const COLLAPSED_HEAD_LINES: usize = 10;
 const NO_RESULT_OUTPUT: &str = "[stderr] no result received";
 const NO_RESULT_EXIT_CODE: i32 = -1;
 const UNANNOUNCED_COMMAND: &str = "<?>";
-/// Leads the first row of a user prompt; later rows take the matching indent.
 const PROMPT_PREFIX: &str = "> ";
 const PROMPT_INDENT: &str = "  ";
 /// First code point of the 8-dot braille block; the low byte picks the dots.
@@ -198,7 +197,7 @@ impl OutputPane {
     }
 
     pub(super) fn push_info(&mut self, text: &str) {
-        self.push_separated(text, info_style());
+        self.push_separated(text.to_string(), info_style());
     }
 
     /// Open a live compaction line.
@@ -231,7 +230,7 @@ impl OutputPane {
     }
 
     /// Append the dim `Worked for …` line that closes a finished reply.
-    pub(super) fn push_turn_summary(&mut self, text: &str) {
+    pub(super) fn push_turn_summary(&mut self, text: String) {
         self.push_separated(text, summary_style());
     }
 
@@ -267,7 +266,7 @@ impl OutputPane {
     }
 
     pub(super) fn push_error(&mut self, msg: &str) {
-        self.push_separated(&format!("!! {msg}"), error_style());
+        self.push_separated(format!("!! {msg}"), error_style());
     }
 
     /// Append a finished tool block. Blocks whose body exceeds
@@ -555,14 +554,11 @@ impl OutputPane {
         self.items.push(OutputItem::Text(Line::from("")));
     }
 
-    /// Append each line of `text`, styled, and the blank row that separates
-    /// them from the next item.
-    fn push_separated(&mut self, text: &str, style: Style) {
+    /// Append one styled line and the blank row that separates it from the next item.
+    fn push_separated(&mut self, text: String, style: Style) {
         self.close_open_assistant();
-        self.items.extend(
-            text.split('\n')
-                .map(|line| OutputItem::Text(single_span_line(line.to_string(), style))),
-        );
+        self.items
+            .push(OutputItem::Text(single_span_line(text, style)));
         self.items.push(OutputItem::Text(Line::from("")));
     }
 
@@ -795,9 +791,13 @@ fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16
     }
     let pad_to_width = style.bg.is_some();
     for chunk in wrapped {
-        let s = chunk.into_owned();
-        let s = if pad_to_width { padded_to(s, width) } else { s };
-        out.push(single_span_line(s, style));
+        let row = chunk.into_owned();
+        let row = if pad_to_width {
+            padded_to(row, width)
+        } else {
+            row
+        };
+        out.push(single_span_line(row, style));
     }
 }
 
@@ -819,7 +819,6 @@ fn unwrapped_prompt_rows(text: &str) -> impl Iterator<Item = Line<'static>> + '_
     })
 }
 
-/// `s` followed by spaces out to `width` chars.
 fn padded_to(mut s: String, width: u16) -> String {
     let visible = s.chars().count();
     let cap = usize::from(width);

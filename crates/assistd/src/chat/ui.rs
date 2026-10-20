@@ -696,7 +696,7 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
             let mut row = if i == 0 {
                 INPUT_PROMPT.to_string()
             } else {
-                " ".repeat(INPUT_PROMPT.chars().count())
+                " ".repeat(usize::from(prompt_w))
             };
             row.extend(&buf_chars[start..end]);
             Line::from(row)
@@ -727,10 +727,9 @@ fn compute_input_height(frame_width: u16, dock_height: u16, buffer: &str) -> u16
     needed.clamp(1, cap)
 }
 
-/// `(start, end)` char ranges of each input row, every row indented past
-/// the prompt, starting a row at each line break and otherwise breaking
-/// after the last whitespace that fits. A final row that fills the width is
-/// followed by an empty one for the cursor.
+/// `(start, end)` char ranges of each input row: a new row at each line
+/// break, otherwise after the last whitespace that fits past the prompt. A
+/// final row that fills the width is followed by an empty one for the cursor.
 fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     let n = buf.len();
     if width == 0 {
@@ -741,8 +740,7 @@ fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     let line_ends = buf
         .iter()
         .enumerate()
-        .filter(|&(_, &c)| c == '\n')
-        .map(|(i, _)| i)
+        .filter_map(|(i, &c)| (c == '\n').then_some(i))
         .chain([n]);
     let mut start = 0usize;
     for end in line_ends {

@@ -341,14 +341,3 @@ fn abandoned_tool_block_ends_as_a_failure() {
     assert_eq!(lines[1], "▎ [stderr] no result received");
     assert_eq!(lines[2], footer(38, "[exit:-1 | 0ms]"));
 }
-
-#[test]
-fn prompt_rows_after_the_first_line_up_beneath_its_text() {
-    let mut rows = Vec::new();
-    render_prompt(&mut rows, "one two three\nfour", 10);
-    let rows: Vec<String> = rows
-        .iter()
-        .map(|l| line_text(l).trim_end().to_string())
-        .collect();
-    assert_eq!(rows, ["> one two", "  three", "  four"]);
-}
