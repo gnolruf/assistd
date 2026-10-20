@@ -56,18 +56,6 @@ const MIN_CONTENT_SCORE: f64 = 10.0;
 /// A best container with fewer characters than this means the page is not an article.
 const MIN_CONTENT_CHARS: usize = 500;
 
-/// Which tests an extraction pass applies; looser passes keep more of the page.
-#[derive(Clone, Copy, Debug)]
-struct Flags {
-    strip_unlikely: bool,
-}
-
-impl Flags {
-    const STRICT: Self = Self {
-        strip_unlikely: true,
-    };
-}
-
 /// Visible text measured over a subtree, in whitespace-collapsed characters.
 #[derive(Clone, Copy, Debug, Default)]
 struct TextStats {
@@ -136,24 +124,23 @@ struct Candidate {
 /// The node to render for `dom`: its main content when one stands out,
 /// otherwise the whole document. Page chrome is pruned from `dom` either way.
 pub(super) fn main_content(dom: &RcDom) -> Handle {
-    let flags = Flags::STRICT;
-    prune(&dom.document, flags);
+    prune(&dom.document);
     sole_landmark(&dom.document)
         .or_else(|| best_container(&dom.document))
         .unwrap_or_else(|| dom.document.clone())
 }
 
-fn prune(root: &Handle, flags: Flags) {
+fn prune(root: &Handle) {
     let mut pending = vec![root.clone()];
     while let Some(node) = pending.pop() {
         node.children
             .borrow_mut()
-            .retain(|child| !is_boilerplate(child, flags));
+            .retain(|child| !is_boilerplate(child));
         pending.extend(node.children.borrow().iter().cloned());
     }
 }
 
-fn is_boilerplate(node: &Handle, flags: Flags) -> bool {
+fn is_boilerplate(node: &Handle) -> bool {
     let Some(tag) = tag(node) else {
         return false;
     };
@@ -165,16 +152,13 @@ fn is_boilerplate(node: &Handle, flags: Flags) -> bool {
         })
         || attribute(node, "hidden").is_some_and(|hidden| hidden != "until-found")
         || attribute(node, "aria-hidden").is_some_and(|hidden| hidden.eq_ignore_ascii_case("true"))
-        || (flags.strip_unlikely && !NAME_EXEMPT_TAGS.contains(&tag) && has_unlikely_name(node))
+        || (!NAME_EXEMPT_TAGS.contains(&tag) && has_unlikely_name(node))
 }
 
 fn has_unlikely_name(node: &Handle) -> bool {
-    let names = [attribute(node, "class"), attribute(node, "id")]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
+    let class = attribute(node, "class").unwrap_or_default();
+    let id = attribute(node, "id").unwrap_or_default();
+    let names = format!("{class} {id}").to_ascii_lowercase();
     UNLIKELY_NAMES.iter().any(|name| names.contains(name))
         && !LIKELY_NAMES.iter().any(|name| names.contains(name))
 }
