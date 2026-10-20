@@ -339,3 +339,37 @@ async fn legacy_charsets_are_decoded() {
         assert_eq!(text.trim(), expected, "{content_type}");
     }
 }
+
+#[tokio::test]
+async fn article_page_keeps_its_body_and_drops_chrome_unless_full() {
+    const PAGE: &str = include_str!("fixtures/article.html");
+    let [article, full] = fetch_page("text/html", PAGE.as_bytes(), &[&[], &["--full"]])
+        .await
+        .try_into()
+        .unwrap();
+    assert!(
+        article.starts_with(
+            "Building a Ferris Wheel | Field Notes\n\n# Building a Ferris Wheel\n\n\
+             The first Ferris wheel"
+        ),
+        "{article}"
+    );
+    assert!(article.contains("about twenty minutes"), "{article}");
+    for chrome in ["Subscribe", "Shop", "Popular posts", "Comments", "Privacy"] {
+        assert!(!article.contains(chrome), "{chrome} in {article}");
+        assert!(full.contains(chrome), "{chrome} missing from {full}");
+    }
+}
+
+#[tokio::test]
+async fn non_article_page_falls_back_to_the_pruned_page() {
+    const PAGE: &str = include_str!("fixtures/results.html");
+    let [text] = fetch_page("text/html", PAGE.as_bytes(), &[&[]])
+        .await
+        .try_into()
+        .unwrap();
+    for result in ["Ferris wheel - Wikipedia", "Ain Dubai", "The London Eye"] {
+        assert!(text.contains(result), "{result} missing from {text}");
+    }
+    assert!(!text.contains("Next page"), "{text}");
+}
