@@ -1,4 +1,5 @@
-//! Single-line input buffer with readline keybindings and history.
+//! Input buffer with readline keybindings and history. Shift+Enter or
+//! Alt+Enter inserts a line break; Enter submits.
 
 use std::collections::VecDeque;
 
@@ -54,8 +55,8 @@ impl InputLine {
         self.buffer = text;
     }
 
-    /// Cursor column in characters, not bytes.
-    pub(super) fn cursor_col(&self) -> u16 {
+    /// Cursor position in characters, not bytes, counting line breaks.
+    pub(super) fn cursor_offset(&self) -> u16 {
         u16::try_from(self.buffer[..self.cursor].chars().count()).unwrap_or(u16::MAX)
     }
 
@@ -102,6 +103,14 @@ impl InputLine {
             }
             KeyCode::Down => {
                 self.history_next();
+                InputAction::None
+            }
+            KeyCode::Enter
+                if ev
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                self.insert_char('\n');
                 InputAction::None
             }
             KeyCode::Enter => self.submit(),
@@ -378,6 +387,23 @@ mod tests {
         i.on_key(key(KeyCode::Left));
         i.on_key(typed('é'));
         assert_eq!(i.buffer(), "aéb");
+    }
+
+    #[test]
+    fn modified_enter_breaks_the_line_and_plain_enter_submits() {
+        let mut i = InputLine::new();
+        type_str(&mut i, "one");
+        for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            assert_eq!(
+                i.on_key(KeyEvent::new(KeyCode::Enter, modifier)),
+                InputAction::None
+            );
+        }
+        type_str(&mut i, "two");
+        assert_eq!(
+            i.on_key(key(KeyCode::Enter)),
+            InputAction::Submit("one\n\ntwo".to_string())
+        );
     }
 
     #[test]

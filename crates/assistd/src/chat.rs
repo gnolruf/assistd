@@ -107,8 +107,9 @@ impl InstanceLock {
 struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Enter raw mode and the alternate screen, saving the window title,
-    /// and install a panic hook that restores the terminal before the
+    /// Enter raw mode and the alternate screen, saving the window title and
+    /// asking for modifier-aware key reports (so Shift+Enter is distinct from
+    /// Enter), and install a panic hook that restores the terminal before the
     /// previous hook runs.
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode().context("enable_raw_mode")?;
@@ -117,7 +118,10 @@ impl TerminalGuard {
             terminal::EnterAlternateScreen,
             style::Print(PUSH_WINDOW_TITLE),
             event::EnableMouseCapture,
-            event::EnableFocusChange
+            event::EnableFocusChange,
+            event::PushKeyboardEnhancementFlags(
+                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
         ) {
             let _ = terminal::disable_raw_mode();
             return Err(e).context("EnterAlternateScreen");
@@ -134,6 +138,7 @@ impl TerminalGuard {
         terminal::disable_raw_mode()?;
         execute!(
             io::stdout(),
+            event::PopKeyboardEnhancementFlags,
             event::DisableFocusChange,
             event::DisableMouseCapture,
             style::Print(POP_WINDOW_TITLE),

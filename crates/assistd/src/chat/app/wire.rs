@@ -304,7 +304,7 @@ impl App {
                         .push_replayed_compaction(Duration::from_millis(ms));
                 }
                 if let Some(stats) = turn_stats {
-                    self.output.push_turn_summary(turn_summary(&stats));
+                    self.output.push_turn_summary(&turn_summary(&stats));
                 }
             }
             Event::UndoApplied {
@@ -479,7 +479,7 @@ impl App {
                 duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 tokens: self.tokens.tokens(),
             };
-            self.output.push_turn_summary(turn_summary(&stats));
+            self.output.push_turn_summary(&turn_summary(&stats));
         }
     }
 

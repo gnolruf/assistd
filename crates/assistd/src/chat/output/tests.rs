@@ -12,6 +12,7 @@ fn item_text(it: &OutputItem) -> String {
     match it {
         OutputItem::Banner { model_name } => format!("[banner:{model_name}]"),
         OutputItem::Text(l) => line_text(l),
+        OutputItem::Prompt(text) => format!("> {text}"),
         OutputItem::Assistant(text) => text.clone(),
         OutputItem::Tool(b) => format!("[tool:{}]", b.command),
         OutputItem::Thumbnail(t) => format!("[thumb:{}]", t.name),
@@ -339,4 +340,15 @@ fn abandoned_tool_block_ends_as_a_failure() {
     let lines = rendered_lines(&mut p, 40, 10);
     assert_eq!(lines[1], "▎ [stderr] no result received");
     assert_eq!(lines[2], footer(38, "[exit:-1 | 0ms]"));
+}
+
+#[test]
+fn prompt_rows_after_the_first_line_up_beneath_its_text() {
+    let mut rows = Vec::new();
+    render_prompt(&mut rows, "one two three\nfour", 10);
+    let rows: Vec<String> = rows
+        .iter()
+        .map(|l| line_text(l).trim_end().to_string())
+        .collect();
+    assert_eq!(rows, ["> one two", "  three", "  four"]);
 }
