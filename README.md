@@ -18,7 +18,9 @@ window-manager bindings), and integrates with the running compositor for context
 - **Tools and pipelines.** A single `run` tool exposes shell-shaped
   commands (`cat`, `grep`, `wc`, `head`, `tail`, `sort`, `uniq`, `bash`,
   `see`, `screenshot`, `web`, `wm`, …) the model composes with `|`,
-  `&&`, `||`, `;`, plus `~` and glob expansion. Alongside it, `remember`
+  `&&`, `||`, `;`, plus `~` and glob expansion. `web` both fetches
+  pages as readable text and, with a local SearXNG installed, searches
+  the web ([web search](docs/web-search.md)). Alongside it, `remember`
   saves and looks up facts, and `reminisce` searches
   transcripts from earlier sessions.
 - **Voice in/out.** Push-to-talk and continuous listening via
@@ -51,8 +53,10 @@ window-manager bindings), and integrates with the running compositor for context
   as a child process.
 - `bubblewrap`. Without it the model gets no tools.
 
-Optional: `piper` for TTS, and `grim` (Wayland) or `maim` (X11) for
-screenshots.
+Optional: `piper` for TTS, `grim` (Wayland) or `maim` (X11) for
+screenshots, and SearXNG's `searxng-run` for web search (`searxng-git`
+on the AUR; enable with `[search] enabled = true`, see
+[web search](docs/web-search.md)).
 
 On Arch, the `assistd` and `assistd-git` AUR packages install the
 binary and a systemd user unit (`systemctl --user enable --now assistd`).

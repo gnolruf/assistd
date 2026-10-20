@@ -18,6 +18,7 @@ depends=(
 optdepends=(
   'llama.cpp: provides llama-server (required to run a local LLM backend)'
   'piper-tts: Piper text-to-speech voice output'
+  'searxng-git: provides searxng-run for the web search command'
   'maim: X11 full/region screenshot capture'
   'slop: maim --select region picker'
   'grim: Wayland full/region screenshot capture'

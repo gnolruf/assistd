@@ -352,6 +352,41 @@ on a slow MCP server: the handshake and each call are bounded by that
 server's `request_timeout_secs`, and a timeout surfaces as a structured
 error to the model.
 
+### Web search (`assistd-search` ↔ SearXNG)
+
+`web search` goes through a private [SearXNG](https://docs.searxng.org)
+instance the daemon runs as a child process when `[search] enabled =
+true`. It needs no GPU, so it starts as soon as the socket opens rather
+than waiting for the model, and runs under the same `ChildServer`
+supervisor as the llama-servers: health probe on `GET /healthz` (checked
+against `/proc` listener ownership), restart with backoff, and a degraded
+state after repeated failures. A `search.command` that is not on `$PATH`
+fails at once instead of going through the restart attempts.
+
+Each launch writes a fresh `settings.yml` (mode 0600, under
+`$XDG_RUNTIME_DIR/assistd/searxng/`) that loads only the engines in
+`search.engines`, enabling each even if SearXNG ships it disabled,
+with API keys read from each engine's `api_key_file`. It turns off the
+limiter, image proxy and public-instance mode and enables the JSON
+format. The bind address, port, settings path and a random per-launch
+secret are passed as `SEARXNG_*` variables; any `SEARXNG_*` variables
+in the daemon's own environment are removed first, so the instance
+never picks up settings from elsewhere.
+
+Readiness is reported as the `web search` component of
+`Event::Readiness`: `starting`, `ready`, or `unavailable (<reason>)`.
+`SearxngClient` checks it before every request, so a search while the
+instance is starting or restarting fails at once with a message the
+model can act on rather than waiting on a dead port. Results come back
+from `GET /search?format=json` and are printed as TSV hits for the model
+to pick from and read with `web fetch`.
+
+The instance has no authentication, so `search.host` must be loopback.
+`web fetch` never fetches loopback or other non-public addresses, so
+the model cannot reach the search port through it, and sandboxed `bash`
+has no network unless `--share-net` is set; in practice only the
+daemon's own client talks to SearXNG.
+
 ## Data flow: end-to-end query
 
 A walk through `assistd query "what files changed this week?"`:

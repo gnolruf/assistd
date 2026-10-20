@@ -15,6 +15,7 @@ pkgbase = assistd-git
 	depends = dbus
 	optdepends = llama.cpp: provides llama-server (required to run a local LLM backend)
 	optdepends = piper-tts: Piper text-to-speech voice output
+	optdepends = searxng-git: provides searxng-run for the web search command
 	optdepends = maim: X11 full/region screenshot capture
 	optdepends = slop: maim --select region picker
 	optdepends = grim: Wayland full/region screenshot capture
