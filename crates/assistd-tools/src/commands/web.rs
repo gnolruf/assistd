@@ -22,7 +22,7 @@ use crate::policy::{ApprovalGate, ConfirmationRequest, Risk, on_blocking_pool};
 mod page;
 mod search;
 
-use page::HtmlPage;
+use page::{Extent, HtmlPage};
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
@@ -41,11 +41,13 @@ const LOCALE_VARS: [&str; 3] = ["LC_ALL", "LC_MESSAGES", "LANG"];
 
 const UNREACHABLE: &str = "a different URL or check the endpoint is reachable";
 
-const FETCH_USAGE: &str = "web fetch [--raw] <URL>";
+const FETCH_USAGE: &str = "web fetch [--raw | --full] <URL>";
 
 const RAW_FLAG: &str = "--raw";
 
-const FETCH_HELP: &str = "usage: web fetch [--raw] <URL>\n\
+const FULL_FLAG: &str = "--full";
+
+const FETCH_HELP: &str = "usage: web fetch [--raw | --full] <URL>\n\
     \n\
     HTTP GET the URL (http or https only) and return the response body \
     as stdout. 30-second timeout; response body capped at 10 MiB. The \
@@ -54,10 +56,13 @@ const FETCH_HELP: &str = "usage: web fetch [--raw] <URL>\n\
     Loopback, private, link-local, and other non-public addresses are \
     never fetched.\n\
     \n\
-    HTML pages come back as plain text: the page title first, headings \
-    marked with #, list items with -, tables as aligned columns, and each \
-    link as `text (absolute-url)`. --raw returns the HTML markup instead. \
-    Other content types always come back as sent.\n\
+    HTML pages come back as plain text: the page title first, then the \
+    article or main content when the page has one, with navigation, \
+    sidebars, footers and other page chrome left out. Headings are marked \
+    with #, list items with -, tables come out as aligned columns, and each \
+    link as `text (absolute-url)`. --full returns the whole page's text when \
+    the main content leaves out something you need; --raw returns the HTML \
+    markup instead. Other content types always come back as sent.\n\
     \n\
     Non-2xx statuses exit 1 so `||` fallbacks fire; transport errors, \
     including a host resolving only to non-public addresses, also exit 1. \
@@ -94,7 +99,7 @@ const SIX_TO_FOUR_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0,
 /// How a fetched HTML body is returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rendering {
-    Text,
+    Text(Extent),
     Raw,
 }
 
@@ -161,22 +166,9 @@ impl WebCommand {
     }
 
     async fn fetch_command(&self, args: &[String]) -> CommandOutput {
-        let rendering = if args.iter().any(|arg| arg == RAW_FLAG) {
-            Rendering::Raw
-        } else {
-            Rendering::Text
-        };
-        let targets: Vec<&String> = args.iter().filter(|arg| *arg != RAW_FLAG).collect();
-        let raw = match targets.as_slice() {
-            [] => return CommandOutput::usage(FETCH_HELP.to_string()),
-            [raw] => raw,
-            _ => {
-                return CommandOutput::usage_error(
-                    NAME,
-                    "fetch expects exactly one URL argument",
-                    FETCH_USAGE,
-                );
-            }
+        let (rendering, raw) = match fetch_args(args) {
+            Ok(parsed) => parsed,
+            Err(usage) => return usage,
         };
         let Some(url) = web_url(raw) else {
             return CommandOutput::usage_error(
@@ -234,7 +226,7 @@ impl WebCommand {
             );
         }
         let html_page = match rendering {
-            Rendering::Text => HtmlPage::of(&response),
+            Rendering::Text(extent) => HtmlPage::of(&response, extent),
             Rendering::Raw => None,
         };
         match read_capped(response, BODY_MAX).await {
@@ -270,7 +262,7 @@ impl Command for WebCommand {
          Subcommands:\n  \
            search [-n N] [--lang <tag>] <query...>\n          \
          search the web; TSV: rank, title, url, snippet\n  \
-           fetch [--raw] <URL>\n          \
+           fetch [--raw | --full] <URL>\n          \
          HTTP GET a public http(s) URL and return the body as stdout\n\
          \n\
          When you do not have a URL, search first, then `web fetch` the most \
@@ -404,6 +396,36 @@ fn language_tag(locale: &str) -> Option<String> {
 
 fn is_subtag(part: &str, allowed: fn(&u8) -> bool) -> bool {
     (2..=3).contains(&part.len()) && part.bytes().all(|byte| allowed(&byte))
+}
+
+/// The rendering and URL `args` ask for, or the usage output to return instead.
+fn fetch_args(args: &[String]) -> Result<(Rendering, &str), CommandOutput> {
+    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    let rendering = match (has(RAW_FLAG), has(FULL_FLAG)) {
+        (true, true) => {
+            return Err(CommandOutput::usage_error(
+                NAME,
+                "--raw and --full cannot be combined",
+                FETCH_USAGE,
+            ));
+        }
+        (true, false) => Rendering::Raw,
+        (false, true) => Rendering::Text(Extent::Whole),
+        (false, false) => Rendering::Text(Extent::Article),
+    };
+    let targets: Vec<&String> = args
+        .iter()
+        .filter(|arg| ![RAW_FLAG, FULL_FLAG].contains(&arg.as_str()))
+        .collect();
+    match targets.as_slice() {
+        [] => Err(CommandOutput::usage(FETCH_HELP.to_string())),
+        [raw] => Ok((rendering, raw)),
+        _ => Err(CommandOutput::usage_error(
+            NAME,
+            "fetch expects exactly one URL argument",
+            FETCH_USAGE,
+        )),
+    }
 }
 
 fn web_url(raw: &str) -> Option<Url> {

@@ -1,13 +1,16 @@
 //! Renders fetched HTML pages as plain text: title first, links inline
-//! with their absolute URLs.
+//! with their absolute URLs, page chrome dropped unless the whole page is asked for.
 
 use std::borrow::Cow;
 
 use encoding_rs::{Encoding, UTF_8};
+use html2text::config::Config;
 use html2text::render::{PlainDecorator, TextDecorator};
 use html2text::{Handle, RcDom};
 use reqwest::Url;
 use reqwest::header::CONTENT_TYPE;
+
+mod readable;
 
 /// Columns HTML pages are wrapped to once rendered as text.
 const TEXT_WIDTH: usize = 100;
@@ -17,16 +20,25 @@ const PRESCAN_BYTES: usize = 1024;
 
 const CHARSET: &[u8] = b"charset";
 
+/// How much of an HTML page is rendered as text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Extent {
+    /// The main content when the page has one, and never navigation, sidebars or footers.
+    Article,
+    Whole,
+}
+
 /// An HTML response whose body is rendered as text once read.
 #[derive(Debug)]
 pub(super) struct HtmlPage {
     url: Url,
     declared: Option<&'static Encoding>,
+    extent: Extent,
 }
 
 impl HtmlPage {
     /// The page `response` carries, or `None` when it is not HTML.
-    pub(super) fn of(response: &reqwest::Response) -> Option<Self> {
+    pub(super) fn of(response: &reqwest::Response, extent: Extent) -> Option<Self> {
         let content_type = response.headers().get(CONTENT_TYPE)?.to_str().ok()?;
         let mut parts = content_type.split(';');
         let mime = parts.next()?.trim();
@@ -43,13 +55,14 @@ impl HtmlPage {
                     .then(|| charset_label(rest))
                     .flatten()
             }),
+            extent,
         })
     }
 
     /// `body` decoded and rendered as text; returned unchanged if it cannot be parsed.
     pub(super) fn render(&self, body: Vec<u8>) -> Vec<u8> {
         let html = decode(&body, self.declared);
-        page_text(&html, &self.url).map_or(body, String::into_bytes)
+        page_text(&html, &self.url, self.extent).map_or(body, String::into_bytes)
     }
 }
 
@@ -164,25 +177,33 @@ impl TextDecorator for LinkDecorator {
 }
 
 /// `html` rendered as text, `<title>` first, with links resolved against `page`.
-fn page_text(html: &str, page: &Url) -> Result<String, html2text::Error> {
+fn page_text(html: &str, page: &Url, extent: Extent) -> Result<String, html2text::Error> {
     let config = html2text::config::with_decorator(LinkDecorator::new(page))
         .allow_width_overflow()
         .no_link_wrapping()
         .no_table_borders();
     let dom = config.parse_html(html.as_bytes())?;
-    let body = config.render_to_string(config.dom_to_render_tree(&dom)?, TEXT_WIDTH)?;
-    let Some(title) = title_element(&dom) else {
+    let title = title_element(&dom);
+    let root = match extent {
+        Extent::Article => readable::main_content(&dom),
+        Extent::Whole => dom.document.clone(),
+    };
+    let body = node_text(&config, root)?;
+    let Some(title) = title else {
         return Ok(body);
     };
-    let title_only = RcDom {
-        document: title,
-        ..RcDom::default()
-    };
-    let title = config.render_to_string(config.dom_to_render_tree(&title_only)?, TEXT_WIDTH)?;
-    Ok(match title.trim() {
+    Ok(match node_text(&config, title)?.trim() {
         "" => body,
         title => format!("{title}\n\n{body}"),
     })
+}
+
+fn node_text(config: &Config<LinkDecorator>, root: Handle) -> Result<String, html2text::Error> {
+    let dom = RcDom {
+        document: root,
+        ..RcDom::default()
+    };
+    config.render_to_string(config.dom_to_render_tree(&dom)?, TEXT_WIDTH)
 }
 
 fn decode<'a>(body: &'a [u8], declared: Option<&'static Encoding>) -> Cow<'a, str> {
