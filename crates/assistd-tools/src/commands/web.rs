@@ -272,6 +272,10 @@ impl Command for WebCommand {
             .to_string()
     }
 
+    fn synopsis(&self) -> String {
+        "search <query...>, or web fetch <URL>".to_string()
+    }
+
     /// URLs and search queries never name files, so `?` and `*` stay literal.
     fn expands_args(&self) -> bool {
         false

@@ -81,13 +81,13 @@ fn build_description(
         max_size = human_size(spec.max_bytes as u64),
         dir = spec.overflow_dir.display(),
     ));
-    let pairs = registry.sorted_summaries();
-    let name_width = pairs.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-    for (name, summary) in pairs {
-        desc.push_str(&format!("  {name:<name_width$}: {summary}\n"));
+    for (name, synopsis, summary) in registry.sorted_listings() {
+        desc.push_str(&format!("  {name} {synopsis}\n      {summary}\n"));
     }
     desc.push_str(
-        "\nCall a command with no (or insufficient) arguments to see its \
+        "\nEach command is listed with the shape of its arguments; a \
+         command with subcommands needs one as its first argument. Call a \
+         command with no (or insufficient) arguments to see its full \
          usage (exit code 2, stdout); `<cmd> --help` prints the same \
          text and works for commands like `ls` and `echo` whose bare \
          form does real work. Errors in real calls exit with a \

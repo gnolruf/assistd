@@ -20,7 +20,7 @@ mod open;
 use open::{OpenArgs, OpenError, PreparedLaunch};
 
 const NAME: &str = "wm";
-const SUMMARY: &str = "manage windows and workspaces (focus, move, open, list, workspaces, etc.)";
+const SUMMARY: &str = "manage windows and workspaces through the compositor";
 
 const FOCUS_HELP: &str = "usage: wm focus <id>\n\
     \n\
@@ -200,6 +200,10 @@ impl Command for WmCommand {
          help. When no compositor is connected, every subcommand emits \
          `[error] wm: compositor not connected. …` instead.\n"
             .to_string()
+    }
+
+    fn synopsis(&self) -> String {
+        "<focus|move|open|active|resize|list|workspaces|outputs|layout> [args...]".to_string()
     }
 
     async fn run(&self, input: CommandInput) -> CommandOutput {

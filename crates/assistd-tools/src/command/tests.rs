@@ -143,7 +143,7 @@ fn every_registered_command_emits_convention_compliant_error() {
 fn every_registered_command_has_nonempty_help_and_summary() {
     let reg = crate::commands::test_registry();
     assert_eq!(reg.len(), 15);
-    for (name, summary) in reg.sorted_summaries() {
+    for (name, synopsis, summary) in reg.sorted_listings() {
         assert!(!summary.is_empty(), "{name} has empty summary");
         assert!(
             summary.len() <= 80,
@@ -152,8 +152,9 @@ fn every_registered_command_has_nonempty_help_and_summary() {
         );
         let help = reg.get(name).expect("command registered").help();
         assert!(
-            help.contains("usage:"),
-            "{name} help should contain `usage:` line, got {help:?}"
+            help.starts_with(&format!("usage: {name}")),
+            "{name} help should open with a `usage: {name}` line, got {help:?}"
         );
+        assert!(!synopsis.is_empty(), "{name} has empty synopsis");
     }
 }

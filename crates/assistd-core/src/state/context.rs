@@ -121,9 +121,9 @@ pub(super) fn format_window_context_block(focused: &FocusedWindowContext) -> Opt
     block.push_str(&format!("The user is interacting with a {kind} window."));
     if is_terminal {
         block.push_str(
-            " If the user asks to run a command, build, or test, prefer calling `run` \
-             with `command: \"bash\"` (executing the command in this terminal context) over \
-             launching a new terminal via `run` with `command: \"wm\"`.",
+            " If the user asks to run a command, build, or test, prefer executing it \
+             directly with `run`, as in {\"command\": \"bash \\\"cargo test\\\"\"}, over \
+             opening a new terminal with `wm open`.",
         );
     }
     Some(block)
