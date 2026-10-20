@@ -33,6 +33,7 @@ const GROUP_OR_WORLD_READABLE: u32 = 0o044;
 /// whisper.cpp's decoder limit.
 const MAX_WHISPER_BEAMS: u32 = 8;
 const MAX_UTTERANCE_SECS: u32 = 300;
+const WAKEWORD_COMMAND_TIMEOUT_MS: RangeInclusive<u32> = 500..=15000;
 const MIN_SENTENCE_CHARS: u32 = 50;
 const MAX_SENTENCE_CHARS: u32 = 2000;
 /// Matches the largest `limit` the `reminisce` tool accepts.
@@ -309,13 +310,24 @@ fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {
         validate_transcription(errors, &voice.transcription);
         require_at_most(
             errors,
-            "voice.continuous.max_utterance_secs",
-            voice.continuous.max_utterance_secs,
+            "voice.wakeword.max_utterance_secs",
+            voice.wakeword.max_utterance_secs,
             MAX_UTTERANCE_SECS,
         );
+        validate_wakeword_timeout(errors, voice.wakeword.command_timeout_ms);
     }
     if voice.synthesis.enabled {
         validate_synthesis(errors, &voice.synthesis);
+    }
+}
+
+fn validate_wakeword_timeout(errors: &mut Vec<String>, timeout_ms: NonZeroU32) {
+    if !WAKEWORD_COMMAND_TIMEOUT_MS.contains(&timeout_ms.get()) {
+        errors.push(format!(
+            "voice.wakeword.command_timeout_ms must be in the range {}..={}, got {timeout_ms}",
+            WAKEWORD_COMMAND_TIMEOUT_MS.start(),
+            WAKEWORD_COMMAND_TIMEOUT_MS.end()
+        ));
     }
 }
 

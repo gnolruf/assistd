@@ -44,14 +44,17 @@ hotkey = "Super+Space"  # hold to talk; empty disables
 # vad_model = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin"
 # model_cache_dir = "/var/cache/assistd/whisper"
 
-[voice.continuous]
-# Hands-free listening: each detected utterance is sent as a query.
+[voice.wakeword]
+# Hands-free listening: speech after the wake phrase is sent as a query.
 enabled = false
 # start_on_launch = false
 # hotkey = "Super+Shift+L"  # toggles listening
 # silence_ms = 800  # trailing silence that ends an utterance
 # max_utterance_secs = 30  # at most 300
 # playback_gate = true  # mute the mic while replies are spoken; false needs an echo-cancelled mic
+# command_timeout_ms = 4000  # after a bare wake phrase, how long to wait for the command
+# match_similarity = 0.8  # how closely Whisper's text must match the phrase (0-1)
+# detector_threshold = 0.5  # detector score that hands audio to Whisper (0-1)
 
 [voice.synthesis]
 # Speak replies with Piper TTS.

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use assistd_config::{ContinuousListenConfig, VoiceConfig};
+use assistd_config::{VoiceConfig, WakeWordConfig};
 use async_trait::async_trait;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
@@ -82,8 +82,8 @@ impl MicContinuousListener {
         config: &VoiceConfig,
         output_speaking: watch::Receiver<bool>,
     ) -> Self {
-        let tuning = tuning_from_config(&config.continuous);
-        let output_speaking = config.continuous.playback_gate.then_some(output_speaking);
+        let tuning = tuning_from_config(&config.wakeword);
+        let output_speaking = config.wakeword.playback_gate.then_some(output_speaking);
         let (state_tx, _) = watch::channel(false);
         let (utterances, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
         Self {
@@ -169,7 +169,7 @@ impl ContinuousListener for MicContinuousListener {
     }
 }
 
-fn tuning_from_config(config: &ContinuousListenConfig) -> VadTuning {
+fn tuning_from_config(config: &WakeWordConfig) -> VadTuning {
     VadTuning::from_ms(config.silence_ms.get(), config.max_utterance_secs.get())
 }
 

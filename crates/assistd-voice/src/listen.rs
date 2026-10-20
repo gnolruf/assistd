@@ -18,8 +18,8 @@ pub use mic::MicContinuousListener;
 /// Errors surfaced by [`ContinuousListener`] implementations.
 #[derive(Debug, Error)]
 pub enum ListenError {
-    /// Continuous listening is turned off in config.
-    #[error("continuous listening is disabled in config (voice.continuous.enabled = false)")]
+    /// Wake-word listening is turned off in config.
+    #[error("wake-word listening is disabled in config (voice.wakeword.enabled = false)")]
     Disabled,
 }
 

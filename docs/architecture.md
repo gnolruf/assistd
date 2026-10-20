@@ -294,7 +294,7 @@ Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
 every recording before decoding. While `VoiceOutputController`
 reports that a reply is being spoken (plus a short hangover), a
 `PlaybackGate` discards mic frames and resets the VAD so the daemon
-never transcribes its own TTS; `voice.continuous.playback_gate = false`
+never transcribes its own TTS; `voice.wakeword.playback_gate = false`
 removes the gate for setups whose sound server already cancels echo.
 To avoid GPU thrashing during
 chat generation, the `QueuedTranscriber` waits for the LLM to go idle

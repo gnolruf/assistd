@@ -53,10 +53,10 @@ async fn init_capture(
     let transcriber = with_cpu_fallback(config, presence, Arc::new(primary), is_gpu);
 
     let mic = MicVoiceInput::new(transcriber.clone(), config.voice.mic_device.clone());
-    let listener: Arc<dyn ContinuousListener> = if config.voice.continuous.enabled {
+    let listener: Arc<dyn ContinuousListener> = if config.voice.wakeword.enabled {
         info!(
-            "voice.continuous: enabled (hotkey={:?}, start_on_launch={})",
-            config.voice.continuous.hotkey, config.voice.continuous.start_on_launch
+            "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
+            config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
         );
         warn_if_ungated_playback(config);
         Arc::new(MicContinuousListener::new(
@@ -65,7 +65,7 @@ async fn init_capture(
             output_speaking,
         ))
     } else {
-        info!("voice.continuous: disabled in config");
+        info!("voice.wakeword: disabled in config");
         Arc::new(NoContinuousListener::new())
     };
     Readiness::Ready(VoiceCapture {
@@ -77,11 +77,11 @@ async fn init_capture(
 /// With the gate off and no echo cancellation, spoken replies come back
 /// through the mic as new queries.
 fn warn_if_ungated_playback(config: &Config) {
-    if config.voice.continuous.playback_gate || !config.voice.synthesis.enabled {
+    if config.voice.wakeword.playback_gate || !config.voice.synthesis.enabled {
         return;
     }
     tracing::warn!(
-        "voice.continuous.playback_gate = false with synthesis enabled: \
+        "voice.wakeword.playback_gate = false with synthesis enabled: \
          the mic stays open while replies are spoken; without an \
          echo-cancelled mic source the daemon will answer its own speech \
          (see docs/voice/echo-cancellation.md)"

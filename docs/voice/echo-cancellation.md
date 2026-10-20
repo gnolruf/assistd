@@ -1,7 +1,7 @@
 # Echo Cancellation for Continuous Listening
 
 By default, continuous listening mutes the mic while a reply is being
-spoken (`voice.continuous.playback_gate = true`). That stops the daemon
+spoken (`voice.wakeword.playback_gate = true`). That stops the daemon
 from hearing its own TTS and answering it, but it also means you cannot
 interrupt a reply by talking over it.
 
@@ -70,7 +70,7 @@ Then `pulseaudio -k` and let it respawn.
 ## Turn the gate off
 
 ```toml
-[voice.continuous]
+[voice.wakeword]
 playback_gate = false
 ```
 

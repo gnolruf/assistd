@@ -4,14 +4,17 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
-    DEFAULT_LISTEN_ENABLED, DEFAULT_LISTEN_HOTKEY, DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
-    DEFAULT_LISTEN_PLAYBACK_GATE, DEFAULT_LISTEN_SILENCE_MS, DEFAULT_LISTEN_START_ON_LAUNCH,
     DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS, DEFAULT_PIPER_ENABLED,
     DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
     DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE,
-    DEFAULT_VOICE_HOTKEY, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
-    DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
+    DEFAULT_VOICE_HOTKEY, DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS, DEFAULT_WAKEWORD_DETECTOR_THRESHOLD,
+    DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_HOTKEY, DEFAULT_WAKEWORD_MATCH_SIMILARITY,
+    DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS, DEFAULT_WAKEWORD_PLAYBACK_GATE,
+    DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WHISPER_BEAMS,
+    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
+    DEFAULT_WHISPER_VAD_MODEL,
 };
+use crate::errors::UnitIntervalError;
 
 /// Voice input and output settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -25,7 +28,7 @@ pub struct VoiceConfig {
     /// the PTT IPC commands still work.
     pub hotkey: String,
     pub transcription: TranscriptionConfig,
-    pub continuous: ContinuousListenConfig,
+    pub wakeword: WakeWordConfig,
     pub synthesis: SynthesisConfig,
 }
 
@@ -36,7 +39,7 @@ impl Default for VoiceConfig {
             mic_device: None,
             hotkey: DEFAULT_VOICE_HOTKEY.to_string(),
             transcription: TranscriptionConfig::default(),
-            continuous: ContinuousListenConfig::default(),
+            wakeword: WakeWordConfig::default(),
             synthesis: SynthesisConfig::default(),
         }
     }
@@ -83,12 +86,13 @@ impl Default for TranscriptionConfig {
     }
 }
 
-/// Hands-free listening: VAD-segmented utterances are sent as queries.
-/// Runs only when both [`VoiceConfig::enabled`] and [`Self::enabled`] are set.
+/// Hands-free listening: VAD-segmented speech becomes a query only after the
+/// wake phrase, which is enrolled at runtime rather than set here. Runs only
+/// when both [`VoiceConfig::enabled`] and [`Self::enabled`] are set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct ContinuousListenConfig {
-    /// Makes continuous listening available; push-to-talk is unaffected.
+pub struct WakeWordConfig {
+    /// Makes wake-word listening available; push-to-talk is unaffected.
     pub enabled: bool,
     /// Start listening at launch; otherwise the listener idles until toggled.
     pub start_on_launch: bool,
@@ -103,18 +107,65 @@ pub struct ContinuousListenConfig {
     /// transcribes its own speech. `false` allows barge-in but requires an
     /// echo-cancelled mic source; without one, replies trigger new queries.
     pub playback_gate: bool,
+    /// After a wake phrase heard on its own, how long in ms to wait for the
+    /// command, `500..=15000`.
+    pub command_timeout_ms: NonZeroU32,
+    /// Minimum normalized edit-distance similarity between Whisper's text and
+    /// the phrase or a learned variant; `1.0` demands an exact match after
+    /// normalization, `0.0` accepts anything.
+    pub match_similarity: UnitInterval,
+    /// Wake-word detector score at or above which audio is handed to Whisper;
+    /// `0.0` passes everything, `1.0` only certain detections.
+    pub detector_threshold: UnitInterval,
 }
 
-impl Default for ContinuousListenConfig {
+impl Default for WakeWordConfig {
     fn default() -> Self {
         Self {
-            enabled: DEFAULT_LISTEN_ENABLED,
-            start_on_launch: DEFAULT_LISTEN_START_ON_LAUNCH,
-            hotkey: DEFAULT_LISTEN_HOTKEY.to_string(),
-            silence_ms: DEFAULT_LISTEN_SILENCE_MS,
-            max_utterance_secs: DEFAULT_LISTEN_MAX_UTTERANCE_SECS,
-            playback_gate: DEFAULT_LISTEN_PLAYBACK_GATE,
+            enabled: DEFAULT_WAKEWORD_ENABLED,
+            start_on_launch: DEFAULT_WAKEWORD_START_ON_LAUNCH,
+            hotkey: DEFAULT_WAKEWORD_HOTKEY.to_string(),
+            silence_ms: DEFAULT_WAKEWORD_SILENCE_MS,
+            max_utterance_secs: DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
+            playback_gate: DEFAULT_WAKEWORD_PLAYBACK_GATE,
+            command_timeout_ms: DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
+            match_similarity: DEFAULT_WAKEWORD_MATCH_SIMILARITY,
+            detector_threshold: DEFAULT_WAKEWORD_DETECTOR_THRESHOLD,
         }
+    }
+}
+
+/// An `f32` in `0.0..=1.0`; never NaN.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "f32", into = "f32")]
+pub struct UnitInterval(f32);
+
+impl UnitInterval {
+    /// Returns `None` when `value` is outside `0.0..=1.0` or NaN.
+    pub const fn new(value: f32) -> Option<Self> {
+        if value >= 0.0 && value <= 1.0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl TryFrom<f32> for UnitInterval {
+    type Error = UnitIntervalError;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(UnitIntervalError(value))
+    }
+}
+
+impl From<UnitInterval> for f32 {
+    fn from(value: UnitInterval) -> Self {
+        value.0
     }
 }
 
@@ -195,3 +246,6 @@ pub enum CodeBlockMode {
     /// Drop them but say `"Code block in <lang>."` (or `"Code block."`) per fence.
     Summarize,
 }
+
+#[cfg(test)]
+mod tests;
