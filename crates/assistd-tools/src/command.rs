@@ -204,6 +204,19 @@ pub trait Command: fmt::Debug + Send + Sync + 'static {
     /// Full usage block, written verbatim to stdout; its first line begins
     /// `usage: <name>`.
     fn help(&self) -> String;
+    /// High-level argument shape after the name, listed beside the summary;
+    /// defaults to the rest of the [`Command::help`] usage line.
+    fn synopsis(&self) -> String {
+        let help = self.help();
+        let usage = help.lines().next().unwrap_or_default();
+        usage
+            .strip_prefix("usage:")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix(self.name()))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
     /// Whether `~` and globs in the arguments expand before [`Command::run`];
     /// `false` passes every word as written.
     fn expands_args(&self) -> bool {
@@ -250,11 +263,11 @@ impl CommandRegistry {
         self.commands.keys().map(String::as_str).collect()
     }
 
-    /// `(name, summary)` pairs, sorted alphabetically by name.
-    pub fn sorted_summaries(&self) -> Vec<(&str, &'static str)> {
+    /// `(name, synopsis, summary)` triples, sorted alphabetically by name.
+    pub fn sorted_listings(&self) -> Vec<(&str, String, &'static str)> {
         self.commands
             .values()
-            .map(|c| (c.name(), c.summary()))
+            .map(|c| (c.name(), c.synopsis(), c.summary()))
             .collect()
     }
 }
