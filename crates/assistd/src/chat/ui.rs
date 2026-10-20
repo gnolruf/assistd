@@ -693,21 +693,19 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, &(start, end))| {
-            let mut row = String::new();
-            if i == 0 {
-                row.push_str(INPUT_PROMPT);
-            }
+            let mut row = if i == 0 {
+                INPUT_PROMPT.to_string()
+            } else {
+                " ".repeat(usize::from(prompt_w))
+            };
             row.extend(&buf_chars[start..end]);
             Line::from(row)
         })
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 
-    let (row_idx, col) = locate_cursor(&rows, app.input.cursor_col() as usize);
-    let mut cursor_x = saturating_u16(col);
-    if row_idx == 0 {
-        cursor_x = cursor_x.saturating_add(prompt_w);
-    }
+    let (row_idx, col) = locate_cursor(&rows, app.input.cursor_offset() as usize);
+    let cursor_x = saturating_u16(col).saturating_add(prompt_w);
     let cy = area
         .y
         .saturating_add(saturating_u16(row_idx))
@@ -729,26 +727,42 @@ fn compute_input_height(frame_width: u16, dock_height: u16, buffer: &str) -> u16
     needed.clamp(1, cap)
 }
 
-/// `(start, end)` char ranges of each input row, breaking after the last
-/// whitespace that fits. A row that fills the width is followed by an
-/// empty one for the cursor.
+/// `(start, end)` char ranges of each input row: a new row at each line
+/// break, otherwise after the last whitespace that fits past the prompt. A
+/// final row that fills the width is followed by an empty one for the cursor.
 fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     let n = buf.len();
     if width == 0 {
         return vec![(0, n)];
     }
+    let cap = width.saturating_sub(prompt_w).max(1) as usize;
     let mut rows: Vec<(usize, usize)> = Vec::new();
+    let line_ends = buf
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| (c == '\n').then_some(i))
+        .chain([n]);
     let mut start = 0usize;
-    while start < n {
-        let cap = if rows.is_empty() {
-            (width as usize).saturating_sub(prompt_w as usize).max(1)
-        } else {
-            width as usize
-        };
-        if n - start <= cap {
-            rows.push((start, n));
-            break;
-        }
+    for end in line_ends {
+        wrap_input_line(buf, (start, end), cap, &mut rows);
+        start = end + 1;
+    }
+    let (ls, le) = *rows.last().expect("rows non-empty");
+    if le - ls >= cap {
+        rows.push((n, n));
+    }
+    rows
+}
+
+/// Append the rows, at most `cap` chars each, of the break-free span
+/// `(start, end)` to `rows`, always at least one.
+fn wrap_input_line(
+    buf: &[char],
+    (mut start, end): (usize, usize),
+    cap: usize,
+    rows: &mut Vec<(usize, usize)>,
+) {
+    while end - start > cap {
         let end_max = start + cap;
         let row_end = buf[start..end_max]
             .iter()
@@ -757,29 +771,18 @@ fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
         rows.push((start, row_end));
         start = row_end;
     }
-    if rows.is_empty() {
-        rows.push((0, 0));
-    }
-    let (ls, le) = *rows.last().expect("rows non-empty");
-    let last_visible = (le - ls)
-        + if rows.len() == 1 {
-            prompt_w as usize
-        } else {
-            0
-        };
-    if last_visible >= width as usize {
-        rows.push((n, n));
-    }
-    rows
+    rows.push((start, end));
 }
 
+/// Row and column of char offset `cursor`. At a soft wrap the cursor moves
+/// to the next row; before a line break it stays at the end of its row.
 fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
     for (idx, &(s, e)) in rows.iter().enumerate() {
         if cursor < e {
             return (idx, cursor - s);
         }
         if cursor == e {
-            if idx + 1 < rows.len() {
+            if rows.get(idx + 1).is_some_and(|&(next, _)| next == e) {
                 return (idx + 1, 0);
             }
             return (idx, cursor - s);
@@ -905,7 +908,7 @@ mod tests {
     #[test]
     fn wrap_input_hard_breaks_when_word_is_longer_than_row() {
         let rows = wrap_input(&chars("hellotherefriend"), 2, 10);
-        assert_eq!(rows, vec![(0, 8), (8, 16)]);
+        assert_eq!(rows, vec![(0, 8), (8, 16), (16, 16)]);
     }
 
     #[test]
@@ -917,6 +920,17 @@ mod tests {
         assert_eq!(locate_cursor(&rows, 5), (0, 5));
         assert_eq!(locate_cursor(&rows, 6), (1, 0));
         assert_eq!(locate_cursor(&rows, 11), (1, 5));
+    }
+
+    #[test]
+    fn line_breaks_start_rows_and_place_cursor_around_them() {
+        let buf = chars("ab\n\ncd\n");
+        let rows = wrap_input(&buf, 2, 10);
+        assert_eq!(rows, [(0, 2), (3, 3), (4, 6), (7, 7)]);
+        assert_eq!(locate_cursor(&rows, 2), (0, 2));
+        assert_eq!(locate_cursor(&rows, 3), (1, 0));
+        assert_eq!(locate_cursor(&rows, 6), (2, 2));
+        assert_eq!(locate_cursor(&rows, 7), (3, 0));
     }
 
     #[test]

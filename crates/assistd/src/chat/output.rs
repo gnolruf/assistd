@@ -22,6 +22,8 @@ const COLLAPSED_HEAD_LINES: usize = 10;
 const NO_RESULT_OUTPUT: &str = "[stderr] no result received";
 const NO_RESULT_EXIT_CODE: i32 = -1;
 const UNANNOUNCED_COMMAND: &str = "<?>";
+const PROMPT_PREFIX: &str = "> ";
+const PROMPT_INDENT: &str = "  ";
 /// First code point of the 8-dot braille block; the low byte picks the dots.
 const BRAILLE_BLANK: u32 = 0x2800;
 /// Fibonacci-hashing multiplier that scatters consecutive frames.
@@ -128,6 +130,9 @@ enum OutputItem {
         model_name: String,
     },
     Text(Line<'static>),
+    /// One user prompt, drawn after `> ` with every later row indented to
+    /// line up beneath its first.
+    Prompt(String),
     /// One assistant reply as raw markdown, rendered on wrap.
     Assistant(String),
     Tool(ToolBlock),
@@ -182,15 +187,13 @@ impl OutputPane {
         }
     }
 
-    /// Append a `> `-prefixed prompt line.
     pub(super) fn push_user(&mut self, text: &str) {
-        self.push_separated(format!("> {text}"), user_style());
+        self.push_prompt(text.to_string());
     }
 
     /// [`Self::push_user`] with a trailing tag naming the attachments.
     pub(super) fn push_user_with_attachments(&mut self, text: &str, names: &[String]) {
-        let tag = format!("  [attached: {}]", names.join(", "));
-        self.push_separated(format!("> {text}{tag}"), user_style());
+        self.push_prompt(format!("{text}  [attached: {}]", names.join(", ")));
     }
 
     pub(super) fn push_info(&mut self, text: &str) {
@@ -342,6 +345,7 @@ impl OutputPane {
                 OutputItem::Thinking(t) => &mut t.expanded,
                 OutputItem::Banner { .. }
                 | OutputItem::Text(_)
+                | OutputItem::Prompt(_)
                 | OutputItem::Assistant(_)
                 | OutputItem::Thumbnail(_)
                 | OutputItem::Compaction(_) => continue,
@@ -485,13 +489,11 @@ impl OutputPane {
     /// Drop everything from the most recent user prompt onward. Returns
     /// the number of items removed.
     pub(super) fn pop_last_user_exchange(&mut self) -> usize {
-        let Some(idx) = self.items.iter().rposition(|item| {
-            matches!(
-                item,
-                OutputItem::Text(line)
-                    if line.spans.first().is_some_and(|s| s.content.starts_with("> "))
-            )
-        }) else {
+        let Some(idx) = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, OutputItem::Prompt(_)))
+        else {
             return 0;
         };
         let removed = self.items.len() - idx;
@@ -544,6 +546,12 @@ impl OutputPane {
 
     fn sync_wrap(&mut self, width: u16) {
         self.wrap.sync(&self.items, width, self.verbose);
+    }
+
+    fn push_prompt(&mut self, text: String) {
+        self.close_open_assistant();
+        self.items.push(OutputItem::Prompt(text));
+        self.items.push(OutputItem::Text(Line::from("")));
     }
 
     /// Append one styled line and the blank row that separates it from the next item.
@@ -694,6 +702,10 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
                 return;
             }
             OutputItem::Text(l) => l.clone(),
+            OutputItem::Prompt(text) => {
+                out.extend(unwrapped_prompt_rows(text));
+                return;
+            }
             OutputItem::Assistant(text) => {
                 out.extend(text.lines().map(|line| Line::from(line.to_string())));
                 return;
@@ -714,6 +726,7 @@ fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verb
     match item {
         OutputItem::Banner { model_name } => render_banner(out, model_name, width),
         OutputItem::Text(line) => wrap_line_into(out, line, width),
+        OutputItem::Prompt(text) => render_prompt(out, text, width),
         OutputItem::Assistant(text) => out.extend(render_markdown(text, usize::from(width))),
         OutputItem::Tool(b) => render_tool_block(out, b, width, verbose),
         OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t),
@@ -778,16 +791,41 @@ fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16
     }
     let pad_to_width = style.bg.is_some();
     for chunk in wrapped {
-        let mut s = chunk.into_owned();
-        if pad_to_width {
-            let visible = s.chars().count();
-            let cap = width as usize;
-            if visible < cap {
-                s.push_str(&" ".repeat(cap - visible));
-            }
-        }
-        out.push(single_span_line(s, style));
+        let row = chunk.into_owned();
+        let row = if pad_to_width {
+            padded_to(row, width)
+        } else {
+            row
+        };
+        out.push(single_span_line(row, style));
     }
+}
+
+fn render_prompt(out: &mut Vec<Line<'static>>, text: &str, width: u16) {
+    let options = textwrap::Options::new(usize::from(width))
+        .initial_indent(PROMPT_PREFIX)
+        .subsequent_indent(PROMPT_INDENT);
+    out.extend(
+        textwrap::wrap(text, options)
+            .into_iter()
+            .map(|row| single_span_line(padded_to(row.into_owned(), width), user_style())),
+    );
+}
+
+fn unwrapped_prompt_rows(text: &str) -> impl Iterator<Item = Line<'static>> + '_ {
+    text.split('\n').enumerate().map(|(i, row)| {
+        let lead = if i == 0 { PROMPT_PREFIX } else { PROMPT_INDENT };
+        single_span_line(format!("{lead}{row}"), user_style())
+    })
+}
+
+fn padded_to(mut s: String, width: u16) -> String {
+    let visible = s.chars().count();
+    let cap = usize::from(width);
+    if visible < cap {
+        s.push_str(&" ".repeat(cap - visible));
+    }
+    s
 }
 
 fn render_thinking_block(

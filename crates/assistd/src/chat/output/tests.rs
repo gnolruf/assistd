@@ -12,6 +12,7 @@ fn item_text(it: &OutputItem) -> String {
     match it {
         OutputItem::Banner { model_name } => format!("[banner:{model_name}]"),
         OutputItem::Text(l) => line_text(l),
+        OutputItem::Prompt(text) => format!("> {text}"),
         OutputItem::Assistant(text) => text.clone(),
         OutputItem::Tool(b) => format!("[tool:{}]", b.command),
         OutputItem::Thumbnail(t) => format!("[thumb:{}]", t.name),
