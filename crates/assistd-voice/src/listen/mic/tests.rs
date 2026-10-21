@@ -48,6 +48,7 @@ async fn only_speech_after_the_wake_phrase_is_heard_in_order() {
     let gate = WakeGate::new(
         WakePhrase::builtin(UnitInterval::new(0.8).unwrap()),
         Duration::from_secs(4),
+        None,
     );
 
     for index in 0..SCRIPT.len() {
@@ -61,7 +62,10 @@ async fn only_speech_after_the_wake_phrase_is_heard_in_order() {
         transcriber.clone(),
         gate,
         ListenOutputs { heard, phase },
-        pcm_rx,
+        TranscribeInputs {
+            utterances: pcm_rx,
+            signals: watch::channel(None).1,
+        },
     )
     .await;
 

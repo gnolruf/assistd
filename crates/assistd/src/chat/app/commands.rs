@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::{App, BranchOp, PendingAttachment, WireStream};
 
 /// A typed slash command with its trimmed argument.
+#[derive(Debug, PartialEq, Eq)]
 enum SlashCommand {
     Attach(String),
     Exit,
@@ -13,6 +14,35 @@ enum SlashCommand {
     Undo,
     New,
     Resume,
+    WakeWord(WakeWordCommand),
+}
+
+/// What `/wakeword` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WakeWordCommand {
+    Status,
+    /// The phrase as typed, with any surrounding double quotes removed.
+    Enroll(String),
+    Test,
+    Reset,
+}
+
+impl WakeWordCommand {
+    /// `test` and `reset` are reserved; quoting either enrolls it as a phrase.
+    fn parse(arg: &str) -> Self {
+        match arg {
+            "" => Self::Status,
+            "test" => Self::Test,
+            "reset" => Self::Reset,
+            _ => {
+                let unquoted = arg
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .unwrap_or(arg);
+                Self::Enroll(unquoted.to_string())
+            }
+        }
+    }
 }
 
 impl SlashCommand {
@@ -31,6 +61,7 @@ impl SlashCommand {
             "/undo" => Some(Self::Undo),
             "/new" => Some(Self::New),
             "/resume" => Some(Self::Resume),
+            "/wakeword" => Some(Self::WakeWord(WakeWordCommand::parse(arg))),
             _ => None,
         }
     }
@@ -73,6 +104,7 @@ impl App {
                 let id = Uuid::new_v4().to_string();
                 self.spawn_branch_command(BranchOp::ResumePicker, Request::Branches { id });
             }
+            SlashCommand::WakeWord(command) => self.run_wake_word_command(command),
         }
     }
 
@@ -141,3 +173,6 @@ impl App {
         self.spawn_one_shot(req, WireStream::Branch, "branch");
     }
 }
+
+#[cfg(test)]
+mod tests;

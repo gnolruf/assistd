@@ -75,6 +75,8 @@ pub(in crate::state) struct PttCapture {
     pub(in crate::state) warmup: JoinHandle<()>,
     /// The turn the release will run, so an interrupt mid-capture drops it.
     pub(in crate::state) cancel: CancellationToken,
+    /// Listening was handed over for the press and resumes on release.
+    pub(in crate::state) resume_listening: bool,
 }
 
 /// Per-process request bookkeeping: the active session, turn

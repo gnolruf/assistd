@@ -24,7 +24,11 @@ mod connection;
 mod keys;
 mod modal;
 mod resume;
+mod wakeword;
 mod wire;
+
+pub(super) use wakeword::{EnrollProgress, EnrollPrompt, SampleResult, TestProgress, WakeWordView};
+use wakeword::{WakeWordDock, WakeWordStream};
 
 const SPINNER_CHARS: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
@@ -77,6 +81,8 @@ pub(super) enum WireStream {
     Branch,
     /// Polls and the F2 cycle; indicator state only.
     Status,
+    /// A `/wakeword` request; owns the wake-word dock.
+    WakeWord(WakeWordStream),
 }
 
 pub(super) enum ChatEvent {
@@ -147,12 +153,20 @@ impl ConfirmChoice {
     }
 }
 
-/// Command-confirmation prompt drawn in the chat panel while the daemon's
-/// agent loop blocks on the answer.
+/// Where a confirmation prompt's answer goes.
+#[derive(Debug)]
+pub(super) enum ConfirmTarget {
+    /// The daemon's agent loop, which blocks on the answer; the id is echoed
+    /// back in the `Request::ConfirmResponse`.
+    Command(String),
+    /// `/wakeword reset`, which this chat sends on "Yes".
+    WakeWordReset,
+}
+
+/// Confirmation prompt drawn in the chat panel in place of the input line.
 pub(super) struct ConfirmationPrompt {
     pub request: ConfirmationRequest,
-    /// Echoed back in the `Request::ConfirmResponse`.
-    confirm_id: String,
+    answer_to: ConfirmTarget,
     /// Index into [`choices`](Self::choices).
     pub selected: usize,
     /// Every script row is shown, scrolled to `scroll`, rather than the
@@ -164,10 +178,10 @@ pub(super) struct ConfirmationPrompt {
 
 impl ConfirmationPrompt {
     /// A prompt with "No" selected, so a stray Enter denies.
-    pub(super) fn new(confirm_id: String, request: ConfirmationRequest) -> Self {
+    pub(super) fn new(answer_to: ConfirmTarget, request: ConfirmationRequest) -> Self {
         let mut prompt = Self {
             request,
-            confirm_id,
+            answer_to,
             selected: 0,
             expanded: false,
             scroll: 0,
@@ -236,6 +250,9 @@ pub(super) struct App {
     /// `/resume` session list; `confirmation` takes precedence while
     /// both are open.
     pub resume_picker: Option<ResumePicker>,
+    /// `/wakeword` enrollment or test panel, drawn in place of the input
+    /// line; `confirmation` takes precedence while both are open.
+    pub wake_word_dock: Option<WakeWordDock>,
     /// Throttles rewraps for a live block's timer to 1 Hz.
     last_live_seconds: Option<u64>,
     pub session_title: Option<String>,
@@ -423,6 +440,7 @@ impl App {
             slash_selected: 0,
             slash_dismissed: false,
             resume_picker: None,
+            wake_word_dock: None,
             last_live_seconds: None,
             session_title: None,
             verbose: false,

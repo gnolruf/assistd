@@ -237,8 +237,9 @@ fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
                 phrase: "hey jarvis".into(),
                 variants: vec!["a jarvis".into()],
                 samples: 4,
+                listening: true,
             },
-            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","variants":["a jarvis"],"samples":4}"#,
+            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","variants":["a jarvis"],"samples":4,"listening":true}"#,
         ),
         (
             Event::WakeWordEnrollment {

@@ -1,11 +1,9 @@
 //! [`assistd_voice::BusyProbe`] backed by presence state and NVML.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use assistd_core::{PresenceManager, PresenceState};
 use assistd_voice::BusyProbe;
-use async_trait::async_trait;
 use nvml_wrapper::Nvml;
 
 use super::gpu_monitor;
@@ -15,9 +13,8 @@ use super::gpu_monitor;
 /// model runner.
 const FOREIGN_VRAM_THRESHOLD_MB: u64 = 100;
 
-/// Reports the GPU busy while an LLM stream is in flight or a foreign
-/// process holds VRAM. Without NVML, foreign contention is never
-/// reported.
+/// Reports the GPU unavailable while presence is not `Active` or a foreign
+/// process holds VRAM. Without NVML, foreign contention is never reported.
 #[derive(Debug)]
 pub(super) struct PresenceGpuProbe {
     presence: Arc<PresenceManager>,
@@ -50,12 +47,7 @@ impl PresenceGpuProbe {
     }
 }
 
-#[async_trait]
 impl BusyProbe for PresenceGpuProbe {
-    async fn wait_until_llm_idle(&self, timeout: Duration) -> bool {
-        self.presence.wait_until_llm_idle(timeout).await
-    }
-
     fn foreign_gpu_busy(&self) -> bool {
         let Some(nvml) = self.nvml.as_ref() else {
             return false;

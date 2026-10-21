@@ -10,8 +10,7 @@ use assistd_core::{
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, ProfileStore,
-    QueueConfig, QueuedTranscriber, Transcriber, WakePhrase, WhisperTranscriberBuilder,
-    build_cpu_fallback,
+    QueuedTranscriber, Transcriber, WakePhrase, WhisperTranscriberBuilder, build_cpu_fallback,
 };
 use tokio::sync::watch;
 use tracing::info;
@@ -108,21 +107,16 @@ fn warn_if_ungated_playback(config: &Config) {
     );
 }
 
-/// Wrap a GPU transcriber so it falls back to CPU while the GPU is busy;
-/// CPU transcribers are returned unchanged.
+/// Wrap a GPU transcriber so it falls back to CPU while the GPU is
+/// unavailable; CPU transcribers are returned unchanged.
 fn with_cpu_fallback(
     config: &Config,
     presence: &Arc<PresenceManager>,
     primary: Arc<dyn Transcriber>,
     is_gpu: bool,
 ) -> Arc<dyn Transcriber> {
-    let queue_cfg = QueueConfig::default();
     if !is_gpu {
         info!("voice: CPU transcription active");
-        return primary;
-    }
-    if !queue_cfg.cpu_fallback_enabled {
-        info!("voice: GPU transcription active; CPU fallback disabled by config");
         return primary;
     }
 
@@ -139,16 +133,10 @@ fn with_cpu_fallback(
         })
     });
     info!(
-        "voice: GPU transcription active; CPU fallback armed \
-             (gpu_busy_timeout_ms={})",
-        queue_cfg.gpu_busy_timeout_ms
+        "voice: GPU transcription active, shared with the LLM; CPU fallback armed \
+         for sleep and foreign VRAM use"
     );
-    Arc::new(QueuedTranscriber::new(
-        primary,
-        cpu_factory,
-        probe,
-        queue_cfg,
-    ))
+    Arc::new(QueuedTranscriber::new(primary, cpu_factory, probe))
 }
 
 async fn init_output(config: &Config) -> Readiness<Arc<dyn VoiceOutput>> {

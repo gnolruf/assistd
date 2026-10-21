@@ -7,6 +7,7 @@ use assistd_ipc::ListenPhase;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio::time::Instant;
 
 use crate::mic::AudioCaptureError;
 
@@ -63,6 +64,14 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// Close the mic and drain any in-flight utterance. Idempotent.
     async fn stop(&self) -> Result<(), ListenError>;
 
+    /// Hand the mic to push-to-talk: stop without acting on anything already
+    /// captured, and record the hand-over for [`Self::last_push_to_talk`].
+    async fn stop_for_push_to_talk(&self) -> Result<(), ListenError>;
+
+    /// When push-to-talk last took the mic; commands heard before then
+    /// belong to a conversation it superseded.
+    fn last_push_to_talk(&self) -> Option<Instant>;
+
     /// Whether the listener is currently capturing.
     fn is_active(&self) -> bool;
 
@@ -74,6 +83,11 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
 
     /// Gate on `phrase` from the next [`Self::start`] on.
     fn set_wake_phrase(&self, phrase: WakePhrase);
+
+    /// Take the next utterance as a command without the wake phrase if it
+    /// begins soon enough after now; the reply to the last one has ended.
+    /// Ignored while listening is stopped.
+    fn open_follow_up(&self);
 
     /// Send every utterance the mic hears into `sink`, cut as listening
     /// cuts it but not transcribed, until `sink` closes. Fails with
@@ -117,6 +131,14 @@ impl ContinuousListener for NoContinuousListener {
         Ok(())
     }
 
+    async fn stop_for_push_to_talk(&self) -> Result<(), ListenError> {
+        Ok(())
+    }
+
+    fn last_push_to_talk(&self) -> Option<Instant> {
+        None
+    }
+
     fn is_active(&self) -> bool {
         false
     }
@@ -130,6 +152,8 @@ impl ContinuousListener for NoContinuousListener {
     }
 
     fn set_wake_phrase(&self, _phrase: WakePhrase) {}
+
+    fn open_follow_up(&self) {}
 
     async fn capture_utterances(
         &self,

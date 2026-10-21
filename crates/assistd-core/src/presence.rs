@@ -119,8 +119,6 @@ pub struct PresenceManager {
     inflight: Arc<RwLock<()>>,
     /// `Some(started_at)` while a `wake` is executing.
     wake_started: StdMutex<Option<Instant>>,
-    /// LLM streams in flight, which can be fewer than live request guards.
-    stream_count_tx: watch::Sender<usize>,
 }
 
 impl PresenceManager {
@@ -160,7 +158,6 @@ impl PresenceManager {
         spawn_shutdown_forwarder(daemon_shutdown.clone(), Arc::clone(&current_inner_shutdown));
 
         let (state_tx, _) = watch::channel(PresenceState::Sleeping);
-        let (stream_count_tx, _) = watch::channel(0usize);
         Ok(Arc::new(Self {
             settled: StdMutex::new(PresenceTarget::Sleeping),
             transition: AsyncMutex::new(()),
@@ -175,7 +172,6 @@ impl PresenceManager {
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
-            stream_count_tx,
         }))
     }
 
@@ -351,28 +347,6 @@ impl PresenceManager {
 
     fn wake_in_progress(&self) -> Option<Instant> {
         *self.wake_started.lock()
-    }
-
-    /// Register an in-flight LLM stream for as long as the guard lives.
-    pub fn acquire_stream_guard(&self) -> LlmStreamGuard {
-        self.stream_count_tx.send_modify(|n| *n += 1);
-        LlmStreamGuard {
-            tx: self.stream_count_tx.clone(),
-        }
-    }
-
-    /// Wait until no LLM stream is in flight. Returns `false` on
-    /// timeout. Cancel-safe.
-    pub async fn wait_until_llm_idle(&self, timeout: Duration) -> bool {
-        if *self.stream_count_tx.borrow() == 0 {
-            return true;
-        }
-        let mut rx = self.stream_count_tx.subscribe();
-        tokio::time::timeout(timeout, async {
-            let _ = rx.wait_for(|n| *n == 0).await;
-        })
-        .await
-        .is_ok()
     }
 
     /// Drive the manager to `target`.
@@ -657,7 +631,6 @@ impl PresenceManager {
         let api_key = ApiKey::generate().expect("stub api key");
         let control = LlamaServerControl::new(SocketAddr::new(model.host, 1), None, None)
             .expect("dummy control");
-        let (stream_count_tx, _) = watch::channel(0usize);
         Arc::new(Self {
             settled: StdMutex::new(state),
             transition: AsyncMutex::new(()),
@@ -672,7 +645,6 @@ impl PresenceManager {
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
-            stream_count_tx,
         })
     }
 }
@@ -682,19 +654,6 @@ impl PresenceManager {
 #[derive(Debug)]
 pub struct RequestGuard {
     _guard: OwnedRwLockReadGuard<()>,
-}
-
-/// Counts one in-flight LLM stream for as long as it is held. Unlike
-/// [`RequestGuard`], does not block sleep/drowse.
-#[derive(Debug)]
-pub struct LlmStreamGuard {
-    tx: watch::Sender<usize>,
-}
-
-impl Drop for LlmStreamGuard {
-    fn drop(&mut self) {
-        self.tx.send_modify(|n| *n = n.saturating_sub(1));
-    }
 }
 
 /// Exposes a [`PresenceManager`] through the [`LlmHealthProbe`] trait.

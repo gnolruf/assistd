@@ -710,12 +710,14 @@ pub enum Event {
     WakeWordDetected { id: String },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
-    /// The saved wake phrase, or the built-in one with no variants or samples.
+    /// The saved wake phrase, or the built-in one with no variants or
+    /// samples; `listening` is whether the wake-word listener is running.
     WakeWordStatus {
         id: String,
         phrase: String,
         variants: Vec<String>,
         samples: u32,
+        listening: bool,
     },
     /// Progress of the enrollment session opened by this connection.
     WakeWordEnrollment { id: String, event: EnrollEvent },

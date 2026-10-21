@@ -62,11 +62,25 @@ pub struct MicContinuousListener {
     output_speaking: Option<watch::Receiver<bool>>,
     wake_phrase: parking_lot::Mutex<WakePhrase>,
     command_timeout: Duration,
+    follow_up: Option<Duration>,
+    /// The latest signal for the running session; each session subscribes
+    /// at start, so signals sent while stopped are ignored.
+    conversation_tx: watch::Sender<Option<ConversationSignal>>,
+    last_push_to_talk: parking_lot::Mutex<Option<Instant>>,
     active: AtomicBool,
     capturing_utterances: Arc<AtomicBool>,
     phase_tx: watch::Sender<ListenPhase>,
     heard: broadcast::Sender<Heard>,
     listen_state: Arc<Mutex<ListenState>>,
+}
+
+/// Steers the running session's conversation from outside it.
+#[derive(Debug, Clone, Copy)]
+enum ConversationSignal {
+    /// A reply to a wake-word command ended at this instant.
+    FollowUp(Instant),
+    /// Push-to-talk took the mic; act on nothing more this session.
+    Abandon,
 }
 
 #[derive(Debug)]
@@ -122,6 +136,10 @@ impl MicContinuousListener {
                 config.wakeword.match_similarity,
             )),
             command_timeout: Duration::from_millis(config.wakeword.command_timeout_ms.get().into()),
+            follow_up: (config.wakeword.follow_up_ms > 0)
+                .then(|| Duration::from_millis(config.wakeword.follow_up_ms.into())),
+            conversation_tx: watch::channel(None).0,
+            last_push_to_talk: parking_lot::Mutex::new(None),
             active: AtomicBool::new(false),
             capturing_utterances: Arc::new(AtomicBool::new(false)),
             phase_tx,
@@ -190,7 +208,11 @@ impl ContinuousListener for MicContinuousListener {
         } = capture::start(self.mic_device.as_deref(), frame_tx);
 
         let (pcm_tx, pcm_rx) = mpsc::channel::<Utterance>(PENDING_UTTERANCE_DEPTH);
-        let gate = WakeGate::new(self.wake_phrase.lock().clone(), self.command_timeout);
+        let gate = WakeGate::new(
+            self.wake_phrase.lock().clone(),
+            self.command_timeout,
+            self.follow_up,
+        );
         let transcribe_handle = tokio::spawn(transcribe_loop(
             self.transcriber.clone(),
             gate,
@@ -198,7 +220,10 @@ impl ContinuousListener for MicContinuousListener {
                 heard: self.heard.clone(),
                 phase: self.phase_tx.clone(),
             },
-            pcm_rx,
+            TranscribeInputs {
+                utterances: pcm_rx,
+                signals: self.conversation_tx.subscribe(),
+            },
         ));
         let tuning = self.tuning;
         let playback_gate = self.playback_gate();
@@ -234,6 +259,17 @@ impl ContinuousListener for MicContinuousListener {
         Ok(())
     }
 
+    async fn stop_for_push_to_talk(&self) -> Result<(), ListenError> {
+        *self.last_push_to_talk.lock() = Some(Instant::now());
+        self.conversation_tx
+            .send_replace(Some(ConversationSignal::Abandon));
+        self.stop().await
+    }
+
+    fn last_push_to_talk(&self) -> Option<Instant> {
+        *self.last_push_to_talk.lock()
+    }
+
     fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
@@ -248,6 +284,11 @@ impl ContinuousListener for MicContinuousListener {
 
     fn set_wake_phrase(&self, phrase: WakePhrase) {
         *self.wake_phrase.lock() = phrase;
+    }
+
+    fn open_follow_up(&self) {
+        self.conversation_tx
+            .send_replace(Some(ConversationSignal::FollowUp(Instant::now())));
     }
 
     async fn capture_utterances(
@@ -274,6 +315,51 @@ struct UtteranceCaptureClaim(Arc<AtomicBool>);
 impl Drop for UtteranceCaptureClaim {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// What the transcription worker waits on.
+#[derive(Debug)]
+struct TranscribeInputs {
+    utterances: mpsc::Receiver<Utterance>,
+    signals: watch::Receiver<Option<ConversationSignal>>,
+}
+
+impl TranscribeInputs {
+    /// Whether push-to-talk took the mic since the last signal was applied.
+    fn abandoned(&self) -> bool {
+        self.signals.has_changed().unwrap_or(false)
+            && matches!(*self.signals.borrow(), Some(ConversationSignal::Abandon))
+    }
+
+    /// The next utterance, or `None` once its sender is gone or push-to-talk
+    /// took the mic. Signals, applied before any queued utterance is
+    /// returned, and a closing command window update `gate` while waiting.
+    async fn next_utterance(
+        &mut self,
+        gate: &mut WakeGate,
+        outputs: &ListenOutputs,
+    ) -> Option<Utterance> {
+        loop {
+            let window_close = gate
+                .command_deadline()
+                .filter(|_| *outputs.phase.borrow() == ListenPhase::Capturing);
+            tokio::select! {
+                biased;
+                Ok(()) = self.signals.changed() => {
+                    match *self.signals.borrow_and_update() {
+                        Some(ConversationSignal::FollowUp(reply_ended)) => {
+                            gate.open_follow_up(reply_ended);
+                        }
+                        Some(ConversationSignal::Abandon) => return None,
+                        None => {}
+                    }
+                    outputs.set_phase(gate.phase(Instant::now()));
+                }
+                utterance = self.utterances.recv() => return utterance,
+                () = sleep_until_some(window_close) => outputs.set_phase(ListenPhase::Armed),
+            }
+        }
     }
 }
 
@@ -382,32 +468,22 @@ fn try_queue<T>(tx: &mpsc::Sender<T>, item: T) -> bool {
 }
 
 /// Transcribes each utterance in turn and gates it on the wake phrase. A
-/// bare phrase opens the command window, reported as `Capturing` until it closes.
+/// bare phrase or a follow-up opens a command window, reported as
+/// `Capturing` until it closes.
 async fn transcribe_loop(
     transcriber: Arc<dyn Transcriber>,
     mut gate: WakeGate,
     outputs: ListenOutputs,
-    mut pcm_rx: mpsc::Receiver<Utterance>,
+    mut inputs: TranscribeInputs,
 ) {
-    loop {
-        let window_close = gate
-            .command_deadline()
-            .filter(|_| *outputs.phase.borrow() == ListenPhase::Capturing);
-        let utterance = tokio::select! {
-            biased;
-            utterance = pcm_rx.recv() => utterance,
-            () = sleep_until_some(window_close) => {
-                outputs.set_phase(ListenPhase::Armed);
-                continue;
-            }
-        };
-        let Some(utterance) = utterance else {
-            return;
-        };
+    while let Some(utterance) = inputs.next_utterance(&mut gate, &outputs).await {
         let Some(transcript) = transcribe_utterance(transcriber.as_ref(), &gate, &utterance).await
         else {
             continue;
         };
+        if inputs.abandoned() {
+            return;
+        }
         let admission = gate.admit(&transcript, utterance.started);
         if admission == Admission::Dropped {
             trace!(target: "assistd::voice::listen", %transcript, "no wake phrase; dropped");

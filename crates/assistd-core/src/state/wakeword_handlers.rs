@@ -185,6 +185,7 @@ impl AppState {
                 phrase,
                 variants,
                 samples: u32::try_from(samples).unwrap_or(u32::MAX),
+                listening: capture.listener.is_active(),
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;

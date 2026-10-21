@@ -1,11 +1,11 @@
-//! The inline command-confirmation prompt.
+//! The inline confirmation prompt.
 
 use assistd_ipc::Request;
 use assistd_tools::{Approval, ConfirmationRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use super::{App, ConfirmChoice, ConfirmationPrompt};
+use super::{App, ConfirmChoice, ConfirmTarget, ConfirmationPrompt};
 
 /// Script rows one PgUp/PgDn moves an expanded prompt.
 const PROMPT_SCROLL_STEP: usize = 10;
@@ -18,12 +18,22 @@ impl App {
             self.send_confirm_response(&confirm_id, Approval::Deny);
             return;
         }
-        self.confirmation = Some(ConfirmationPrompt::new(confirm_id, request));
+        self.confirmation = Some(ConfirmationPrompt::new(
+            ConfirmTarget::Command(confirm_id),
+            request,
+        ));
     }
 
     pub(super) fn resolve_confirmation(&mut self, approval: Approval) {
-        if let Some(prompt) = self.confirmation.take() {
-            self.send_confirm_response(&prompt.confirm_id, approval);
+        let Some(prompt) = self.confirmation.take() else {
+            return;
+        };
+        match prompt.answer_to {
+            ConfirmTarget::Command(confirm_id) => self.send_confirm_response(&confirm_id, approval),
+            ConfirmTarget::WakeWordReset if approval != Approval::Deny => {
+                self.spawn_wake_word_reset();
+            }
+            ConfirmTarget::WakeWordReset => {}
         }
     }
 

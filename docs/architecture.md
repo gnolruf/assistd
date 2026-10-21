@@ -291,8 +291,13 @@ as if the user had typed them.
 Continuous mode (`MicContinuousListener`) keeps the mic open and uses
 WebRTC VAD to chop the stream into utterances. Each is transcribed with
 the wake phrase as Whisper's initial prompt, and a `WakeGate` keeps only
-speech that opens with the phrase, or the utterance after a bare phrase
-within `voice.wakeword.command_timeout_ms`; everything else is dropped.
+speech that opens with the phrase, the utterance after a bare phrase
+within `voice.wakeword.command_timeout_ms`, or the utterance that begins
+within `voice.wakeword.follow_up_ms` of a listen-started reply ending,
+speech included; everything else is dropped. A push-to-talk press takes
+the mic from the listener, which drops what it captured but has not acted
+on and resumes on release; it ends the voice conversation, so no follow-up
+window opens until the wake phrase starts a new one.
 The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`) and a
 `WakeWordDetected` event on the bus. The listener keeps running while
 presence sleeps, and a command wakes the model like any other query.

@@ -49,7 +49,7 @@ pub use piper::{PiperError, PiperVoiceOutput};
 pub use sentence::SentenceBuffer;
 #[cfg(feature = "whisper")]
 pub use transcribe::{
-    BusyProbe, CpuFallbackFactory, NullBusyProbe, QueueConfig, QueuedTranscriber, Transcriber,
+    BusyProbe, CpuFallbackFactory, NullBusyProbe, QueuedTranscriber, Transcriber,
     TranscriptionError,
 };
 #[cfg(feature = "whisper")]

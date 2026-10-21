@@ -634,6 +634,7 @@ struct MockListener {
     heard: tokio::sync::broadcast::Sender<Heard>,
     phrase: StdMutex<Option<WakePhrase>>,
     captured: StdMutex<Vec<CapturedUtterance>>,
+    last_push_to_talk: StdMutex<Option<tokio::time::Instant>>,
 }
 
 impl MockListener {
@@ -651,6 +652,7 @@ impl MockListener {
             heard,
             phrase: StdMutex::new(None),
             captured: StdMutex::new(Vec::new()),
+            last_push_to_talk: StdMutex::new(None),
         })
     }
 }
@@ -667,6 +669,13 @@ impl ContinuousListener for MockListener {
         self.phase_tx.send_replace(ListenPhase::Off);
         Ok(())
     }
+    async fn stop_for_push_to_talk(&self) -> Result<(), ListenError> {
+        *self.last_push_to_talk.lock() = Some(tokio::time::Instant::now());
+        self.stop().await
+    }
+    fn last_push_to_talk(&self) -> Option<tokio::time::Instant> {
+        *self.last_push_to_talk.lock()
+    }
     fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
@@ -679,6 +688,7 @@ impl ContinuousListener for MockListener {
     fn set_wake_phrase(&self, phrase: WakePhrase) {
         *self.phrase.lock() = Some(phrase);
     }
+    fn open_follow_up(&self) {}
     async fn capture_utterances(
         &self,
         sink: mpsc::Sender<CapturedUtterance>,
@@ -726,15 +736,6 @@ async fn listen_requests_drive_the_listener() {
             vec![listen_state("l", ListenPhase::Off), done("l")],
             false,
         ),
-        (
-            true,
-            Request::PttStart { id: "l".into() },
-            vec![error(
-                "l",
-                "continuous listening is active; disable it before using PTT",
-            )],
-            true,
-        ),
     ];
     for (initially_active, req, expected, active_after) in cases {
         let label = format!("{} from active={initially_active}", req.kind());
@@ -748,6 +749,42 @@ async fn listen_requests_drive_the_listener() {
         res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
         assert_eq!(events, expected, "{label}");
         assert_eq!(listener.is_active(), active_after, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn ptt_takes_the_mic_from_listening_and_returns_it_on_release() {
+    let cases = [
+        (None, true),
+        (Some(Request::ListenToggle { id: "t".into() }), false),
+    ];
+    for (while_held, listening_after_release) in cases {
+        let label = format!("{:?} while held", while_held.as_ref().map(Request::kind));
+        let listener = MockListener::new(true);
+        let state = StateParts {
+            voice: MockVoice::new(Ok(()), Ok(String::new())),
+            listener: listener.clone(),
+            ..StateParts::default()
+        }
+        .build();
+
+        let (res, events) = dispatch(&state, Request::PttStart { id: "p".into() }).await;
+        res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
+        assert_eq!(
+            events,
+            [voice_state("p", VoiceCaptureState::Recording), done("p")],
+            "{label}"
+        );
+        assert!(!listener.is_active(), "{label}: listening yields the mic");
+        assert!(listener.last_push_to_talk().is_some(), "{label}");
+
+        if let Some(request) = while_held {
+            let (res, _) = dispatch(&state, request).await;
+            res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
+        }
+        let (res, _) = dispatch(&state, Request::PttStop { id: "s".into() }).await;
+        res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
+        assert_eq!(listener.is_active(), listening_after_release, "{label}");
     }
 }
 

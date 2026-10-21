@@ -17,25 +17,57 @@ pub enum Admission {
     WakePhrase,
     /// The phrase followed by this command.
     WakePhraseAndCommand(String),
-    /// The utterance after a bare phrase, taken whole as the command.
+    /// An utterance inside a command window, taken whole as the command.
     Command(String),
 }
 
 /// Admits a transcript when it opens with the wake phrase, or when it
-/// began within `command_timeout` of a bare phrase.
+/// began inside a command window: `command_timeout` after a bare phrase,
+/// or `follow_up` after a reply ended. One utterance closes the window.
 #[derive(Debug)]
 pub struct WakeGate {
     phrase: WakePhrase,
     command_timeout: Duration,
-    command_deadline: Option<Instant>,
+    /// `None` when follow-ups are disabled.
+    follow_up: Option<Duration>,
+    window: Option<CommandWindow>,
+}
+
+/// Speech that began between `opens` and `closes` is a command.
+#[derive(Debug, Clone, Copy)]
+struct CommandWindow {
+    opens: Instant,
+    closes: Instant,
+}
+
+impl CommandWindow {
+    fn contains(self, started: Instant) -> bool {
+        self.opens <= started && started <= self.closes
+    }
 }
 
 impl WakeGate {
-    pub fn new(phrase: WakePhrase, command_timeout: Duration) -> Self {
+    pub fn new(phrase: WakePhrase, command_timeout: Duration, follow_up: Option<Duration>) -> Self {
         Self {
             phrase,
             command_timeout,
-            command_deadline: None,
+            follow_up,
+            window: None,
+        }
+    }
+
+    /// Open the follow-up window for a reply that ended at `reply_ended`,
+    /// unless an open window already closes later.
+    pub fn open_follow_up(&mut self, reply_ended: Instant) {
+        let Some(follow_up) = self.follow_up else {
+            return;
+        };
+        let closes = reply_ended + follow_up;
+        if self.window.is_none_or(|open| open.closes < closes) {
+            self.window = Some(CommandWindow {
+                opens: reply_ended,
+                closes,
+            });
         }
     }
 
@@ -44,33 +76,40 @@ impl WakeGate {
         self.phrase.phrase()
     }
 
-    /// When the command window after a bare phrase closes, if one is open.
+    /// When the open command window closes, if one is open.
     pub fn command_deadline(&self) -> Option<Instant> {
-        self.command_deadline
+        self.window.map(|window| window.closes)
     }
 
-    /// `Capturing` while the command window is open at `now`, else `Armed`.
+    /// `Capturing` while a command window is open at `now`, else `Armed`.
     pub fn phase(&self, now: Instant) -> ListenPhase {
-        match self.command_deadline {
-            Some(deadline) if now < deadline => ListenPhase::Capturing,
+        match self.window {
+            Some(window) if window.contains(now) => ListenPhase::Capturing,
             _ => ListenPhase::Armed,
         }
     }
 
-    /// Gate `transcript`, whose speech began at `started`.
+    /// Gate `transcript`, whose speech began at `started`. Inside a window,
+    /// a transcript that opens with the phrase is still stripped of it.
     pub fn admit(&mut self, transcript: &str, started: Instant) -> Admission {
-        if let Some(deadline) = self.command_deadline.take()
-            && started <= deadline
-        {
-            return Admission::Command(transcript.to_string());
-        }
+        let in_window = self
+            .window
+            .take()
+            .is_some_and(|window| window.contains(started));
         match self.phrase.match_prefix(transcript) {
-            None => Admission::Dropped,
             Some("") => {
-                self.command_deadline = Some(Instant::now() + self.command_timeout);
+                self.window = Some(CommandWindow {
+                    opens: started,
+                    closes: Instant::now() + self.command_timeout,
+                });
                 Admission::WakePhrase
             }
             Some(command) => Admission::WakePhraseAndCommand(command.to_string()),
+            None if in_window => Admission::Command(transcript.to_string()),
+            None => Admission::Dropped,
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

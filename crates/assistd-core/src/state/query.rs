@@ -27,7 +27,7 @@ use super::persistence::PersistTarget;
 use super::wire::decode_wire_attachments;
 use super::{AppState, DispatchError, RuntimeState, send_error};
 use crate::Agent;
-use crate::presence::{LlmStreamGuard, PresenceLlmHealthProbe, RequestGuard};
+use crate::presence::{PresenceLlmHealthProbe, RequestGuard};
 use crate::recovery::{Component, spawn_supervised};
 
 const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -40,11 +40,6 @@ pub enum TurnOrigin {
     Typed,
     /// A push-to-talk or continuous-listening transcription.
     Voice,
-}
-
-struct QueryGuards {
-    _request: RequestGuard,
-    _stream: LlmStreamGuard,
 }
 
 /// Sentence splitter and the channel to the speech worker.
@@ -350,7 +345,7 @@ impl AppState {
         let attachments = self
             .prepare_attachments(&id, &wire_attachments, &tx)
             .await?;
-        let Some((_session_guards, agent_guard)) = self.admit_turn(&id, &tx, &cancel).await? else {
+        let Some((_request_guard, agent_guard)) = self.admit_turn(&id, &tx, &cancel).await? else {
             return finish_interrupted_before_start(&tx, id).await;
         };
         if let Some(revalidator) = &self.subsystems.vision_revalidator {
@@ -434,11 +429,11 @@ impl AppState {
         id: &str,
         tx: &mpsc::Sender<Event>,
         cancel: &CancellationToken,
-    ) -> Result<Option<(QueryGuards, OwnedMutexGuard<()>)>, DispatchError> {
+    ) -> Result<Option<(RequestGuard, OwnedMutexGuard<()>)>, DispatchError> {
         let admission = async {
             let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
-            let guards = self.acquire_query_guards(id, tx).await?;
-            Ok((guards, agent_guard))
+            let request_guard = self.acquire_request_guard(id, tx).await?;
+            Ok((request_guard, agent_guard))
         };
         tokio::select! {
             biased;
@@ -447,28 +442,23 @@ impl AppState {
         }
     }
 
-    async fn acquire_query_guards(
+    async fn acquire_request_guard(
         &self,
         id: &str,
         tx: &mpsc::Sender<Event>,
-    ) -> Result<QueryGuards, DispatchError> {
-        let request = match self
+    ) -> Result<RequestGuard, DispatchError> {
+        match self
             .subsystems
             .presence
             .acquire_request_guard_with_progress(id.to_string(), tx.clone())
             .await
         {
-            Ok(guard) => guard,
+            Ok(guard) => Ok(guard),
             Err(e) => {
                 send_error(tx, id.to_string(), format!("wake failed: {e}")).await;
-                return Err(e.into());
+                Err(e.into())
             }
-        };
-        let stream = self.subsystems.presence.acquire_stream_guard();
-        Ok(QueryGuards {
-            _request: request,
-            _stream: stream,
-        })
+        }
     }
 
     /// Save the session if needed and queue the write opening the turn with
