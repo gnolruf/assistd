@@ -138,6 +138,7 @@ pub const DEFAULT_MCP_REQUEST_TIMEOUT_SECS: NonZeroU64 = nz64(30);
 
 pub const DEFAULT_TRAY_ICON_ACTIVE: &str = "user-available";
 pub const DEFAULT_TRAY_ICON_SLEEPING: &str = "user-offline";
+pub const DEFAULT_TRAY_ICON_ARMED: &str = "microphone-sensitivity-low";
 pub const DEFAULT_TRAY_ICON_LISTENING: &str = "audio-input-microphone";
 pub const DEFAULT_TRAY_ICON_GENERATING: &str = "system-run";
 pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";

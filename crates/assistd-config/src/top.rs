@@ -540,6 +540,7 @@ fn validate_tray_icons(errors: &mut Vec<String>, icons: &TrayIconsConfig) {
     let named = [
         ("active", &icons.active),
         ("sleeping", &icons.sleeping),
+        ("armed", &icons.armed),
         ("listening", &icons.listening),
         ("generating", &icons.generating),
         ("disconnected", &icons.disconnected),

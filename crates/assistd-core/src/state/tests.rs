@@ -7,7 +7,7 @@ use tokio::sync::{Notify, watch};
 
 use assistd_embed::EmbedderHandle;
 use assistd_ipc::{
-    Component, ComponentReadiness, ImageAttachment, PresenceState, PresenceTarget,
+    Component, ComponentReadiness, ImageAttachment, ListenPhase, PresenceState, PresenceTarget,
     StartupComponent, StatusKind, StatusSeverity, SubscribeFilter, VoiceCaptureState,
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
@@ -22,8 +22,8 @@ use assistd_tools::{
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
-    ContinuousListener, ListenError, VoiceCapture, VoiceInput, VoiceInputError, VoiceManager,
-    VoiceOutputController, VoiceOutputError,
+    ContinuousListener, Heard, ListenError, VoiceCapture, VoiceInput, VoiceInputError,
+    VoiceManager, VoiceOutputController, VoiceOutputError,
 };
 use assistd_wm::FocusedWindowContext;
 
@@ -119,10 +119,10 @@ fn voice_state(id: &str, state: VoiceCaptureState) -> Event {
     }
 }
 
-fn listen_state(id: &str, active: bool) -> Event {
+fn listen_state(id: &str, phase: ListenPhase) -> Event {
     Event::ListenState {
         id: id.into(),
-        active,
+        phase,
     }
 }
 
@@ -620,18 +620,23 @@ async fn interrupt_between_ptt_press_and_release_drops_the_prompt() {
 #[derive(Debug)]
 struct MockListener {
     active: AtomicBool,
-    state_tx: watch::Sender<bool>,
-    utterances: tokio::sync::broadcast::Sender<String>,
+    phase_tx: watch::Sender<ListenPhase>,
+    heard: tokio::sync::broadcast::Sender<Heard>,
 }
 
 impl MockListener {
     fn new(active: bool) -> Arc<Self> {
-        let (state_tx, _) = watch::channel(active);
-        let (utterances, _) = tokio::sync::broadcast::channel(4);
+        let phase = if active {
+            ListenPhase::Armed
+        } else {
+            ListenPhase::Off
+        };
+        let (phase_tx, _) = watch::channel(phase);
+        let (heard, _) = tokio::sync::broadcast::channel(4);
         Arc::new(Self {
             active: AtomicBool::new(active),
-            state_tx,
-            utterances,
+            phase_tx,
+            heard,
         })
     }
 }
@@ -640,22 +645,22 @@ impl MockListener {
 impl ContinuousListener for MockListener {
     async fn start(&self) -> Result<(), ListenError> {
         self.active.store(true, Ordering::SeqCst);
-        let _ = self.state_tx.send(true);
+        self.phase_tx.send_replace(ListenPhase::Armed);
         Ok(())
     }
     async fn stop(&self) -> Result<(), ListenError> {
         self.active.store(false, Ordering::SeqCst);
-        let _ = self.state_tx.send(false);
+        self.phase_tx.send_replace(ListenPhase::Off);
         Ok(())
     }
     fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
-    fn subscribe_utterances(&self) -> tokio::sync::broadcast::Receiver<String> {
-        self.utterances.subscribe()
+    fn subscribe_heard(&self) -> tokio::sync::broadcast::Receiver<Heard> {
+        self.heard.subscribe()
     }
-    fn subscribe_state(&self) -> watch::Receiver<bool> {
-        self.state_tx.subscribe()
+    fn subscribe_phase(&self) -> watch::Receiver<ListenPhase> {
+        self.phase_tx.subscribe()
     }
 }
 
@@ -665,13 +670,13 @@ async fn listen_requests_drive_the_listener() {
         (
             false,
             Request::ListenToggle { id: "l".into() },
-            vec![listen_state("l", true), done("l")],
+            vec![listen_state("l", ListenPhase::Armed), done("l")],
             true,
         ),
         (
             true,
             Request::ListenToggle { id: "l".into() },
-            vec![listen_state("l", false), done("l")],
+            vec![listen_state("l", ListenPhase::Off), done("l")],
             false,
         ),
         (

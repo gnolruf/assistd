@@ -1,20 +1,25 @@
 //! cpal + webrtc-vad + whisper hands-free listener: ring buffer →
-//! resampler → playback gate → VAD frames → transcriber → broadcast.
+//! resampler → playback gate → VAD frames → transcriber → wake gate → broadcast.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use assistd_config::{VoiceConfig, WakeWordConfig};
+use assistd_ipc::ListenPhase;
 use async_trait::async_trait;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tokio::time::Instant;
+use tracing::{debug, info, trace, warn};
 
 use super::capture::{self, ListenCaptureSession};
 use super::playback_gate::{PLAYBACK_HANGOVER_FRAMES, PlaybackGate};
-use super::vad::{FRAME_SAMPLES, UtteranceVad, VadEvent, VadTuning};
-use super::{ContinuousListener, ListenError};
+use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTuning};
+use super::wake_gate::{Admission, WakeGate};
+use super::wake_phrase::WakePhrase;
+use super::{ContinuousListener, Heard, ListenError};
 use crate::mic::capture::AudioCaptureError;
 use crate::transcribe::Transcriber;
 
@@ -29,6 +34,25 @@ const PENDING_UTTERANCE_DEPTH: usize = 4;
 
 type CaptureJoin = JoinHandle<Result<(), AudioCaptureError>>;
 
+/// One VAD-bounded utterance and when its audio began.
+#[derive(Debug)]
+struct Utterance {
+    pcm: Vec<i16>,
+    started: Instant,
+}
+
+impl Utterance {
+    /// Dates `pcm` back from now by its own length.
+    fn ending_now(pcm: Vec<i16>) -> Self {
+        let millis = pcm.len() as u64 * 1000 / u64::from(SAMPLE_RATE_HZ);
+        let now = Instant::now();
+        let started = now
+            .checked_sub(Duration::from_millis(millis))
+            .unwrap_or(now);
+        Self { pcm, started }
+    }
+}
+
 /// cpal + webrtc-vad implementation of [`ContinuousListener`].
 #[derive(Debug)]
 pub struct MicContinuousListener {
@@ -36,9 +60,11 @@ pub struct MicContinuousListener {
     mic_device: Option<String>,
     tuning: VadTuning,
     output_speaking: Option<watch::Receiver<bool>>,
+    wake_phrase: WakePhrase,
+    command_timeout: Duration,
     active: AtomicBool,
-    state_tx: watch::Sender<bool>,
-    utterances: broadcast::Sender<String>,
+    phase_tx: watch::Sender<ListenPhase>,
+    heard: broadcast::Sender<Heard>,
     listen_state: Arc<Mutex<ListenState>>,
 }
 
@@ -74,9 +100,9 @@ impl ListenSession {
 }
 
 impl MicContinuousListener {
-    /// The audio device is opened on [`Self::start`], not here. When the
-    /// playback gate is configured on, frames captured while
-    /// `output_speaking` is true are discarded.
+    /// Listens for the built-in wake phrase. The audio device is opened on
+    /// [`Self::start`], not here. When the playback gate is configured on,
+    /// frames captured while `output_speaking` is true are discarded.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         config: &VoiceConfig,
@@ -84,16 +110,18 @@ impl MicContinuousListener {
     ) -> Self {
         let tuning = tuning_from_config(&config.wakeword);
         let output_speaking = config.wakeword.playback_gate.then_some(output_speaking);
-        let (state_tx, _) = watch::channel(false);
-        let (utterances, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
+        let (phase_tx, _) = watch::channel(ListenPhase::Off);
+        let (heard, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
         Self {
             transcriber,
             mic_device: config.mic_device.clone(),
             tuning,
             output_speaking,
+            wake_phrase: WakePhrase::builtin(config.wakeword.match_similarity),
+            command_timeout: Duration::from_millis(config.wakeword.command_timeout_ms.get().into()),
             active: AtomicBool::new(false),
-            state_tx,
-            utterances,
+            phase_tx,
+            heard,
             listen_state: Arc::new(Mutex::new(ListenState { session: None })),
         }
     }
@@ -116,10 +144,15 @@ impl ContinuousListener for MicContinuousListener {
             handle: capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
 
-        let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(PENDING_UTTERANCE_DEPTH);
+        let (pcm_tx, pcm_rx) = mpsc::channel::<Utterance>(PENDING_UTTERANCE_DEPTH);
+        let gate = WakeGate::new(self.wake_phrase.clone(), self.command_timeout);
         let transcribe_handle = tokio::spawn(transcribe_loop(
             self.transcriber.clone(),
-            self.utterances.clone(),
+            gate,
+            ListenOutputs {
+                heard: self.heard.clone(),
+                phase: self.phase_tx.clone(),
+            },
             pcm_rx,
         ));
         let tuning = self.tuning;
@@ -136,8 +169,8 @@ impl ContinuousListener for MicContinuousListener {
             vad_handle,
             transcribe_handle,
         });
-        let _ = self.state_tx.send(true);
-        info!(target: "assistd::voice::listen", "continuous listening started");
+        self.phase_tx.send_replace(ListenPhase::Armed);
+        info!(target: "assistd::voice::listen", "wake-word listening started");
         Ok(())
     }
 
@@ -151,8 +184,8 @@ impl ContinuousListener for MicContinuousListener {
         session.shutdown().await;
 
         self.active.store(false, Ordering::SeqCst);
-        let _ = self.state_tx.send(false);
-        info!(target: "assistd::voice::listen", "continuous listening stopped");
+        self.phase_tx.send_replace(ListenPhase::Off);
+        info!(target: "assistd::voice::listen", "wake-word listening stopped");
         Ok(())
     }
 
@@ -160,12 +193,47 @@ impl ContinuousListener for MicContinuousListener {
         self.active.load(Ordering::SeqCst)
     }
 
-    fn subscribe_utterances(&self) -> broadcast::Receiver<String> {
-        self.utterances.subscribe()
+    fn subscribe_heard(&self) -> broadcast::Receiver<Heard> {
+        self.heard.subscribe()
     }
 
-    fn subscribe_state(&self) -> watch::Receiver<bool> {
-        self.state_tx.subscribe()
+    fn subscribe_phase(&self) -> watch::Receiver<ListenPhase> {
+        self.phase_tx.subscribe()
+    }
+}
+
+/// Where the transcription worker reports what it admits.
+#[derive(Debug)]
+struct ListenOutputs {
+    heard: broadcast::Sender<Heard>,
+    phase: watch::Sender<ListenPhase>,
+}
+
+impl ListenOutputs {
+    fn send_heard(&self, heard: Heard) {
+        if self.heard.send(heard).is_err() {
+            debug!(
+                target: "assistd::voice::listen",
+                "no listen subscribers; dropping what was heard"
+            );
+        }
+    }
+
+    fn publish(&self, admission: Admission) {
+        match admission {
+            Admission::Dropped => {}
+            Admission::WakePhrase => self.send_heard(Heard::WakePhrase),
+            Admission::WakePhraseAndCommand(command) => {
+                self.send_heard(Heard::WakePhrase);
+                self.send_heard(Heard::Command(command));
+            }
+            Admission::Command(command) => self.send_heard(Heard::Command(command)),
+        }
+    }
+
+    fn set_phase(&self, phase: ListenPhase) {
+        self.phase
+            .send_if_modified(|current| std::mem::replace(current, phase) != phase);
     }
 }
 
@@ -182,7 +250,7 @@ fn vad_loop(
     tuning: VadTuning,
     mut playback_gate: Option<PlaybackGate>,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
-    pcm_tx: &mpsc::Sender<Vec<i16>>,
+    pcm_tx: &mpsc::Sender<Utterance>,
 ) {
     let mut vad = UtteranceVad::new(tuning);
     while let Some(frame) = frame_rx.blocking_recv() {
@@ -199,7 +267,7 @@ fn vad_loop(
         let pcm = match event {
             VadEvent::UtteranceComplete(pcm) | VadEvent::Truncated(pcm) => pcm,
         };
-        match pcm_tx.try_send(pcm) {
+        match pcm_tx.try_send(Utterance::ending_now(pcm)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => warn!(
                 target: "assistd::voice::listen",
@@ -210,29 +278,67 @@ fn vad_loop(
     }
 }
 
+/// Transcribes each utterance in turn and gates it on the wake phrase. A
+/// bare phrase opens the command window, reported as `Capturing` until it closes.
 async fn transcribe_loop(
     transcriber: Arc<dyn Transcriber>,
-    utterances: broadcast::Sender<String>,
-    mut pcm_rx: mpsc::Receiver<Vec<i16>>,
+    mut gate: WakeGate,
+    outputs: ListenOutputs,
+    mut pcm_rx: mpsc::Receiver<Utterance>,
 ) {
-    while let Some(pcm) = pcm_rx.recv().await {
-        match transcriber.transcribe(&pcm).await {
-            Ok(text) => {
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if utterances.send(trimmed.to_string()).is_err() {
-                    debug!(
-                        target: "assistd::voice::listen",
-                        "no utterance subscribers; dropping transcript"
-                    );
-                }
+    loop {
+        let window_close = gate
+            .command_deadline()
+            .filter(|_| *outputs.phase.borrow() == ListenPhase::Capturing);
+        let utterance = tokio::select! {
+            biased;
+            utterance = pcm_rx.recv() => utterance,
+            () = sleep_until_some(window_close) => {
+                outputs.set_phase(ListenPhase::Armed);
+                continue;
             }
-            Err(err) => {
-                warn!(target: "assistd::voice::listen", "transcription failed: {err:#}");
-            }
+        };
+        let Some(utterance) = utterance else {
+            return;
+        };
+        let Some(transcript) = transcribe_utterance(transcriber.as_ref(), &gate, &utterance).await
+        else {
+            continue;
+        };
+        let admission = gate.admit(&transcript, utterance.started);
+        if admission == Admission::Dropped {
+            trace!(target: "assistd::voice::listen", %transcript, "no wake phrase; dropped");
         }
+        outputs.publish(admission);
+        outputs.set_phase(gate.phase(Instant::now()));
+    }
+}
+
+/// The non-empty transcript of `utterance`, biased toward the wake phrase.
+async fn transcribe_utterance(
+    transcriber: &dyn Transcriber,
+    gate: &WakeGate,
+    utterance: &Utterance,
+) -> Option<String> {
+    match transcriber
+        .transcribe(&utterance.pcm, Some(gate.phrase()))
+        .await
+    {
+        Ok(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Err(err) => {
+            warn!(target: "assistd::voice::listen", "transcription failed: {err:#}");
+            None
+        }
+    }
+}
+
+async fn sleep_until_some(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 

@@ -552,6 +552,8 @@ async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
             kinds: vec![
                 EventKind::SessionTitle,
                 EventKind::Transcription,
+                EventKind::ListenState,
+                EventKind::WakeWordDetected,
                 EventKind::Delta,
                 EventKind::ReasoningDelta,
                 EventKind::ToolCall,

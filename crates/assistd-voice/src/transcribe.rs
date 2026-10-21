@@ -13,9 +13,14 @@ use crate::VoiceCaptureState;
 /// Transcribe 16 kHz mono PCM audio into text.
 #[async_trait]
 pub trait Transcriber: fmt::Debug + Send + Sync + 'static {
-    /// Transcribe signed 16-bit mono samples at 16 kHz. Returns trimmed
-    /// text; an empty string means the input was silence, not an error.
-    async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError>;
+    /// Transcribe signed 16-bit mono samples at 16 kHz, biased toward the
+    /// spellings in `prompt` when given. Returns trimmed text; an empty
+    /// string means the input was silence, not an error.
+    async fn transcribe(
+        &self,
+        pcm_i16_16k_mono: &[i16],
+        prompt: Option<&str>,
+    ) -> Result<String, TranscriptionError>;
 
     /// State transitions the transcriber drives itself (`Queued`,
     /// `Transcribing`). `None` when the implementation has no internal
@@ -209,10 +214,14 @@ impl QueuedTranscriber {
 
 #[async_trait]
 impl Transcriber for QueuedTranscriber {
-    async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
+    async fn transcribe(
+        &self,
+        pcm_i16_16k_mono: &[i16],
+        prompt: Option<&str>,
+    ) -> Result<String, TranscriptionError> {
         if !self.primary.is_gpu() || !self.config.cpu_fallback_enabled {
             let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-            let result = self.primary.transcribe(pcm_i16_16k_mono).await;
+            let result = self.primary.transcribe(pcm_i16_16k_mono, prompt).await;
             let _ = self.state_tx.send(VoiceCaptureState::Idle);
             return result;
         }
@@ -224,10 +233,10 @@ impl Transcriber for QueuedTranscriber {
         let result = if use_cpu {
             self.cpu_transcriber()
                 .await?
-                .transcribe(pcm_i16_16k_mono)
+                .transcribe(pcm_i16_16k_mono, prompt)
                 .await
         } else {
-            self.primary.transcribe(pcm_i16_16k_mono).await
+            self.primary.transcribe(pcm_i16_16k_mono, prompt).await
         };
 
         let _ = self.state_tx.send(VoiceCaptureState::Idle);
@@ -278,7 +287,11 @@ mod tests {
 
     #[async_trait]
     impl Transcriber for StubTranscriber {
-        async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
+        async fn transcribe(
+            &self,
+            _pcm: &[i16],
+            _prompt: Option<&str>,
+        ) -> Result<String, TranscriptionError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.text.clone())
         }
@@ -414,7 +427,7 @@ mod tests {
                     ..test_config()
                 },
             );
-            let text = queued.transcribe(&[0i16; 16]).await.unwrap();
+            let text = queued.transcribe(&[0i16; 16], None).await.unwrap();
             let (expected, primary_calls, cpu_calls) = if case.uses_cpu {
                 ("cpu", 0, 1)
             } else {
@@ -440,7 +453,11 @@ mod tests {
 
     #[async_trait]
     impl Transcriber for GatedTranscriber {
-        async fn transcribe(&self, _pcm: &[i16]) -> Result<String, TranscriptionError> {
+        async fn transcribe(
+            &self,
+            _pcm: &[i16],
+            _prompt: Option<&str>,
+        ) -> Result<String, TranscriptionError> {
             self.started.notify_one();
             self.release.notified().await;
             Ok(self.label.to_string())
@@ -471,7 +488,7 @@ mod tests {
 
         let transcription = {
             let queued = queued.clone();
-            tokio::spawn(async move { queued.transcribe(&[0i16; 16]).await })
+            tokio::spawn(async move { queued.transcribe(&[0i16; 16], None).await })
         };
 
         started.notified().await;

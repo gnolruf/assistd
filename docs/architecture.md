@@ -289,7 +289,12 @@ loaded once at startup). Transcripts feed back into the agent loop
 as if the user had typed them.
 
 Continuous mode (`MicContinuousListener`) keeps the mic open and uses
-WebRTC VAD to chop the stream into utterances. Separately, whisper.cpp's
+WebRTC VAD to chop the stream into utterances. Each is transcribed with
+the wake phrase as Whisper's initial prompt, and a `WakeGate` keeps only
+speech that opens with the phrase, or the utterance after a bare phrase
+within `voice.wakeword.command_timeout_ms`; everything else is dropped.
+The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`) and a
+`WakeWordDetected` event on the bus. Separately, whisper.cpp's
 Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
 every recording before decoding. While `VoiceOutputController`
 reports that a reply is being spoken (plus a short hangover), a

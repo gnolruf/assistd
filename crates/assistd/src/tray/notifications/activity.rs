@@ -185,8 +185,8 @@ impl ActivityTracker {
             Event::SessionTitle { title, .. } => {
                 self.session_title = Some(title.clone());
             }
-            Event::ListenState { active, .. } => {
-                self.listening = *active;
+            Event::ListenState { phase, .. } => {
+                self.listening = phase.is_on();
             }
             Event::SpeakingState { id, speaking } => {
                 if *speaking {
@@ -316,6 +316,7 @@ fn truncate_chars_from_start(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assistd_ipc::ListenPhase;
     use serde_json::json;
 
     use super::*;
@@ -418,7 +419,7 @@ mod tests {
 
         t.ingest(&Event::ListenState {
             id: "x".into(),
-            active: true,
+            phase: ListenPhase::Armed,
         });
         assert!(t.is_listening());
         assert_eq!(t.snapshot().activity, Activity::Listening);
@@ -430,7 +431,7 @@ mod tests {
 
         t.ingest(&Event::ListenState {
             id: "x".into(),
-            active: false,
+            phase: ListenPhase::Off,
         });
         assert!(!t.is_listening());
         assert_eq!(t.snapshot().activity, Activity::Done);

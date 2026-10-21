@@ -30,12 +30,8 @@ impl ListenAction {
 pub(crate) async fn run(action: ListenAction) -> Result<()> {
     let req = action.to_request(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
-        if let Event::ListenState { active, .. } = event {
-            writeln!(
-                io::stdout(),
-                "listen: {}",
-                if *active { "on" } else { "off" }
-            )?;
+        if let Event::ListenState { phase, .. } = event {
+            writeln!(io::stdout(), "listen: {}", phase.as_str())?;
         }
         Ok(())
     })

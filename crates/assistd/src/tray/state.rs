@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use assistd_config::TrayIconsConfig;
-use assistd_ipc::{Event, PresenceState, StartupReadiness, VoiceCaptureState};
+use assistd_ipc::{Event, ListenPhase, PresenceState, StartupReadiness, VoiceCaptureState};
 
 /// What the tray icon should currently display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,8 +14,10 @@ pub(super) enum TrayState {
     Disconnected,
     /// At least one query turn is in flight.
     Generating,
-    /// Continuous listening is on, or a push-to-talk capture is underway.
+    /// The wake phrase was heard, or a push-to-talk capture is underway.
     Listening,
+    /// The mic is open, waiting for the wake phrase.
+    Armed,
     /// Daemon is awake and idle.
     Active,
     /// Daemon is drowsing, sleeping, or loading the model (rendered the
@@ -27,7 +29,7 @@ pub(super) enum TrayState {
 pub(super) struct TrayTracker {
     config_error: Option<String>,
     presence: PresenceState,
-    listening: bool,
+    listen_phase: ListenPhase,
     ptt_capture: VoiceCaptureState,
     startup: StartupReadiness,
     in_flight: HashSet<String>,
@@ -47,7 +49,7 @@ impl TrayTracker {
         Self {
             config_error,
             presence: PresenceState::Active,
-            listening: false,
+            listen_phase: ListenPhase::Off,
             ptt_capture: VoiceCaptureState::Idle,
             startup: StartupReadiness::default(),
             in_flight: HashSet::new(),
@@ -55,7 +57,7 @@ impl TrayTracker {
         }
     }
 
-    /// Priority: config error, disconnected, generating, listening, presence.
+    /// Priority: config error, disconnected, generating, listening, armed, presence.
     pub(super) fn current(&self) -> TrayState {
         if self.config_error.is_some() {
             return TrayState::ConfigError;
@@ -66,8 +68,13 @@ impl TrayTracker {
         if !self.in_flight.is_empty() {
             return TrayState::Generating;
         }
-        if self.listening || self.ptt_capture != VoiceCaptureState::Idle {
+        if self.listen_phase == ListenPhase::Capturing
+            || self.ptt_capture != VoiceCaptureState::Idle
+        {
             return TrayState::Listening;
+        }
+        if self.listen_phase == ListenPhase::Armed {
+            return TrayState::Armed;
         }
         match self.presence {
             PresenceState::Active => TrayState::Active,
@@ -113,7 +120,7 @@ impl TrayTracker {
         let before = self.current();
         self.connected = false;
         self.in_flight.clear();
-        self.listening = false;
+        self.listen_phase = ListenPhase::Off;
         self.ptt_capture = VoiceCaptureState::Idle;
         self.startup = StartupReadiness::default();
         before != self.current()
@@ -132,8 +139,8 @@ impl TrayTracker {
             Event::Presence { state, .. } => {
                 self.presence = *state;
             }
-            Event::ListenState { active, .. } => {
-                self.listening = *active;
+            Event::ListenState { phase, .. } => {
+                self.listen_phase = *phase;
             }
             Event::VoiceState { state, .. } => {
                 self.ptt_capture = *state;
@@ -156,6 +163,7 @@ pub(super) fn icon_name_for(state: TrayState, icons: &TrayIconsConfig) -> &str {
         TrayState::Disconnected => &icons.disconnected,
         TrayState::Generating => &icons.generating,
         TrayState::Listening => &icons.listening,
+        TrayState::Armed => &icons.armed,
         TrayState::Active => &icons.active,
         TrayState::Sleeping => &icons.sleeping,
     }
@@ -167,6 +175,7 @@ pub(super) fn tooltip_for(state: TrayState) -> &'static str {
         TrayState::Disconnected => "assistd: daemon offline",
         TrayState::Generating => "assistd: thinking…",
         TrayState::Listening => "assistd: listening",
+        TrayState::Armed => "assistd: waiting for the wake phrase",
         TrayState::Active => "assistd: idle",
         TrayState::Sleeping => "assistd: sleeping",
     }

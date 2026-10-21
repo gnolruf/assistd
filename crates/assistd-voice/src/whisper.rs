@@ -142,7 +142,11 @@ impl Transcriber for WhisperTranscriber {
         self.is_gpu
     }
 
-    async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
+    async fn transcribe(
+        &self,
+        pcm_i16_16k_mono: &[i16],
+        prompt: Option<&str>,
+    ) -> Result<String, TranscriptionError> {
         if pcm_i16_16k_mono.is_empty() {
             return Err(TranscriptionError::EmptyAudio);
         }
@@ -158,6 +162,7 @@ impl Transcriber for WhisperTranscriber {
         let states = self.states.clone();
         let inference = self.inference.clone();
         let trimmer = self.trimmer.clone();
+        let prompt = prompt.map(str::to_owned);
         let result = tokio::task::spawn_blocking(move || {
             let speech = match &trimmer {
                 Some(trimmer) => trimmer.trim(&audio_f32)?,
@@ -171,7 +176,7 @@ impl Transcriber for WhisperTranscriber {
                     ctx.create_state()
                         .map_err(|err| TranscriptionError::WhisperInference(err.to_string()))
                 },
-                |state| run_inference(state, &inference, &speech),
+                |state| run_inference(state, &inference, prompt.as_deref(), &speech),
             )
         })
         .await?;
@@ -322,6 +327,7 @@ pub async fn build_cpu_fallback(
 fn run_inference(
     state: &mut WhisperState,
     inference: &InferenceConfig,
+    prompt: Option<&str>,
     audio: &[f32],
 ) -> Result<String, TranscriptionError> {
     let mut params = FullParams::new(sampling_strategy(inference.beams));
@@ -335,6 +341,9 @@ fn run_inference(
     params.set_suppress_blank(true);
     if let Some(threads) = inference.threads {
         params.set_n_threads(i32::try_from(threads).unwrap_or(i32::MAX));
+    }
+    if let Some(prompt) = prompt {
+        params.set_initial_prompt(prompt);
     }
 
     state

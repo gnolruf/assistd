@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use assistd_ipc::{ComponentReadiness, StartupComponent};
+use assistd_ipc::{ComponentReadiness, ListenPhase, StartupComponent};
 use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use thiserror::Error;
 
@@ -66,6 +66,13 @@ impl VoiceManager {
     pub fn listening(&self) -> bool {
         self.capture()
             .is_ok_and(|capture| capture.listener.is_active())
+    }
+
+    /// The wake-word listener's phase; `Off` before capture is up.
+    pub fn listen_phase(&self) -> ListenPhase {
+        self.capture().map_or(ListenPhase::Off, |capture| {
+            *capture.listener.subscribe_phase().borrow()
+        })
     }
 
     /// Speech output and its mute, skip and speaking controls.

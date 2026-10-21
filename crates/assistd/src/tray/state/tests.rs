@@ -26,10 +26,10 @@ fn error(id: &str) -> Event {
     }
 }
 
-fn listen(active: bool) -> Event {
+fn listen(phase: ListenPhase) -> Event {
     Event::ListenState {
         id: "x".into(),
-        active,
+        phase,
     }
 }
 
@@ -48,7 +48,7 @@ fn config_error_outranks_everything() {
 
     assert!(!t.set_connected());
     assert!(t.connected());
-    assert!(!t.ingest(&listen(true)));
+    assert!(!t.ingest(&listen(ListenPhase::Capturing)));
     assert!(!t.ingest(&delta("a")));
     assert_eq!(t.current(), TrayState::ConfigError);
 
@@ -60,7 +60,7 @@ fn config_error_outranks_everything() {
 fn generating_outranks_listening_and_presence() {
     let mut t = TrayTracker::default();
     t.set_connected();
-    t.ingest(&listen(true));
+    t.ingest(&listen(ListenPhase::Capturing));
     t.ingest(&delta("a"));
     assert_eq!(t.current(), TrayState::Generating);
 }
@@ -82,7 +82,7 @@ fn concurrent_turns_keep_generating_until_all_resolve() {
 fn disconnect_clears_in_flight_and_listening() {
     let mut t = TrayTracker::default();
     t.set_connected();
-    t.ingest(&listen(true));
+    t.ingest(&listen(ListenPhase::Capturing));
     t.ingest(&delta("a"));
     assert!(t.set_disconnected());
     assert_eq!(t.current(), TrayState::Disconnected);

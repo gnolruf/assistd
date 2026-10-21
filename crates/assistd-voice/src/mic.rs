@@ -167,7 +167,7 @@ impl VoiceInput for MicVoiceInput {
 
         log_captured_levels(&pcm);
 
-        let result = self.transcriber.transcribe(&pcm).await;
+        let result = self.transcriber.transcribe(&pcm, None).await;
         self.cleanup_forwarder_and_idle(forwarder).await;
 
         let text = result?;

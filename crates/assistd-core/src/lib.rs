@@ -55,13 +55,14 @@ pub use assistd_config::{
 };
 
 pub use assistd_ipc as ipc;
-pub use assistd_ipc::{PresenceState, PresenceTarget, VoiceCaptureState};
+pub use assistd_ipc::{ListenPhase, PresenceState, PresenceTarget, VoiceCaptureState};
 
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
 
 pub use assistd_voice::{
-    CaptureUnavailable, ContinuousListener, NoContinuousListener, NoVoiceInput, NoVoiceOutput,
-    SpeakDecision, VoiceCapture, VoiceInput, VoiceManager, VoiceOutput, VoiceOutputController,
+    CaptureUnavailable, ContinuousListener, Heard, NoContinuousListener, NoVoiceInput,
+    NoVoiceOutput, SpeakDecision, VoiceCapture, VoiceInput, VoiceManager, VoiceOutput,
+    VoiceOutputController,
 };
 
 pub use assistd_wm::{NoWindowManager, WindowManager};

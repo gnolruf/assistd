@@ -497,7 +497,7 @@ async fn transcribe_prompt(
     no_think: bool,
 ) -> Result<String> {
     let transcript = whisper
-        .transcribe(pcm)
+        .transcribe(pcm, None)
         .await
         .map_err(|err| anyhow::anyhow!("whisper failed: {err}"))?;
     if transcript.trim().is_empty() {

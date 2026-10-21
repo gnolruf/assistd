@@ -283,9 +283,13 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str)> {
         (
             Event::ListenState {
                 id: id(),
-                active: true,
+                phase: ListenPhase::Armed,
             },
-            r#"{"type":"listen_state","id":"r","active":true}"#,
+            r#"{"type":"listen_state","id":"r","phase":"armed"}"#,
+        ),
+        (
+            Event::WakeWordDetected { id: id() },
+            r#"{"type":"wake_word_detected","id":"r"}"#,
         ),
         (
             Event::VoiceOutputState {
