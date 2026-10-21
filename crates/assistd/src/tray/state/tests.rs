@@ -102,3 +102,15 @@ fn push_to_talk_shows_listening_until_transcription_ends() {
     assert!(t.ingest(&ptt(VoiceCaptureState::Idle)));
     assert_eq!(t.current(), TrayState::Active);
 }
+
+#[test]
+fn waiting_for_the_wake_phrase_is_idle_until_it_is_heard() {
+    let mut t = TrayTracker::default();
+    t.set_connected();
+    assert!(!t.ingest(&listen(ListenPhase::Armed)));
+    assert_eq!(t.current(), TrayState::Active);
+    assert!(t.ingest(&listen(ListenPhase::Capturing)));
+    assert_eq!(t.current(), TrayState::Listening);
+    assert!(t.ingest(&listen(ListenPhase::Armed)));
+    assert_eq!(t.current(), TrayState::Active);
+}

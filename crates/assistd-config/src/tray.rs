@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
-    DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_ARMED, DEFAULT_TRAY_ICON_DISCONNECTED,
-    DEFAULT_TRAY_ICON_GENERATING, DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
+    DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED, DEFAULT_TRAY_ICON_GENERATING,
+    DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
     DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS, DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY,
     DEFAULT_TRAY_NOTIFICATIONS_ENABLED, DEFAULT_TRAY_NOTIFICATIONS_WAKE_DELTA,
     DEFAULT_TRAY_NOTIFICATIONS_WAKE_ERROR, DEFAULT_TRAY_NOTIFICATIONS_WAKE_TOOL_CALL,
@@ -26,8 +26,6 @@ pub struct TrayIconsConfig {
     pub active: String,
     /// The daemon is drowsy, asleep, or loading the model.
     pub sleeping: String,
-    /// The mic is open, waiting for the wake phrase.
-    pub armed: String,
     /// The wake phrase was heard, or a push-to-talk capture is underway.
     pub listening: String,
     /// A turn is in flight.
@@ -41,7 +39,6 @@ impl Default for TrayIconsConfig {
         Self {
             active: DEFAULT_TRAY_ICON_ACTIVE.into(),
             sleeping: DEFAULT_TRAY_ICON_SLEEPING.into(),
-            armed: DEFAULT_TRAY_ICON_ARMED.into(),
             listening: DEFAULT_TRAY_ICON_LISTENING.into(),
             generating: DEFAULT_TRAY_ICON_GENERATING.into(),
             disconnected: DEFAULT_TRAY_ICON_DISCONNECTED.into(),

@@ -16,8 +16,6 @@ pub(super) enum TrayState {
     Generating,
     /// The wake phrase was heard, or a push-to-talk capture is underway.
     Listening,
-    /// The mic is open, waiting for the wake phrase.
-    Armed,
     /// Daemon is awake and idle.
     Active,
     /// Daemon is drowsing, sleeping, or loading the model (rendered the
@@ -57,7 +55,7 @@ impl TrayTracker {
         }
     }
 
-    /// Priority: config error, disconnected, generating, listening, armed, presence.
+    /// Priority: config error, disconnected, generating, listening, presence.
     pub(super) fn current(&self) -> TrayState {
         if self.config_error.is_some() {
             return TrayState::ConfigError;
@@ -72,9 +70,6 @@ impl TrayTracker {
             || self.ptt_capture != VoiceCaptureState::Idle
         {
             return TrayState::Listening;
-        }
-        if self.listen_phase == ListenPhase::Armed {
-            return TrayState::Armed;
         }
         match self.presence {
             PresenceState::Active => TrayState::Active,
@@ -163,7 +158,6 @@ pub(super) fn icon_name_for(state: TrayState, icons: &TrayIconsConfig) -> &str {
         TrayState::Disconnected => &icons.disconnected,
         TrayState::Generating => &icons.generating,
         TrayState::Listening => &icons.listening,
-        TrayState::Armed => &icons.armed,
         TrayState::Active => &icons.active,
         TrayState::Sleeping => &icons.sleeping,
     }
@@ -175,7 +169,6 @@ pub(super) fn tooltip_for(state: TrayState) -> &'static str {
         TrayState::Disconnected => "assistd: daemon offline",
         TrayState::Generating => "assistd: thinking…",
         TrayState::Listening => "assistd: listening",
-        TrayState::Armed => "assistd: waiting for the wake phrase",
         TrayState::Active => "assistd: idle",
         TrayState::Sleeping => "assistd: sleeping",
     }
