@@ -294,8 +294,9 @@ the wake phrase as Whisper's initial prompt, and a `WakeGate` keeps only
 speech that opens with the phrase, or the utterance after a bare phrase
 within `voice.wakeword.command_timeout_ms`; everything else is dropped.
 The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`) and a
-`WakeWordDetected` event on the bus. Separately, whisper.cpp's
-Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
+`WakeWordDetected` event on the bus. The listener keeps running while
+presence sleeps, and a command wakes the model like any other query.
+Separately, whisper.cpp's Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
 every recording before decoding. While `VoiceOutputController`
 reports that a reply is being spoken (plus a short hangover), a
 `PlaybackGate` discards mic frames and resets the VAD so the daemon
