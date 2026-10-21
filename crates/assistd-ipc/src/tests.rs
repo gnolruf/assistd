@@ -11,8 +11,29 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         voice_and_presence_request_cases(),
         memory_request_cases(),
         session_request_cases(),
+        wake_word_request_cases(),
     ]
     .concat()
+}
+
+fn wake_word_request_cases() -> Vec<(Request, &'static str)> {
+    let phrase = WakePhraseText::try_from("hey jarvis".to_string()).unwrap();
+    vec![
+        (
+            Request::WakeWord {
+                id: id(),
+                op: WakeWordOp::EnrollStart { phrase },
+            },
+            r#"{"type":"wake_word","id":"r","op":{"action":"enroll_start","phrase":"hey jarvis"}}"#,
+        ),
+        (
+            Request::WakeWord {
+                id: id(),
+                op: WakeWordOp::TestStop,
+            },
+            r#"{"type":"wake_word","id":"r","op":{"action":"test_stop"}}"#,
+        ),
+    ]
 }
 
 fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
@@ -203,8 +224,52 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         memory_event_cases(),
         confirmation_and_status_event_cases(),
         session_event_cases(),
+        wake_word_event_cases(),
     ]
     .concat()
+}
+
+fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
+    vec![
+        (
+            Event::WakeWordStatus {
+                id: id(),
+                phrase: "hey jarvis".into(),
+                variants: vec!["a jarvis".into()],
+                samples: 4,
+            },
+            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","variants":["a jarvis"],"samples":4}"#,
+        ),
+        (
+            Event::WakeWordEnrollment {
+                id: id(),
+                event: EnrollEvent::Prompt {
+                    accepted: 2,
+                    minimum: 3,
+                    consistent: false,
+                },
+            },
+            r#"{"type":"wake_word_enrollment","id":"r","event":{"kind":"prompt","accepted":2,"minimum":3,"consistent":false}}"#,
+        ),
+        (
+            Event::WakeWordEnrollment {
+                id: id(),
+                event: EnrollEvent::SampleRejected {
+                    reason: SampleRejection::DidNotMatch,
+                    heard: Some("hello there".into()),
+                },
+            },
+            r#"{"type":"wake_word_enrollment","id":"r","event":{"kind":"sample_rejected","reason":"did_not_match","heard":"hello there"}}"#,
+        ),
+        (
+            Event::WakeWordTest {
+                id: id(),
+                heard: "hey jarvis".into(),
+                matched: true,
+            },
+            r#"{"type":"wake_word_test","id":"r","heard":"hey jarvis","matched":true}"#,
+        ),
+    ]
 }
 
 fn turn_event_cases() -> Vec<(Event, &'static str)> {
@@ -535,6 +600,46 @@ fn events_match_pinned_wire_format() {
         let parsed: Event = serde_json::from_str(wire).unwrap();
         assert_eq!(parsed, ev, "{wire}");
         assert_eq!(ev.id(), "r", "{wire}");
+    }
+}
+
+#[test]
+fn enroll_start_accepts_only_short_lettered_phrases() {
+    let cases = [
+        ("hey  jarvis", Ok("hey jarvis")),
+        ("O'Brien wake up", Ok("O'Brien wake up")),
+        ("", Err(InvalidWakePhrase::Empty)),
+        (" ' ", Err(InvalidWakePhrase::Empty)),
+        ("hey, jarvis", Err(InvalidWakePhrase::BadCharacter(','))),
+        ("computer 2", Err(InvalidWakePhrase::BadCharacter('2'))),
+        (
+            "one two three four five six seven",
+            Err(InvalidWakePhrase::TooManyWords),
+        ),
+    ];
+    for (phrase, expected) in cases {
+        let wire = json!({"type": "wake_word", "id": "r", "op": {"action": "enroll_start", "phrase": phrase}});
+        let parsed = serde_json::from_value::<Request>(wire);
+        match expected {
+            Ok(normalized) => {
+                let Ok(Request::WakeWord {
+                    op: WakeWordOp::EnrollStart { phrase: parsed },
+                    ..
+                }) = parsed
+                else {
+                    panic!("{phrase:?} should parse, got {parsed:?}");
+                };
+                assert_eq!(parsed.as_str(), normalized, "{phrase:?}");
+            }
+            Err(reason) => {
+                assert_eq!(
+                    WakePhraseText::try_from(phrase.to_string()),
+                    Err(reason),
+                    "{phrase:?}"
+                );
+                assert!(parsed.is_err(), "{phrase:?} must be refused at parse");
+            }
+        }
     }
 }
 

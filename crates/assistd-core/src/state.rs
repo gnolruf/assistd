@@ -11,11 +11,11 @@ use tokio::task::JoinError;
 use tracing::warn;
 
 use assistd_embed::EmbedError;
-use assistd_ipc::{Event, Request, Role};
+use assistd_ipc::{Event, Request, Role, WakeWordOp};
 use assistd_llm::{LlmBackend, LlmError};
 use assistd_memory::{MemoryError, PersistedRole};
 use assistd_tools::ToolRegistry;
-use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError, VoiceManager};
+use assistd_voice::{CaptureUnavailable, ListenError, ProfileError, VoiceInputError, VoiceManager};
 
 use crate::{Config, PresenceError, PresenceManager};
 
@@ -33,6 +33,7 @@ pub(crate) mod runtime;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
 pub(crate) mod voice_handlers;
+pub(crate) mod wakeword_handlers;
 pub(crate) mod wire;
 
 pub use self::branches::branch_replay;
@@ -74,6 +75,9 @@ pub enum DispatchError {
 
     #[error(transparent)]
     Listen(#[from] ListenError),
+
+    #[error(transparent)]
+    WakeWordProfile(#[from] ProfileError),
 }
 
 /// Shared, long-lived daemon state handed to every request handler.
@@ -148,11 +152,18 @@ impl AppState {
     }
 
     /// Requests the envelope timeout leaves alone: a subscription lives as
-    /// long as its client, and an agent turn is bounded per step instead.
+    /// long as its client, an agent turn is bounded per step instead, and a
+    /// wake-word session by its own idle timeout.
     fn outlives_dispatch_envelope(req: &Request) -> bool {
         matches!(
             req,
-            Request::Subscribe { .. } | Request::Query { .. } | Request::PttStop { .. }
+            Request::Subscribe { .. }
+                | Request::Query { .. }
+                | Request::PttStop { .. }
+                | Request::WakeWord {
+                    op: WakeWordOp::EnrollStart { .. } | WakeWordOp::TestStart,
+                    ..
+                }
         )
     }
 
@@ -181,6 +192,7 @@ impl AppState {
             Request::ListenStart { id } => return self.handle_listen_start(id, tx).await,
             Request::ListenStop { id } => return self.handle_listen_stop(id, tx).await,
             Request::ListenToggle { id } => return self.handle_listen_toggle(id, tx).await,
+            Request::WakeWord { id, op } => return self.handle_wake_word(id, op, tx).await,
             Request::MemorySave { id, key, value } => {
                 return self.handle_memory_save(id, key, value, tx).await;
             }

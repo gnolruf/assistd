@@ -7,14 +7,19 @@ use assistd_ipc::{ComponentReadiness, ListenPhase, StartupComponent};
 use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use thiserror::Error;
 
-use crate::{ContinuousListener, VoiceInput, VoiceOutput, VoiceOutputController};
+use crate::{
+    ContinuousListener, ProfileStore, Transcriber, VoiceInput, VoiceOutput, VoiceOutputController,
+};
 
 /// Push-to-talk input and the continuous listener, which share one
-/// transcriber and so come up together.
+/// transcriber and so come up together, plus where the listener's enrolled
+/// wake phrase is kept.
 #[derive(Debug, Clone)]
 pub struct VoiceCapture {
     pub input: Arc<dyn VoiceInput>,
     pub listener: Arc<dyn ContinuousListener>,
+    pub transcriber: Arc<dyn Transcriber>,
+    pub profiles: ProfileStore,
 }
 
 /// Voice capture is still starting, or unavailable this run.

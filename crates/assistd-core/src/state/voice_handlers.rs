@@ -23,6 +23,10 @@ impl AppState {
     ) -> Result<(), DispatchError> {
         self.subsystems.voice.speech().interrupt().await;
         let capture = self.ready_capture(&id, "ptt_start", &tx).await?;
+        if let Some(session) = self.mic_session_kind() {
+            send_error(&tx, id, session.in_progress().into()).await;
+            return Ok(());
+        }
         if capture.listener.is_active() {
             send_error(
                 &tx,
@@ -166,6 +170,10 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let capture = self.ready_capture(&id, "listen_start", &tx).await?;
+        if let Some(session) = self.mic_session_kind() {
+            send_error(&tx, id, session.in_progress().into()).await;
+            return Ok(());
+        }
         if capture.input.state() != VoiceCaptureState::Idle {
             send_error(
                 &tx,
@@ -310,7 +318,7 @@ impl AppState {
 
     /// The capture handles, or an error event on `tx` saying why `request`
     /// cannot use them.
-    async fn ready_capture(
+    pub(super) async fn ready_capture(
         &self,
         id: &str,
         request: &str,

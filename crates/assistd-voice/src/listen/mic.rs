@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
 use super::capture::{self, ListenCaptureSession};
+use super::enrollment::CapturedUtterance;
 use super::playback_gate::{PLAYBACK_HANGOVER_FRAMES, PlaybackGate};
 use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTuning};
 use super::wake_gate::{Admission, WakeGate};
@@ -59,9 +60,10 @@ pub struct MicContinuousListener {
     mic_device: Option<String>,
     tuning: VadTuning,
     output_speaking: Option<watch::Receiver<bool>>,
-    wake_phrase: WakePhrase,
+    wake_phrase: parking_lot::Mutex<WakePhrase>,
     command_timeout: Duration,
     active: AtomicBool,
+    capturing_utterances: Arc<AtomicBool>,
     phase_tx: watch::Sender<ListenPhase>,
     heard: broadcast::Sender<Heard>,
     listen_state: Arc<Mutex<ListenState>>,
@@ -116,13 +118,54 @@ impl MicContinuousListener {
             mic_device: config.mic_device.clone(),
             tuning,
             output_speaking,
-            wake_phrase: WakePhrase::builtin(config.wakeword.match_similarity),
+            wake_phrase: parking_lot::Mutex::new(WakePhrase::builtin(
+                config.wakeword.match_similarity,
+            )),
             command_timeout: Duration::from_millis(config.wakeword.command_timeout_ms.get().into()),
             active: AtomicBool::new(false),
+            capturing_utterances: Arc::new(AtomicBool::new(false)),
             phase_tx,
             heard,
             listen_state: Arc::new(Mutex::new(ListenState { session: None })),
         }
+    }
+
+    fn playback_gate(&self) -> Option<PlaybackGate> {
+        self.output_speaking
+            .clone()
+            .map(|speaking| PlaybackGate::new(speaking, PLAYBACK_HANGOVER_FRAMES))
+    }
+
+    /// Run capture and the VAD into `sink` until it closes or capture fails.
+    async fn stream_utterances(
+        &self,
+        sink: mpsc::Sender<CapturedUtterance>,
+    ) -> Result<(), ListenError> {
+        let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
+        let ListenCaptureSession {
+            stop_flag,
+            overrun: _,
+            handle: mut capture_handle,
+        } = capture::start(self.mic_device.as_deref(), frame_tx);
+        let tuning = self.tuning;
+        let playback_gate = self.playback_gate();
+        let vad_sink = sink.clone();
+        let vad_handle = tokio::task::spawn_blocking(move || {
+            vad_loop(tuning, playback_gate, frame_rx, |event| {
+                forward_captured(&vad_sink, event)
+            });
+        });
+        let finished_early = tokio::select! {
+            result = &mut capture_handle => Some(result),
+            () = sink.closed() => None,
+        };
+        stop_flag.store(true, Ordering::SeqCst);
+        let captured = match finished_early {
+            Some(result) => result,
+            None => capture_handle.await,
+        };
+        vad_handle.await?;
+        Ok(captured??)
     }
 }
 
@@ -132,6 +175,9 @@ impl ContinuousListener for MicContinuousListener {
         let mut listen_state = self.listen_state.lock().await;
         if listen_state.session.is_some() {
             return Ok(());
+        }
+        if self.capturing_utterances.load(Ordering::SeqCst) {
+            return Err(ListenError::Enrolling);
         }
         self.active.store(true, Ordering::SeqCst);
 
@@ -144,7 +190,7 @@ impl ContinuousListener for MicContinuousListener {
         } = capture::start(self.mic_device.as_deref(), frame_tx);
 
         let (pcm_tx, pcm_rx) = mpsc::channel::<Utterance>(PENDING_UTTERANCE_DEPTH);
-        let gate = WakeGate::new(self.wake_phrase.clone(), self.command_timeout);
+        let gate = WakeGate::new(self.wake_phrase.lock().clone(), self.command_timeout);
         let transcribe_handle = tokio::spawn(transcribe_loop(
             self.transcriber.clone(),
             gate,
@@ -155,12 +201,12 @@ impl ContinuousListener for MicContinuousListener {
             pcm_rx,
         ));
         let tuning = self.tuning;
-        let playback_gate = self
-            .output_speaking
-            .clone()
-            .map(|speaking| PlaybackGate::new(speaking, PLAYBACK_HANGOVER_FRAMES));
-        let vad_handle =
-            tokio::task::spawn_blocking(move || vad_loop(tuning, playback_gate, frame_rx, &pcm_tx));
+        let playback_gate = self.playback_gate();
+        let vad_handle = tokio::task::spawn_blocking(move || {
+            vad_loop(tuning, playback_gate, frame_rx, |event| {
+                queue_for_transcription(&pcm_tx, event)
+            });
+        });
 
         listen_state.session = Some(ListenSession {
             capture_stop,
@@ -198,6 +244,38 @@ impl ContinuousListener for MicContinuousListener {
 
     fn subscribe_phase(&self) -> watch::Receiver<ListenPhase> {
         self.phase_tx.subscribe()
+    }
+
+    fn set_wake_phrase(&self, phrase: WakePhrase) {
+        *self.wake_phrase.lock() = phrase;
+    }
+
+    async fn capture_utterances(
+        &self,
+        sink: mpsc::Sender<CapturedUtterance>,
+    ) -> Result<(), ListenError> {
+        let claim = {
+            let listen_state = self.listen_state.lock().await;
+            if listen_state.session.is_some() {
+                return Err(ListenError::Listening);
+            }
+            if self.capturing_utterances.swap(true, Ordering::SeqCst) {
+                return Err(ListenError::Enrolling);
+            }
+            UtteranceCaptureClaim(Arc::clone(&self.capturing_utterances))
+        };
+        let result = self.stream_utterances(sink).await;
+        drop(claim);
+        result
+    }
+}
+
+/// Clears the utterance-capture flag when the capture ends or is dropped.
+struct UtteranceCaptureClaim(Arc<AtomicBool>);
+
+impl Drop for UtteranceCaptureClaim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -242,13 +320,13 @@ fn tuning_from_config(config: &WakeWordConfig) -> VadTuning {
 /// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Frames
 /// blocked by the playback gate also reset the VAD, since a half-captured
 /// utterance is about to be contaminated by the daemon's own speech.
-/// Never waits on `pcm_tx`: stalling here would back up the frame channel
-/// and silently truncate live audio, so a full queue drops the utterance.
+/// `emit` must never wait: stalling here would back up the frame channel
+/// and silently truncate live audio. The loop ends when `emit` returns false.
 fn vad_loop(
     tuning: VadTuning,
     mut playback_gate: Option<PlaybackGate>,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
-    pcm_tx: &mpsc::Sender<Utterance>,
+    mut emit: impl FnMut(VadEvent) -> bool,
 ) {
     let mut vad = UtteranceVad::new(tuning);
     while let Some(frame) = frame_rx.blocking_recv() {
@@ -259,20 +337,49 @@ fn vad_loop(
             vad.reset();
             continue;
         }
-        let Some(event) = vad.feed(&frame) else {
-            continue;
-        };
-        let pcm = match event {
-            VadEvent::UtteranceComplete(pcm) | VadEvent::Truncated(pcm) => pcm,
-        };
-        match pcm_tx.try_send(Utterance::ending_now(pcm)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => warn!(
-                target: "assistd::voice::listen",
-                "transcription backlog full; dropping utterance"
-            ),
-            Err(TrySendError::Closed(_)) => return,
+        if let Some(event) = vad.feed(&frame)
+            && !emit(event)
+        {
+            return;
         }
+    }
+}
+
+/// Queue a listening utterance, dropping it when the backlog is full.
+/// False once the transcription worker is gone.
+fn queue_for_transcription(pcm_tx: &mpsc::Sender<Utterance>, event: VadEvent) -> bool {
+    let pcm = match event {
+        VadEvent::UtteranceComplete(pcm) | VadEvent::Truncated(pcm) => pcm,
+    };
+    try_queue(pcm_tx, Utterance::ending_now(pcm))
+}
+
+/// Hand an enrollment utterance to the session. False once it closed.
+fn forward_captured(sink: &mpsc::Sender<CapturedUtterance>, event: VadEvent) -> bool {
+    let utterance = match event {
+        VadEvent::UtteranceComplete(pcm) => CapturedUtterance {
+            pcm,
+            truncated: false,
+        },
+        VadEvent::Truncated(pcm) => CapturedUtterance {
+            pcm,
+            truncated: true,
+        },
+    };
+    try_queue(sink, utterance)
+}
+
+fn try_queue<T>(tx: &mpsc::Sender<T>, item: T) -> bool {
+    match tx.try_send(item) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            warn!(
+                target: "assistd::voice::listen",
+                "utterance backlog full; dropping utterance"
+            );
+            true
+        }
+        Err(TrySendError::Closed(_)) => false,
     }
 }
 

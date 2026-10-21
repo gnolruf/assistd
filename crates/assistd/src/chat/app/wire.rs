@@ -101,6 +101,9 @@ impl App {
             | Event::MemoryRow { .. }
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. }
+            | Event::WakeWordStatus { .. }
+            | Event::WakeWordEnrollment { .. }
+            | Event::WakeWordTest { .. }
             | Event::LastDelta { .. } => {}
         }
     }

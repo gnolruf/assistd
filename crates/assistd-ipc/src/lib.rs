@@ -12,7 +12,9 @@ use assistd_utils::readiness::NotReady;
 
 pub mod attachment;
 pub mod client;
+pub mod wakeword;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
+pub use wakeword::{EnrollEvent, InvalidWakePhrase, SampleRejection, WakePhraseText, WakeWordOp};
 
 /// An image on a [`Request::Query`]: `mime` is PNG, JPEG or WebP; `data_base64` is standard
 /// padded base64.
@@ -314,6 +316,8 @@ pub enum Request {
     VoiceSkip { id: String },
     /// Cancel the in-flight turn and queued TTS audio; idempotent. Emits `Done`.
     InterruptTurn { id: String },
+    /// Run one wake-phrase operation; see [`WakeWordOp`] for what each emits.
+    WakeWord { id: String, op: WakeWordOp },
     /// Report whether TTS is enabled and how far voice startup has got.
     /// Emits `VoiceOutputState`, a `Readiness` for voice input and for
     /// speech, then `Done`.
@@ -443,6 +447,7 @@ impl Request {
             | Request::VoiceSkip { id }
             | Request::InterruptTurn { id }
             | Request::GetVoiceState { id }
+            | Request::WakeWord { id, .. }
             | Request::GetReadiness { id }
             | Request::MemorySave { id, .. }
             | Request::MemoryLoad { id, .. }
@@ -485,6 +490,7 @@ impl Request {
             Request::VoiceSkip { .. } => "voice_skip",
             Request::InterruptTurn { .. } => "interrupt_turn",
             Request::GetVoiceState { .. } => "get_voice_state",
+            Request::WakeWord { .. } => "wake_word",
             Request::MemorySave { .. } => "memory_save",
             Request::MemoryLoad { .. } => "memory_load",
             Request::MemoryList { .. } => "memory_list",
@@ -704,6 +710,21 @@ pub enum Event {
     WakeWordDetected { id: String },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
+    /// The saved wake phrase, or the built-in one with no variants or samples.
+    WakeWordStatus {
+        id: String,
+        phrase: String,
+        variants: Vec<String>,
+        samples: u32,
+    },
+    /// Progress of the enrollment session opened by this connection.
+    WakeWordEnrollment { id: String, event: EnrollEvent },
+    /// What a test session heard and whether the saved phrase matched it.
+    WakeWordTest {
+        id: String,
+        heard: String,
+        matched: bool,
+    },
     /// How far one background subsystem has started; broadcast whenever
     /// one finishes starting.
     Readiness {
@@ -878,6 +899,9 @@ impl Event {
             | Event::ListenState { id, .. }
             | Event::WakeWordDetected { id }
             | Event::VoiceOutputState { id, .. }
+            | Event::WakeWordStatus { id, .. }
+            | Event::WakeWordEnrollment { id, .. }
+            | Event::WakeWordTest { id, .. }
             | Event::Readiness { id, .. }
             | Event::SpeakingState { id, .. }
             | Event::ChatFocus { id, .. }
@@ -923,6 +947,9 @@ impl Event {
             Event::Readiness { .. } => EventKind::Readiness,
             Event::ContextSize { .. } => EventKind::ContextSize,
             Event::VoiceOutputState { .. }
+            | Event::WakeWordStatus { .. }
+            | Event::WakeWordEnrollment { .. }
+            | Event::WakeWordTest { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }

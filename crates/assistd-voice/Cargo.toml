@@ -14,7 +14,7 @@ whisper = [
 ]
 # Requires `whisper` because `MicVoiceInput` wraps `WhisperTranscriber`.
 mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
-listen = ["mic", "dep:webrtc-vad"]
+listen = ["mic", "dep:webrtc-vad", "dep:serde", "dep:serde_json", "dep:hound"]
 # Pulls in rodio (which itself uses cpal).
 tts = [
     "dep:rodio",
@@ -54,6 +54,7 @@ webrtc-vad = { workspace = true, optional = true }
 rodio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+hound = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

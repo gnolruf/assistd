@@ -14,6 +14,7 @@ use assistd_ipc::{Event, EventKind, SubscribeFilter};
 use assistd_memory::{BranchId, SessionId};
 
 use super::chat_focus::ChatFocusSlot;
+use super::wakeword_handlers::MicSession;
 
 const EVENTS_BUS_CAPACITY: usize = 256;
 
@@ -96,6 +97,8 @@ pub struct RuntimeState {
     pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
     /// The chat's last focus report.
     pub(in crate::state) chat_focus: ChatFocusSlot,
+    /// The open wake-word enrollment or test session, which holds the mic.
+    pub(in crate::state) mic_session: StdMutex<Option<MicSession>>,
     events_bus: broadcast::Sender<Event>,
     /// Filters of the live [`BusSubscription`]s.
     bus_interest: Arc<StdMutex<Vec<SubscribeFilter>>>,
@@ -113,6 +116,7 @@ impl RuntimeState {
             interrupt: StdMutex::new(CancellationToken::new()),
             persist_chain: StdMutex::new(None),
             chat_focus: ChatFocusSlot::default(),
+            mic_session: StdMutex::new(None),
             events_bus,
             bus_interest: Arc::default(),
         }
