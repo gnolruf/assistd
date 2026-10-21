@@ -6,17 +6,23 @@ use std::fmt;
 use assistd_ipc::ListenPhase;
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
+
+use crate::mic::AudioCaptureError;
 
 pub mod capture;
 pub mod consumer;
+pub mod enrollment;
 pub mod mic;
 pub mod playback_gate;
+pub mod profile;
 pub mod vad;
 pub mod wake_gate;
 pub mod wake_phrase;
 
+pub use enrollment::{CapturedUtterance, Enrollment};
 pub use mic::MicContinuousListener;
+pub use profile::{ProfileError, ProfileStore, WakeWordProfile};
 pub use wake_phrase::WakePhrase;
 
 /// Errors surfaced by [`ContinuousListener`] implementations.
@@ -25,6 +31,16 @@ pub enum ListenError {
     /// Wake-word listening is turned off in config.
     #[error("wake-word listening is disabled in config (voice.wakeword.enabled = false)")]
     Disabled,
+    /// The mic is taken by an enrollment or test capture.
+    #[error("wake-word enrollment in progress")]
+    Enrolling,
+    /// The mic is taken by wake-word listening.
+    #[error("wake-word listening is active")]
+    Listening,
+    #[error("audio capture failed: {0}")]
+    Capture(#[from] AudioCaptureError),
+    #[error("listen worker panicked: {0}")]
+    Worker(#[from] tokio::task::JoinError),
 }
 
 /// What the listener heard that is addressed to assistd.
@@ -40,7 +56,8 @@ pub enum Heard {
 /// phrase.
 #[async_trait]
 pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
-    /// Open the mic and start segmenting. A no-op when already active.
+    /// Open the mic and start segmenting. A no-op when already active;
+    /// [`ListenError::Enrolling`] while [`Self::capture_utterances`] runs.
     async fn start(&self) -> Result<(), ListenError>;
 
     /// Close the mic and drain any in-flight utterance. Idempotent.
@@ -54,6 +71,17 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
 
     /// Phase transitions. The initial value is the current phase.
     fn subscribe_phase(&self) -> watch::Receiver<ListenPhase>;
+
+    /// Gate on `phrase` from the next [`Self::start`] on.
+    fn set_wake_phrase(&self, phrase: WakePhrase);
+
+    /// Send every utterance the mic hears into `sink`, cut as listening
+    /// cuts it but not transcribed, until `sink` closes. Fails with
+    /// [`ListenError::Listening`] while listening is active.
+    async fn capture_utterances(
+        &self,
+        sink: mpsc::Sender<CapturedUtterance>,
+    ) -> Result<(), ListenError>;
 }
 
 /// [`ContinuousListener`] for when continuous listening is off in config:
@@ -99,5 +127,14 @@ impl ContinuousListener for NoContinuousListener {
 
     fn subscribe_phase(&self) -> watch::Receiver<ListenPhase> {
         self.phase_tx.subscribe()
+    }
+
+    fn set_wake_phrase(&self, _phrase: WakePhrase) {}
+
+    async fn capture_utterances(
+        &self,
+        _sink: mpsc::Sender<CapturedUtterance>,
+    ) -> Result<(), ListenError> {
+        Err(ListenError::Disabled)
     }
 }

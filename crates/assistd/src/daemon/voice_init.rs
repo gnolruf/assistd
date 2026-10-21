@@ -9,8 +9,9 @@ use assistd_core::{
 };
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
-    CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, QueueConfig,
-    QueuedTranscriber, Transcriber, WhisperTranscriberBuilder, build_cpu_fallback,
+    CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, ProfileStore,
+    QueueConfig, QueuedTranscriber, Transcriber, WakePhrase, WhisperTranscriberBuilder,
+    build_cpu_fallback,
 };
 use tokio::sync::watch;
 use tracing::info;
@@ -53,17 +54,17 @@ async fn init_capture(
     let transcriber = with_cpu_fallback(config, presence, Arc::new(primary), is_gpu);
 
     let mic = MicVoiceInput::new(transcriber.clone(), config.voice.mic_device.clone());
+    let profiles = ProfileStore::default_location();
     let listener: Arc<dyn ContinuousListener> = if config.voice.wakeword.enabled {
         info!(
             "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
             config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
         );
         warn_if_ungated_playback(config);
-        Arc::new(MicContinuousListener::new(
-            transcriber,
-            &config.voice,
-            output_speaking,
-        ))
+        let listener =
+            MicContinuousListener::new(transcriber.clone(), &config.voice, output_speaking);
+        listener.set_wake_phrase(enrolled_wake_phrase(config, &profiles).await);
+        Arc::new(listener)
     } else {
         info!("voice.wakeword: disabled in config");
         Arc::new(NoContinuousListener::new())
@@ -71,7 +72,26 @@ async fn init_capture(
     Readiness::Ready(VoiceCapture {
         input: Arc::new(mic),
         listener,
+        transcriber,
+        profiles,
     })
+}
+
+/// The enrolled phrase, or the built-in one when none is enrolled or the
+/// profile cannot be read.
+async fn enrolled_wake_phrase(config: &Config, profiles: &ProfileStore) -> WakePhrase {
+    let similarity = config.voice.wakeword.match_similarity;
+    match profiles.load().await {
+        Ok(Some(profile)) => {
+            info!("voice.wakeword: using enrolled phrase {:?}", profile.phrase);
+            profile.wake_phrase(similarity)
+        }
+        Ok(None) => WakePhrase::builtin(similarity),
+        Err(e) => {
+            tracing::warn!("voice.wakeword: {e}; using the built-in phrase");
+            WakePhrase::builtin(similarity)
+        }
+    }
 }
 
 /// With the gate off and no echo cancellation, spoken replies come back

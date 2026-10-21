@@ -35,7 +35,8 @@ pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
 pub use error::{VoiceInputError, VoiceOutputError};
 #[cfg(feature = "listen")]
 pub use listen::{
-    ContinuousListener, Heard, ListenError, MicContinuousListener, NoContinuousListener, WakePhrase,
+    CapturedUtterance, ContinuousListener, Enrollment, Heard, ListenError, MicContinuousListener,
+    NoContinuousListener, ProfileError, ProfileStore, WakePhrase, WakeWordProfile,
 };
 #[cfg(feature = "listen")]
 pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};

@@ -62,7 +62,7 @@ impl WakePhrase {
 
 /// Lowercase alphanumeric words, apostrophes dropped, other punctuation
 /// treated as a separator.
-fn normalized_words(text: &str) -> Vec<String> {
+pub(super) fn normalized_words(text: &str) -> Vec<String> {
     word_spans(text).into_iter().map(|(word, _)| word).collect()
 }
 
@@ -84,7 +84,7 @@ fn word_spans(text: &str) -> Vec<(String, usize)> {
 }
 
 /// `1 - levenshtein / longer length`, in `0.0..=1.0`.
-fn similarity(expected: &str, heard: &str) -> f32 {
+pub(super) fn similarity(expected: &str, heard: &str) -> f32 {
     let expected: Vec<char> = expected.chars().collect();
     let heard: Vec<char> = heard.chars().collect();
     let longer = expected.len().max(heard.len());
