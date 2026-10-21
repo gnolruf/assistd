@@ -29,8 +29,9 @@ mod wire;
 
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
-    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, SampleResult,
-    SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus, WakeWordView,
+    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, ResetChoice,
+    SampleResult, SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus,
+    WakeWordView,
 };
 
 const SPINNER_CHARS: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
@@ -156,20 +157,12 @@ impl ConfirmChoice {
     }
 }
 
-/// Where a confirmation prompt's answer goes.
-#[derive(Debug)]
-pub(super) enum ConfirmTarget {
-    /// The daemon's agent loop, which blocks on the answer; the id is echoed
-    /// back in the `Request::ConfirmResponse`.
-    Command(String),
-    /// `/wakeword reset`, which this chat sends on "Yes".
-    WakeWordReset,
-}
-
-/// Confirmation prompt drawn in the chat panel in place of the input line.
+/// Command-confirmation prompt drawn in the chat panel while the daemon's
+/// agent loop blocks on the answer.
 pub(super) struct ConfirmationPrompt {
     pub request: ConfirmationRequest,
-    answer_to: ConfirmTarget,
+    /// Echoed back in the `Request::ConfirmResponse`.
+    confirm_id: String,
     /// Index into [`choices`](Self::choices).
     pub selected: usize,
     /// Every script row is shown, scrolled to `scroll`, rather than the
@@ -181,10 +174,10 @@ pub(super) struct ConfirmationPrompt {
 
 impl ConfirmationPrompt {
     /// A prompt with "No" selected, so a stray Enter denies.
-    pub(super) fn new(answer_to: ConfirmTarget, request: ConfirmationRequest) -> Self {
+    pub(super) fn new(confirm_id: String, request: ConfirmationRequest) -> Self {
         let mut prompt = Self {
             request,
-            answer_to,
+            confirm_id,
             selected: 0,
             expanded: false,
             scroll: 0,

@@ -15,8 +15,9 @@ use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 use textwrap::core::display_width;
 
 use super::super::app::{
-    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, SampleResult,
-    SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus, WakeWordView,
+    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, ResetChoice,
+    SampleResult, SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus,
+    WakeWordView,
 };
 use super::super::markdown::BLEY;
 use super::{rule_style, saturating_u16, selected_style};
@@ -101,6 +102,7 @@ pub(super) fn render_wake_word_panel(frame: &mut Frame<'_>, area: Rect, panel: &
             frame.render_widget(wrapped(body), inner);
         }
         WakeWordView::Update(phrase) => render_update(frame, inner, phrase),
+        WakeWordView::Reset(selected) => frame.render_widget(wrapped(reset_body(*selected)), inner),
         WakeWordView::Session(session) => {
             let captions = match &session.purpose {
                 SessionPurpose::Enroll(progress) => enroll_captions(progress),
@@ -119,6 +121,7 @@ pub(super) fn wake_word_hint(view: &WakeWordView) -> &'static str {
     match view {
         WakeWordView::Menu(_) => "↑/↓ select · Enter choose · Esc close",
         WakeWordView::Update(_) => "Enter record · Ctrl+U clear · Esc back",
+        WakeWordView::Reset(_) => "↑/↓ select · Enter choose · Esc back",
         WakeWordView::Session(session) => match session.purpose {
             SessionPurpose::Enroll(_) => "Esc cancel",
             SessionPurpose::Test(_) => "Esc stop",
@@ -131,6 +134,7 @@ fn panel_title(view: &WakeWordView) -> &'static str {
     match view {
         WakeWordView::Menu(_) => " Wake word ",
         WakeWordView::Update(_) => " New wake word ",
+        WakeWordView::Reset(_) => " Reset wake word ",
         WakeWordView::Session(session) => match session.purpose {
             SessionPurpose::Enroll(_) => " Learning your wake word ",
             SessionPurpose::Test(_) => " Testing your wake word ",
@@ -154,6 +158,31 @@ fn menu_body(status: &StatusState, selected: MenuItem) -> Vec<Line<'static>> {
             Span::raw("  "),
             Span::styled(about, dim()),
         ])
+    }));
+    body
+}
+
+/// The question, what a reset deletes, then the choices.
+fn reset_body(selected: ResetChoice) -> Vec<Line<'static>> {
+    let mut body = vec![
+        Line::from(format!("Go back to \"{DEFAULT_WAKE_PHRASE}\"?")),
+        Line::default(),
+        Line::styled(
+            "This deletes the saved wake word, its learned variants and its recordings.",
+            dim(),
+        ),
+        Line::default(),
+    ];
+    body.extend(ResetChoice::ALL.into_iter().map(|choice| {
+        let name = match choice {
+            ResetChoice::Reset => "Reset",
+            ResetChoice::Keep => "Keep",
+        };
+        if choice == selected {
+            Line::styled(format!("› {name}"), selected_style())
+        } else {
+            Line::raw(format!("  {name}"))
+        }
     }));
     body
 }

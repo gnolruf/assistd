@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use super::super::ui::turn_summary;
 use super::{
-    ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, ConfirmTarget, OWN_TURN_MEMORY,
-    QueuedTranscription, WakeWordStream, WireStream,
+    ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
+    WakeWordStream, WireStream,
 };
 
 impl App {
@@ -481,8 +481,7 @@ impl App {
         self.reply_started_at = None;
         self.compacting_soon = false;
         self.active_reply = None;
-        self.confirmation
-            .take_if(|prompt| matches!(prompt.answer_to, ConfirmTarget::Command(_)));
+        self.confirmation = None;
         self.last_live_seconds = None;
     }
 

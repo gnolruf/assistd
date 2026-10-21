@@ -266,10 +266,13 @@ fn render_slash_popup(
         height,
         ..area
     };
+    let visible_rows = usize::from(height);
+    let first_visible = selected.saturating_sub(visible_rows - 1);
     let lines: Vec<Line<'_>> = suggestions
         .iter()
         .enumerate()
-        .take(area.height as usize)
+        .skip(first_visible)
+        .take(visible_rows)
         .map(|(i, (cmd, hint))| {
             let (style, hint_style) = if i == selected {
                 (selected_style(), reversed_style())
@@ -812,11 +815,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::chat::app::ConfirmTarget;
 
     fn confirmation_prompt(script: &str) -> ConfirmationPrompt {
         ConfirmationPrompt::new(
-            ConfirmTarget::Command("c1".into()),
+            "c1".into(),
             ConfirmationRequest {
                 tool: "bash".into(),
                 script: script.into(),

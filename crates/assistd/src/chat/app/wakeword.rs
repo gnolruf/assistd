@@ -5,13 +5,12 @@
 use std::collections::VecDeque;
 
 use assistd_ipc::{EnrollEvent, Event, Request, SampleRejection, WakePhraseText, WakeWordOp};
-use assistd_tools::{ConfirmationRequest, Risk};
 use assistd_voice::listen::enrollment::CONFIDENT_SAMPLES;
 use assistd_voice::listen::wake_phrase::DEFAULT_WAKE_PHRASE;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use super::{App, ConfirmTarget, ConfirmationPrompt, WireStream};
+use super::{App, WireStream};
 
 mod scene;
 
@@ -55,6 +54,9 @@ pub(in crate::chat) enum WakeWordView {
     Menu(MenuItem),
     /// The new phrase as typed so far.
     Update(String),
+    /// Asking before the saved phrase is deleted; opens on "Keep" so a
+    /// stray Enter keeps it.
+    Reset(ResetChoice),
     Session(MicSession),
     Saved {
         phrase: String,
@@ -83,6 +85,24 @@ impl MenuItem {
         match self {
             Self::Update => Self::Test,
             Self::Test | Self::Reset => Self::Reset,
+        }
+    }
+}
+
+/// The answers the reset view offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::chat) enum ResetChoice {
+    Reset,
+    Keep,
+}
+
+impl ResetChoice {
+    pub(in crate::chat) const ALL: [Self; 2] = [Self::Reset, Self::Keep];
+
+    fn other(self) -> Self {
+        match self {
+            Self::Reset => Self::Keep,
+            Self::Keep => Self::Reset,
         }
     }
 }
@@ -149,10 +169,6 @@ impl App {
             .filter(|_| self.confirmation.is_none())
     }
 
-    pub(super) fn spawn_wake_word_reset(&mut self) {
-        self.send_wake_word_op(WakeWordOp::Reset, WakeWordStream::Reset);
-    }
-
     /// Whether the open session's computer is animating.
     pub(crate) fn wake_word_scene_live(&self) -> bool {
         self.wake_word_panel
@@ -195,6 +211,18 @@ impl App {
                 KeyCode::Char(c) if !control => phrase.push(c),
                 KeyCode::Backspace => {
                     phrase.pop();
+                }
+                _ => {}
+            },
+            WakeWordView::Reset(_) if back => panel.view = WakeWordView::Menu(MenuItem::Reset),
+            WakeWordView::Reset(choice) => match ev.code {
+                KeyCode::Up | KeyCode::Down => *choice = choice.other(),
+                KeyCode::Enter => {
+                    let choice = *choice;
+                    panel.view = WakeWordView::Menu(MenuItem::Reset);
+                    if choice == ResetChoice::Reset {
+                        self.send_wake_word_op(WakeWordOp::Reset, WakeWordStream::Reset);
+                    }
                 }
                 _ => {}
             },
@@ -282,7 +310,7 @@ impl App {
         match item {
             MenuItem::Update => self.set_wake_word_view(WakeWordView::Update(String::new())),
             MenuItem::Test => self.start_wake_word_test(self.saved_wake_phrase()),
-            MenuItem::Reset => self.confirm_wake_word_reset(),
+            MenuItem::Reset => self.set_wake_word_view(WakeWordView::Reset(ResetChoice::Keep)),
         }
     }
 
@@ -332,28 +360,6 @@ impl App {
             results: VecDeque::with_capacity(RECENT_RESULTS),
         });
         self.open_wake_word_session(WakeWordOp::TestStart, purpose);
-    }
-
-    /// Refused mid-reply, when a command's confirmation prompt may need the dock.
-    fn confirm_wake_word_reset(&mut self) {
-        if self.generating() {
-            self.set_notice("still generating, please wait");
-            return;
-        }
-        let request = ConfirmationRequest {
-            tool: "wakeword".into(),
-            script: "/wakeword reset".into(),
-            matched_pattern: format!(
-                "Deletes the saved wake phrase, its learned variants and its recordings, \
-                 and goes back to \"{DEFAULT_WAKE_PHRASE}\"."
-            ),
-            always_allow: Vec::new(),
-            risk: Risk::Elevated,
-        };
-        self.confirmation = Some(ConfirmationPrompt::new(
-            ConfirmTarget::WakeWordReset,
-            request,
-        ));
     }
 
     fn open_wake_word_session(&mut self, op: WakeWordOp, purpose: SessionPurpose) {
