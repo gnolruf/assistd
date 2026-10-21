@@ -2,6 +2,7 @@
 //! computer that enrollment and testing share.
 
 use std::borrow::Cow;
+use std::time::Instant;
 
 use assistd_ipc::wakeword::MAX_WAKE_PHRASE_WORDS;
 use assistd_ipc::{SampleRejection, WakePhraseText};
@@ -14,7 +15,7 @@ use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 use textwrap::core::display_width;
 
 use super::super::app::{
-    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, RECENT_RESULTS, SampleResult,
+    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, SampleResult,
     SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus, WakeWordView,
 };
 use super::super::markdown::BLEY;
@@ -45,6 +46,29 @@ const COMPUTER: [&str; 23] = [
     r"    \ [][][][][][][][][][][][][][]  \",
     r"     \ [][] [________________] [][]  \",
     r"      \_______________________________\",
+];
+
+/// First row of [`COMPUTER`]'s face, from the brows down to the mouth; the
+/// content face is the one drawn there.
+const FACE_TOP_ROW: usize = 5;
+const FACE_ROWS: usize = 6;
+
+const WONDERING_FACE: [&str; FACE_ROWS] = [
+    r"|  | |                ,-.      | |",
+    r"|  | |      ---                | |",
+    r"|  | |       █         █       | |",
+    r"|  | |                         | |",
+    r"|  | |                         | |",
+    r"|  | |        ─────────        | |",
+];
+
+const WORRIED_FACE: [&str; FACE_ROWS] = [
+    r"|  | |                         | |",
+    r"|  | |      _/        \_       | |",
+    r"|  | |       █         █       | |",
+    r"|  | |                         | |",
+    r"|  | |                         | |",
+    r"|  | |        /\/\/\/\/        | |",
 ];
 
 /// Row of [`COMPUTER`] the lanes run along: the middle of its screen.
@@ -307,7 +331,8 @@ fn render_computer(frame: &mut Frame<'_>, area: Rect, scene: &ComputerScene) {
         width: area.right() - x,
         ..area
     };
-    frame.render_widget(Paragraph::new(computer_lines(scene, lane_cols)), lanes_area);
+    let lines = computer_lines(scene, scene.mood(Instant::now()), lane_cols);
+    frame.render_widget(Paragraph::new(lines), lanes_area);
 }
 
 fn computer_width() -> usize {
@@ -318,9 +343,10 @@ fn computer_width() -> usize {
         .unwrap_or(0)
 }
 
-/// Each row of the computer behind the last `lane_cols` of the inbound lane,
-/// the lane row followed by the outbound one.
-fn computer_lines(scene: &ComputerScene, lane_cols: usize) -> Text<'static> {
+/// Each row of the computer wearing `mood`'s face, behind the last
+/// `lane_cols` of the inbound lane, the lane row followed by the outbound one.
+fn computer_lines(scene: &ComputerScene, mood: Mood, lane_cols: usize) -> Text<'static> {
+    let face = face_rows(mood);
     let quiet_lane = " ".repeat(lane_cols);
     let inbound: String = scene
         .inbound()
@@ -328,6 +354,10 @@ fn computer_lines(scene: &ComputerScene, lane_cols: usize) -> Text<'static> {
         .skip(LANE_COLUMNS - lane_cols)
         .collect();
     let lines = COMPUTER.iter().enumerate().map(|(row, art)| {
+        let art = row
+            .checked_sub(FACE_TOP_ROW)
+            .and_then(|face_row| face.get(face_row))
+            .unwrap_or(art);
         if row == LANE_ROW {
             Line::from(vec![
                 Span::styled(inbound.clone(), Style::default().fg(BLEY)),
@@ -344,6 +374,14 @@ fn computer_lines(scene: &ComputerScene, lane_cols: usize) -> Text<'static> {
         }
     });
     Text::from(lines.collect::<Vec<_>>())
+}
+
+fn face_rows(mood: Mood) -> &'static [&'static str] {
+    match mood {
+        Mood::Content => &COMPUTER[FACE_TOP_ROW..FACE_TOP_ROW + FACE_ROWS],
+        Mood::Wondering => &WONDERING_FACE,
+        Mood::Worried => &WORRIED_FACE,
+    }
 }
 
 fn enroll_captions(progress: &EnrollProgress) -> Vec<Line<'static>> {

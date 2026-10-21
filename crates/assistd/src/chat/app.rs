@@ -29,7 +29,7 @@ mod wire;
 
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
-    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, RECENT_RESULTS, SampleResult,
+    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, SampleResult,
     SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus, WakeWordView,
 };
 

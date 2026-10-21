@@ -15,7 +15,7 @@ use super::{App, ConfirmTarget, ConfirmationPrompt, WireStream};
 
 mod scene;
 
-pub(in crate::chat) use scene::{ComputerScene, LANE_COLUMNS};
+pub(in crate::chat) use scene::{ComputerScene, LANE_COLUMNS, Mood};
 
 /// Sample or test results a session view keeps, newest last.
 pub(in crate::chat) const RECENT_RESULTS: usize = 4;
@@ -238,7 +238,10 @@ impl App {
             Event::WakeWordTest {
                 id, heard, matched, ..
             } => {
-                if let Some(SessionPurpose::Test(progress)) = self.session_purpose(&id) {
+                if let Some(session) = self.open_session(&id)
+                    && let SessionPurpose::Test(progress) = &mut session.purpose
+                {
+                    session.scene.react(matched);
                     push_recent(&mut progress.results, TestResult { heard, matched });
                 }
             }
@@ -383,10 +386,6 @@ impl App {
         }
     }
 
-    fn session_purpose(&mut self, id: &str) -> Option<&mut SessionPurpose> {
-        self.open_session(id).map(|session| &mut session.purpose)
-    }
-
     fn on_enroll_event(&mut self, id: &str, event: EnrollEvent) {
         if let EnrollEvent::Saved { phrase, variants } = event {
             if self.open_session(id).is_some() {
@@ -394,7 +393,10 @@ impl App {
             }
             return;
         }
-        let Some(SessionPurpose::Enroll(progress)) = self.session_purpose(id) else {
+        let Some(session) = self.open_session(id) else {
+            return;
+        };
+        let SessionPurpose::Enroll(progress) = &mut session.purpose else {
             return;
         };
         let result = match event {
@@ -420,6 +422,9 @@ impl App {
             }
             EnrollEvent::Saved { .. } => return,
         };
+        session
+            .scene
+            .react(!matches!(result, SampleResult::Rejected { .. }));
         push_recent(&mut progress.results, result);
     }
 

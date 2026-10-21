@@ -49,7 +49,7 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Frame interval of the live thinking and compaction glyphs.
 const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
 /// Frame interval of the `/wakeword` computer's audio and bit lanes.
-const SCENE_INTERVAL: Duration = Duration::from_millis(70);
+const SCENE_INTERVAL: Duration = Duration::from_millis(30);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
