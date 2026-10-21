@@ -15,7 +15,7 @@ use super::vad::SAMPLE_RATE_HZ;
 use super::wake_phrase::WakePhrase;
 
 /// Profile format this build reads and writes.
-pub const PROFILE_VERSION: u32 = 1;
+const PROFILE_VERSION: u32 = 1;
 
 const PROFILE_FILE: &str = "profile.json";
 const SAMPLES_DIR: &str = "samples";

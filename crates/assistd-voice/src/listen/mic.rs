@@ -254,7 +254,7 @@ impl ContinuousListener for MicContinuousListener {
         &self,
         sink: mpsc::Sender<CapturedUtterance>,
     ) -> Result<(), ListenError> {
-        let claim = {
+        let _claim = {
             let listen_state = self.listen_state.lock().await;
             if listen_state.session.is_some() {
                 return Err(ListenError::Listening);
@@ -264,9 +264,7 @@ impl ContinuousListener for MicContinuousListener {
             }
             UtteranceCaptureClaim(Arc::clone(&self.capturing_utterances))
         };
-        let result = self.stream_utterances(sink).await;
-        drop(claim);
-        result
+        self.stream_utterances(sink).await
     }
 }
 

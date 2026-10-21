@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tracing::warn;
 
-use assistd_ipc::{EnrollEvent, Event, SampleRejection, WakePhraseText, WakeWordOp};
+use assistd_ipc::{
+    EnrollEvent, Event, SampleRejection, VoiceCaptureState, WakePhraseText, WakeWordOp,
+};
 use assistd_voice::listen::enrollment::MIN_SAMPLES;
 use assistd_voice::listen::wake_phrase::DEFAULT_WAKE_PHRASE;
 use assistd_voice::{
@@ -158,7 +160,6 @@ impl AppState {
         }
     }
 
-    /// The kind of the open wake-word session, if any.
     pub(in crate::state) fn mic_session_kind(&self) -> Option<MicSessionKind> {
         self.runtime
             .mic_session
@@ -355,7 +356,7 @@ impl AppState {
     }
 
     async fn ptt_busy(&self, capture: &VoiceCapture) -> bool {
-        capture.input.state() != assistd_ipc::VoiceCaptureState::Idle
+        capture.input.state() != VoiceCaptureState::Idle
             || self.runtime.ptt_capture.lock().await.is_some()
     }
 

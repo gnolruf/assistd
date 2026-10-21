@@ -40,9 +40,9 @@ pub struct CapturedUtterance {
 
 /// An accepted enrollment recording and what Whisper heard in it.
 #[derive(Debug, Clone)]
-pub struct Recording {
-    pub pcm: Vec<i16>,
-    pub heard: String,
+pub(super) struct Recording {
+    pub(super) pcm: Vec<i16>,
+    pub(super) heard: String,
 }
 
 /// An enrollment in progress: the phrase, the spellings learned so far
@@ -65,7 +65,7 @@ impl Enrollment {
         }
     }
 
-    /// The phrase as the user typed it, for biasing Whisper.
+    /// The phrase as the user typed it.
     pub fn phrase(&self) -> &str {
         &self.phrase
     }
@@ -126,7 +126,7 @@ impl Enrollment {
     }
 
     /// The phrase, its variants, and the accepted recordings.
-    pub fn into_parts(self) -> (String, Vec<String>, Vec<Recording>) {
+    pub(super) fn into_parts(self) -> (String, Vec<String>, Vec<Recording>) {
         let variants = self.spellings.into_iter().skip(1).collect();
         (self.phrase, variants, self.recordings)
     }
