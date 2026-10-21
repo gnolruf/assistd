@@ -97,14 +97,14 @@ async fn run_listen_dispatcher(
     shutdown: watch::Receiver<bool>,
 ) {
     let voice = &state.config.voice;
-    if !(voice.enabled && voice.continuous.enabled) {
+    if !(voice.enabled && voice.wakeword.enabled) {
         return;
     }
     let handles = listen_dispatcher::spawn_dispatcher(
         state.clone(),
         listener,
         presence,
-        voice.continuous.start_on_launch,
+        voice.wakeword.start_on_launch,
         shutdown,
     );
     let _ = handles.forwarder.await;

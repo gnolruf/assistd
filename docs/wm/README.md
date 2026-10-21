@@ -40,7 +40,7 @@ the chat scratchpad) live in your compositor config and call the
   `sleep` never suspends the machine; `wake` blocks until `Active`.
 - **`chat --wait`** waits for the daemon's socket instead of exiting
   because it isn't up yet. If the chat exits, rerun the same command.
-- **`listen-toggle`** needs `[voice.continuous] enabled = true` and
+- **`listen-toggle`** needs `[voice.wakeword] enabled = true` and
   exits with an error otherwise. **`voice-toggle`** silences or
   resumes spoken replies, and **`voice-skip`** stops the current one;
   both need `[voice.synthesis] enabled = true` to have any effect.

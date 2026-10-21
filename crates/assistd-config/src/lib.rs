@@ -27,7 +27,7 @@ pub use compositor::{CompositorConfig, CompositorType};
 pub use custom_args::{ChatServer, CustomArgs, EmbeddingServer, ServerKind};
 pub use daemon::DaemonConfig;
 pub use embedding::EmbeddingConfig;
-pub use errors::{ConfigError, CustomArgsError, SearchCommandError};
+pub use errors::{ConfigError, CustomArgsError, SearchCommandError, UnitIntervalError};
 pub use mcp::{McpConfig, McpServerConfig};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
@@ -42,5 +42,5 @@ pub use tools::{
 pub use top::Config;
 pub use tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig, TrayNotificationsWakeConfig};
 pub use voice::{
-    CodeBlockMode, ContinuousListenConfig, SynthesisConfig, TranscriptionConfig, VoiceConfig,
+    CodeBlockMode, SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, WakeWordConfig,
 };

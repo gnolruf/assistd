@@ -39,7 +39,7 @@ impl Binding {
         match self {
             Binding::Presence => "presence.hotkey",
             Binding::Voice => "voice.hotkey",
-            Binding::Listen => "voice.continuous.hotkey",
+            Binding::Listen => "voice.wakeword.hotkey",
             Binding::Toggle => "voice.synthesis.toggle_hotkey",
             Binding::Skip => "voice.synthesis.skip_hotkey",
         }
@@ -62,8 +62,8 @@ impl Binding {
             Binding::Presence => (true, &presence.hotkey),
             Binding::Voice => (voice.enabled, &voice.hotkey),
             Binding::Listen => (
-                voice.enabled && voice.continuous.enabled,
-                &voice.continuous.hotkey,
+                voice.enabled && voice.wakeword.enabled,
+                &voice.wakeword.hotkey,
             ),
             Binding::Toggle => (
                 voice.enabled && voice.synthesis.enabled,
@@ -453,8 +453,8 @@ mod tests {
             hotkey: String::new(),
             ..VoiceConfig::default()
         };
-        voice.continuous.enabled = true;
-        voice.continuous.hotkey = String::new();
+        voice.wakeword.enabled = true;
+        voice.wakeword.hotkey = String::new();
         voice.synthesis.enabled = true;
         voice.synthesis.toggle_hotkey = String::new();
         voice.synthesis.skip_hotkey = String::new();
@@ -464,17 +464,17 @@ mod tests {
 
     #[test]
     fn validate_rejects_garbage_only_for_enabled_features() {
-        let (p, v) = configs(|_, v| v.continuous.hotkey = GARBAGE.into());
+        let (p, v) = configs(|_, v| v.wakeword.hotkey = GARBAGE.into());
         let err = validate(&p, &v).expect_err("garbage hotkey must be rejected");
         assert!(
             err.to_string()
-                .starts_with("invalid voice.continuous.hotkey "),
+                .starts_with("invalid voice.wakeword.hotkey "),
             "{err}"
         );
 
         let (p, v) = configs(|_, v| {
-            v.continuous.enabled = false;
-            v.continuous.hotkey = GARBAGE.into();
+            v.wakeword.enabled = false;
+            v.wakeword.hotkey = GARBAGE.into();
         });
         validate(&p, &v).expect("disabled feature's hotkey is ignored");
     }

@@ -72,6 +72,11 @@ pub enum SearchCommandError {
     Empty,
 }
 
+/// A number refused by [`crate::voice::UnitInterval`].
+#[derive(Debug, Error)]
+#[error("{0} is outside the range 0.0..=1.0")]
+pub struct UnitIntervalError(pub f32);
+
 fn format_validation_errors(errors: &[String]) -> String {
     let mut report = format!("configuration has {} error(s):", errors.len());
     for (i, error) in errors.iter().enumerate() {

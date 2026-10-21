@@ -4,6 +4,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
+use crate::voice::UnitInterval;
+
 /// Builds a `NonZero` from a literal; a zero fails at compile time.
 pub const fn nz16(v: u16) -> NonZeroU16 {
     match NonZeroU16::new(v) {
@@ -25,6 +27,15 @@ pub const fn nz64(v: u64) -> NonZeroU64 {
     match NonZeroU64::new(v) {
         Some(n) => n,
         None => panic!("default must be non-zero"),
+    }
+}
+
+/// Builds a [`UnitInterval`] from a literal; a value outside `0.0..=1.0`
+/// fails at compile time.
+pub const fn unit(v: f32) -> UnitInterval {
+    match UnitInterval::new(v) {
+        Some(u) => u,
+        None => panic!("default must be in 0.0..=1.0"),
     }
 }
 
@@ -68,12 +79,15 @@ pub const DEFAULT_PIPER_PARTIAL_FLUSH_MS: u32 = 750;
 pub const DEFAULT_PIPER_TOGGLE_HOTKEY: &str = "";
 pub const DEFAULT_PIPER_SKIP_HOTKEY: &str = "";
 
-pub const DEFAULT_LISTEN_ENABLED: bool = false;
-pub const DEFAULT_LISTEN_START_ON_LAUNCH: bool = false;
-pub const DEFAULT_LISTEN_HOTKEY: &str = "";
-pub const DEFAULT_LISTEN_SILENCE_MS: NonZeroU32 = nz32(800);
-pub const DEFAULT_LISTEN_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
-pub const DEFAULT_LISTEN_PLAYBACK_GATE: bool = true;
+pub const DEFAULT_WAKEWORD_ENABLED: bool = false;
+pub const DEFAULT_WAKEWORD_START_ON_LAUNCH: bool = false;
+pub const DEFAULT_WAKEWORD_HOTKEY: &str = "";
+pub const DEFAULT_WAKEWORD_SILENCE_MS: NonZeroU32 = nz32(800);
+pub const DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
+pub const DEFAULT_WAKEWORD_PLAYBACK_GATE: bool = true;
+pub const DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS: NonZeroU32 = nz32(4000);
+pub const DEFAULT_WAKEWORD_MATCH_SIMILARITY: UnitInterval = unit(0.8);
+pub const DEFAULT_WAKEWORD_DETECTOR_THRESHOLD: UnitInterval = unit(0.5);
 
 pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
 
