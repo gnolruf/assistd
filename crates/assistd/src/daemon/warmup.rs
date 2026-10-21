@@ -54,7 +54,7 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
         state.publish_readiness(component, readiness);
     }
     if let Ok(capture) = voice.capture() {
-        run_listen_dispatcher(&state, capture.listener, presence, shutdown).await;
+        run_listen_dispatcher(&state, capture.listener, shutdown).await;
     }
 }
 
@@ -93,20 +93,17 @@ async fn load_model(
 async fn run_listen_dispatcher(
     state: &Arc<AppState>,
     listener: Arc<dyn ContinuousListener>,
-    presence: Arc<PresenceManager>,
     shutdown: watch::Receiver<bool>,
 ) {
     let voice = &state.config.voice;
     if !(voice.enabled && voice.wakeword.enabled) {
         return;
     }
-    let handles = listen_dispatcher::spawn_dispatcher(
+    let forwarder = listen_dispatcher::spawn_dispatcher(
         state.clone(),
         listener,
-        presence,
         voice.wakeword.start_on_launch,
         shutdown,
     );
-    let _ = handles.forwarder.await;
-    let _ = handles.presence_gate.await;
+    let _ = forwarder.await;
 }
