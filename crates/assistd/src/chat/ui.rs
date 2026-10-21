@@ -44,29 +44,29 @@ const RESUME_DETAIL_INDENT: &str = "    ";
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let [main_area, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    match app.shown_resume_picker() {
-        Some(picker) => {
+    match (app.shown_resume_picker(), app.shown_wake_word_panel()) {
+        (Some(picker), _) => {
             render_resume_picker(frame, main_area, picker, &app.model_name, Utc::now());
         }
-        None => render_chat(frame, main_area, app),
+        (None, Some(panel)) => wakeword::render_wake_word_panel(frame, main_area, panel),
+        (None, None) => render_chat(frame, main_area, app),
     }
     render_status_line(frame, status_area, app);
 }
 
-/// The transcript above the input line, the confirmation prompt or the
-/// wake-word dock, the slash popup over the transcript's bottom rows, then the permission-mode
+/// The transcript above the input line or the confirmation prompt, the
+/// slash popup over the transcript's bottom rows, then the permission-mode
 /// line.
 fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let [chat_area, mode_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    let output_area = match (app.confirmation.as_mut(), app.wake_word_dock.as_ref()) {
-        (Some(prompt), _) => render_confirmation_dock(frame, chat_area, prompt),
-        (None, Some(dock)) => wakeword::render_wake_word_dock(frame, chat_area, &dock.view),
-        (None, None) => render_input_dock(frame, chat_area, app),
+    let output_area = match app.confirmation.as_mut() {
+        Some(prompt) => render_confirmation_dock(frame, chat_area, prompt),
+        None => render_input_dock(frame, chat_area, app),
     };
     app.set_output_height(output_area.height);
     render_output(frame, output_area, app);
-    if app.confirmation.is_none() && app.wake_word_dock.is_none() {
+    if app.confirmation.is_none() {
         render_slash_popup(
             frame,
             output_area,
@@ -655,8 +655,8 @@ fn status_hint(app: &App) -> Option<String> {
         Some("type to search · ↑/↓ select · Enter resume · Esc cancel".to_string())
     } else if let Some(notice) = app.notice() {
         Some(notice.to_string())
-    } else if let Some(dock) = &app.wake_word_dock {
-        Some(wakeword::wake_word_hint(&dock.view).to_string())
+    } else if let Some(panel) = app.shown_wake_word_panel() {
+        Some(wakeword::wake_word_hint(&panel.view).to_string())
     } else if app.output.scroll_offset() > 0 {
         Some(format!("↑{} · PgDn to follow", app.output.scroll_offset()))
     } else if app.generating() {

@@ -22,8 +22,8 @@ use assistd_tools::{
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
-    CapturedUtterance, ContinuousListener, Heard, ListenError, ProfileStore, Transcriber,
-    TranscriptionError, VoiceCapture, VoiceInput, VoiceInputError, VoiceManager,
+    CapturedUtterance, ContinuousListener, Heard, ListenError, ProfileStore, SessionAudio,
+    Transcriber, TranscriptionError, VoiceCapture, VoiceInput, VoiceInputError, VoiceManager,
     VoiceOutputController, VoiceOutputError, WakePhrase,
 };
 use assistd_wm::FocusedWindowContext;
@@ -626,14 +626,16 @@ async fn interrupt_between_ptt_press_and_release_drops_the_prompt() {
 }
 
 /// `ContinuousListener` that records its phrase and, when capturing,
-/// delivers the `captured` utterances.
+/// delivers the `captured` reports, then the `held` ones once `release`d.
 #[derive(Debug)]
 struct MockListener {
     active: AtomicBool,
     phase_tx: watch::Sender<ListenPhase>,
     heard: tokio::sync::broadcast::Sender<Heard>,
     phrase: StdMutex<Option<WakePhrase>>,
-    captured: StdMutex<Vec<CapturedUtterance>>,
+    captured: StdMutex<Vec<SessionAudio>>,
+    held: StdMutex<Vec<SessionAudio>>,
+    release: Notify,
     last_push_to_talk: StdMutex<Option<tokio::time::Instant>>,
 }
 
@@ -652,6 +654,8 @@ impl MockListener {
             heard,
             phrase: StdMutex::new(None),
             captured: StdMutex::new(Vec::new()),
+            held: StdMutex::new(Vec::new()),
+            release: Notify::new(),
             last_push_to_talk: StdMutex::new(None),
         })
     }
@@ -691,12 +695,19 @@ impl ContinuousListener for MockListener {
     fn open_follow_up(&self) {}
     async fn capture_utterances(
         &self,
-        sink: mpsc::Sender<CapturedUtterance>,
+        sink: mpsc::Sender<SessionAudio>,
     ) -> Result<(), ListenError> {
         assert!(!self.is_active(), "listening must pause while capturing");
         let captured = std::mem::take(&mut *self.captured.lock());
-        for utterance in captured {
-            sink.send(utterance).await.unwrap();
+        for audio in captured {
+            sink.send(audio).await.unwrap();
+        }
+        let held = std::mem::take(&mut *self.held.lock());
+        if !held.is_empty() {
+            self.release.notified().await;
+        }
+        for audio in held {
+            sink.send(audio).await.unwrap();
         }
         sink.closed().await;
         Ok(())
@@ -797,13 +808,13 @@ const ENROLLMENT_SCRIPT: [&str; 5] = [
 ];
 
 /// Utterance `index` of [`ENROLLMENT_SCRIPT`], lasting `millis` of speech.
-fn spoken(index: i16, millis: usize) -> CapturedUtterance {
+fn spoken(index: i16, millis: usize) -> SessionAudio {
     let mut pcm = vec![index];
     pcm.resize(1 + millis * 16, 8_000);
-    CapturedUtterance {
+    SessionAudio::Utterance(CapturedUtterance {
         pcm,
         truncated: false,
-    }
+    })
 }
 
 fn wake_word(id: &str, op: WakeWordOp) -> Request {
@@ -817,19 +828,26 @@ fn enrollment(event: assistd_ipc::EnrollEvent) -> Event {
     }
 }
 
-fn prompt(accepted: u8) -> Event {
+fn prompt(confident: u8) -> Event {
     enrollment(assistd_ipc::EnrollEvent::Prompt {
-        accepted,
-        minimum: 3,
-        consistent: false,
+        confident,
+        required: 5,
     })
 }
 
-fn accepted(index: u8, heard: &str) -> Event {
+fn accepted(index: u8, heard: &str, confident: bool) -> Event {
     enrollment(assistd_ipc::EnrollEvent::SampleAccepted {
         index,
         heard: heard.into(),
+        confident,
     })
+}
+
+fn speaking(speaking: bool) -> Event {
+    Event::WakeWordSpeech {
+        id: "e".into(),
+        speaking,
+    }
 }
 
 fn rejected(reason: assistd_ipc::SampleRejection, heard: Option<&str>) -> Event {
@@ -840,18 +858,21 @@ fn rejected(reason: assistd_ipc::SampleRejection, heard: Option<&str>) -> Event 
 }
 
 #[tokio::test]
-async fn enrollment_session_learns_variants_and_holds_the_mic() {
+async fn enrollment_session_learns_variants_holds_the_mic_and_saves_itself() {
     use assistd_ipc::SampleRejection::{DidNotMatch, TooShort};
 
     let profile_dir = tempfile::tempdir().unwrap();
     let listener = MockListener::new(true);
     *listener.captured.lock() = vec![
+        SessionAudio::Speaking(true),
         spoken(0, 1_000),
+        SessionAudio::Speaking(false),
         spoken(1, 50),
         spoken(2, 1_000),
         spoken(3, 1_000),
         spoken(4, 1_000),
     ];
+    *listener.held.lock() = vec![spoken(4, 1_000), spoken(4, 1_000), spoken(4, 1_000)];
     let state = StateParts {
         listener: listener.clone(),
         transcriber: Arc::new(ScriptedTranscriber(&ENROLLMENT_SCRIPT)),
@@ -868,56 +889,42 @@ async fn enrollment_session_learns_variants_and_holds_the_mic() {
     ));
 
     let mut events = Vec::new();
-    while events.len() < 11 {
+    while events.len() < 13 {
         events.push(rx.recv().await.unwrap());
     }
     assert_eq!(
         events,
         [
             prompt(0),
-            accepted(1, "Hey Jarvis."),
+            speaking(true),
+            accepted(1, "Hey Jarvis.", true),
             prompt(1),
+            speaking(false),
             rejected(TooShort, None),
             prompt(1),
             rejected(DidNotMatch, Some("what's the weather")),
             prompt(1),
-            accepted(2, "a jarvis"),
+            accepted(2, "a jarvis", false),
+            prompt(1),
+            accepted(3, "hey jarvis", true),
             prompt(2),
-            accepted(3, "hey jarvis"),
-            prompt(3),
         ]
     );
 
-    let phrase_again = assistd_ipc::WakePhraseText::try_from("hey friday".to_string()).unwrap();
-    let in_progress = "wake-word enrollment in progress";
-    for (req, message) in [
-        (
-            wake_word(
-                "x",
-                WakeWordOp::EnrollStart {
-                    phrase: phrase_again,
-                },
-            ),
-            "wake-word enrollment in progress; finish it first",
-        ),
-        (Request::PttStart { id: "x".into() }, in_progress),
-        (Request::ListenStart { id: "x".into() }, in_progress),
-    ] {
-        let label = req.kind();
-        let (res, refused) = dispatch(&state, req).await;
-        res.unwrap();
-        assert_eq!(refused, [error("x", message)], "{label}");
-    }
-    assert!(!listener.is_active(), "listening stays paused mid-session");
+    assert_mic_is_held(&state, &listener).await;
 
-    let (res, finished) = dispatch(&state, wake_word("f", WakeWordOp::EnrollFinish)).await;
-    res.unwrap();
-    assert_eq!(finished, [done("f")]);
+    listener.release.notify_one();
     session.await.unwrap().unwrap();
     let rest: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(
         rest,
         [
+            accepted(4, "hey jarvis", true),
+            prompt(3),
+            accepted(5, "hey jarvis", true),
+            prompt(4),
+            accepted(6, "hey jarvis", true),
+            prompt(5),
             enrollment(assistd_ipc::EnrollEvent::Saved {
                 phrase: "hey jarvis".into(),
                 variants: vec!["a jarvis".into()],
@@ -927,6 +934,31 @@ async fn enrollment_session_learns_variants_and_holds_the_mic() {
     );
 
     assert!(listener.is_active(), "listening resumes after the session");
+    assert_enrollment_saved(&listener, profile_dir.path()).await;
+}
+
+/// Mic requests are refused while an enrollment holds the mic.
+async fn assert_mic_is_held(state: &Arc<AppState>, listener: &MockListener) {
+    let phrase = assistd_ipc::WakePhraseText::try_from("hey friday".to_string()).unwrap();
+    let in_progress = "wake-word enrollment in progress";
+    for (req, message) in [
+        (
+            wake_word("x", WakeWordOp::EnrollStart { phrase }),
+            "wake-word enrollment in progress; finish it first",
+        ),
+        (Request::PttStart { id: "x".into() }, in_progress),
+        (Request::ListenStart { id: "x".into() }, in_progress),
+    ] {
+        let label = req.kind();
+        let (res, refused) = dispatch(state, req).await;
+        res.unwrap();
+        assert_eq!(refused, [error("x", message)], "{label}");
+    }
+    assert!(!listener.is_active(), "listening stays paused mid-session");
+}
+
+/// The listener gates on the learned variant and the profile holds every sample.
+async fn assert_enrollment_saved(listener: &MockListener, profile_dir: &std::path::Path) {
     let swapped = listener
         .phrase
         .lock()
@@ -936,13 +968,23 @@ async fn enrollment_session_learns_variants_and_holds_the_mic() {
         swapped.match_prefix("a jarvis open firefox"),
         Some("open firefox")
     );
-    let saved = ProfileStore::new(profile_dir.path().to_path_buf())
+    let saved = ProfileStore::new(profile_dir.to_path_buf())
         .load()
         .await
         .unwrap()
         .expect("profile was written");
-    assert_eq!(saved.samples, ["Hey Jarvis.", "a jarvis", "hey jarvis"]);
-    assert!(profile_dir.path().join("samples/03.wav").is_file());
+    assert_eq!(
+        saved.samples,
+        [
+            "Hey Jarvis.",
+            "a jarvis",
+            "hey jarvis",
+            "hey jarvis",
+            "hey jarvis",
+            "hey jarvis"
+        ]
+    );
+    assert!(profile_dir.join("samples/06.wav").is_file());
 }
 
 /// Records every `speak()` in arrival order, counts `wait_idle()`, and

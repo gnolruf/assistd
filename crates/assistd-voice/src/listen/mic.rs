@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
 use super::capture::{self, ListenCaptureSession};
-use super::enrollment::CapturedUtterance;
+use super::enrollment::{CapturedUtterance, SessionAudio};
 use super::playback_gate::{PLAYBACK_HANGOVER_FRAMES, PlaybackGate};
 use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTuning};
 use super::wake_gate::{Admission, WakeGate};
@@ -155,10 +155,7 @@ impl MicContinuousListener {
     }
 
     /// Run capture and the VAD into `sink` until it closes or capture fails.
-    async fn stream_utterances(
-        &self,
-        sink: mpsc::Sender<CapturedUtterance>,
-    ) -> Result<(), ListenError> {
+    async fn stream_utterances(&self, sink: mpsc::Sender<SessionAudio>) -> Result<(), ListenError> {
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
         let ListenCaptureSession {
             stop_flag,
@@ -169,9 +166,15 @@ impl MicContinuousListener {
         let playback_gate = self.playback_gate();
         let vad_sink = sink.clone();
         let vad_handle = tokio::task::spawn_blocking(move || {
-            vad_loop(tuning, playback_gate, frame_rx, |event| {
-                forward_captured(&vad_sink, event)
-            });
+            vad_loop(
+                tuning,
+                playback_gate,
+                frame_rx,
+                |event| forward_captured(&vad_sink, event),
+                |speaking| {
+                    let _ = vad_sink.try_send(SessionAudio::Speaking(speaking));
+                },
+            );
         });
         let finished_early = tokio::select! {
             result = &mut capture_handle => Some(result),
@@ -228,9 +231,13 @@ impl ContinuousListener for MicContinuousListener {
         let tuning = self.tuning;
         let playback_gate = self.playback_gate();
         let vad_handle = tokio::task::spawn_blocking(move || {
-            vad_loop(tuning, playback_gate, frame_rx, |event| {
-                queue_for_transcription(&pcm_tx, event)
-            });
+            vad_loop(
+                tuning,
+                playback_gate,
+                frame_rx,
+                |event| queue_for_transcription(&pcm_tx, event),
+                |_| {},
+            );
         });
 
         listen_state.session = Some(ListenSession {
@@ -293,7 +300,7 @@ impl ContinuousListener for MicContinuousListener {
 
     async fn capture_utterances(
         &self,
-        sink: mpsc::Sender<CapturedUtterance>,
+        sink: mpsc::Sender<SessionAudio>,
     ) -> Result<(), ListenError> {
         let _claim = {
             let listen_state = self.listen_state.lock().await;
@@ -404,24 +411,33 @@ fn tuning_from_config(config: &WakeWordConfig) -> VadTuning {
 /// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Frames
 /// blocked by the playback gate also reset the VAD, since a half-captured
 /// utterance is about to be contaminated by the daemon's own speech.
-/// `emit` must never wait: stalling here would back up the frame channel
-/// and silently truncate live audio. The loop ends when `emit` returns false.
+/// `emit` and `speaking_changed`, told when an utterance starts and ends,
+/// must never wait: stalling here would back up the frame channel and
+/// silently truncate live audio. The loop ends when `emit` returns false.
 fn vad_loop(
     tuning: VadTuning,
     mut playback_gate: Option<PlaybackGate>,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
     mut emit: impl FnMut(VadEvent) -> bool,
+    mut speaking_changed: impl FnMut(bool),
 ) {
     let mut vad = UtteranceVad::new(tuning);
+    let mut speaking = false;
     while let Some(frame) = frame_rx.blocking_recv() {
-        if playback_gate
+        let event = if playback_gate
             .as_mut()
             .is_some_and(PlaybackGate::blocks_frame)
         {
             vad.reset();
-            continue;
+            None
+        } else {
+            vad.feed(&frame)
+        };
+        if vad.in_utterance() != speaking {
+            speaking = !speaking;
+            speaking_changed(speaking);
         }
-        if let Some(event) = vad.feed(&frame)
+        if let Some(event) = event
             && !emit(event)
         {
             return;
@@ -439,7 +455,7 @@ fn queue_for_transcription(pcm_tx: &mpsc::Sender<Utterance>, event: VadEvent) ->
 }
 
 /// Hand an enrollment utterance to the session. False once it closed.
-fn forward_captured(sink: &mpsc::Sender<CapturedUtterance>, event: VadEvent) -> bool {
+fn forward_captured(sink: &mpsc::Sender<SessionAudio>, event: VadEvent) -> bool {
     let utterance = match event {
         VadEvent::UtteranceComplete(pcm) => CapturedUtterance {
             pcm,
@@ -450,7 +466,7 @@ fn forward_captured(sink: &mpsc::Sender<CapturedUtterance>, event: VadEvent) -> 
             truncated: true,
         },
     };
-    try_queue(sink, utterance)
+    try_queue(sink, SessionAudio::Utterance(utterance))
 }
 
 fn try_queue<T>(tx: &mpsc::Sender<T>, item: T) -> bool {

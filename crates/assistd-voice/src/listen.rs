@@ -21,10 +21,10 @@ pub mod vad;
 pub mod wake_gate;
 pub mod wake_phrase;
 
-pub use enrollment::{CapturedUtterance, Enrollment};
+pub use enrollment::{CapturedUtterance, Enrollment, SessionAudio};
 pub use mic::MicContinuousListener;
 pub use profile::{ProfileError, ProfileStore, WakeWordProfile};
-pub use wake_phrase::WakePhrase;
+pub use wake_phrase::{PhraseStrength, WakePhrase};
 
 /// Errors surfaced by [`ContinuousListener`] implementations.
 #[derive(Debug, Error)]
@@ -90,12 +90,11 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     fn open_follow_up(&self);
 
     /// Send every utterance the mic hears into `sink`, cut as listening
-    /// cuts it but not transcribed, until `sink` closes. Fails with
+    /// cuts it but not transcribed, and each start and end of speech, until
+    /// `sink` closes. Fails with
     /// [`ListenError::Listening`] while listening is active.
-    async fn capture_utterances(
-        &self,
-        sink: mpsc::Sender<CapturedUtterance>,
-    ) -> Result<(), ListenError>;
+    async fn capture_utterances(&self, sink: mpsc::Sender<SessionAudio>)
+    -> Result<(), ListenError>;
 }
 
 /// [`ContinuousListener`] for when continuous listening is off in config:
@@ -157,7 +156,7 @@ impl ContinuousListener for NoContinuousListener {
 
     async fn capture_utterances(
         &self,
-        _sink: mpsc::Sender<CapturedUtterance>,
+        _sink: mpsc::Sender<SessionAudio>,
     ) -> Result<(), ListenError> {
         Err(ListenError::Disabled)
     }

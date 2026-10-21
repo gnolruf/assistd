@@ -727,6 +727,9 @@ pub enum Event {
         heard: String,
         matched: bool,
     },
+    /// Speech started (`true`) or ended (`false`) on the mic of the
+    /// wake-word session opened by this connection.
+    WakeWordSpeech { id: String, speaking: bool },
     /// How far one background subsystem has started; broadcast whenever
     /// one finishes starting.
     Readiness {
@@ -904,6 +907,7 @@ impl Event {
             | Event::WakeWordStatus { id, .. }
             | Event::WakeWordEnrollment { id, .. }
             | Event::WakeWordTest { id, .. }
+            | Event::WakeWordSpeech { id, .. }
             | Event::Readiness { id, .. }
             | Event::SpeakingState { id, .. }
             | Event::ChatFocus { id, .. }
@@ -952,6 +956,7 @@ impl Event {
             | Event::WakeWordStatus { .. }
             | Event::WakeWordEnrollment { .. }
             | Event::WakeWordTest { .. }
+            | Event::WakeWordSpeech { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }

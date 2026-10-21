@@ -1,22 +1,22 @@
 //! Wake-phrase status, enrollment, testing and reset. Enrollment and
 //! testing are sessions that hold the mic, one at a time, for as long as the
-//! connection that opened them stays.
+//! connection that opened them stays; an enrollment saves itself once ready.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex as StdMutex;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::warn;
 
 use assistd_ipc::{
     EnrollEvent, Event, SampleRejection, VoiceCaptureState, WakePhraseText, WakeWordOp,
 };
-use assistd_voice::listen::enrollment::MIN_SAMPLES;
 use assistd_voice::listen::wake_phrase::DEFAULT_WAKE_PHRASE;
 use assistd_voice::{
-    CapturedUtterance, Enrollment, ListenError, VoiceCapture, WakePhrase, WakeWordProfile,
+    CapturedUtterance, Enrollment, ListenError, SessionAudio, VoiceCapture, WakePhrase,
+    WakeWordProfile,
 };
 
 use super::{AppState, DispatchError, send_error};
@@ -24,10 +24,11 @@ use super::{AppState, DispatchError, send_error};
 /// A session with no utterance or command for this long is cancelled.
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Utterances captured while the previous one is still being transcribed.
-const UTTERANCE_BACKLOG: usize = 4;
+/// Mic reports queued while the previous utterance is still being
+/// transcribed; each utterance comes with a start and an end of speech.
+const AUDIO_BACKLOG: usize = 12;
 
-const CONTROL_BACKLOG: usize = 4;
+const STOP_BACKLOG: usize = 1;
 
 /// What an open wake-word session is doing with the mic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,18 +54,11 @@ impl MicSessionKind {
     }
 }
 
-/// The open session, reachable from the requests that steer it.
+/// The open session, reachable from the request that stops it.
 #[derive(Debug)]
 pub(in crate::state) struct MicSession {
     kind: MicSessionKind,
-    control: mpsc::Sender<SessionControl>,
-}
-
-#[derive(Debug)]
-enum SessionControl {
-    /// Save the enrollment, answering whether it was saved.
-    Finish(oneshot::Sender<Result<(), String>>),
-    Stop,
+    stop: mpsc::Sender<()>,
 }
 
 /// Frees the session slot when the session ends, however it ends.
@@ -86,40 +80,46 @@ enum SessionEnd {
     Disconnected,
 }
 
-enum SessionInput {
-    Utterance(CapturedUtterance),
-    Control(SessionControl),
-    Ended(SessionEnd),
-}
-
-/// A session's event stream, steering requests, and captured utterances.
+/// A session's event stream, stop requests, and mic reports.
 struct SessionIo {
     id: String,
     tx: mpsc::Sender<Event>,
-    control: mpsc::Receiver<SessionControl>,
-    utterances: mpsc::Receiver<CapturedUtterance>,
+    stop: mpsc::Receiver<()>,
+    audio: mpsc::Receiver<SessionAudio>,
     idle_deadline: Instant,
 }
 
 impl SessionIo {
-    /// The next thing the session must act on; disconnect and the idle
-    /// timeout end it.
-    async fn next_input(&mut self) -> SessionInput {
-        let input = tokio::select! {
-            biased;
-            () = self.tx.closed() => SessionInput::Ended(SessionEnd::Disconnected),
-            control = self.control.recv() => {
-                control.map_or(SessionInput::Ended(SessionEnd::Done), SessionInput::Control)
+    /// The next utterance, after reporting each start and end of speech
+    /// before it. A stop request, disconnect, or the idle timeout ends the
+    /// session instead.
+    async fn next_utterance(&mut self) -> Result<CapturedUtterance, SessionEnd> {
+        loop {
+            let audio = tokio::select! {
+                biased;
+                () = self.tx.closed() => Err(SessionEnd::Disconnected),
+                _ = self.stop.recv() => Err(SessionEnd::Done),
+                audio = self.audio.recv() => audio.ok_or(SessionEnd::CaptureStopped),
+                () = tokio::time::sleep_until(self.idle_deadline) => Err(SessionEnd::Failed(
+                    "wake-word session cancelled after 2 minutes idle".into(),
+                )),
+            }?;
+            self.idle_deadline = Instant::now() + SESSION_IDLE_TIMEOUT;
+            match audio {
+                SessionAudio::Speaking(speaking) => self.send_speaking(speaking).await,
+                SessionAudio::Utterance(utterance) => return Ok(utterance),
             }
-            utterance = self.utterances.recv() => {
-                utterance.map_or(SessionInput::Ended(SessionEnd::CaptureStopped), SessionInput::Utterance)
-            }
-            () = tokio::time::sleep_until(self.idle_deadline) => SessionInput::Ended(
-                SessionEnd::Failed("wake-word session cancelled after 2 minutes idle".into()),
-            ),
-        };
-        self.idle_deadline = Instant::now() + SESSION_IDLE_TIMEOUT;
-        input
+        }
+    }
+
+    async fn send_speaking(&self, speaking: bool) {
+        let _ = self
+            .tx
+            .send(Event::WakeWordSpeech {
+                id: self.id.clone(),
+                speaking,
+            })
+            .await;
     }
 
     async fn send_enrollment(&self, event: EnrollEvent) {
@@ -143,10 +143,6 @@ impl AppState {
         match op {
             WakeWordOp::Status => self.handle_wake_word_status(id, tx).await,
             WakeWordOp::EnrollStart { phrase } => self.handle_enroll_start(id, phrase, tx).await,
-            WakeWordOp::EnrollFinish => {
-                self.handle_enroll_finish(id, tx).await;
-                Ok(())
-            }
             WakeWordOp::EnrollCancel => {
                 self.stop_mic_session(id, MicSessionKind::Enroll, tx).await;
                 Ok(())
@@ -199,7 +195,8 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let capture = self.ready_capture(&id, "wake-word enrollment", &tx).await?;
-        let enrollment = Enrollment::new(phrase.as_str());
+        let enrollment =
+            Enrollment::new(phrase.as_str(), self.config.voice.wakeword.match_similarity);
         self.run_mic_session(id, tx, MicSessionKind::Enroll, &capture, |io| {
             self.drive_enrollment(io, &capture, enrollment)
         })
@@ -219,29 +216,9 @@ impl AppState {
         .await
     }
 
-    async fn handle_enroll_finish(&self, id: String, tx: mpsc::Sender<Event>) {
-        let Some(control) = self.session_control(MicSessionKind::Enroll) else {
-            send_error(&tx, id, MicSessionKind::Enroll.not_open().into()).await;
-            return;
-        };
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let saved = match control.send(SessionControl::Finish(reply_tx)).await {
-            Ok(()) => reply_rx
-                .await
-                .unwrap_or_else(|_| Err("the enrollment ended before it was saved".into())),
-            Err(_) => Err(MicSessionKind::Enroll.not_open().into()),
-        };
-        match saved {
-            Ok(()) => {
-                let _ = tx.send(Event::Done { id }).await;
-            }
-            Err(message) => send_error(&tx, id, message).await,
-        }
-    }
-
     async fn stop_mic_session(&self, id: String, kind: MicSessionKind, tx: mpsc::Sender<Event>) {
-        let stopped = match self.session_control(kind) {
-            Some(control) => control.send(SessionControl::Stop).await.is_ok(),
+        let stopped = match self.session_stop(kind) {
+            Some(stop) => stop.send(()).await.is_ok(),
             None => false,
         };
         if stopped {
@@ -289,7 +266,7 @@ impl AppState {
         F: FnOnce(SessionIo) -> Fut,
         Fut: Future<Output = SessionEnd>,
     {
-        let Some((claim, control)) = self.claim_mic_session(kind) else {
+        let Some((claim, stop)) = self.claim_mic_session(kind) else {
             let busy = self.mic_session_kind().unwrap_or(kind);
             send_error(&tx, id, format!("{}; finish it first", busy.in_progress())).await;
             return Ok(());
@@ -308,16 +285,16 @@ impl AppState {
             send_error(&tx, id, format!("failed to pause listening: {e}")).await;
             return Err(e.into());
         }
-        let (utterance_tx, utterances) = mpsc::channel(UTTERANCE_BACKLOG);
+        let (audio_tx, audio) = mpsc::channel(AUDIO_BACKLOG);
         let io = SessionIo {
             id: id.clone(),
             tx: tx.clone(),
-            control,
-            utterances,
+            stop,
+            audio,
             idle_deadline: Instant::now() + SESSION_IDLE_TIMEOUT,
         };
         let (captured, end) =
-            tokio::join!(capture.listener.capture_utterances(utterance_tx), drive(io));
+            tokio::join!(capture.listener.capture_utterances(audio_tx), drive(io));
         drop(claim);
         if resume_listening && let Err(e) = capture.listener.start().await {
             warn!(target: "assistd::wakeword", "failed to resume listening: {e}");
@@ -329,31 +306,31 @@ impl AppState {
     fn claim_mic_session(
         &self,
         kind: MicSessionKind,
-    ) -> Option<(MicSessionClaim<'_>, mpsc::Receiver<SessionControl>)> {
+    ) -> Option<(MicSessionClaim<'_>, mpsc::Receiver<()>)> {
         let mut slot = self.runtime.mic_session.lock();
         if slot.is_some() {
             return None;
         }
-        let (control_tx, control_rx) = mpsc::channel(CONTROL_BACKLOG);
+        let (stop_tx, stop_rx) = mpsc::channel(STOP_BACKLOG);
         *slot = Some(MicSession {
             kind,
-            control: control_tx,
+            stop: stop_tx,
         });
         Some((
             MicSessionClaim {
                 slot: &self.runtime.mic_session,
             },
-            control_rx,
+            stop_rx,
         ))
     }
 
-    fn session_control(&self, kind: MicSessionKind) -> Option<mpsc::Sender<SessionControl>> {
+    fn session_stop(&self, kind: MicSessionKind) -> Option<mpsc::Sender<()>> {
         self.runtime
             .mic_session
             .lock()
             .as_ref()
             .filter(|session| session.kind == kind)
-            .map(|session| session.control.clone())
+            .map(|session| session.stop.clone())
     }
 
     async fn ptt_busy(&self, capture: &VoiceCapture) -> bool {
@@ -367,26 +344,9 @@ impl AppState {
         capture: &VoiceCapture,
         mut enrollment: Enrollment,
     ) -> SessionEnd {
-        io.send_enrollment(enrollment.prompt()).await;
-        loop {
-            match io.next_input().await {
-                SessionInput::Utterance(utterance) => {
-                    if let Err(end) = enroll_sample(&io, capture, &mut enrollment, utterance).await
-                    {
-                        return end;
-                    }
-                }
-                SessionInput::Control(SessionControl::Finish(reply)) if !enrollment.is_ready() => {
-                    let _ = reply.send(Err(format!(
-                        "at least {MIN_SAMPLES} accepted samples are needed before saving"
-                    )));
-                }
-                SessionInput::Control(SessionControl::Finish(reply)) => {
-                    return self.save_enrollment(&io, capture, enrollment, reply).await;
-                }
-                SessionInput::Control(SessionControl::Stop) => return SessionEnd::Done,
-                SessionInput::Ended(end) => return end,
-            }
+        match collect_samples(&mut io, capture, &mut enrollment).await {
+            Ok(()) => self.save_enrollment(&io, capture, enrollment).await,
+            Err(end) => end,
         }
     }
 
@@ -395,20 +355,16 @@ impl AppState {
         io: &SessionIo,
         capture: &VoiceCapture,
         enrollment: Enrollment,
-        reply: oneshot::Sender<Result<(), String>>,
     ) -> SessionEnd {
         let profile = match capture.profiles.save(enrollment).await {
             Ok(profile) => profile,
             Err(e) => {
-                let message = format!("failed to save the wake-word profile: {e}");
-                let _ = reply.send(Err(message.clone()));
-                return SessionEnd::Failed(message);
+                return SessionEnd::Failed(format!("failed to save the wake-word profile: {e}"));
             }
         };
         capture
             .listener
             .set_wake_phrase(profile.wake_phrase(self.config.voice.wakeword.match_similarity));
-        let _ = reply.send(Ok(()));
         io.send_enrollment(EnrollEvent::Saved {
             phrase: profile.phrase,
             variants: profile.variants,
@@ -447,6 +403,20 @@ impl AppState {
     }
 }
 
+/// Prompt for and offer utterances to `enrollment` until it is ready to save.
+async fn collect_samples(
+    io: &mut SessionIo,
+    capture: &VoiceCapture,
+    enrollment: &mut Enrollment,
+) -> Result<(), SessionEnd> {
+    io.send_enrollment(enrollment.prompt()).await;
+    while !enrollment.is_ready() {
+        let utterance = io.next_utterance().await?;
+        enroll_sample(io, capture, enrollment, utterance).await?;
+    }
+    Ok(())
+}
+
 /// Screen, transcribe and offer one utterance to `enrollment`, reporting
 /// the outcome and the next prompt. A transcription failure ends the session.
 async fn enroll_sample(
@@ -475,17 +445,13 @@ async fn enroll_sample(
 }
 
 fn offer_sample(enrollment: &mut Enrollment, pcm: Vec<i16>, heard: &str) -> EnrollEvent {
-    match enrollment.accept(pcm, heard) {
-        Ok(index) => EnrollEvent::SampleAccepted {
-            index,
-            heard: heard.to_string(),
-        },
-        Err(reason) => EnrollEvent::SampleRejected {
+    enrollment
+        .accept(pcm, heard)
+        .unwrap_or_else(|reason| EnrollEvent::SampleRejected {
             reason,
             heard: (reason == SampleRejection::DidNotMatch && !heard.is_empty())
                 .then(|| heard.to_string()),
-        },
-    }
+        })
 }
 
 /// Report what each utterance was heard as and whether `wake_phrase` matched it.
@@ -495,35 +461,30 @@ async fn drive_test(
     wake_phrase: WakePhrase,
 ) -> SessionEnd {
     loop {
-        match io.next_input().await {
-            SessionInput::Utterance(utterance) => {
-                let heard = match capture
-                    .transcriber
-                    .transcribe(&utterance.pcm, Some(wake_phrase.phrase()))
-                    .await
-                {
-                    Ok(heard) => heard.trim().to_string(),
-                    Err(e) => return SessionEnd::Failed(format!("transcription failed: {e}")),
-                };
-                if heard.is_empty() {
-                    continue;
-                }
-                let matched = wake_phrase.match_prefix(&heard).is_some();
-                let _ = io
-                    .tx
-                    .send(Event::WakeWordTest {
-                        id: io.id.clone(),
-                        heard,
-                        matched,
-                    })
-                    .await;
-            }
-            SessionInput::Control(SessionControl::Finish(reply)) => {
-                let _ = reply.send(Err(MicSessionKind::Enroll.not_open().into()));
-            }
-            SessionInput::Control(SessionControl::Stop) => return SessionEnd::Done,
-            SessionInput::Ended(end) => return end,
+        let utterance = match io.next_utterance().await {
+            Ok(utterance) => utterance,
+            Err(end) => return end,
+        };
+        let heard = match capture
+            .transcriber
+            .transcribe(&utterance.pcm, Some(wake_phrase.phrase()))
+            .await
+        {
+            Ok(heard) => heard.trim().to_string(),
+            Err(e) => return SessionEnd::Failed(format!("transcription failed: {e}")),
+        };
+        if heard.is_empty() {
+            continue;
         }
+        let matched = wake_phrase.match_prefix(&heard).is_some();
+        let _ = io
+            .tx
+            .send(Event::WakeWordTest {
+                id: io.id.clone(),
+                heard,
+                matched,
+            })
+            .await;
     }
 }
 

@@ -48,6 +48,8 @@ const RESUME_RECENCY_SECS: u64 = 10;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Frame interval of the live thinking and compaction glyphs.
 const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
+/// Frame interval of the `/wakeword` computer's audio and bit lanes.
+const SCENE_INTERVAL: Duration = Duration::from_millis(70);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -322,6 +324,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     let mut glyph_tick = tokio::time::interval(GLYPH_INTERVAL);
     glyph_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut scene_tick = tokio::time::interval(SCENE_INTERVAL);
+    scene_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut window_title = String::new();
     sync_window_title(&mut window_title, app.session_title.as_deref())?;
@@ -342,6 +346,9 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
             }
             _ = glyph_tick.tick(), if app.output.glyph_live() => {
                 app.output.advance_live_glyphs();
+            }
+            _ = scene_tick.tick(), if app.wake_word_scene_live() => {
+                app.advance_wake_word_scene();
             }
             _ = shutdown_rx.changed() => {
                 break;

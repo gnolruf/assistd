@@ -27,8 +27,11 @@ mod resume;
 mod wakeword;
 mod wire;
 
-pub(super) use wakeword::{EnrollProgress, EnrollPrompt, SampleResult, TestProgress, WakeWordView};
-use wakeword::{WakeWordDock, WakeWordStream};
+use wakeword::WakeWordStream;
+pub(super) use wakeword::{
+    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, RECENT_RESULTS, SampleResult,
+    SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus, WakeWordView,
+};
 
 const SPINNER_CHARS: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
@@ -250,9 +253,9 @@ pub(super) struct App {
     /// `/resume` session list; `confirmation` takes precedence while
     /// both are open.
     pub resume_picker: Option<ResumePicker>,
-    /// `/wakeword` enrollment or test panel, drawn in place of the input
-    /// line; `confirmation` takes precedence while both are open.
-    pub wake_word_dock: Option<WakeWordDock>,
+    /// `/wakeword` panel, drawn in place of the transcript;
+    /// `confirmation` takes precedence while both are open.
+    pub wake_word_panel: Option<WakeWordPanel>,
     /// Throttles rewraps for a live block's timer to 1 Hz.
     last_live_seconds: Option<u64>,
     pub session_title: Option<String>,
@@ -440,7 +443,7 @@ impl App {
             slash_selected: 0,
             slash_dismissed: false,
             resume_picker: None,
-            wake_word_dock: None,
+            wake_word_panel: None,
             last_live_seconds: None,
             session_title: None,
             verbose: false,
