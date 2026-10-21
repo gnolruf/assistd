@@ -937,7 +937,6 @@ async fn enrollment_session_learns_variants_holds_the_mic_and_saves_itself() {
     assert_enrollment_saved(&listener, profile_dir.path()).await;
 }
 
-/// Mic requests are refused while an enrollment holds the mic.
 async fn assert_mic_is_held(state: &Arc<AppState>, listener: &MockListener) {
     let phrase = assistd_ipc::WakePhraseText::try_from("hey friday".to_string()).unwrap();
     let in_progress = "wake-word enrollment in progress";

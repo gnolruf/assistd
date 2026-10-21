@@ -91,8 +91,8 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
 
     /// Send every utterance the mic hears into `sink`, cut as listening
     /// cuts it but not transcribed, and each start and end of speech, until
-    /// `sink` closes. Fails with
-    /// [`ListenError::Listening`] while listening is active.
+    /// `sink` closes. Fails with [`ListenError::Listening`] while listening
+    /// is active.
     async fn capture_utterances(&self, sink: mpsc::Sender<SessionAudio>)
     -> Result<(), ListenError>;
 }

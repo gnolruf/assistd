@@ -23,9 +23,8 @@ pub(in crate::chat) enum Mood {
     Worried,
 }
 
-/// Both lanes, leftmost column first, the audio still inside the computer,
-/// whether audio has reached it and is still coming, and its worry over speech that did not pass: shown until `worried_until`,
-/// or `worry_pending` until the audio has finished flowing in.
+/// Both lanes, leftmost column first, and the computer's mood. A worry is
+/// held as `worry_pending` until the audio has finished flowing in.
 pub(in crate::chat) struct ComputerScene {
     hearing: bool,
     worried_until: Option<Instant>,
