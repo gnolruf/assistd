@@ -115,6 +115,34 @@ pub enum VoiceCaptureState {
     Transcribing,
 }
 
+/// Wake-word listener phase.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ListenPhase {
+    /// The listener is stopped.
+    Off,
+    /// The mic is open and waiting for the wake phrase.
+    Armed,
+    /// The wake phrase was heard; the next utterance is the command.
+    Capturing,
+}
+
+impl ListenPhase {
+    /// Whether the listener has the mic open.
+    pub const fn is_on(self) -> bool {
+        !matches!(self, ListenPhase::Off)
+    }
+
+    /// Lower-case name, matching the wire form.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ListenPhase::Off => "off",
+            ListenPhase::Armed => "armed",
+            ListenPhase::Capturing => "capturing",
+        }
+    }
+}
+
 /// A subsystem that starts in the background after the socket opens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -220,6 +248,7 @@ pub enum EventKind {
     ToolResult,
     Presence,
     ListenState,
+    WakeWordDetected,
     VoiceState,
     SpeakingState,
     SessionTitle,
@@ -277,7 +306,7 @@ pub enum Request {
     ListenStop { id: String },
     /// Toggle continuous listening. Emits `ListenState`, then `Done`.
     ListenToggle { id: String },
-    /// Report continuous-listening state. Emits `ListenState`, then `Done`.
+    /// Report the wake-word listener's phase. Emits `ListenState`, then `Done`.
     GetListenState { id: String },
     /// Toggle TTS; off cancels in-flight playback. Emits `VoiceOutputState`, then `Done`.
     VoiceToggle { id: String },
@@ -669,8 +698,10 @@ pub enum Event {
     },
     /// Transcript of a PTT recording; empty means silence, and only `Done` follows.
     Transcription { id: String, text: String },
-    /// Whether continuous listening is active.
-    ListenState { id: String, active: bool },
+    /// The wake-word listener's phase.
+    ListenState { id: String, phase: ListenPhase },
+    /// The wake phrase was heard; a command's `Transcription` may follow.
+    WakeWordDetected { id: String },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
     /// How far one background subsystem has started; broadcast whenever
@@ -845,6 +876,7 @@ impl Event {
             | Event::VoiceState { id, .. }
             | Event::Transcription { id, .. }
             | Event::ListenState { id, .. }
+            | Event::WakeWordDetected { id }
             | Event::VoiceOutputState { id, .. }
             | Event::Readiness { id, .. }
             | Event::SpeakingState { id, .. }
@@ -880,6 +912,7 @@ impl Event {
             Event::Presence { .. } => EventKind::Presence,
             Event::VoiceState { .. } => EventKind::VoiceState,
             Event::ListenState { .. } => EventKind::ListenState,
+            Event::WakeWordDetected { .. } => EventKind::WakeWordDetected,
             Event::SpeakingState { .. } => EventKind::SpeakingState,
             Event::SessionTitle { .. } => EventKind::SessionTitle,
             Event::Done { .. } => EventKind::Done,

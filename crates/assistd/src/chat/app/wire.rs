@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use assistd_ipc::{Event, PresenceState, Role, StatusKind, StatusSeverity, TurnStats};
+use assistd_ipc::{Event, ListenPhase, PresenceState, Role, StatusKind, StatusSeverity, TurnStats};
 use assistd_tools::{ConfirmationRequest, Risk};
 use serde_json::Value;
 
@@ -40,6 +40,9 @@ impl App {
     /// `Error` counts only when it closes the turn on screen, since every
     /// client's one-shot requests end with one.
     fn on_bus_event(&mut self, ev: Event) {
+        if matches!(ev, Event::Transcription { .. }) {
+            self.wake_word_heard = false;
+        }
         if matches!(ev, Event::SessionTitle { .. }) {
             self.on_wire_event(WireStream::Status, ev);
             return;
@@ -79,6 +82,7 @@ impl App {
             state @ (Event::Presence { .. }
             | Event::VoiceState { .. }
             | Event::ListenState { .. }
+            | Event::WakeWordDetected { .. }
             | Event::VoiceOutputState { .. }
             | Event::Capabilities { .. }
             | Event::Status { .. }) => self.on_state_event(state),
@@ -170,7 +174,10 @@ impl App {
         match ev {
             Event::Presence { state, .. } => self.on_presence(state),
             Event::VoiceState { state, .. } => self.listening = state,
-            Event::ListenState { active, .. } => self.listen_active = active,
+            Event::ListenState { phase, .. } => {
+                self.wake_word_heard &= phase == ListenPhase::Capturing;
+            }
+            Event::WakeWordDetected { .. } => self.wake_word_heard = true,
             Event::VoiceOutputState { enabled, .. } => self.voice_output_enabled = enabled,
             Event::Capabilities {
                 vision, model_name, ..

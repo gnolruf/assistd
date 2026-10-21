@@ -34,7 +34,9 @@ pub mod sentence;
 pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
 pub use error::{VoiceInputError, VoiceOutputError};
 #[cfg(feature = "listen")]
-pub use listen::{ContinuousListener, ListenError, MicContinuousListener, NoContinuousListener};
+pub use listen::{
+    ContinuousListener, Heard, ListenError, MicContinuousListener, NoContinuousListener, WakePhrase,
+};
 #[cfg(feature = "listen")]
 pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
 #[cfg(feature = "mic")]

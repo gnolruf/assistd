@@ -211,7 +211,8 @@ pub(super) struct App {
     pub confirmation: Option<ConfirmationPrompt>,
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
-    pub listen_active: bool,
+    /// The wake phrase was heard and its command has not arrived yet.
+    pub wake_word_heard: bool,
     pub pending_attachments: Vec<PendingAttachment>,
     picker: Option<Picker>,
     ipc: Arc<IpcClient>,
@@ -408,7 +409,7 @@ impl App {
             confirmation: None,
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
-            listen_active: false,
+            wake_word_heard: false,
             pending_attachments: Vec::new(),
             picker,
             ipc,

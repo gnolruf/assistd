@@ -110,9 +110,9 @@ pub struct WakeWordConfig {
     /// After a wake phrase heard on its own, how long in ms to wait for the
     /// command, `500..=15000`.
     pub command_timeout_ms: NonZeroU32,
-    /// Minimum normalized edit-distance similarity between Whisper's text and
-    /// the phrase or a learned variant; `1.0` demands an exact match after
-    /// normalization, `0.0` accepts anything.
+    /// Minimum normalized edit-distance similarity between each leading word
+    /// Whisper heard and the same word of the phrase or a learned variant;
+    /// `1.0` demands an exact match after normalization, `0.0` accepts anything.
     pub match_similarity: UnitInterval,
     /// Wake-word detector score at or above which audio is handed to Whisper;
     /// `0.0` passes everything, `1.0` only certain detections.

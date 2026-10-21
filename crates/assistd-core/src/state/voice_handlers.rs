@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, VoiceCaptureState};
+use assistd_ipc::{Event, ListenPhase, VoiceCaptureState};
 use assistd_voice::VoiceCapture;
 
 use super::query::{TurnOrigin, finish_interrupted_before_start};
@@ -180,7 +180,7 @@ impl AppState {
                 let _ = tx
                     .send(Event::ListenState {
                         id: id.clone(),
-                        active: true,
+                        phase: self.subsystems.voice.listen_phase(),
                     })
                     .await;
                 let _ = tx.send(Event::Done { id }).await;
@@ -207,7 +207,7 @@ impl AppState {
                 let _ = tx
                     .send(Event::ListenState {
                         id: id.clone(),
-                        active: false,
+                        phase: ListenPhase::Off,
                     })
                     .await;
                 let _ = tx.send(Event::Done { id }).await;
@@ -237,11 +237,11 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) {
-        let active = self.subsystems.voice.listening();
+        let phase = self.subsystems.voice.listen_phase();
         let _ = tx
             .send(Event::ListenState {
                 id: id.clone(),
-                active,
+                phase,
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;

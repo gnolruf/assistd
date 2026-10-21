@@ -631,6 +631,9 @@ fn status_segments(app: &App) -> Vec<String> {
     if let Some(label) = voice_indicator(app.listening) {
         segments.push(format!("{} {label}", app.spinner_char()));
     }
+    if app.wake_word_heard {
+        segments.push(format!("{} Listening…", app.spinner_char()));
+    }
     if let Some(state) = app.presence_state.filter(|s| *s != PresenceState::Active) {
         segments.push(format!("model is {}", state.as_str()));
     }

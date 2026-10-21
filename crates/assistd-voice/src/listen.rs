@@ -1,8 +1,9 @@
-//! Hands-free continuous listening: VAD-gated segmentation that emits completed
-//! transcripts as a long-running stream, unlike one-shot [`crate::VoiceInput`] presses.
+//! Hands-free wake-word listening: VAD-gated segmentation whose transcripts
+//! reach clients only after the wake phrase, unlike one-shot [`crate::VoiceInput`] presses.
 
 use std::fmt;
 
+use assistd_ipc::ListenPhase;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::{broadcast, watch};
@@ -12,8 +13,11 @@ pub mod consumer;
 pub mod mic;
 pub mod playback_gate;
 pub mod vad;
+pub mod wake_gate;
+pub mod wake_phrase;
 
 pub use mic::MicContinuousListener;
+pub use wake_phrase::WakePhrase;
 
 /// Errors surfaced by [`ContinuousListener`] implementations.
 #[derive(Debug, Error)]
@@ -23,8 +27,17 @@ pub enum ListenError {
     Disabled,
 }
 
-/// A long-running, VAD-gated listener emitting completed utterance
-/// transcripts.
+/// What the listener heard that is addressed to assistd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Heard {
+    /// The wake phrase, alone or ahead of a command.
+    WakePhrase,
+    /// A command, without the wake phrase; never empty.
+    Command(String),
+}
+
+/// A long-running, VAD-gated listener that emits what follows the wake
+/// phrase.
 #[async_trait]
 pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// Open the mic and start segmenting. A no-op when already active.
@@ -36,20 +49,19 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// Whether the listener is currently capturing.
     fn is_active(&self) -> bool;
 
-    /// Completed transcripts. Slow consumers may miss older utterances.
-    /// Empty transcripts are never delivered.
-    fn subscribe_utterances(&self) -> broadcast::Receiver<String>;
+    /// Wake-phrase detections and commands. Slow consumers may miss older ones.
+    fn subscribe_heard(&self) -> broadcast::Receiver<Heard>;
 
-    /// On/off transitions. The initial value is the current state.
-    fn subscribe_state(&self) -> watch::Receiver<bool>;
+    /// Phase transitions. The initial value is the current phase.
+    fn subscribe_phase(&self) -> watch::Receiver<ListenPhase>;
 }
 
 /// [`ContinuousListener`] for when continuous listening is off in config:
 /// refuses to start and never delivers transcripts.
 #[derive(Debug)]
 pub struct NoContinuousListener {
-    state_tx: watch::Sender<bool>,
-    utterances: broadcast::Sender<String>,
+    phase_tx: watch::Sender<ListenPhase>,
+    heard: broadcast::Sender<Heard>,
 }
 
 impl Default for NoContinuousListener {
@@ -61,12 +73,9 @@ impl Default for NoContinuousListener {
 impl NoContinuousListener {
     /// A placeholder that stays inactive.
     pub fn new() -> Self {
-        let (state_tx, _) = watch::channel(false);
-        let (utterances, _) = broadcast::channel(16);
-        Self {
-            state_tx,
-            utterances,
-        }
+        let (phase_tx, _) = watch::channel(ListenPhase::Off);
+        let (heard, _) = broadcast::channel(16);
+        Self { phase_tx, heard }
     }
 }
 
@@ -84,11 +93,11 @@ impl ContinuousListener for NoContinuousListener {
         false
     }
 
-    fn subscribe_utterances(&self) -> broadcast::Receiver<String> {
-        self.utterances.subscribe()
+    fn subscribe_heard(&self) -> broadcast::Receiver<Heard> {
+        self.heard.subscribe()
     }
 
-    fn subscribe_state(&self) -> watch::Receiver<bool> {
-        self.state_tx.subscribe()
+    fn subscribe_phase(&self) -> watch::Receiver<ListenPhase> {
+        self.phase_tx.subscribe()
     }
 }

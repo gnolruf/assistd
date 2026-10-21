@@ -107,8 +107,11 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
                 )?;
             }
         }
-        Event::ListenState { active, .. } => {
-            writeln!(out, "[listen: {}]", if *active { "on" } else { "off" })?;
+        Event::ListenState { phase, .. } => {
+            writeln!(out, "[listen: {}]", phase.as_str())?;
+        }
+        Event::WakeWordDetected { .. } => {
+            writeln!(out, "[wake word]")?;
         }
         Event::VoiceOutputState { enabled, .. } => {
             writeln!(

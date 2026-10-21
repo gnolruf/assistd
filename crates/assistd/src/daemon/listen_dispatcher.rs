@@ -1,20 +1,23 @@
-//! Routes continuous-listen utterances into the agent loop, and pauses
-//! the listener while the daemon sleeps so stray room speech does not
-//! keep waking llama-server.
+//! Routes wake-word commands into the agent loop, publishes the listener's
+//! phase, and pauses the listener while the daemon sleeps so stray room
+//! speech does not keep waking llama-server.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assistd_core::{
-    AppState, Component, ContinuousListener, PresenceManager, PresenceState, TurnOrigin,
-    drain_join_set, spawn_supervised,
+    AppState, Component, ContinuousListener, Heard, ListenPhase, PresenceManager, PresenceState,
+    TurnOrigin, drain_join_set, spawn_supervised,
 };
 use assistd_ipc::Event;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, debug, error, info, warn};
+
+/// Id of the `ListenState` events published when the listener changes phase.
+const LISTEN_PHASE_EVENT_ID: &str = "listen";
 
 pub(super) struct ListenDispatcherHandles {
     pub forwarder: JoinHandle<()>,
@@ -77,33 +80,21 @@ async fn run_utterance_forwarder(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
-    let mut utterances = listener.subscribe_utterances();
+    let mut heard = listener.subscribe_heard();
+    let mut phases = listener.subscribe_phase();
     let mut turns = ListenTurns::default();
     loop {
         tokio::select! {
-            res = utterances.recv() => {
-                match res {
-                    Ok(text) => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            turns.submit(&state, trimmed.to_string());
-                        }
-                    }
-                    Err(RecvError::Lagged(n)) => {
-                        warn!(
-                            target: "assistd::listen",
-                            dropped = n,
-                            "utterance subscriber lagged; dropped transcripts"
-                        );
-                    }
-                    Err(RecvError::Closed) => {
-                        info!(
-                            target: "assistd::listen",
-                            "utterance broadcast closed; forwarder exiting"
-                        );
-                        break;
-                    }
+            res = heard.recv() => {
+                if !forward_heard(&state, &mut turns, res) {
+                    break;
                 }
+            }
+            changed = phases.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                publish_phase(&state, *phases.borrow_and_update());
             }
             Some(res) = turns.running.join_next(), if !turns.running.is_empty() => {
                 if let Err(e) = res
@@ -125,6 +116,44 @@ async fn run_utterance_forwarder(
     }
 
     drain_join_set(&mut turns.running, grace, "listen-triggered query").await;
+}
+
+/// Act on one item from the listener; false once its broadcast has closed.
+fn forward_heard(
+    state: &Arc<AppState>,
+    turns: &mut ListenTurns,
+    received: Result<Heard, RecvError>,
+) -> bool {
+    match received {
+        Ok(Heard::WakePhrase) => {
+            state.runtime.publish(&Event::WakeWordDetected {
+                id: format!("listen-{}", short_id()),
+            });
+        }
+        Ok(Heard::Command(text)) => turns.submit(state, text),
+        Err(RecvError::Lagged(n)) => {
+            warn!(
+                target: "assistd::listen",
+                dropped = n,
+                "listen subscriber lagged; dropped wake phrases or commands"
+            );
+        }
+        Err(RecvError::Closed) => {
+            info!(
+                target: "assistd::listen",
+                "listen broadcast closed; forwarder exiting"
+            );
+            return false;
+        }
+    }
+    true
+}
+
+fn publish_phase(state: &AppState, phase: ListenPhase) {
+    state.runtime.publish(&Event::ListenState {
+        id: LISTEN_PHASE_EVENT_ID.to_string(),
+        phase,
+    });
 }
 
 fn spawn_listen_query(handlers: &mut JoinSet<()>, state: &Arc<AppState>, text: String) {
@@ -300,12 +329,12 @@ mod tests {
             self.active.load(Ordering::SeqCst)
         }
 
-        fn subscribe_utterances(&self) -> broadcast::Receiver<String> {
+        fn subscribe_heard(&self) -> broadcast::Receiver<Heard> {
             broadcast::channel(1).1
         }
 
-        fn subscribe_state(&self) -> watch::Receiver<bool> {
-            watch::channel(false).1
+        fn subscribe_phase(&self) -> watch::Receiver<ListenPhase> {
+            watch::channel(ListenPhase::Off).1
         }
     }
 

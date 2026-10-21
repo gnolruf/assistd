@@ -26,7 +26,7 @@ pub struct TrayIconsConfig {
     pub active: String,
     /// The daemon is drowsy, asleep, or loading the model.
     pub sleeping: String,
-    /// Continuous listening is on.
+    /// The wake phrase was heard, or a push-to-talk capture is underway.
     pub listening: String,
     /// A turn is in flight.
     pub generating: String,
