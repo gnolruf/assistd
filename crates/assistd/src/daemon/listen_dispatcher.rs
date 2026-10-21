@@ -16,13 +16,13 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, debug, error, info, warn};
 
+/// Id of the `ListenState` events published when the listener changes phase.
+const LISTEN_PHASE_EVENT_ID: &str = "listen";
+
 pub(super) struct ListenDispatcherHandles {
     pub forwarder: JoinHandle<()>,
     pub presence_gate: JoinHandle<()>,
 }
-
-/// Id of the `ListenState` events published when the listener changes phase.
-const LISTEN_PHASE_EVENT_ID: &str = "listen";
 
 /// The running listen turn plus at most one utterance waiting behind it;
 /// a newer utterance replaces the waiting one.

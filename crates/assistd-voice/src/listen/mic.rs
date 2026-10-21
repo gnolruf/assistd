@@ -34,7 +34,6 @@ const PENDING_UTTERANCE_DEPTH: usize = 4;
 
 type CaptureJoin = JoinHandle<Result<(), AudioCaptureError>>;
 
-/// One VAD-bounded utterance and when its audio began.
 #[derive(Debug)]
 struct Utterance {
     pcm: Vec<i16>,
@@ -202,7 +201,6 @@ impl ContinuousListener for MicContinuousListener {
     }
 }
 
-/// Where the transcription worker reports what it admits.
 #[derive(Debug)]
 struct ListenOutputs {
     heard: broadcast::Sender<Heard>,
@@ -314,7 +312,6 @@ async fn transcribe_loop(
     }
 }
 
-/// The non-empty transcript of `utterance`, biased toward the wake phrase.
 async fn transcribe_utterance(
     transcriber: &dyn Transcriber,
     gate: &WakeGate,

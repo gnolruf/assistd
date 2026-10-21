@@ -1,5 +1,5 @@
-//! The `Armed` / `AwaitingCommand` state machine that turns transcripts
-//! into wake-phrase detections and commands.
+//! The state machine that turns transcripts into wake-phrase detections
+//! and commands.
 
 use std::time::Duration;
 
