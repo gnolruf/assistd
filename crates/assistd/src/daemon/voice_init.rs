@@ -10,25 +10,32 @@ use assistd_core::{
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, ProfileStore,
-    QueuedTranscriber, Transcriber, WakePhrase, WhisperTranscriberBuilder, build_cpu_fallback,
+    QueuedTranscriber, SileroVad, Transcriber, VoiceOutputController, WakePhrase,
+    WhisperTranscriberBuilder, build_cpu_fallback,
 };
-use tokio::sync::watch;
 use tracing::info;
 
 use super::voice_probe::PresenceGpuProbe;
+use super::vram::VramLedger;
 
 /// Start speech output, then capture, recording on `voice` whether each
 /// came up or why it is unavailable.
-pub(super) async fn init(voice: &VoiceManager, config: &Config, presence: &Arc<PresenceManager>) {
+pub(super) async fn init(
+    voice: &VoiceManager,
+    config: &Config,
+    presence: &Arc<PresenceManager>,
+    vram: Option<Arc<VramLedger>>,
+) {
     voice.speech().set_output(init_output(config).await);
-    let speaking = voice.speech().subscribe_speaking();
-    voice.set_capture(init_capture(config, presence, speaking).await);
+    let speech = Arc::clone(voice.speech());
+    voice.set_capture(init_capture(config, presence, vram, speech).await);
 }
 
 async fn init_capture(
     config: &Config,
     presence: &Arc<PresenceManager>,
-    output_speaking: watch::Receiver<bool>,
+    vram: Option<Arc<VramLedger>>,
+    speech: Arc<VoiceOutputController>,
 ) -> Readiness<VoiceCapture> {
     if !config.voice.enabled {
         info!("voice: disabled in config (voice.enabled = false)");
@@ -50,30 +57,48 @@ async fn init_capture(
         }
     };
     let is_gpu = primary.is_gpu();
-    let transcriber = with_cpu_fallback(config, presence, Arc::new(primary), is_gpu);
+    let transcriber = with_cpu_fallback(config, presence, vram, Arc::new(primary), is_gpu);
 
     let mic = MicVoiceInput::new(transcriber.clone(), config.voice.mic_device.clone());
     let profiles = ProfileStore::default_location();
-    let listener: Arc<dyn ContinuousListener> = if config.voice.wakeword.enabled {
-        info!(
-            "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
-            config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
-        );
-        warn_if_ungated_playback(config);
-        let listener =
-            MicContinuousListener::new(transcriber.clone(), &config.voice, output_speaking);
-        listener.set_wake_phrase(enrolled_wake_phrase(config, &profiles).await);
-        Arc::new(listener)
-    } else {
-        info!("voice.wakeword: disabled in config");
-        Arc::new(NoContinuousListener::new())
-    };
+    let listener = init_listener(config, &transcriber, speech, &profiles).await;
     Readiness::Ready(VoiceCapture {
         input: Arc::new(mic),
         listener,
         transcriber,
         profiles,
     })
+}
+
+/// Wake-word listening, or a listener that refuses to start when it is off
+/// in config or its Silero model cannot be loaded.
+async fn init_listener(
+    config: &Config,
+    transcriber: &Arc<dyn Transcriber>,
+    speech: Arc<VoiceOutputController>,
+    profiles: &ProfileStore,
+) -> Arc<dyn ContinuousListener> {
+    if !config.voice.wakeword.enabled {
+        info!("voice.wakeword: disabled in config");
+        return Arc::new(NoContinuousListener::new());
+    }
+    let silero = match SileroVad::load(&config.voice.transcription).await {
+        Ok(silero) => silero,
+        Err(e) => {
+            tracing::warn!(
+                "voice.wakeword: Silero VAD failed to load: {e:#}; listening unavailable"
+            );
+            return Arc::new(NoContinuousListener::new());
+        }
+    };
+    info!(
+        "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
+        config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
+    );
+    warn_if_ungated_playback(config);
+    let listener = MicContinuousListener::new(transcriber.clone(), &config.voice, speech, silero);
+    listener.set_wake_phrase(enrolled_wake_phrase(config, profiles).await);
+    Arc::new(listener)
 }
 
 /// The enrolled phrase, or the built-in one when none is enrolled or the
@@ -112,6 +137,7 @@ fn warn_if_ungated_playback(config: &Config) {
 fn with_cpu_fallback(
     config: &Config,
     presence: &Arc<PresenceManager>,
+    vram: Option<Arc<VramLedger>>,
     primary: Arc<dyn Transcriber>,
     is_gpu: bool,
 ) -> Arc<dyn Transcriber> {
@@ -120,10 +146,7 @@ fn with_cpu_fallback(
         return primary;
     }
 
-    let probe = Arc::new(PresenceGpuProbe::new(
-        presence.clone(),
-        config.sleep.gpu_allowlist.clone(),
-    ));
+    let probe = Arc::new(PresenceGpuProbe::new(presence.clone(), vram));
     let cpu_cfg = config.voice.transcription.clone();
     let cpu_factory: CpuFallbackFactory = Arc::new(move || {
         let cfg = cpu_cfg.clone();

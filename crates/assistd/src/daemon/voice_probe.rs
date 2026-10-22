@@ -1,70 +1,30 @@
-//! [`assistd_voice::BusyProbe`] backed by presence state and NVML.
+//! [`assistd_voice::BusyProbe`] backed by presence state and the GPU monitor.
 
 use std::sync::Arc;
 
 use assistd_core::{PresenceManager, PresenceState};
 use assistd_voice::BusyProbe;
-use nvml_wrapper::Nvml;
 
-use super::gpu_monitor;
+use super::vram::VramLedger;
 
-/// Minimum per-process VRAM (MiB) for a foreign PID to count as GPU
-/// contention. Above a desktop compositor's noise floor, below a second
-/// model runner.
-const FOREIGN_VRAM_THRESHOLD_MB: u64 = 100;
-
-/// Reports the GPU unavailable while presence is not `Active` or a foreign
-/// process holds VRAM. Without NVML, foreign contention is never reported.
+/// Reports the GPU unavailable while presence is not `Active` or the GPU
+/// monitor last found another process crowding the model. Without NVML,
+/// contention is never reported.
 #[derive(Debug)]
 pub(super) struct PresenceGpuProbe {
     presence: Arc<PresenceManager>,
-    nvml: Option<Arc<Nvml>>,
-    self_pid: u32,
-    /// Process names never counted as foreign. Must include `llama-server`:
-    /// in router mode the model runner is a child PID presence doesn't track.
-    allowlist: Vec<String>,
+    vram: Option<Arc<VramLedger>>,
 }
 
 impl PresenceGpuProbe {
-    pub(super) fn new(presence: Arc<PresenceManager>, allowlist: Vec<String>) -> Self {
-        let nvml = match Nvml::init() {
-            Ok(n) => Some(Arc::new(n)),
-            Err(err) => {
-                tracing::warn!(
-                    target: "assistd::voice::probe",
-                    "NVML init failed ({err}); foreign-process contention detection disabled"
-                );
-                None
-            }
-        };
-        let self_pid = std::process::id();
-        Self {
-            presence,
-            nvml,
-            self_pid,
-            allowlist,
-        }
+    pub(super) fn new(presence: Arc<PresenceManager>, vram: Option<Arc<VramLedger>>) -> Self {
+        Self { presence, vram }
     }
 }
 
 impl BusyProbe for PresenceGpuProbe {
     fn foreign_gpu_busy(&self) -> bool {
-        let Some(nvml) = self.nvml.as_ref() else {
-            return false;
-        };
-        let llama_pid = self.presence.llama_pid_blocking();
-        match gpu_monitor::collect_foreign_usage(nvml.as_ref(), self.self_pid, llama_pid) {
-            Ok(samples) => samples.iter().any(|p| {
-                !self.allowlist.contains(&p.name) && p.used_mb >= FOREIGN_VRAM_THRESHOLD_MB
-            }),
-            Err(err) => {
-                tracing::debug!(
-                    target: "assistd::voice::probe",
-                    "NVML scan failed: {err}; treating GPU as free"
-                );
-                false
-            }
-        }
+        self.vram.as_ref().is_some_and(|vram| vram.contended())
     }
 
     fn presence_active(&self) -> bool {

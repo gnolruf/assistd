@@ -85,6 +85,7 @@ pub const DEFAULT_WAKEWORD_HOTKEY: &str = "";
 pub const DEFAULT_WAKEWORD_SILENCE_MS: NonZeroU32 = nz32(800);
 pub const DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
 pub const DEFAULT_WAKEWORD_PLAYBACK_GATE: bool = true;
+pub const DEFAULT_WAKEWORD_BARGE_IN: bool = true;
 pub const DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS: NonZeroU32 = nz32(4000);
 pub const DEFAULT_WAKEWORD_FOLLOW_UP_MS: u32 = 8000;
 pub const DEFAULT_WAKEWORD_MATCH_SIMILARITY: UnitInterval = unit(0.8);
@@ -104,7 +105,7 @@ pub const DEFAULT_IDLE_TO_DROWSY_MINS: u64 = 30;
 pub const DEFAULT_IDLE_TO_SLEEP_MINS: u64 = 120;
 pub const DEFAULT_GPU_MONITOR_ENABLED: bool = true;
 pub const DEFAULT_GPU_POLL_SECS: NonZeroU64 = nz64(5);
-pub const DEFAULT_GPU_VRAM_THRESHOLD_MB: NonZeroU64 = nz64(2048);
+pub const DEFAULT_GPU_HEADROOM_MB: u64 = 500;
 
 pub const DEFAULT_TOOLS_MAX_LINES: NonZeroU32 = nz32(200);
 pub const DEFAULT_TOOLS_MAX_KB: NonZeroU32 = nz32(4);
@@ -173,20 +174,6 @@ pub fn default_tools_scratch_dir() -> PathBuf {
         .or_else(dirs::cache_dir)
         .unwrap_or_else(|| PathBuf::from(".cache"));
     base.join("assistd").join("scratch")
-}
-
-/// Process basenames whose GPU use never triggers sleep.
-pub fn default_gpu_allowlist() -> Vec<String> {
-    vec![
-        "Xorg".into(),
-        "Xwayland".into(),
-        "gnome-shell".into(),
-        "kwin_x11".into(),
-        "kwin_wayland".into(),
-        "firefox".into(),
-        "chromium".into(),
-        "chrome".into(),
-    ]
 }
 
 /// Literal command substrings rejected before spawn.

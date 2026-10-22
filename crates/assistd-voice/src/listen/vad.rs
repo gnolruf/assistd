@@ -1,23 +1,18 @@
-//! VAD-driven utterance segmentation over 20 ms frames.
+//! Utterance segmentation over 20 ms frames already labelled speech or not.
 
 use std::collections::VecDeque;
 use std::fmt;
 
-use webrtc_vad::{SampleRate, Vad, VadMode};
-
 /// Sample rate of every frame fed to the VAD.
 pub const SAMPLE_RATE_HZ: u32 = 16_000;
 
-/// 20 ms at 16 kHz. webrtc-vad accepts exactly 10, 20, or 30 ms frames.
+/// 20 ms at 16 kHz.
 pub const FRAME_SAMPLES: usize = 320;
 
 const FRAME_MS: u32 = 20;
 const MIN_UTTERANCE_MS: u32 = 400;
 const PREROLL_MS: u32 = 300;
 const ONSET_CONFIRM_MS: u32 = 60;
-/// webrtc-vad's most selective mode; lower modes admit keyboard and
-/// fan noise on a desktop mic.
-const AGGRESSIVENESS: u8 = 3;
 
 /// VAD state-machine thresholds, in whole frames.
 #[derive(Debug, Clone, Copy)]
@@ -32,8 +27,6 @@ pub struct VadTuning {
     pub max_utterance_frames: u32,
     /// Pre-roll ring size, in frames.
     pub preroll_frames: u32,
-    /// webrtc-vad aggressiveness, mapped to `VadMode` at init.
-    pub aggressiveness: u8,
 }
 
 impl VadTuning {
@@ -48,7 +41,6 @@ impl VadTuning {
                 .div_ceil(FRAME_MS)
                 .max(1),
             preroll_frames: PREROLL_MS.div_ceil(FRAME_MS),
-            aggressiveness: AGGRESSIVENESS,
         }
     }
 }
@@ -71,16 +63,16 @@ enum Phase {
     Trailing { silent: u32 },
 }
 
-/// Classifies 20 ms frames via webrtc-vad and emits utterances bounded by
-/// confirmed silence. Onset and offset each need consecutive frames per
+/// Emits utterances bounded by confirmed silence from frames labelled
+/// speech or not. Onset and offset each need consecutive frames per
 /// [`VadTuning`]; a pre-roll ring is prepended so the first syllable is not clipped.
 pub struct UtteranceVad {
-    vad: Vad,
     tuning: VadTuning,
     phase: Phase,
     preroll: VecDeque<[i16; FRAME_SAMPLES]>,
     utterance: Vec<i16>,
     utterance_frames: u32,
+    voiced_frames: u32,
 }
 
 impl fmt::Debug for UtteranceVad {
@@ -89,39 +81,35 @@ impl fmt::Debug for UtteranceVad {
             .field("tuning", &self.tuning)
             .field("phase", &self.phase)
             .field("utterance_frames", &self.utterance_frames)
+            .field("voiced_frames", &self.voiced_frames)
             .finish_non_exhaustive()
     }
 }
 
 impl UtteranceVad {
-    /// A segmenter in the silent state. An `aggressiveness` above 3 is
-    /// treated as 3.
+    /// A segmenter in the silent state.
     pub fn new(tuning: VadTuning) -> Self {
-        let vad =
-            Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, vad_mode(tuning.aggressiveness));
         Self {
-            vad,
             tuning,
             phase: Phase::Silent,
             preroll: VecDeque::with_capacity(tuning.preroll_frames as usize),
             utterance: Vec::new(),
             utterance_frames: 0,
+            voiced_frames: 0,
         }
     }
 
-    /// Feed one 20 ms frame; `Some` when an utterance boundary is crossed.
-    pub fn feed(&mut self, frame: &[i16; FRAME_SAMPLES]) -> Option<VadEvent> {
-        let is_voiced = self.vad.is_voice_segment(frame).unwrap_or(false);
-        self.feed_decided(frame, is_voiced)
+    /// Feed one 20 ms frame and whether it holds speech; `Some` when an
+    /// utterance boundary is crossed.
+    pub fn feed(&mut self, frame: &[i16; FRAME_SAMPLES], is_voiced: bool) -> Option<VadEvent> {
+        let event = self.advance(frame, is_voiced);
+        if is_voiced && self.in_utterance() {
+            self.voiced_frames = self.voiced_frames.saturating_add(1);
+        }
+        event
     }
 
-    /// [`feed`](Self::feed) with the voiced/silent decision supplied by
-    /// the caller instead of webrtc-vad.
-    pub fn feed_decided(
-        &mut self,
-        frame: &[i16; FRAME_SAMPLES],
-        is_voiced: bool,
-    ) -> Option<VadEvent> {
+    fn advance(&mut self, frame: &[i16; FRAME_SAMPLES], is_voiced: bool) -> Option<VadEvent> {
         match self.phase {
             Phase::Silent => {
                 self.feed_silent(frame, is_voiced);
@@ -209,6 +197,18 @@ impl UtteranceVad {
         matches!(self.phase, Phase::Voiced | Phase::Trailing { .. })
     }
 
+    /// Voiced frames in the utterance being recorded; meaningful only while
+    /// [`in_utterance`](Self::in_utterance).
+    pub fn voiced_frames(&self) -> u32 {
+        self.voiced_frames
+    }
+
+    /// The last `max_samples` samples of the utterance being recorded.
+    pub fn utterance_tail(&self, max_samples: usize) -> &[i16] {
+        let start = self.utterance.len().saturating_sub(max_samples);
+        &self.utterance[start..]
+    }
+
     /// Discard any in-progress utterance and pre-roll and return to silence.
     pub fn reset(&mut self) {
         self.phase = Phase::Silent;
@@ -230,6 +230,7 @@ impl UtteranceVad {
     fn begin_utterance(&mut self) {
         self.utterance.clear();
         self.utterance_frames = 0;
+        self.voiced_frames = 0;
         for frame in self.preroll.drain(..) {
             self.utterance.extend_from_slice(&frame);
             self.utterance_frames = self.utterance_frames.saturating_add(1);
@@ -260,15 +261,6 @@ impl UtteranceVad {
     }
 }
 
-fn vad_mode(aggressiveness: u8) -> VadMode {
-    match aggressiveness {
-        0 => VadMode::Quality,
-        1 => VadMode::LowBitrate,
-        2 => VadMode::Aggressive,
-        _ => VadMode::VeryAggressive,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +276,6 @@ mod tests {
             min_utterance_frames: 1,
             max_utterance_frames: 50,
             preroll_frames: 3,
-            aggressiveness: 3,
         }
     }
 
@@ -292,7 +283,7 @@ mod tests {
     fn feed(vad: &mut UtteranceVad, voiced: bool, count: usize) -> Vec<VadEvent> {
         let frame = [if voiced { VOICED } else { SILENT }; FRAME_SAMPLES];
         (0..count)
-            .filter_map(|_| vad.feed_decided(&frame, voiced))
+            .filter_map(|_| vad.feed(&frame, voiced))
             .collect()
     }
 

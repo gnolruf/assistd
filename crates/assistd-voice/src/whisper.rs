@@ -54,13 +54,8 @@ struct SpeechTrimmer {
 
 impl SpeechTrimmer {
     fn load(params: &SileroVadParams) -> Result<Self, TranscriptionError> {
-        let mut context_params = WhisperVadContextParams::new();
-        // whisper.cpp aborts on GPU VAD: weights go to the GPU, the backend stays CPU-only.
-        context_params.set_use_gpu(false);
-        let context = WhisperVadContext::new(&params.model_path, context_params)
-            .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))?;
         Ok(Self {
-            context: Mutex::new(context),
+            context: Mutex::new(load_vad_context(Path::new(&params.model_path))?),
             silence_secs: params.silence_secs,
         })
     }
@@ -438,6 +433,28 @@ async fn fetch_vad(
         model_path: vad_path.to_string_lossy().into_owned(),
         silence_secs: silence_secs.max(0.0),
     })
+}
+
+/// Download `config.vad_model` if missing and load it on the CPU.
+pub(crate) async fn load_silero(
+    config: &TranscriptionConfig,
+) -> Result<WhisperVadContext, TranscriptionError> {
+    whisper_rs::install_logging_hooks();
+    let cache_dir = config
+        .model_cache_dir
+        .clone()
+        .map_or_else(|| download::default_cache_dir("whisper"), Ok)?;
+    let path = download::ensure_cached(&config.vad_model, &cache_dir).await?;
+    tokio::task::spawn_blocking(move || load_vad_context(&path)).await?
+}
+
+fn load_vad_context(model_path: &Path) -> Result<WhisperVadContext, TranscriptionError> {
+    let mut context_params = WhisperVadContextParams::new();
+    // whisper.cpp aborts on GPU VAD: weights go to the GPU, the backend stays CPU-only.
+    context_params.set_use_gpu(false);
+    let model_path = model_path.to_string_lossy();
+    WhisperVadContext::new(&model_path, context_params)
+        .map_err(|err| TranscriptionError::WhisperInit(err.to_string()))
 }
 
 async fn load_trimmer(params: SileroVadParams) -> Result<SpeechTrimmer, TranscriptionError> {

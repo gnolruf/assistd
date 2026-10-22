@@ -1,6 +1,7 @@
-//! Routes wake-word commands into the agent loop, opens a follow-up window
-//! when each reply ends unless push-to-talk took over, and publishes the
-//! listener's phase; a command heard while the daemon sleeps wakes it.
+//! Routes wake-word commands into the agent loop, interrupts a reply the
+//! user talks over, opens a follow-up window when each reply ends unless
+//! push-to-talk took over, and publishes the listener's phase; a command
+//! heard while the daemon sleeps wakes it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,13 +37,13 @@ struct HeardCommand {
 }
 
 impl ListenTurns {
-    fn submit(&mut self, state: &Arc<AppState>, text: String) {
+    fn submit(&mut self, state: &Arc<AppState>, listener: &dyn ContinuousListener, text: String) {
         let command = HeardCommand {
             text,
             heard_at: Instant::now(),
         };
         if self.running.is_empty() {
-            self.spawn(state, command);
+            self.spawn(state, listener, command);
         } else if self.waiting.replace(command).is_some() {
             debug!(
                 target: "assistd::listen",
@@ -59,9 +60,12 @@ impl ListenTurns {
                 .last_push_to_talk()
                 .is_some_and(|pressed| pressed >= heard_at)
         };
+        listener.set_replying(false);
         let finished_heard_at = self.running_heard_at.take();
         match self.waiting.take() {
-            Some(command) if !superseded(command.heard_at) => self.spawn(state, command),
+            Some(command) if !superseded(command.heard_at) => {
+                self.spawn(state, listener, command);
+            }
             Some(_) => debug!(
                 target: "assistd::listen",
                 "push-to-talk superseded the waiting utterance; dropped it"
@@ -73,7 +77,13 @@ impl ListenTurns {
         }
     }
 
-    fn spawn(&mut self, state: &Arc<AppState>, command: HeardCommand) {
+    fn spawn(
+        &mut self,
+        state: &Arc<AppState>,
+        listener: &dyn ContinuousListener,
+        command: HeardCommand,
+    ) {
+        listener.set_replying(true);
         self.running_heard_at = Some(command.heard_at);
         spawn_listen_query(&mut self.running, state, command.text);
     }
@@ -108,7 +118,7 @@ async fn run_utterance_forwarder(
     loop {
         tokio::select! {
             res = heard.recv() => {
-                if !forward_heard(&state, &mut turns, res) {
+                if !forward_heard(&state, listener.as_ref(), &mut turns, res).await {
                     break;
                 }
             }
@@ -141,8 +151,9 @@ async fn run_utterance_forwarder(
 }
 
 /// Act on one item from the listener; false once its broadcast has closed.
-fn forward_heard(
+async fn forward_heard(
     state: &Arc<AppState>,
+    listener: &dyn ContinuousListener,
     turns: &mut ListenTurns,
     received: Result<Heard, RecvError>,
 ) -> bool {
@@ -152,7 +163,18 @@ fn forward_heard(
                 id: format!("listen-{}", short_id()),
             });
         }
-        Ok(Heard::Command(text)) => turns.submit(state, text),
+        Ok(Heard::Command(text)) => turns.submit(state, listener, text),
+        Ok(Heard::BargeIn) if !turns.running.is_empty() => {
+            info!(target: "assistd::listen", "user talked over the reply; interrupting it");
+            if turns.waiting.take().is_some() {
+                debug!(
+                    target: "assistd::listen",
+                    "barge-in superseded the waiting utterance; dropped it"
+                );
+            }
+            state.interrupt_turns().await;
+        }
+        Ok(Heard::BargeIn) => {}
         Err(RecvError::Lagged(n)) => {
             warn!(
                 target: "assistd::listen",

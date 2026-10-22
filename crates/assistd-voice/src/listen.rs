@@ -11,12 +11,14 @@ use tokio::time::Instant;
 
 use crate::mic::AudioCaptureError;
 
+pub mod barge_in;
 pub mod capture;
 pub mod consumer;
 pub mod enrollment;
 pub mod mic;
 pub mod playback_gate;
 pub mod profile;
+pub mod silero;
 pub mod vad;
 pub mod wake_gate;
 pub mod wake_phrase;
@@ -24,6 +26,7 @@ pub mod wake_phrase;
 pub use enrollment::{CapturedUtterance, Enrollment, SessionAudio};
 pub use mic::MicContinuousListener;
 pub use profile::{ProfileError, ProfileStore, WakeWordProfile};
+pub use silero::SileroVad;
 pub use wake_phrase::{PhraseStrength, WakePhrase};
 
 /// Errors surfaced by [`ContinuousListener`] implementations.
@@ -51,6 +54,9 @@ pub enum Heard {
     WakePhrase,
     /// A command, without the wake phrase; never empty.
     Command(String),
+    /// The user is talking over the reply; their words follow as a
+    /// [`Heard::Command`] once they finish.
+    BargeIn,
 }
 
 /// A long-running, VAD-gated listener that emits what follows the wake
@@ -88,6 +94,11 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// begins soon enough after now; the reply to the last one has ended.
     /// Ignored while listening is stopped.
     fn open_follow_up(&self);
+
+    /// Whether a reply to a wake-word command is under way. While it is and
+    /// barge-in is on, speech is checked for [`Heard::BargeIn`] instead of
+    /// for the wake phrase.
+    fn set_replying(&self, replying: bool);
 
     /// Send every utterance the mic hears into `sink`, cut as listening
     /// cuts it but not transcribed, and each start and end of speech, until
@@ -153,6 +164,8 @@ impl ContinuousListener for NoContinuousListener {
     fn set_wake_phrase(&self, _phrase: WakePhrase) {}
 
     fn open_follow_up(&self) {}
+
+    fn set_replying(&self, _replying: bool) {}
 
     async fn capture_utterances(
         &self,

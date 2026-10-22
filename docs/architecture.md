@@ -289,7 +289,9 @@ loaded once at startup). Transcripts feed back into the agent loop
 as if the user had typed them.
 
 Continuous mode (`MicContinuousListener`) keeps the mic open and uses
-WebRTC VAD to chop the stream into utterances. Each is transcribed with
+Silero VAD to chop the stream into utterances: every 160 ms it labels the
+newest frames speech or not, with the half second before as context, so
+music and room noise never hold an utterance open. Each is transcribed with
 the wake phrase as Whisper's initial prompt, and a `WakeGate` keeps only
 speech that opens with the phrase, the utterance after a bare phrase
 within `voice.wakeword.command_timeout_ms`, or the utterance that begins
@@ -307,6 +309,13 @@ reports that a reply is being spoken (plus a short hangover), a
 `PlaybackGate` discards mic frames and resets the VAD so the daemon
 never transcribes its own TTS; `voice.wakeword.playback_gate = false`
 removes the gate for setups whose sound server already cancels echo.
+While a listen-started reply is under way (generation and speech), the
+gate lets frames through for barge-in instead (`voice.wakeword.barge_in`):
+an utterance that began during the reply is periodically transcribed and
+confirmed only when most of its words are absent from the reply's recent
+sentences, which rejects bumps, noise, and echo. A confirmed barge-in
+interrupts the turn and its speech, and the whole utterance becomes the
+next command; unconfirmed speech over a reply is dropped, never wake-gated.
 To avoid GPU thrashing during
 chat generation, the `QueuedTranscriber` waits for the LLM to go idle
 before running Whisper, falling back to a CPU Whisper if the wait

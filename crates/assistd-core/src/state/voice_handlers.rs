@@ -309,13 +309,17 @@ impl AppState {
 
     /// Cancel every agent turn already received, including ones still
     /// waking the model or queued, and drop queued TTS audio. Idempotent.
+    pub async fn interrupt_turns(&self) {
+        self.runtime.interrupt_turns();
+        self.subsystems.voice.speech().skip().await;
+    }
+
     pub(super) async fn handle_interrupt_turn(
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
     ) {
-        self.runtime.interrupt_turns();
-        self.subsystems.voice.speech().skip().await;
+        self.interrupt_turns().await;
         let _ = tx.send(Event::Done { id }).await;
     }
 

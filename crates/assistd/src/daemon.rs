@@ -30,6 +30,7 @@ use memory_init::MemorySubsystem;
 use search_init::{SearchService, SearchStartup};
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 use tools_init::ToolDeps;
+use vram::VramLedger;
 use warmup::Warmup;
 
 mod embed_init;
@@ -43,8 +44,13 @@ mod shutdown;
 mod tools_init;
 mod voice_init;
 mod voice_probe;
+mod vram;
 mod warmup;
 mod wm_init;
+
+/// Log filter when `RUST_LOG` is unset. whisper.cpp logs every Silero call
+/// at INFO, which wake-word listening makes several times a second.
+const DEFAULT_LOG_DIRECTIVES: &str = "info,whisper_rs::whisper_logging_hook=warn";
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
@@ -131,9 +137,18 @@ async fn start(
     let vision_revalidator = build_vision_revalidator(&config, &api_key, &presence, &health_probe)?;
     let voice = VoiceManager::new(config.voice.synthesis.enabled);
 
+    let vram = VramLedger::open(&config.sleep);
+    if let Some(vram) = &vram {
+        presence.set_wake_room(vram.clone());
+    }
+
     let hotkey_handle = spawn_hotkeys(&config, &presence, &voice, stages.intake.subscribe());
-    let gpu_monitor_handle =
-        gpu_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
+    let gpu_monitor_handle = gpu_monitor::spawn_monitor(
+        &config.sleep,
+        vram.clone(),
+        presence.clone(),
+        stages.intake.subscribe(),
+    );
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
@@ -181,6 +196,7 @@ async fn start(
         &state,
         BackgroundStarts {
             vision: vision_revalidator,
+            vram,
             embed: embed_startup,
             search: search_startup,
             mcp: tools.mcp_startup,
@@ -210,6 +226,7 @@ async fn start(
 
 struct BackgroundStarts {
     vision: Arc<VisionRevalidator>,
+    vram: Option<Arc<VramLedger>>,
     embed: Option<EmbeddingStartup>,
     search: Option<SearchStartup>,
     mcp: Option<McpStartup>,
@@ -234,6 +251,7 @@ fn spawn_background_starts(
         Warmup {
             state: state.clone(),
             vision: starts.vision,
+            vram: starts.vram,
             model_settled: model_settled_tx,
         },
         stages.intake.subscribe(),
@@ -360,6 +378,6 @@ async fn replay_history(chat: &dyn LlmBackend, replay: HistoryReplay) {
 
 fn init_tracing() {
     tracing_subscriber::fmt()
-        .with_env_filter(env_filter_or("info"))
+        .with_env_filter(env_filter_or(DEFAULT_LOG_DIRECTIVES))
         .init();
 }

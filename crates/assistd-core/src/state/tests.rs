@@ -693,6 +693,7 @@ impl ContinuousListener for MockListener {
         *self.phrase.lock() = Some(phrase);
     }
     fn open_follow_up(&self) {}
+    fn set_replying(&self, _replying: bool) {}
     async fn capture_utterances(
         &self,
         sink: mpsc::Sender<SessionAudio>,

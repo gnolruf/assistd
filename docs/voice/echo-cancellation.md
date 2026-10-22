@@ -1,15 +1,20 @@
 # Echo Cancellation for Continuous Listening
 
 By default, continuous listening mutes the mic while a reply is being
-spoken (`voice.wakeword.playback_gate = true`). That stops the daemon
-from hearing its own TTS and answering it, but it also means you cannot
-interrupt a reply by talking over it.
+spoken (`voice.wakeword.playback_gate = true`), so the daemon never
+answers its own TTS. The exception is barge-in (`voice.wakeword.barge_in`):
+during a reply to a wake-word command the mic stays open, and speech
+interrupts the reply once Whisper confirms it holds words the reply did
+not just say. That rejects echo by text alone, which works through
+headphones but is unreliable through speakers: Whisper mishears echo
+mixed with your voice, and a command you give over the reply carries
+some of the reply's words.
 
-To get barge-in, let the sound server cancel the echo and turn the gate
-off. `assistd` does not implement echo cancellation itself; it consumes
-whatever mic source the system hands it. Both PipeWire and PulseAudio
-ship WebRTC's echo canceller as a loadable module that creates a
-virtual sink and a virtual source. Audio played to the sink is used as
+For clean barge-in through speakers, let the sound server cancel the
+echo and turn the gate off. `assistd` does not implement echo
+cancellation itself; it consumes whatever mic source the system hands
+it. Both PipeWire and PulseAudio ship WebRTC's echo canceller as a
+loadable module that creates a virtual sink and a virtual source. Audio played to the sink is used as
 the reference signal and subtracted from the source.
 
 Two conditions must hold for this to work:
