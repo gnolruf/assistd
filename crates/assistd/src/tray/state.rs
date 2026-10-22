@@ -125,7 +125,9 @@ impl TrayTracker {
     pub(super) fn ingest(&mut self, event: &Event) -> bool {
         let before = self.current();
         match event {
-            Event::Delta { id, .. } | Event::ToolCall { id, .. } => {
+            Event::Delta { id, .. }
+            | Event::ReasoningDelta { id, .. }
+            | Event::ToolCall { id, .. } => {
                 self.in_flight.insert(id.clone());
             }
             Event::Done { id, .. } | Event::Error { id, .. } => {
