@@ -1,5 +1,6 @@
 //! cpal + webrtc-vad + whisper hands-free listener: ring buffer →
-//! resampler → playback gate → VAD frames → transcriber → wake gate → broadcast.
+//! resampler → playback gate → VAD frames → transcriber → wake gate or
+//! barge-in check → broadcast.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +15,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
+use super::barge_in::{BargeInWatch, confirms_barge_in};
 use super::capture::{self, ListenCaptureSession};
 use super::enrollment::{CapturedUtterance, SessionAudio};
 use super::playback_gate::{PLAYBACK_HANGOVER_FRAMES, PlaybackGate};
@@ -21,6 +23,7 @@ use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTunin
 use super::wake_gate::{Admission, WakeGate};
 use super::wake_phrase::WakePhrase;
 use super::{ContinuousListener, Heard, ListenError};
+use crate::controller::VoiceOutputController;
 use crate::mic::capture::AudioCaptureError;
 use crate::transcribe::Transcriber;
 
@@ -39,18 +42,48 @@ type CaptureJoin = JoinHandle<Result<(), AudioCaptureError>>;
 struct Utterance {
     pcm: Vec<i16>,
     started: Instant,
+    /// Began while a reply was under way, so it is a barge-in or nothing.
+    during_reply: bool,
 }
 
 impl Utterance {
     /// Dates `pcm` back from now by its own length.
-    fn ending_now(pcm: Vec<i16>) -> Self {
+    fn ending_now(pcm: Vec<i16>, during_reply: bool) -> Self {
         let millis = pcm.len() as u64 * 1000 / u64::from(SAMPLE_RATE_HZ);
         let now = Instant::now();
         let started = now
             .checked_sub(Duration::from_millis(millis))
             .unwrap_or(now);
-        Self { pcm, started }
+        Self {
+            pcm,
+            started,
+            during_reply,
+        }
     }
+}
+
+/// Audio queued for the transcription worker.
+#[derive(Debug)]
+enum ListenAudio {
+    Utterance(Utterance),
+    /// Recent audio of speech still going on over a reply.
+    BargeInCheck(Vec<i16>),
+}
+
+impl ListenAudio {
+    fn pcm(&self) -> &[i16] {
+        match self {
+            Self::Utterance(utterance) => &utterance.pcm,
+            Self::BargeInCheck(pcm) => pcm,
+        }
+    }
+}
+
+/// What the VAD loop hands on.
+#[derive(Debug)]
+enum Segment {
+    Utterance { event: VadEvent, during_reply: bool },
+    BargeInCheck(Vec<i16>),
 }
 
 /// cpal + webrtc-vad implementation of [`ContinuousListener`].
@@ -60,6 +93,9 @@ pub struct MicContinuousListener {
     mic_device: Option<String>,
     tuning: VadTuning,
     output_speaking: Option<watch::Receiver<bool>>,
+    speech: Arc<VoiceOutputController>,
+    barge_in: bool,
+    replying_tx: watch::Sender<bool>,
     wake_phrase: parking_lot::Mutex<WakePhrase>,
     command_timeout: Duration,
     follow_up: Option<Duration>,
@@ -117,14 +153,18 @@ impl ListenSession {
 impl MicContinuousListener {
     /// Listens for the built-in wake phrase. The audio device is opened on
     /// [`Self::start`], not here. When the playback gate is configured on,
-    /// frames captured while `output_speaking` is true are discarded.
+    /// frames captured while `speech` is speaking are discarded unless a
+    /// barge-in check needs them.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         config: &VoiceConfig,
-        output_speaking: watch::Receiver<bool>,
+        speech: Arc<VoiceOutputController>,
     ) -> Self {
         let tuning = tuning_from_config(&config.wakeword);
-        let output_speaking = config.wakeword.playback_gate.then_some(output_speaking);
+        let output_speaking = config
+            .wakeword
+            .playback_gate
+            .then(|| speech.subscribe_speaking());
         let (phase_tx, _) = watch::channel(ListenPhase::Off);
         let (heard, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
         Self {
@@ -132,6 +172,9 @@ impl MicContinuousListener {
             mic_device: config.mic_device.clone(),
             tuning,
             output_speaking,
+            speech,
+            barge_in: config.wakeword.barge_in,
+            replying_tx: watch::channel(false).0,
             wake_phrase: parking_lot::Mutex::new(WakePhrase::builtin(
                 config.wakeword.match_similarity,
             )),
@@ -154,6 +197,11 @@ impl MicContinuousListener {
             .map(|speaking| PlaybackGate::new(speaking, PLAYBACK_HANGOVER_FRAMES))
     }
 
+    fn barge_in_watch(&self) -> Option<BargeInWatch> {
+        self.barge_in
+            .then(|| BargeInWatch::new(self.replying_tx.subscribe()))
+    }
+
     /// Run capture and the VAD into `sink` until it closes or capture fails.
     async fn stream_utterances(&self, sink: mpsc::Sender<SessionAudio>) -> Result<(), ListenError> {
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
@@ -168,9 +216,12 @@ impl MicContinuousListener {
         let vad_handle = tokio::task::spawn_blocking(move || {
             vad_loop(
                 tuning,
-                playback_gate,
+                VadGates {
+                    playback: playback_gate,
+                    barge_in: None,
+                },
                 frame_rx,
-                |event| forward_captured(&vad_sink, event),
+                |segment| forward_captured(&vad_sink, segment),
                 |speaking| {
                     let _ = vad_sink.try_send(SessionAudio::Speaking(speaking));
                 },
@@ -210,7 +261,7 @@ impl ContinuousListener for MicContinuousListener {
             handle: capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
 
-        let (pcm_tx, pcm_rx) = mpsc::channel::<Utterance>(PENDING_UTTERANCE_DEPTH);
+        let (pcm_tx, pcm_rx) = mpsc::channel::<ListenAudio>(PENDING_UTTERANCE_DEPTH);
         let gate = WakeGate::new(
             self.wake_phrase.lock().clone(),
             self.command_timeout,
@@ -227,15 +278,19 @@ impl ContinuousListener for MicContinuousListener {
                 utterances: pcm_rx,
                 signals: self.conversation_tx.subscribe(),
             },
+            BargeIn::new(Arc::clone(&self.speech)),
         ));
         let tuning = self.tuning;
-        let playback_gate = self.playback_gate();
+        let gates = VadGates {
+            playback: self.playback_gate(),
+            barge_in: self.barge_in_watch(),
+        };
         let vad_handle = tokio::task::spawn_blocking(move || {
             vad_loop(
                 tuning,
-                playback_gate,
+                gates,
                 frame_rx,
-                |event| queue_for_transcription(&pcm_tx, event),
+                |segment| queue_for_transcription(&pcm_tx, segment),
                 |_| {},
             );
         });
@@ -298,6 +353,10 @@ impl ContinuousListener for MicContinuousListener {
             .send_replace(Some(ConversationSignal::FollowUp(Instant::now())));
     }
 
+    fn set_replying(&self, replying: bool) {
+        self.replying_tx.send_replace(replying);
+    }
+
     async fn capture_utterances(
         &self,
         sink: mpsc::Sender<SessionAudio>,
@@ -328,7 +387,7 @@ impl Drop for UtteranceCaptureClaim {
 /// What the transcription worker waits on.
 #[derive(Debug)]
 struct TranscribeInputs {
-    utterances: mpsc::Receiver<Utterance>,
+    utterances: mpsc::Receiver<ListenAudio>,
     signals: watch::Receiver<Option<ConversationSignal>>,
 }
 
@@ -339,14 +398,14 @@ impl TranscribeInputs {
             && matches!(*self.signals.borrow(), Some(ConversationSignal::Abandon))
     }
 
-    /// The next utterance, or `None` once its sender is gone or push-to-talk
-    /// took the mic. Signals, applied before any queued utterance is
-    /// returned, and a closing command window update `gate` while waiting.
-    async fn next_utterance(
+    /// The next audio, or `None` once its sender is gone or push-to-talk
+    /// took the mic. Signals, applied before any queued audio is returned,
+    /// and a closing command window update `gate` while waiting.
+    async fn next_audio(
         &mut self,
         gate: &mut WakeGate,
         outputs: &ListenOutputs,
-    ) -> Option<Utterance> {
+    ) -> Option<ListenAudio> {
         loop {
             let window_close = gate
                 .command_deadline()
@@ -367,6 +426,55 @@ impl TranscribeInputs {
                 () = sleep_until_some(window_close) => outputs.set_phase(ListenPhase::Armed),
             }
         }
+    }
+}
+
+/// Barge-in progress through the utterance being heard over a reply.
+#[derive(Debug)]
+struct BargeIn {
+    speech: Arc<VoiceOutputController>,
+    confirmed: bool,
+}
+
+impl BargeIn {
+    fn new(speech: Arc<VoiceOutputController>) -> Self {
+        Self {
+            speech,
+            confirmed: false,
+        }
+    }
+
+    /// Whether `audio` is a check for an utterance already confirmed.
+    fn already_confirmed(&self, audio: &ListenAudio) -> bool {
+        self.confirmed && matches!(audio, ListenAudio::BargeInCheck(_))
+    }
+
+    fn check(&mut self, transcript: &str, outputs: &ListenOutputs) {
+        self.confirmed = self.announce_if_confirmed(transcript, outputs);
+    }
+
+    /// Settle an utterance heard over a reply: a confirmed barge-in becomes
+    /// the next command, anything else is dropped.
+    fn finish_utterance(&mut self, transcript: Option<String>, outputs: &ListenOutputs) {
+        let confirmed = std::mem::take(&mut self.confirmed);
+        if let Some(transcript) = transcript
+            && (confirmed || self.announce_if_confirmed(&transcript, outputs))
+        {
+            outputs.send_heard(Heard::Command(transcript));
+        }
+    }
+
+    /// Publish [`Heard::BargeIn`] when `transcript` is the user talking
+    /// rather than echo of the reply; true if so.
+    fn announce_if_confirmed(&self, transcript: &str, outputs: &ListenOutputs) -> bool {
+        let confirmed = confirms_barge_in(transcript, &self.speech.recent_speech());
+        if confirmed {
+            debug!(target: "assistd::voice::listen", %transcript, "barge-in confirmed");
+            outputs.send_heard(Heard::BargeIn);
+        } else {
+            trace!(target: "assistd::voice::listen", %transcript, "not a barge-in");
+        }
+        confirmed
     }
 }
 
@@ -408,6 +516,38 @@ fn tuning_from_config(config: &WakeWordConfig) -> VadTuning {
     VadTuning::from_ms(config.silence_ms.get(), config.max_utterance_secs.get())
 }
 
+/// What decides which frames the VAD hears and what it reports.
+#[derive(Debug)]
+struct VadGates {
+    playback: Option<PlaybackGate>,
+    /// `None` when speech over a reply is never checked for barge-in.
+    barge_in: Option<BargeInWatch>,
+}
+
+impl VadGates {
+    /// Whether the frame arriving now must be discarded: the playback gate
+    /// holds it back unless a reply is under way and barge-in needs it.
+    fn blocks_frame(&mut self) -> bool {
+        let playing = self
+            .playback
+            .as_mut()
+            .is_some_and(PlaybackGate::blocks_frame);
+        playing && !self.barge_in.as_ref().is_some_and(BargeInWatch::replying)
+    }
+
+    /// What to hand on after a frame produced `event`.
+    fn segment(&mut self, event: Option<VadEvent>, vad: &UtteranceVad) -> Option<Segment> {
+        match (event, self.barge_in.as_mut()) {
+            (Some(event), watch) => Some(Segment::Utterance {
+                event,
+                during_reply: watch.is_some_and(BargeInWatch::finish_utterance),
+            }),
+            (None, Some(watch)) => watch.check_due(vad).map(Segment::BargeInCheck),
+            (None, None) => None,
+        }
+    }
+}
+
 /// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Frames
 /// blocked by the playback gate also reset the VAD, since a half-captured
 /// utterance is about to be contaminated by the daemon's own speech.
@@ -416,18 +556,15 @@ fn tuning_from_config(config: &WakeWordConfig) -> VadTuning {
 /// silently truncate live audio. The loop ends when `emit` returns false.
 fn vad_loop(
     tuning: VadTuning,
-    mut playback_gate: Option<PlaybackGate>,
+    mut gates: VadGates,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
-    mut emit: impl FnMut(VadEvent) -> bool,
+    mut emit: impl FnMut(Segment) -> bool,
     mut speaking_changed: impl FnMut(bool),
 ) {
     let mut vad = UtteranceVad::new(tuning);
     let mut speaking = false;
     while let Some(frame) = frame_rx.blocking_recv() {
-        let event = if playback_gate
-            .as_mut()
-            .is_some_and(PlaybackGate::blocks_frame)
-        {
+        let event = if gates.blocks_frame() {
             vad.reset();
             None
         } else {
@@ -437,25 +574,38 @@ fn vad_loop(
             speaking = !speaking;
             speaking_changed(speaking);
         }
-        if let Some(event) = event
-            && !emit(event)
+        if let Some(segment) = gates.segment(event, &vad)
+            && !emit(segment)
         {
             return;
         }
     }
 }
 
-/// Queue a listening utterance, dropping it when the backlog is full.
-/// False once the transcription worker is gone.
-fn queue_for_transcription(pcm_tx: &mpsc::Sender<Utterance>, event: VadEvent) -> bool {
-    let pcm = match event {
-        VadEvent::UtteranceComplete(pcm) | VadEvent::Truncated(pcm) => pcm,
-    };
-    try_queue(pcm_tx, Utterance::ending_now(pcm))
+/// Queue listening audio, dropping it when the backlog is full; a barge-in
+/// check is dropped silently, as another follows. False once the
+/// transcription worker is gone.
+fn queue_for_transcription(pcm_tx: &mpsc::Sender<ListenAudio>, segment: Segment) -> bool {
+    match segment {
+        Segment::Utterance {
+            event: VadEvent::UtteranceComplete(pcm) | VadEvent::Truncated(pcm),
+            during_reply,
+        } => try_queue(
+            pcm_tx,
+            ListenAudio::Utterance(Utterance::ending_now(pcm, during_reply)),
+        ),
+        Segment::BargeInCheck(pcm) => !matches!(
+            pcm_tx.try_send(ListenAudio::BargeInCheck(pcm)),
+            Err(TrySendError::Closed(_))
+        ),
+    }
 }
 
 /// Hand an enrollment utterance to the session. False once it closed.
-fn forward_captured(sink: &mpsc::Sender<SessionAudio>, event: VadEvent) -> bool {
+fn forward_captured(sink: &mpsc::Sender<SessionAudio>, segment: Segment) -> bool {
+    let Segment::Utterance { event, .. } = segment else {
+        return true;
+    };
     let utterance = match event {
         VadEvent::UtteranceComplete(pcm) => CapturedUtterance {
             pcm,
@@ -483,41 +633,62 @@ fn try_queue<T>(tx: &mpsc::Sender<T>, item: T) -> bool {
     }
 }
 
-/// Transcribes each utterance in turn and gates it on the wake phrase. A
-/// bare phrase or a follow-up opens a command window, reported as
-/// `Capturing` until it closes.
+/// Transcribes each utterance in turn and gates it on the wake phrase, or
+/// on barge-in when it was heard over a reply. A bare phrase or a
+/// follow-up opens a command window, reported as `Capturing` until it closes.
 async fn transcribe_loop(
     transcriber: Arc<dyn Transcriber>,
     mut gate: WakeGate,
     outputs: ListenOutputs,
     mut inputs: TranscribeInputs,
+    mut barge_in: BargeIn,
 ) {
-    while let Some(utterance) = inputs.next_utterance(&mut gate, &outputs).await {
-        let Some(transcript) = transcribe_utterance(transcriber.as_ref(), &gate, &utterance).await
-        else {
+    while let Some(audio) = inputs.next_audio(&mut gate, &outputs).await {
+        if barge_in.already_confirmed(&audio) {
             continue;
-        };
-        if inputs.abandoned() {
+        }
+        let transcript = transcribe_pcm(transcriber.as_ref(), &gate, audio.pcm()).await;
+        if transcript.is_some() && inputs.abandoned() {
             return;
         }
-        let admission = gate.admit(&transcript, utterance.started);
-        if admission == Admission::Dropped {
-            trace!(target: "assistd::voice::listen", %transcript, "no wake phrase; dropped");
+        match audio {
+            ListenAudio::BargeInCheck(_) => {
+                if let Some(transcript) = &transcript {
+                    barge_in.check(transcript, &outputs);
+                }
+            }
+            ListenAudio::Utterance(utterance) if utterance.during_reply => {
+                barge_in.finish_utterance(transcript, &outputs);
+            }
+            ListenAudio::Utterance(utterance) => {
+                if let Some(transcript) = transcript {
+                    admit_wake_phrase(&mut gate, &transcript, utterance.started, &outputs);
+                }
+            }
         }
-        outputs.publish(admission);
         outputs.set_phase(gate.phase(Instant::now()));
     }
 }
 
-async fn transcribe_utterance(
+fn admit_wake_phrase(
+    gate: &mut WakeGate,
+    transcript: &str,
+    started: Instant,
+    outputs: &ListenOutputs,
+) {
+    let admission = gate.admit(transcript, started);
+    if admission == Admission::Dropped {
+        trace!(target: "assistd::voice::listen", %transcript, "no wake phrase; dropped");
+    }
+    outputs.publish(admission);
+}
+
+async fn transcribe_pcm(
     transcriber: &dyn Transcriber,
     gate: &WakeGate,
-    utterance: &Utterance,
+    pcm: &[i16],
 ) -> Option<String> {
-    match transcriber
-        .transcribe(&utterance.pcm, Some(gate.phrase()))
-        .await
-    {
+    match transcriber.transcribe(pcm, Some(gate.phrase())).await {
         Ok(text) => {
             let trimmed = text.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())

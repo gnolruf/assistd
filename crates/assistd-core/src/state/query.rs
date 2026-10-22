@@ -731,6 +731,7 @@ async fn run_speech_worker(
                     });
                     speaking = Some(voice_output.begin_speaking());
                 }
+                voice_output.remember_spoken(&sentence);
                 speak_sentence(&voice_output, output.as_ref(), sentence, start_epoch).await;
             }
             SpeakDecision::DropSilent | SpeakDecision::DropForSkip => {}

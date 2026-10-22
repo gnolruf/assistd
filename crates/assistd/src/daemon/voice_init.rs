@@ -10,9 +10,9 @@ use assistd_core::{
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, ProfileStore,
-    QueuedTranscriber, Transcriber, WakePhrase, WhisperTranscriberBuilder, build_cpu_fallback,
+    QueuedTranscriber, Transcriber, VoiceOutputController, WakePhrase, WhisperTranscriberBuilder,
+    build_cpu_fallback,
 };
-use tokio::sync::watch;
 use tracing::info;
 
 use super::voice_probe::PresenceGpuProbe;
@@ -21,14 +21,14 @@ use super::voice_probe::PresenceGpuProbe;
 /// came up or why it is unavailable.
 pub(super) async fn init(voice: &VoiceManager, config: &Config, presence: &Arc<PresenceManager>) {
     voice.speech().set_output(init_output(config).await);
-    let speaking = voice.speech().subscribe_speaking();
-    voice.set_capture(init_capture(config, presence, speaking).await);
+    let speech = Arc::clone(voice.speech());
+    voice.set_capture(init_capture(config, presence, speech).await);
 }
 
 async fn init_capture(
     config: &Config,
     presence: &Arc<PresenceManager>,
-    output_speaking: watch::Receiver<bool>,
+    speech: Arc<VoiceOutputController>,
 ) -> Readiness<VoiceCapture> {
     if !config.voice.enabled {
         info!("voice: disabled in config (voice.enabled = false)");
@@ -60,8 +60,7 @@ async fn init_capture(
             config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
         );
         warn_if_ungated_playback(config);
-        let listener =
-            MicContinuousListener::new(transcriber.clone(), &config.voice, output_speaking);
+        let listener = MicContinuousListener::new(transcriber.clone(), &config.voice, speech);
         listener.set_wake_phrase(enrolled_wake_phrase(config, &profiles).await);
         Arc::new(listener)
     } else {

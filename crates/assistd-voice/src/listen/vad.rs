@@ -81,6 +81,7 @@ pub struct UtteranceVad {
     preroll: VecDeque<[i16; FRAME_SAMPLES]>,
     utterance: Vec<i16>,
     utterance_frames: u32,
+    voiced_frames: u32,
 }
 
 impl fmt::Debug for UtteranceVad {
@@ -89,6 +90,7 @@ impl fmt::Debug for UtteranceVad {
             .field("tuning", &self.tuning)
             .field("phase", &self.phase)
             .field("utterance_frames", &self.utterance_frames)
+            .field("voiced_frames", &self.voiced_frames)
             .finish_non_exhaustive()
     }
 }
@@ -106,6 +108,7 @@ impl UtteranceVad {
             preroll: VecDeque::with_capacity(tuning.preroll_frames as usize),
             utterance: Vec::new(),
             utterance_frames: 0,
+            voiced_frames: 0,
         }
     }
 
@@ -122,6 +125,14 @@ impl UtteranceVad {
         frame: &[i16; FRAME_SAMPLES],
         is_voiced: bool,
     ) -> Option<VadEvent> {
+        let event = self.advance(frame, is_voiced);
+        if is_voiced && self.in_utterance() {
+            self.voiced_frames = self.voiced_frames.saturating_add(1);
+        }
+        event
+    }
+
+    fn advance(&mut self, frame: &[i16; FRAME_SAMPLES], is_voiced: bool) -> Option<VadEvent> {
         match self.phase {
             Phase::Silent => {
                 self.feed_silent(frame, is_voiced);
@@ -209,6 +220,18 @@ impl UtteranceVad {
         matches!(self.phase, Phase::Voiced | Phase::Trailing { .. })
     }
 
+    /// Voiced frames in the utterance being recorded; meaningful only while
+    /// [`in_utterance`](Self::in_utterance).
+    pub fn voiced_frames(&self) -> u32 {
+        self.voiced_frames
+    }
+
+    /// The last `max_samples` samples of the utterance being recorded.
+    pub fn utterance_tail(&self, max_samples: usize) -> &[i16] {
+        let start = self.utterance.len().saturating_sub(max_samples);
+        &self.utterance[start..]
+    }
+
     /// Discard any in-progress utterance and pre-roll and return to silence.
     pub fn reset(&mut self) {
         self.phase = Phase::Silent;
@@ -230,6 +253,7 @@ impl UtteranceVad {
     fn begin_utterance(&mut self) {
         self.utterance.clear();
         self.utterance_frames = 0;
+        self.voiced_frames = 0;
         for frame in self.preroll.drain(..) {
             self.utterance.extend_from_slice(&frame);
             self.utterance_frames = self.utterance_frames.saturating_add(1);

@@ -7,12 +7,13 @@ use crate::defaults::{
     DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS, DEFAULT_PIPER_ENABLED,
     DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
     DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE,
-    DEFAULT_VOICE_HOTKEY, DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS, DEFAULT_WAKEWORD_DETECTOR_THRESHOLD,
-    DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_FOLLOW_UP_MS, DEFAULT_WAKEWORD_HOTKEY,
-    DEFAULT_WAKEWORD_MATCH_SIMILARITY, DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
-    DEFAULT_WAKEWORD_PLAYBACK_GATE, DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH,
-    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
-    DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
+    DEFAULT_VOICE_HOTKEY, DEFAULT_WAKEWORD_BARGE_IN, DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
+    DEFAULT_WAKEWORD_DETECTOR_THRESHOLD, DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_FOLLOW_UP_MS,
+    DEFAULT_WAKEWORD_HOTKEY, DEFAULT_WAKEWORD_MATCH_SIMILARITY,
+    DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS, DEFAULT_WAKEWORD_PLAYBACK_GATE,
+    DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WHISPER_BEAMS,
+    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
+    DEFAULT_WHISPER_VAD_MODEL,
 };
 use crate::errors::UnitIntervalError;
 
@@ -104,9 +105,13 @@ pub struct WakeWordConfig {
     /// `1..=300`; bounds the audio buffered under constant noise.
     pub max_utterance_secs: NonZeroU32,
     /// Discard mic audio while a reply is being spoken, so the daemon never
-    /// transcribes its own speech. `false` allows barge-in but requires an
-    /// echo-cancelled mic source; without one, replies trigger new queries.
+    /// takes its own speech as a command; barge-in checks still hear it.
+    /// `false` requires an echo-cancelled mic source.
     pub playback_gate: bool,
+    /// Let confirmed speech over a reply to a wake-word command interrupt it
+    /// and become the next command; bumps, noise and the reply's own echo
+    /// are rejected.
+    pub barge_in: bool,
     /// After a wake phrase heard on its own, how long in ms to wait for the
     /// command, `500..=15000`.
     pub command_timeout_ms: NonZeroU32,
@@ -132,6 +137,7 @@ impl Default for WakeWordConfig {
             silence_ms: DEFAULT_WAKEWORD_SILENCE_MS,
             max_utterance_secs: DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
             playback_gate: DEFAULT_WAKEWORD_PLAYBACK_GATE,
+            barge_in: DEFAULT_WAKEWORD_BARGE_IN,
             command_timeout_ms: DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
             follow_up_ms: DEFAULT_WAKEWORD_FOLLOW_UP_MS,
             match_similarity: DEFAULT_WAKEWORD_MATCH_SIMILARITY,

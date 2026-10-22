@@ -1,7 +1,9 @@
 //! Runtime control over a [`VoiceOutput`] that may still be starting: a
 //! mute switch, a skip epoch that in-flight speech workers compare against
-//! to drop stale sentences, and a speaking signal that gates the mic.
+//! to drop stale sentences, a speaking signal that gates the mic, and the
+//! reply's recent sentences, which the mic hears back as echo.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -9,6 +11,9 @@ use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use tokio::sync::watch;
 
 use crate::VoiceOutput;
+
+/// Sentences of the current reply kept for [`VoiceOutputController::recent_speech`].
+const RECENT_SENTENCES: usize = 4;
 
 /// Per-sentence decision returned by [`VoiceOutputController::should_speak`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +35,7 @@ pub struct VoiceOutputController {
     skip_epoch: AtomicU64,
     active_speakers: AtomicUsize,
     speaking_tx: watch::Sender<bool>,
+    recent_speech: parking_lot::Mutex<VecDeque<String>>,
 }
 
 impl VoiceOutputController {
@@ -52,6 +58,7 @@ impl VoiceOutputController {
             skip_epoch: AtomicU64::new(0),
             active_speakers: AtomicUsize::new(0),
             speaking_tx,
+            recent_speech: parking_lot::Mutex::new(VecDeque::with_capacity(RECENT_SENTENCES)),
         })
     }
 
@@ -103,11 +110,26 @@ impl VoiceOutputController {
     /// stays true while any guard is alive.
     pub fn begin_speaking(self: &Arc<Self>) -> SpeakingGuard {
         if self.active_speakers.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.recent_speech.lock().clear();
             self.speaking_tx.send_replace(true);
         }
         SpeakingGuard {
             controller: Arc::clone(self),
         }
+    }
+
+    /// Record `sentence` as handed to the output for speaking.
+    pub fn remember_spoken(&self, sentence: &str) {
+        let mut recent = self.recent_speech.lock();
+        if recent.len() == RECENT_SENTENCES {
+            recent.pop_front();
+        }
+        recent.push_back(sentence.to_owned());
+    }
+
+    /// The last few sentences spoken since speaking last began, oldest first.
+    pub fn recent_speech(&self) -> Vec<String> {
+        self.recent_speech.lock().iter().cloned().collect()
     }
 
     /// Whether any speech worker currently holds a [`SpeakingGuard`].

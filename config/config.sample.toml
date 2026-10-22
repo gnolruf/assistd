@@ -52,6 +52,7 @@ enabled = false
 # silence_ms = 800  # trailing silence that ends an utterance
 # max_utterance_secs = 30  # at most 300
 # playback_gate = true  # mute the mic while replies are spoken; false needs an echo-cancelled mic
+# barge_in = true  # talking over a wake-word reply interrupts it and becomes the next command
 # command_timeout_ms = 4000  # after a bare wake phrase, how long to wait for the command
 # follow_up_ms = 8000  # after a reply, how long a reply needs no wake phrase; 0 disables
 # match_similarity = 0.8  # how closely Whisper's text must match the phrase (0-1)
