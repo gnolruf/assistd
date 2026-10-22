@@ -95,7 +95,6 @@ async fn init_listener(
         "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
         config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
     );
-    warn_if_ungated_playback(config);
     let listener = MicContinuousListener::new(transcriber.clone(), &config.voice, speech, silero);
     listener.set_wake_phrase(enrolled_wake_phrase(config, profiles).await);
     Arc::new(listener)
@@ -116,20 +115,6 @@ async fn enrolled_wake_phrase(config: &Config, profiles: &ProfileStore) -> WakeP
             WakePhrase::builtin(similarity)
         }
     }
-}
-
-/// With the gate off and no echo cancellation, spoken replies come back
-/// through the mic as new queries.
-fn warn_if_ungated_playback(config: &Config) {
-    if config.voice.wakeword.playback_gate || !config.voice.synthesis.enabled {
-        return;
-    }
-    tracing::warn!(
-        "voice.wakeword.playback_gate = false with synthesis enabled: \
-         the mic stays open while replies are spoken; without an \
-         echo-cancelled mic source the daemon will answer its own speech \
-         (see docs/voice/echo-cancellation.md)"
-    );
 }
 
 /// Wrap a GPU transcriber so it falls back to CPU while the GPU is

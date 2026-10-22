@@ -70,7 +70,7 @@ flowchart TB
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, `find_program` (a `PATH` lookup that says why a program cannot be run), child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
-| `assistd-voice`  | `VoiceInput` (Whisper STT, VAD continuous mode) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
+| `assistd-voice`  | `VoiceInput` (Whisper STT, wake-word listening and enrollment) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `utils`                                                                          |
 
 `utils` sits at the bottom with no internal dependencies; `config`
@@ -304,22 +304,37 @@ The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`) and a
 `WakeWordDetected` event on the bus. The listener keeps running while
 presence sleeps, and a command wakes the model like any other query.
 Separately, whisper.cpp's Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
-every recording before decoding. While `VoiceOutputController`
-reports that a reply is being spoken (plus a short hangover), a
-`PlaybackGate` discards mic frames and resets the VAD so the daemon
-never transcribes its own TTS; `voice.wakeword.playback_gate = false`
-removes the gate for setups whose sound server already cancels echo.
-While a listen-started reply is under way (generation and speech), the
-gate lets frames through for barge-in instead (`voice.wakeword.barge_in`):
+every recording before decoding. The mic stays open while replies are
+spoken, so the listener hears the daemon's own TTS; outside a
+listen-started reply it is wake-gated like any other speech, and the
+recommended setup cancels it in the sound server. While a listen-started
+reply is under way (generation and speech), speech is checked for
+barge-in instead (`voice.wakeword.barge_in`):
 an utterance that began during the reply is periodically transcribed and
 confirmed only when most of its words are absent from the reply's recent
 sentences, which rejects bumps, noise, and echo. A confirmed barge-in
 interrupts the turn and its speech, and the whole utterance becomes the
 next command; unconfirmed speech over a reply is dropped, never wake-gated.
-To avoid GPU thrashing during
-chat generation, the `QueuedTranscriber` waits for the LLM to go idle
-before running Whisper, falling back to a CPU Whisper if the wait
-times out or another process holds the GPU.
+A GPU Whisper shares the GPU with the model; the `QueuedTranscriber`
+routes to a lazily built CPU Whisper while presence is not `Active` or
+the `VramLedger` reports another process crowding the GPU.
+
+The wake phrase is enrolled at runtime, not configured. A
+`Request::WakeWord` carries a `WakeWordOp` (`Status`, `EnrollStart`,
+`EnrollCancel`, `TestStart`, `TestStop`, `Reset`). Enrollment and test
+are sessions owned by the connection that opened them: one at a time,
+they pause the listener and take its capture stack through
+`capture_utterances`, refuse push-to-talk and `ListenStart`, and end on
+stop, disconnect, or two minutes idle. They stream `WakeWordEnrollment`,
+`WakeWordTest`, and `WakeWordSpeech` events; `Status` answers with
+`WakeWordStatus`. `Enrollment` screens each utterance (length, clipping),
+transcribes it with the phrase as prompt, learns each new spelling as a
+variant, and saves once five samples match the bare phrase.
+`ProfileStore` writes `profile.json` and `samples/NN.wav` owner-only
+under `$XDG_DATA_HOME/assistd/wakeword/`; saving or `Reset` swaps the
+phrase into the running listener, and the daemon loads the profile at
+startup, falling back to "hey computer". The user guide is
+[voice/wake-word.md](voice/wake-word.md).
 
 TTS: model output flows through a `SentenceBuffer` that segments the
 stream into speakable units, each handed to `PiperVoiceOutput`,

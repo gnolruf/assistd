@@ -158,32 +158,29 @@ async fn speech_over_a_reply_is_a_barge_in_only_when_it_is_not_echo() {
 }
 
 #[test]
-fn speech_begun_over_a_reply_survives_the_reply_ending_mid_utterance() {
-    let (speaking_tx, speaking_rx) = watch::channel(true);
+fn speech_begun_over_a_reply_is_settled_as_one_after_the_reply_ends() {
     let (replying_tx, replying_rx) = watch::channel(true);
-    let mut gates = VadGates {
-        playback: Some(PlaybackGate::new(speaking_rx, PLAYBACK_HANGOVER_FRAMES)),
-        barge_in: Some(BargeInWatch::new(replying_rx)),
-    };
+    let mut barge_in = Some(BargeInWatch::new(replying_rx));
     let mut vad = UtteranceVad::new(VadTuning::from_ms(800, 30));
     let frame = [1000i16; FRAME_SAMPLES];
-    for _ in 0..10 {
-        assert!(!gates.blocks_frame());
+    for _ in 0..30 {
         let event = vad.feed(&frame, true);
-        gates.segment(event, &vad);
+        next_segment(barge_in.as_mut(), event, &vad);
     }
 
     replying_tx.send_replace(false);
-    assert!(
-        !gates.blocks_frame(),
-        "the interrupted reply's audio is still draining, but the user's utterance must go on"
-    );
-
-    speaking_tx.send_replace(false);
-    vad.reset();
-    gates.segment(None, &vad);
-    assert!(
-        gates.blocks_frame(),
-        "a new utterance during the hangover is held back again"
+    let during_reply = std::iter::repeat_with(|| {
+        let event = vad.feed(&frame, false);
+        next_segment(barge_in.as_mut(), event, &vad)
+    })
+    .take(100)
+    .find_map(|segment| match segment {
+        Some(Segment::Utterance { during_reply, .. }) => Some(during_reply),
+        _ => None,
+    });
+    assert_eq!(
+        during_reply,
+        Some(true),
+        "the user's utterance stays a barge-in candidate even though the reply ended first"
     );
 }

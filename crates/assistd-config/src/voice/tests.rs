@@ -2,10 +2,11 @@ use super::*;
 
 #[test]
 fn out_of_range_match_similarity_is_refused() {
-    let parsed: WakeWordConfig =
-        toml::from_str("match_similarity = 1.0\ndetector_threshold = 0.0\n")
+    for (edge, expected) in [("0.0", 0.0), ("1.0", 1.0)] {
+        let parsed: WakeWordConfig = toml::from_str(&format!("match_similarity = {edge}\n"))
             .expect("in-range similarity must parse");
-    assert_eq!(parsed.match_similarity, crate::defaults::unit(1.0));
+        assert_eq!(parsed.match_similarity.get(), expected);
+    }
 
     for bad in ["1.5", "-0.1", "nan"] {
         let source = format!("match_similarity = {bad}\n");
