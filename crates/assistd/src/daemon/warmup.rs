@@ -11,12 +11,15 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+use super::vram::VramLedger;
 use super::{listen_dispatcher, voice_init};
 
 /// What warmup brings up behind the managers `state` already serves.
 pub(super) struct Warmup {
     pub state: Arc<AppState>,
     pub vision: Arc<VisionRevalidator>,
+    /// `None` when VRAM cannot be measured.
+    pub vram: Option<Arc<VramLedger>>,
     /// Flipped once the first model load has finished, whether or not it
     /// succeeded.
     pub model_settled: watch::Sender<bool>,
@@ -32,6 +35,7 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
     let Warmup {
         state,
         vision,
+        vram,
         model_settled,
     } = warmup;
     let presence = state.subsystems.presence.clone();
@@ -46,7 +50,7 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
     }
     model_settled.send_replace(true);
     let voice = &state.subsystems.voice;
-    let init_voice = Box::pin(voice_init::init(voice, &state.config, &presence));
+    let init_voice = Box::pin(voice_init::init(voice, &state.config, &presence, vram));
     if until_shutdown(&mut shutdown, init_voice).await.is_none() {
         return;
     }

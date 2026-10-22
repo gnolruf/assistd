@@ -156,3 +156,34 @@ async fn speech_over_a_reply_is_a_barge_in_only_when_it_is_not_echo() {
         ]
     );
 }
+
+#[test]
+fn speech_begun_over_a_reply_survives_the_reply_ending_mid_utterance() {
+    let (speaking_tx, speaking_rx) = watch::channel(true);
+    let (replying_tx, replying_rx) = watch::channel(true);
+    let mut gates = VadGates {
+        playback: Some(PlaybackGate::new(speaking_rx, PLAYBACK_HANGOVER_FRAMES)),
+        barge_in: Some(BargeInWatch::new(replying_rx)),
+    };
+    let mut vad = UtteranceVad::new(VadTuning::from_ms(800, 30));
+    let frame = [1000i16; FRAME_SAMPLES];
+    for _ in 0..10 {
+        assert!(!gates.blocks_frame());
+        let event = vad.feed_decided(&frame, true);
+        gates.segment(event, &vad);
+    }
+
+    replying_tx.send_replace(false);
+    assert!(
+        !gates.blocks_frame(),
+        "the interrupted reply's audio is still draining, but the user's utterance must go on"
+    );
+
+    speaking_tx.send_replace(false);
+    vad.reset();
+    gates.segment(None, &vad);
+    assert!(
+        gates.blocks_frame(),
+        "a new utterance during the hangover is held back again"
+    );
+}

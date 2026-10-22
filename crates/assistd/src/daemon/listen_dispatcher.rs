@@ -166,6 +166,12 @@ async fn forward_heard(
         Ok(Heard::Command(text)) => turns.submit(state, listener, text),
         Ok(Heard::BargeIn) if !turns.running.is_empty() => {
             info!(target: "assistd::listen", "user talked over the reply; interrupting it");
+            if turns.waiting.take().is_some() {
+                debug!(
+                    target: "assistd::listen",
+                    "barge-in superseded the waiting utterance; dropped it"
+                );
+            }
             state.interrupt_turns().await;
         }
         Ok(Heard::BargeIn) => {}

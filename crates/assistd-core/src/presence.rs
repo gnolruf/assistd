@@ -1,8 +1,9 @@
 //! Daemon presence state machine (`Active`, `Drowsy`, `Sleeping`), which
 //! frees GPU resources on demand and auto-wakes when a query arrives.
 
+use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -91,6 +92,24 @@ pub enum PresenceError {
     /// Sleep/wake churn kept the daemon out of `Active` on every retry.
     #[error("failed to acquire active request guard after {attempts} retries")]
     GuardRetriesExhausted { attempts: usize },
+
+    #[error(transparent)]
+    NoRoom(#[from] VramShortfall),
+}
+
+/// Loading the model now would leave less free VRAM than the configured headroom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("not enough free VRAM to load the model: {free_mb} MiB free, {needed_mb} MiB needed")]
+pub struct VramShortfall {
+    pub free_mb: u64,
+    pub needed_mb: u64,
+}
+
+/// Says, before a wake loads the model, whether the GPU has room for it.
+pub trait WakeRoom: fmt::Debug + Send + Sync {
+    /// `Err` when the model would not fit now. `llama_pid` is the running
+    /// llama-server, whose VRAM already counts toward the model.
+    fn check(&self, llama_pid: Option<u32>) -> Result<(), VramShortfall>;
 }
 
 /// Owner of the llama-server handle and the daemon-wide presence state.
@@ -119,6 +138,8 @@ pub struct PresenceManager {
     inflight: Arc<RwLock<()>>,
     /// `Some(started_at)` while a `wake` is executing.
     wake_started: StdMutex<Option<Instant>>,
+    /// Run before every wake; unset when VRAM cannot be measured.
+    wake_room: OnceLock<Arc<dyn WakeRoom>>,
 }
 
 impl PresenceManager {
@@ -172,7 +193,13 @@ impl PresenceManager {
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
+            wake_room: OnceLock::new(),
         }))
+    }
+
+    /// Check `room` before every wake from now on; a second call is ignored.
+    pub fn set_wake_room(&self, room: Arc<dyn WakeRoom>) {
+        let _ = self.wake_room.set(room);
     }
 
     /// The current presence state, `Waking` while a wake runs.
@@ -490,6 +517,7 @@ impl PresenceManager {
         if prior == PresenceTarget::Active {
             return Ok(());
         }
+        self.ensure_room_to_wake().await?;
 
         let _wake_marker = WakeMarker::new(self);
 
@@ -509,6 +537,16 @@ impl PresenceManager {
             "transitioned {prior:?} → Active"
         );
         Ok(())
+    }
+
+    async fn ensure_room_to_wake(&self) -> Result<(), PresenceError> {
+        let Some(room) = self.wake_room.get() else {
+            return Ok(());
+        };
+        room.check(self.llama_pid().await).map_err(|shortfall| {
+            warn!(target: "assistd::presence", "wake refused: {shortfall}");
+            PresenceError::NoRoom(shortfall)
+        })
     }
 
     async fn reload_model(&self) -> Result<(), PresenceError> {
@@ -645,6 +683,7 @@ impl PresenceManager {
             last_activity: StdMutex::new(Instant::now()),
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
+            wake_room: OnceLock::new(),
         })
     }
 }

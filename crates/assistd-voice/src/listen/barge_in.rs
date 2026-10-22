@@ -54,6 +54,13 @@ impl BargeInWatch {
         *self.replying.borrow()
     }
 
+    /// Whether the utterance being recorded began during a reply; it is the
+    /// user talking over it, so it must not be cut when the reply ends.
+    pub fn holds_reply_utterance(&self) -> bool {
+        self.utterance
+            .is_some_and(|watched| watched.next_check.is_some())
+    }
+
     /// After a frame that ended no utterance: the audio to check for
     /// barge-in, when one is due.
     pub fn check_due(&mut self, vad: &UtteranceVad) -> Option<Vec<i16>> {

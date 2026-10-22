@@ -526,13 +526,18 @@ struct VadGates {
 
 impl VadGates {
     /// Whether the frame arriving now must be discarded: the playback gate
-    /// holds it back unless a reply is under way and barge-in needs it.
+    /// holds it back unless barge-in needs it, during a reply or through the
+    /// end of an utterance that began in one.
     fn blocks_frame(&mut self) -> bool {
         let playing = self
             .playback
             .as_mut()
             .is_some_and(PlaybackGate::blocks_frame);
-        playing && !self.barge_in.as_ref().is_some_and(BargeInWatch::replying)
+        playing
+            && !self
+                .barge_in
+                .as_ref()
+                .is_some_and(|watch| watch.replying() || watch.holds_reply_utterance())
     }
 
     /// What to hand on after a frame produced `event`.

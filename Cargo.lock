@@ -161,6 +161,7 @@ dependencies = [
  "image",
  "ksni",
  "nvml-wrapper",
+ "parking_lot",
  "procfs",
  "pulldown-cmark",
  "ratatui",

@@ -67,7 +67,7 @@ pub use assistd_voice::{
 
 pub use assistd_wm::{NoWindowManager, WindowManager};
 
-pub use presence::{PresenceError, PresenceManager, RequestGuard};
+pub use presence::{PresenceError, PresenceManager, RequestGuard, VramShortfall, WakeRoom};
 pub use state::{
     AppState, DispatchError, McpServerStatus, MemoryStack, RuntimeState, SessionContext,
     Subsystems, TurnOrigin, branch_replay,

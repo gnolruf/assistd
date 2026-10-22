@@ -16,18 +16,25 @@ use assistd_voice::{
 use tracing::info;
 
 use super::voice_probe::PresenceGpuProbe;
+use super::vram::VramLedger;
 
 /// Start speech output, then capture, recording on `voice` whether each
 /// came up or why it is unavailable.
-pub(super) async fn init(voice: &VoiceManager, config: &Config, presence: &Arc<PresenceManager>) {
+pub(super) async fn init(
+    voice: &VoiceManager,
+    config: &Config,
+    presence: &Arc<PresenceManager>,
+    vram: Option<Arc<VramLedger>>,
+) {
     voice.speech().set_output(init_output(config).await);
     let speech = Arc::clone(voice.speech());
-    voice.set_capture(init_capture(config, presence, speech).await);
+    voice.set_capture(init_capture(config, presence, vram, speech).await);
 }
 
 async fn init_capture(
     config: &Config,
     presence: &Arc<PresenceManager>,
+    vram: Option<Arc<VramLedger>>,
     speech: Arc<VoiceOutputController>,
 ) -> Readiness<VoiceCapture> {
     if !config.voice.enabled {
@@ -50,7 +57,7 @@ async fn init_capture(
         }
     };
     let is_gpu = primary.is_gpu();
-    let transcriber = with_cpu_fallback(config, presence, Arc::new(primary), is_gpu);
+    let transcriber = with_cpu_fallback(config, presence, vram, Arc::new(primary), is_gpu);
 
     let mic = MicVoiceInput::new(transcriber.clone(), config.voice.mic_device.clone());
     let profiles = ProfileStore::default_location();
@@ -111,6 +118,7 @@ fn warn_if_ungated_playback(config: &Config) {
 fn with_cpu_fallback(
     config: &Config,
     presence: &Arc<PresenceManager>,
+    vram: Option<Arc<VramLedger>>,
     primary: Arc<dyn Transcriber>,
     is_gpu: bool,
 ) -> Arc<dyn Transcriber> {
@@ -119,10 +127,7 @@ fn with_cpu_fallback(
         return primary;
     }
 
-    let probe = Arc::new(PresenceGpuProbe::new(
-        presence.clone(),
-        config.sleep.gpu_allowlist.clone(),
-    ));
+    let probe = Arc::new(PresenceGpuProbe::new(presence.clone(), vram));
     let cpu_cfg = config.voice.transcription.clone();
     let cpu_factory: CpuFallbackFactory = Arc::new(move || {
         let cfg = cpu_cfg.clone();
