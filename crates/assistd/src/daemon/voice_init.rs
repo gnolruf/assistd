@@ -10,8 +10,8 @@ use assistd_core::{
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
     CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, ProfileStore,
-    QueuedTranscriber, Transcriber, VoiceOutputController, WakePhrase, WhisperTranscriberBuilder,
-    build_cpu_fallback,
+    QueuedTranscriber, SileroVad, Transcriber, VoiceOutputController, WakePhrase,
+    WhisperTranscriberBuilder, build_cpu_fallback,
 };
 use tracing::info;
 
@@ -61,25 +61,44 @@ async fn init_capture(
 
     let mic = MicVoiceInput::new(transcriber.clone(), config.voice.mic_device.clone());
     let profiles = ProfileStore::default_location();
-    let listener: Arc<dyn ContinuousListener> = if config.voice.wakeword.enabled {
-        info!(
-            "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
-            config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
-        );
-        warn_if_ungated_playback(config);
-        let listener = MicContinuousListener::new(transcriber.clone(), &config.voice, speech);
-        listener.set_wake_phrase(enrolled_wake_phrase(config, &profiles).await);
-        Arc::new(listener)
-    } else {
-        info!("voice.wakeword: disabled in config");
-        Arc::new(NoContinuousListener::new())
-    };
+    let listener = init_listener(config, &transcriber, speech, &profiles).await;
     Readiness::Ready(VoiceCapture {
         input: Arc::new(mic),
         listener,
         transcriber,
         profiles,
     })
+}
+
+/// Wake-word listening, or a listener that refuses to start when it is off
+/// in config or its Silero model cannot be loaded.
+async fn init_listener(
+    config: &Config,
+    transcriber: &Arc<dyn Transcriber>,
+    speech: Arc<VoiceOutputController>,
+    profiles: &ProfileStore,
+) -> Arc<dyn ContinuousListener> {
+    if !config.voice.wakeword.enabled {
+        info!("voice.wakeword: disabled in config");
+        return Arc::new(NoContinuousListener::new());
+    }
+    let silero = match SileroVad::load(&config.voice.transcription).await {
+        Ok(silero) => silero,
+        Err(e) => {
+            tracing::warn!(
+                "voice.wakeword: Silero VAD failed to load: {e:#}; listening unavailable"
+            );
+            return Arc::new(NoContinuousListener::new());
+        }
+    };
+    info!(
+        "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
+        config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
+    );
+    warn_if_ungated_playback(config);
+    let listener = MicContinuousListener::new(transcriber.clone(), &config.voice, speech, silero);
+    listener.set_wake_phrase(enrolled_wake_phrase(config, profiles).await);
+    Arc::new(listener)
 }
 
 /// The enrolled phrase, or the built-in one when none is enrolled or the

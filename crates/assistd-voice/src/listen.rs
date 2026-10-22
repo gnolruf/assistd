@@ -18,6 +18,7 @@ pub mod enrollment;
 pub mod mic;
 pub mod playback_gate;
 pub mod profile;
+pub mod silero;
 pub mod vad;
 pub mod wake_gate;
 pub mod wake_phrase;
@@ -25,6 +26,7 @@ pub mod wake_phrase;
 pub use enrollment::{CapturedUtterance, Enrollment, SessionAudio};
 pub use mic::MicContinuousListener;
 pub use profile::{ProfileError, ProfileStore, WakeWordProfile};
+pub use silero::SileroVad;
 pub use wake_phrase::{PhraseStrength, WakePhrase};
 
 /// Errors surfaced by [`ContinuousListener`] implementations.

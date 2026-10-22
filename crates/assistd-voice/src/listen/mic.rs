@@ -1,6 +1,6 @@
-//! cpal + webrtc-vad + whisper hands-free listener: ring buffer →
-//! resampler → playback gate → VAD frames → transcriber → wake gate or
-//! barge-in check → broadcast.
+//! cpal + Silero + whisper hands-free listener: ring buffer → resampler →
+//! Silero speech labels → playback gate → utterance segmenter → transcriber
+//! → wake gate or barge-in check → broadcast.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +19,7 @@ use super::barge_in::{BargeInWatch, confirms_barge_in};
 use super::capture::{self, ListenCaptureSession};
 use super::enrollment::{CapturedUtterance, SessionAudio};
 use super::playback_gate::{PLAYBACK_HANGOVER_FRAMES, PlaybackGate};
+use super::silero::{FrameClassifier, SileroVad};
 use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTuning};
 use super::wake_gate::{Admission, WakeGate};
 use super::wake_phrase::WakePhrase;
@@ -86,10 +87,12 @@ enum Segment {
     BargeInCheck(Vec<i16>),
 }
 
-/// cpal + webrtc-vad implementation of [`ContinuousListener`].
+/// cpal + Silero implementation of [`ContinuousListener`].
 #[derive(Debug)]
 pub struct MicContinuousListener {
     transcriber: Arc<dyn Transcriber>,
+    /// Shared by listening and utterance capture, which never run together.
+    silero: Arc<parking_lot::Mutex<SileroVad>>,
     mic_device: Option<String>,
     tuning: VadTuning,
     output_speaking: Option<watch::Receiver<bool>>,
@@ -154,11 +157,12 @@ impl MicContinuousListener {
     /// Listens for the built-in wake phrase. The audio device is opened on
     /// [`Self::start`], not here. When the playback gate is configured on,
     /// frames captured while `speech` is speaking are discarded unless a
-    /// barge-in check needs them.
+    /// barge-in check needs them. `silero` decides which frames hold speech.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         config: &VoiceConfig,
         speech: Arc<VoiceOutputController>,
+        silero: SileroVad,
     ) -> Self {
         let tuning = tuning_from_config(&config.wakeword);
         let output_speaking = config
@@ -169,6 +173,7 @@ impl MicContinuousListener {
         let (heard, _) = broadcast::channel(UTTERANCE_CHANNEL_DEPTH);
         Self {
             transcriber,
+            silero: Arc::new(parking_lot::Mutex::new(silero)),
             mic_device: config.mic_device.clone(),
             tuning,
             output_speaking,
@@ -211,15 +216,17 @@ impl MicContinuousListener {
             handle: mut capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
         let tuning = self.tuning;
-        let playback_gate = self.playback_gate();
+        let gates = VadGates {
+            playback: self.playback_gate(),
+            barge_in: None,
+        };
+        let classifier = FrameClassifier::new(Arc::clone(&self.silero));
         let vad_sink = sink.clone();
         let vad_handle = tokio::task::spawn_blocking(move || {
             vad_loop(
                 tuning,
-                VadGates {
-                    playback: playback_gate,
-                    barge_in: None,
-                },
+                gates,
+                classifier,
                 frame_rx,
                 |segment| forward_captured(&vad_sink, segment),
                 |speaking| {
@@ -285,10 +292,12 @@ impl ContinuousListener for MicContinuousListener {
             playback: self.playback_gate(),
             barge_in: self.barge_in_watch(),
         };
+        let classifier = FrameClassifier::new(Arc::clone(&self.silero));
         let vad_handle = tokio::task::spawn_blocking(move || {
             vad_loop(
                 tuning,
                 gates,
+                classifier,
                 frame_rx,
                 |segment| queue_for_transcription(&pcm_tx, segment),
                 |_| {},
@@ -553,15 +562,17 @@ impl VadGates {
     }
 }
 
-/// Blocking because `webrtc_vad::Vad` holds a `!Send` pointer. Frames
-/// blocked by the playback gate also reset the VAD, since a half-captured
-/// utterance is about to be contaminated by the daemon's own speech.
+/// Blocking because Silero inference is CPU work. Frames reach the gates
+/// and segmenter a stride at a time, once Silero has labelled them. Frames
+/// blocked by the playback gate also reset the segmenter, since a
+/// half-captured utterance is about to be contaminated by the daemon's own speech.
 /// `emit` and `speaking_changed`, told when an utterance starts and ends,
 /// must never wait: stalling here would back up the frame channel and
 /// silently truncate live audio. The loop ends when `emit` returns false.
 fn vad_loop(
     tuning: VadTuning,
     mut gates: VadGates,
+    mut classifier: FrameClassifier,
     mut frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
     mut emit: impl FnMut(Segment) -> bool,
     mut speaking_changed: impl FnMut(bool),
@@ -569,20 +580,22 @@ fn vad_loop(
     let mut vad = UtteranceVad::new(tuning);
     let mut speaking = false;
     while let Some(frame) = frame_rx.blocking_recv() {
-        let event = if gates.blocks_frame() {
-            vad.reset();
-            None
-        } else {
-            vad.feed(&frame)
-        };
-        if vad.in_utterance() != speaking {
-            speaking = !speaking;
-            speaking_changed(speaking);
-        }
-        if let Some(segment) = gates.segment(event, &vad)
-            && !emit(segment)
-        {
-            return;
+        for (frame, is_speech) in classifier.push(&frame) {
+            let event = if gates.blocks_frame() {
+                vad.reset();
+                None
+            } else {
+                vad.feed(&frame, is_speech)
+            };
+            if vad.in_utterance() != speaking {
+                speaking = !speaking;
+                speaking_changed(speaking);
+            }
+            if let Some(segment) = gates.segment(event, &vad)
+                && !emit(segment)
+            {
+                return;
+            }
         }
     }
 }

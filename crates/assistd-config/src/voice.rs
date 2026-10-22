@@ -64,8 +64,9 @@ pub struct TranscriptionConfig {
     pub beams: NonZeroU32,
     /// Trim silence with Silero VAD before decoding.
     pub vad_enabled: bool,
-    /// VAD GGML model as `<owner>/<repo>[@<revision>]:<file>`; used only with
-    /// `vad_enabled`.
+    /// Silero VAD GGML model as `<owner>/<repo>[@<revision>]:<file>`; trims
+    /// audio with `vad_enabled` and always decides where wake-word listening's
+    /// utterances start and end.
     pub vad_model: String,
     /// Model cache directory, absolute or starting with `~/`. `None` uses
     /// `$XDG_CACHE_HOME/assistd/whisper/` (or `~/.cache/assistd/whisper/`).

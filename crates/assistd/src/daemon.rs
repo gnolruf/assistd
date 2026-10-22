@@ -48,6 +48,10 @@ mod vram;
 mod warmup;
 mod wm_init;
 
+/// Log filter when `RUST_LOG` is unset. whisper.cpp logs every Silero call
+/// at INFO, which wake-word listening makes several times a second.
+const DEFAULT_LOG_DIRECTIVES: &str = "info,whisper_rs::whisper_logging_hook=warn";
+
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
 pub(crate) struct DaemonArgs {
@@ -374,6 +378,6 @@ async fn replay_history(chat: &dyn LlmBackend, replay: HistoryReplay) {
 
 fn init_tracing() {
     tracing_subscriber::fmt()
-        .with_env_filter(env_filter_or("info"))
+        .with_env_filter(env_filter_or(DEFAULT_LOG_DIRECTIVES))
         .init();
 }

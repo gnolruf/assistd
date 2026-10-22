@@ -289,7 +289,9 @@ loaded once at startup). Transcripts feed back into the agent loop
 as if the user had typed them.
 
 Continuous mode (`MicContinuousListener`) keeps the mic open and uses
-WebRTC VAD to chop the stream into utterances. Each is transcribed with
+Silero VAD to chop the stream into utterances: every 160 ms it labels the
+newest frames speech or not, with the half second before as context, so
+music and room noise never hold an utterance open. Each is transcribed with
 the wake phrase as Whisper's initial prompt, and a `WakeGate` keeps only
 speech that opens with the phrase, the utterance after a bare phrase
 within `voice.wakeword.command_timeout_ms`, or the utterance that begins

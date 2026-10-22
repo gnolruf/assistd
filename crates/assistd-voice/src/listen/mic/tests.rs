@@ -169,7 +169,7 @@ fn speech_begun_over_a_reply_survives_the_reply_ending_mid_utterance() {
     let frame = [1000i16; FRAME_SAMPLES];
     for _ in 0..10 {
         assert!(!gates.blocks_frame());
-        let event = vad.feed_decided(&frame, true);
+        let event = vad.feed(&frame, true);
         gates.segment(event, &vad);
     }
 
