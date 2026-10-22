@@ -11,10 +11,10 @@ mixed with your voice, and a command you give over the reply carries
 some of the reply's words.
 
 For clean barge-in through speakers, let the sound server cancel the
-echo and turn the gate off. `assistd` does not implement echo cancellation itself; it consumes
-whatever mic source the system hands it. Both PipeWire and PulseAudio
-ship WebRTC's echo canceller as a loadable module that creates a
-virtual sink and a virtual source. Audio played to the sink is used as
+echo and turn the gate off. `assistd` does not implement echo
+cancellation itself; it consumes whatever mic source the system hands
+it. Both PipeWire and PulseAudio ship WebRTC's echo canceller as a
+loadable module that creates a virtual sink and a virtual source. Audio played to the sink is used as
 the reference signal and subtracted from the source.
 
 Two conditions must hold for this to work:

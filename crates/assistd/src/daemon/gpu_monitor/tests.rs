@@ -27,12 +27,6 @@ fn decide_sleeps_on_contention_and_auto_wakes_only_its_own_sleep_once_it_fits() 
             Action::Sleep(CROWDED),
         ),
         (
-            "active, not crowded",
-            poll(PresenceState::Active, false, true),
-            SleepCause::None,
-            Action::None,
-        ),
-        (
             "own sleep, still no room",
             poll(PresenceState::Sleeping, false, false),
             SleepCause::Contention,

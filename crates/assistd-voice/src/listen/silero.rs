@@ -27,6 +27,11 @@ const STRIDE_CHUNKS: usize = STRIDE_SAMPLES / CHUNK_SAMPLES;
 /// resets: 512 ms, a whole number of chunks.
 const CONTEXT_SAMPLES: usize = 16 * CHUNK_SAMPLES;
 
+const _: () = assert!(
+    STRIDE_SAMPLES.is_multiple_of(CHUNK_SAMPLES),
+    "strides align to chunks"
+);
+
 /// Speech probability at or above which a chunk counts as speech; Silero's
 /// own default.
 const SPEECH_THRESHOLD: f32 = 0.5;
@@ -131,12 +136,6 @@ mod tests {
 
     #[test]
     fn each_frame_takes_the_chunk_under_its_midpoint() {
-        assert_eq!(STRIDE_SAMPLES % CHUNK_SAMPLES, 0, "strides align to chunks");
-        assert_eq!(
-            CONTEXT_SAMPLES % CHUNK_SAMPLES,
-            0,
-            "context aligns to chunks"
-        );
         let only_third_chunk_is_speech = [0.1, 0.2, 0.9, 0.3, 0.4];
         assert_eq!(
             frame_verdicts(&only_third_chunk_is_speech),

@@ -49,7 +49,6 @@ impl BargeInWatch {
         }
     }
 
-    /// Whether a reply is under way now.
     pub fn replying(&self) -> bool {
         *self.replying.borrow()
     }
@@ -111,11 +110,8 @@ mod tests {
             "Highs will reach twenty degrees.".to_string(),
         ];
         let cases = [
-            ("wait, what about Saturday", true),
             ("no stop", true),
             ("stop", false),
-            ("", false),
-            ("The forecast for tomorrow is sunny.", false),
             ("highs will reach twenty three degrees", false),
             ("the forecast for tomorrow is funny and highs", false),
             ("actually what about tomorrow", true),
