@@ -21,6 +21,8 @@ use super::markdown::BLEY;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use crate::client::terminal_text::escape_controls_single_line;
 
+mod wakeword;
+
 const INPUT_PROMPT: &str = "> ";
 const SLASH_POPUP_MAX_ROWS: u16 = 6;
 /// Wrapped script rows a collapsed confirmation prompt shows, its
@@ -42,11 +44,12 @@ const RESUME_DETAIL_INDENT: &str = "    ";
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let [main_area, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    match app.shown_resume_picker() {
-        Some(picker) => {
+    match (app.shown_resume_picker(), app.shown_wake_word_panel()) {
+        (Some(picker), _) => {
             render_resume_picker(frame, main_area, picker, &app.model_name, Utc::now());
         }
-        None => render_chat(frame, main_area, app),
+        (None, Some(panel)) => wakeword::render_wake_word_panel(frame, main_area, panel),
+        (None, None) => render_chat(frame, main_area, app),
     }
     render_status_line(frame, status_area, app);
 }
@@ -263,10 +266,13 @@ fn render_slash_popup(
         height,
         ..area
     };
+    let visible_rows = usize::from(height);
+    let first_visible = selected.saturating_sub(visible_rows - 1);
     let lines: Vec<Line<'_>> = suggestions
         .iter()
         .enumerate()
-        .take(area.height as usize)
+        .skip(first_visible)
+        .take(visible_rows)
         .map(|(i, (cmd, hint))| {
             let (style, hint_style) = if i == selected {
                 (selected_style(), reversed_style())
@@ -652,6 +658,8 @@ fn status_hint(app: &App) -> Option<String> {
         Some("type to search · ↑/↓ select · Enter resume · Esc cancel".to_string())
     } else if let Some(notice) = app.notice() {
         Some(notice.to_string())
+    } else if let Some(panel) = app.shown_wake_word_panel() {
+        Some(wakeword::wake_word_hint(&panel.view).to_string())
     } else if app.output.scroll_offset() > 0 {
         Some(format!("↑{} · PgDn to follow", app.output.scroll_offset()))
     } else if app.generating() {

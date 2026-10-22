@@ -6,6 +6,10 @@ use assistd_config::UnitInterval;
 /// Phrase used until the user enrolls their own.
 pub const DEFAULT_WAKE_PHRASE: &str = "hey computer";
 
+/// Estimated syllables from which a phrase rates medium, and high.
+const MEDIUM_SYLLABLES: usize = 3;
+const HIGH_SYLLABLES: usize = 4;
+
 /// The wake phrase plus the spellings Whisper has been heard to produce
 /// for it. Every word of a transcript's leading words must reach
 /// `min_similarity` against the phrase or a variant for it to match.
@@ -60,6 +64,32 @@ impl WakePhrase {
     }
 }
 
+/// How well a wake phrase stands out from ordinary speech, rated by its
+/// estimated syllables: longer phrases trigger by accident less often.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhraseStrength {
+    Low,
+    Medium,
+    High,
+}
+
+impl PhraseStrength {
+    /// Under 3 estimated syllables is low, 3 is medium, 4 or more high.
+    pub fn of(phrase: &str) -> Self {
+        let syllables: usize = normalized_words(phrase)
+            .iter()
+            .map(|word| estimated_syllables(word))
+            .sum();
+        if syllables >= HIGH_SYLLABLES {
+            Self::High
+        } else if syllables >= MEDIUM_SYLLABLES {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+}
+
 /// Lowercase alphanumeric words, apostrophes dropped, other punctuation
 /// treated as a separator.
 pub(super) fn normalized_words(text: &str) -> Vec<String> {
@@ -81,6 +111,23 @@ fn word_spans(text: &str) -> Vec<(String, usize)> {
         spans.push((word, text.len()));
     }
     spans
+}
+
+/// Vowel groups in a lowercase word, less a silent final `e`; at least one.
+fn estimated_syllables(word: &str) -> usize {
+    let is_vowel = |ch: char| "aeiouy".contains(ch);
+    let mut previous_vowel = false;
+    let groups = word
+        .chars()
+        .filter(|&ch| {
+            let starts_group = is_vowel(ch) && !previous_vowel;
+            previous_vowel = is_vowel(ch);
+            starts_group
+        })
+        .count();
+    let silent_e =
+        groups > 1 && word.ends_with('e') && !word.ends_with("le") && !word.ends_with("ee");
+    (groups - usize::from(silent_e)).max(1)
 }
 
 /// `1 - levenshtein / longer length`, in `0.0..=1.0`.

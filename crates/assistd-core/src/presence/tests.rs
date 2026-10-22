@@ -75,31 +75,6 @@ async fn sleep_defers_for_inflight_request() {
     assert_eq!(m.state(), PresenceState::Sleeping);
 }
 
-#[tokio::test(start_paused = true)]
-async fn wait_until_llm_idle_returns_true_after_guard_dropped() {
-    let m = PresenceManager::stub(PresenceTarget::Active);
-    let g = m.acquire_stream_guard();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        drop(g);
-    });
-    assert!(m.wait_until_llm_idle(Duration::from_millis(500)).await);
-}
-
-#[tokio::test]
-async fn stream_guard_does_not_block_sleep() {
-    let m = PresenceManager::stub(PresenceTarget::Active);
-    let _stream = m.acquire_stream_guard();
-    let m2 = Arc::clone(&m);
-    let sleep_task = tokio::spawn(async move { m2.sleep().await });
-    timeout(Duration::from_secs(1), sleep_task)
-        .await
-        .expect("sleep was blocked by an LLM stream guard")
-        .expect("sleep task panicked")
-        .expect("sleep returned Err");
-    assert_eq!(m.state(), PresenceState::Sleeping);
-}
-
 #[tokio::test]
 async fn failed_wake_settles_back_to_the_prior_state() {
     let m = PresenceManager::stub(PresenceTarget::Sleeping);

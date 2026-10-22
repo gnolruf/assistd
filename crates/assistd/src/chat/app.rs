@@ -24,7 +24,15 @@ mod connection;
 mod keys;
 mod modal;
 mod resume;
+mod wakeword;
 mod wire;
+
+use wakeword::WakeWordStream;
+pub(super) use wakeword::{
+    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, ResetChoice,
+    SampleResult, SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus,
+    WakeWordView,
+};
 
 const SPINNER_CHARS: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
@@ -77,6 +85,8 @@ pub(super) enum WireStream {
     Branch,
     /// Polls and the F2 cycle; indicator state only.
     Status,
+    /// A `/wakeword` request; owns the wake-word dock.
+    WakeWord(WakeWordStream),
 }
 
 pub(super) enum ChatEvent {
@@ -236,6 +246,9 @@ pub(super) struct App {
     /// `/resume` session list; `confirmation` takes precedence while
     /// both are open.
     pub resume_picker: Option<ResumePicker>,
+    /// `/wakeword` panel, drawn in place of the transcript;
+    /// `confirmation` takes precedence while both are open.
+    pub wake_word_panel: Option<WakeWordPanel>,
     /// Throttles rewraps for a live block's timer to 1 Hz.
     last_live_seconds: Option<u64>,
     pub session_title: Option<String>,
@@ -423,6 +436,7 @@ impl App {
             slash_selected: 0,
             slash_dismissed: false,
             resume_picker: None,
+            wake_word_panel: None,
             last_live_seconds: None,
             session_title: None,
             verbose: false,

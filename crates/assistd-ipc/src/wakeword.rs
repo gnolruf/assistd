@@ -66,15 +66,14 @@ pub enum WakeWordOp {
     /// Report the saved profile. Emits `WakeWordStatus`, then `Done`.
     Status,
     /// Open an enrollment session on this connection, which streams
-    /// `WakeWordEnrollment` events until it is finished, cancelled, or the
-    /// client disconnects.
+    /// `WakeWordEnrollment` and `WakeWordSpeech` events until it saves itself,
+    /// is cancelled, or the client disconnects.
     EnrollStart { phrase: WakePhraseText },
-    /// Save the open enrollment. Errors before enough samples are accepted.
-    EnrollFinish,
     /// Abandon the open enrollment without saving.
     EnrollCancel,
     /// Open a test session on this connection, which streams `WakeWordTest`
-    /// events against the saved phrase until stopped or disconnected.
+    /// and `WakeWordSpeech` events against the saved phrase until stopped or
+    /// disconnected.
     TestStart,
     /// End the open test session.
     TestStop,
@@ -98,15 +97,17 @@ pub enum SampleRejection {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EnrollEvent {
-    /// Say the phrase again. `consistent` once the last few samples taught
-    /// nothing new; saving needs `accepted >= minimum`.
-    Prompt {
-        accepted: u8,
-        minimum: u8,
-        consistent: bool,
-    },
+    /// Say the phrase again. The enrollment saves itself once `confident`
+    /// reaches `required`.
+    Prompt { confident: u8, required: u8 },
     /// Sample `index` (from 1) was kept; `heard` is Whisper's transcript.
-    SampleAccepted { index: u8, heard: String },
+    /// `confident` when the listener would wake on `heard` without variants;
+    /// otherwise only its spelling is learned as a variant.
+    SampleAccepted {
+        index: u8,
+        heard: String,
+        confident: bool,
+    },
     /// `heard` is `None` when the audio was refused before transcription.
     SampleRejected {
         reason: SampleRejection,

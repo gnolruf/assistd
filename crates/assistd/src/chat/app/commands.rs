@@ -13,6 +13,7 @@ enum SlashCommand {
     Undo,
     New,
     Resume,
+    WakeWord,
 }
 
 impl SlashCommand {
@@ -31,6 +32,7 @@ impl SlashCommand {
             "/undo" => Some(Self::Undo),
             "/new" => Some(Self::New),
             "/resume" => Some(Self::Resume),
+            "/wakeword" => Some(Self::WakeWord),
             _ => None,
         }
     }
@@ -73,6 +75,7 @@ impl App {
                 let id = Uuid::new_v4().to_string();
                 self.spawn_branch_command(BranchOp::ResumePicker, Request::Branches { id });
             }
+            SlashCommand::WakeWord => self.open_wake_word_panel(),
         }
     }
 

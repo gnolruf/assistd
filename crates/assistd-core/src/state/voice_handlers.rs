@@ -27,20 +27,13 @@ impl AppState {
             send_error(&tx, id, session.in_progress().into()).await;
             return Ok(());
         }
-        if capture.listener.is_active() {
-            send_error(
-                &tx,
-                id,
-                "continuous listening is active; disable it before using PTT".into(),
-            )
-            .await;
-            return Ok(());
-        }
         match capture.input.start_recording().await {
             Ok(()) => {
+                let resume_listening = take_mic_from_listening(&capture).await;
                 let capture = PttCapture {
                     warmup: self.spawn_presence_warmup(),
                     cancel: self.runtime.turn_cancellation(),
+                    resume_listening,
                 };
                 *self.runtime.ptt_capture.lock().await = Some(capture);
                 let _ = tx
@@ -77,11 +70,19 @@ impl AppState {
             })
             .await;
 
-        let (warmup, cancel) = match self.runtime.ptt_capture.lock().await.take() {
-            Some(PttCapture { warmup, cancel }) => (Some(warmup), cancel),
-            None => (None, self.runtime.turn_cancellation()),
+        let (warmup, cancel, resume_listening) = match self.runtime.ptt_capture.lock().await.take()
+        {
+            Some(PttCapture {
+                warmup,
+                cancel,
+                resume_listening,
+            }) => (Some(warmup), cancel, resume_listening),
+            None => (None, self.runtime.turn_cancellation(), false),
         };
         let transcription = self.transcribe_while_warming(warmup, &cancel).await;
+        if resume_listening {
+            self.resume_listening_after_ptt().await;
+        }
         debug!(
             target: "assistd::voice::latency",
             stage = "ensure_active_done",
@@ -146,6 +147,29 @@ impl AppState {
         Ok(transcription?)
     }
 
+    async fn resume_listening_after_ptt(&self) {
+        let resumed = match self.subsystems.voice.capture() {
+            Ok(capture) => capture.listener.start().await,
+            Err(e) => {
+                warn!(target: "assistd::state", "cannot resume listening after PTT: {e}");
+                return;
+            }
+        };
+        if let Err(e) = resumed {
+            warn!(target: "assistd::state", "failed to resume listening after PTT: {e}");
+        }
+    }
+
+    /// Whether a press holds the mic that listening will get back on release.
+    async fn listening_paused_for_ptt(&self) -> bool {
+        self.runtime
+            .ptt_capture
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|capture| capture.resume_listening)
+    }
+
     fn spawn_presence_warmup(&self) -> JoinHandle<()> {
         let presence = self.subsystems.presence.clone();
         spawn_supervised(
@@ -206,6 +230,9 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
+        if let Some(capture) = self.runtime.ptt_capture.lock().await.as_mut() {
+            capture.resume_listening = false;
+        }
         let stopped = match self.subsystems.voice.capture() {
             Ok(capture) => capture.listener.stop().await,
             Err(_) => Ok(()),
@@ -233,7 +260,7 @@ impl AppState {
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        if self.subsystems.voice.listening() {
+        if self.subsystems.voice.listening() || self.listening_paused_for_ptt().await {
             self.handle_listen_stop(id, tx).await
         } else {
             self.handle_listen_start(id, tx).await
@@ -332,4 +359,16 @@ impl AppState {
             }
         }
     }
+}
+
+/// Hand the mic from listening to a press that just started recording;
+/// true when listening was on and should resume on release.
+async fn take_mic_from_listening(capture: &VoiceCapture) -> bool {
+    if !capture.listener.is_active() {
+        return false;
+    }
+    if let Err(e) = capture.listener.stop_for_push_to_talk().await {
+        warn!(target: "assistd::state", "failed to pause listening for PTT: {e}");
+    }
+    true
 }

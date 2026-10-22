@@ -36,7 +36,8 @@ pub use error::{VoiceInputError, VoiceOutputError};
 #[cfg(feature = "listen")]
 pub use listen::{
     CapturedUtterance, ContinuousListener, Enrollment, Heard, ListenError, MicContinuousListener,
-    NoContinuousListener, ProfileError, ProfileStore, WakePhrase, WakeWordProfile,
+    NoContinuousListener, PhraseStrength, ProfileError, ProfileStore, SessionAudio, WakePhrase,
+    WakeWordProfile,
 };
 #[cfg(feature = "listen")]
 pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
@@ -49,7 +50,7 @@ pub use piper::{PiperError, PiperVoiceOutput};
 pub use sentence::SentenceBuffer;
 #[cfg(feature = "whisper")]
 pub use transcribe::{
-    BusyProbe, CpuFallbackFactory, NullBusyProbe, QueueConfig, QueuedTranscriber, Transcriber,
+    BusyProbe, CpuFallbackFactory, NullBusyProbe, QueuedTranscriber, Transcriber,
     TranscriptionError,
 };
 #[cfg(feature = "whisper")]

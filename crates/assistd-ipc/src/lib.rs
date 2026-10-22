@@ -710,12 +710,14 @@ pub enum Event {
     WakeWordDetected { id: String },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
-    /// The saved wake phrase, or the built-in one with no variants or samples.
+    /// The saved wake phrase, or the built-in one with no variants or
+    /// samples; `listening` is whether the wake-word listener is running.
     WakeWordStatus {
         id: String,
         phrase: String,
         variants: Vec<String>,
         samples: u32,
+        listening: bool,
     },
     /// Progress of the enrollment session opened by this connection.
     WakeWordEnrollment { id: String, event: EnrollEvent },
@@ -725,6 +727,9 @@ pub enum Event {
         heard: String,
         matched: bool,
     },
+    /// Speech started (`true`) or ended (`false`) on the mic of the
+    /// wake-word session opened by this connection.
+    WakeWordSpeech { id: String, speaking: bool },
     /// How far one background subsystem has started; broadcast whenever
     /// one finishes starting.
     Readiness {
@@ -902,6 +907,7 @@ impl Event {
             | Event::WakeWordStatus { id, .. }
             | Event::WakeWordEnrollment { id, .. }
             | Event::WakeWordTest { id, .. }
+            | Event::WakeWordSpeech { id, .. }
             | Event::Readiness { id, .. }
             | Event::SpeakingState { id, .. }
             | Event::ChatFocus { id, .. }
@@ -950,6 +956,7 @@ impl Event {
             | Event::WakeWordStatus { .. }
             | Event::WakeWordEnrollment { .. }
             | Event::WakeWordTest { .. }
+            | Event::WakeWordSpeech { .. }
             | Event::SemanticHit { .. }
             | Event::MemoryValue { .. }
             | Event::MemoryKeys { .. }

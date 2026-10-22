@@ -1,17 +1,14 @@
 //! Wake-phrase enrollment: screens each recording, then learns the distinct
 //! spellings Whisper produces for the phrase as accepted variants.
 
+use assistd_config::UnitInterval;
 use assistd_ipc::{EnrollEvent, SampleRejection};
 
 use super::vad::SAMPLE_RATE_HZ;
-use super::wake_phrase::{normalized_words, similarity};
+use super::wake_phrase::{WakePhrase, normalized_words, similarity};
 
-/// Accepted samples required before an enrollment can be saved.
-pub const MIN_SAMPLES: u8 = 3;
-
-/// Trailing samples that must all repeat a known spelling for the
-/// enrollment to count as consistent.
-const CONSISTENT_RUN: usize = 3;
+/// Confident samples an enrollment collects before it is ready to save.
+pub const CONFIDENT_SAMPLES: u8 = 5;
 
 const MIN_SPEECH_MS: usize = 250;
 const MAX_SPEECH_MS: usize = 4_000;
@@ -38,6 +35,14 @@ pub struct CapturedUtterance {
     pub truncated: bool,
 }
 
+/// What a wake-word session's capture reports from the mic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionAudio {
+    /// An utterance started (`true`) or ended (`false`), kept or not.
+    Speaking(bool),
+    Utterance(CapturedUtterance),
+}
+
 /// An accepted enrollment recording and what Whisper heard in it.
 #[derive(Debug, Clone)]
 pub(super) struct Recording {
@@ -46,22 +51,27 @@ pub(super) struct Recording {
 }
 
 /// An enrollment in progress: the phrase, the spellings learned so far
-/// (the phrase's own first), and the accepted recordings.
+/// (the phrase's own first), and the accepted recordings, of which
+/// `confident` would wake the listener on the phrase alone.
 #[derive(Debug)]
 pub struct Enrollment {
     phrase: String,
     spellings: Vec<String>,
     recordings: Vec<Recording>,
-    known_run: usize,
+    bare_phrase: WakePhrase,
+    confident: u8,
 }
 
 impl Enrollment {
-    pub fn new(phrase: &str) -> Self {
+    /// A sample is confident when the phrase, without variants, matches it
+    /// at `min_similarity`.
+    pub fn new(phrase: &str, min_similarity: UnitInterval) -> Self {
         Self {
             phrase: phrase.to_string(),
             spellings: vec![spelling(phrase)],
             recordings: Vec::new(),
-            known_run: 0,
+            bare_phrase: WakePhrase::new(phrase, &[], min_similarity),
+            confident: 0,
         }
     }
 
@@ -90,38 +100,42 @@ impl Enrollment {
 
     /// Keep `pcm` as a sample of the phrase when `heard` plausibly is it,
     /// learning `heard` as a variant if it is a new spelling. Returns the
-    /// sample's index, counting from 1.
-    pub fn accept(&mut self, pcm: Vec<i16>, heard: &str) -> Result<u8, SampleRejection> {
+    /// `SampleAccepted` event to report.
+    pub fn accept(&mut self, pcm: Vec<i16>, heard: &str) -> Result<EnrollEvent, SampleRejection> {
         let heard_spelling = spelling(heard);
         if heard_spelling.is_empty()
             || similarity(&self.spellings[0], &heard_spelling) < MIN_PHRASE_SIMILARITY
         {
             return Err(SampleRejection::DidNotMatch);
         }
-        if self.spellings.contains(&heard_spelling) {
-            self.known_run += 1;
-        } else {
-            self.known_run = 0;
+        if !self.spellings.contains(&heard_spelling) {
             self.spellings.push(heard_spelling);
+        }
+        let confident = self.bare_phrase.match_prefix(heard).is_some();
+        if confident {
+            self.confident = self.confident.saturating_add(1);
         }
         self.recordings.push(Recording {
             pcm,
             heard: heard.to_string(),
         });
-        Ok(self.accepted())
+        Ok(EnrollEvent::SampleAccepted {
+            index: self.accepted(),
+            heard: heard.to_string(),
+            confident,
+        })
     }
 
-    /// Whether enough samples were accepted to save.
+    /// Whether [`CONFIDENT_SAMPLES`] confident samples were collected.
     pub fn is_ready(&self) -> bool {
-        self.accepted() >= MIN_SAMPLES
+        self.confident >= CONFIDENT_SAMPLES
     }
 
     /// The prompt for the next sample, with progress so far.
     pub fn prompt(&self) -> EnrollEvent {
         EnrollEvent::Prompt {
-            accepted: self.accepted(),
-            minimum: MIN_SAMPLES,
-            consistent: self.is_ready() && self.known_run >= CONSISTENT_RUN,
+            confident: self.confident,
+            required: CONFIDENT_SAMPLES,
         }
     }
 

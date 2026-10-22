@@ -8,11 +8,11 @@ use crate::defaults::{
     DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
     DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE,
     DEFAULT_VOICE_HOTKEY, DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS, DEFAULT_WAKEWORD_DETECTOR_THRESHOLD,
-    DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_HOTKEY, DEFAULT_WAKEWORD_MATCH_SIMILARITY,
-    DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS, DEFAULT_WAKEWORD_PLAYBACK_GATE,
-    DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WHISPER_BEAMS,
-    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
-    DEFAULT_WHISPER_VAD_MODEL,
+    DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_FOLLOW_UP_MS, DEFAULT_WAKEWORD_HOTKEY,
+    DEFAULT_WAKEWORD_MATCH_SIMILARITY, DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
+    DEFAULT_WAKEWORD_PLAYBACK_GATE, DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH,
+    DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU,
+    DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
 };
 use crate::errors::UnitIntervalError;
 
@@ -110,6 +110,10 @@ pub struct WakeWordConfig {
     /// After a wake phrase heard on its own, how long in ms to wait for the
     /// command, `500..=15000`.
     pub command_timeout_ms: NonZeroU32,
+    /// After a reply to a wake-word command finishes, including its speech,
+    /// how long in ms the next utterance is taken as a command without the
+    /// phrase, `0..=30000`; `0` disables follow-ups.
+    pub follow_up_ms: u32,
     /// Minimum normalized edit-distance similarity between each leading word
     /// Whisper heard and the same word of the phrase or a learned variant;
     /// `1.0` demands an exact match after normalization, `0.0` accepts anything.
@@ -129,6 +133,7 @@ impl Default for WakeWordConfig {
             max_utterance_secs: DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
             playback_gate: DEFAULT_WAKEWORD_PLAYBACK_GATE,
             command_timeout_ms: DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
+            follow_up_ms: DEFAULT_WAKEWORD_FOLLOW_UP_MS,
             match_similarity: DEFAULT_WAKEWORD_MATCH_SIMILARITY,
             detector_threshold: DEFAULT_WAKEWORD_DETECTOR_THRESHOLD,
         }

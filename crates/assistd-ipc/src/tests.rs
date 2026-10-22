@@ -237,19 +237,19 @@ fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
                 phrase: "hey jarvis".into(),
                 variants: vec!["a jarvis".into()],
                 samples: 4,
+                listening: true,
             },
-            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","variants":["a jarvis"],"samples":4}"#,
+            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","variants":["a jarvis"],"samples":4,"listening":true}"#,
         ),
         (
             Event::WakeWordEnrollment {
                 id: id(),
                 event: EnrollEvent::Prompt {
-                    accepted: 2,
-                    minimum: 3,
-                    consistent: false,
+                    confident: 2,
+                    required: 5,
                 },
             },
-            r#"{"type":"wake_word_enrollment","id":"r","event":{"kind":"prompt","accepted":2,"minimum":3,"consistent":false}}"#,
+            r#"{"type":"wake_word_enrollment","id":"r","event":{"kind":"prompt","confident":2,"required":5}}"#,
         ),
         (
             Event::WakeWordEnrollment {
@@ -268,6 +268,13 @@ fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
                 matched: true,
             },
             r#"{"type":"wake_word_test","id":"r","heard":"hey jarvis","matched":true}"#,
+        ),
+        (
+            Event::WakeWordSpeech {
+                id: id(),
+                speaking: true,
+            },
+            r#"{"type":"wake_word_speech","id":"r","speaking":true}"#,
         ),
     ]
 }

@@ -34,6 +34,7 @@ const GROUP_OR_WORLD_READABLE: u32 = 0o044;
 const MAX_WHISPER_BEAMS: u32 = 8;
 const MAX_UTTERANCE_SECS: u32 = 300;
 const WAKEWORD_COMMAND_TIMEOUT_MS: RangeInclusive<u32> = 500..=15000;
+const MAX_WAKEWORD_FOLLOW_UP_MS: u32 = 30_000;
 const MIN_SENTENCE_CHARS: u32 = 50;
 const MAX_SENTENCE_CHARS: u32 = 2000;
 /// Matches the largest `limit` the `reminisce` tool accepts.
@@ -315,6 +316,12 @@ fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {
             MAX_UTTERANCE_SECS,
         );
         validate_wakeword_timeout(errors, voice.wakeword.command_timeout_ms);
+        if voice.wakeword.follow_up_ms > MAX_WAKEWORD_FOLLOW_UP_MS {
+            errors.push(format!(
+                "voice.wakeword.follow_up_ms must be at most {MAX_WAKEWORD_FOLLOW_UP_MS}, got {}",
+                voice.wakeword.follow_up_ms
+            ));
+        }
     }
     if voice.synthesis.enabled {
         validate_synthesis(errors, &voice.synthesis);

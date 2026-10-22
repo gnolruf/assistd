@@ -204,6 +204,11 @@ impl UtteranceVad {
         }
     }
 
+    /// Whether an utterance is being recorded, its trailing silence included.
+    pub fn in_utterance(&self) -> bool {
+        matches!(self.phase, Phase::Voiced | Phase::Trailing { .. })
+    }
+
     /// Discard any in-progress utterance and pre-roll and return to silence.
     pub fn reset(&mut self) {
         self.phase = Phase::Silent;

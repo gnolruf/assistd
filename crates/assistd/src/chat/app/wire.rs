@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::super::ui::turn_summary;
 use super::{
     ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
-    WireStream,
+    WakeWordStream, WireStream,
 };
 
 impl App {
@@ -63,6 +63,10 @@ impl App {
     }
 
     fn on_wire_event(&mut self, stream: WireStream, ev: Event) {
+        if let WireStream::WakeWord(wake_word_stream) = stream {
+            self.on_wake_word_event(wake_word_stream, ev);
+            return;
+        }
         if matches!(stream, WireStream::Reply) && !self.accept_reply_event(&ev) {
             return;
         }
@@ -104,6 +108,7 @@ impl App {
             | Event::WakeWordStatus { .. }
             | Event::WakeWordEnrollment { .. }
             | Event::WakeWordTest { .. }
+            | Event::WakeWordSpeech { .. }
             | Event::LastDelta { .. } => {}
         }
     }
@@ -501,7 +506,7 @@ impl App {
                     self.open_resume_picker();
                 }
             }
-            WireStream::Status => {}
+            WireStream::Status | WireStream::WakeWord(_) => {}
         }
     }
 
@@ -512,7 +517,8 @@ impl App {
                 self.in_flight_branch_op = None;
                 self.branches_buffer.clear();
             }
-            WireStream::Status => {}
+            WireStream::WakeWord(WakeWordStream::Session) => self.fail_wake_word_session(),
+            WireStream::Status | WireStream::WakeWord(_) => {}
         }
     }
 }

@@ -20,6 +20,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/new", ""),
     ("/resume", ""),
     ("/undo", ""),
+    ("/wakeword", ""),
 ];
 
 impl App {
@@ -34,6 +35,8 @@ impl App {
     pub(crate) fn on_key(&mut self, ev: KeyEvent) {
         if self.shown_resume_picker().is_some() {
             self.on_resume_picker_key(ev);
+        } else if self.shown_wake_word_panel().is_some() {
+            self.on_wake_word_key(ev);
         } else if ev.code == KeyCode::BackTab {
             self.toggle_permission_mode();
         } else if self.confirmation.is_some() {
