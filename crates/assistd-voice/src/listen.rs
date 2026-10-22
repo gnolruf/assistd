@@ -16,7 +16,6 @@ pub mod capture;
 pub mod consumer;
 pub mod enrollment;
 pub mod mic;
-pub mod playback_gate;
 pub mod profile;
 pub mod silero;
 pub mod vad;

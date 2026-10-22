@@ -23,9 +23,12 @@ window-manager bindings), and integrates with the running compositor for context
   the web ([web search](docs/web-search.md)). Alongside it, `remember`
   saves and looks up facts, and `reminisce` searches
   transcripts from earlier sessions.
-- **Voice in/out.** Push-to-talk and continuous listening via
-  `whisper.cpp`; spoken responses via Piper TTS, streamed sentence by
-  sentence so playback starts before the model has finished.
+- **Voice in/out.** Push-to-talk and hands-free
+  [wake-word listening](docs/voice/wake-word.md) via `whisper.cpp`,
+  with the wake phrase enrolled to your voice in the chat TUI's
+  `/wakeword`; spoken responses via Piper TTS, streamed sentence by
+  sentence so playback starts before the model has finished, and
+  interruptible by talking over them.
 - **Vision when the model has it.** `see photo.png` and `screenshot`
   attach images to the next turn whenever the loaded model has a
   vision projector; capability is detected at runtime.
@@ -145,7 +148,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd cycle`          | Step `Active → Drowsy → Sleeping → Active`.                   |
 | `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |
 | `assistd ptt-start/stop` | Push-to-talk start/stop, for window-manager bindings.         |
-| `assistd listen-toggle`  | Toggle hands-free continuous listening.                       |
+| `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |
 | `assistd voice-toggle`   | Toggle Piper TTS playback.                                    |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |

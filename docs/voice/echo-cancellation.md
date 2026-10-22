@@ -1,17 +1,15 @@
 # Echo Cancellation for Continuous Listening
 
-By default, continuous listening mutes the mic while a reply is being
-spoken (`voice.wakeword.playback_gate = true`), so the daemon never
-answers its own TTS. The exception is barge-in (`voice.wakeword.barge_in`):
-during a reply to a wake-word command the mic stays open, and speech
-interrupts the reply once Whisper confirms it holds words the reply did
-not just say. That rejects echo by text alone, which works through
-headphones but is unreliable through speakers: Whisper mishears echo
-mixed with your voice, and a command you give over the reply carries
-some of the reply's words.
+Continuous listening keeps the mic open while a reply is spoken, so
+through speakers it hears the daemon's own TTS. During a reply to a
+wake-word command, speech interrupts the reply (barge-in,
+`voice.wakeword.barge_in`) once Whisper confirms it holds words the
+reply did not just say. That rejects echo by text alone, which works
+through headphones but is unreliable through speakers: Whisper mishears
+echo mixed with your voice, and a command you give over the reply
+carries some of the reply's words.
 
-For clean barge-in through speakers, let the sound server cancel the
-echo and turn the gate off. `assistd` does not implement echo
+With speakers, let the sound server cancel the echo. `assistd` does not implement echo
 cancellation itself; it consumes whatever mic source the system hands
 it. Both PipeWire and PulseAudio ship WebRTC's echo canceller as a
 loadable module that creates a virtual sink and a virtual source. Audio played to the sink is used as
@@ -72,14 +70,9 @@ set-default-sink echo-cancel-sink
 
 Then `pulseaudio -k` and let it respawn.
 
-## Turn the gate off
+## Check it
 
-```toml
-[voice.wakeword]
-playback_gate = false
-```
-
-Restart the daemon. If the daemon starts answering itself, the
+Restart the daemon. If barge-in fires on the daemon's own replies, the
 cancelled source is not the one being captured; check `wpctl status`
 or `pactl info` and set the defaults again. Bare ALSA has no
-echo-cancellation module, so leave the gate on there.
+echo-cancellation module, so use headphones there.
