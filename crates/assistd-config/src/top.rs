@@ -21,7 +21,7 @@ use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
 use crate::notifications::{NotificationsConfig, TrayIconsConfig};
 use crate::search::SearchConfig;
-use crate::settings::DescribeSettings;
+use crate::settings::{DescribeSettings, describe_fields};
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::{ToolsConfig, ToolsOutputConfig};
@@ -41,35 +41,41 @@ const MAX_SENTENCE_CHARS: u32 = 2000;
 const MAX_EMBEDDING_TOP_K: u32 = 20;
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
-#[derive(DescribeSettings, Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    #[setting(nested)]
     pub model: ModelConfig,
-    #[setting(nested)]
     pub chat: ChatConfig,
-    #[setting(nested)]
     pub voice: VoiceConfig,
-    #[setting(nested)]
     pub compositor: CompositorConfig,
-    #[setting(nested)]
     pub sleep: SleepConfig,
-    #[setting(nested)]
     pub hotkeys: HotkeysConfig,
-    #[setting(nested)]
     pub tools: ToolsConfig,
-    #[setting(nested)]
     pub memory: MemoryConfig,
-    #[setting(nested)]
     pub embedding: EmbeddingConfig,
-    #[setting(nested)]
     pub search: SearchConfig,
-    #[setting(nested)]
     pub mcp: McpConfig,
     #[serde(skip)]
     pub timeouts: TimeoutsConfig,
-    #[setting(nested)]
     pub notifications: NotificationsConfig,
+}
+
+impl DescribeSettings for Config {
+    describe_fields! {
+        model => nested,
+        chat => nested,
+        voice => nested,
+        compositor => nested,
+        sleep => nested,
+        hotkeys => nested,
+        tools => nested,
+        memory => nested,
+        embedding => nested,
+        search => nested,
+        mcp => nested,
+        timeouts => skip,
+        notifications => nested,
+    }
 }
 
 impl Config {

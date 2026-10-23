@@ -3,19 +3,24 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::DEFAULT_MEMORY_ENABLED;
-use crate::settings::DescribeSettings;
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// SQLite-backed memory settings.
-#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// When `false`, the model gets no `remember` or `reminisce` tool and no
     /// recalled past context; chats are saved either way.
-    #[setting(
-        label = "remember memories and past chats",
-        description = "Gives the model remember and reminisce tools"
-    )]
     pub enabled: bool,
+}
+
+impl DescribeSettings for MemoryConfig {
+    describe_fields! {
+        enabled => (
+            "recall memories and past chats",
+            "Gives the model remember and reminisce tools"
+        ),
+    }
 }
 
 impl Default for MemoryConfig {

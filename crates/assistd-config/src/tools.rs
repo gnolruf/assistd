@@ -9,24 +9,29 @@ use crate::defaults::{
     default_bash_destructive_patterns, default_tools_overflow_dir, default_tools_scratch_dir,
     default_writable_paths,
 };
-use crate::settings::DescribeSettings;
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// Tools subsystem configuration.
-#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ToolsConfig {
-    #[setting(nested)]
     pub scratch: ToolsScratchConfig,
-    #[setting(nested)]
     pub output: ToolsOutputConfig,
-    #[setting(nested)]
     pub bash: ToolsBashConfig,
-    #[setting(nested)]
     pub write: ToolsWriteConfig,
 }
 
+impl DescribeSettings for ToolsConfig {
+    describe_fields! {
+        scratch => nested,
+        output => nested,
+        bash => nested,
+        write => nested,
+    }
+}
+
 /// The directory `bash` scripts and the other commands share.
-#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsScratchConfig {
     /// Bound writable into the sandbox, and writable by `write` without
@@ -34,21 +39,26 @@ pub struct ToolsScratchConfig {
     /// start with `~/`. Defaults to `$XDG_RUNTIME_DIR/assistd/scratch`, else
     /// under the user cache dir.
     #[serde(deserialize_with = "crate::home_path::deserialize")]
-    #[setting(
-        label = "scratch folder",
-        description = "Folder tools may write to freely; absolute or starting with ~/",
-        advanced
-    )]
     pub dir: PathBuf,
     /// Days an entry in `dir` is kept after it last changed; older ones,
     /// and directories that leaves empty, are removed on daemon startup.
     /// 0 empties the directory at every startup.
-    #[setting(
-        label = "keep scratch files (days)",
-        description = "Days scratch files are kept; 0 empties it at every startup",
-        advanced
-    )]
     pub retention_days: u32,
+}
+
+impl DescribeSettings for ToolsScratchConfig {
+    describe_fields! {
+        dir => (
+            "scratch folder",
+            "Folder tools may write to freely; absolute or starting with ~/",
+            advanced
+        ),
+        retention_days => (
+            "keep scratch files (days)",
+            "Days scratch files are kept; 0 empties it at every startup",
+            advanced
+        ),
+    }
 }
 
 impl Default for ToolsScratchConfig {
@@ -62,23 +72,13 @@ impl Default for ToolsScratchConfig {
 
 /// Limits on every tool result before it reaches the LLM; the excess
 /// spills to a file whose path the model is given.
-#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsOutputConfig {
     /// Max lines of one tool result, notices included.
-    #[setting(
-        label = "max result lines",
-        description = "Most lines of one tool result",
-        advanced
-    )]
     pub max_lines: NonZeroU32,
     /// Max size of one tool result in KB, notices included. At about 256
     /// tokens per KB, must not exceed a quarter of `chat.max_history_tokens`.
-    #[setting(
-        label = "max result size (KB)",
-        description = "Largest tool result; at most a quarter of the history budget",
-        advanced
-    )]
     pub max_kb: NonZeroU32,
     /// Spill directory for overflow (`cmd-<n>.txt` for `run`,
     /// `<tool>-<n>.txt` for any other tool); made owner-only on daemon
@@ -87,12 +87,19 @@ pub struct ToolsOutputConfig {
     /// or 128 MiB. Must be absolute or start with `~/`. Defaults to
     /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
     #[serde(deserialize_with = "crate::home_path::deserialize")]
-    #[setting(
-        label = "overflow folder",
-        description = "Where cut-off tool output is saved in full",
-        advanced
-    )]
     pub overflow_dir: PathBuf,
+}
+
+impl DescribeSettings for ToolsOutputConfig {
+    describe_fields! {
+        max_lines => ("max result lines", "Most lines of one tool result", advanced),
+        max_kb => (
+            "max result size (KB)",
+            "Largest tool result; at most a quarter of the history budget",
+            advanced
+        ),
+        overflow_dir => ("overflow folder", "Where cut-off tool output is saved in full", advanced),
+    }
 }
 
 impl Default for ToolsOutputConfig {
@@ -130,34 +137,20 @@ pub enum BashSandboxMode {
 /// Policy for the scripts `bash` runs. A script runs
 /// without confirmation only when every program it can run is allowed and
 /// it matches no destructive pattern; the denylist refuses outright.
-#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsBashConfig {
     /// `bash` timeout in seconds; on expiry the process group is killed
     /// (exit 137).
-    #[setting(
-        label = "command timeout (s)",
-        description = "Longest a bash command runs before it is killed"
-    )]
     pub timeout_secs: NonZeroU64,
     /// Case-insensitive substrings that reject a script before spawn (exit
     /// 126). An entry ending in a non-alphanumeric must also end a shell
     /// word: `"rm -rf /"` rejects `rm -rf /` but not `rm -rf /tmp/build`.
-    #[setting(
-        label = "blocked commands",
-        description = "Case-insensitive substrings that reject a script outright",
-        advanced
-    )]
     pub denylist: Vec<String>,
     /// Programs that run without confirmation: absolute paths, or bare
     /// names resolved on `PATH` that count only if the file is not
     /// user-writable or is the one approved. "Always allow" approvals
     /// persist in `allowed_programs.toml` beside the config file.
-    #[setting(
-        label = "programs run without asking",
-        description = "Programs that run without asking for confirmation",
-        advanced
-    )]
     pub allowed_programs: Vec<String>,
     /// Commands that need confirmation, and are refused when no one can
     /// confirm. Each is a command name (matching any path ending in it)
@@ -167,28 +160,41 @@ pub struct ToolsBashConfig {
     /// with that prefix; other words match exactly. Quoted text is one
     /// word, so `"rm -r|--recursive"` matches `rm -vfr x` but not
     /// `echo "rm -rf"`.
-    #[setting(
-        label = "commands that always ask",
-        description = "Commands that always ask, and are refused when no one can confirm",
-        advanced
-    )]
     pub destructive_patterns: Vec<String>,
-    #[setting(
-        label = "sandbox",
-        description = "auto uses bubblewrap if installed; tools are disabled unsandboxed"
-    )]
     pub sandbox: BashSandboxMode,
     /// Extra bubblewrap arguments, inserted before the trailing `--`: e.g.
     /// `["--share-net"]` giving `bash` the network (it has none by default;
     /// needs Linux 6.12+ Landlock scoping to keep abstract sockets out, or
     /// tools are disabled), or a `--bind` making a dot entry of `$HOME`
     /// writable (read-only).
-    #[setting(
-        label = "extra bubblewrap arguments",
-        description = "Extra bubblewrap arguments, e.g. --share-net for network access",
-        advanced
-    )]
     pub bwrap_extra_args: Vec<String>,
+}
+
+impl DescribeSettings for ToolsBashConfig {
+    describe_fields! {
+        timeout_secs => ("command timeout (s)", "Longest a bash command runs before it is killed"),
+        denylist => (
+            "blocked commands",
+            "Case-insensitive substrings that reject a script outright",
+            advanced
+        ),
+        allowed_programs => (
+            "programs run without asking",
+            "Programs that run without asking for confirmation",
+            advanced
+        ),
+        destructive_patterns => (
+            "commands that always ask",
+            "Commands that always ask, and are refused when no one can confirm",
+            advanced
+        ),
+        sandbox => ("sandbox", "auto uses bubblewrap if installed; tools are disabled unsandboxed"),
+        bwrap_extra_args => (
+            "extra bubblewrap arguments",
+            "Extra bubblewrap arguments, e.g. --share-net for network access",
+            advanced
+        ),
+    }
 }
 
 impl Default for ToolsBashConfig {
@@ -205,7 +211,7 @@ impl Default for ToolsBashConfig {
 }
 
 /// Write-command policy.
-#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsWriteConfig {
     /// Non-empty path prefixes `write` may create files under; symlinks and dot
@@ -213,11 +219,16 @@ pub struct ToolsWriteConfig {
     /// Writes here ask the user first; `tools.scratch.dir` is always
     /// writable, without asking. `~` and `~/` expand to
     /// `$HOME`; any other relative entry errors, missing ones are dropped.
-    #[setting(
-        label = "writable folders",
-        description = "Folders write may create files under, after asking"
-    )]
     pub writable_paths: Vec<String>,
+}
+
+impl DescribeSettings for ToolsWriteConfig {
+    describe_fields! {
+        writable_paths => (
+            "writable folders",
+            "Folders write may create files under, after asking"
+        ),
+    }
 }
 
 impl Default for ToolsWriteConfig {

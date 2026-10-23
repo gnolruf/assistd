@@ -2,8 +2,6 @@
 //! [`defaults`]; an unknown key is ignored with a warning, and `0` in a
 //! `NonZero*` field is a parse error.
 
-extern crate self as assistd_config;
-
 pub mod chat;
 pub mod compositor;
 pub mod custom_args;
