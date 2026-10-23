@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/assistd",
     "crates/assistd-config",
+    "crates/assistd-config-derive",
     "crates/assistd-core",
     "crates/assistd-embed",
     "crates/assistd-ipc",
@@ -25,6 +26,7 @@ rust-version = "1.98"
 
 [workspace.dependencies]
 assistd-config = { version = "1.1", path = "crates/assistd-config" }
+assistd-config-derive = { version = "1.1", path = "crates/assistd-config-derive" }
 assistd-core   = { version = "1.1", path = "crates/assistd-core" }
 assistd-embed  = { version = "1.1", path = "crates/assistd-embed" }
 assistd-ipc    = { version = "1.1", path = "crates/assistd-ipc" }
@@ -38,6 +40,9 @@ assistd-utils  = { version = "1.1", path = "crates/assistd-utils", default-featu
 assistd-wm     = { version = "1.1", path = "crates/assistd-wm", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
+proc-macro2 = "1"
+quote = "1"
+syn = "2"
 serde_json = "1"
 tokio = { version = "1.52.3", default-features = false }
 tokio-util = { version = "0.7", features = ["rt"] }

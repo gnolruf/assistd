@@ -118,7 +118,7 @@ impl SettingsPanel {
                         section
                             .settings
                             .iter()
-                            .filter(move |setting| shown || !setting.advanced)
+                            .filter(move |setting| shown || !setting.advanced())
                             .map(move |setting| Row::Setting(index, setting)),
                     )
                     .chain(toggle)

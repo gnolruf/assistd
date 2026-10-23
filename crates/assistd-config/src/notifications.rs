@@ -5,22 +5,37 @@ use crate::defaults::{
     DEFAULT_NOTIFICATIONS_ENABLED, DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED,
     DEFAULT_TRAY_ICON_GENERATING, DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
 };
+use crate::settings::DescribeSettings;
 
 /// freedesktop icon-theme names the tray icon shows per state; none may be
 /// empty. Custom artwork under `~/.local/share/icons/<theme>/` is found by
 /// its file name without the extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TrayIconsConfig {
     /// The daemon is awake and idle.
+    #[setting(label = "awake", description = "Tray icon while awake and idle")]
     pub active: String,
     /// The daemon is drowsy, asleep, or loading the model.
+    #[setting(
+        label = "sleeping",
+        description = "Tray icon while drowsy, asleep or loading the model"
+    )]
     pub sleeping: String,
     /// The wake phrase was heard, or a push-to-talk capture is underway.
+    #[setting(label = "listening", description = "Tray icon while hearing a query")]
     pub listening: String,
     /// A turn is in flight.
+    #[setting(
+        label = "generating",
+        description = "Tray icon while a turn is in flight"
+    )]
     pub generating: String,
     /// The daemon socket is unreachable.
+    #[setting(
+        label = "disconnected",
+        description = "Tray icon while the daemon is unreachable"
+    )]
     pub disconnected: String,
 }
 
@@ -39,17 +54,30 @@ impl Default for TrayIconsConfig {
 /// Desktop notifications from `assistd tray` showing a turn's activity, tool
 /// calls and reply, plus the tray icon's names. No notification is sent while
 /// the chat has keyboard focus.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct NotificationsConfig {
+    #[setting(
+        label = "enabled",
+        description = "Desktop notifications of each turn from assistd tray"
+    )]
     pub enabled: bool,
     /// Idle ms before the notification closes, `500..=60000`. Reset by
     /// each event and paused while a turn is in flight.
+    #[setting(
+        label = "hide after idle (ms)",
+        description = "Idle time before a notification closes, 500 to 60000"
+    )]
     pub auto_hide_ms: u64,
     /// Ask for a short plain-text reply to a voice turn while the chat is
     /// unfocused or closed.
+    #[setting(
+        label = "brief voice replies when away",
+        description = "Ask for short replies to voice turns while the chat is unfocused"
+    )]
     pub brief_when_away: bool,
     /// Used by the tray icon whether or not notifications are enabled.
+    #[setting(nested)]
     pub icons: TrayIconsConfig,
 }
 

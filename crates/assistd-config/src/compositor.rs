@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::settings::DescribeSettings;
+
 /// The `compositor.type` values. `Auto` defers to [`detect_from_env`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -19,11 +21,15 @@ pub enum Compositor {
 }
 
 /// The compositor that window management and screenshots target.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CompositorConfig {
     /// The `type` key.
     #[serde(rename = "type")]
+    #[setting(
+        label = "compositor",
+        description = "Compositor to manage windows and take screenshots on; auto detects"
+    )]
     pub compositor_type: CompositorType,
 }
 

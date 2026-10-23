@@ -8,13 +8,22 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{DEFAULT_MCP_ENABLED, DEFAULT_MCP_REQUEST_TIMEOUT_SECS};
+use crate::settings::DescribeSettings;
 
 /// Model Context Protocol client settings.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct McpConfig {
     /// When `false`, no server in `servers` is connected.
+    #[setting(
+        label = "enabled",
+        description = "Connects the MCP servers listed below"
+    )]
     pub enabled: bool,
+    #[setting(
+        label = "servers",
+        description = "MCP servers to run; edit in config.toml"
+    )]
     pub servers: Vec<McpServerConfig>,
 }
 

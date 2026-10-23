@@ -2,6 +2,8 @@
 //! [`defaults`]; an unknown key is ignored with a warning, and `0` in a
 //! `NonZero*` field is a parse error.
 
+extern crate self as assistd_config;
+
 pub mod chat;
 pub mod compositor;
 pub mod custom_args;
@@ -16,6 +18,7 @@ pub mod memory;
 pub mod model;
 pub mod notifications;
 pub mod search;
+pub mod settings;
 pub mod sleep;
 pub mod timeouts;
 pub mod tools;
@@ -34,6 +37,7 @@ pub use memory::MemoryConfig;
 pub use model::ModelConfig;
 pub use notifications::{NotificationsConfig, TrayIconsConfig};
 pub use search::{SearchCommand, SearchConfig, SearchEngine};
+pub use settings::{DescribeSettings, SettingInfo, setting_info};
 pub use sleep::SleepConfig;
 pub use timeouts::TimeoutsConfig;
 pub use tools::{

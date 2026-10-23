@@ -115,9 +115,10 @@ wrong, fix the test and explain why in the commit message.
 
 ## Workspace layout
 
-The workspace is split into one binary plus twelve library crates.
-`assistd-utils` sits at the very bottom (no internal deps), with
-`assistd-config` and `assistd-ipc` just above it; `assistd-core` and
+The workspace is split into one binary plus thirteen library crates.
+`assistd-utils` and the `assistd-config-derive` proc macro sit at the
+very bottom (no internal deps), with `assistd-config` and `assistd-ipc`
+just above them; `assistd-core` and
 the `assistd` binary sit at the top. See
 [docs/architecture.md](docs/architecture.md) for the full diagram
 and data-flow walkthrough.
@@ -125,7 +126,8 @@ and data-flow walkthrough.
 | Crate            | Responsibility                                                                                                                  |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------|
 | `assistd`        | Binary (`assistd` on `$PATH`; package `assistd-cli`). CLI parsing (`daemon`, `query`, `chat`, `settings`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`) are optional features; `settings` ships with `chat`. |
-| `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
+| `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable, including each key's settings-panel label, description and advanced flag, declared on the field with `#[setting(...)]`; every other crate that needs configuration depends on this one. Depends only on `assistd-utils` and `assistd-config-derive`. |
+| `assistd-config-derive` | Proc macro: `#[derive(DescribeSettings)]`, which turns each config field's `#[setting(...)]` into `SettingInfo`. A field with neither metadata nor `#[serde(skip)]` fails to compile. No internal deps. |
 | `assistd-core`   | Daemon glue. Owns `AppState`, the per-turn `Agent` loop, the Unix-socket server, the presence state machine, and the `build_tools()` factory that wires every subsystem together. |
 | `assistd-embed`  | Embedding HTTP client + background job queue. Pulls chunks off an mpsc, batches them to the embedding `llama-server`, writes vectors into `assistd-memory`'s semantic store. |
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light; depends only on `assistd-utils`. |
@@ -142,8 +144,8 @@ and data-flow walkthrough.
 crates higher up. If you find yourself wanting `assistd-memory` to
 call into `assistd-core`, you're holding it wrong — invert the
 dependency or move the type. `assistd-utils` has no internal deps and
-is the only one `assistd-config` and `assistd-ipc` may take; they're
-the foundation everything else builds on.
+is the only one `assistd-ipc` may take; `assistd-config` may also take
+`assistd-config-derive`. They're the foundation everything else builds on.
 
 **Shared logic goes in `assistd-utils`.** When the same function or
 type would otherwise be written in two crates, put it in
@@ -172,7 +174,8 @@ stays where it is used.
 - **`config.toml` is canonical.** The annotated
   [config/config.sample.toml](config/config.sample.toml) documents
   every tunable. If you add a new option, update the schema in
-  `assistd-config` *and* the sample.
+  `assistd-config` (with its `#[setting(...)]`), the sample, and the
+  settings panel's catalog, which places the key in a section.
 
 ## What not to do
 

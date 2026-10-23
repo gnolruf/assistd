@@ -9,30 +9,69 @@ use crate::defaults::{
     DEFAULT_MODEL_CONTEXT_LENGTH, DEFAULT_MODEL_GPU_LAYERS, DEFAULT_MODEL_HOST, DEFAULT_MODEL_NAME,
     DEFAULT_MODEL_PORT, DEFAULT_MODEL_READY_TIMEOUT_SECS, DEFAULT_MODEL_SERVER_BINARY,
 };
+use crate::settings::DescribeSettings;
 
 /// The chat model and the local server process that serves it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ModelConfig {
     /// HuggingFace model the server loads, as `owner/repo:quant`. Must
     /// not be empty.
+    #[setting(
+        label = "model",
+        description = "Hugging Face model to load, as owner/repo:quant"
+    )]
     pub name: String,
     /// Context window length in tokens.
+    #[setting(
+        label = "context window (tokens)",
+        description = "Tokens the model can see at once, prompt and reply together"
+    )]
     pub context_length: NonZeroU32,
     /// Server binary path, or a name on `$PATH`. Must not be empty.
+    #[setting(
+        label = "llama-server binary",
+        description = "llama-server path, or a name on $PATH",
+        advanced
+    )]
     pub server_binary: PathBuf,
     /// Bind host. Must be loopback: the server has no authentication.
+    #[setting(
+        label = "server address",
+        description = "Address the model server binds; must be loopback",
+        advanced
+    )]
     pub host: IpAddr,
     /// Bind port.
+    #[setting(
+        label = "server port",
+        description = "Port the model server binds",
+        advanced
+    )]
     pub port: NonZeroU16,
     /// Layers offloaded to the GPU; values above the model's layer count
     /// offload every layer.
+    #[setting(
+        label = "layers offloaded to GPU",
+        description = "Layers offloaded to the GPU; above the model's count offloads all",
+        advanced
+    )]
     pub gpu_layers: u32,
     /// Last-ditch cap, in seconds, on becoming healthy and loading the model;
     /// neither wait trips while progressing.
+    #[setting(
+        label = "startup timeout (s)",
+        description = "Longest wait for the model server to start and load",
+        advanced
+    )]
     pub ready_timeout_secs: NonZeroU64,
     /// Extra server arguments. Flags assistd sets itself, or that expose
     /// files, tools or state through the server, fail to parse.
+    #[setting(
+        label = "extra server arguments",
+        description = "Extra llama-server arguments; flags assistd sets are refused",
+        advanced
+    )]
     pub custom_args: CustomArgs<ChatServer>,
 }
 

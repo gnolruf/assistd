@@ -12,27 +12,55 @@ use crate::defaults::{
     DEFAULT_SEARCH_PORT, DEFAULT_SEARCH_READY_TIMEOUT_SECS,
 };
 use crate::errors::SearchCommandError;
+use crate::settings::DescribeSettings;
 
 /// A daemon-supervised SearXNG instance.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(DescribeSettings, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SearchConfig {
     /// When `false`, no instance starts and web search is unavailable.
+    #[setting(
+        label = "enabled",
+        description = "Enables web search through a local SearXNG instance"
+    )]
     pub enabled: bool,
     /// The entry point to run. It must honour the `SEARXNG_*` variables assistd
     /// sets, serve `host:port` in the foreground, and answer `GET /healthz`
     /// with 200; uWSGI, Granian and containers need a wrapper that does so.
+    #[setting(
+        label = "SearXNG command",
+        description = "SearXNG entry point; must serve host:port in the foreground"
+    )]
     pub command: SearchCommand,
     /// Bind host. Must be loopback: the instance has no authentication.
+    #[setting(
+        label = "server address",
+        description = "Address SearXNG binds; must be loopback",
+        advanced
+    )]
     pub host: IpAddr,
     /// Bind port. Must differ from `model.port` and `embedding.port`.
+    #[setting(
+        label = "server port",
+        description = "Port SearXNG binds; must differ from the model and embedding ports",
+        advanced
+    )]
     pub port: NonZeroU16,
     /// Longest, in seconds, a freshly spawned instance may take to answer
     /// its health check before the attempt counts as failed.
+    #[setting(
+        label = "startup timeout (s)",
+        description = "Longest wait for SearXNG to pass its health check",
+        advanced
+    )]
     pub ready_timeout_secs: NonZeroU64,
     /// SearXNG engines to search with; only these load, each enabled even if
     /// SearXNG ships it disabled or inactive. Must not be empty; a name
     /// SearXNG does not know is logged and skipped.
+    #[setting(
+        label = "search engines",
+        description = "SearXNG engines to search with; must not be empty"
+    )]
     pub engines: Vec<SearchEngine>,
 }
 

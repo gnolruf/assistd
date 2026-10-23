@@ -47,6 +47,11 @@ fn catalog_lists_every_schema_key_and_only_schema_keys() {
     let root = tempfile::tempdir().unwrap();
     let mut document = ConfigDocument::open(&root.path().join("config.toml")).unwrap();
     for setting in settings() {
+        assert!(
+            setting_info(setting.key).is_some(),
+            "{} has no #[setting] metadata",
+            setting.key
+        );
         let value = document
             .default_value(setting.key)
             .cloned()

@@ -1,6 +1,8 @@
 //! The settings the panel lists, grouped into sections in display order and
 //! sections into tabs. A feature's section heading is the checkbox that enables it.
 
+use assistd_config::{SettingInfo, setting_info};
+
 const COMPOSITOR_TYPES: &[&str] = &["auto", "i3", "sway", "hyprland"];
 const SANDBOX_MODES: &[&str] = &["auto", "bwrap", "none"];
 
@@ -9,107 +11,43 @@ pub(crate) const SECTIONS: &[Section] = &[
         Tab::General,
         "Hotkeys",
         &[
-            basic("hotkeys.push_to_talk", "push-to-talk", SettingKind::Text),
-            basic(
-                "hotkeys.toggle_listening",
-                "toggle wake-word listening",
-                SettingKind::Text,
-            ),
-            basic(
-                "hotkeys.toggle_speech",
-                "toggle spoken replies",
-                SettingKind::Text,
-            ),
-            basic(
-                "hotkeys.skip_speech",
-                "skip the current reply",
-                SettingKind::Text,
-            ),
+            setting("hotkeys.push_to_talk", SettingKind::Text),
+            setting("hotkeys.toggle_listening", SettingKind::Text),
+            setting("hotkeys.toggle_speech", SettingKind::Text),
+            setting("hotkeys.skip_speech", SettingKind::Text),
         ],
     ),
     section(
         Tab::Model,
         "Model",
         &[
-            basic("model.name", "model", SettingKind::Text),
-            basic(
-                "model.context_length",
-                "context window (tokens)",
-                SettingKind::Integer,
-            ),
-            basic(
-                "model.gpu_layers",
-                "layers offloaded to GPU",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "model.server_binary",
-                "llama-server binary",
-                SettingKind::Text,
-            ),
-            advanced("model.host", "server address", SettingKind::Text),
-            advanced("model.port", "server port", SettingKind::Integer),
-            advanced(
-                "model.ready_timeout_secs",
-                "startup timeout (s)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "model.custom_args",
-                "extra server arguments",
-                SettingKind::Text,
-            ),
+            setting("model.name", SettingKind::Text),
+            setting("model.context_length", SettingKind::Integer),
+            setting("model.gpu_layers", SettingKind::Integer),
+            setting("model.server_binary", SettingKind::Text),
+            setting("model.host", SettingKind::Text),
+            setting("model.port", SettingKind::Integer),
+            setting("model.ready_timeout_secs", SettingKind::Integer),
+            setting("model.custom_args", SettingKind::Text),
         ],
     ),
     section(
         Tab::Model,
         "Chat",
         &[
-            basic("chat.system_prompt", "system prompt", SettingKind::Prose),
-            basic("chat.temperature", "temperature", SettingKind::Decimal),
-            basic(
-                "chat.max_response_tokens",
-                "max reply length (tokens)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "chat.max_history_tokens",
-                "history budget (tokens)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "chat.summary_target_tokens",
-                "summary length (tokens)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "chat.max_reasoning_tokens",
-                "max thinking (tokens)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "chat.reasoning_effort",
-                "reasoning effort",
-                SettingKind::Text,
-            ),
-            advanced(
-                "chat.request_timeout_secs",
-                "first-token timeout (s)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "chat.summary_temperature",
-                "summary temperature",
-                SettingKind::Decimal,
-            ),
-            advanced("chat.top_p", "top-p cutoff", SettingKind::Decimal),
-            advanced("chat.top_k", "top-k cutoff", SettingKind::Integer),
-            advanced("chat.min_p", "min-p cutoff", SettingKind::Decimal),
-            advanced(
-                "chat.presence_penalty",
-                "presence penalty",
-                SettingKind::Decimal,
-            ),
+            setting("chat.system_prompt", SettingKind::Prose),
+            setting("chat.temperature", SettingKind::Decimal),
+            setting("chat.max_response_tokens", SettingKind::Integer),
+            setting("chat.max_history_tokens", SettingKind::Integer),
+            setting("chat.summary_target_tokens", SettingKind::Integer),
+            setting("chat.max_reasoning_tokens", SettingKind::Integer),
+            setting("chat.reasoning_effort", SettingKind::Text),
+            setting("chat.request_timeout_secs", SettingKind::Integer),
+            setting("chat.summary_temperature", SettingKind::Decimal),
+            setting("chat.top_p", SettingKind::Decimal),
+            setting("chat.top_k", SettingKind::Integer),
+            setting("chat.min_p", SettingKind::Decimal),
+            setting("chat.presence_penalty", SettingKind::Decimal),
         ],
     ),
     feature(
@@ -118,42 +56,14 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("voice.enabled"),
         &[],
         &[
-            basic("voice.mic_device", "microphone", SettingKind::Text),
-            basic(
-                "voice.transcription.model",
-                "speech-to-text model",
-                SettingKind::Text,
-            ),
-            basic(
-                "voice.transcription.prefer_gpu",
-                "prefer GPU if available",
-                SettingKind::Toggle,
-            ),
-            advanced(
-                "voice.transcription.threads",
-                "CPU threads",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.transcription.beams",
-                "decoding beams",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.transcription.vad_enabled",
-                "enable silence trimming",
-                SettingKind::Toggle,
-            ),
-            advanced(
-                "voice.transcription.vad_model",
-                "voice-detection model",
-                SettingKind::Text,
-            ),
-            advanced(
-                "voice.transcription.model_cache_dir",
-                "model cache folder",
-                SettingKind::Text,
-            ),
+            setting("voice.mic_device", SettingKind::Text),
+            setting("voice.transcription.model", SettingKind::Text),
+            setting("voice.transcription.prefer_gpu", SettingKind::Toggle),
+            setting("voice.transcription.threads", SettingKind::Integer),
+            setting("voice.transcription.beams", SettingKind::Integer),
+            setting("voice.transcription.vad_enabled", SettingKind::Toggle),
+            setting("voice.transcription.vad_model", SettingKind::Text),
+            setting("voice.transcription.model_cache_dir", SettingKind::Text),
         ],
     ),
     feature(
@@ -162,41 +72,13 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("voice.wakeword.enabled"),
         &["voice.enabled"],
         &[
-            basic(
-                "voice.wakeword.start_on_launch",
-                "listen from launch",
-                SettingKind::Toggle,
-            ),
-            basic(
-                "voice.wakeword.barge_in",
-                "interrupt replies by talking",
-                SettingKind::Toggle,
-            ),
-            basic(
-                "voice.wakeword.follow_up_ms",
-                "follow-up window (ms)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.wakeword.silence_ms",
-                "end-of-speech silence (ms)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.wakeword.max_utterance_secs",
-                "max utterance (s)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.wakeword.command_timeout_ms",
-                "wait for command (ms)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.wakeword.match_similarity",
-                "phrase match strictness",
-                SettingKind::Decimal,
-            ),
+            setting("voice.wakeword.start_on_launch", SettingKind::Toggle),
+            setting("voice.wakeword.barge_in", SettingKind::Toggle),
+            setting("voice.wakeword.follow_up_ms", SettingKind::Integer),
+            setting("voice.wakeword.silence_ms", SettingKind::Integer),
+            setting("voice.wakeword.max_utterance_secs", SettingKind::Integer),
+            setting("voice.wakeword.command_timeout_ms", SettingKind::Integer),
+            setting("voice.wakeword.match_similarity", SettingKind::Decimal),
         ],
     ),
     feature(
@@ -205,56 +87,23 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("voice.synthesis.enabled"),
         &[],
         &[
-            basic("voice.synthesis.voice", "voice", SettingKind::Text),
-            basic(
-                "voice.synthesis.length_scale",
-                "speaking pace",
-                SettingKind::Decimal,
-            ),
-            basic(
-                "voice.synthesis.output_device",
-                "speaker",
-                SettingKind::Text,
-            ),
-            advanced(
-                "voice.synthesis.binary_path",
-                "piper binary",
-                SettingKind::Text,
-            ),
-            advanced(
-                "voice.synthesis.model_cache_dir",
-                "voice cache folder",
-                SettingKind::Text,
-            ),
-            advanced(
-                "voice.synthesis.espeak_data_dir",
-                "espeak-ng data folder",
-                SettingKind::Text,
-            ),
-            advanced(
-                "voice.synthesis.deadline_secs",
-                "per-sentence timeout (s)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.synthesis.max_sentence_chars",
-                "max sentence length (chars)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "voice.synthesis.partial_flush_ms",
-                "speak partial sentence after (ms)",
-                SettingKind::Integer,
-            ),
-            advanced("voice.synthesis.use_cuda", "use CUDA", SettingKind::Toggle),
+            setting("voice.synthesis.voice", SettingKind::Text),
+            setting("voice.synthesis.output_device", SettingKind::Text),
+            setting("voice.synthesis.length_scale", SettingKind::Decimal),
+            setting("voice.synthesis.binary_path", SettingKind::Text),
+            setting("voice.synthesis.model_cache_dir", SettingKind::Text),
+            setting("voice.synthesis.espeak_data_dir", SettingKind::Text),
+            setting("voice.synthesis.deadline_secs", SettingKind::Integer),
+            setting("voice.synthesis.max_sentence_chars", SettingKind::Integer),
+            setting("voice.synthesis.partial_flush_ms", SettingKind::Integer),
+            setting("voice.synthesis.use_cuda", SettingKind::Toggle),
         ],
     ),
     section(
         Tab::General,
         "Compositor",
-        &[basic(
+        &[setting(
             "compositor.type",
-            "compositor",
             SettingKind::Choice(COMPOSITOR_TYPES),
         )],
     ),
@@ -262,16 +111,8 @@ pub(crate) const SECTIONS: &[Section] = &[
         Tab::General,
         "Sleep",
         &[
-            basic(
-                "sleep.idle_to_drowsy_mins",
-                "drowse after idle (min)",
-                SettingKind::Integer,
-            ),
-            basic(
-                "sleep.idle_to_sleep_mins",
-                "sleep after idle (min)",
-                SettingKind::Integer,
-            ),
+            setting("sleep.idle_to_drowsy_mins", SettingKind::Integer),
+            setting("sleep.idle_to_sleep_mins", SettingKind::Integer),
         ],
     ),
     feature(
@@ -280,83 +121,39 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("sleep.gpu_monitor_enabled"),
         &[],
         &[
-            basic(
-                "sleep.gpu_poll_secs",
-                "check interval (s)",
-                SettingKind::Integer,
-            ),
-            basic(
-                "sleep.gpu_headroom_mb",
-                "free VRAM to keep (MiB)",
-                SettingKind::Integer,
-            ),
-            basic(
-                "sleep.gpu_auto_wake",
-                "wake when VRAM frees up",
-                SettingKind::Toggle,
-            ),
+            setting("sleep.gpu_poll_secs", SettingKind::Integer),
+            setting("sleep.gpu_headroom_mb", SettingKind::Integer),
+            setting("sleep.gpu_auto_wake", SettingKind::Toggle),
         ],
     ),
     section(
         Tab::Tools,
         "Tools",
         &[
-            basic(
-                "tools.bash.sandbox",
-                "sandbox",
-                SettingKind::Choice(SANDBOX_MODES),
-            ),
-            basic(
-                "tools.bash.timeout_secs",
-                "command timeout (s)",
-                SettingKind::Integer,
-            ),
-            basic(
+            setting("tools.bash.sandbox", SettingKind::Choice(SANDBOX_MODES)),
+            setting("tools.bash.timeout_secs", SettingKind::Integer),
+            setting(
                 "tools.write.writable_paths",
-                "writable folders",
                 SettingKind::List(ListItem::Text),
             ),
-            advanced(
-                "tools.bash.denylist",
-                "blocked commands",
-                SettingKind::List(ListItem::Text),
-            ),
-            advanced(
+            setting("tools.bash.denylist", SettingKind::List(ListItem::Text)),
+            setting(
                 "tools.bash.allowed_programs",
-                "programs run without asking",
                 SettingKind::List(ListItem::Text),
             ),
-            advanced(
+            setting(
                 "tools.bash.destructive_patterns",
-                "commands that always ask",
                 SettingKind::List(ListItem::Text),
             ),
-            advanced(
+            setting(
                 "tools.bash.bwrap_extra_args",
-                "extra bubblewrap arguments",
                 SettingKind::List(ListItem::Text),
             ),
-            advanced("tools.scratch.dir", "scratch folder", SettingKind::Text),
-            advanced(
-                "tools.scratch.retention_days",
-                "keep scratch files (days)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "tools.output.max_lines",
-                "max result lines",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "tools.output.max_kb",
-                "max result size (KB)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "tools.output.overflow_dir",
-                "overflow folder",
-                SettingKind::Text,
-            ),
+            setting("tools.scratch.dir", SettingKind::Text),
+            setting("tools.scratch.retention_days", SettingKind::Integer),
+            setting("tools.output.max_lines", SettingKind::Integer),
+            setting("tools.output.max_kb", SettingKind::Integer),
+            setting("tools.output.overflow_dir", SettingKind::Text),
         ],
     ),
     feature(
@@ -365,39 +162,15 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("embedding.enabled"),
         &[],
         &[
-            basic("embedding.model", "embedding model", SettingKind::Text),
-            basic(
-                "embedding.top_k",
-                "memories recalled per query",
-                SettingKind::Integer,
-            ),
-            basic(
-                "embedding.auto_inject",
-                "add recalled memories to queries",
-                SettingKind::Toggle,
-            ),
-            advanced(
-                "embedding.server_binary",
-                "llama-server binary",
-                SettingKind::Text,
-            ),
-            advanced("embedding.host", "server address", SettingKind::Text),
-            advanced("embedding.port", "server port", SettingKind::Integer),
-            advanced(
-                "embedding.gpu_layers",
-                "layers offloaded to GPU",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "embedding.ready_timeout_secs",
-                "startup timeout (s)",
-                SettingKind::Integer,
-            ),
-            advanced(
-                "embedding.custom_args",
-                "extra server arguments",
-                SettingKind::Text,
-            ),
+            setting("embedding.model", SettingKind::Text),
+            setting("embedding.top_k", SettingKind::Integer),
+            setting("embedding.auto_inject", SettingKind::Toggle),
+            setting("embedding.server_binary", SettingKind::Text),
+            setting("embedding.host", SettingKind::Text),
+            setting("embedding.port", SettingKind::Integer),
+            setting("embedding.gpu_layers", SettingKind::Integer),
+            setting("embedding.ready_timeout_secs", SettingKind::Integer),
+            setting("embedding.custom_args", SettingKind::Text),
         ],
     ),
     feature(
@@ -406,19 +179,11 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("search.enabled"),
         &[],
         &[
-            basic(
-                "search.engines",
-                "search engines",
-                SettingKind::List(ListItem::SearchEngine),
-            ),
-            basic("search.command", "SearXNG command", SettingKind::Text),
-            advanced("search.host", "server address", SettingKind::Text),
-            advanced("search.port", "server port", SettingKind::Integer),
-            advanced(
-                "search.ready_timeout_secs",
-                "startup timeout (s)",
-                SettingKind::Integer,
-            ),
+            setting("search.engines", SettingKind::List(ListItem::SearchEngine)),
+            setting("search.command", SettingKind::Text),
+            setting("search.host", SettingKind::Text),
+            setting("search.port", SettingKind::Integer),
+            setting("search.ready_timeout_secs", SettingKind::Integer),
         ],
     ),
     feature(
@@ -426,16 +191,12 @@ pub(crate) const SECTIONS: &[Section] = &[
         "MCP",
         enable("mcp.enabled"),
         &[],
-        &[basic("mcp.servers", "servers", SettingKind::External)],
+        &[setting("mcp.servers", SettingKind::External)],
     ),
     section(
         Tab::General,
         "Memory",
-        &[basic(
-            "memory.enabled",
-            "remember facts and past chats",
-            SettingKind::Toggle,
-        )],
+        &[setting("memory.enabled", SettingKind::Toggle)],
     ),
     feature(
         Tab::General,
@@ -443,43 +204,19 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("notifications.enabled"),
         &[],
         &[
-            basic(
-                "notifications.auto_hide_ms",
-                "hide after idle (ms)",
-                SettingKind::Integer,
-            ),
-            basic(
-                "notifications.brief_when_away",
-                "brief voice replies when away",
-                SettingKind::Toggle,
-            ),
+            setting("notifications.auto_hide_ms", SettingKind::Integer),
+            setting("notifications.brief_when_away", SettingKind::Toggle),
         ],
     ),
     section(
         Tab::General,
         "Tray icons",
         &[
-            basic("notifications.icons.active", "awake", SettingKind::Text),
-            basic(
-                "notifications.icons.sleeping",
-                "sleeping",
-                SettingKind::Text,
-            ),
-            basic(
-                "notifications.icons.listening",
-                "listening",
-                SettingKind::Text,
-            ),
-            advanced(
-                "notifications.icons.generating",
-                "generating",
-                SettingKind::Text,
-            ),
-            advanced(
-                "notifications.icons.disconnected",
-                "disconnected",
-                SettingKind::Text,
-            ),
+            setting("notifications.icons.active", SettingKind::Text),
+            setting("notifications.icons.sleeping", SettingKind::Text),
+            setting("notifications.icons.listening", SettingKind::Text),
+            setting("notifications.icons.generating", SettingKind::Text),
+            setting("notifications.icons.disconnected", SettingKind::Text),
         ],
     ),
 ];
@@ -510,15 +247,34 @@ pub(crate) enum ListItem {
     SearchEngine,
 }
 
-/// One config key, by its dotted path.
+/// One config key, by its dotted path. Its label, description and whether
+/// it is advanced are declared on the config field.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Setting {
     pub key: &'static str,
-    /// What the key is for, in words, shown in its place.
-    pub label: &'static str,
     pub kind: SettingKind,
+}
+
+impl Setting {
+    /// What the key is for, in words, shown in its place; the key itself if
+    /// no config field has its path.
+    pub(crate) fn label(&self) -> &'static str {
+        self.info().map_or(self.key, |info| info.label)
+    }
+
+    /// One line on what the key does, shown while it is selected.
+    pub(crate) fn description(&self) -> &'static str {
+        self.info().map_or("", |info| info.description)
+    }
+
     /// Listed only while its section shows advanced settings.
-    pub advanced: bool,
+    pub(crate) fn advanced(&self) -> bool {
+        self.info().is_some_and(|info| info.advanced)
+    }
+
+    fn info(&self) -> Option<&'static SettingInfo> {
+        setting_info(self.key)
+    }
 }
 
 /// A page of the panel, listing the sections filed under it.
@@ -559,7 +315,7 @@ pub(crate) struct Section {
 
 impl Section {
     pub(crate) fn advanced_count(&self) -> usize {
-        self.settings.iter().filter(|s| s.advanced).count()
+        self.settings.iter().filter(|s| s.advanced()).count()
     }
 }
 
@@ -591,25 +347,11 @@ const fn feature(
 
 /// A section's checkbox; its heading shows the title in place of a label.
 const fn enable(key: &'static str) -> Setting {
-    basic(key, "enabled", SettingKind::Toggle)
+    setting(key, SettingKind::Toggle)
 }
 
-const fn basic(key: &'static str, label: &'static str, kind: SettingKind) -> Setting {
-    Setting {
-        key,
-        label,
-        kind,
-        advanced: false,
-    }
-}
-
-const fn advanced(key: &'static str, label: &'static str, kind: SettingKind) -> Setting {
-    Setting {
-        key,
-        label,
-        kind,
-        advanced: true,
-    }
+const fn setting(key: &'static str, kind: SettingKind) -> Setting {
+    Setting { key, kind }
 }
 
 #[cfg(test)]

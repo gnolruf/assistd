@@ -185,6 +185,7 @@ dependencies = [
 name = "assistd-config"
 version = "1.4.0"
 dependencies = [
+ "assistd-config-derive",
  "assistd-utils",
  "dirs",
  "serde",
@@ -194,6 +195,15 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
+]
+
+[[package]]
+name = "assistd-config-derive"
+version = "1.4.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

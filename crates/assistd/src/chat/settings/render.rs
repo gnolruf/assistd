@@ -174,7 +174,7 @@ fn row_line(
     let line = match row {
         Row::Heading(section) => return heading_line(panel, section, selected),
         Row::Setting(_, setting) => {
-            let label = format!("{:label_width$}", setting.label);
+            let label = format!("{:label_width$}", setting.label());
             let value = match (selected, panel.mode()) {
                 (true, PanelMode::Edit(editor)) if !editor.is_box() => {
                     Span::raw(editor_window(editor, value_width).0)
@@ -247,7 +247,7 @@ fn value_span(panel: &SettingsPanel, setting: &Setting, width: usize) -> Span<'s
     }
 }
 
-/// The selected setting's full key and default.
+/// The selected setting's full key, description and default.
 fn render_detail(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
     let Some(setting) = panel.selected_setting() else {
         return;
@@ -256,7 +256,12 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
         || "unset".to_string(),
         |value| shown_value(setting.kind, value),
     );
-    let detail = format!("{} · default {default}", setting.key);
+    let detail = format!(
+        "{} : {} (default value: {default})",
+        setting.key,
+        setting.description()
+    );
+    let detail = ellipsized(detail, usize::from(area.width));
     frame.render_widget(Paragraph::new(Span::styled(detail, dim())), area);
 }
 
@@ -328,7 +333,9 @@ fn open_text_box(panel: &SettingsPanel) -> Option<&TextEditor> {
 
 /// A rounded, accent-bordered box titled with the selected setting's label.
 fn box_block(panel: &SettingsPanel) -> Block<'static> {
-    let label = panel.selected_setting().map_or("", |setting| setting.label);
+    let label = panel
+        .selected_setting()
+        .map_or("", |setting| setting.label());
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent())
@@ -529,7 +536,7 @@ fn longest_label() -> usize {
     SECTIONS
         .iter()
         .flat_map(|section| section.settings)
-        .map(|setting| setting.label.chars().count())
+        .map(|setting| setting.label().chars().count())
         .max()
         .unwrap_or(0)
         + LABEL_GAP
