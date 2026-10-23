@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::super::ui::{locate_cursor, wrap_input};
 use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
+use super::list_editor::{ListAction, ListEditor};
 
 /// Rows PgUp/PgDn move the selection.
 const PAGE_ROWS: usize = 10;
@@ -37,6 +38,8 @@ impl Row {
 pub(crate) enum PanelMode {
     Browse,
     Edit(TextEditor),
+    /// Editing a list setting's entries.
+    List(ListEditor),
     /// Closing with unsaved changes; waits for save, discard or cancel.
     ConfirmClose,
 }
@@ -150,6 +153,13 @@ impl SettingsPanel {
             .unwrap_or(false)
     }
 
+    /// The entries in effect for list setting `key`.
+    pub(crate) fn list_entries(&self, key: &str) -> &[toml::Value] {
+        self.current_value(key)
+            .and_then(toml::Value::as_array)
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// The value in effect for `key`: the file's, else the default.
     pub(crate) fn current_value(&self, key: &str) -> Option<&toml::Value> {
         self.document
@@ -166,6 +176,10 @@ impl SettingsPanel {
             PanelMode::Browse => self.on_browse_key(ev),
             PanelMode::Edit(_) => {
                 self.on_edit_key(ev);
+                ControlFlow::Continue(())
+            }
+            PanelMode::List(_) => {
+                self.on_list_key(ev);
                 ControlFlow::Continue(())
             }
             PanelMode::ConfirmClose => self.on_confirm_close_key(ev),
@@ -217,6 +231,50 @@ impl SettingsPanel {
                 let text = editor.text.clone();
                 self.apply_text(&text);
             }
+        }
+    }
+
+    fn on_list_key(&mut self, ev: KeyEvent) {
+        let Some(setting) = self.selected_setting() else {
+            return;
+        };
+        let mut entries = self.list_entries(setting.key).to_vec();
+        let PanelMode::List(editor) = &mut self.mode else {
+            return;
+        };
+        match editor.on_key(ev, &entries) {
+            ListAction::Pending => {}
+            ListAction::Close => {
+                self.mode = PanelMode::Browse;
+                self.feedback = None;
+            }
+            ListAction::Store { index, value } => {
+                match entries.get_mut(index) {
+                    Some(entry) => *entry = value,
+                    None => entries.push(value),
+                }
+                self.apply_entries(setting, entries);
+            }
+            ListAction::Delete(index) => {
+                entries.remove(index);
+                self.apply_entries(setting, entries);
+            }
+            ListAction::Refused(reason) => self.feedback = Some(Feedback::Error(reason)),
+        }
+    }
+
+    /// Sets list `setting` to `entries`, closing the open entry, or reports
+    /// why they were refused and leaves the entry open.
+    fn apply_entries(&mut self, setting: &Setting, entries: Vec<toml::Value>) {
+        let value = toml::Value::Array(entries);
+        match self.change(|document| document.set(setting.key, &value)) {
+            Ok(()) => {
+                if let PanelMode::List(editor) = &mut self.mode {
+                    editor.close_entry();
+                }
+                self.feedback = None;
+            }
+            Err(reason) => self.feedback = Some(Feedback::Error(reason)),
         }
     }
 
@@ -334,11 +392,14 @@ impl SettingsPanel {
                     self.document.path().display()
                 )));
             }
+            SettingKind::List(item) => {
+                self.mode = PanelMode::List(ListEditor::new(item));
+                self.feedback = None;
+            }
             SettingKind::Integer
             | SettingKind::Decimal
             | SettingKind::Text
-            | SettingKind::Prose
-            | SettingKind::List => {
+            | SettingKind::Prose => {
                 let text = self
                     .current_value(setting.key)
                     .map(|value| editable_text(setting.kind, value))
@@ -460,7 +521,8 @@ impl SettingsPanel {
     }
 }
 
-enum EditAction {
+/// What a [`TextEditor`] key asks of its owner.
+pub(crate) enum EditAction {
     Pending,
     Apply,
     Cancel,
@@ -488,7 +550,7 @@ pub(crate) struct TextEditor {
 
 impl TextEditor {
     /// Places the cursor at the end of `text`.
-    fn new(text: String, shape: EditorShape) -> Self {
+    pub(crate) fn new(text: String, shape: EditorShape) -> Self {
         let cursor = text.len();
         Self {
             text,
@@ -510,7 +572,7 @@ impl TextEditor {
         self.text[..self.cursor].chars().count()
     }
 
-    fn on_key(&mut self, ev: KeyEvent) -> EditAction {
+    pub(crate) fn on_key(&mut self, ev: KeyEvent) -> EditAction {
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
         let alt = ev.modifiers.contains(KeyModifiers::ALT);
         let line_break = ev
@@ -629,14 +691,11 @@ fn parse_input(kind: SettingKind, text: &str) -> Result<toml::Value, String> {
             .filter(|number| number.is_finite())
             .map(toml::Value::Float)
             .ok_or_else(|| "expected a number".to_string()),
-        SettingKind::List => match text.parse() {
-            Ok(list @ toml::Value::Array(_)) => Ok(list),
-            _ => Err(r#"expected a TOML array, e.g. ["a", "b"]"#.to_string()),
-        },
         SettingKind::Toggle
         | SettingKind::Choice(_)
         | SettingKind::Text
         | SettingKind::Prose
+        | SettingKind::List(_)
         | SettingKind::External => Ok(toml::Value::String(text.to_string())),
     }
 }

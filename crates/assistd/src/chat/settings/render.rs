@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 use super::super::markdown::BLEY;
 use super::super::ui::{locate_cursor, wrap_input};
 use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
+use super::list_editor::{EntryEditor, ListState, entry_summary};
 use super::panel::{Feedback, PanelMode, Row, SettingsPanel, TextEditor, short_decimal};
 use crate::client::terminal_text::escape_controls_single_line;
 
@@ -21,12 +22,15 @@ const LABEL_GAP: usize = 2;
 const RULE: &str = "─";
 const CHECKED: &str = "[✓]";
 const UNCHECKED: &str = "[ ]";
-/// Share of the list's rows the text box takes while open.
+/// Field labels of a search engine entry, padded to one width.
+const ENGINE_LABEL: &str = "engine        ";
+const KEY_FILE_LABEL: &str = "API key file  ";
+/// Share of the list's rows the text or list box takes while open.
 const TEXT_BOX_PERCENT: u16 = 60;
 /// Lines kept below the selection before the list scrolls.
 const SCROLL_MARGIN: usize = 5;
 
-/// The title and file, the tab bar, the list (over the text box while one is open), then
+/// The title and file, the tab bar, the list (over the text or list box while one is open), then
 /// the selected key's details, feedback, validation problems and key hints.
 /// Mutates only the text box's wrap width.
 pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel) {
@@ -55,15 +59,17 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
     render_tabs(frame, tab_area, panel.tab());
     let rule = RULE.repeat(usize::from(area.width));
     frame.render_widget(Paragraph::new(Span::styled(rule, dim())), rule_area);
-    let list_area = match open_text_box(panel) {
-        Some(_) => {
-            let [list_area, box_area] =
-                Layout::vertical([Constraint::Min(3), Constraint::Percentage(TEXT_BOX_PERCENT)])
-                    .areas(list_area);
-            render_text_box(frame, box_area, panel);
-            list_area
+    let list_area = if has_box(panel.mode()) {
+        let [list_area, box_area] =
+            Layout::vertical([Constraint::Min(3), Constraint::Percentage(TEXT_BOX_PERCENT)])
+                .areas(list_area);
+        match panel.mode() {
+            PanelMode::List(_) => render_list_box(frame, box_area, panel),
+            _ => render_text_box(frame, box_area, panel),
         }
-        None => list_area,
+        list_area
+    } else {
+        list_area
     };
     let panel = &*panel;
     render_list(frame, list_area, panel);
@@ -289,9 +295,26 @@ fn hint(mode: &PanelMode) -> &'static str {
             "Enter apply · Shift+Enter new line · Esc cancel · Ctrl+U clear"
         }
         PanelMode::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
+        PanelMode::List(editor) => match editor.state() {
+            ListState::Browse => "↑/↓ move · Enter edit · a add · d delete · Esc done",
+            ListState::Edit(entry) if entry.key_file_field().is_some() => {
+                "Enter apply · Tab switch field · Esc cancel · Ctrl+U clear"
+            }
+            ListState::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
+            ListState::ConfirmDelete => "y delete · n keep",
+        },
         PanelMode::ConfirmClose => {
             "unsaved changes: s save and close · d discard · Esc keep editing"
         }
+    }
+}
+
+/// Whether the mode draws a box under the list.
+fn has_box(mode: &PanelMode) -> bool {
+    match mode {
+        PanelMode::Edit(editor) => editor.is_box(),
+        PanelMode::List(_) => true,
+        PanelMode::Browse | PanelMode::ConfirmClose => false,
     }
 }
 
@@ -303,13 +326,19 @@ fn open_text_box(panel: &SettingsPanel) -> Option<&TextEditor> {
     }
 }
 
+/// A rounded, accent-bordered box titled with the selected setting's label.
+fn box_block(panel: &SettingsPanel) -> Block<'static> {
+    let label = panel.selected_setting().map_or("", |setting| setting.label);
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(accent())
+        .title(Span::styled(format!(" {label} "), accent()))
+}
+
 /// The edited text wrapped in a bordered box, scrolled to keep the cursor
 /// in view.
 fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel) {
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(accent())
-        .title(Span::styled(" system prompt ", accent()));
+    let block = box_block(panel);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     panel.set_text_box_width(inner.width);
@@ -339,6 +368,108 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel)
     ));
 }
 
+/// The list setting's entries then an add row, scrolled to keep the
+/// selection in view, with the open entry's fields in its place.
+fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
+    let (PanelMode::List(editor), Some(setting)) = (panel.mode(), panel.selected_setting()) else {
+        return;
+    };
+    let block = box_block(panel);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = usize::from(inner.width).saturating_sub(NO_POINTER.len());
+    let entries = panel.list_entries(setting.key);
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    let mut selected_line = 0;
+    for index in 0..=entries.len() {
+        let selected = index == editor.selected();
+        if selected {
+            selected_line = lines.len();
+        }
+        match (selected, editor.state(), entries.get(index)) {
+            (true, ListState::Edit(entry), _) => {
+                cursor = Some(push_entry_lines(&mut lines, entry, width));
+                selected_line = lines.len() - 1;
+            }
+            (true, ListState::ConfirmDelete, Some(entry)) => {
+                lines.push(confirm_delete_line(entry, width));
+            }
+            (_, _, entry) => lines.push(list_box_line(entry, selected, width)),
+        }
+    }
+    let visible = usize::from(inner.height).max(1);
+    let start = scroll_start(selected_line, lines.len(), visible);
+    let lines: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+    if let Some((row, column)) = cursor {
+        frame.set_cursor_position(Position::new(
+            inner
+                .x
+                .saturating_add(u16::try_from(column).unwrap_or(u16::MAX))
+                .min(inner.right().saturating_sub(1)),
+            inner
+                .y
+                .saturating_add(u16::try_from(row.saturating_sub(start)).unwrap_or(u16::MAX)),
+        ));
+    }
+}
+
+/// One entry, or the add row when `entry` is `None`.
+fn list_box_line(entry: Option<&toml::Value>, selected: bool, width: usize) -> Line<'static> {
+    let span = match entry {
+        Some(entry) => Span::raw(ellipsized(
+            escape_controls_single_line(&entry_summary(entry)).into_owned(),
+            width,
+        )),
+        None => Span::styled("+ add entry", dim()),
+    };
+    pointed_line(selected, vec![span])
+}
+
+/// The entry awaiting deletion, asking y or n.
+fn confirm_delete_line(entry: &toml::Value, width: usize) -> Line<'static> {
+    let summary = escape_controls_single_line(&entry_summary(entry)).into_owned();
+    let question = format!("delete {summary}? (y/n)");
+    pointed_line(
+        true,
+        vec![Span::styled(
+            ellipsized(question, width),
+            Style::default().fg(Color::Yellow),
+        )],
+    )
+}
+
+/// Pushes the open entry's fields, one per line with the pointer on the
+/// first, and returns the focused field's cursor as (line, column).
+fn push_entry_lines(
+    lines: &mut Vec<Line<'static>>,
+    entry: &EntryEditor,
+    width: usize,
+) -> (usize, usize) {
+    let Some(key_file) = entry.key_file_field() else {
+        let (text, column) = editor_window(entry.value_field(), width);
+        lines.push(pointed_line(true, vec![Span::raw(text)]));
+        return (lines.len() - 1, NO_POINTER.len() + column);
+    };
+    let fields = [
+        (ENGINE_LABEL, entry.value_field(), !entry.key_file_focused()),
+        (KEY_FILE_LABEL, key_file, entry.key_file_focused()),
+    ];
+    let mut cursor = (0, 0);
+    let field_width = width.saturating_sub(ENGINE_LABEL.len());
+    for (index, (label, field, focused)) in fields.into_iter().enumerate() {
+        let (text, column) = editor_window(field, field_width);
+        let label_style = if focused { accent() } else { dim() };
+        let spans = vec![Span::styled(label, label_style), Span::raw(text)];
+        if focused {
+            cursor = (lines.len(), NO_POINTER.len() + label.len() + column);
+        }
+        lines.push(pointed_line(index == 0, spans));
+    }
+    cursor
+}
+
 /// `chars` with control characters shown as `↵` so they cannot move the
 /// terminal's cursor.
 fn visible_chars(chars: &[char]) -> String {
@@ -352,6 +483,14 @@ fn visible_chars(chars: &[char]) -> String {
 fn shown_value(kind: SettingKind, value: &toml::Value) -> String {
     match (kind, value) {
         (SettingKind::Toggle, toml::Value::Boolean(on)) => checkbox(*on).to_string(),
+        (SettingKind::List(_), toml::Value::Array(entries)) if entries.is_empty() => {
+            "(none)".to_string()
+        }
+        (SettingKind::List(_), toml::Value::Array(entries)) => entries
+            .iter()
+            .map(|entry| escape_controls_single_line(&entry_summary(entry)).into_owned())
+            .collect::<Vec<_>>()
+            .join(", "),
         (SettingKind::External, toml::Value::Array(entries)) => match entries.len() {
             1 => "1 entry".to_string(),
             count => format!("{count} entries"),

@@ -314,23 +314,27 @@ pub(crate) const SECTIONS: &[Section] = &[
             basic(
                 "tools.write.writable_paths",
                 "writable folders",
-                SettingKind::List,
+                SettingKind::List(ListItem::Text),
             ),
-            advanced("tools.bash.denylist", "blocked commands", SettingKind::List),
+            advanced(
+                "tools.bash.denylist",
+                "blocked commands",
+                SettingKind::List(ListItem::Text),
+            ),
             advanced(
                 "tools.bash.allowed_programs",
                 "programs run without asking",
-                SettingKind::List,
+                SettingKind::List(ListItem::Text),
             ),
             advanced(
                 "tools.bash.destructive_patterns",
                 "commands that always ask",
-                SettingKind::List,
+                SettingKind::List(ListItem::Text),
             ),
             advanced(
                 "tools.bash.bwrap_extra_args",
                 "extra bubblewrap arguments",
-                SettingKind::List,
+                SettingKind::List(ListItem::Text),
             ),
             advanced("tools.scratch.dir", "scratch folder", SettingKind::Text),
             advanced(
@@ -402,7 +406,11 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("search.enabled"),
         &[],
         &[
-            basic("search.engines", "search engines", SettingKind::List),
+            basic(
+                "search.engines",
+                "search engines",
+                SettingKind::List(ListItem::SearchEngine),
+            ),
             basic("search.command", "SearXNG command", SettingKind::Text),
             advanced("search.host", "server address", SettingKind::Text),
             advanced("search.port", "server port", SettingKind::Integer),
@@ -487,10 +495,19 @@ pub(crate) enum SettingKind {
     Prose,
     /// One of a fixed set of strings, cycled in place.
     Choice(&'static [&'static str]),
-    /// A TOML array, edited as its literal.
-    List,
+    /// A TOML array, edited entry by entry.
+    List(ListItem),
     /// Too structured to edit in a line; shown as an entry count.
     External,
+}
+
+/// What one entry of a [`SettingKind::List`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListItem {
+    Text,
+    /// A SearXNG engine name, with the file holding its API key when it
+    /// needs one.
+    SearchEngine,
 }
 
 /// One config key, by its dotted path.

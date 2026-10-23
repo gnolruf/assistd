@@ -15,6 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use super::TerminalGuard;
 
 mod catalog;
+mod list_editor;
 mod panel;
 mod render;
 
