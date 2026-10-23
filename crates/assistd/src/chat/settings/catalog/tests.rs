@@ -49,7 +49,7 @@ fn catalog_lists_every_schema_key_and_only_schema_keys() {
     for setting in settings() {
         assert!(
             setting_info(setting.key).is_some(),
-            "{} has no #[setting] metadata",
+            "{} has no describe_fields! entry",
             setting.key
         );
         let value = document

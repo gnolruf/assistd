@@ -56,7 +56,7 @@ pub(crate) struct SettingsPanel {
     tab: Tab,
     /// Per section, whether its advanced settings are listed.
     advanced_shown: [bool; SECTIONS.len()],
-    /// Index into [`rows`](Self::rows); never a heading.
+    /// Index into [`rows`](Self::rows).
     selected: usize,
     mode: PanelMode,
     feedback: Option<Feedback>,
@@ -104,7 +104,6 @@ impl SettingsPanel {
         &self.issues
     }
 
-    /// The current tab's rows.
     pub(crate) fn rows(&self) -> Vec<Row> {
         SECTIONS
             .iter()

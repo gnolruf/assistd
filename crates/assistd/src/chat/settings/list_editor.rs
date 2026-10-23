@@ -59,7 +59,6 @@ impl ListEditor {
         self.state = ListState::Browse;
     }
 
-    /// Handles `ev` over the current `entries`.
     pub(crate) fn on_key(&mut self, ev: KeyEvent, entries: &[toml::Value]) -> ListAction {
         match &mut self.state {
             ListState::Edit(entry) => match entry.on_key(ev) {
@@ -134,16 +133,16 @@ pub(crate) struct EntryEditor {
 impl EntryEditor {
     /// Starts from `entry`, or blank when adding one.
     fn new(item: ListItem, entry: Option<&toml::Value>) -> Self {
-        let field = |text: &str| TextEditor::new(text.to_string(), EditorShape::Line);
+        let field = |text: String| TextEditor::new(text, EditorShape::Line);
         let text_of = |value: Option<&toml::Value>| value.map(entry_text).unwrap_or_default();
         let (value, key_file) = match item {
-            ListItem::Text => (field(&text_of(entry)), None),
+            ListItem::Text => (field(text_of(entry)), None),
             ListItem::SearchEngine => match entry {
                 Some(toml::Value::Table(table)) => (
-                    field(&text_of(table.get("name"))),
-                    Some(field(&text_of(table.get("api_key_file")))),
+                    field(text_of(table.get("name"))),
+                    Some(field(text_of(table.get("api_key_file")))),
                 ),
-                _ => (field(&text_of(entry)), Some(field(""))),
+                _ => (field(text_of(entry)), Some(field(String::new()))),
             },
         };
         Self {

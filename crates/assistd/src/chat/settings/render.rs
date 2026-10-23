@@ -30,8 +30,8 @@ const TEXT_BOX_PERCENT: u16 = 60;
 /// Lines kept below the selection before the list scrolls.
 const SCROLL_MARGIN: usize = 5;
 
-/// The title and file, the tab bar, the list (over the text or list box while one is open), then
-/// the selected key's details, feedback, validation problems and key hints.
+/// The title, tab bar and list (over the text or list box while one is
+/// open), then the selected key's details, feedback, problems and key hints.
 /// Mutates only the text box's wrap width.
 pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel) {
     let issue_rows = panel.issues().len().min(MAX_ISSUE_ROWS + 1);
@@ -96,7 +96,6 @@ fn render_title(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Every tab's title, the current one highlighted.
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, current: Tab) {
     let spans: Vec<Span<'static>> = Tab::ALL
         .iter()
@@ -131,13 +130,7 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
         let (_, cursor_column) = editor_window(editor, value_width);
         let row = selected_line.saturating_sub(start);
         let column = NO_POINTER.len() + label_width + cursor_column;
-        frame.set_cursor_position(Position::new(
-            area.x
-                .saturating_add(u16::try_from(column).unwrap_or(u16::MAX))
-                .min(area.right().saturating_sub(1)),
-            area.y
-                .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
-        ));
+        place_cursor(frame, area, row, column);
     }
 }
 
@@ -314,20 +307,11 @@ fn hint(mode: &PanelMode) -> &'static str {
     }
 }
 
-/// Whether the mode draws a box under the list.
 fn has_box(mode: &PanelMode) -> bool {
     match mode {
         PanelMode::Edit(editor) => editor.is_box(),
         PanelMode::List(_) => true,
         PanelMode::Browse | PanelMode::ConfirmClose => false,
-    }
-}
-
-/// The open editor when it is a text box.
-fn open_text_box(panel: &SettingsPanel) -> Option<&TextEditor> {
-    match panel.mode() {
-        PanelMode::Edit(editor) if editor.is_box() => Some(editor),
-        _ => None,
     }
 }
 
@@ -349,7 +333,7 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel)
     let inner = block.inner(area);
     frame.render_widget(block, area);
     panel.set_text_box_width(inner.width);
-    let Some(editor) = open_text_box(panel) else {
+    let PanelMode::Edit(editor) = panel.mode() else {
         return;
     };
     let chars: Vec<char> = editor.text().chars().collect();
@@ -364,15 +348,7 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel)
         .map(|&(row_start, row_end)| Line::raw(visible_chars(&chars[row_start..row_end])))
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
-    frame.set_cursor_position(Position::new(
-        inner
-            .x
-            .saturating_add(u16::try_from(cursor_column).unwrap_or(u16::MAX))
-            .min(inner.right().saturating_sub(1)),
-        inner
-            .y
-            .saturating_add(u16::try_from(cursor_row - start).unwrap_or(u16::MAX)),
-    ));
+    place_cursor(frame, inner, cursor_row - start, cursor_column);
 }
 
 /// The list setting's entries then an add row, scrolled to keep the
@@ -410,15 +386,7 @@ fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
     let lines: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
     frame.render_widget(Paragraph::new(lines), inner);
     if let Some((row, column)) = cursor {
-        frame.set_cursor_position(Position::new(
-            inner
-                .x
-                .saturating_add(u16::try_from(column).unwrap_or(u16::MAX))
-                .min(inner.right().saturating_sub(1)),
-            inner
-                .y
-                .saturating_add(u16::try_from(row.saturating_sub(start)).unwrap_or(u16::MAX)),
-        ));
+        place_cursor(frame, inner, row.saturating_sub(start), column);
     }
 }
 
@@ -540,6 +508,18 @@ fn longest_label() -> usize {
         .max()
         .unwrap_or(0)
         + LABEL_GAP
+}
+
+/// Puts the terminal cursor `row` lines and `column` columns into `area`,
+/// clamped to its right edge.
+fn place_cursor(frame: &mut Frame<'_>, area: Rect, row: usize, column: usize) {
+    let offset = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
+    frame.set_cursor_position(Position::new(
+        area.x
+            .saturating_add(offset(column))
+            .min(area.right().saturating_sub(1)),
+        area.y.saturating_add(offset(row)),
+    ));
 }
 
 /// First line of a `visible`-line window that keeps [`SCROLL_MARGIN`] lines
