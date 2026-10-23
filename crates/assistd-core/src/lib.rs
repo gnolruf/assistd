@@ -251,8 +251,8 @@ pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsErr
     Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)
 }
 
-/// Assemble the tool registry: the built-in commands behind `run` and the
-/// memory tools. Removes earlier spill files from
+/// Assemble the tool registry: the built-in commands behind `run` and,
+/// with `memory.enabled`, the memory tools. Removes earlier spill files from
 /// [`BuildToolsDeps::overflow_dir`].
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
     let BuildToolsDeps {
@@ -332,13 +332,15 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         Some(scratch_dir) => run.with_scratch_dir(scratch_dir),
         None => run,
     });
-    tools.register(RememberTool::new(
-        memory_ops,
-        embed_tx,
-        embedder.clone(),
-        semantic.clone(),
-    ));
-    tools.register(ReminisceTool::new(embedder, semantic, current_session));
+    if config.memory.enabled {
+        tools.register(RememberTool::new(
+            memory_ops,
+            embed_tx,
+            embedder.clone(),
+            semantic.clone(),
+        ));
+        tools.register(ReminisceTool::new(embedder, semantic, current_session));
+    }
     Ok(Arc::new(tools))
 }
 

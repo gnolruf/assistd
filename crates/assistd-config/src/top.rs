@@ -70,7 +70,6 @@ impl Config {
         validate_sleep(&mut errors, &self.sleep);
         validate_tools(&mut errors, &self.tools);
         validate_tool_output_share(&mut errors, &self.tools.output, &self.chat);
-        validate_memory(&mut errors, &self.memory);
         validate_embedding(&mut errors, &self.embedding, &self.model);
         validate_search(&mut errors, &self.search, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
@@ -433,14 +432,6 @@ fn validate_tool_output_share(
              of chat.max_history_tokens ({allowed} tokens)",
             output.max_kb
         ));
-    }
-}
-
-fn validate_memory(errors: &mut Vec<String>, memory: &MemoryConfig) {
-    if memory.enabled && !memory.db_path.is_absolute() {
-        errors.push(
-            "memory.db_path must be an absolute path or start with `~/` when memory.enabled".into(),
-        );
     }
 }
 

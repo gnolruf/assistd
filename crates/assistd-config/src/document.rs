@@ -12,7 +12,7 @@ use crate::top::{Config, create_private_dir_all, create_private_file};
 
 /// An editable `config.toml`. Every accepted change leaves a document that
 /// parses into a [`Config`]; [`save`](Self::save) also requires it to validate.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigDocument {
     path: PathBuf,
     document: DocumentMut,

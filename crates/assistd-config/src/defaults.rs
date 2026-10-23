@@ -138,13 +138,6 @@ pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 pub const DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
 pub const DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
 
-/// `$XDG_DATA_HOME/assistd/memory.db`, or
-/// `$HOME/.local/share/assistd/memory.db`.
-pub fn default_memory_db_path() -> PathBuf {
-    let data_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from(".local/share"));
-    data_dir.join("assistd").join("memory.db")
-}
-
 /// `$XDG_RUNTIME_DIR/assistd/output`, or `$XDG_CACHE_HOME/assistd/output`, or
 /// `$HOME/.cache/assistd/output`.
 pub fn default_tools_overflow_dir() -> PathBuf {

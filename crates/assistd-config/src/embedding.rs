@@ -41,7 +41,8 @@ pub struct EmbeddingConfig {
     /// `reminisce` default. `1..=20`, the most `reminisce` returns.
     pub top_k: NonZeroU32,
     /// Prepend the `top_k` most similar past chunks to every query; when
-    /// `false`, recall happens only through `reminisce`.
+    /// `false`, recall happens only through `reminisce`. Off while
+    /// `memory.enabled` is `false`.
     pub auto_inject: bool,
 }
 

@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 
 use super::super::markdown::BLEY;
 use super::super::ui::{locate_cursor, wrap_input};
-use super::catalog::{SECTIONS, Setting, SettingKind};
+use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
 use super::panel::{Feedback, PanelMode, Row, SettingsPanel, TextEditor, short_decimal};
 use crate::client::terminal_text::escape_controls_single_line;
 
@@ -23,14 +23,17 @@ const CHECKED: &str = "[✓]";
 const UNCHECKED: &str = "[ ]";
 /// Share of the list's rows the text box takes while open.
 const TEXT_BOX_PERCENT: u16 = 60;
+/// Lines kept below the selection before the list scrolls.
+const SCROLL_MARGIN: usize = 5;
 
-/// The title and file, the list (over the text box while one is open), then
+/// The title and file, the tab bar, the list (over the text box while one is open), then
 /// the selected key's details, feedback, validation problems and key hints.
 /// Mutates only the text box's wrap width.
 pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel) {
     let issue_rows = panel.issues().len().min(MAX_ISSUE_ROWS + 1);
     let [
         title_area,
+        tab_area,
         rule_area,
         list_area,
         detail_area,
@@ -38,6 +41,7 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
         issues_area,
         hint_area,
     ] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(1),
@@ -48,6 +52,7 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
     ])
     .areas(area);
     render_title(frame, title_area, panel);
+    render_tabs(frame, tab_area, panel.tab());
     let rule = RULE.repeat(usize::from(area.width));
     frame.render_widget(Paragraph::new(Span::styled(rule, dim())), rule_area);
     let list_area = match open_text_box(panel) {
@@ -85,30 +90,40 @@ fn render_title(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// The window of rows that keeps the selection in view, with the cursor
-/// placed in the field being edited.
-fn render_list(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
-    let rows = panel.rows();
-    let visible = usize::from(area.height).max(1);
-    let start = scroll_start(panel.selected(), rows.len(), visible);
-    let label_width = longest_label().min(usize::from(area.width) / 2);
-    let value_width = usize::from(area.width).saturating_sub(NO_POINTER.len() + label_width);
-    let lines: Vec<Line<'static>> = rows
+/// Every tab's title, the current one highlighted.
+fn render_tabs(frame: &mut Frame<'_>, area: Rect, current: Tab) {
+    let spans: Vec<Span<'static>> = Tab::ALL
         .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .map(|(index, row)| {
-            let selected = index == panel.selected();
-            row_line(panel, *row, selected, label_width, value_width)
+        .flat_map(|&tab| {
+            let style = if tab == current {
+                accent().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                dim()
+            };
+            [
+                Span::styled(format!(" {} ", tab.title()), style),
+                Span::raw(" "),
+            ]
         })
         .collect();
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The window of rows that keeps the selection clear of the list's edges,
+/// with the cursor placed in the field being edited.
+fn render_list(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
+    let label_width = longest_label().min(usize::from(area.width) / 2);
+    let value_width = usize::from(area.width).saturating_sub(NO_POINTER.len() + label_width);
+    let (lines, selected_line) = list_lines(panel, label_width, value_width);
+    let visible = usize::from(area.height).max(1);
+    let start = scroll_start(selected_line, lines.len(), visible);
+    let lines: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
     frame.render_widget(Paragraph::new(lines), area);
     if let PanelMode::Edit(editor) = panel.mode()
         && !editor.is_box()
     {
         let (_, cursor_column) = editor_window(editor, value_width);
-        let row = panel.selected().saturating_sub(start);
+        let row = selected_line.saturating_sub(start);
         let column = NO_POINTER.len() + label_width + cursor_column;
         frame.set_cursor_position(Position::new(
             area.x
@@ -118,6 +133,28 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel) {
                 .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
         ));
     }
+}
+
+/// Every row as listed with a blank line between sections, and the index
+/// of the selected row's line.
+fn list_lines(
+    panel: &SettingsPanel,
+    label_width: usize,
+    value_width: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines = Vec::new();
+    let mut selected_line = 0;
+    for (index, row) in panel.rows().into_iter().enumerate() {
+        if matches!(row, Row::Heading(_)) && !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        let selected = index == panel.selected();
+        if selected {
+            selected_line = lines.len();
+        }
+        lines.push(row_line(panel, row, selected, label_width, value_width));
+    }
+    (lines, selected_line)
 }
 
 /// `row` as listed; dim throughout when it is locked.
@@ -246,7 +283,7 @@ fn render_issues(frame: &mut Frame<'_>, area: Rect, issues: &[String]) {
 fn hint(mode: &PanelMode) -> &'static str {
     match mode {
         PanelMode::Browse => {
-            "↑/↓ move · Enter edit · ←/→ change · r reset · a advanced · Ctrl+S save · Esc close"
+            "Tab switch tab · ↑/↓ move · Enter edit · ←/→ change · r reset · a advanced · Ctrl+S save · Esc close"
         }
         PanelMode::Edit(editor) if editor.is_box() => {
             "Enter apply · Shift+Enter new line · Esc cancel · Ctrl+U clear"
@@ -359,12 +396,16 @@ fn longest_label() -> usize {
         + LABEL_GAP
 }
 
-/// First row of a `visible`-row window that keeps `selected` in view.
+/// First line of a `visible`-line window that keeps [`SCROLL_MARGIN`] lines
+/// below `selected` in view, or as many as half the window allows.
 fn scroll_start(selected: usize, total: usize, visible: usize) -> usize {
     if total <= visible {
         return 0;
     }
-    (selected + 1).saturating_sub(visible).min(total - visible)
+    let margin = SCROLL_MARGIN.min(visible.saturating_sub(1) / 2);
+    (selected + 1 + margin)
+        .saturating_sub(visible)
+        .min(total - visible)
 }
 
 fn accent() -> Style {

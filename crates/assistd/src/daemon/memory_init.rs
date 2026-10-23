@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_core::{Config, branch_replay};
+use assistd_core::branch_replay;
 use assistd_llm::HistoryReplay;
 use assistd_memory::{
     BranchHistory, BranchId, HistoryScope, MemoryError, MemoryStore, NoMemoryStore,
@@ -53,15 +53,12 @@ impl MemorySubsystem {
     }
 }
 
-/// Degrades to a no-op subsystem when disabled or when the database
-/// cannot be opened.
-pub(super) async fn init(config: &Config) -> MemorySubsystem {
-    if !config.memory.enabled {
-        info!("memory: disabled in config (memory.enabled = false)");
+/// Degrades to a no-op subsystem when the database cannot be opened.
+pub(super) async fn init() -> MemorySubsystem {
+    let Some(db_path) = db_path() else {
+        tracing::warn!("memory: no data directory (is $HOME set?); persistence disabled this run");
         return MemorySubsystem::disabled();
-    }
-
-    let db_path = PathBuf::from(&config.memory.db_path);
+    };
     let handle = match SqliteHandle::open(&db_path).await {
         Ok(handle) => handle,
         Err(e) => {
@@ -135,6 +132,11 @@ async fn load_resumed_replay(
         .inspect_err(|e| tracing::warn!("memory: load_branch failed for resume ({e:#})"))
         .unwrap_or_default();
     branch_replay(&rows, summary)
+}
+
+/// `$XDG_DATA_HOME/assistd/memory.db`; `None` when there is no data directory.
+fn db_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|data| data.join("assistd").join("memory.db"))
 }
 
 fn pid_is_alive(pid: u32) -> bool {

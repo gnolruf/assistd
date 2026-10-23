@@ -143,8 +143,7 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # writable_paths = ["~"]  # besides tools.scratch.dir
 
 [memory]
-# enabled = true
-# db_path = "~/.local/share/assistd/memory.db"
+# enabled = true  # false: no memory tools or recalled context; chats are still saved
 
 [embedding]
 # A second model server for semantic recall.

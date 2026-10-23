@@ -1,8 +1,10 @@
 # Database schema
 
 `assistd-memory` keeps everything the daemon remembers in one SQLite
-file, by default `~/.local/share/assistd/memory.db` (`[memory] db_path`).
-With `[memory] enabled = false` the file is never opened.
+file, `$XDG_DATA_HOME/assistd/memory.db` (`~/.local/share/assistd/memory.db`
+by default).
+Chats are saved whatever `[memory] enabled` says; turning it off only
+withholds the memory tools and recalled context from the model.
 
 ## Entity-relationship diagram
 

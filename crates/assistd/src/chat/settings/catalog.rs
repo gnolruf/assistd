@@ -1,11 +1,12 @@
-//! The settings the panel lists, grouped into sections in display order,
-//! hotkeys first. A feature's section heading is the checkbox that enables it.
+//! The settings the panel lists, grouped into sections in display order and
+//! sections into tabs. A feature's section heading is the checkbox that enables it.
 
 const COMPOSITOR_TYPES: &[&str] = &["auto", "i3", "sway", "hyprland"];
 const SANDBOX_MODES: &[&str] = &["auto", "bwrap", "none"];
 
 pub(crate) const SECTIONS: &[Section] = &[
     section(
+        Tab::General,
         "Hotkeys",
         &[
             basic("hotkeys.push_to_talk", "push-to-talk", SettingKind::Text),
@@ -27,6 +28,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     section(
+        Tab::Model,
         "Model",
         &[
             basic("model.name", "model", SettingKind::Text),
@@ -60,6 +62,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     section(
+        Tab::Model,
         "Chat",
         &[
             basic("chat.system_prompt", "system prompt", SettingKind::Prose),
@@ -110,6 +113,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     feature(
+        Tab::Voice,
         "Voice input",
         enable("voice.enabled"),
         &[],
@@ -153,6 +157,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     feature(
+        Tab::Voice,
         "Wake word",
         enable("voice.wakeword.enabled"),
         &["voice.enabled"],
@@ -195,6 +200,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     feature(
+        Tab::Voice,
         "Spoken replies",
         enable("voice.synthesis.enabled"),
         &[],
@@ -244,6 +250,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     section(
+        Tab::General,
         "Compositor",
         &[basic(
             "compositor.type",
@@ -252,6 +259,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         )],
     ),
     section(
+        Tab::General,
         "Sleep",
         &[
             basic(
@@ -267,6 +275,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     feature(
+        Tab::General,
         "GPU monitor",
         enable("sleep.gpu_monitor_enabled"),
         &[],
@@ -289,6 +298,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     section(
+        Tab::Tools,
         "Tools",
         &[
             basic(
@@ -346,12 +356,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     feature(
-        "Memory",
-        enable("memory.enabled"),
-        &[],
-        &[basic("memory.db_path", "database file", SettingKind::Text)],
-    ),
-    feature(
+        Tab::Model,
         "Embedding",
         enable("embedding.enabled"),
         &[],
@@ -392,6 +397,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     feature(
+        Tab::Tools,
         "Search",
         enable("search.enabled"),
         &[],
@@ -408,12 +414,23 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     feature(
+        Tab::Tools,
         "MCP",
         enable("mcp.enabled"),
         &[],
         &[basic("mcp.servers", "servers", SettingKind::External)],
     ),
+    section(
+        Tab::General,
+        "Memory",
+        &[basic(
+            "memory.enabled",
+            "remember facts and past chats",
+            SettingKind::Toggle,
+        )],
+    ),
     feature(
+        Tab::General,
         "Notifications",
         enable("notifications.enabled"),
         &[],
@@ -431,6 +448,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         ],
     ),
     section(
+        Tab::General,
         "Tray icons",
         &[
             basic("notifications.icons.active", "awake", SettingKind::Text),
@@ -486,8 +504,32 @@ pub(crate) struct Setting {
     pub advanced: bool,
 }
 
+/// A page of the panel, listing the sections filed under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tab {
+    General,
+    Model,
+    Voice,
+    Tools,
+}
+
+impl Tab {
+    /// Every tab, in the order the tab bar shows them.
+    pub(crate) const ALL: [Self; 4] = [Self::General, Self::Model, Self::Voice, Self::Tools];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Model => "Model",
+            Self::Voice => "Voice",
+            Self::Tools => "Tools",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Section {
+    pub tab: Tab,
     pub title: &'static str,
     /// The checkbox, drawn in the heading, that turns the section's feature
     /// on; the rest of the section is locked while it is off.
@@ -504,8 +546,9 @@ impl Section {
     }
 }
 
-const fn section(title: &'static str, settings: &'static [Setting]) -> Section {
+const fn section(tab: Tab, title: &'static str, settings: &'static [Setting]) -> Section {
     Section {
+        tab,
         title,
         enable: None,
         requires: &[],
@@ -514,12 +557,14 @@ const fn section(title: &'static str, settings: &'static [Setting]) -> Section {
 }
 
 const fn feature(
+    tab: Tab,
     title: &'static str,
     enable: Setting,
     requires: &'static [&'static str],
     settings: &'static [Setting],
 ) -> Section {
     Section {
+        tab,
         title,
         enable: Some(enable),
         requires,

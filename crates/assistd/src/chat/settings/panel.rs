@@ -7,7 +7,7 @@ use assistd_config::{ConfigDocument, ConfigError};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::super::ui::{locate_cursor, wrap_input};
-use super::catalog::{SECTIONS, Setting, SettingKind};
+use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
 
 /// Rows PgUp/PgDn move the selection.
 const PAGE_ROWS: usize = 10;
@@ -50,6 +50,7 @@ pub(crate) enum Feedback {
 /// The settings list over an open config file.
 pub(crate) struct SettingsPanel {
     document: ConfigDocument,
+    tab: Tab,
     /// Per section, whether its advanced settings are listed.
     advanced_shown: [bool; SECTIONS.len()],
     /// Index into [`rows`](Self::rows); never a heading.
@@ -64,19 +65,24 @@ impl SettingsPanel {
     pub(crate) fn new(document: ConfigDocument) -> Self {
         let mut panel = Self {
             document,
+            tab: Tab::ALL[0],
             advanced_shown: [false; SECTIONS.len()],
             selected: 0,
             mode: PanelMode::Browse,
             feedback: None,
             issues: Vec::new(),
         };
-        panel.refresh_issues();
-        panel.step_selection(true, 1);
+        panel.issues = validation_issues(&panel.document);
+        panel.select_first();
         panel
     }
 
     pub(crate) fn document(&self) -> &ConfigDocument {
         &self.document
+    }
+
+    pub(crate) fn tab(&self) -> Tab {
+        self.tab
     }
 
     pub(crate) fn selected(&self) -> usize {
@@ -95,10 +101,12 @@ impl SettingsPanel {
         &self.issues
     }
 
+    /// The current tab's rows.
     pub(crate) fn rows(&self) -> Vec<Row> {
         SECTIONS
             .iter()
             .enumerate()
+            .filter(|(_, section)| section.tab == self.tab)
             .flat_map(|(index, section)| {
                 let shown = self.advanced_shown[index];
                 let toggle = (section.advanced_count() > 0).then_some(Row::AdvancedToggle(index));
@@ -172,6 +180,8 @@ impl SettingsPanel {
             }
             KeyCode::Char('c') if ctrl => return self.request_close(),
             KeyCode::Esc | KeyCode::Char('q') => return self.request_close(),
+            KeyCode::Tab => self.switch_tab(true),
+            KeyCode::BackTab => self.switch_tab(false),
             KeyCode::Up | KeyCode::Char('k') => self.step_selection(false, 1),
             KeyCode::Down | KeyCode::Char('j') => self.step_selection(true, 1),
             KeyCode::PageUp => self.step_selection(false, PAGE_ROWS),
@@ -245,6 +255,27 @@ impl SettingsPanel {
             Row::Heading(section) => SECTIONS[section].enable.as_ref(),
             Row::AdvancedToggle(_) => None,
         }
+    }
+
+    /// Shows the next or previous tab, wrapping at the ends.
+    fn switch_tab(&mut self, forward: bool) {
+        let count = Tab::ALL.len();
+        let index = Tab::ALL
+            .iter()
+            .position(|tab| *tab == self.tab)
+            .unwrap_or(0);
+        let offset = if forward { 1 } else { count - 1 };
+        self.tab = Tab::ALL[(index + offset) % count];
+        self.select_first();
+    }
+
+    /// Selects the tab's first selectable row, or its first row when none is.
+    fn select_first(&mut self) {
+        self.selected = self
+            .rows()
+            .into_iter()
+            .position(|row| self.is_selectable(row))
+            .unwrap_or(0);
     }
 
     /// Moves up to `steps` selectable rows forward or back, stopping at the ends.
@@ -357,15 +388,14 @@ impl SettingsPanel {
     }
 
     /// Sets `setting` and returns to browsing, or reports why the value
-    /// was refused and stays in the current mode.
+    /// was refused and stays in the current mode with the value unchanged.
     fn apply(&mut self, setting: &Setting, value: &toml::Value) {
-        match self.document.set(setting.key, value) {
+        match self.change(|document| document.set(setting.key, value)) {
             Ok(()) => {
                 self.mode = PanelMode::Browse;
                 self.feedback = None;
-                self.refresh_issues();
             }
-            Err(e) => self.feedback = Some(Feedback::Error(e.to_string())),
+            Err(reason) => self.feedback = Some(Feedback::Error(reason)),
         }
     }
 
@@ -376,13 +406,32 @@ impl SettingsPanel {
         if self.document.file_value(setting.key).is_none() {
             return;
         }
-        match self.document.reset(setting.key) {
-            Ok(()) => {
-                self.feedback = Some(Feedback::Note(format!("{} reset to default", setting.key)));
-                self.refresh_issues();
-            }
-            Err(e) => self.feedback = Some(Feedback::Error(e.to_string())),
+        self.feedback = Some(match self.change(|document| document.reset(setting.key)) {
+            Ok(()) => Feedback::Note(format!("{} reset to default", setting.key)),
+            Err(reason) => Feedback::Error(reason),
+        });
+    }
+
+    /// Makes `edit` and keeps it only when the config gains no validation
+    /// problem; otherwise the document is left as it was and the error says why.
+    fn change(
+        &mut self,
+        edit: impl FnOnce(&mut ConfigDocument) -> Result<(), ConfigError>,
+    ) -> Result<(), String> {
+        let mut candidate = self.document.clone();
+        edit(&mut candidate).map_err(|e| e.to_string())?;
+        let issues = validation_issues(&candidate);
+        let introduced: Vec<&str> = issues
+            .iter()
+            .filter(|issue| !self.issues.contains(issue))
+            .map(String::as_str)
+            .collect();
+        if !introduced.is_empty() {
+            return Err(format!("not applied: {}", introduced.join("; ")));
         }
+        self.document = candidate;
+        self.issues = issues;
+        Ok(())
     }
 
     /// Returns whether the file was written.
@@ -408,14 +457,6 @@ impl SettingsPanel {
         {
             *wrap_width = width;
         }
-    }
-
-    fn refresh_issues(&mut self) {
-        self.issues = match self.document.config().validate() {
-            Err(ConfigError::Validation(issues)) => issues,
-            Err(e) => vec![e.to_string()],
-            Ok(()) => Vec::new(),
-        };
     }
 }
 
@@ -544,6 +585,15 @@ impl TextEditor {
             .chars()
             .next()
             .map(|c| self.cursor + c.len_utf8())
+    }
+}
+
+/// Why `document`'s config would not validate; empty when it would.
+fn validation_issues(document: &ConfigDocument) -> Vec<String> {
+    match document.config().validate() {
+        Err(ConfigError::Validation(issues)) => issues,
+        Err(e) => vec![e.to_string()],
+        Ok(()) => Vec::new(),
     }
 }
 
