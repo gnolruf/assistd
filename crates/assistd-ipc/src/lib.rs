@@ -54,16 +54,6 @@ pub enum PresenceState {
 }
 
 impl PresenceState {
-    /// Next state in the manual-cycle order: Active → Drowsy → Sleeping →
-    /// Active. A wake in progress continues to Active.
-    pub fn next(self) -> PresenceTarget {
-        match self {
-            PresenceState::Active => PresenceTarget::Drowsy,
-            PresenceState::Drowsy => PresenceTarget::Sleeping,
-            PresenceState::Sleeping | PresenceState::Waking => PresenceTarget::Active,
-        }
-    }
-
     /// Lower-case name, matching the wire form.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -295,8 +285,6 @@ pub enum Request {
     SetPresence { id: String, target: PresenceTarget },
     /// Report the presence state. Emits `Presence`, then `Done`.
     GetPresence { id: String },
-    /// Atomically advance one step along `Active → Drowsy → Sleeping → Active`.
-    Cycle { id: String },
     /// Open the mic and buffer audio until `PttStop`. Emits `Done` once the mic is open.
     PttStart { id: String },
     /// Transcribe the recording and run it as a query. Emits `VoiceState`, `Transcription`, the
@@ -436,7 +424,6 @@ impl Request {
             Request::Query { id, .. }
             | Request::SetPresence { id, .. }
             | Request::GetPresence { id }
-            | Request::Cycle { id }
             | Request::PttStart { id }
             | Request::PttStop { id }
             | Request::ListenStart { id }
@@ -479,7 +466,6 @@ impl Request {
             Request::Query { .. } => "query",
             Request::SetPresence { .. } => "set_presence",
             Request::GetPresence { .. } => "get_presence",
-            Request::Cycle { .. } => "cycle",
             Request::PttStart { .. } => "ptt_start",
             Request::PttStop { .. } => "ptt_stop",
             Request::ListenStart { .. } => "listen_start",

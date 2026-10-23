@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Supported tiling compositors. `Auto` defers to [`detect_from_env`].
+/// The `compositor.type` values. `Auto` defers to [`detect_from_env`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CompositorType {
@@ -10,13 +10,34 @@ pub enum CompositorType {
     Hyprland,
 }
 
-/// Compositor integration settings.
+/// A supported compositor, once `Auto` is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compositor {
+    I3,
+    Sway,
+    Hyprland,
+}
+
+/// The compositor that window management and screenshots target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CompositorConfig {
     /// The `type` key.
     #[serde(rename = "type")]
     pub compositor_type: CompositorType,
+}
+
+impl CompositorConfig {
+    /// The configured compositor, else the one the process environment
+    /// names; `None` when `Auto` detects none.
+    pub fn resolve(&self) -> Option<Compositor> {
+        match self.compositor_type {
+            CompositorType::Auto => detect_from_env(&SessionEnv::from_process()),
+            CompositorType::I3 => Some(Compositor::I3),
+            CompositorType::Sway => Some(Compositor::Sway),
+            CompositorType::Hyprland => Some(Compositor::Hyprland),
+        }
+    }
 }
 
 impl Default for CompositorConfig {
@@ -52,15 +73,15 @@ impl SessionEnv {
 /// Resolve a compositor from the session environment, in priority
 /// order: `$SWAYSOCK`, `$I3SOCK`, `$HYPRLAND_INSTANCE_SIGNATURE`, then
 /// `$XDG_CURRENT_DESKTOP` case-insensitively.
-pub fn detect_from_env(env: &SessionEnv) -> Option<CompositorType> {
+pub fn detect_from_env(env: &SessionEnv) -> Option<Compositor> {
     if env.swaysock {
-        return Some(CompositorType::Sway);
+        return Some(Compositor::Sway);
     }
     if env.i3sock {
-        return Some(CompositorType::I3);
+        return Some(Compositor::I3);
     }
     if env.hyprland_signature {
-        return Some(CompositorType::Hyprland);
+        return Some(Compositor::Hyprland);
     }
     match env
         .xdg_current_desktop
@@ -69,9 +90,9 @@ pub fn detect_from_env(env: &SessionEnv) -> Option<CompositorType> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "sway" => Some(CompositorType::Sway),
-        "i3" => Some(CompositorType::I3),
-        "hyprland" => Some(CompositorType::Hyprland),
+        "sway" => Some(Compositor::Sway),
+        "i3" => Some(Compositor::I3),
+        "hyprland" => Some(Compositor::Hyprland),
         _ => None,
     }
 }
@@ -94,7 +115,7 @@ mod tests {
                     i3sock: true,
                     ..SessionEnv::default()
                 },
-                Some(CompositorType::Sway),
+                Some(Compositor::Sway),
             ),
             (
                 "hyprland signature",
@@ -102,7 +123,7 @@ mod tests {
                     hyprland_signature: true,
                     ..SessionEnv::default()
                 },
-                Some(CompositorType::Hyprland),
+                Some(Compositor::Hyprland),
             ),
             (
                 "socket beats xdg",
@@ -111,9 +132,9 @@ mod tests {
                     xdg_current_desktop: Some("sway".into()),
                     ..SessionEnv::default()
                 },
-                Some(CompositorType::I3),
+                Some(Compositor::I3),
             ),
-            ("xdg SWAY", xdg("SWAY"), Some(CompositorType::Sway)),
+            ("xdg SWAY", xdg("SWAY"), Some(Compositor::Sway)),
             ("nothing set", SessionEnv::default(), None),
             ("xdg KDE", xdg("KDE"), None),
         ];

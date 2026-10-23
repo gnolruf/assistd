@@ -13,7 +13,7 @@ flowchart TB
         direction LR
         query["assistd query"]
         chat["assistd chat (TUI)"]
-        ptt["assistd ptt-start / cycle"]
+        ptt["assistd ptt-start / sleep"]
         hooks["Compositor hooks<br/>(i3 / Sway exec)"]
     end
 
@@ -79,9 +79,8 @@ three. `core` sits at the top because it's where every subsystem is
 wired into a working daemon.
 
 The same binary also ships several client subcommands that speak the
-Unix-socket IPC: `query`, `chat`, `cycle` / `sleep` / `wake` /
-`drowse`, `ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`,
-and `tray`. The tray subcommand is a long-lived
+Unix-socket IPC: `query`, `chat`, `sleep` / `wake` / `drowse`,
+`ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`, and `tray`. The tray subcommand is a long-lived
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)
 client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
 holds a passive `Request::Subscribe` connection, translates the

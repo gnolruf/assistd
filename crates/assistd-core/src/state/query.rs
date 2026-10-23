@@ -513,10 +513,7 @@ impl AppState {
 
     fn speech_pipeline(&self) -> (SpeechPipeline, mpsc::Receiver<String>) {
         let synthesis = &self.config.voice.synthesis;
-        let sentences = SentenceBuffer::new_with_mode(
-            synthesis.max_sentence_chars.get() as usize,
-            synthesis.code_block_mode,
-        );
+        let sentences = SentenceBuffer::new(synthesis.max_sentence_chars.get() as usize);
         let partial_flush = (synthesis.partial_flush_ms > 0)
             .then(|| Duration::from_millis(u64::from(synthesis.partial_flush_ms)));
         let (tx, rx) = mpsc::channel::<String>(32);

@@ -18,7 +18,6 @@ pub struct ToolsConfig {
     pub output: ToolsOutputConfig,
     pub bash: ToolsBashConfig,
     pub write: ToolsWriteConfig,
-    pub screenshot: ToolsScreenshotConfig,
 }
 
 /// The directory `bash` scripts and the other commands share.
@@ -165,24 +164,4 @@ impl Default for ToolsWriteConfig {
             writable_paths: default_writable_paths(),
         }
     }
-}
-
-/// Screenshot capture backend.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ScreenshotBackend {
-    /// Wayland when `XDG_SESSION_TYPE`/`WAYLAND_DISPLAY` say so, else X11.
-    #[default]
-    Auto,
-    /// `maim`; `--focused` also needs `xdotool`.
-    X11,
-    /// `grim`; `--focused` needs sway or Hyprland.
-    Wayland,
-}
-
-/// Screenshot-command settings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ToolsScreenshotConfig {
-    pub backend: ScreenshotBackend,
 }

@@ -387,15 +387,6 @@ impl PresenceManager {
         }
     }
 
-    /// Advance one step along `Active → Drowsy → Sleeping → Active`. Of two
-    /// racing calls targeting the same state, the loser is a no-op.
-    pub async fn cycle(&self) -> Result<PresenceTarget, PresenceError> {
-        self.mark_activity();
-        let target = self.state().next();
-        self.set_presence(target).await?;
-        Ok(target)
-    }
-
     /// `Active|Drowsy → Sleeping`. Idempotent from `Sleeping`. Waits for
     /// every outstanding [`RequestGuard`] to drop first.
     pub async fn sleep(&self) -> Result<(), PresenceError> {

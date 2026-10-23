@@ -370,7 +370,6 @@ fn chat_spec(port: u16) -> ClientCfg {
             system_prompt: "test system prompt".into(),
             max_history_tokens: nz32(10_000),
             summary_target_tokens: nz32(1000),
-            preserve_recent_turns: nz32(2),
             temperature: 0.5,
             max_response_tokens: nz32(256),
             max_reasoning_tokens: nz32(128),
@@ -659,8 +658,9 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
             "data: [DONE]\n\n".into(),
         ])
     };
-    script.push_stream(reply_with_usage(20)).await;
-    script.push_stream(reply_with_usage(20)).await;
+    for _ in 0..6 {
+        script.push_stream(reply_with_usage(20)).await;
+    }
     script.push_stream(reply_with_usage(20_000)).await;
     script.push_stream(reply_with_usage(20)).await;
     script
@@ -668,11 +668,10 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
-    let mut spec = chat_spec(port);
-    spec.chat.preserve_recent_turns = nz32(1);
+    let spec = chat_spec(port);
     let client = build_client(&spec);
     let mut compaction_notices = Vec::new();
-    for i in 0..4 {
+    for i in 0..8 {
         let (tx, mut rx) = mpsc::channel(32);
         client.generate(format!("turn {i}"), tx).await.unwrap();
         let announced = drain(&mut rx).await.iter().any(|ev| {
@@ -688,7 +687,7 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
     }
     assert_eq!(
         compaction_notices,
-        [false, false, false, true],
+        [false, false, false, false, false, false, false, true],
         "only the turn that compacts announces it"
     );
 
@@ -702,7 +701,7 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
     );
     let summaries_before_last_turn = captured
         .iter()
-        .take_while(|r| !(r.stream && r.body.to_string().contains("turn 3")))
+        .take_while(|r| !(r.stream && r.body.to_string().contains("turn 7")))
         .filter(|r| !r.stream)
         .count();
     assert_eq!(
@@ -715,11 +714,13 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
 async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     let script = Script::new();
     let long_reply: String = "padding word ".repeat(20);
+    for _ in 0..6 {
+        script
+            .push_stream(StreamResponse::Deltas(vec!["ok".into()]))
+            .await;
+    }
     script
-        .push_stream(StreamResponse::Deltas(vec![long_reply.clone()]))
-        .await;
-    script
-        .push_stream(StreamResponse::Deltas(vec![long_reply.clone()]))
+        .push_stream(StreamResponse::Deltas(vec![long_reply]))
         .await;
     script
         .push_stream(StreamResponse::Deltas(vec!["final".into()]))
@@ -730,12 +731,11 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let mut spec = chat_spec(port);
-    spec.chat.max_history_tokens = nz32(50);
+    spec.chat.max_history_tokens = nz32(100);
     spec.chat.summary_target_tokens = nz32(10);
-    spec.chat.preserve_recent_turns = nz32(1);
     let client = build_client(&spec);
 
-    for i in 0..3 {
+    for i in 0..8 {
         let (tx, mut rx) = mpsc::channel(32);
         client
             .generate(format!("turn {i}"), tx)
@@ -1369,7 +1369,6 @@ async fn history_is_not_sent_for_summarizing_while_the_server_is_not_serving() {
     let mut spec = chat_spec(port);
     spec.chat.max_history_tokens = nz32(60);
     spec.chat.summary_target_tokens = nz32(15);
-    spec.chat.preserve_recent_turns = nz32(1);
     let probe = ScriptedProbe::serving();
     let client = build_probed_client(&spec, &probe);
     for i in 0..2 {

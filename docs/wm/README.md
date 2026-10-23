@@ -9,18 +9,14 @@ the chat scratchpad) live in your compositor config and call the
 
 - `assistd` on your `$PATH` and a config at
   `~/.config/assistd/config.toml` (`assistd init-config` writes one).
-- Turn off the daemon's built-in X11 hotkeys for push-to-talk
-  (`Super+Space`) and presence cycling (`Super+Escape`). When the
-  compositor binds the same keys, the daemon's grab fails, and under
-  Wayland it only sees keys while an X11 window has focus. The other
-  hotkey fields are empty by default.
+- Turn off the daemon's built-in X11 push-to-talk hotkey
+  (`Super+Space`). When the compositor binds the same key, the
+  daemon's grab fails, and under Wayland it only sees keys while an X11
+  window has focus. The other `[hotkeys]` fields are empty by default.
 
   ```toml
-  [voice]
-  hotkey = ""
-
-  [presence]
-  hotkey = ""
+  [hotkeys]
+  push_to_talk = ""
   ```
 
 ## What the commands do
@@ -34,7 +30,7 @@ the chat scratchpad) live in your compositor config and call the
 - **`ptt-start` / `ptt-stop`** record while a key is held, then
   transcribe and run the turn. Both exit with an error when `[voice]
   enabled = false`. An open chat shows the transcript and reply.
-- **`cycle`** steps `Active → Drowsy → Sleeping → Active`. `Active`
+- **`sleep` / `drowse` / `wake`** set the presence state. `Active`
   has the model loaded, `Drowsy` keeps `llama-server` running with
   the weights unloaded, and `Sleeping` stops it, freeing its VRAM.
   `sleep` never suspends the machine; `wake` blocks until `Active`.
@@ -56,9 +52,9 @@ After reloading the compositor config:
 # 1. Daemon up?
 assistd query "what time is it"
 
-# 2. Presence cycle works?
-assistd cycle   # Active → Drowsy
-assistd cycle   # Drowsy → Sleeping
+# 2. Presence changes work?
+assistd drowse  # Active → Drowsy
+assistd sleep   # Drowsy → Sleeping
 assistd wake    # blocks until Active
 
 # 3. Scratchpad visible?

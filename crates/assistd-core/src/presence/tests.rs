@@ -83,5 +83,4 @@ async fn failed_wake_settles_back_to_the_prior_state() {
         .expect_err("stub llama-server binary does not exist");
     assert_eq!(m.state(), PresenceState::Sleeping);
     assert!(m.wake_in_progress().is_none());
-    assert_eq!(m.state().next(), PresenceTarget::Active);
 }

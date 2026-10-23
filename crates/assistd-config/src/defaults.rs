@@ -49,7 +49,6 @@ pub const DEFAULT_MODEL_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
 
 pub const DEFAULT_CHAT_MAX_HISTORY_TOKENS: NonZeroU32 = nz32(6000);
 pub const DEFAULT_CHAT_SUMMARY_TARGET_TOKENS: NonZeroU32 = nz32(1000);
-pub const DEFAULT_CHAT_PRESERVE_RECENT_TURNS: NonZeroU32 = nz32(4);
 pub const DEFAULT_CHAT_TEMPERATURE: f32 = 0.7;
 pub const DEFAULT_CHAT_MAX_RESPONSE_TOKENS: NonZeroU32 = nz32(1024);
 pub const DEFAULT_CHAT_MAX_REASONING_TOKENS: NonZeroU32 = nz32(512);
@@ -59,8 +58,6 @@ pub const DEFAULT_CHAT_SUMMARY_TEMPERATURE: f32 = 0.3;
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local desktop assistant \
      running on a Linux workstation. When a question is about this machine or its files, \
      prefer calling a tool over guessing. Answer precisely and in a conversational tone.";
-
-pub const DEFAULT_VOICE_HOTKEY: &str = "Super+Space";
 
 pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
 pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
@@ -76,12 +73,9 @@ pub const DEFAULT_PIPER_LENGTH_SCALE: f32 = 1.0;
 pub const DEFAULT_PIPER_DEADLINE_SECS: NonZeroU32 = nz32(30);
 pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: NonZeroU32 = nz32(400);
 pub const DEFAULT_PIPER_PARTIAL_FLUSH_MS: u32 = 750;
-pub const DEFAULT_PIPER_TOGGLE_HOTKEY: &str = "";
-pub const DEFAULT_PIPER_SKIP_HOTKEY: &str = "";
 
 pub const DEFAULT_WAKEWORD_ENABLED: bool = false;
 pub const DEFAULT_WAKEWORD_START_ON_LAUNCH: bool = false;
-pub const DEFAULT_WAKEWORD_HOTKEY: &str = "";
 pub const DEFAULT_WAKEWORD_SILENCE_MS: NonZeroU32 = nz32(800);
 pub const DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
 pub const DEFAULT_WAKEWORD_BARGE_IN: bool = true;
@@ -89,9 +83,7 @@ pub const DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS: NonZeroU32 = nz32(4000);
 pub const DEFAULT_WAKEWORD_FOLLOW_UP_MS: u32 = 8000;
 pub const DEFAULT_WAKEWORD_MATCH_SIMILARITY: UnitInterval = unit(0.8);
 
-pub const DEFAULT_PRESENCE_HOTKEY: &str = "Super+Escape";
-
-pub const DEFAULT_DAEMON_SHUTDOWN_GRACE_SECS: u64 = 5;
+pub const DEFAULT_HOTKEY_PUSH_TO_TALK: &str = "Super+Space";
 
 pub const DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS: u64 = 30;
 pub const DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS: u64 = 10;
@@ -145,9 +137,6 @@ pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";
 pub const DEFAULT_TRAY_NOTIFICATIONS_ENABLED: bool = true;
 pub const DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
 pub const DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
-pub const DEFAULT_TRAY_NOTIFICATIONS_WAKE_TOOL_CALL: bool = true;
-pub const DEFAULT_TRAY_NOTIFICATIONS_WAKE_DELTA: bool = true;
-pub const DEFAULT_TRAY_NOTIFICATIONS_WAKE_ERROR: bool = true;
 
 /// `$XDG_DATA_HOME/assistd/memory.db`, or
 /// `$HOME/.local/share/assistd/memory.db`.

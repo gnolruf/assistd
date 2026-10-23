@@ -1,4 +1,4 @@
-//! `sleep`, `wake`, `drowse`, and `cycle` subcommands.
+//! `sleep`, `wake`, and `drowse` subcommands.
 
 use std::io::{self, Write};
 
@@ -13,7 +13,6 @@ pub(crate) enum PresenceAction {
     Sleep,
     Drowse,
     Wake,
-    Cycle,
 }
 
 impl PresenceAction {
@@ -31,7 +30,6 @@ impl PresenceAction {
                 id,
                 target: PresenceTarget::Active,
             },
-            PresenceAction::Cycle => Request::Cycle { id },
         }
     }
 }

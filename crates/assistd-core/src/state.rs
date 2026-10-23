@@ -186,7 +186,6 @@ impl AppState {
             Request::SetPresence { id, target } => {
                 return self.handle_set_presence(id, target, tx).await;
             }
-            Request::Cycle { id } => return self.handle_cycle(id, tx).await,
             Request::PttStart { id } => return self.handle_ptt_start(id, tx).await,
             Request::PttStop { id } => return self.handle_ptt_stop(id, tx).await,
             Request::ListenStart { id } => return self.handle_listen_start(id, tx).await,

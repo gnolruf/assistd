@@ -1,7 +1,5 @@
-//! Keyboard and mouse input: scrolling, toggles, the slash-command popup
-//! and the F2 presence cycle.
+//! Keyboard and mouse input: scrolling, toggles and the slash-command popup.
 
-use assistd_core::{PresenceState, PresenceTarget};
 use assistd_ipc::{PermissionMode, Request};
 use assistd_tools::Approval;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -53,7 +51,6 @@ impl App {
         match ev.code {
             KeyCode::PageUp => self.output.scroll_page_up(self.last_output_height),
             KeyCode::PageDown => self.output.scroll_page_down(self.last_output_height),
-            KeyCode::F(2) => self.on_cycle_key(),
             KeyCode::Tab => self.on_tab(slash_active),
             KeyCode::Char('o') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_verbose();
@@ -138,20 +135,6 @@ impl App {
             id: Uuid::new_v4().to_string(),
         };
         self.spawn_one_shot(req, WireStream::Status, "interrupt");
-    }
-
-    fn on_cycle_key(&mut self) {
-        let target = self
-            .presence_state
-            .map_or(PresenceTarget::Active, PresenceState::next);
-        self.set_notice(&format!(
-            "cycling → {}",
-            PresenceState::from(target).as_str()
-        ));
-        let req = Request::Cycle {
-            id: Uuid::new_v4().to_string(),
-        };
-        self.spawn_one_shot(req, WireStream::Status, "cycle");
     }
 
     /// Empty when the popup should be hidden.

@@ -11,6 +11,9 @@ use tracing::{debug, error, info, warn};
 
 pub use assistd_ipc::{Component, StatusSeverity};
 
+/// How long in-flight tasks get to finish on shutdown before being aborted.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// Log a recovery event at the level matching `severity`, under
 /// `target = "assistd::recovery"`, with `severity`, `component`, and
 /// `event` fields ahead of the caller's own.
@@ -105,18 +108,18 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Wait up to `grace` for every task in `tasks` to finish, then abort
+/// Wait up to five seconds for every task in `tasks` to finish, then abort
 /// the rest. Panics are logged as `"{what} task panicked"`.
-pub async fn drain_join_set(tasks: &mut JoinSet<()>, grace: Duration, what: &str) {
+pub async fn drain_join_set(tasks: &mut JoinSet<()>, what: &str) {
     let in_flight = tasks.len();
     if in_flight == 0 {
         return;
     }
     info!(
-        grace_secs = grace.as_secs(),
+        grace_secs = SHUTDOWN_GRACE.as_secs(),
         in_flight, "draining in-flight {what} tasks"
     );
-    let drained = tokio::time::timeout(grace, async {
+    let drained = tokio::time::timeout(SHUTDOWN_GRACE, async {
         while let Some(res) = tasks.join_next().await {
             if let Err(e) = res
                 && e.is_panic()

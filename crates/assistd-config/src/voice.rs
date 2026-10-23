@@ -6,43 +6,25 @@ use serde::{Deserialize, Serialize};
 use crate::defaults::{
     DEFAULT_PIPER_BINARY, DEFAULT_PIPER_DEADLINE_SECS, DEFAULT_PIPER_ENABLED,
     DEFAULT_PIPER_LENGTH_SCALE, DEFAULT_PIPER_MAX_SENTENCE_CHARS, DEFAULT_PIPER_PARTIAL_FLUSH_MS,
-    DEFAULT_PIPER_SKIP_HOTKEY, DEFAULT_PIPER_TOGGLE_HOTKEY, DEFAULT_PIPER_VOICE,
-    DEFAULT_VOICE_HOTKEY, DEFAULT_WAKEWORD_BARGE_IN, DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
-    DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_FOLLOW_UP_MS, DEFAULT_WAKEWORD_HOTKEY,
-    DEFAULT_WAKEWORD_MATCH_SIMILARITY, DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
-    DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WHISPER_BEAMS,
-    DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED,
-    DEFAULT_WHISPER_VAD_MODEL,
+    DEFAULT_PIPER_VOICE, DEFAULT_WAKEWORD_BARGE_IN, DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
+    DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_FOLLOW_UP_MS, DEFAULT_WAKEWORD_MATCH_SIMILARITY,
+    DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS, DEFAULT_WAKEWORD_SILENCE_MS,
+    DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WHISPER_BEAMS, DEFAULT_WHISPER_MODEL,
+    DEFAULT_WHISPER_PREFER_GPU, DEFAULT_WHISPER_VAD_ENABLED, DEFAULT_WHISPER_VAD_MODEL,
 };
 use crate::errors::UnitIntervalError;
 
 /// Voice input and output settings.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VoiceConfig {
     /// Enables voice input.
     pub enabled: bool,
     /// ALSA/PulseAudio input device. `None` uses the system default.
     pub mic_device: Option<String>,
-    /// Push-to-talk hold hotkey (e.g. `"Super+Space"`). Empty disables it;
-    /// the PTT IPC commands still work.
-    pub hotkey: String,
     pub transcription: TranscriptionConfig,
     pub wakeword: WakeWordConfig,
     pub synthesis: SynthesisConfig,
-}
-
-impl Default for VoiceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mic_device: None,
-            hotkey: DEFAULT_VOICE_HOTKEY.to_string(),
-            transcription: TranscriptionConfig::default(),
-            wakeword: WakeWordConfig::default(),
-            synthesis: SynthesisConfig::default(),
-        }
-    }
 }
 
 /// Whisper speech-to-text settings.
@@ -97,8 +79,6 @@ pub struct WakeWordConfig {
     pub enabled: bool,
     /// Start listening at launch; otherwise the listener idles until toggled.
     pub start_on_launch: bool,
-    /// Hotkey that toggles listening. Empty disables it.
-    pub hotkey: String,
     /// Trailing silence, in ms, that ends an utterance.
     pub silence_ms: NonZeroU32,
     /// Seconds after which an utterance is transcribed even mid-speech,
@@ -126,7 +106,6 @@ impl Default for WakeWordConfig {
         Self {
             enabled: DEFAULT_WAKEWORD_ENABLED,
             start_on_launch: DEFAULT_WAKEWORD_START_ON_LAUNCH,
-            hotkey: DEFAULT_WAKEWORD_HOTKEY.to_string(),
             silence_ms: DEFAULT_WAKEWORD_SILENCE_MS,
             max_utterance_secs: DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
             barge_in: DEFAULT_WAKEWORD_BARGE_IN,
@@ -203,13 +182,6 @@ pub struct SynthesisConfig {
     /// Idle gap, in ms, between LLM deltas after which buffered text is
     /// spoken unterminated. `0` disables; suspended during tool calls.
     pub partial_flush_ms: u32,
-    pub code_block_mode: CodeBlockMode,
-    /// Hotkey that toggles TTS (e.g. `"Super+Shift+M"`). Empty disables it.
-    /// Off cancels playback; sentences arriving while off are dropped.
-    pub toggle_hotkey: String,
-    /// Hotkey that stops playback and drops the current response's queued
-    /// sentences. Empty disables it.
-    pub skip_hotkey: String,
     /// Pass `--cuda` to piper; needs a piper built against `onnxruntime-gpu`.
     pub use_cuda: bool,
     /// Output device as listed by `aplay -L` (e.g. `"pipewire"`). `None`
@@ -229,24 +201,10 @@ impl Default for SynthesisConfig {
             deadline_secs: DEFAULT_PIPER_DEADLINE_SECS,
             max_sentence_chars: DEFAULT_PIPER_MAX_SENTENCE_CHARS,
             partial_flush_ms: DEFAULT_PIPER_PARTIAL_FLUSH_MS,
-            code_block_mode: CodeBlockMode::Skip,
-            toggle_hotkey: DEFAULT_PIPER_TOGGLE_HOTKEY.to_string(),
-            skip_hotkey: DEFAULT_PIPER_SKIP_HOTKEY.to_string(),
             use_cuda: false,
             output_device: None,
         }
     }
-}
-
-/// How fenced code blocks in a reply are spoken.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CodeBlockMode {
-    /// Drop them silently.
-    #[default]
-    Skip,
-    /// Drop them but say `"Code block in <lang>."` (or `"Code block."`) per fence.
-    Summarize,
 }
 
 #[cfg(test)]

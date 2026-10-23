@@ -2,10 +2,7 @@
 
 use std::sync::Arc;
 
-use assistd_config::{
-    CompositorType, Config,
-    compositor::{SessionEnv, detect_from_env},
-};
+use assistd_config::{Compositor, Config};
 #[cfg(feature = "i3")]
 use assistd_wm::I3Backend;
 #[cfg(feature = "sway")]
@@ -33,41 +30,24 @@ pub(crate) async fn start_backend(
     config: &Config,
     shutdown_rx: watch::Receiver<bool>,
 ) -> WmBackend {
-    connect(
-        resolve_compositor(config.compositor.compositor_type),
-        shutdown_rx,
-    )
-    .await
-}
-
-/// Resolve `Auto` from the session environment; stays `Auto` when no
-/// supported compositor is detected.
-fn resolve_compositor(configured: CompositorType) -> CompositorType {
-    match configured {
-        CompositorType::Auto => match detect_from_env(&SessionEnv::from_process()) {
-            Some(c) => {
-                tracing::info!(target: "assistd::wm", "auto-detected compositor = {c:?}");
-                c
-            }
-            None => {
-                tracing::info!(
-                    target: "assistd::wm",
-                    "auto-detect found no supported compositor \
-                     (no $SWAYSOCK/$I3SOCK/$HYPRLAND_INSTANCE_SIGNATURE/$XDG_CURRENT_DESKTOP); \
-                     window operations disabled"
-                );
-                CompositorType::Auto
-            }
-        },
-        explicit => explicit,
-    }
+    let Some(compositor) = config.compositor.resolve() else {
+        tracing::info!(
+            target: "assistd::wm",
+            "no supported compositor configured or detected \
+             (no $SWAYSOCK/$I3SOCK/$HYPRLAND_INSTANCE_SIGNATURE/$XDG_CURRENT_DESKTOP); \
+             window operations disabled"
+        );
+        return WmBackend::disconnected();
+    };
+    tracing::info!(target: "assistd::wm", "compositor = {compositor:?}");
+    connect(compositor, shutdown_rx).await
 }
 
 #[cfg(any(feature = "i3", feature = "sway"))]
-async fn connect(compositor: CompositorType, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
+async fn connect(compositor: Compositor, shutdown_rx: watch::Receiver<bool>) -> WmBackend {
     match compositor {
         #[cfg(feature = "i3")]
-        CompositorType::I3 => match I3Backend::start(shutdown_rx).await {
+        Compositor::I3 => match I3Backend::start(shutdown_rx).await {
             Ok(handle) => {
                 tracing::info!(target: "assistd::wm", "i3 backend connected");
                 WmBackend {
@@ -84,7 +64,7 @@ async fn connect(compositor: CompositorType, shutdown_rx: watch::Receiver<bool>)
             }
         },
         #[cfg(feature = "sway")]
-        CompositorType::Sway => match SwayBackend::start(shutdown_rx).await {
+        Compositor::Sway => match SwayBackend::start(shutdown_rx).await {
             Ok(handle) => {
                 tracing::info!(target: "assistd::wm", "sway backend connected");
                 WmBackend {
@@ -106,33 +86,32 @@ async fn connect(compositor: CompositorType, shutdown_rx: watch::Receiver<bool>)
 
 #[cfg(not(any(feature = "i3", feature = "sway")))]
 fn connect(
-    compositor: CompositorType,
+    compositor: Compositor,
     _shutdown_rx: watch::Receiver<bool>,
 ) -> std::future::Ready<WmBackend> {
     std::future::ready(without_backend(compositor))
 }
 
-fn without_backend(compositor: CompositorType) -> WmBackend {
+fn without_backend(compositor: Compositor) -> WmBackend {
     match compositor {
-        CompositorType::I3 => {
+        Compositor::I3 => {
             tracing::warn!(
                 target: "assistd::wm",
                 "i3 backend not compiled into this build (feature `i3`); window operations disabled"
             );
         }
-        CompositorType::Sway => {
+        Compositor::Sway => {
             tracing::warn!(
                 target: "assistd::wm",
                 "sway backend not compiled into this build (feature `sway`); window operations disabled"
             );
         }
-        CompositorType::Hyprland => {
+        Compositor::Hyprland => {
             tracing::info!(
                 target: "assistd::wm",
                 "no hyprland backend; window operations disabled"
             );
         }
-        CompositorType::Auto => {}
     }
     WmBackend::disconnected()
 }

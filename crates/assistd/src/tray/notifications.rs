@@ -18,16 +18,13 @@ mod render;
 #[derive(Clone)]
 pub(crate) struct NotificationSink {
     driver_tx: UnboundedSender<DriverInput>,
-    wake_tool_call: bool,
-    wake_delta: bool,
-    wake_error: bool,
 }
 
 impl NotificationSink {
-    /// Forward an event into the driver, then a `Wake` when the event
-    /// matches a configured wake rule.
+    /// Forward an event into the driver, then a `Wake` for a tool call,
+    /// reply text or error.
     pub(crate) fn ingest(&self, ev: &Event) {
-        let wakes = self.matches_wake_rule(ev);
+        let wakes = raises_notification(ev);
         let _ = self
             .driver_tx
             .send(DriverInput::Event(Box::new(ev.clone())));
@@ -43,17 +40,6 @@ impl NotificationSink {
     /// Report a click on the tray icon.
     pub(crate) fn tray_activated(&self) {
         let _ = self.driver_tx.send(DriverInput::TrayActivated);
-    }
-
-    fn matches_wake_rule(&self, ev: &Event) -> bool {
-        match ev {
-            Event::ToolCall { .. } => self.wake_tool_call,
-            Event::Delta { .. } | Event::LastDelta { .. } | Event::ReasoningDelta { .. } => {
-                self.wake_delta
-            }
-            Event::Error { .. } => self.wake_error,
-            _ => false,
-        }
     }
 }
 
@@ -90,15 +76,21 @@ pub(crate) fn spawn_notifications(cfg: &Config, ipc: IpcClient) -> Option<Notifi
         ipc,
     ));
     Some(NotificationsHandle {
-        sink: NotificationSink {
-            driver_tx,
-            wake_tool_call: notifications_cfg.wake_on.tool_call,
-            wake_delta: notifications_cfg.wake_on.delta,
-            wake_error: notifications_cfg.wake_on.error,
-        },
+        sink: NotificationSink { driver_tx },
         driver_task,
         notifier_task,
     })
+}
+
+fn raises_notification(ev: &Event) -> bool {
+    matches!(
+        ev,
+        Event::ToolCall { .. }
+            | Event::Delta { .. }
+            | Event::LastDelta { .. }
+            | Event::ReasoningDelta { .. }
+            | Event::Error { .. }
+    )
 }
 
 #[cfg(test)]
@@ -107,26 +99,10 @@ mod tests {
 
     use super::*;
 
-    fn sink(
-        wake_tool_call: bool,
-        wake_delta: bool,
-        wake_error: bool,
-    ) -> (NotificationSink, mpsc::UnboundedReceiver<DriverInput>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (
-            NotificationSink {
-                driver_tx: tx,
-                wake_tool_call,
-                wake_delta,
-                wake_error,
-            },
-            rx,
-        )
-    }
-
     #[test]
     fn sink_sends_the_event_before_its_wake() {
-        let (s, mut rx) = sink(true, true, true);
+        let (driver_tx, mut rx) = mpsc::unbounded_channel();
+        let s = NotificationSink { driver_tx };
         s.ingest(&Event::ToolCall {
             id: "a".into(),
             name: "x".into(),

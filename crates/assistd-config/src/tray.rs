@@ -4,8 +4,7 @@ use crate::defaults::{
     DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED, DEFAULT_TRAY_ICON_GENERATING,
     DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
     DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS, DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY,
-    DEFAULT_TRAY_NOTIFICATIONS_ENABLED, DEFAULT_TRAY_NOTIFICATIONS_WAKE_DELTA,
-    DEFAULT_TRAY_NOTIFICATIONS_WAKE_ERROR, DEFAULT_TRAY_NOTIFICATIONS_WAKE_TOOL_CALL,
+    DEFAULT_TRAY_NOTIFICATIONS_ENABLED,
 };
 
 /// System-tray settings for `assistd tray`.
@@ -58,8 +57,6 @@ pub struct TrayNotificationsConfig {
     /// Ask for a short plain-text reply to a voice turn while the chat is
     /// unfocused or closed.
     pub brief_when_away: bool,
-    /// Events that raise a notification; tray-icon left-click always does.
-    pub wake_on: TrayNotificationsWakeConfig,
 }
 
 impl TrayNotificationsConfig {
@@ -76,29 +73,6 @@ impl Default for TrayNotificationsConfig {
             enabled: DEFAULT_TRAY_NOTIFICATIONS_ENABLED,
             auto_hide_ms: DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS,
             brief_when_away: DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY,
-            wake_on: TrayNotificationsWakeConfig::default(),
-        }
-    }
-}
-
-/// Events that raise a notification, each independent.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct TrayNotificationsWakeConfig {
-    /// Every tool call.
-    pub tool_call: bool,
-    /// The first reply text of a turn.
-    pub delta: bool,
-    /// A failed turn.
-    pub error: bool,
-}
-
-impl Default for TrayNotificationsWakeConfig {
-    fn default() -> Self {
-        Self {
-            tool_call: DEFAULT_TRAY_NOTIFICATIONS_WAKE_TOOL_CALL,
-            delta: DEFAULT_TRAY_NOTIFICATIONS_WAKE_DELTA,
-            error: DEFAULT_TRAY_NOTIFICATIONS_WAKE_ERROR,
         }
     }
 }

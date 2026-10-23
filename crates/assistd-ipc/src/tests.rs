@@ -67,7 +67,6 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"chat_state","id":"r","focused":false}"#,
         ),
-        (Request::Cycle { id: id() }, r#"{"type":"cycle","id":"r"}"#),
         (
             Request::PttStart { id: id() },
             r#"{"type":"ptt_start","id":"r"}"#,

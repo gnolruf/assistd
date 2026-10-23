@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
     DEFAULT_CHAT_MAX_HISTORY_TOKENS, DEFAULT_CHAT_MAX_REASONING_TOKENS,
-    DEFAULT_CHAT_MAX_RESPONSE_TOKENS, DEFAULT_CHAT_PRESERVE_RECENT_TURNS,
-    DEFAULT_CHAT_REQUEST_TIMEOUT_SECS, DEFAULT_CHAT_SUMMARY_TARGET_TOKENS,
-    DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE, DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_CHAT_MAX_RESPONSE_TOKENS, DEFAULT_CHAT_REQUEST_TIMEOUT_SECS,
+    DEFAULT_CHAT_SUMMARY_TARGET_TOKENS, DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE,
+    DEFAULT_SYSTEM_PROMPT,
 };
 
 /// System prompt, history window and sampling. Sampler fields left `None`
@@ -23,8 +23,6 @@ pub struct ChatConfig {
     pub max_history_tokens: NonZeroU32,
     /// Target summary length in tokens. Must be below `max_history_tokens`.
     pub summary_target_tokens: NonZeroU32,
-    /// Recent user/assistant exchanges kept verbatim when summarizing.
-    pub preserve_recent_turns: NonZeroU32,
     /// Sampling temperature, `0.0..=2.0`.
     pub temperature: f32,
     /// Max tokens per model response, reasoning included; a response that
@@ -58,7 +56,6 @@ impl Default for ChatConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             max_history_tokens: DEFAULT_CHAT_MAX_HISTORY_TOKENS,
             summary_target_tokens: DEFAULT_CHAT_SUMMARY_TARGET_TOKENS,
-            preserve_recent_turns: DEFAULT_CHAT_PRESERVE_RECENT_TURNS,
             temperature: DEFAULT_CHAT_TEMPERATURE,
             max_response_tokens: DEFAULT_CHAT_MAX_RESPONSE_TOKENS,
             max_reasoning_tokens: DEFAULT_CHAT_MAX_REASONING_TOKENS,

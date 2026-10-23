@@ -145,7 +145,6 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd init-config`    | Write the default config to `~/.config/assistd/config.toml`.  |
 | `assistd query <text>`   | One-shot query; prints the streamed response and exits.       |
 | `assistd chat`           | Interactive ratatui TUI.                                      |
-| `assistd cycle`          | Step `Active → Drowsy → Sleeping → Active`.                   |
 | `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |
 | `assistd ptt-start/stop` | Push-to-talk start/stop, for window-manager bindings.         |
 | `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |

@@ -13,13 +13,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatConfig;
 use crate::compositor::CompositorConfig;
-use crate::daemon::DaemonConfig;
 use crate::embedding::EmbeddingConfig;
 use crate::errors::ConfigError;
+use crate::hotkeys::HotkeysConfig;
 use crate::mcp::McpConfig;
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
-use crate::presence::PresenceConfig;
 use crate::search::SearchConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
@@ -49,8 +48,7 @@ pub struct Config {
     pub voice: VoiceConfig,
     pub compositor: CompositorConfig,
     pub sleep: SleepConfig,
-    pub presence: PresenceConfig,
-    pub daemon: DaemonConfig,
+    pub hotkeys: HotkeysConfig,
     pub tools: ToolsConfig,
     pub memory: MemoryConfig,
     pub embedding: EmbeddingConfig,
