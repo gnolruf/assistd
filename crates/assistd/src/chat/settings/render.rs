@@ -130,8 +130,8 @@ fn row_line(
 ) -> Line<'static> {
     let line = match row {
         Row::Heading(section) => return heading_line(panel, section, selected),
-        Row::Setting(section, setting) => {
-            let label = format!("{:label_width$}", SECTIONS[section].label(setting));
+        Row::Setting(_, setting) => {
+            let label = format!("{:label_width$}", setting.label);
             let value = match (selected, panel.mode()) {
                 (true, PanelMode::Edit(editor)) if !editor.is_box() => {
                     Span::raw(editor_window(editor, value_width).0)
@@ -352,13 +352,8 @@ fn editor_window(editor: &TextEditor, width: usize) -> (String, usize) {
 fn longest_label() -> usize {
     SECTIONS
         .iter()
-        .flat_map(|section| {
-            section
-                .settings
-                .iter()
-                .map(|setting| section.label(setting))
-        })
-        .map(|label| label.chars().count())
+        .flat_map(|section| section.settings)
+        .map(|setting| setting.label.chars().count())
         .max()
         .unwrap_or(0)
         + LABEL_GAP
