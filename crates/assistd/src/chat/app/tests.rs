@@ -16,7 +16,14 @@ fn test_app() -> (App, mpsc::Receiver<ChatEvent>) {
 fn test_app_at(socket: PathBuf) -> (App, mpsc::Receiver<ChatEvent>) {
     let (tx, rx) = mpsc::channel::<ChatEvent>(16);
     let ipc = Arc::new(IpcClient::with_path(socket));
-    let app = App::new(ipc, tx, "test-model".into(), true, None);
+    let app = App::new(
+        ipc,
+        tx,
+        "test-model".into(),
+        true,
+        None,
+        PathBuf::from("/tmp/assistd-test-nonexistent.toml"),
+    );
     (app, rx)
 }
 

@@ -2,6 +2,7 @@
 //! only; I/O lives in the `spawn_*` methods and the attach loader.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ use tokio::task::JoinSet;
 
 use super::input::InputLine;
 use super::output::OutputPane;
+use super::settings::SettingsPanel;
 
 mod attach;
 mod commands;
@@ -249,6 +251,11 @@ pub(super) struct App {
     /// `/wakeword` panel, drawn in place of the transcript;
     /// `confirmation` takes precedence while both are open.
     pub wake_word_panel: Option<WakeWordPanel>,
+    /// `/settings` panel, drawn in place of the transcript; `confirmation`
+    /// takes precedence while both are open.
+    pub settings_panel: Option<SettingsPanel>,
+    /// The config file `/settings` edits.
+    config_path: PathBuf,
     /// Throttles rewraps for a live block's timer to 1 Hz.
     last_live_seconds: Option<u64>,
     pub session_title: Option<String>,
@@ -403,6 +410,7 @@ impl App {
         model_name: String,
         vision_enabled: bool,
         picker: Option<Picker>,
+        config_path: PathBuf,
     ) -> Self {
         let mut output = OutputPane::new();
         output.push_banner(model_name.clone());
@@ -437,6 +445,8 @@ impl App {
             slash_dismissed: false,
             resume_picker: None,
             wake_word_panel: None,
+            settings_panel: None,
+            config_path,
             last_live_seconds: None,
             session_title: None,
             verbose: false,
@@ -460,6 +470,14 @@ impl App {
     /// hides it.
     pub(super) fn shown_resume_picker(&self) -> Option<&ResumePicker> {
         self.resume_picker
+            .as_ref()
+            .filter(|_| self.confirmation.is_none())
+    }
+
+    /// The `/settings` panel when it is on screen; an open confirmation
+    /// prompt hides it.
+    pub(super) fn shown_settings_panel(&self) -> Option<&SettingsPanel> {
+        self.settings_panel
             .as_ref()
             .filter(|_| self.confirmation.is_none())
     }

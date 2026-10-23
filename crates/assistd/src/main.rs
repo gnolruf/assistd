@@ -88,6 +88,11 @@ enum Commands {
     #[cfg(feature = "chat")]
     Chat(chat::ChatArgs),
 
+    /// Edit the config file in a terminal settings panel; restart the
+    /// daemon to apply saved changes
+    #[cfg(feature = "chat")]
+    Settings(chat::settings::SettingsArgs),
+
     /// Run the system-tray icon (StatusNotifierItem over DBus). Long-
     /// lived; suitable for compositor autostart (`exec assistd tray`).
     #[cfg(feature = "tray")]
@@ -126,6 +131,8 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::VoiceState => voice_ctl::run(voice_ctl::VoiceCtlAction::State).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
+        #[cfg(feature = "chat")]
+        Commands::Settings(args) => chat::settings::run(args).await,
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
         Commands::Memory(args) => memory::run(args).await,

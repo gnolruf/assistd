@@ -41,6 +41,7 @@ mod focus;
 mod input;
 mod markdown;
 mod output;
+pub(crate) mod settings;
 mod ui;
 
 const CHAT_CHANNEL_CAPACITY: usize = 64;
@@ -78,6 +79,7 @@ struct TuiContext {
     shutdown_rx: watch::Receiver<bool>,
     model_name: String,
     vision_enabled: bool,
+    config_path: PathBuf,
 }
 
 /// Exclusive hold on the per-user chat lock beside the daemon socket,
@@ -241,6 +243,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         shutdown_rx: shutdown_tx.subscribe(),
         model_name,
         vision_enabled,
+        config_path,
     })
     .await;
 
@@ -310,6 +313,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         mut shutdown_rx,
         model_name,
         vision_enabled,
+        config_path,
     } = ctx;
 
     let _guard = TerminalGuard::enter()?;
@@ -317,7 +321,14 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
 
-    let mut app = App::new(ipc, chat_tx, model_name, vision_enabled, picker);
+    let mut app = App::new(
+        ipc,
+        chat_tx,
+        model_name,
+        vision_enabled,
+        picker,
+        config_path,
+    );
     app.spawn_resume_or_new(RESUME_RECENCY_SECS);
 
     let mut events = EventStream::new();
