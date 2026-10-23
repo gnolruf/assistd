@@ -56,15 +56,13 @@ impl AppState {
     }
 
     /// The brief-reply instruction for a voice turn while no live chat has
-    /// focus, unless `tray.notifications.brief_when_away` is off.
+    /// focus, unless `notifications.brief_when_away` is off.
     pub(super) fn brief_reply_note(
         &self,
         origin: TurnOrigin,
         chat_focused: bool,
     ) -> Option<String> {
-        (origin == TurnOrigin::Voice
-            && !chat_focused
-            && self.config.tray.notifications.brief_when_away)
+        (origin == TurnOrigin::Voice && !chat_focused && self.config.notifications.brief_when_away)
             .then(|| BRIEF_REPLY_NOTE.to_string())
     }
 

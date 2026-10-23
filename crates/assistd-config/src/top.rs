@@ -19,11 +19,11 @@ use crate::hotkeys::HotkeysConfig;
 use crate::mcp::McpConfig;
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
+use crate::notifications::{NotificationsConfig, TrayIconsConfig};
 use crate::search::SearchConfig;
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::{ToolsConfig, ToolsOutputConfig};
-use crate::tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig};
 use crate::voice::{SynthesisConfig, TranscriptionConfig, VoiceConfig};
 
 const CONFIG_DIR_MODE: u32 = 0o700;
@@ -56,7 +56,7 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(skip)]
     pub timeouts: TimeoutsConfig,
-    pub tray: TrayConfig,
+    pub notifications: NotificationsConfig,
 }
 
 impl Config {
@@ -74,8 +74,7 @@ impl Config {
         validate_embedding(&mut errors, &self.embedding, &self.model);
         validate_search(&mut errors, &self.search, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
-        validate_tray_icons(&mut errors, &self.tray.icons);
-        validate_tray_notifications(&mut errors, &self.tray.notifications);
+        validate_notifications(&mut errors, &self.notifications);
         if errors.is_empty() {
             Ok(())
         } else {
@@ -551,15 +550,16 @@ fn validate_tray_icons(errors: &mut Vec<String>, icons: &TrayIconsConfig) {
     ];
     for (key, name) in named {
         if name.trim().is_empty() {
-            errors.push(format!("tray.icons.{key} must not be empty"));
+            errors.push(format!("notifications.icons.{key} must not be empty"));
         }
     }
 }
 
-fn validate_tray_notifications(errors: &mut Vec<String>, notifications: &TrayNotificationsConfig) {
+fn validate_notifications(errors: &mut Vec<String>, notifications: &NotificationsConfig) {
     if notifications.enabled && !(500..=60_000).contains(&notifications.auto_hide_ms) {
-        errors.push("tray.notifications.auto_hide_ms must be in the range 500..=60000".into());
+        errors.push("notifications.auto_hide_ms must be in the range 500..=60000".into());
     }
+    validate_tray_icons(errors, &notifications.icons);
 }
 
 /// Pushes `message` unless `value` lies in `range`; NaN never does.

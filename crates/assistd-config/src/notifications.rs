@@ -1,19 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
-    DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED, DEFAULT_TRAY_ICON_GENERATING,
-    DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
-    DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS, DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY,
-    DEFAULT_TRAY_NOTIFICATIONS_ENABLED,
+    DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS, DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY,
+    DEFAULT_NOTIFICATIONS_ENABLED, DEFAULT_TRAY_ICON_ACTIVE, DEFAULT_TRAY_ICON_DISCONNECTED,
+    DEFAULT_TRAY_ICON_GENERATING, DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
 };
-
-/// System-tray settings for `assistd tray`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct TrayConfig {
-    pub icons: TrayIconsConfig,
-    pub notifications: TrayNotificationsConfig,
-}
 
 /// freedesktop icon-theme names the tray icon shows per state; none may be
 /// empty. Custom artwork under `~/.local/share/icons/<theme>/` is found by
@@ -45,11 +36,12 @@ impl Default for TrayIconsConfig {
     }
 }
 
-/// Desktop notifications showing a turn's activity, tool calls and reply.
-/// None are sent while the chat has keyboard focus.
+/// Desktop notifications from `assistd tray` showing a turn's activity, tool
+/// calls and reply, plus the tray icon's names. No notification is sent while
+/// the chat has keyboard focus.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct TrayNotificationsConfig {
+pub struct NotificationsConfig {
     pub enabled: bool,
     /// Idle ms before the notification closes, `500..=60000`. Reset by
     /// each event and paused while a turn is in flight.
@@ -57,9 +49,11 @@ pub struct TrayNotificationsConfig {
     /// Ask for a short plain-text reply to a voice turn while the chat is
     /// unfocused or closed.
     pub brief_when_away: bool,
+    /// Used by the tray icon whether or not notifications are enabled.
+    pub icons: TrayIconsConfig,
 }
 
-impl TrayNotificationsConfig {
+impl NotificationsConfig {
     /// Idle timeout while continuous listening is active: `3 × auto_hide_ms`
     /// (saturating), leaving time to hear the reply and answer verbally.
     pub fn listen_auto_hide_ms(&self) -> u64 {
@@ -67,12 +61,13 @@ impl TrayNotificationsConfig {
     }
 }
 
-impl Default for TrayNotificationsConfig {
+impl Default for NotificationsConfig {
     fn default() -> Self {
         Self {
-            enabled: DEFAULT_TRAY_NOTIFICATIONS_ENABLED,
-            auto_hide_ms: DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS,
-            brief_when_away: DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY,
+            enabled: DEFAULT_NOTIFICATIONS_ENABLED,
+            auto_hide_ms: DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS,
+            brief_when_away: DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY,
+            icons: TrayIconsConfig::default(),
         }
     }
 }

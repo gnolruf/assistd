@@ -23,7 +23,7 @@ fn sample(kind: SettingKind) -> toml::Value {
         SettingKind::Toggle => toml::Value::Boolean(false),
         SettingKind::Integer => toml::Value::Integer(1),
         SettingKind::Decimal => toml::Value::Float(0.5),
-        SettingKind::Text => toml::Value::from("x"),
+        SettingKind::Text | SettingKind::Prose => toml::Value::from("x"),
         SettingKind::Choice(options) => toml::Value::from(options[0]),
         SettingKind::List | SettingKind::External => toml::Value::Array(Vec::new()),
     }
@@ -34,7 +34,11 @@ fn catalog_lists_every_schema_key_and_only_schema_keys() {
     let defaults = toml::Table::try_from(Config::default()).unwrap();
     let mut schema_keys = Vec::new();
     collect_leaf_keys(&defaults, "", &mut schema_keys);
-    let settings = || SECTIONS.iter().flat_map(|section| section.settings);
+    let settings = || {
+        SECTIONS
+            .iter()
+            .flat_map(|section| section.enable.iter().chain(section.settings))
+    };
     let listed: HashSet<&str> = settings().map(|setting| setting.key).collect();
     for key in &schema_keys {
         assert!(listed.contains(key.as_str()), "{key} is not in the catalog");

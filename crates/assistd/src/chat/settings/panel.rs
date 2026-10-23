@@ -6,6 +6,7 @@ use std::ops::ControlFlow;
 use assistd_config::{ConfigDocument, ConfigError};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::super::ui::{locate_cursor, wrap_input};
 use super::catalog::{SECTIONS, Setting, SettingKind};
 
 /// Rows PgUp/PgDn move the selection.
@@ -15,6 +16,8 @@ const SAVED_NOTE: &str = "saved; restart the daemon to apply (systemctl --user r
 /// One line of the settings list; sections are indexes into [`SECTIONS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Row {
+    /// The section's title, and its [`enable`](super::catalog::Section::enable)
+    /// checkbox when it has one.
     Heading(usize),
     Setting(usize, &'static Setting),
     /// Shows or hides the section's advanced settings.
@@ -33,7 +36,7 @@ impl Row {
 
 pub(crate) enum PanelMode {
     Browse,
-    Edit(LineEditor),
+    Edit(TextEditor),
     /// Closing with unsaved changes; waits for save, discard or cancel.
     ConfirmClose,
 }
@@ -116,6 +119,29 @@ impl SettingsPanel {
         self.advanced_shown[section]
     }
 
+    /// Whether `row` sits in a feature that is off, or that needs another
+    /// feature that is off; locked rows are shown but skipped.
+    pub(crate) fn is_locked(&self, row: Row) -> bool {
+        let section = &SECTIONS[row.section()];
+        let requirements_met = section.requires.iter().all(|key| self.is_on(key));
+        match row {
+            Row::Heading(_) => !requirements_met,
+            Row::Setting(..) | Row::AdvancedToggle(_) => {
+                !requirements_met
+                    || section
+                        .enable
+                        .as_ref()
+                        .is_some_and(|enable| !self.is_on(enable.key))
+            }
+        }
+    }
+
+    pub(crate) fn is_on(&self, key: &str) -> bool {
+        self.current_value(key)
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// The value in effect for `key`: the file's, else the default.
     pub(crate) fn current_value(&self, key: &str) -> Option<&toml::Value> {
         self.document
@@ -155,7 +181,12 @@ impl SettingsPanel {
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_selected(),
             KeyCode::Left => self.cycle_selected(false),
             KeyCode::Right => self.cycle_selected(true),
-            KeyCode::Char('a') => self.toggle_advanced(self.selected_row().section()),
+            KeyCode::Char('a') => {
+                let toggle = Row::AdvancedToggle(self.selected_row().section());
+                if !self.is_locked(toggle) {
+                    self.toggle_advanced(toggle.section());
+                }
+            }
             KeyCode::Char('r') | KeyCode::Delete | KeyCode::Backspace => self.reset_selected(),
             _ => {}
         }
@@ -207,28 +238,43 @@ impl SettingsPanel {
         self.rows()[self.selected]
     }
 
-    fn selected_setting(&self) -> Option<&'static Setting> {
+    /// The setting on the selected row, the section checkbox included.
+    pub(crate) fn selected_setting(&self) -> Option<&'static Setting> {
         match self.selected_row() {
             Row::Setting(_, setting) => Some(setting),
-            Row::Heading(_) | Row::AdvancedToggle(_) => None,
+            Row::Heading(section) => SECTIONS[section].enable.as_ref(),
+            Row::AdvancedToggle(_) => None,
         }
     }
 
     /// Moves up to `steps` selectable rows forward or back, stopping at the ends.
     fn step_selection(&mut self, forward: bool, steps: usize) {
-        let rows = self.rows();
-        let selectable = |index: &usize| !matches!(rows[*index], Row::Heading(_));
+        let selectable: Vec<bool> = self
+            .rows()
+            .into_iter()
+            .map(|row| self.is_selectable(row))
+            .collect();
+        let is_selectable = |index: &usize| selectable[*index];
         for _ in 0..steps {
             let next = if forward {
-                (self.selected + 1..rows.len()).find(selectable)
+                (self.selected + 1..selectable.len()).find(is_selectable)
             } else {
-                (0..self.selected).rev().find(selectable)
+                (0..self.selected).rev().find(is_selectable)
             };
             match next {
                 Some(index) => self.selected = index,
                 None => break,
             }
         }
+    }
+
+    /// Unlocked settings, advanced toggles, and headings that are checkboxes.
+    fn is_selectable(&self, row: Row) -> bool {
+        let is_checkbox = match row {
+            Row::Heading(section) => SECTIONS[section].enable.is_some(),
+            Row::Setting(..) | Row::AdvancedToggle(_) => true,
+        };
+        is_checkbox && !self.is_locked(row)
     }
 
     fn toggle_advanced(&mut self, section: usize) {
@@ -242,8 +288,11 @@ impl SettingsPanel {
     fn activate_selected(&mut self) {
         let setting = match self.selected_row() {
             Row::AdvancedToggle(section) => return self.toggle_advanced(section),
-            Row::Heading(_) => return,
             Row::Setting(_, setting) => setting,
+            Row::Heading(section) => match SECTIONS[section].enable.as_ref() {
+                Some(enable) => enable,
+                None => return,
+            },
         };
         match setting.kind {
             SettingKind::Toggle | SettingKind::Choice(_) => self.cycle_selected(true),
@@ -254,12 +303,21 @@ impl SettingsPanel {
                     self.document.path().display()
                 )));
             }
-            SettingKind::Integer | SettingKind::Decimal | SettingKind::Text | SettingKind::List => {
+            SettingKind::Integer
+            | SettingKind::Decimal
+            | SettingKind::Text
+            | SettingKind::Prose
+            | SettingKind::List => {
                 let text = self
                     .current_value(setting.key)
                     .map(|value| editable_text(setting.kind, value))
                     .unwrap_or_default();
-                self.mode = PanelMode::Edit(LineEditor::new(text));
+                let shape = if setting.kind == SettingKind::Prose {
+                    EditorShape::Box { wrap_width: 0 }
+                } else {
+                    EditorShape::Line
+                };
+                self.mode = PanelMode::Edit(TextEditor::new(text, shape));
                 self.feedback = None;
             }
         }
@@ -340,6 +398,18 @@ impl SettingsPanel {
         outcome.is_ok()
     }
 
+    /// Records the columns the open text box wraps at, so ↑/↓ move by
+    /// the rows on screen.
+    pub(crate) fn set_text_box_width(&mut self, width: u16) {
+        if let PanelMode::Edit(TextEditor {
+            shape: EditorShape::Box { wrap_width },
+            ..
+        }) = &mut self.mode
+        {
+            *wrap_width = width;
+        }
+    }
+
     fn refresh_issues(&mut self) {
         self.issues = match self.document.config().validate() {
             Err(ConfigError::Validation(issues)) => issues,
@@ -355,22 +425,43 @@ enum EditAction {
     Cancel,
 }
 
-/// A single-line text field with a cursor.
-pub(crate) struct LineEditor {
+/// How a [`TextEditor`] is laid out.
+#[derive(Clone, Copy)]
+pub(crate) enum EditorShape {
+    /// One row, scrolled sideways to keep the cursor in view.
+    Line,
+    /// A wrapped box that takes line breaks.
+    Box {
+        /// Columns the box last wrapped at; 0 before it is first drawn.
+        wrap_width: u16,
+    },
+}
+
+/// A text field with a cursor.
+pub(crate) struct TextEditor {
     text: String,
     /// Byte offset, always on a char boundary.
     cursor: usize,
+    shape: EditorShape,
 }
 
-impl LineEditor {
+impl TextEditor {
     /// Places the cursor at the end of `text`.
-    fn new(text: String) -> Self {
+    fn new(text: String, shape: EditorShape) -> Self {
         let cursor = text.len();
-        Self { text, cursor }
+        Self {
+            text,
+            cursor,
+            shape,
+        }
     }
 
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn is_box(&self) -> bool {
+        matches!(self.shape, EditorShape::Box { .. })
     }
 
     /// Characters before the cursor.
@@ -380,35 +471,65 @@ impl LineEditor {
 
     fn on_key(&mut self, ev: KeyEvent) -> EditAction {
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
-        match ev.code {
-            KeyCode::Enter => return EditAction::Apply,
-            KeyCode::Esc => return EditAction::Cancel,
-            KeyCode::Char('u') if ctrl => {
+        let alt = ev.modifiers.contains(KeyModifiers::ALT);
+        let line_break = ev
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+        match (ev.code, self.shape) {
+            (KeyCode::Enter, EditorShape::Box { .. }) if line_break => self.insert('\n'),
+            (KeyCode::Up, EditorShape::Box { wrap_width }) => self.move_row(wrap_width, false),
+            (KeyCode::Down, EditorShape::Box { wrap_width }) => self.move_row(wrap_width, true),
+            (KeyCode::Enter, _) => return EditAction::Apply,
+            (KeyCode::Esc, _) => return EditAction::Cancel,
+            (KeyCode::Char('u'), _) if ctrl => {
                 self.text.clear();
                 self.cursor = 0;
             }
-            KeyCode::Char(c) if !ctrl && !ev.modifiers.contains(KeyModifiers::ALT) => {
-                self.text.insert(self.cursor, c);
-                self.cursor += c.len_utf8();
-            }
-            KeyCode::Backspace => {
+            (KeyCode::Char(c), _) if !ctrl && !alt => self.insert(c),
+            (KeyCode::Backspace, _) => {
                 if let Some(previous) = self.previous_boundary() {
                     self.text.drain(previous..self.cursor);
                     self.cursor = previous;
                 }
             }
-            KeyCode::Delete => {
+            (KeyCode::Delete, _) => {
                 if let Some(next) = self.next_boundary() {
                     self.text.drain(self.cursor..next);
                 }
             }
-            KeyCode::Left => self.cursor = self.previous_boundary().unwrap_or(self.cursor),
-            KeyCode::Right => self.cursor = self.next_boundary().unwrap_or(self.cursor),
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.text.len(),
+            (KeyCode::Left, _) => self.cursor = self.previous_boundary().unwrap_or(self.cursor),
+            (KeyCode::Right, _) => self.cursor = self.next_boundary().unwrap_or(self.cursor),
+            (KeyCode::Home, _) => self.cursor = 0,
+            (KeyCode::End, _) => self.cursor = self.text.len(),
             _ => {}
         }
         EditAction::Pending
+    }
+
+    fn insert(&mut self, c: char) {
+        self.text.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    /// Moves to the same column of the wrapped row above or below, or to
+    /// that row's end when it is shorter.
+    fn move_row(&mut self, wrap_width: u16, down: bool) {
+        let chars: Vec<char> = self.text.chars().collect();
+        let rows = wrap_input(&chars, 0, wrap_width);
+        let (row, column) = locate_cursor(&rows, self.cursor_chars());
+        let target = if down {
+            row.checked_add(1)
+        } else {
+            row.checked_sub(1)
+        };
+        if let Some(&(start, end)) = target.and_then(|target| rows.get(target)) {
+            let char_offset = start + column.min(end - start);
+            self.cursor = self
+                .text
+                .char_indices()
+                .nth(char_offset)
+                .map_or(self.text.len(), |(index, _)| index);
+        }
     }
 
     fn previous_boundary(&self) -> Option<usize> {
@@ -465,6 +586,7 @@ fn parse_input(kind: SettingKind, text: &str) -> Result<toml::Value, String> {
         SettingKind::Toggle
         | SettingKind::Choice(_)
         | SettingKind::Text
+        | SettingKind::Prose
         | SettingKind::External => Ok(toml::Value::String(text.to_string())),
     }
 }

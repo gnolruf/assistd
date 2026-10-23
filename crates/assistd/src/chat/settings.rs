@@ -41,7 +41,7 @@ pub(crate) async fn run(args: SettingsArgs) -> Result<()> {
         Terminal::new(CrosstermBackend::new(io::stdout())).context("Terminal::new")?;
     let mut events = EventStream::new();
     loop {
-        terminal.draw(|frame| render_settings(frame, frame.area(), &panel))?;
+        terminal.draw(|frame| render_settings(frame, frame.area(), &mut panel))?;
         match events.next().await {
             Some(Ok(TermEvent::Key(key))) => {
                 if panel.on_key(key).is_break() {

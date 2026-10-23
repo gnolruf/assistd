@@ -61,7 +61,7 @@ impl NotificationsHandle {
 
 /// Spawn the notification tasks; `None` when disabled by config.
 pub(crate) fn spawn_notifications(cfg: &Config, ipc: IpcClient) -> Option<NotificationsHandle> {
-    let notifications_cfg = &cfg.tray.notifications;
+    let notifications_cfg = &cfg.notifications;
     if !notifications_cfg.enabled {
         tracing::info!(target: "tray", "notifications: disabled by config");
         return None;

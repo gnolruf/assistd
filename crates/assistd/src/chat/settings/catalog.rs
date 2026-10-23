@@ -1,24 +1,24 @@
 //! The settings the panel lists, grouped into sections in display order,
-//! hotkeys first.
+//! hotkeys first. A feature's section heading is the checkbox that enables it.
 
 const COMPOSITOR_TYPES: &[&str] = &["auto", "i3", "sway", "hyprland"];
 const SANDBOX_MODES: &[&str] = &["auto", "bwrap", "none"];
 
 pub(crate) const SECTIONS: &[Section] = &[
-    Section {
-        title: "Hotkeys",
-        table: "hotkeys",
-        settings: &[
+    section(
+        "Hotkeys",
+        "hotkeys",
+        &[
             basic("hotkeys.push_to_talk", SettingKind::Text),
             basic("hotkeys.toggle_listening", SettingKind::Text),
             basic("hotkeys.toggle_speech", SettingKind::Text),
             basic("hotkeys.skip_speech", SettingKind::Text),
         ],
-    },
-    Section {
-        title: "Model",
-        table: "model",
-        settings: &[
+    ),
+    section(
+        "Model",
+        "model",
+        &[
             basic("model.name", SettingKind::Text),
             basic("model.context_length", SettingKind::Integer),
             basic("model.gpu_layers", SettingKind::Integer),
@@ -28,12 +28,12 @@ pub(crate) const SECTIONS: &[Section] = &[
             advanced("model.ready_timeout_secs", SettingKind::Integer),
             advanced("model.custom_args", SettingKind::Text),
         ],
-    },
-    Section {
-        title: "Chat",
-        table: "chat",
-        settings: &[
-            basic("chat.system_prompt", SettingKind::Text),
+    ),
+    section(
+        "Chat",
+        "chat",
+        &[
+            basic("chat.system_prompt", SettingKind::Prose),
             basic("chat.temperature", SettingKind::Decimal),
             basic("chat.max_response_tokens", SettingKind::Integer),
             advanced("chat.max_history_tokens", SettingKind::Integer),
@@ -47,65 +47,88 @@ pub(crate) const SECTIONS: &[Section] = &[
             advanced("chat.min_p", SettingKind::Decimal),
             advanced("chat.presence_penalty", SettingKind::Decimal),
         ],
-    },
-    Section {
-        title: "Voice",
-        table: "voice",
-        settings: &[
-            basic("voice.enabled", SettingKind::Toggle),
-            basic("voice.wakeword.enabled", SettingKind::Toggle),
-            basic("voice.synthesis.enabled", SettingKind::Toggle),
-            advanced("voice.mic_device", SettingKind::Text),
-            advanced("voice.transcription.model", SettingKind::Text),
-            advanced("voice.transcription.prefer_gpu", SettingKind::Toggle),
+    ),
+    feature(
+        "Voice input",
+        "voice",
+        enable("voice.enabled"),
+        &[],
+        &[
+            basic("voice.mic_device", SettingKind::Text),
+            basic("voice.transcription.model", SettingKind::Text),
+            basic("voice.transcription.prefer_gpu", SettingKind::Toggle),
             advanced("voice.transcription.threads", SettingKind::Integer),
             advanced("voice.transcription.beams", SettingKind::Integer),
-            advanced("voice.transcription.vad_enabled", SettingKind::Toggle),
+            advanced("voice.transcription.vad_enabled", SettingKind::Toggle)
+                .labeled("enable silence trimming"),
             advanced("voice.transcription.vad_model", SettingKind::Text),
             advanced("voice.transcription.model_cache_dir", SettingKind::Text),
-            advanced("voice.wakeword.start_on_launch", SettingKind::Toggle),
+        ],
+    ),
+    feature(
+        "Wake word",
+        "voice.wakeword",
+        enable("voice.wakeword.enabled"),
+        &["voice.enabled"],
+        &[
+            basic("voice.wakeword.start_on_launch", SettingKind::Toggle),
+            basic("voice.wakeword.barge_in", SettingKind::Toggle),
+            basic("voice.wakeword.follow_up_ms", SettingKind::Integer),
             advanced("voice.wakeword.silence_ms", SettingKind::Integer),
             advanced("voice.wakeword.max_utterance_secs", SettingKind::Integer),
-            advanced("voice.wakeword.barge_in", SettingKind::Toggle),
             advanced("voice.wakeword.command_timeout_ms", SettingKind::Integer),
-            advanced("voice.wakeword.follow_up_ms", SettingKind::Integer),
             advanced("voice.wakeword.match_similarity", SettingKind::Decimal),
+        ],
+    ),
+    feature(
+        "Spoken replies",
+        "voice.synthesis",
+        enable("voice.synthesis.enabled"),
+        &[],
+        &[
+            basic("voice.synthesis.voice", SettingKind::Text),
+            basic("voice.synthesis.length_scale", SettingKind::Decimal),
+            basic("voice.synthesis.output_device", SettingKind::Text),
             advanced("voice.synthesis.binary_path", SettingKind::Text),
-            advanced("voice.synthesis.voice", SettingKind::Text),
             advanced("voice.synthesis.model_cache_dir", SettingKind::Text),
-            advanced("voice.synthesis.length_scale", SettingKind::Decimal),
             advanced("voice.synthesis.espeak_data_dir", SettingKind::Text),
             advanced("voice.synthesis.deadline_secs", SettingKind::Integer),
             advanced("voice.synthesis.max_sentence_chars", SettingKind::Integer),
             advanced("voice.synthesis.partial_flush_ms", SettingKind::Integer),
             advanced("voice.synthesis.use_cuda", SettingKind::Toggle),
-            advanced("voice.synthesis.output_device", SettingKind::Text),
         ],
-    },
-    Section {
-        title: "Compositor",
-        table: "compositor",
-        settings: &[basic(
+    ),
+    section(
+        "Compositor",
+        "compositor",
+        &[basic(
             "compositor.type",
             SettingKind::Choice(COMPOSITOR_TYPES),
         )],
-    },
-    Section {
-        title: "Sleep",
-        table: "sleep",
-        settings: &[
+    ),
+    section(
+        "Sleep",
+        "sleep",
+        &[
             basic("sleep.idle_to_drowsy_mins", SettingKind::Integer),
             basic("sleep.idle_to_sleep_mins", SettingKind::Integer),
-            basic("sleep.gpu_monitor_enabled", SettingKind::Toggle),
-            advanced("sleep.gpu_poll_secs", SettingKind::Integer),
-            advanced("sleep.gpu_headroom_mb", SettingKind::Integer),
-            advanced("sleep.gpu_auto_wake", SettingKind::Toggle),
         ],
-    },
-    Section {
-        title: "Tools",
-        table: "tools",
-        settings: &[
+    ),
+    feature(
+        "GPU monitor",
+        "sleep",
+        enable("sleep.gpu_monitor_enabled"),
+        &[],
+        &[
+            basic("sleep.gpu_poll_secs", SettingKind::Integer),
+            basic("sleep.gpu_headroom_mb", SettingKind::Integer),
+            basic("sleep.gpu_auto_wake", SettingKind::Toggle),
+        ],
+    ),
+    section(
+        "Tools",
+        "tools",
+        &[
             basic("tools.bash.sandbox", SettingKind::Choice(SANDBOX_MODES)),
             basic("tools.bash.timeout_secs", SettingKind::Integer),
             basic("tools.write.writable_paths", SettingKind::List),
@@ -119,23 +142,23 @@ pub(crate) const SECTIONS: &[Section] = &[
             advanced("tools.output.max_kb", SettingKind::Integer),
             advanced("tools.output.overflow_dir", SettingKind::Text),
         ],
-    },
-    Section {
-        title: "Memory",
-        table: "memory",
-        settings: &[
-            basic("memory.enabled", SettingKind::Toggle),
-            basic("memory.db_path", SettingKind::Text),
-        ],
-    },
-    Section {
-        title: "Embedding",
-        table: "embedding",
-        settings: &[
-            basic("embedding.enabled", SettingKind::Toggle),
+    ),
+    feature(
+        "Memory",
+        "memory",
+        enable("memory.enabled"),
+        &[],
+        &[basic("memory.db_path", SettingKind::Text)],
+    ),
+    feature(
+        "Embedding",
+        "embedding",
+        enable("embedding.enabled"),
+        &[],
+        &[
             basic("embedding.model", SettingKind::Text),
             basic("embedding.top_k", SettingKind::Integer),
-            advanced("embedding.auto_inject", SettingKind::Toggle),
+            basic("embedding.auto_inject", SettingKind::Toggle),
             advanced("embedding.server_binary", SettingKind::Text),
             advanced("embedding.host", SettingKind::Text),
             advanced("embedding.port", SettingKind::Integer),
@@ -143,41 +166,48 @@ pub(crate) const SECTIONS: &[Section] = &[
             advanced("embedding.ready_timeout_secs", SettingKind::Integer),
             advanced("embedding.custom_args", SettingKind::Text),
         ],
-    },
-    Section {
-        title: "Search",
-        table: "search",
-        settings: &[
-            basic("search.enabled", SettingKind::Toggle),
+    ),
+    feature(
+        "Search",
+        "search",
+        enable("search.enabled"),
+        &[],
+        &[
             basic("search.engines", SettingKind::List),
-            advanced("search.command", SettingKind::Text),
+            basic("search.command", SettingKind::Text),
             advanced("search.host", SettingKind::Text),
             advanced("search.port", SettingKind::Integer),
             advanced("search.ready_timeout_secs", SettingKind::Integer),
         ],
-    },
-    Section {
-        title: "MCP",
-        table: "mcp",
-        settings: &[
-            basic("mcp.enabled", SettingKind::Toggle),
-            basic("mcp.servers", SettingKind::External),
+    ),
+    feature(
+        "MCP",
+        "mcp",
+        enable("mcp.enabled"),
+        &[],
+        &[basic("mcp.servers", SettingKind::External)],
+    ),
+    feature(
+        "Notifications",
+        "notifications",
+        enable("notifications.enabled"),
+        &[],
+        &[
+            basic("notifications.auto_hide_ms", SettingKind::Integer),
+            basic("notifications.brief_when_away", SettingKind::Toggle),
         ],
-    },
-    Section {
-        title: "Tray",
-        table: "tray",
-        settings: &[
-            basic("tray.notifications.enabled", SettingKind::Toggle),
-            basic("tray.notifications.auto_hide_ms", SettingKind::Integer),
-            basic("tray.notifications.brief_when_away", SettingKind::Toggle),
-            advanced("tray.icons.active", SettingKind::Text),
-            advanced("tray.icons.sleeping", SettingKind::Text),
-            advanced("tray.icons.listening", SettingKind::Text),
-            advanced("tray.icons.generating", SettingKind::Text),
-            advanced("tray.icons.disconnected", SettingKind::Text),
+    ),
+    section(
+        "Tray icons",
+        "notifications.icons",
+        &[
+            basic("notifications.icons.active", SettingKind::Text),
+            basic("notifications.icons.sleeping", SettingKind::Text),
+            basic("notifications.icons.listening", SettingKind::Text),
+            advanced("notifications.icons.generating", SettingKind::Text),
+            advanced("notifications.icons.disconnected", SettingKind::Text),
         ],
-    },
+    ),
 ];
 
 /// How a setting is edited and shown.
@@ -187,6 +217,8 @@ pub(crate) enum SettingKind {
     Integer,
     Decimal,
     Text,
+    /// Free text long enough to need a wrapped, multi-line box.
+    Prose,
     /// One of a fixed set of strings, cycled in place.
     Choice(&'static [&'static str]),
     /// A TOML array, edited as its literal.
@@ -202,6 +234,17 @@ pub(crate) struct Setting {
     pub kind: SettingKind,
     /// Listed only while its section shows advanced settings.
     pub advanced: bool,
+    /// Shown in place of the key's name.
+    label: Option<&'static str>,
+}
+
+impl Setting {
+    const fn labeled(self, label: &'static str) -> Self {
+        Self {
+            label: Some(label),
+            ..self
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -209,17 +252,25 @@ pub(crate) struct Section {
     pub title: &'static str,
     /// The table every key in the section sits under.
     pub table: &'static str,
+    /// The checkbox, drawn in the heading, that turns the section's feature
+    /// on; the rest of the section is locked while it is off.
+    pub enable: Option<Setting>,
+    /// Checkboxes elsewhere that must be on before any of the section,
+    /// [`enable`](Self::enable) included, can be edited.
+    pub requires: &'static [&'static str],
     pub settings: &'static [Setting],
 }
 
 impl Section {
-    /// `setting`'s key relative to the section's table.
+    /// `setting`'s label, else its key relative to the section's table.
     pub(crate) fn label(&self, setting: &Setting) -> &'static str {
-        setting
-            .key
-            .strip_prefix(self.table)
-            .and_then(|rest| rest.strip_prefix('.'))
-            .unwrap_or(setting.key)
+        setting.label.unwrap_or_else(|| {
+            setting
+                .key
+                .strip_prefix(self.table)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .unwrap_or(setting.key)
+        })
     }
 
     pub(crate) fn advanced_count(&self) -> usize {
@@ -227,11 +278,46 @@ impl Section {
     }
 }
 
+const fn section(
+    title: &'static str,
+    table: &'static str,
+    settings: &'static [Setting],
+) -> Section {
+    Section {
+        title,
+        table,
+        enable: None,
+        requires: &[],
+        settings,
+    }
+}
+
+const fn feature(
+    title: &'static str,
+    table: &'static str,
+    enable: Setting,
+    requires: &'static [&'static str],
+    settings: &'static [Setting],
+) -> Section {
+    Section {
+        title,
+        table,
+        enable: Some(enable),
+        requires,
+        settings,
+    }
+}
+
+const fn enable(key: &'static str) -> Setting {
+    basic(key, SettingKind::Toggle)
+}
+
 const fn basic(key: &'static str, kind: SettingKind) -> Setting {
     Setting {
         key,
         kind,
         advanced: false,
+        label: None,
     }
 }
 
@@ -240,6 +326,7 @@ const fn advanced(key: &'static str, kind: SettingKind) -> Setting {
         key,
         kind,
         advanced: true,
+        label: None,
     }
 }
 

@@ -134,9 +134,9 @@ pub const DEFAULT_TRAY_ICON_LISTENING: &str = "audio-input-microphone";
 pub const DEFAULT_TRAY_ICON_GENERATING: &str = "system-run";
 pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";
 
-pub const DEFAULT_TRAY_NOTIFICATIONS_ENABLED: bool = true;
-pub const DEFAULT_TRAY_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
-pub const DEFAULT_TRAY_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
+pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
+pub const DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
+pub const DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
 
 /// `$XDG_DATA_HOME/assistd/memory.db`, or
 /// `$HOME/.local/share/assistd/memory.db`.
