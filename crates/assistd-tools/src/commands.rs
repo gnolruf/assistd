@@ -34,7 +34,7 @@ pub use echo::EchoCommand;
 pub use grep::GrepCommand;
 pub use head_tail::{HeadCommand, TailCommand};
 pub use ls::LsCommand;
-pub use screenshot::{Backend as ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg};
+pub use screenshot::{ScreenshotCommand, ScreenshotPolicyCfg};
 pub use see::SeeCommand;
 pub use sort::SortCommand;
 pub use uniq::UniqCommand;

@@ -15,7 +15,9 @@ enabled = true
 [voice.wakeword]
 enabled = true
 start_on_launch = true      # otherwise it waits for listen-toggle
-# hotkey = "Super+Shift+L"  # X11 only; on Wayland bind `assistd listen-toggle`
+
+[hotkeys]
+# toggle_listening = "Super+Shift+L"  # X11 only; on Wayland bind `assistd listen-toggle`
 ```
 
 Restart the daemon. `assistd listen-toggle` turns listening on and off,

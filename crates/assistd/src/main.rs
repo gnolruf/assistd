@@ -52,9 +52,6 @@ enum Commands {
     /// Drive a running daemon to Active (block until wake completes)
     Wake,
 
-    /// Advance the daemon one step along Active → Drowsy → Sleeping → Active
-    Cycle,
-
     /// Begin a push-to-talk recording on the running daemon (for i3
     /// `bindsym`; release handled by `ptt-stop` on the matching
     /// `bindsym --release` line).
@@ -118,7 +115,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Sleep => presence::run(presence::PresenceAction::Sleep).await,
         Commands::Drowse => presence::run(presence::PresenceAction::Drowse).await,
         Commands::Wake => presence::run(presence::PresenceAction::Wake).await,
-        Commands::Cycle => presence::run(presence::PresenceAction::Cycle).await,
         Commands::PttStart => ptt::run(ptt::PttAction::Start).await,
         Commands::PttStop => ptt::run(ptt::PttAction::Stop).await,
         Commands::ListenStart => listen::run(listen::ListenAction::Start).await,

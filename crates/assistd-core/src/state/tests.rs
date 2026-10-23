@@ -167,12 +167,6 @@ async fn presence_requests_emit_expected_events() {
             PresenceState::Active,
         ),
         (
-            PresenceTarget::Drowsy,
-            Request::Cycle { id: "cy".into() },
-            vec![presence("cy", PresenceState::Sleeping), done("cy")],
-            PresenceState::Sleeping,
-        ),
-        (
             PresenceTarget::Active,
             Request::ConfirmResponse {
                 id: "cr".into(),

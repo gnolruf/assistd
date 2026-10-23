@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_config::Compositor;
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
@@ -20,15 +21,16 @@ mod geometry;
 /// Configuration for the screenshot command.
 #[derive(Debug, Clone)]
 pub struct ScreenshotPolicyCfg {
-    /// Force a specific backend; `None` auto-detects on every call.
-    pub backend: Option<Backend>,
+    /// Picks the display server and the `--focused` method; `None` detects
+    /// the display server on every call and supports `--focused` on X11 only.
+    pub compositor: Option<Compositor>,
     pub timeout: Duration,
 }
 
 impl Default for ScreenshotPolicyCfg {
     fn default() -> Self {
         Self {
-            backend: None,
+            compositor: None,
             timeout: Duration::from_secs(5),
         }
     }
@@ -36,7 +38,7 @@ impl Default for ScreenshotPolicyCfg {
 
 /// Display-server backend, which selects the capture binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
+enum Backend {
     X11,
     Wayland,
 }
@@ -83,8 +85,9 @@ impl ScreenshotCommand {
     }
 
     fn resolve_backend(&self) -> Result<Backend, CommandOutput> {
-        match self.cfg.backend {
-            Some(backend) => Ok(backend),
+        match self.cfg.compositor {
+            Some(Compositor::I3) => Ok(Backend::X11),
+            Some(Compositor::Sway | Compositor::Hyprland) => Ok(Backend::Wayland),
             None => detect_backend().map_err(|msg| {
                 CommandOutput::failed(
                     2,
@@ -188,7 +191,7 @@ impl Command for ScreenshotCommand {
             Ok(backend) => backend,
             Err(failure) => return failure,
         };
-        match capture_target(backend, &target, self.cfg.timeout).await {
+        match capture_target(backend, self.cfg.compositor, &target, self.cfg.timeout).await {
             Ok(png) => attach_png(png, &target, backend),
             Err(e) => e.to_output(),
         }

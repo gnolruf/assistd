@@ -24,8 +24,8 @@ use assistd_tools::{
     SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
-        ScreenshotBackendKind, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand,
-        TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
+        ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand, TailCommand, UniqCommand,
+        WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
     },
     presentation::is_spill_file_name,
     probe_sandbox,
@@ -49,9 +49,9 @@ pub use recovery::{
 pub use assistd_config as config;
 pub use assistd_config::{
     BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config, ConfigError,
-    DaemonConfig, McpConfig, McpServerConfig, ModelConfig, PresenceConfig, ScreenshotBackend,
-    SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
-    ToolsScratchConfig, ToolsScreenshotConfig, ToolsWriteConfig, VoiceConfig, WakeWordConfig,
+    HotkeysConfig, McpConfig, McpServerConfig, ModelConfig, SleepConfig, SynthesisConfig,
+    ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScratchConfig, ToolsWriteConfig,
+    VoiceConfig, WakeWordConfig,
 };
 
 pub use assistd_ipc as ipc;
@@ -311,7 +311,10 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         write_cfg,
         approved_hosts: Arc::new(Approvals::load(config_dir.join(APPROVED_HOSTS_FILE))?),
         approved_apps: Arc::new(Approvals::load(config_dir.join(APPROVED_APPS_FILE))?),
-        screenshot_cfg: Arc::new(screenshot_policy(config.tools.screenshot.backend)),
+        screenshot_cfg: Arc::new(ScreenshotPolicyCfg {
+            compositor: config.compositor.resolve(),
+            ..ScreenshotPolicyCfg::default()
+        }),
         sandbox,
         confirmation_gate,
         vision_gate,
@@ -483,17 +486,6 @@ fn resolve_writable_paths(raw_paths: &[String]) -> Vec<PathBuf> {
                 .ok()
         })
         .collect()
-}
-
-fn screenshot_policy(backend: ScreenshotBackend) -> ScreenshotPolicyCfg {
-    ScreenshotPolicyCfg {
-        backend: match backend {
-            ScreenshotBackend::Auto => None,
-            ScreenshotBackend::X11 => Some(ScreenshotBackendKind::X11),
-            ScreenshotBackend::Wayland => Some(ScreenshotBackendKind::Wayland),
-        },
-        timeout: ScreenshotPolicyCfg::default().timeout,
-    }
 }
 
 /// Set `gate` from a probe that reached the model, returning whether it

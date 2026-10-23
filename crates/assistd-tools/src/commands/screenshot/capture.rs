@@ -3,11 +3,11 @@
 use std::io;
 use std::time::Duration;
 
+use assistd_config::Compositor;
 use assistd_utils::text::human_size;
 use serde_json::Value;
 use tokio::process::Command as ProcCommand;
 
-use super::detect::{WaylandCompositor, detect_wayland_compositor};
 use super::geometry::{find_focused_sway_rect, parse_hyprland_geom, parse_xrandr_monitor_geom};
 use super::{Backend, Target};
 use crate::attachment::MAX_IMAGE_BYTES;
@@ -125,6 +125,7 @@ impl CaptureError {
 /// Capture `target` as PNG bytes with the binaries `backend` uses.
 pub(super) async fn capture_target(
     backend: Backend,
+    compositor: Option<Compositor>,
     target: &Target,
     deadline: Duration,
 ) -> Result<Vec<u8>, CaptureError> {
@@ -133,7 +134,7 @@ pub(super) async fn capture_target(
         (Backend::X11, Target::Focused) => capture_x11_focused(deadline).await,
         (Backend::X11, Target::Monitor(name)) => capture_x11_monitor(name, deadline).await,
         (Backend::Wayland, Target::Full) => run_capture("grim", &["-"], deadline).await,
-        (Backend::Wayland, Target::Focused) => capture_wayland_focused(deadline).await,
+        (Backend::Wayland, Target::Focused) => capture_wayland_focused(compositor, deadline).await,
         (Backend::Wayland, Target::Monitor(name)) => {
             run_capture("grim", &["-o", name, "-"], deadline).await
         }
@@ -160,17 +161,19 @@ async fn capture_x11_focused(deadline: Duration) -> Result<Vec<u8>, CaptureError
     run_capture("maim", &["-i", &window_id], deadline).await
 }
 
-async fn capture_wayland_focused(deadline: Duration) -> Result<Vec<u8>, CaptureError> {
-    let geom = match detect_wayland_compositor() {
-        WaylandCompositor::Sway => focused_geom_sway(deadline).await?,
-        WaylandCompositor::Hyprland => focused_geom_hyprland(deadline).await?,
-        WaylandCompositor::Unknown(name) => {
+async fn capture_wayland_focused(
+    compositor: Option<Compositor>,
+    deadline: Duration,
+) -> Result<Vec<u8>, CaptureError> {
+    let geom = match compositor {
+        Some(Compositor::Sway) => focused_geom_sway(deadline).await?,
+        Some(Compositor::Hyprland) => focused_geom_hyprland(deadline).await?,
+        Some(Compositor::I3) | None => {
             return Err(CaptureError::FocusedUnsupportedOnWayland {
-                compositor: if name.is_empty() {
-                    "unknown".into()
-                } else {
-                    name
-                },
+                compositor: std::env::var("XDG_CURRENT_DESKTOP")
+                    .ok()
+                    .filter(|desktop| !desktop.is_empty())
+                    .unwrap_or_else(|| "unknown".into()),
             });
         }
     };

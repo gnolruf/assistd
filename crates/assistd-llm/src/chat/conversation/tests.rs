@@ -37,12 +37,11 @@ impl Summarizer for FakeSummarizer {
     }
 }
 
-fn spec(max_history: u32, preserve: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
+fn spec(max_history: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
     let chat = ChatConfig {
         system_prompt: "sys".into(),
         max_history_tokens: nz32(max_history),
         summary_target_tokens: nz32(max_history / 4),
-        preserve_recent_turns: nz32(preserve),
         temperature: 0.7,
         max_response_tokens: nz32(512),
         max_reasoning_tokens: nz32(256),
@@ -305,19 +304,37 @@ fn push_user_with_attachments_renders_multimodal_wire() {
     );
 }
 
+/// Earlier user/assistant pairs in the summarization tests.
+const PAIRS: usize = 20;
+/// The current question counts as one preserved turn.
+const FIRST_KEPT_PAIR: usize = PAIRS + 1 - PRESERVE_RECENT_TURNS;
+
+fn expected_after_summary(summary: &str) -> Vec<String> {
+    let kept = (FIRST_KEPT_PAIR..PAIRS).flat_map(|i| {
+        [
+            format!("user {i} message with enough length to count"),
+            format!("assistant {i} message with enough length to count"),
+        ]
+    });
+    std::iter::once(summary.to_string())
+        .chain(kept)
+        .chain(["current question with enough length to count".to_string()])
+        .collect()
+}
+
 #[tokio::test]
 async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
     let user = |i: usize| format!("user {i} message with enough length to count");
     let assistant = |i: usize| format!("assistant {i} message with enough length to count");
     let mut c = Conversation::new("sys".into());
-    for i in 0..6 {
+    for i in 0..PAIRS {
         c.push_user(user(i));
         c.push_assistant(assistant(i));
     }
     c.push_user("current question with enough length to count".into());
 
     let fake = FakeSummarizer::new("early chat covered topics 0 to 4");
-    let (chat, model) = spec(120, 2, 10_000);
+    let (chat, model) = spec(400, 10_000);
     let rendered_before = serde_json::to_string(&c.as_wire_messages()).unwrap();
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
@@ -329,19 +346,14 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
     assert!(
         captured[0].instruction.contains(&format!(
             "before the user message containing \"{}\"",
-            user(5)
+            user(FIRST_KEPT_PAIR)
         )),
         "{}",
         captured[0].instruction
     );
     assert_eq!(
         contents(&c),
-        [
-            "[Conversation summary] early chat covered topics 0 to 4",
-            user(5).as_str(),
-            assistant(5).as_str(),
-            "current question with enough length to count",
-        ]
+        expected_after_summary("[Conversation summary] early chat covered topics 0 to 4")
     );
 }
 
@@ -354,14 +366,14 @@ async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
         Role::System,
         "[Conversation summary] first summary",
     ));
-    for i in 0..6 {
+    for i in 0..PAIRS {
         c.push_user(user(i));
         c.push_assistant(assistant(i));
     }
     c.push_user("current question with enough length to count".into());
 
     let fake = FakeSummarizer::new("second summary");
-    let (chat, model) = spec(120, 2, 10_000);
+    let (chat, model) = spec(400, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
     let captured = fake.captured.lock().await;
@@ -374,12 +386,7 @@ async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
     );
     assert_eq!(
         contents(&c),
-        [
-            "[Conversation summary] second summary",
-            user(5).as_str(),
-            assistant(5).as_str(),
-            "current question with enough length to count",
-        ]
+        expected_after_summary("[Conversation summary] second summary")
     );
     let system_positions: Vec<usize> = c
         .as_wire_messages()
@@ -398,7 +405,7 @@ fn truncate_preserves_last_user_message() {
         c.push_assistant(format!("a{i} with filler"));
     }
     c.push_user("keepme with filler".into());
-    let (chat, model) = spec(10, 1, 10_000);
+    let (chat, model) = spec(10, 10_000);
     c.truncate_to_budget(&chat, &model);
     assert_eq!(
         contents(&c),
@@ -479,7 +486,7 @@ fn dropping_a_tool_call_message_drops_all_of_its_results() {
     c.push_assistant("answer".into());
     c.push_user("second question".into());
 
-    let (chat, model) = spec(60, 1, 10_000);
+    let (chat, model) = spec(60, 10_000);
     c.truncate_to_budget(&chat, &model);
     assert_eq!(
         contents(&c),
@@ -497,32 +504,31 @@ async fn summarize_preserves_tool_call_pair_boundary() {
             "turn {i} answer with some filler text here to blow budget"
         ));
     }
-    c.push_assistant_with_tool_calls(
-        None,
-        String::new(),
-        vec![mk_call("c-99", r#"{"command":"ls"}"#)],
-    );
-    c.push_tool_result_with_attachments("run", "foo\nbar\n", Vec::new());
+    let calls: Vec<_> = (0..PRESERVE_RECENT_TURNS)
+        .map(|i| mk_call(&format!("c-{i}"), r#"{"command":"ls"}"#))
+        .collect();
+    c.push_assistant_with_tool_calls(None, String::new(), calls.clone());
+    for _ in &calls {
+        c.push_tool_result_with_attachments("run", "foo\nbar\n", Vec::new());
+    }
     c.push_user("latest".into());
 
     let fake = FakeSummarizer::new("summary");
-    let (chat, model) = spec(60, 2, 10_000);
+    let (chat, model) = spec(200, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
+    let results = vec!["[tool:run]\nfoo\nbar\n"; calls.len()];
     assert_eq!(
         contents(&c),
         [
-            "[Conversation summary] summary",
-            "",
-            "[tool:run]\nfoo\nbar\n",
-            "latest",
-        ],
-        "preserve boundary must widen to keep the call its result answers"
+            &["[Conversation summary] summary", ""],
+            results.as_slice(),
+            &["latest"]
+        ]
+        .concat(),
+        "preserve boundary must widen to keep the call its results answer"
     );
-    assert_eq!(
-        c.messages[1].tool_calls,
-        [mk_call("c-99", r#"{"command":"ls"}"#)]
-    );
+    assert_eq!(c.messages[1].tool_calls, calls);
 }
 
 fn push_tool_steps(c: &mut Conversation, steps: usize) {
@@ -558,7 +564,7 @@ async fn summarize_keeps_the_question_of_a_long_tool_loop() {
     push_tool_steps(&mut c, 12);
 
     let fake = FakeSummarizer::new("summary");
-    let (chat, model) = spec(200, 2, 10_000);
+    let (chat, model) = spec(200, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
     assert_eq!(real_user_contents(&c), ["current question"]);
@@ -574,7 +580,7 @@ fn truncate_keeps_the_question_and_newest_step_of_a_long_tool_loop() {
     c.push_user("current question".into());
     push_tool_steps(&mut c, 12);
 
-    let (chat, model) = spec(600, 2, 10_000);
+    let (chat, model) = spec(600, 10_000);
     c.truncate_to_budget(&chat, &model);
 
     assert_eq!(c.messages[0].content, "current question");
@@ -596,7 +602,7 @@ async fn a_long_tool_loop_folds_its_oldest_steps_into_the_summary_and_a_call_log
     push_tool_steps(&mut c, 25);
 
     let fake = FakeSummarizer::new("summary");
-    let (chat, model) = spec(3000, 2, 10_000);
+    let (chat, model) = spec(3000, 10_000);
     let total_before = c.total_tokens();
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
     assert_eq!(
@@ -656,7 +662,7 @@ async fn replaying_a_tool_loop_compacted_mid_turn_renders_what_the_model_saw() {
     push_tool_steps(&mut c, 25);
     let persisted = c.messages.clone();
     let fake = FakeSummarizer::new("summary");
-    let (chat, model) = spec(3000, 2, 10_000);
+    let (chat, model) = spec(3000, 10_000);
     c.ensure_budget(&fake, &chat, &model).await.unwrap();
 
     let (summary, cut) = c.summary_snapshot().unwrap();

@@ -50,7 +50,6 @@ remove that line or pick another key.
 ## Presence
 
 ```sway
-bindsym $mod+Escape       exec assistd cycle
 bindsym $mod+Shift+Escape exec assistd sleep
 bindsym $mod+Shift+w      exec assistd wake
 ```

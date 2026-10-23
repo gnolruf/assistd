@@ -92,8 +92,8 @@ async fn init_listener(
         }
     };
     info!(
-        "voice.wakeword: enabled (hotkey={:?}, start_on_launch={})",
-        config.voice.wakeword.hotkey, config.voice.wakeword.start_on_launch
+        "voice.wakeword: enabled (start_on_launch={})",
+        config.voice.wakeword.start_on_launch
     );
     let listener = MicContinuousListener::new(transcriber.clone(), &config.voice, speech, silero);
     listener.set_wake_phrase(enrolled_wake_phrase(config, profiles).await);

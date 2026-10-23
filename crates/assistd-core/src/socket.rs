@@ -184,7 +184,7 @@ where
 }
 
 /// Serve the IPC socket at `path` until `shutdown` resolves, then drain
-/// in-flight connections for up to `daemon.shutdown_grace_secs`. The
+/// in-flight connections for a few seconds. The
 /// socket's directory must belong to this user and not be writable by
 /// others, and the socket is owner-only. A stale socket file at `path` is
 /// removed first; a live one is an error.
@@ -300,7 +300,6 @@ async fn accept_loop<F>(
 where
     F: Future<Output = ()>,
 {
-    let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut connections: JoinSet<()> = JoinSet::new();
     let mut fd_exhausted = false;
     let (drain_tx, drain_rx) = watch::channel(false);
@@ -356,7 +355,7 @@ where
 
     drop(listener);
     let _ = drain_tx.send(true);
-    drain_join_set(&mut connections, grace, "connection").await;
+    drain_join_set(&mut connections, "connection").await;
     Ok(())
 }
 

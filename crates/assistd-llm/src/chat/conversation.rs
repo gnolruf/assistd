@@ -67,6 +67,8 @@ const COMPACTION_TARGET_PERCENT: u64 = 40;
 /// Share of `summary_target_tokens`, in percent, the instruction asks for, so
 /// a summary that overruns it still ends before its length limit.
 const SUMMARY_ASK_PERCENT: u32 = 75;
+/// Recent user/assistant exchanges kept verbatim when summarizing.
+const PRESERVE_RECENT_TURNS: usize = 6;
 
 /// Message role for conversation turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,7 +535,7 @@ impl Conversation {
     /// only when that turn outgrows the budget even with all earlier
     /// history summarized.
     fn fold_end(&self, chat: &ChatConfig, model: &ModelConfig) -> usize {
-        let preserved = self.first_preserved_index(chat.preserve_recent_turns.get() as usize);
+        let preserved = self.first_preserved_index(PRESERVE_RECENT_TURNS);
         let turn_start = self.current_turn_start();
         let turn_tokens = u64::from(messages_tokens(&self.messages[turn_start..]));
         let fixed = u64::from(self.fixed_tokens()) + u64::from(chat.summary_target_tokens.get());

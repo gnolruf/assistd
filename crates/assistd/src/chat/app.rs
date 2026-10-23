@@ -83,7 +83,7 @@ pub(super) enum WireStream {
     Reply,
     /// A branch command; owns the in-flight branch op and its rows.
     Branch,
-    /// Polls and the F2 cycle; indicator state only.
+    /// Polls; indicator state only.
     Status,
     /// A `/wakeword` request; owns the wake-word dock.
     WakeWord(WakeWordStream),

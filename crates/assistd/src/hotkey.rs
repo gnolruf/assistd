@@ -1,4 +1,4 @@
-//! Global hotkey listener for presence cycling and voice control.
+//! Global hotkey listener for voice control.
 //! `global-hotkey` only supports X11 on Linux, so pure Wayland sessions
 //! get no listener and rely on compositor bindings to the CLI instead.
 
@@ -8,26 +8,24 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::{
-    Component, PresenceConfig, PresenceManager, VoiceConfig, VoiceInput, VoiceManager,
-    VoiceOutputController, spawn_supervised,
+    Component, HotkeysConfig, VoiceConfig, VoiceInput, VoiceManager, VoiceOutputController,
+    spawn_supervised,
 };
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{info, warn};
 
-/// The five hotkeys the listener can register.
+/// The four hotkeys the listener can register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Binding {
-    Presence,
     Voice,
     Listen,
     Toggle,
     Skip,
 }
 
-const BINDINGS: [Binding; 5] = [
-    Binding::Presence,
+const BINDINGS: [Binding; 4] = [
     Binding::Voice,
     Binding::Listen,
     Binding::Toggle,
@@ -37,17 +35,15 @@ const BINDINGS: [Binding; 5] = [
 impl Binding {
     fn config_path(self) -> &'static str {
         match self {
-            Binding::Presence => "presence.hotkey",
-            Binding::Voice => "voice.hotkey",
-            Binding::Listen => "voice.wakeword.hotkey",
-            Binding::Toggle => "voice.synthesis.toggle_hotkey",
-            Binding::Skip => "voice.synthesis.skip_hotkey",
+            Binding::Voice => "hotkeys.push_to_talk",
+            Binding::Listen => "hotkeys.toggle_listening",
+            Binding::Toggle => "hotkeys.toggle_speech",
+            Binding::Skip => "hotkeys.skip_speech",
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
-            Binding::Presence => "press to cycle",
             Binding::Voice => "hold to talk",
             Binding::Listen => "press to toggle",
             Binding::Toggle => "press to mute/unmute",
@@ -57,21 +53,20 @@ impl Binding {
 
     /// The configured spec, or `None` when this binding's feature is
     /// off or its hotkey is empty.
-    fn spec<'a>(self, presence: &'a PresenceConfig, voice: &'a VoiceConfig) -> Option<&'a str> {
+    fn spec<'a>(self, hotkeys: &'a HotkeysConfig, voice: &VoiceConfig) -> Option<&'a str> {
         let (enabled, spec) = match self {
-            Binding::Presence => (true, &presence.hotkey),
-            Binding::Voice => (voice.enabled, &voice.hotkey),
+            Binding::Voice => (voice.enabled, &hotkeys.push_to_talk),
             Binding::Listen => (
                 voice.enabled && voice.wakeword.enabled,
-                &voice.wakeword.hotkey,
+                &hotkeys.toggle_listening,
             ),
             Binding::Toggle => (
                 voice.enabled && voice.synthesis.enabled,
-                &voice.synthesis.toggle_hotkey,
+                &hotkeys.toggle_speech,
             ),
             Binding::Skip => (
                 voice.enabled && voice.synthesis.enabled,
-                &voice.synthesis.skip_hotkey,
+                &hotkeys.skip_speech,
             ),
         };
         (enabled && !spec.is_empty()).then_some(spec.as_str())
@@ -80,7 +75,6 @@ impl Binding {
     /// Whether the listener has a target to route this binding to.
     fn has_target(self, subsystems: &Subsystems) -> bool {
         match self {
-            Binding::Presence => subsystems.presence.is_some(),
             Binding::Voice => true,
             Binding::Listen | Binding::Toggle | Binding::Skip => subsystems.voice.is_some(),
         }
@@ -89,9 +83,9 @@ impl Binding {
 
 /// Validate every configured hotkey string. Empty strings are accepted
 /// and disable that hotkey.
-pub(crate) fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result<()> {
+pub(crate) fn validate(hotkeys: &HotkeysConfig, voice: &VoiceConfig) -> Result<()> {
     for binding in BINDINGS {
-        if let Some(spec) = binding.spec(presence, voice) {
+        if let Some(spec) = binding.spec(hotkeys, voice) {
             HotKey::from_str(spec)
                 .with_context(|| format!("invalid {} {spec:?}", binding.config_path()))?;
         }
@@ -102,7 +96,6 @@ pub(crate) fn validate(presence: &PresenceConfig, voice: &VoiceConfig) -> Result
 /// Targets the hotkey listener routes events to. A `None` handle leaves
 /// its hotkey unregistered.
 pub(crate) struct Subsystems {
-    pub presence: Option<Arc<PresenceManager>>,
     pub ptt: Arc<dyn VoiceInput>,
     pub voice: Option<Arc<VoiceManager>>,
 }
@@ -110,7 +103,7 @@ pub(crate) struct Subsystems {
 /// Spawn the hotkey listener. `None` when no hotkey is configured, the
 /// session is pure Wayland, or registration failed.
 pub(crate) fn spawn_listener(
-    presence_cfg: &PresenceConfig,
+    hotkeys_cfg: &HotkeysConfig,
     voice_cfg: &VoiceConfig,
     subsystems: Subsystems,
     shutdown: watch::Receiver<bool>,
@@ -118,7 +111,7 @@ pub(crate) fn spawn_listener(
     let specs: Vec<(Binding, &str)> = BINDINGS
         .into_iter()
         .filter(|b| b.has_target(&subsystems))
-        .filter_map(|b| b.spec(presence_cfg, voice_cfg).map(|spec| (b, spec)))
+        .filter_map(|b| b.spec(hotkeys_cfg, voice_cfg).map(|spec| (b, spec)))
         .collect();
 
     if specs.is_empty() {
@@ -133,7 +126,7 @@ pub(crate) fn spawn_listener(
         info!(
             target: "assistd::hotkey",
             "pure Wayland session detected; global hotkeys disabled. Bind \
-             `assistd cycle` / `assistd ptt-start` / `assistd ptt-stop` in \
+             `assistd ptt-start` / `assistd ptt-stop` in \
              your compositor instead (Sway/Hyprland: `bindsym ... exec ...`)"
         );
         return None;
@@ -256,11 +249,6 @@ fn on_hotkey(
 ) {
     let pressed = state == HotKeyState::Pressed;
     match binding {
-        Binding::Presence if pressed => {
-            if let Some(presence) = subsystems.presence.clone() {
-                handlers.spawn(cycle_presence(presence));
-            }
-        }
         Binding::Voice if pressed => {
             let (started_tx, started_rx) = oneshot::channel();
             *ptt_started = Some(started_rx);
@@ -291,20 +279,7 @@ fn on_hotkey(
                 handlers.spawn(skip_voice_output(voice.speech().clone()));
             }
         }
-        Binding::Presence | Binding::Listen | Binding::Toggle | Binding::Skip => {}
-    }
-}
-
-async fn cycle_presence(presence: Arc<PresenceManager>) {
-    match presence.cycle().await {
-        Ok(target) => info!(
-            target: "assistd::hotkey",
-            "hotkey cycled presence → {target:?}"
-        ),
-        Err(e) => warn!(
-            target: "assistd::hotkey",
-            "hotkey cycle failed: {e:#}"
-        ),
+        Binding::Listen | Binding::Toggle | Binding::Skip => {}
     }
 }
 
@@ -441,49 +416,45 @@ mod tests {
         }
     }
 
-    type Edit = fn(&mut PresenceConfig, &mut VoiceConfig);
+    type Edit = fn(&mut HotkeysConfig, &mut VoiceConfig);
 
     /// Every hotkey feature enabled, every hotkey empty.
-    fn configs(edit: Edit) -> (PresenceConfig, VoiceConfig) {
-        let mut presence = PresenceConfig {
-            hotkey: String::new(),
+    fn configs(edit: Edit) -> (HotkeysConfig, VoiceConfig) {
+        let mut hotkeys = HotkeysConfig {
+            push_to_talk: String::new(),
+            ..HotkeysConfig::default()
         };
         let mut voice = VoiceConfig {
             enabled: true,
-            hotkey: String::new(),
             ..VoiceConfig::default()
         };
         voice.wakeword.enabled = true;
-        voice.wakeword.hotkey = String::new();
         voice.synthesis.enabled = true;
-        voice.synthesis.toggle_hotkey = String::new();
-        voice.synthesis.skip_hotkey = String::new();
-        edit(&mut presence, &mut voice);
-        (presence, voice)
+        edit(&mut hotkeys, &mut voice);
+        (hotkeys, voice)
     }
 
     #[test]
     fn validate_rejects_garbage_only_for_enabled_features() {
-        let (p, v) = configs(|_, v| v.wakeword.hotkey = GARBAGE.into());
-        let err = validate(&p, &v).expect_err("garbage hotkey must be rejected");
+        let (h, v) = configs(|h, _| h.toggle_listening = GARBAGE.into());
+        let err = validate(&h, &v).expect_err("garbage hotkey must be rejected");
         assert!(
             err.to_string()
-                .starts_with("invalid voice.wakeword.hotkey "),
+                .starts_with("invalid hotkeys.toggle_listening "),
             "{err}"
         );
 
-        let (p, v) = configs(|_, v| {
+        let (h, v) = configs(|h, v| {
             v.wakeword.enabled = false;
-            v.wakeword.hotkey = GARBAGE.into();
+            h.toggle_listening = GARBAGE.into();
         });
-        validate(&p, &v).expect("disabled feature's hotkey is ignored");
+        validate(&h, &v).expect("disabled feature's hotkey is ignored");
     }
 
     #[tokio::test]
     async fn quick_tap_stops_only_after_recording_started() {
         let voice = Arc::new(CallOrderVoice::default());
         let subsystems = Subsystems {
-            presence: None,
             ptt: voice.clone(),
             voice: None,
         };

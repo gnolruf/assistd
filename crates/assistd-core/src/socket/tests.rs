@@ -7,29 +7,19 @@ use super::*;
 use crate::{Config, PresenceManager, PresenceState, PresenceTarget};
 
 fn test_state() -> Arc<AppState> {
-    state_with_backend_and_grace(Arc::new(assistd_llm::EchoBackend::new()), 5)
+    state_with_backend(Arc::new(assistd_llm::EchoBackend::new()))
 }
 
-fn state_with_backend_and_grace(
-    backend: Arc<dyn assistd_llm::LlmBackend>,
-    grace_secs: u64,
-) -> Arc<AppState> {
-    state_with(
-        backend,
-        Arc::new(assistd_tools::ToolRegistry::default()),
-        grace_secs,
-    )
+fn state_with_backend(backend: Arc<dyn assistd_llm::LlmBackend>) -> Arc<AppState> {
+    state_with(backend, Arc::new(assistd_tools::ToolRegistry::default()))
 }
 
 fn state_with(
     backend: Arc<dyn assistd_llm::LlmBackend>,
     tools: Arc<assistd_tools::ToolRegistry>,
-    grace_secs: u64,
 ) -> Arc<AppState> {
-    let mut config = Config::default();
-    config.daemon.shutdown_grace_secs = grace_secs;
     Arc::new(AppState::new(
-        config,
+        Config::default(),
         backend,
         PresenceManager::stub(PresenceTarget::Active),
         tools,
@@ -489,13 +479,10 @@ impl assistd_llm::LlmBackend for StuckBackend {
 
 #[tokio::test]
 async fn graceful_shutdown_waits_for_in_flight_stream() {
-    let state = state_with_backend_and_grace(
-        Arc::new(SlowBackend {
-            deltas: 3,
-            pause: Duration::from_millis(50),
-        }),
-        5,
-    );
+    let state = state_with_backend(Arc::new(SlowBackend {
+        deltas: 3,
+        pause: Duration::from_millis(50),
+    }));
     let server = TestServer::start(state).await;
     let (_write, mut reader) = open_connection(
         &server.path,
@@ -516,7 +503,7 @@ async fn graceful_shutdown_waits_for_in_flight_stream() {
 
 #[tokio::test]
 async fn graceful_shutdown_aborts_after_grace_timeout() {
-    let state = state_with_backend_and_grace(Arc::new(StuckBackend), 0);
+    let state = state_with_backend(Arc::new(StuckBackend));
     let server = TestServer::start(state).await;
     let (_write, mut reader) = open_connection(
         &server.path,
@@ -528,9 +515,10 @@ async fn graceful_shutdown_aborts_after_grace_timeout() {
         .await
         .expect("expected first Delta from StuckBackend");
 
-    tokio::time::timeout(Duration::from_secs(2), server.stop())
+    tokio::time::pause();
+    tokio::time::timeout(Duration::from_secs(10), server.stop())
         .await
-        .expect("server did not exit within 2s of shutdown");
+        .expect("server did not exit within 10s of shutdown");
 }
 
 /// Collect subscriber events until the stream goes quiet for `idle`.
@@ -916,7 +904,7 @@ async fn open_query_and_read_first_event(
 #[tokio::test]
 async fn client_disconnect_mid_turn_releases_the_turn_lock() {
     with_server(
-        state_with_backend_and_grace(Arc::new(FloodBackend), 0),
+        state_with_backend(Arc::new(FloodBackend)),
         |path| async move {
             let (first, reader, write) = open_query_and_read_first_event(&path, "gone").await;
             assert!(matches!(first, Event::Delta { .. }), "got {first:?}");
@@ -943,7 +931,7 @@ async fn client_closing_mid_stream_is_not_a_connection_error() {
         .write_all(b"{\"type\":\"query\",\"id\":\"bye\",\"text\":\"go\"}\n")
         .await
         .unwrap();
-    let state = state_with_backend_and_grace(Arc::new(FloodBackend), 0);
+    let state = state_with_backend(Arc::new(FloodBackend));
     let (_drain_tx, drain_rx) = watch::channel(false);
     let connection = tokio::spawn(handle_connection(server, state, drain_rx));
 
@@ -1077,7 +1065,7 @@ async fn client_hangup_during_a_silent_tool_call_cancels_the_turn() {
     tools.register(SilentHangingTool {
         dropped: dropped.clone(),
     });
-    let state = state_with(Arc::new(HangingCallBackend::default()), Arc::new(tools), 5);
+    let state = state_with(Arc::new(HangingCallBackend::default()), Arc::new(tools));
     with_server(state, |path| async move {
         let (write, mut reader) =
             open_connection(&path, &[r#"{"type":"query","id":"h1","text":"go"}"#], true).await;

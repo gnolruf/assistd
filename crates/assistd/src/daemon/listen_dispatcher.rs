@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use assistd_core::{
     AppState, Component, ContinuousListener, Heard, ListenPhase, TurnOrigin, drain_join_set,
@@ -108,7 +108,6 @@ async fn run_utterance_forwarder(
     start_on_launch: bool,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let grace = Duration::from_secs(state.config.daemon.shutdown_grace_secs);
     let mut heard = listener.subscribe_heard();
     let mut phases = listener.subscribe_phase();
     if start_on_launch {
@@ -147,7 +146,7 @@ async fn run_utterance_forwarder(
         }
     }
 
-    drain_join_set(&mut turns.running, grace, "listen-triggered query").await;
+    drain_join_set(&mut turns.running, "listen-triggered query").await;
 }
 
 /// Act on one item from the listener; false once its broadcast has closed.

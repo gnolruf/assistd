@@ -71,7 +71,7 @@ pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
-    hotkey::validate(&config.presence, &config.voice)?;
+    hotkey::validate(&config.hotkeys, &config.voice)?;
     idle_monitor::validate(&config.sleep)?;
     assistd_voice::mic_validate(&config.voice)?;
 
@@ -142,7 +142,7 @@ async fn start(
         presence.set_wake_room(vram.clone());
     }
 
-    let hotkey_handle = spawn_hotkeys(&config, &presence, &voice, stages.intake.subscribe());
+    let hotkey_handle = spawn_hotkeys(&config, &voice, stages.intake.subscribe());
     let gpu_monitor_handle = gpu_monitor::spawn_monitor(
         &config.sleep,
         vram.clone(),
@@ -318,17 +318,15 @@ fn build_vision_revalidator(
 /// so the daemon and the chat TUI share one PTT path.
 fn spawn_hotkeys(
     config: &Config,
-    presence: &Arc<PresenceManager>,
     voice: &Arc<VoiceManager>,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     let voice_proxy: Arc<dyn assistd_voice::VoiceInput> =
         Arc::new(IpcVoiceProxy::new(Arc::new(IpcClient::new())));
     hotkey::spawn_listener(
-        &config.presence,
+        &config.hotkeys,
         &config.voice,
         hotkey::Subsystems {
-            presence: Some(presence.clone()),
             ptt: voice_proxy,
             voice: Some(voice.clone()),
         },

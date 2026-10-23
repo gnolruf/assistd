@@ -5,15 +5,14 @@
 pub mod chat;
 pub mod compositor;
 pub mod custom_args;
-pub mod daemon;
 pub mod defaults;
 pub mod embedding;
 pub mod errors;
 mod home_path;
+pub mod hotkeys;
 pub mod mcp;
 pub mod memory;
 pub mod model;
-pub mod presence;
 pub mod search;
 pub mod sleep;
 pub mod timeouts;
@@ -23,24 +22,21 @@ pub mod tray;
 pub mod voice;
 
 pub use chat::ChatConfig;
-pub use compositor::{CompositorConfig, CompositorType};
+pub use compositor::{Compositor, CompositorConfig, CompositorType};
 pub use custom_args::{ChatServer, CustomArgs, EmbeddingServer, ServerKind};
-pub use daemon::DaemonConfig;
 pub use embedding::EmbeddingConfig;
 pub use errors::{ConfigError, CustomArgsError, SearchCommandError, UnitIntervalError};
+pub use hotkeys::HotkeysConfig;
 pub use mcp::{McpConfig, McpServerConfig};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
-pub use presence::PresenceConfig;
 pub use search::{SearchCommand, SearchConfig, SearchEngine};
 pub use sleep::SleepConfig;
 pub use timeouts::TimeoutsConfig;
 pub use tools::{
-    BashSandboxMode, ScreenshotBackend, ToolsBashConfig, ToolsConfig, ToolsOutputConfig,
-    ToolsScratchConfig, ToolsScreenshotConfig, ToolsWriteConfig,
+    BashSandboxMode, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScratchConfig,
+    ToolsWriteConfig,
 };
 pub use top::Config;
-pub use tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig, TrayNotificationsWakeConfig};
-pub use voice::{
-    CodeBlockMode, SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, WakeWordConfig,
-};
+pub use tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig};
+pub use voice::{SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, WakeWordConfig};

@@ -1,9 +1,5 @@
 //! Streaming sentence segmenter between the LLM token stream and TTS: strips
-//! markdown and handles fenced code blocks per [`CodeBlockMode`].
-
-pub use assistd_config::CodeBlockMode;
-
-const MAX_LANG_LEN: usize = 32;
+//! markdown and drops fenced code blocks.
 
 const ABBREVIATIONS: &[&str] = &[
     "Mr", "Mrs", "Ms", "Dr", "St", "Sr", "Jr", "Inc", "Ltd", "Co", "etc", "vs", "e.g", "i.e",
@@ -22,28 +18,16 @@ pub struct SentenceBuffer {
     in_code_fence: bool,
     pending: String,
     max_len: usize,
-    mode: CodeBlockMode,
-    capturing_lang: bool,
-    lang_buf: String,
 }
 
 impl SentenceBuffer {
-    /// [`new_with_mode`](Self::new_with_mode) with [`CodeBlockMode::Skip`].
+    /// A segmenter cutting sentences at `max_len` bytes, raised to at least 50.
     pub fn new(max_len: usize) -> Self {
-        Self::new_with_mode(max_len, CodeBlockMode::Skip)
-    }
-
-    /// A segmenter that handles fenced code blocks per `mode`. `max_len`
-    /// is raised to at least 50 bytes.
-    pub fn new_with_mode(max_len: usize, mode: CodeBlockMode) -> Self {
         Self {
             buf: String::new(),
             in_code_fence: false,
             pending: String::new(),
             max_len: max_len.max(50),
-            mode,
-            capturing_lang: false,
-            lang_buf: String::new(),
         }
     }
 
@@ -66,8 +50,6 @@ impl SentenceBuffer {
         }
         self.in_code_fence = false;
         self.pending.clear();
-        self.capturing_lang = false;
-        self.lang_buf.clear();
         let raw = std::mem::take(&mut self.buf);
         let speech = postprocess_for_speech(&raw);
         (!speech.is_empty()).then_some(speech)
@@ -94,7 +76,7 @@ impl SentenceBuffer {
             return;
         }
         if self.in_code_fence {
-            self.feed_fenced(ch);
+            self.pending.clear();
             return;
         }
 
@@ -120,7 +102,7 @@ impl SentenceBuffer {
         }
         self.pending.truncate(self.pending.len() - 3);
         if self.in_code_fence {
-            self.close_fence(out);
+            self.close_fence();
         } else {
             self.open_fence(out);
         }
@@ -129,38 +111,10 @@ impl SentenceBuffer {
     fn open_fence(&mut self, out: &mut Vec<String>) {
         self.in_code_fence = true;
         self.flush_buf_to_out(out);
-        self.capturing_lang = matches!(self.mode, CodeBlockMode::Summarize);
-        self.lang_buf.clear();
     }
 
-    fn close_fence(&mut self, out: &mut Vec<String>) {
+    fn close_fence(&mut self) {
         self.in_code_fence = false;
-        self.pending.clear();
-        if matches!(self.mode, CodeBlockMode::Summarize) {
-            let phrase = if self.lang_buf.is_empty() {
-                "Code block.".to_string()
-            } else {
-                format!("Code block in {}.", self.lang_buf)
-            };
-            out.push(phrase);
-        }
-        self.capturing_lang = false;
-        self.lang_buf.clear();
-    }
-
-    /// Inside a fence only the language tag after the opener is kept.
-    fn feed_fenced(&mut self, ch: char) {
-        if self.capturing_lang {
-            if ch.is_whitespace() {
-                self.capturing_lang = false;
-            } else if self.lang_buf.len() < MAX_LANG_LEN
-                && (ch.is_ascii_alphanumeric() || ch == '+' || ch == '-' || ch == '_')
-            {
-                self.lang_buf.push(ch);
-            } else {
-                self.capturing_lang = false;
-            }
-        }
         self.pending.clear();
     }
 
@@ -497,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_mode_drops_code_blocks() {
+    fn code_blocks_are_dropped() {
         check(
             || SentenceBuffer::new(400),
             &[
@@ -513,19 +467,6 @@ mod tests {
                 ),
                 ("unterminated fence", &["```rust\nfn main() {"], &[], None),
             ],
-        );
-    }
-
-    #[test]
-    fn summarize_mode_replaces_code_blocks_with_a_phrase() {
-        check(
-            || SentenceBuffer::new_with_mode(400, CodeBlockMode::Summarize),
-            &[(
-                "with language",
-                &["Prelude. ", "```rust\nfn main() {}\n```", " Tail end."],
-                &["Prelude.", "Code block in rust."],
-                Some("Tail end."),
-            )],
         );
     }
 

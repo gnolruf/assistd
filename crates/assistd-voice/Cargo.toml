@@ -35,8 +35,6 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 tracing = { workspace = true }
 thiserror = { workspace = true }
 assistd-ipc = { workspace = true }
-# Required unconditionally because `sentence` (built in every feature combination)
-# consumes the `CodeBlockMode` enum.
 assistd-config = { workspace = true }
 assistd-utils = { workspace = true }
 parking_lot = { workspace = true }
