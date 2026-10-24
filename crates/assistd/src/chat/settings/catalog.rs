@@ -11,10 +11,10 @@ pub(crate) const SECTIONS: &[Section] = &[
         Tab::General,
         "Hotkeys",
         &[
-            setting("hotkeys.push_to_talk", SettingKind::Text),
-            setting("hotkeys.toggle_listening", SettingKind::Text),
-            setting("hotkeys.toggle_speech", SettingKind::Text),
-            setting("hotkeys.skip_speech", SettingKind::Text),
+            setting("hotkeys.push_to_talk", SettingKind::Hotkey),
+            setting("hotkeys.toggle_listening", SettingKind::Hotkey),
+            setting("hotkeys.toggle_speech", SettingKind::Hotkey),
+            setting("hotkeys.skip_speech", SettingKind::Hotkey),
         ],
     ),
     section(
@@ -230,6 +230,8 @@ pub(crate) enum SettingKind {
     Text,
     /// Free text long enough to need a wrapped, multi-line box.
     Prose,
+    /// A key combination, set by pressing it.
+    Hotkey,
     /// One of a fixed set of strings, cycled in place.
     Choice(&'static [&'static str]),
     /// A TOML array, edited entry by entry.

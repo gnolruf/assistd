@@ -23,7 +23,7 @@ fn sample(kind: SettingKind) -> toml::Value {
         SettingKind::Toggle => toml::Value::Boolean(false),
         SettingKind::Integer => toml::Value::Integer(1),
         SettingKind::Decimal => toml::Value::Float(0.5),
-        SettingKind::Text | SettingKind::Prose => toml::Value::from("x"),
+        SettingKind::Text | SettingKind::Prose | SettingKind::Hotkey => toml::Value::from("x"),
         SettingKind::Choice(options) => toml::Value::from(options[0]),
         SettingKind::List(_) | SettingKind::External => toml::Value::Array(Vec::new()),
     }
