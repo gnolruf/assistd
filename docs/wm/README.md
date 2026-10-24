@@ -1,23 +1,34 @@
 # Window-manager integration
 
-The bindings that make `assistd` feel native (push-to-talk, presence,
-the chat scratchpad) live in your compositor config and call the
-`assistd` IPC commands. This page covers what every setup shares; the
-[i3](i3.md) and [Sway](sway.md) guides have the config snippets.
+The daemon binds the voice keys in `[hotkeys]` itself; the other
+bindings that make `assistd` feel native (presence, the chat
+scratchpad) live in your compositor config and call the `assistd` IPC
+commands. This page covers what every setup shares; the [i3](i3.md)
+and [Sway](sway.md) guides have the config snippets.
 
 ## Before you start
 
 - `assistd` on your `$PATH` and a config at
   `~/.config/assistd/config.toml` (`assistd init-config` writes one).
-- Turn off the daemon's built-in X11 push-to-talk hotkey
-  (`Super+Space`). When the compositor binds the same key, the
-  daemon's grab fails, and under Wayland it only sees keys while an X11
-  window has focus. The other `[hotkeys]` fields are empty by default.
+- Set the voice keys in `[hotkeys]`. On Sway the daemon adds them as
+  bindings over IPC, re-adds them after `swaymsg reload`, and removes
+  them when it stops. On i3 and other X11 sessions it grabs them on
+  the root window. Push-to-talk defaults to `Super+Space`; the others
+  are empty, which leaves them unbound.
 
   ```toml
   [hotkeys]
-  push_to_talk = ""
+  push_to_talk = "Super+Space"
+  toggle_listening = "Super+Shift+L"
   ```
+
+- Remove any `bindsym … exec assistd ptt-start` (or `listen-*`,
+  `voice-*`) lines left from older setups, and any other binding on
+  the same keys. On Sway the daemon's binding replaces yours and Sway
+  warns about it; on i3 the daemon's grab fails and it logs a warning.
+- On Wayland compositors other than Sway (Hyprland, GNOME, KDE) the
+  daemon binds nothing; bind the `ptt-*`, `listen-*` and `voice-*`
+  commands below in the compositor instead.
 
 ## What the commands do
 
@@ -69,6 +80,9 @@ is visible. The chat logs to `~/.local/state/assistd/chat.log.<date>`.
 
 ## Troubleshooting
 
+- **A hotkey does nothing.** Check the daemon log for an
+  `assistd::hotkey` line naming the key; on i3 a failed grab means
+  another binding holds it.
 - **`bindsym` fires but nothing happens.** The daemon isn't running.
 - **PTT transcribes nothing.** The default capture device is probably
   the wrong one; set `[voice] mic_device` to a name from `arecord -L`.

@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 pub mod criteria;
 pub mod error;
+pub mod hotkeys;
 #[cfg(feature = "i3")]
 pub mod i3;
 #[cfg(any(feature = "i3", feature = "sway"))]
@@ -21,10 +22,11 @@ pub(crate) mod snapshot;
 pub mod sway;
 
 pub use error::{TransportError, WmError, WmResult};
+pub use hotkeys::{Hotkey, HotkeyEvent, KeyCombo, KeyEdge, Modifier};
 #[cfg(feature = "i3")]
 pub use i3::{I3Backend, I3Handle};
 #[cfg(feature = "sway")]
-pub use sway::{SwayBackend, SwayHandle};
+pub use sway::{SwayBackend, SwayHandle, SwayHotkeys};
 
 /// Per-call IPC timeout, so a wedged compositor cannot block a request
 /// indefinitely.

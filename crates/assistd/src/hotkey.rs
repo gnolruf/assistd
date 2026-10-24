@@ -1,20 +1,29 @@
-//! Global hotkey listener for voice control.
-//! `global-hotkey` only supports X11 on Linux, so pure Wayland sessions
-//! get no listener and rely on compositor bindings to the CLI instead.
+//! Global hotkey listener for voice control, bound through Sway IPC on Sway
+//! and grabbed on the X11 root window on i3 and other X11 sessions.
 
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use assistd_config::Compositor;
 use assistd_core::{
     Component, HotkeysConfig, VoiceConfig, VoiceInput, VoiceManager, VoiceOutputController,
     spawn_supervised,
 };
+use assistd_wm::{KeyCombo, KeyEdge};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::Interval;
 use tracing::{info, warn};
+
+mod key_combo;
+#[cfg(feature = "sway")]
+mod sway;
+
+const X11_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The four hotkeys the listener can register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,13 +90,13 @@ impl Binding {
     }
 }
 
-/// Validate every configured hotkey string. Empty strings are accepted
-/// and disable that hotkey.
+/// Validate every configured hotkey string, including that it translates
+/// into a compositor binding. Empty strings are accepted and disable that
+/// hotkey.
 pub(crate) fn validate(hotkeys: &HotkeysConfig, voice: &VoiceConfig) -> Result<()> {
     for binding in BINDINGS {
         if let Some(spec) = binding.spec(hotkeys, voice) {
-            HotKey::from_str(spec)
-                .with_context(|| format!("invalid {} {spec:?}", binding.config_path()))?;
+            parse(binding, spec)?;
         }
     }
     Ok(())
@@ -100,11 +109,13 @@ pub(crate) struct Subsystems {
     pub voice: Option<Arc<VoiceManager>>,
 }
 
-/// Spawn the hotkey listener. `None` when no hotkey is configured, the
-/// session is pure Wayland, or registration failed.
+/// Spawn the hotkey listener, registering through Sway IPC on Sway and as
+/// X11 grabs on i3 or an undetected X11 session. `None` when no hotkey is
+/// configured, the compositor offers neither, or registration failed.
 pub(crate) fn spawn_listener(
     hotkeys_cfg: &HotkeysConfig,
     voice_cfg: &VoiceConfig,
+    compositor: Option<Compositor>,
     subsystems: Subsystems,
     shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
@@ -122,45 +133,174 @@ pub(crate) fn spawn_listener(
         return None;
     }
 
-    if is_wayland_only() {
-        info!(
-            target: "assistd::hotkey",
-            "pure Wayland session detected; global hotkeys disabled. Bind \
-             `assistd ptt-start` / `assistd ptt-stop` in \
-             your compositor instead (Sway/Hyprland: `bindsym ... exec ...`)"
-        );
-        return None;
-    }
-
-    let manager = match GlobalHotKeyManager::new() {
-        Ok(m) => m,
-        Err(e) => {
-            warn!(target: "assistd::hotkey", "failed to create GlobalHotKeyManager: {e}; hotkeys disabled");
-            return None;
+    match registrar(compositor)? {
+        Registrar::X11 => Some(spawn_events(
+            X11Hotkeys::register(specs)?,
+            subsystems,
+            shutdown,
+        )),
+        #[cfg(feature = "sway")]
+        Registrar::Sway => {
+            let events = sway::SwayEvents::spawn(specs, shutdown.clone());
+            Some(spawn_events(events, subsystems, shutdown))
         }
-    };
-
-    let registered: Vec<(Binding, HotKey)> = specs
-        .into_iter()
-        .filter_map(|(binding, spec)| register(&manager, binding, spec).map(|h| (binding, h)))
-        .collect();
-    if registered.is_empty() {
-        return None;
     }
+}
 
-    Some(spawn_supervised(
+fn spawn_events(
+    events: impl HotkeyEvents,
+    subsystems: Subsystems,
+    shutdown: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    spawn_supervised(
         "hotkey_listener",
         Component::Hotkey,
-        run_listener(manager, registered, subsystems, shutdown),
-    ))
+        run_listener(events, subsystems, shutdown),
+    )
+}
+
+/// Where hotkeys are registered.
+enum Registrar {
+    X11,
+    #[cfg(feature = "sway")]
+    Sway,
+}
+
+/// The registrar for `compositor`, or `None` (logged) when hotkeys cannot
+/// be registered on it. i3 cannot bind keys over IPC, but runs on X11.
+fn registrar(compositor: Option<Compositor>) -> Option<Registrar> {
+    match compositor {
+        #[cfg(feature = "sway")]
+        Some(Compositor::Sway) => Some(Registrar::Sway),
+        #[cfg(not(feature = "sway"))]
+        Some(Compositor::Sway) => {
+            warn!(
+                target: "assistd::hotkey",
+                "sway hotkeys not compiled into this build (feature `sway`); hotkeys disabled"
+            );
+            None
+        }
+        Some(Compositor::I3) => Some(Registrar::X11),
+        Some(Compositor::Hyprland) => {
+            info!(
+                target: "assistd::hotkey",
+                "no hotkey support on Hyprland; bind `assistd ptt-start` / \
+                 `assistd ptt-stop` in the compositor instead"
+            );
+            None
+        }
+        None if std::env::var_os("WAYLAND_DISPLAY").is_some() => {
+            info!(
+                target: "assistd::hotkey",
+                "Wayland session without a supported compositor; global hotkeys \
+                 disabled. Bind `assistd ptt-start` / `assistd ptt-stop` in \
+                 the compositor instead"
+            );
+            None
+        }
+        None => Some(Registrar::X11),
+    }
+}
+
+/// The X11 hotkey for `spec` and its compositor binding; an error when
+/// either fails to parse.
+fn parse(binding: Binding, spec: &str) -> Result<(HotKey, KeyCombo)> {
+    let config_path = binding.config_path();
+    let hotkey =
+        HotKey::from_str(spec).with_context(|| format!("invalid {config_path} {spec:?}"))?;
+    let Some(keys) = key_combo::key_combo(&hotkey) else {
+        bail!("invalid {config_path} {spec:?}: its key cannot be bound through Sway");
+    };
+    Ok((hotkey, keys))
+}
+
+/// Registered hotkeys and the events they fire.
+trait HotkeyEvents: Send + 'static {
+    /// The next hotkey press or release. Cancel-safe.
+    fn next_event(&mut self) -> impl Future<Output = Option<(Binding, KeyEdge)>> + Send;
+
+    /// Remove every registration. Flip the shutdown watch first.
+    fn release(self) -> impl Future<Output = ()> + Send;
+}
+
+/// Hotkeys grabbed on the X11 root window.
+struct X11Hotkeys {
+    manager: GlobalHotKeyManager,
+    registered: Vec<(Binding, HotKey)>,
+    tick: Interval,
+}
+
+impl X11Hotkeys {
+    fn register(specs: Vec<(Binding, &str)>) -> Option<Self> {
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(target: "assistd::hotkey", "failed to create GlobalHotKeyManager: {e}; hotkeys disabled");
+                return None;
+            }
+        };
+        let registered: Vec<(Binding, HotKey)> = specs
+            .into_iter()
+            .filter_map(|(binding, spec)| register(&manager, binding, spec).map(|h| (binding, h)))
+            .collect();
+        if registered.is_empty() {
+            return None;
+        }
+        let mut tick = tokio::time::interval(X11_POLL_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Some(Self {
+            manager,
+            registered,
+            tick,
+        })
+    }
+
+    fn binding_for(&self, event: GlobalHotKeyEvent) -> Option<(Binding, KeyEdge)> {
+        let binding = self
+            .registered
+            .iter()
+            .find(|(_, h)| h.id() == event.id)
+            .map(|(b, _)| *b)?;
+        let edge = match event.state {
+            HotKeyState::Pressed => KeyEdge::Press,
+            HotKeyState::Released => KeyEdge::Release,
+        };
+        Some((binding, edge))
+    }
+}
+
+impl HotkeyEvents for X11Hotkeys {
+    async fn next_event(&mut self) -> Option<(Binding, KeyEdge)> {
+        let receiver = GlobalHotKeyEvent::receiver();
+        loop {
+            while let Ok(event) = receiver.try_recv() {
+                if let Some(fired) = self.binding_for(event) {
+                    return Some(fired);
+                }
+            }
+            self.tick.tick().await;
+        }
+    }
+
+    async fn release(self) {
+        for (binding, hotkey) in self.registered {
+            if let Err(e) = self.manager.unregister(hotkey) {
+                warn!(
+                    target: "assistd::hotkey",
+                    "failed to unregister {} on shutdown: {e}",
+                    binding.config_path()
+                );
+            }
+        }
+    }
 }
 
 fn register(manager: &GlobalHotKeyManager, binding: Binding, spec: &str) -> Option<HotKey> {
     let config_path = binding.config_path();
-    let hotkey = match HotKey::from_str(spec) {
-        Ok(h) => h,
+    let hotkey = match parse(binding, spec) {
+        Ok((h, _)) => h,
         Err(e) => {
-            warn!(target: "assistd::hotkey", "failed to parse {config_path} {spec:?}: {e}");
+            warn!(target: "assistd::hotkey", "{e:#}");
             return None;
         }
     };
@@ -181,35 +321,17 @@ fn register(manager: &GlobalHotKeyManager, binding: Binding, spec: &str) -> Opti
 }
 
 async fn run_listener(
-    manager: GlobalHotKeyManager,
-    registered: Vec<(Binding, HotKey)>,
+    mut source: impl HotkeyEvents,
     subsystems: Subsystems,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let receiver = GlobalHotKeyEvent::receiver();
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut handlers = JoinSet::new();
     let mut ptt_started = None;
 
     loop {
         tokio::select! {
-            _ = tick.tick() => {
-                while let Ok(event) = receiver.try_recv() {
-                    let binding = registered
-                        .iter()
-                        .find(|(_, h)| h.id() == event.id)
-                        .map(|(b, _)| *b);
-                    if let Some(binding) = binding {
-                        on_hotkey(
-                            binding,
-                            event.state,
-                            &subsystems,
-                            &mut handlers,
-                            &mut ptt_started,
-                        );
-                    }
-                }
+            Some((binding, edge)) = source.next_event() => {
+                on_hotkey(binding, edge, &subsystems, &mut handlers, &mut ptt_started);
             }
             Some(res) = handlers.join_next() => {
                 if let Err(e) = res {
@@ -225,15 +347,7 @@ async fn run_listener(
     }
 
     handlers.shutdown().await;
-    for (binding, hotkey) in registered {
-        if let Err(e) = manager.unregister(hotkey) {
-            warn!(
-                target: "assistd::hotkey",
-                "failed to unregister {} on shutdown: {e}",
-                binding.config_path()
-            );
-        }
-    }
+    source.release().await;
 }
 
 /// Route one hotkey event to its subsystem on a task in `handlers`, so
@@ -242,12 +356,12 @@ async fn run_listener(
 /// release cannot overtake it.
 fn on_hotkey(
     binding: Binding,
-    state: HotKeyState,
+    edge: KeyEdge,
     subsystems: &Subsystems,
     handlers: &mut JoinSet<()>,
     ptt_started: &mut Option<oneshot::Receiver<()>>,
 ) {
-    let pressed = state == HotKeyState::Pressed;
+    let pressed = edge == KeyEdge::Press;
     match binding {
         Binding::Voice if pressed => {
             let (started_tx, started_rx) = oneshot::channel();
@@ -372,10 +486,6 @@ async fn skip_voice_output(ctrl: Arc<VoiceOutputController>) {
     );
 }
 
-fn is_wayland_only() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_none()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -461,10 +571,10 @@ mod tests {
         let mut handlers = JoinSet::new();
         let mut ptt_started = None;
 
-        for state in [HotKeyState::Pressed, HotKeyState::Released] {
+        for edge in [KeyEdge::Press, KeyEdge::Release] {
             on_hotkey(
                 Binding::Voice,
-                state,
+                edge,
                 &subsystems,
                 &mut handlers,
                 &mut ptt_started,

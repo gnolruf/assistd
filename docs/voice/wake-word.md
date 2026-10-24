@@ -17,7 +17,7 @@ enabled = true
 start_on_launch = true      # otherwise it waits for listen-toggle
 
 [hotkeys]
-# toggle_listening = "Super+Shift+L"  # X11 only; on Wayland bind `assistd listen-toggle`
+# toggle_listening = "Super+Shift+L"  # Sway, i3 and X11; elsewhere bind `assistd listen-toggle`
 ```
 
 Restart the daemon. `assistd listen-toggle` turns listening on and off,

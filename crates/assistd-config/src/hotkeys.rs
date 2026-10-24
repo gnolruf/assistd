@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::defaults::DEFAULT_HOTKEY_PUSH_TO_TALK;
 use crate::settings::{DescribeSettings, describe_fields};
 
-/// Global hotkeys, as `global-hotkey` specs like `"Super+Shift+L"`. Only
-/// registered on X11; elsewhere bind the matching `assistd` subcommands in
-/// the compositor. Empty disables a hotkey, as does turning its feature off.
+/// Global hotkeys, as `global-hotkey` specs like `"Super+Shift+L"`, bound
+/// over Sway IPC or grabbed on X11; a key with no xkb keysym fails config
+/// load. Empty disables a hotkey, as does turning its feature off.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct HotkeysConfig {
