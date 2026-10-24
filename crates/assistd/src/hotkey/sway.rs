@@ -4,7 +4,7 @@ use assistd_wm::{Hotkey, KeyEdge, SwayHotkeys};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use super::{Binding, HotkeyEvents, key_combo, parse};
+use super::{Binding, HotkeyEvents, parse};
 
 /// Sway's bindings, with the [`Binding`] each one's index stands for.
 pub(super) struct SwayEvents {
@@ -37,10 +37,9 @@ impl HotkeyEvents for SwayEvents {
 }
 
 fn sway_hotkey(binding: Binding, spec: &str) -> Option<Hotkey> {
-    let keys = parse(binding, spec)
+    let (_, keys) = parse(binding, spec)
         .map_err(|e| warn!(target: "assistd::hotkey", "{e:#}"))
-        .ok()
-        .and_then(|hotkey| key_combo::key_combo(&hotkey))?;
+        .ok()?;
     info!(
         target: "assistd::hotkey",
         "{} {spec:?} bound through sway as {keys} ({})",

@@ -136,9 +136,8 @@ effect when the daemon restarts.
 ## Window-manager integration
 
 The daemon binds the voice hotkeys in `[hotkeys]` itself on X11, Sway
-and i3; remove any `bindsym … exec assistd …` lines for the same keys
-so they aren't bound twice. The other bindings (presence toggling, the
-TUI scratchpad) live in your compositor config. Start with the
+and i3. The other bindings (presence toggling, the TUI scratchpad) live
+in your compositor config. Start with the
 [shared setup page](docs/wm/README.md), then the [i3](docs/wm/i3.md)
 or [Sway](docs/wm/sway.md) guide.
 

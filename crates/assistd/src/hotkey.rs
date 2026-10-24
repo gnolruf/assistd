@@ -12,7 +12,7 @@ use assistd_core::{
     Component, HotkeysConfig, VoiceConfig, VoiceInput, VoiceManager, VoiceOutputController,
     spawn_supervised,
 };
-use assistd_wm::KeyEdge;
+use assistd_wm::{KeyCombo, KeyEdge};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -202,16 +202,16 @@ fn registrar(compositor: Option<Compositor>) -> Option<Registrar> {
     }
 }
 
-/// The X11 hotkey for `spec`, checked to also translate into a compositor
-/// binding.
-fn parse(binding: Binding, spec: &str) -> Result<HotKey> {
+/// The X11 hotkey for `spec` and its compositor binding; an error when
+/// either fails to parse.
+fn parse(binding: Binding, spec: &str) -> Result<(HotKey, KeyCombo)> {
     let config_path = binding.config_path();
     let hotkey =
         HotKey::from_str(spec).with_context(|| format!("invalid {config_path} {spec:?}"))?;
-    if key_combo::key_combo(&hotkey).is_none() {
+    let Some(keys) = key_combo::key_combo(&hotkey) else {
         bail!("invalid {config_path} {spec:?}: its key cannot be bound through Sway");
-    }
-    Ok(hotkey)
+    };
+    Ok((hotkey, keys))
 }
 
 /// Registered hotkeys and the events they fire.
@@ -298,7 +298,7 @@ impl HotkeyEvents for X11Hotkeys {
 fn register(manager: &GlobalHotKeyManager, binding: Binding, spec: &str) -> Option<HotKey> {
     let config_path = binding.config_path();
     let hotkey = match parse(binding, spec) {
-        Ok(h) => h,
+        Ok((h, _)) => h,
         Err(e) => {
             warn!(target: "assistd::hotkey", "{e:#}");
             return None;

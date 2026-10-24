@@ -39,8 +39,7 @@ exec systemctl --user import-environment SWAYSOCK WAYLAND_DISPLAY DISPLAY && sys
 ## Hotkeys
 
 The daemon binds `[hotkeys]` through Sway's IPC, so push-to-talk needs
-no lines in the Sway config. `Super+Space` becomes `Mod4+space`. Remove
-any `bindsym … exec assistd …` lines for the same keys.
+no lines in the Sway config. `Super+Space` becomes `Mod4+space`.
 
 The default Sway config binds `$mod+space` to `focus mode_toggle`.
 The daemon's binding replaces it while the daemon runs, and Sway warns

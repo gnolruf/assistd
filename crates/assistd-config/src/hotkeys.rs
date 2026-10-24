@@ -3,11 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::defaults::DEFAULT_HOTKEY_PUSH_TO_TALK;
 use crate::settings::{DescribeSettings, describe_fields};
 
-/// Global hotkeys, as `global-hotkey` specs like `"Super+Shift+L"`. Bound
-/// through IPC on Sway (as `Mod4+Shift+l`) and grabbed on X11 under i3 or
-/// another X11 session; other Wayland compositors must bind the matching
-/// `assistd` subcommands. A key Sway has no keysym for fails config load.
-/// Empty disables a hotkey, as does turning its feature off.
+/// Global hotkeys, as `global-hotkey` specs like `"Super+Shift+L"`, bound
+/// over Sway IPC or grabbed on X11; a key with no xkb keysym fails config
+/// load. Empty disables a hotkey, as does turning its feature off.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct HotkeysConfig {
