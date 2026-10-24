@@ -326,6 +326,7 @@ fn spawn_hotkeys(
     hotkey::spawn_listener(
         &config.hotkeys,
         &config.voice,
+        config.compositor.resolve(),
         hotkey::Subsystems {
             ptt: voice_proxy,
             voice: Some(voice.clone()),

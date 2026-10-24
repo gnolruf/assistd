@@ -30,7 +30,7 @@ request_timeout_secs = 120  # wait for the first token
 # summary_temperature = 0.3
 
 [hotkeys]
-# X11 only; on Wayland bind `assistd ptt-start` etc. in the compositor. Empty disables.
+# Bound by the daemon on Sway, i3 and X11; elsewhere bind `assistd ptt-start` etc. Empty disables.
 push_to_talk = "Super+Space"  # hold to talk
 # toggle_listening = "Super+Shift+L"
 # toggle_speech = ""

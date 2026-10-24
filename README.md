@@ -135,10 +135,12 @@ effect when the daemon restarts.
 
 ## Window-manager integration
 
-The bindings that make `assistd` feel native (push-to-talk, presence
-toggling, the TUI scratchpad) live in your compositor config rather
-than the daemon. Start with the [shared setup page](docs/wm/README.md),
-then the [i3](docs/wm/i3.md) or [Sway](docs/wm/sway.md) guide.
+The daemon binds the voice hotkeys in `[hotkeys]` itself on X11, Sway
+and i3; remove any `bindsym … exec assistd …` lines for the same keys
+so they aren't bound twice. The other bindings (presence toggling, the
+TUI scratchpad) live in your compositor config. Start with the
+[shared setup page](docs/wm/README.md), then the [i3](docs/wm/i3.md)
+or [Sway](docs/wm/sway.md) guide.
 
 ## CLI surface
 
@@ -152,7 +154,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd chat`           | Interactive ratatui TUI.                                      |
 | `assistd settings`       | Edit `config.toml` in a terminal panel (also `/settings` in chat). |
 | `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |
-| `assistd ptt-start/stop` | Push-to-talk start/stop, for window-manager bindings.         |
+| `assistd ptt-start/stop` | Push-to-talk start/stop, for compositors without hotkey support. |
 | `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |
 | `assistd voice-toggle`   | Toggle Piper TTS playback.                                    |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
