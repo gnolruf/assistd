@@ -6,6 +6,7 @@ use crate::defaults::{
     DEFAULT_GPU_HEADROOM_MB, DEFAULT_GPU_MONITOR_ENABLED, DEFAULT_GPU_POLL_SECS,
     DEFAULT_IDLE_TO_DROWSY_MINS, DEFAULT_IDLE_TO_SLEEP_MINS,
 };
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// Sleep/idle policy settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,6 +30,32 @@ pub struct SleepConfig {
     /// After a sleep for contention, return to `Active` once the model fits
     /// again with the headroom to spare.
     pub gpu_auto_wake: bool,
+}
+
+impl DescribeSettings for SleepConfig {
+    describe_fields! {
+        idle_to_drowsy_mins => (
+            "drowse after idle (min)",
+            "Idle minutes before the model is unloaded; 0 disables"
+        ),
+        idle_to_sleep_mins => (
+            "sleep after idle (min)",
+            "Idle minutes before llama-server stops; 0 disables"
+        ),
+        gpu_monitor_enabled => (
+            "enabled",
+            "Sleep when other processes crowd the model's VRAM (NVIDIA only)"
+        ),
+        gpu_poll_secs => ("check interval (s)", "Seconds between VRAM checks"),
+        gpu_headroom_mb => (
+            "free VRAM to keep (MiB)",
+            "Free VRAM to keep beside the model; 0 keeps no margin"
+        ),
+        gpu_auto_wake => (
+            "wake when VRAM frees up",
+            "Wake again once the model fits with headroom to spare"
+        ),
+    }
 }
 
 impl Default for SleepConfig {

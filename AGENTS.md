@@ -124,8 +124,8 @@ and data-flow walkthrough.
 
 | Crate            | Responsibility                                                                                                                  |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `assistd`        | Binary (`assistd` on `$PATH`; package `assistd-cli`). CLI parsing (`daemon`, `query`, `chat`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`) are optional features. |
-| `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
+| `assistd`        | Binary (`assistd` on `$PATH`; package `assistd-cli`). CLI parsing (`daemon`, `query`, `chat`, `settings`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`) are optional features; `settings` ships with `chat`. |
+| `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable, including each key's settings-panel label, description and advanced flag, declared per table with `describe_fields!`; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
 | `assistd-core`   | Daemon glue. Owns `AppState`, the per-turn `Agent` loop, the Unix-socket server, the presence state machine, and the `build_tools()` factory that wires every subsystem together. |
 | `assistd-embed`  | Embedding HTTP client + background job queue. Pulls chunks off an mpsc, batches them to the embedding `llama-server`, writes vectors into `assistd-memory`'s semantic store. |
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light; depends only on `assistd-utils`. |
@@ -172,7 +172,8 @@ stays where it is used.
 - **`config.toml` is canonical.** The annotated
   [config/config.sample.toml](config/config.sample.toml) documents
   every tunable. If you add a new option, update the schema in
-  `assistd-config` *and* the sample.
+  `assistd-config` (with its `describe_fields!` entry), the sample, and the
+  settings panel's catalog, which places the key in a section.
 
 ## What not to do
 

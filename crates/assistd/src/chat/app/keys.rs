@@ -17,6 +17,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/fork", "<name>"),
     ("/new", ""),
     ("/resume", ""),
+    ("/settings", ""),
     ("/undo", ""),
     ("/wakeword", ""),
 ];
@@ -35,6 +36,8 @@ impl App {
             self.on_resume_picker_key(ev);
         } else if self.shown_wake_word_panel().is_some() {
             self.on_wake_word_key(ev);
+        } else if self.shown_settings_panel().is_some() {
+            self.on_settings_key(ev);
         } else if ev.code == KeyCode::BackTab {
             self.toggle_permission_mode();
         } else if self.confirmation.is_some() {
@@ -76,6 +79,14 @@ impl App {
             self.refresh_slash_state();
         } else if !self.try_complete_attach_path() {
             self.output.toggle_last_expandable();
+        }
+    }
+
+    fn on_settings_key(&mut self, ev: KeyEvent) {
+        if let Some(panel) = self.settings_panel.as_mut()
+            && panel.on_key(ev).is_break()
+        {
+            self.settings_panel = None;
         }
     }
 

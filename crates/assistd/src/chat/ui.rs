@@ -19,6 +19,7 @@ use textwrap::core::display_width;
 use super::app::{App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker};
 use super::markdown::BLEY;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
+use super::settings::render_settings;
 use crate::client::terminal_text::escape_controls_single_line;
 
 mod wakeword;
@@ -44,12 +45,16 @@ const RESUME_DETAIL_INDENT: &str = "    ";
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let [main_area, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    match (app.shown_resume_picker(), app.shown_wake_word_panel()) {
-        (Some(picker), _) => {
-            render_resume_picker(frame, main_area, picker, &app.model_name, Utc::now());
-        }
-        (None, Some(panel)) => wakeword::render_wake_word_panel(frame, main_area, panel),
-        (None, None) => render_chat(frame, main_area, app),
+    if let Some(picker) = app.shown_resume_picker() {
+        render_resume_picker(frame, main_area, picker, &app.model_name, Utc::now());
+    } else if let Some(panel) = app.shown_wake_word_panel() {
+        wakeword::render_wake_word_panel(frame, main_area, panel);
+    } else if app.confirmation.is_none()
+        && let Some(panel) = app.settings_panel.as_mut()
+    {
+        render_settings(frame, main_area, panel);
+    } else {
+        render_chat(frame, main_area, app);
     }
     render_status_line(frame, status_area, app);
 }
@@ -741,7 +746,7 @@ fn compute_input_height(frame_width: u16, dock_height: u16, buffer: &str) -> u16
 /// `(start, end)` char ranges of each input row: a new row at each line
 /// break, otherwise after the last whitespace that fits past the prompt. A
 /// final row that fills the width is followed by an empty one for the cursor.
-fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
+pub(super) fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     let n = buf.len();
     if width == 0 {
         return vec![(0, n)];
@@ -787,7 +792,7 @@ fn wrap_input_line(
 
 /// Row and column of char offset `cursor`. At a soft wrap the cursor moves
 /// to the next row; before a line break it stays at the end of its row.
-fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
+pub(super) fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
     for (idx, &(s, e)) in rows.iter().enumerate() {
         if cursor < e {
             return (idx, cursor - s);

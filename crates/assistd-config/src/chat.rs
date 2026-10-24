@@ -8,6 +8,7 @@ use crate::defaults::{
     DEFAULT_CHAT_SUMMARY_TARGET_TOKENS, DEFAULT_CHAT_SUMMARY_TEMPERATURE, DEFAULT_CHAT_TEMPERATURE,
     DEFAULT_SYSTEM_PROMPT,
 };
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// System prompt, history window and sampling. Sampler fields left `None`
 /// are omitted from requests, so llama-server applies its own default.
@@ -48,6 +49,55 @@ pub struct ChatConfig {
     /// `low`. Valid values depend on the model's template; `None` keeps the
     /// template's default. Must not be empty.
     pub reasoning_effort: Option<String>,
+}
+
+impl DescribeSettings for ChatConfig {
+    describe_fields! {
+        system_prompt => ("system prompt", "First message of every request; empty sends none"),
+        max_history_tokens => (
+            "history budget (tokens)",
+            "Prompt and history budget; older messages are summarized past it",
+            advanced
+        ),
+        summary_target_tokens => (
+            "summary length (tokens)",
+            "Target length of a history summary; below the history budget",
+            advanced
+        ),
+        temperature => ("temperature", "Sampling randomness, 0.0 to 2.0"),
+        max_response_tokens => (
+            "max reply length (tokens)",
+            "Longest reply, thinking included; longer replies are retried"
+        ),
+        max_reasoning_tokens => (
+            "max thinking (tokens)",
+            "Longest the model may think before it must act",
+            advanced
+        ),
+        request_timeout_secs => (
+            "first-token timeout (s)",
+            "Longest wait for the first streamed byte of a reply",
+            advanced
+        ),
+        summary_temperature => (
+            "summary temperature",
+            "Sampling randomness for summaries, 0.0 to 2.0",
+            advanced
+        ),
+        top_p => ("top-p cutoff", "Nucleus sampling cutoff, 0.0 to 1.0", advanced),
+        top_k => ("top-k cutoff", "Sample only from the k most likely tokens", advanced),
+        min_p => ("min-p cutoff", "Min-p sampling cutoff, 0.0 to 1.0", advanced),
+        presence_penalty => (
+            "presence penalty",
+            "Penalty on tokens already used, -2.0 to 2.0",
+            advanced
+        ),
+        reasoning_effort => (
+            "reasoning effort",
+            "Template's reasoning_effort value, e.g. low; unset keeps its default",
+            advanced
+        ),
+    }
 }
 
 impl Default for ChatConfig {

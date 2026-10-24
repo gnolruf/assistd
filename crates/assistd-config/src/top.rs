@@ -19,11 +19,12 @@ use crate::hotkeys::HotkeysConfig;
 use crate::mcp::McpConfig;
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
+use crate::notifications::{NotificationsConfig, TrayIconsConfig};
 use crate::search::SearchConfig;
+use crate::settings::{DescribeSettings, describe_fields};
 use crate::sleep::SleepConfig;
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::{ToolsConfig, ToolsOutputConfig};
-use crate::tray::{TrayConfig, TrayIconsConfig, TrayNotificationsConfig};
 use crate::voice::{SynthesisConfig, TranscriptionConfig, VoiceConfig};
 
 const CONFIG_DIR_MODE: u32 = 0o700;
@@ -56,7 +57,25 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(skip)]
     pub timeouts: TimeoutsConfig,
-    pub tray: TrayConfig,
+    pub notifications: NotificationsConfig,
+}
+
+impl DescribeSettings for Config {
+    describe_fields! {
+        model => nested,
+        chat => nested,
+        voice => nested,
+        compositor => nested,
+        sleep => nested,
+        hotkeys => nested,
+        tools => nested,
+        memory => nested,
+        embedding => nested,
+        search => nested,
+        mcp => nested,
+        timeouts => skip,
+        notifications => nested,
+    }
 }
 
 impl Config {
@@ -70,12 +89,10 @@ impl Config {
         validate_sleep(&mut errors, &self.sleep);
         validate_tools(&mut errors, &self.tools);
         validate_tool_output_share(&mut errors, &self.tools.output, &self.chat);
-        validate_memory(&mut errors, &self.memory);
         validate_embedding(&mut errors, &self.embedding, &self.model);
         validate_search(&mut errors, &self.search, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
-        validate_tray_icons(&mut errors, &self.tray.icons);
-        validate_tray_notifications(&mut errors, &self.tray.notifications);
+        validate_notifications(&mut errors, &self.notifications);
         if errors.is_empty() {
             Ok(())
         } else {
@@ -167,7 +184,7 @@ impl Config {
     }
 }
 
-fn create_private_dir_all(dir: &Path) -> Result<(), ConfigError> {
+pub(crate) fn create_private_dir_all(dir: &Path) -> Result<(), ConfigError> {
     DirBuilder::new()
         .recursive(true)
         .mode(CONFIG_DIR_MODE)
@@ -178,7 +195,7 @@ fn create_private_dir_all(dir: &Path) -> Result<(), ConfigError> {
         })
 }
 
-fn create_private_file(path: &Path) -> Result<File, ConfigError> {
+pub(crate) fn create_private_file(path: &Path) -> Result<File, ConfigError> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -437,14 +454,6 @@ fn validate_tool_output_share(
     }
 }
 
-fn validate_memory(errors: &mut Vec<String>, memory: &MemoryConfig) {
-    if memory.enabled && !memory.db_path.is_absolute() {
-        errors.push(
-            "memory.db_path must be an absolute path or start with `~/` when memory.enabled".into(),
-        );
-    }
-}
-
 fn validate_embedding(errors: &mut Vec<String>, embedding: &EmbeddingConfig, model: &ModelConfig) {
     if !embedding.enabled {
         return;
@@ -551,15 +560,16 @@ fn validate_tray_icons(errors: &mut Vec<String>, icons: &TrayIconsConfig) {
     ];
     for (key, name) in named {
         if name.trim().is_empty() {
-            errors.push(format!("tray.icons.{key} must not be empty"));
+            errors.push(format!("notifications.icons.{key} must not be empty"));
         }
     }
 }
 
-fn validate_tray_notifications(errors: &mut Vec<String>, notifications: &TrayNotificationsConfig) {
+fn validate_notifications(errors: &mut Vec<String>, notifications: &NotificationsConfig) {
     if notifications.enabled && !(500..=60_000).contains(&notifications.auto_hide_ms) {
-        errors.push("tray.notifications.auto_hide_ms must be in the range 500..=60000".into());
+        errors.push("notifications.auto_hide_ms must be in the range 500..=60000".into());
     }
+    validate_tray_icons(errors, &notifications.icons);
 }
 
 /// Pushes `message` unless `value` lies in `range`; NaN never does.

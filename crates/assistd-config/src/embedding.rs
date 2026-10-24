@@ -12,6 +12,7 @@ use crate::defaults::{
     DEFAULT_EMBEDDING_HOST, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_PORT,
     DEFAULT_EMBEDDING_READY_TIMEOUT_SECS, DEFAULT_EMBEDDING_SERVER_BINARY, DEFAULT_EMBEDDING_TOP_K,
 };
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// Dedicated embedding server and semantic-recall settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -41,8 +42,47 @@ pub struct EmbeddingConfig {
     /// `reminisce` default. `1..=20`, the most `reminisce` returns.
     pub top_k: NonZeroU32,
     /// Prepend the `top_k` most similar past chunks to every query; when
-    /// `false`, recall happens only through `reminisce`.
+    /// `false`, recall happens only through `reminisce`. Off while
+    /// `memory.enabled` is `false`.
     pub auto_inject: bool,
+}
+
+impl DescribeSettings for EmbeddingConfig {
+    describe_fields! {
+        enabled => ("enabled", "Enables semantic recall of past chats"),
+        model => ("embedding model", "Embedding model, as owner/repo:quant"),
+        server_binary => ("llama-server binary", "llama-server path, or a name on $PATH", advanced),
+        host => (
+            "server address",
+            "Address the embedding server binds; must be loopback",
+            advanced
+        ),
+        port => (
+            "server port",
+            "Port the embedding server binds; must differ from model.port",
+            advanced
+        ),
+        gpu_layers => (
+            "layers offloaded to GPU",
+            "Layers offloaded to the GPU; 0 keeps it on CPU",
+            advanced
+        ),
+        ready_timeout_secs => (
+            "startup timeout (s)",
+            "Longest wait for the embedding server to start",
+            advanced
+        ),
+        custom_args => (
+            "extra server arguments",
+            "Extra llama-server arguments; flags assistd sets are refused",
+            advanced
+        ),
+        top_k => ("memories recalled per query", "Matches recalled per query, 1 to 20"),
+        auto_inject => (
+            "add recalled memories to queries",
+            "Prepend recalled memories to every query"
+        ),
+    }
 }
 
 impl Default for EmbeddingConfig {

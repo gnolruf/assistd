@@ -152,7 +152,7 @@ async fn start(
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
-    let mut memory = memory_init::init(&config).await;
+    let mut memory = memory_init::init().await;
     let (embed, embed_startup) =
         embed_init::prepare(&config, &api_key, memory.sqlite_handle.as_ref());
     let (web_search, search_startup) = search_init::prepare(&config);

@@ -12,7 +12,7 @@ impl Harness {
     fn new() -> Self {
         let (tx, commands) = mpsc::unbounded_channel();
         Self {
-            driver: Driver::new(tx, &TrayNotificationsConfig::default()),
+            driver: Driver::new(tx, &NotificationsConfig::default()),
             commands,
         }
     }

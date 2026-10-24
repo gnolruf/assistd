@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use assistd_config::TrayNotificationsConfig;
+use assistd_config::NotificationsConfig;
 use assistd_ipc::{Event, IpcClient, Request};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
@@ -57,7 +57,7 @@ enum Display {
 pub(super) async fn drive_notifications(
     mut rx: UnboundedReceiver<DriverInput>,
     commands: UnboundedSender<NotifierCommand>,
-    cfg: TrayNotificationsConfig,
+    cfg: NotificationsConfig,
     ipc: IpcClient,
 ) {
     let mut driver = Driver::new(commands, &cfg);
@@ -104,7 +104,7 @@ struct Driver {
 }
 
 impl Driver {
-    fn new(commands: UnboundedSender<NotifierCommand>, cfg: &TrayNotificationsConfig) -> Self {
+    fn new(commands: UnboundedSender<NotifierCommand>, cfg: &NotificationsConfig) -> Self {
         Self {
             commands,
             tracker: ActivityTracker::default(),

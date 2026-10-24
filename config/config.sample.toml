@@ -143,8 +143,7 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # writable_paths = ["~"]  # besides tools.scratch.dir
 
 [memory]
-# enabled = true
-# db_path = "~/.local/share/assistd/memory.db"
+# enabled = true  # false: no memory tools or recalled context; chats are still saved
 
 [embedding]
 # A second model server for semantic recall.
@@ -180,16 +179,16 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # env = { API_TOKEN = "..." }  # only PATH, HOME, locale and a few basics are inherited
 # request_timeout_secs = 30
 
-# [tray.icons]
+# [notifications]
+# Desktop notifications from `assistd tray`; none while the chat is focused.
+# enabled = true
+# auto_hide_ms = 3000
+# brief_when_away = true  # short replies to voice turns while the chat is unfocused
+
+# [notifications.icons]
 # Icon-theme names for the tray icon; custom icons go in ~/.local/share/icons/<theme>/.
 # active = "user-available"
 # sleeping = "user-offline"          # drowsy, asleep, or loading
 # listening = "audio-input-microphone"  # wake phrase heard, or push-to-talk
 # generating = "system-run"
 # disconnected = "network-offline"
-
-# [tray.notifications]
-# Desktop notifications from `assistd tray`; none while the chat is focused.
-# enabled = true
-# auto_hide_ms = 3000
-# brief_when_away = true  # short replies to voice turns while the chat is unfocused

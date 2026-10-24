@@ -25,6 +25,7 @@ chat = [
     "dep:ratatui-image",
     "dep:image",
     "dep:chrono",
+    "dep:toml",
 ]
 tray = [
     "dep:ksni",
@@ -71,6 +72,7 @@ pulldown-cmark   = { workspace = true, optional = true }
 shlex            = { workspace = true, optional = true }
 ratatui-image    = { workspace = true, optional = true }
 image            = { workspace = true, optional = true }
+toml             = { workspace = true, optional = true }
 ksni             = { workspace = true, optional = true }
 zbus             = { workspace = true, optional = true }
 

@@ -133,10 +133,10 @@ impl Tool for RememberTool {
     }
 
     fn description(&self) -> Cow<'_, str> {
-        "Save or look up durable facts and preferences about the user. \
+        "Save or look up durable memories about the user. \
          action=\"save\": call whenever the user states a stable preference, \
-         a fact about themselves, or anything they want remembered; `key` \
-         names the fact and `text` is its value. Saving an existing key \
+         something about themselves, or anything they want remembered; `key` \
+         names the memory and `text` is its value. Saving an existing key \
          overwrites it. Examples: \"I prefer vim over emacs\" -> \
          remember(action=\"save\", key=\"editor_preference\", text=\"vim\"); \
          \"my name is Ben\" -> remember(action=\"save\", key=\"user.name\", \
@@ -171,7 +171,7 @@ impl Tool for RememberTool {
                 },
                 "text": {
                     "type": "string",
-                    "description": "For save: the fact or preference to store. \
+                    "description": "For save: the memory or preference to store. \
                                     For search: a natural-language question."
                 }
             },
@@ -225,7 +225,7 @@ impl Tool for ReminisceTool {
         "Search *earlier* conversations — every session except the one \
          in progress, which is already in context — for messages similar \
          in meaning to a query. Complement to `remember`: its search looks \
-         up *saved facts* (key/value), `reminisce` searches *past \
+         up *saved memories* (key/value), `reminisce` searches *past \
          dialogue text*; use it when the user references something they \
          'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \

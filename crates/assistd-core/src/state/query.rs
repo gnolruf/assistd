@@ -482,8 +482,7 @@ impl AppState {
     }
 
     async fn assemble_transient_context(&self, text: &str, origin: TurnOrigin, chat_focused: bool) {
-        let semantic = if self.memory.embedding_cfg.enabled && self.memory.embedding_cfg.auto_inject
-        {
+        let semantic = if self.recalls_past_context() {
             match self.build_semantic_context(text).await {
                 Ok(block) => block,
                 Err(e) => {
@@ -509,6 +508,11 @@ impl AppState {
                 "set_transient_context failed; continuing without it",
             );
         }
+    }
+
+    fn recalls_past_context(&self) -> bool {
+        let embedding = &self.memory.embedding_cfg;
+        self.config.memory.enabled && embedding.enabled && embedding.auto_inject
     }
 
     fn speech_pipeline(&self) -> (SpeechPipeline, mpsc::Receiver<String>) {

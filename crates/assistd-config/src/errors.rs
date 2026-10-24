@@ -22,6 +22,16 @@ pub enum ConfigError {
         source: toml::de::Error,
     },
 
+    #[error("failed to parse config file {path}: {source}")]
+    Document {
+        path: PathBuf,
+        #[source]
+        source: toml_edit::TomlError,
+    },
+
+    #[error("cannot set `{key}`: {reason}")]
+    Edit { key: String, reason: String },
+
     #[error("failed to serialize default config: {0}")]
     Serialize(#[from] toml::ser::Error),
 

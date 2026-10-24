@@ -9,6 +9,7 @@ use crate::defaults::{
     DEFAULT_MODEL_CONTEXT_LENGTH, DEFAULT_MODEL_GPU_LAYERS, DEFAULT_MODEL_HOST, DEFAULT_MODEL_NAME,
     DEFAULT_MODEL_PORT, DEFAULT_MODEL_READY_TIMEOUT_SECS, DEFAULT_MODEL_SERVER_BINARY,
 };
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// The chat model and the local server process that serves it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +35,34 @@ pub struct ModelConfig {
     /// Extra server arguments. Flags assistd sets itself, or that expose
     /// files, tools or state through the server, fail to parse.
     pub custom_args: CustomArgs<ChatServer>,
+}
+
+impl DescribeSettings for ModelConfig {
+    describe_fields! {
+        name => ("model", "Hugging Face model to load, as owner/repo:quant"),
+        context_length => (
+            "context window (tokens)",
+            "Tokens the model can see at once, prompt and reply together"
+        ),
+        server_binary => ("llama-server binary", "llama-server path, or a name on $PATH", advanced),
+        host => ("server address", "Address the model server binds; must be loopback", advanced),
+        port => ("server port", "Port the model server binds", advanced),
+        gpu_layers => (
+            "layers offloaded to GPU",
+            "Layers offloaded to the GPU; above the model's count offloads all",
+            advanced
+        ),
+        ready_timeout_secs => (
+            "startup timeout (s)",
+            "Longest wait for the model server to start and load",
+            advanced
+        ),
+        custom_args => (
+            "extra server arguments",
+            "Extra llama-server arguments; flags assistd sets are refused",
+            advanced
+        ),
+    }
 }
 
 impl ModelConfig {

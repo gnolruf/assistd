@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::DEFAULT_HOTKEY_PUSH_TO_TALK;
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// Global hotkeys, as `global-hotkey` specs like `"Super+Shift+L"`. Only
 /// registered on X11; elsewhere bind the matching `assistd` subcommands in
@@ -18,6 +19,18 @@ pub struct HotkeysConfig {
     /// Stops playback and drops the current reply's queued sentences. Needs
     /// `voice.synthesis.enabled`.
     pub skip_speech: String,
+}
+
+impl DescribeSettings for HotkeysConfig {
+    describe_fields! {
+        push_to_talk => ("push-to-talk", "Hold to record a spoken query"),
+        toggle_listening => ("toggle wake-word listening", "Turns wake-word listening on or off"),
+        toggle_speech => (
+            "toggle spoken replies",
+            "Turns spoken replies on or off; off stops playback"
+        ),
+        skip_speech => ("skip the current reply", "Stops speaking the current reply"),
+    }
 }
 
 impl Default for HotkeysConfig {

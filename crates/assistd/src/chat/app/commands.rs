@@ -1,9 +1,11 @@
 //! Submitted input: slash commands and queries.
 
+use assistd_config::ConfigDocument;
 use assistd_ipc::Request;
 use uuid::Uuid;
 
 use super::{App, BranchOp, PendingAttachment, WireStream};
+use crate::chat::settings::SettingsPanel;
 
 /// A typed slash command with its trimmed argument.
 enum SlashCommand {
@@ -13,6 +15,7 @@ enum SlashCommand {
     Undo,
     New,
     Resume,
+    Settings,
     WakeWord,
 }
 
@@ -32,6 +35,7 @@ impl SlashCommand {
             "/undo" => Some(Self::Undo),
             "/new" => Some(Self::New),
             "/resume" => Some(Self::Resume),
+            "/settings" => Some(Self::Settings),
             "/wakeword" => Some(Self::WakeWord),
             _ => None,
         }
@@ -75,7 +79,18 @@ impl App {
                 let id = Uuid::new_v4().to_string();
                 self.spawn_branch_command(BranchOp::ResumePicker, Request::Branches { id });
             }
+            SlashCommand::Settings => self.open_settings_panel(),
             SlashCommand::WakeWord => self.open_wake_word_panel(),
+        }
+    }
+
+    fn open_settings_panel(&mut self) {
+        match ConfigDocument::open(&self.config_path) {
+            Ok(document) => self.settings_panel = Some(SettingsPanel::new(document)),
+            Err(e) => {
+                self.output.push_error(&format!("[error] settings: {e}"));
+                self.set_notice("settings unavailable");
+            }
         }
     }
 

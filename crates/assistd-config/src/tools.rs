@@ -9,6 +9,7 @@ use crate::defaults::{
     default_bash_destructive_patterns, default_tools_overflow_dir, default_tools_scratch_dir,
     default_writable_paths,
 };
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// Tools subsystem configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -18,6 +19,15 @@ pub struct ToolsConfig {
     pub output: ToolsOutputConfig,
     pub bash: ToolsBashConfig,
     pub write: ToolsWriteConfig,
+}
+
+impl DescribeSettings for ToolsConfig {
+    describe_fields! {
+        scratch => nested,
+        output => nested,
+        bash => nested,
+        write => nested,
+    }
 }
 
 /// The directory `bash` scripts and the other commands share.
@@ -34,6 +44,21 @@ pub struct ToolsScratchConfig {
     /// and directories that leaves empty, are removed on daemon startup.
     /// 0 empties the directory at every startup.
     pub retention_days: u32,
+}
+
+impl DescribeSettings for ToolsScratchConfig {
+    describe_fields! {
+        dir => (
+            "scratch folder",
+            "Folder tools may write to freely; absolute or starting with ~/",
+            advanced
+        ),
+        retention_days => (
+            "keep scratch files (days)",
+            "Days scratch files are kept; 0 empties it at every startup",
+            advanced
+        ),
+    }
 }
 
 impl Default for ToolsScratchConfig {
@@ -63,6 +88,18 @@ pub struct ToolsOutputConfig {
     /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
     #[serde(deserialize_with = "crate::home_path::deserialize")]
     pub overflow_dir: PathBuf,
+}
+
+impl DescribeSettings for ToolsOutputConfig {
+    describe_fields! {
+        max_lines => ("max result lines", "Most lines of one tool result", advanced),
+        max_kb => (
+            "max result size (KB)",
+            "Largest tool result; at most a quarter of the history budget",
+            advanced
+        ),
+        overflow_dir => ("overflow folder", "Where cut-off tool output is saved in full", advanced),
+    }
 }
 
 impl Default for ToolsOutputConfig {
@@ -133,6 +170,33 @@ pub struct ToolsBashConfig {
     pub bwrap_extra_args: Vec<String>,
 }
 
+impl DescribeSettings for ToolsBashConfig {
+    describe_fields! {
+        timeout_secs => ("command timeout (s)", "Longest a bash command runs before it is killed"),
+        denylist => (
+            "blocked commands",
+            "Case-insensitive substrings that reject a script outright",
+            advanced
+        ),
+        allowed_programs => (
+            "programs run without asking",
+            "Programs that run without asking for confirmation",
+            advanced
+        ),
+        destructive_patterns => (
+            "commands that always ask",
+            "Commands that always ask, and are refused when no one can confirm",
+            advanced
+        ),
+        sandbox => ("sandbox", "auto uses bubblewrap if installed; tools are disabled unsandboxed"),
+        bwrap_extra_args => (
+            "extra bubblewrap arguments",
+            "Extra bubblewrap arguments, e.g. --share-net for network access",
+            advanced
+        ),
+    }
+}
+
 impl Default for ToolsBashConfig {
     fn default() -> Self {
         Self {
@@ -156,6 +220,15 @@ pub struct ToolsWriteConfig {
     /// writable, without asking. `~` and `~/` expand to
     /// `$HOME`; any other relative entry errors, missing ones are dropped.
     pub writable_paths: Vec<String>,
+}
+
+impl DescribeSettings for ToolsWriteConfig {
+    describe_fields! {
+        writable_paths => (
+            "writable folders",
+            "Folders write may create files under, after asking"
+        ),
+    }
 }
 
 impl Default for ToolsWriteConfig {

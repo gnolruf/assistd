@@ -128,6 +128,11 @@ with a hint if no daemon is listening (pass `--wait` to wait for one
 instead). Only one chat may be open at a time, since every chat
 drives the daemon's single conversation.
 
+`/settings` in the chat, or `assistd settings` on its own, opens the
+config in an editable panel: hotkeys first, then each section, with
+its detailed keys behind an "advanced" toggle. Saved changes take
+effect when the daemon restarts.
+
 ## Window-manager integration
 
 The bindings that make `assistd` feel native (push-to-talk, presence
@@ -145,6 +150,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd init-config`    | Write the default config to `~/.config/assistd/config.toml`.  |
 | `assistd query <text>`   | One-shot query; prints the streamed response and exits.       |
 | `assistd chat`           | Interactive ratatui TUI.                                      |
+| `assistd settings`       | Edit `config.toml` in a terminal panel (also `/settings` in chat). |
 | `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |
 | `assistd ptt-start/stop` | Push-to-talk start/stop, for window-manager bindings.         |
 | `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |

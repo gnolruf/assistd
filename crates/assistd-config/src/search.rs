@@ -12,6 +12,7 @@ use crate::defaults::{
     DEFAULT_SEARCH_PORT, DEFAULT_SEARCH_READY_TIMEOUT_SECS,
 };
 use crate::errors::SearchCommandError;
+use crate::settings::{DescribeSettings, describe_fields};
 
 /// A daemon-supervised SearXNG instance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +35,28 @@ pub struct SearchConfig {
     /// SearXNG ships it disabled or inactive. Must not be empty; a name
     /// SearXNG does not know is logged and skipped.
     pub engines: Vec<SearchEngine>,
+}
+
+impl DescribeSettings for SearchConfig {
+    describe_fields! {
+        enabled => ("enabled", "Enables web search through a local SearXNG instance"),
+        command => (
+            "SearXNG command",
+            "SearXNG entry point; must serve host:port in the foreground"
+        ),
+        host => ("server address", "Address SearXNG binds; must be loopback", advanced),
+        port => (
+            "server port",
+            "Port SearXNG binds; must differ from the model and embedding ports",
+            advanced
+        ),
+        ready_timeout_secs => (
+            "startup timeout (s)",
+            "Longest wait for SearXNG to pass its health check",
+            advanced
+        ),
+        engines => ("search engines", "SearXNG engines to search with; must not be empty"),
+    }
 }
 
 impl Default for SearchConfig {
