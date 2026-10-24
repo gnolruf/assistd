@@ -84,7 +84,7 @@ swayipc-async = "3"
 url = { version = "2", features = ["serde"] }
 parking_lot = "0.12"
 ksni = { version = "0.3.4", default-features = false, features = ["tokio"] }
-zbus = { version = "6.0", default-features = false, features = ["tokio"] }
+zbus = { version = "6.0", default-features = false, features = ["tokio", "proxy"] }
 whisper-rs = { version = "0.16", default-features = false, features = ["tracing_backend"] }
 cpal = "0.18.1"
 ringbuf = "0.5"
