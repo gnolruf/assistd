@@ -63,7 +63,7 @@ pub const DEFAULT_STT_MODEL: &str = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.
      @a6cc4e24ed264a93a17575dad416dacc4238497a:encoder.fp16.onnx";
 pub const DEFAULT_SILERO_VAD_MODEL: &str =
     "Tinysoft/silero-vad-6.2@3034960e5d3beb943b860ec0ea1a857bdae4ae96:silero_vad.onnx";
-pub const DEFAULT_STT_PREFER_GPU: bool = true;
+pub const DEFAULT_STT_PREFER_GPU: bool = false;
 pub const DEFAULT_STT_THREADS: NonZeroU32 = nz32(4);
 pub const DEFAULT_STT_VAD_ENABLED: bool = true;
 

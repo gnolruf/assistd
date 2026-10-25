@@ -42,7 +42,7 @@ enabled = false
 
 [voice.transcription]
 # model = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16@a6cc4e24ed264a93a17575dad416dacc4238497a:encoder.fp16.onnx"
-# prefer_gpu = true  # needs a build with sherpa-onnx's CUDA libraries
+# prefer_gpu = false  # true needs a build with sherpa-onnx's CUDA libraries
 # threads = 4
 # vad_enabled = true
 # vad_model = "Tinysoft/silero-vad-6.2@3034960e5d3beb943b860ec0ea1a857bdae4ae96:silero_vad.onnx"

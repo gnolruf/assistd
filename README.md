@@ -77,13 +77,29 @@ release; set `SHERPA_ONNX_ARCHIVE_DIR` to a directory holding
 in `target/release/`; if you copy `assistd` elsewhere, put them in the
 same directory or in `../lib/assistd/` relative to it.
 
-Speech-to-text runs on the CPU unless the binary ships sherpa-onnx's CUDA
-libraries. For GPU transcription, install `cuda` (13.x) and `cudnn`,
-extract `sherpa-onnx-v2.0.0-cuda-13.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu.tar.bz2`
-from the sherpa-onnx release, and build with
-`SHERPA_ONNX_LIB_DIR=<extracted>/lib cargo build --release`. With
-`[voice.transcription] prefer_gpu = true` (the default) the daemon then
-transcribes on CUDA, using about 2.6 GB of VRAM.
+Speech-to-text runs on the CPU (about 80 ms for a short command). GPU
+transcription needs a binary built against sherpa-onnx's CUDA libraries:
+install `cuda` (13.x) and `cudnn`, extract
+`sherpa-onnx-v2.0.0-cuda-13.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu.tar.bz2`
+from the sherpa-onnx release somewhere permanent, and point every build at
+it. sherpa-onnx's build script reruns whenever `SHERPA_ONNX_LIB_DIR`
+changes, so a single build with it set does not stick: a later build
+without it quietly switches back to the CPU libraries. Set it once in
+`~/.cargo/config.toml`, with an absolute path:
+
+```toml
+[env]
+SHERPA_ONNX_LIB_DIR = "/home/you/.local/share/sherpa-onnx/cuda/lib"
+```
+
+Then set `[voice.transcription] prefer_gpu = true`. Parakeet holds about
+2.6 GB of VRAM beside the model, so check that the model leaves that much
+free; if it does not, the model's next allocation fails and llama-server
+exits with `CUDA error: out of memory`. A CUDA build also puts
+`libonnxruntime_providers_cuda.so` and `libonnxruntime_providers_shared.so`
+in `target/release/`; copy them with the binary, as the AUR packages do not.
+Builds never remove them, so delete them by hand when going back to the CPU
+libraries.
 
 ### 2. Configure
 
