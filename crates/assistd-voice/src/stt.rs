@@ -7,16 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_config::TranscriptionConfig;
-use assistd_utils::hf::HfFileId;
-use assistd_utils::hf::download::{self, DownloadError, cached_path, ensure_file, parse_id};
+use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id, parse_id};
 use async_trait::async_trait;
-use num_traits::ToPrimitive;
 use parking_lot::Mutex;
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
 
 use crate::gpu;
 use crate::transcribe::{Transcriber, TranscriptionError};
-use crate::vad::{self, SpeechDetector};
+use crate::vad::{self, SAMPLE_RATE_HZ, SpeechDetector, secs_to_samples};
 
 /// Minimum trailing silence, in seconds, before Silero VAD ends a speech
 /// segment.
@@ -25,7 +23,6 @@ pub const VAD_SILENCE_SECS: f32 = 0.5;
 /// Shortest speech Silero VAD keeps when trimming.
 const VAD_MIN_SPEECH_SECS: f32 = 0.25;
 
-const SAMPLE_RATE_HZ: usize = 16_000;
 /// Trailing audio kept after each non-final speech segment.
 const SEGMENT_OVERLAP_SECS: f32 = 0.1;
 /// Silence inserted between stitched speech segments.
@@ -133,11 +130,7 @@ impl Transcriber for SherpaTranscriber {
         self.is_gpu
     }
 
-    async fn transcribe(
-        &self,
-        pcm_i16_16k_mono: &[i16],
-        _prompt: Option<&str>,
-    ) -> Result<String, TranscriptionError> {
+    async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
         if pcm_i16_16k_mono.is_empty() {
             return Err(TranscriptionError::EmptyAudio);
         }
@@ -225,7 +218,7 @@ fn decode(recognizer: &OfflineRecognizer, speech: &[f32]) -> Result<String, Tran
         return Ok(String::new());
     }
     let stream = recognizer.create_stream();
-    stream.accept_waveform(i32::try_from(SAMPLE_RATE_HZ).unwrap_or(i32::MAX), speech);
+    stream.accept_waveform(SAMPLE_RATE_HZ, speech);
     recognizer.decode(&stream);
     let result = stream
         .get_result()
@@ -250,20 +243,14 @@ async fn ensure_model(model_id: &str, cache_dir: &Path) -> Result<ModelFiles, Tr
                 id: model_id.to_string(),
                 reason,
             })?;
-        fetch(cache_dir, &id).await
+        ensure_cached_id(&id, cache_dir).await
     };
     Ok(ModelFiles {
         tokens: sibling("tokens.txt".into()).await?,
         decoder: sibling(format!("decoder{suffix}")).await?,
         joiner: sibling(format!("joiner{suffix}")).await?,
-        encoder: fetch(cache_dir, &encoder_id).await?,
+        encoder: ensure_cached_id(&encoder_id, cache_dir).await?,
     })
-}
-
-async fn fetch(cache_dir: &Path, id: &HfFileId) -> Result<PathBuf, DownloadError> {
-    let path = cached_path(cache_dir, id);
-    ensure_file(id, &path).await?;
-    Ok(path)
 }
 
 fn path_string(path: &Path) -> String {
@@ -291,14 +278,6 @@ fn stitch_speech_segments(audio: &[f32], segments: &[Range<usize>]) -> Vec<f32> 
         stitched.extend_from_slice(&audio[start..end]);
     }
     stitched
-}
-
-fn secs_to_samples(secs: f32) -> usize {
-    (secs * SAMPLE_RATE_HZ as f32)
-        .round()
-        .max(0.0)
-        .to_usize()
-        .unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]

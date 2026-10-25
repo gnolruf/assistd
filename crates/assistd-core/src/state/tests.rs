@@ -688,11 +688,7 @@ struct ScriptedTranscriber(&'static [&'static str]);
 
 #[async_trait::async_trait]
 impl Transcriber for ScriptedTranscriber {
-    async fn transcribe(
-        &self,
-        pcm: &[i16],
-        _prompt: Option<&str>,
-    ) -> Result<String, TranscriptionError> {
+    async fn transcribe(&self, pcm: &[i16]) -> Result<String, TranscriptionError> {
         let index = pcm
             .first()
             .map_or(0, |&sample| usize::from(sample.unsigned_abs()));

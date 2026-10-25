@@ -68,7 +68,7 @@ flowchart TB
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, `find_program` (a `PATH` lookup that says why a program cannot be run), child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
-| `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS in a supervised worker process) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
+| `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; `SwayHotkeys` binds `[hotkeys]` over Sway IPC. | `utils`                                                                          |
 
 `utils` sits at the bottom with no internal dependencies; `config`
@@ -322,8 +322,8 @@ transcriber shares the GPU with the model; the `QueuedTranscriber` routes
 to a lazily built CPU transcriber of the same model while presence is not
 `Active` or the `VramLedger` reports another process crowding the GPU.
 
-The wake phrase is configured, not enrolled. A `Request::WakeWord`
-carries a `WakeWordOp` (`Status`, `TestStart`, `TestStop`). A test is a
+A `Request::WakeWord` carries a `WakeWordOp` (`Status`, `TestStart`,
+`TestStop`). A test is a
 session owned by the connection that opened it: one at a time, it pauses
 the listener and takes its capture stack through `capture_utterances`,
 refuses push-to-talk and `ListenStart`, and ends on stop, disconnect, or

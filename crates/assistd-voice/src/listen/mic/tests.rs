@@ -12,12 +12,7 @@ struct Scripted {
 
 #[async_trait]
 impl Transcriber for Scripted {
-    async fn transcribe(
-        &self,
-        pcm: &[i16],
-        prompt: Option<&str>,
-    ) -> Result<String, TranscriptionError> {
-        assert_eq!(prompt, None);
+    async fn transcribe(&self, pcm: &[i16]) -> Result<String, TranscriptionError> {
         let (delay_ms, text) = self.script[usize::try_from(pcm[0]).unwrap()];
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         Ok(text.to_string())

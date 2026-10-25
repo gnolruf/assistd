@@ -27,9 +27,8 @@ window-manager bindings), and integrates with the running compositor for context
   [wake-word listening](docs/voice/wake-word.md) via Parakeet speech-to-text,
   with the wake phrase found by a keyword spotter and tested in the chat
   TUI's `/wakeword`; spoken responses through a sherpa-onnx voice (Piper or
-  Kokoro) in a worker process the daemon supervises, streamed sentence
-  by sentence so playback starts before the model has finished, and
-  interruptible by talking over them.
+  Kokoro), streamed sentence by sentence so playback starts before the
+  model has finished, and interruptible by talking over them.
 - **Vision when the model has it.** `see photo.png` and `screenshot`
   attach images to the next turn whenever the loaded model has a
   vision projector; capability is detected at runtime.

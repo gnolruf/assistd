@@ -699,7 +699,7 @@ async fn spot(spotter: &Arc<WakeWordSpotter>, pcm: Vec<i16>) -> (Vec<i16>, Optio
 }
 
 async fn transcribe_pcm(transcriber: &dyn Transcriber, pcm: &[i16]) -> Option<String> {
-    match transcriber.transcribe(pcm, None).await {
+    match transcriber.transcribe(pcm).await {
         Ok(text) => {
             let trimmed = text.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())

@@ -489,7 +489,7 @@ async fn run_one(
 /// honor it skip the `<think>` block and others ignore it.
 async fn transcribe_prompt(stt: &dyn Transcriber, pcm: &[i16], no_think: bool) -> Result<String> {
     let transcript = stt
-        .transcribe(pcm, None)
+        .transcribe(pcm)
         .await
         .map_err(|err| anyhow::anyhow!("transcription failed: {err}"))?;
     if transcript.trim().is_empty() {

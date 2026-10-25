@@ -15,7 +15,8 @@ use crate::transcribe::TranscriptionError;
 /// Samples per Silero window at 16 kHz: 32 ms.
 pub const WINDOW_SAMPLES: usize = 512;
 
-const SAMPLE_RATE_HZ: i32 = 16_000;
+/// The rate every model here takes its audio at.
+pub(crate) const SAMPLE_RATE_HZ: i32 = 16_000;
 
 /// Speech probability at or above which a window counts as speech; Silero's
 /// own default.
@@ -111,4 +112,13 @@ pub async fn ensure_model(config: &TranscriptionConfig) -> Result<PathBuf, Trans
         .clone()
         .map_or_else(|| download::default_cache_dir("stt"), Ok)?;
     Ok(download::ensure_cached(&config.vad_model, &cache_dir).await?)
+}
+
+/// Whole samples in `secs` of audio, rounded.
+pub(crate) fn secs_to_samples(secs: f32) -> usize {
+    (secs * SAMPLE_RATE_HZ as f32)
+        .round()
+        .max(0.0)
+        .to_usize()
+        .unwrap_or(usize::MAX)
 }

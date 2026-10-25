@@ -91,10 +91,7 @@ async fn transcribes_clear_english_speech() {
 
     let transcriber = make_transcriber(false).await;
     let started = Instant::now();
-    let text = transcriber
-        .transcribe(&pcm, None)
-        .await
-        .expect("transcribe");
+    let text = transcriber.transcribe(&pcm).await.expect("transcribe");
     let elapsed = started.elapsed();
 
     let normalized = normalize(&text);
@@ -126,11 +123,11 @@ async fn vad_trims_silence_padding() {
 
     let transcriber = make_transcriber(true).await;
     let plain = transcriber
-        .transcribe(&pcm, None)
+        .transcribe(&pcm)
         .await
         .expect("plain transcribe");
     let padded_out = transcriber
-        .transcribe(&padded, None)
+        .transcribe(&padded)
         .await
         .expect("padded transcribe");
 

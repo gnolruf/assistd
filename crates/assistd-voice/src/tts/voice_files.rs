@@ -1,11 +1,10 @@
 //! On-disk cache for sherpa-onnx voices: the configured `.onnx` and the
 //! files its model family needs from the same directory.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use assistd_config::{SynthesisConfig, VoiceFamily};
-use assistd_utils::hf::HfFileId;
-use assistd_utils::hf::download::{self, DownloadError, cached_path, ensure_file, parse_id};
+use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id, parse_id};
 
 use crate::tts::error::SpeechError;
 
@@ -41,7 +40,7 @@ pub async fn ensure_voice(config: &SynthesisConfig) -> Result<VoiceFiles, Speech
                 id: config.voice.clone(),
                 reason,
             })?;
-        fetch(&cache_dir, &id).await
+        ensure_cached_id(&id, &cache_dir).await
     };
     let tokens = sibling("tokens.txt")
         .await
@@ -51,13 +50,13 @@ pub async fn ensure_voice(config: &SynthesisConfig) -> Result<VoiceFiles, Speech
         })?;
     Ok(match config.family {
         VoiceFamily::Vits => VoiceFiles::Vits {
-            model: fetch(&cache_dir, &model_id).await?,
+            model: ensure_cached_id(&model_id, &cache_dir).await?,
             tokens,
         },
         VoiceFamily::Kokoro => VoiceFiles::Kokoro {
             voices: sibling("voices.bin").await?,
             lexicon: sibling("lexicon-us-en.txt").await?,
-            model: fetch(&cache_dir, &model_id).await?,
+            model: ensure_cached_id(&model_id, &cache_dir).await?,
             tokens,
         },
     })
@@ -74,10 +73,4 @@ fn not_found_as_stock_voice(err: DownloadError, voice: &str) -> SpeechError {
         },
         other => other.into(),
     }
-}
-
-async fn fetch(cache_dir: &Path, id: &HfFileId) -> Result<PathBuf, DownloadError> {
-    let path = cached_path(cache_dir, id);
-    ensure_file(id, &path).await?;
-    Ok(path)
 }

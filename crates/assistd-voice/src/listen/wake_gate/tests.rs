@@ -35,6 +35,6 @@ async fn follow_up_admits_one_utterance_inside_the_window_only() {
     assert_eq!(
         gate.admit(true, ended),
         Admission::WakePhrase,
-        "a spotted phrase inside a window still has its phrase cut off"
+        "a spotted phrase wins over an open window"
     );
 }

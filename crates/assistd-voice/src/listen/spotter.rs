@@ -7,12 +7,11 @@ use std::path::{Path, PathBuf};
 
 use assistd_config::VoiceConfig;
 use assistd_utils::hf::download::{self, DownloadError};
-use num_traits::ToPrimitive;
 use sentencepiece_rust::SentencePieceProcessor;
 use sherpa_onnx::{KeywordSpotter, KeywordSpotterConfig};
 use thiserror::Error;
 
-use super::vad::SAMPLE_RATE_HZ;
+use crate::vad::{SAMPLE_RATE_HZ, secs_to_samples};
 
 /// The 3.3M-parameter `GigaSpeech` keyword model, pinned to a mirror whose files match
 /// the k2-fsa release byte for byte.
@@ -126,7 +125,7 @@ impl WakeWordSpotter {
             .map(|&sample| f32::from(sample) / 32_768.0)
             .collect();
         audio.resize(audio.len() + secs_to_samples(TRAILING_SILENCE_SECS), 0.0);
-        stream.accept_waveform(i32::try_from(SAMPLE_RATE_HZ).unwrap_or(i32::MAX), &audio);
+        stream.accept_waveform(SAMPLE_RATE_HZ, &audio);
         stream.input_finished();
         while self.spotter.is_ready(&stream) {
             self.spotter.decode(&stream);
@@ -164,12 +163,4 @@ fn spell(dir: &Path, phrase: &str) -> Result<Vec<String>, SpotterError> {
         });
     }
     Ok(pieces)
-}
-
-fn secs_to_samples(secs: f32) -> usize {
-    (secs * SAMPLE_RATE_HZ as f32)
-        .round()
-        .max(0.0)
-        .to_usize()
-        .unwrap_or(usize::MAX)
 }
