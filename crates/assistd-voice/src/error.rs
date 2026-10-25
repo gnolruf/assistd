@@ -14,7 +14,7 @@ pub enum VoiceInputError {
     #[error("audio capture error: {0}")]
     Capture(#[from] crate::mic::AudioCaptureError),
 
-    #[cfg(feature = "whisper")]
+    #[cfg(feature = "stt")]
     #[error("transcription error: {0}")]
     Transcription(#[from] crate::transcribe::TranscriptionError),
 
@@ -30,10 +30,10 @@ pub enum VoiceInputError {
 #[derive(Debug, Error)]
 pub enum VoiceOutputError {
     #[cfg(feature = "tts")]
-    #[error("piper synthesis failed: {0}")]
-    Synthesis(#[source] crate::piper::PiperError),
+    #[error("speech synthesis failed: {0}")]
+    Synthesis(#[source] crate::tts::SpeechError),
 
     #[cfg(feature = "tts")]
-    #[error("piper playback enqueue failed: {0}")]
-    Playback(#[source] crate::piper::PiperError),
+    #[error("speech playback enqueue failed: {0}")]
+    Playback(#[source] crate::tts::SpeechError),
 }

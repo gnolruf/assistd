@@ -17,14 +17,13 @@ fn request_cases() -> Vec<(Request, &'static str)> {
 }
 
 fn wake_word_request_cases() -> Vec<(Request, &'static str)> {
-    let phrase = WakePhraseText::try_from("hey jarvis".to_string()).unwrap();
     vec![
         (
             Request::WakeWord {
                 id: id(),
-                op: WakeWordOp::EnrollStart { phrase },
+                op: WakeWordOp::TestStart,
             },
-            r#"{"type":"wake_word","id":"r","op":{"action":"enroll_start","phrase":"hey jarvis"}}"#,
+            r#"{"type":"wake_word","id":"r","op":{"action":"test_start"}}"#,
         ),
         (
             Request::WakeWord {
@@ -234,39 +233,16 @@ fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
             Event::WakeWordStatus {
                 id: id(),
                 phrase: "hey jarvis".into(),
-                variants: vec!["a jarvis".into()],
-                samples: 4,
                 listening: true,
             },
-            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","variants":["a jarvis"],"samples":4,"listening":true}"#,
-        ),
-        (
-            Event::WakeWordEnrollment {
-                id: id(),
-                event: EnrollEvent::Prompt {
-                    confident: 2,
-                    required: 5,
-                },
-            },
-            r#"{"type":"wake_word_enrollment","id":"r","event":{"kind":"prompt","confident":2,"required":5}}"#,
-        ),
-        (
-            Event::WakeWordEnrollment {
-                id: id(),
-                event: EnrollEvent::SampleRejected {
-                    reason: SampleRejection::DidNotMatch,
-                    heard: Some("hello there".into()),
-                },
-            },
-            r#"{"type":"wake_word_enrollment","id":"r","event":{"kind":"sample_rejected","reason":"did_not_match","heard":"hello there"}}"#,
+            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","listening":true}"#,
         ),
         (
             Event::WakeWordTest {
                 id: id(),
-                heard: "hey jarvis".into(),
                 matched: true,
             },
-            r#"{"type":"wake_word_test","id":"r","heard":"hey jarvis","matched":true}"#,
+            r#"{"type":"wake_word_test","id":"r","matched":true}"#,
         ),
         (
             Event::WakeWordSpeech {
@@ -606,46 +582,6 @@ fn events_match_pinned_wire_format() {
         let parsed: Event = serde_json::from_str(wire).unwrap();
         assert_eq!(parsed, ev, "{wire}");
         assert_eq!(ev.id(), "r", "{wire}");
-    }
-}
-
-#[test]
-fn enroll_start_accepts_only_short_lettered_phrases() {
-    let cases = [
-        ("hey  jarvis", Ok("hey jarvis")),
-        ("O'Brien wake up", Ok("O'Brien wake up")),
-        ("", Err(InvalidWakePhrase::Empty)),
-        (" ' ", Err(InvalidWakePhrase::Empty)),
-        ("hey, jarvis", Err(InvalidWakePhrase::BadCharacter(','))),
-        ("computer 2", Err(InvalidWakePhrase::BadCharacter('2'))),
-        (
-            "one two three four five six seven",
-            Err(InvalidWakePhrase::TooManyWords),
-        ),
-    ];
-    for (phrase, expected) in cases {
-        let wire = json!({"type": "wake_word", "id": "r", "op": {"action": "enroll_start", "phrase": phrase}});
-        let parsed = serde_json::from_value::<Request>(wire);
-        match expected {
-            Ok(normalized) => {
-                let Ok(Request::WakeWord {
-                    op: WakeWordOp::EnrollStart { phrase: parsed },
-                    ..
-                }) = parsed
-                else {
-                    panic!("{phrase:?} should parse, got {parsed:?}");
-                };
-                assert_eq!(parsed.as_str(), normalized, "{phrase:?}");
-            }
-            Err(reason) => {
-                assert_eq!(
-                    WakePhraseText::try_from(phrase.to_string()),
-                    Err(reason),
-                    "{phrase:?}"
-                );
-                assert!(parsed.is_err(), "{phrase:?} must be refused at parse");
-            }
-        }
     }
 }
 

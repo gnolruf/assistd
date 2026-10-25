@@ -1,20 +1,18 @@
-//! [`PiperVoiceOutput`]: Piper synthesis plus rodio playback behind a
-//! circuit breaker.
+//! [`SherpaVoiceOutput`]: sherpa-onnx synthesis plus rodio playback behind
+//! a circuit breaker.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_config::SynthesisConfig;
-use assistd_utils::program::find_program;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use crate::piper::cache::{VoiceFiles, default_cache_dir, ensure_voice};
-use crate::piper::config::{NOISE_SCALE, NOISE_W, PiperRuntimeConfig, SENTENCE_SILENCE_SECS};
-use crate::piper::error::PiperError;
-use crate::piper::playback::RodioPlaybackWorker;
-use crate::piper::synth::OneShotSynth;
+use crate::tts::engine::{SpeechEngine, Utterance};
+use crate::tts::error::SpeechError;
+use crate::tts::playback::RodioPlaybackWorker;
+use crate::tts::voice_files::ensure_voice;
 use crate::{VoiceOutput, VoiceOutputError};
 
 const FAILURE_THRESHOLD: usize = 3;
@@ -58,9 +56,9 @@ impl CircuitState {
         }
         if !self.logged_degraded {
             tracing::warn!(
-                target: "assistd::voice::piper",
+                target: "assistd::voice::tts",
                 %reason,
-                "piper degraded; dropping speak() request"
+                "speech degraded; dropping speak() request"
             );
             self.logged_degraded = true;
         }
@@ -70,13 +68,13 @@ impl CircuitState {
     fn record_success(&mut self) {
         self.recent_failures.clear();
         if matches!(self.ready, ReadyState::Degraded { .. }) {
-            tracing::info!(target: "assistd::voice::piper", "piper recovered from degraded");
+            tracing::info!(target: "assistd::voice::tts", "speech recovered from degraded");
             self.ready = ReadyState::Ready;
             self.logged_degraded = false;
         }
     }
 
-    fn record_failure(&mut self, err: &PiperError) {
+    fn record_failure(&mut self, err: &SpeechError) {
         let now = Instant::now();
         while self
             .recent_failures
@@ -91,73 +89,61 @@ impl CircuitState {
         {
             let reason = err.to_string();
             tracing::warn!(
-                target: "assistd::voice::piper",
+                target: "assistd::voice::tts",
                 %reason,
                 threshold = FAILURE_THRESHOLD,
                 window_secs = FAILURE_WINDOW.as_secs(),
-                "piper synthesis repeatedly failed; entering degraded state"
+                "speech synthesis repeatedly failed; entering degraded state"
             );
             self.ready = ReadyState::Degraded { reason };
         }
     }
 }
 
-/// [`VoiceOutput`] backed by per-utterance piper subprocesses and
-/// rodio playback. After three failures within a minute the service is
-/// degraded and `speak` drops utterances without error; once a minute
-/// has passed since the last failure, one utterance is let through and
-/// either re-arms the service or re-opens the breaker.
+/// [`VoiceOutput`] backed by a sherpa-onnx voice and rodio playback. After
+/// three failures within a minute the service is degraded and `speak` drops
+/// utterances without error; once a minute has passed since the last
+/// failure, one utterance is let through and either re-arms the service or
+/// re-opens the breaker.
 #[derive(Debug)]
-pub struct PiperVoiceOutput {
-    synth: Arc<OneShotSynth>,
+pub struct SherpaVoiceOutput {
+    engine: Arc<Mutex<SpeechEngine>>,
     playback: Arc<RodioPlaybackWorker>,
     circuit: Arc<Mutex<CircuitState>>,
 }
 
-impl PiperVoiceOutput {
-    /// Resolve the voice files, open the audio device, and run a
-    /// health-check synthesis.
-    pub async fn start(config: SynthesisConfig) -> Result<Self, PiperError> {
-        let path_env = std::env::var_os("PATH").unwrap_or_default();
-        find_program(&config.binary_path, &path_env).map_err(|reason| {
-            PiperError::BinaryMissing {
-                binary: config.binary_path.clone(),
-                reason,
-            }
-        })?;
+impl SherpaVoiceOutput {
+    /// Fetch and load the voice, open the audio device, and speak a
+    /// health-check sentence.
+    pub async fn start(config: &SynthesisConfig) -> Result<Self, SpeechError> {
+        let voice = ensure_voice(config).await?;
+        tracing::info!(target: "assistd::voice::tts", ?voice, "voice resolved");
+        let (speaker_id, length_scale) = (config.speaker_id, config.length_scale);
+        let engine = tokio::task::spawn_blocking(move || {
+            SpeechEngine::load(&voice, speaker_id, length_scale)
+        })
+        .await??;
+        let engine = Arc::new(Mutex::new(engine));
+        let playback = RodioPlaybackWorker::start(config.output_device.clone()).await?;
 
-        let cache_dir = config
-            .model_cache_dir
-            .clone()
-            .map_or_else(default_cache_dir, Ok)?;
-        let voice_files = ensure_voice(&config.voice, &cache_dir).await?;
-        tracing::info!(
-            target: "assistd::voice::piper",
-            onnx = %voice_files.onnx.display(),
-            sample_rate = voice_files.sample_rate,
-            "piper voice resolved"
-        );
-
-        let runtime = Arc::new(runtime_config(&config, voice_files));
-        let synth = Arc::new(OneShotSynth::new(runtime));
-        let playback = Arc::new(RodioPlaybackWorker::start(config.output_device.clone()).await?);
-
-        synth.health_check().await?;
-        tracing::info!(
-            target: "assistd::voice::piper",
-            "piper health-check passed"
-        );
+        let probe = synthesize(&engine, "ok".into()).await?;
+        if probe.samples.is_empty() {
+            return Err(SpeechError::Rejected {
+                reason: "health check produced no audio".into(),
+            });
+        }
+        tracing::info!(target: "assistd::voice::tts", "speech health check passed");
 
         Ok(Self {
-            synth,
-            playback,
+            engine,
+            playback: Arc::new(playback),
             circuit: Arc::new(Mutex::new(CircuitState::new())),
         })
     }
 }
 
 #[async_trait]
-impl VoiceOutput for PiperVoiceOutput {
+impl VoiceOutput for SherpaVoiceOutput {
     async fn speak(&self, text: String) -> Result<(), VoiceOutputError> {
         if !self.circuit.lock().admit() {
             return Ok(());
@@ -167,13 +153,13 @@ impl VoiceOutput for PiperVoiceOutput {
             return Ok(());
         }
 
-        let output = match self.synth.synthesize(&text).await {
+        let output = match synthesize(&self.engine, text).await {
             Ok(output) => output,
             Err(err) => {
                 tracing::warn!(
-                    target: "assistd::voice::piper",
+                    target: "assistd::voice::tts",
                     error = %err,
-                    "piper synthesis failed"
+                    "speech synthesis failed"
                 );
                 self.circuit.lock().record_failure(&err);
                 return Err(VoiceOutputError::Synthesis(err));
@@ -182,9 +168,9 @@ impl VoiceOutput for PiperVoiceOutput {
 
         if let Err(err) = self.playback.play(output).await {
             tracing::warn!(
-                target: "assistd::voice::piper",
+                target: "assistd::voice::tts",
                 error = %err,
-                "piper playback enqueue failed"
+                "speech playback enqueue failed"
             );
             self.circuit.lock().record_failure(&err);
             return Err(VoiceOutputError::Playback(err));
@@ -208,27 +194,35 @@ impl VoiceOutput for PiperVoiceOutput {
     }
 }
 
-fn runtime_config(config: &SynthesisConfig, voice_files: VoiceFiles) -> PiperRuntimeConfig {
-    PiperRuntimeConfig {
-        binary_path: config.binary_path.clone(),
-        voice_files,
-        length_scale: config.length_scale,
-        noise_scale: NOISE_SCALE,
-        noise_w: NOISE_W,
-        sentence_silence_secs: SENTENCE_SILENCE_SECS,
-        espeak_data_dir: config.espeak_data_dir.clone(),
-        deadline: Duration::from_secs(u64::from(config.deadline_secs.get())),
-        use_cuda: config.use_cuda,
-        output_device: config.output_device.clone(),
-    }
+/// Synthesize on the blocking pool, one sentence at a time.
+async fn synthesize(
+    engine: &Arc<Mutex<SpeechEngine>>,
+    sentence: String,
+) -> Result<Utterance, SpeechError> {
+    let engine = Arc::clone(engine);
+    tracing::debug!(
+        target: "assistd::voice::latency",
+        stage = "tts_synth_start",
+        "voice latency stage"
+    );
+    let utterance =
+        tokio::task::spawn_blocking(move || engine.lock().synthesize(&sentence)).await??;
+    tracing::debug!(
+        target: "assistd::voice::latency",
+        stage = "tts_synth_done",
+        "voice latency stage"
+    );
+    Ok(utterance)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn err() -> PiperError {
-        PiperError::Deadline { secs: 1 }
+    fn err() -> SpeechError {
+        SpeechError::Rejected {
+            reason: "test".into(),
+        }
     }
 
     fn trip(state: &mut CircuitState) {

@@ -106,7 +106,6 @@ impl App {
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. }
             | Event::WakeWordStatus { .. }
-            | Event::WakeWordEnrollment { .. }
             | Event::WakeWordTest { .. }
             | Event::WakeWordSpeech { .. }
             | Event::LastDelta { .. } => {}

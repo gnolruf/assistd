@@ -12,6 +12,7 @@ use assistd_voice::VoiceCapture;
 
 use super::query::{TurnOrigin, finish_interrupted_before_start};
 use super::runtime::PttCapture;
+use super::wakeword_handlers::TEST_IN_PROGRESS;
 use super::{AppState, DispatchError, send_error};
 use crate::recovery::{Component, spawn_supervised};
 
@@ -23,8 +24,8 @@ impl AppState {
     ) -> Result<(), DispatchError> {
         self.subsystems.voice.speech().interrupt().await;
         let capture = self.ready_capture(&id, "ptt_start", &tx).await?;
-        if let Some(session) = self.mic_session_kind() {
-            send_error(&tx, id, session.in_progress().into()).await;
+        if self.mic_session_busy() {
+            send_error(&tx, id, TEST_IN_PROGRESS.into()).await;
             return Ok(());
         }
         match capture.input.start_recording().await {
@@ -194,8 +195,8 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let capture = self.ready_capture(&id, "listen_start", &tx).await?;
-        if let Some(session) = self.mic_session_kind() {
-            send_error(&tx, id, session.in_progress().into()).await;
+        if self.mic_session_busy() {
+            send_error(&tx, id, TEST_IN_PROGRESS.into()).await;
             return Ok(());
         }
         if capture.input.state() != VoiceCaptureState::Idle {

@@ -57,6 +57,24 @@ allow = [
 name = "option-ext"
 allow = ["MPL-2.0"]
 
+# The next three only run inside sherpa-onnx-sys's build script, which
+# downloads and unpacks its prebuilt library archive; none of them is
+# linked into assistd. All three licences are permissive.
+[[licenses.exceptions]]
+# bzip2 decoder for the .tar.bz2 archive; BSD-style bzip2 licence.
+name = "libbz2-rs-sys"
+allow = ["bzip2-1.0.6"]
+
+[[licenses.exceptions]]
+# PPMd codec pulled in by the zip crate.
+name = "ppmd-rust"
+allow = ["CC0-1.0", "MIT-0"]
+
+[[licenses.exceptions]]
+# Mozilla's CA roots, used by ureq for the archive download.
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 # ---------------------------------------------------------------------------
 # Bans / multiple-version check.
 # ---------------------------------------------------------------------------

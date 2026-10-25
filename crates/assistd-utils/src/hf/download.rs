@@ -79,9 +79,13 @@ pub fn cached_path(cache_dir: &Path, id: &HfFileId) -> PathBuf {
 
 /// Path to the cached file for `hf_id`, downloading it first if missing.
 pub async fn ensure_cached(hf_id: &str, cache_dir: &Path) -> Result<PathBuf, DownloadError> {
-    let id = parse_id(hf_id)?;
-    let dest = cached_path(cache_dir, &id);
-    ensure_file(&id, &dest).await?;
+    ensure_cached_id(&parse_id(hf_id)?, cache_dir).await
+}
+
+/// Path to the cached file for `id`, downloading it first if missing.
+pub async fn ensure_cached_id(id: &HfFileId, cache_dir: &Path) -> Result<PathBuf, DownloadError> {
+    let dest = cached_path(cache_dir, id);
+    ensure_file(id, &dest).await?;
     Ok(dest)
 }
 

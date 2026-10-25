@@ -48,9 +48,8 @@ mod vram;
 mod warmup;
 mod wm_init;
 
-/// Log filter when `RUST_LOG` is unset. whisper.cpp logs every Silero call
-/// at INFO, which wake-word listening makes several times a second.
-const DEFAULT_LOG_DIRECTIVES: &str = "info,whisper_rs::whisper_logging_hook=warn";
+/// Log filter when `RUST_LOG` is unset.
+const DEFAULT_LOG_DIRECTIVES: &str = "info";
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]

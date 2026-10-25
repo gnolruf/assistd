@@ -16,6 +16,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
+  # sherpa-onnx-sys reads its prebuilt library archive from here instead of
+  # downloading it from GitHub releases on every build.
+  SHERPA_ONNX_ARCHIVE: sherpa-onnx-v2.0.0-linux-x64-shared-lib.tar.bz2
+  SHERPA_ONNX_ARCHIVE_DIR: ${{ github.workspace }}/.sherpa-onnx
 
 jobs:
   ci:
@@ -49,6 +53,20 @@ jobs:
           shared-key: "ci"
           cache-on-failure: true
 
+      - name: Cache sherpa-onnx archive
+        id: sherpa-cache
+        uses: actions/cache@v4
+        with:
+          path: .sherpa-onnx
+          key: ${{ env.SHERPA_ONNX_ARCHIVE }}
+
+      - name: Download sherpa-onnx archive
+        if: steps.sherpa-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$SHERPA_ONNX_ARCHIVE_DIR"
+          curl -fsSL -o "$SHERPA_ONNX_ARCHIVE_DIR/$SHERPA_ONNX_ARCHIVE" \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/$SHERPA_ONNX_ARCHIVE"
+
       - name: Rustfmt (check)
         run: cargo fmt --all -- --check
 
@@ -60,10 +78,8 @@ jobs:
       - name: Unused dependencies (cargo-machete)
         run: cargo machete
 
-      # --all-features can't be used here: assistd-voice exposes a `cuda`
-      # feature that links against cuBLAS/cudart, which aren't installed
-      # on ubuntu-latest. Enable the test-support features explicitly so
-      # integration test code is still linted/exercised.
+      # Enable the test-support features explicitly so integration test
+      # code is still linted/exercised.
       - name: Clippy (deny warnings)
         run: |
           cargo clippy --workspace --all-targets --locked \
@@ -100,6 +116,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: assistd-linux-x86_64
-          path: target/release/assistd
+          path: |
+            target/release/assistd
+            target/release/libsherpa-onnx-c-api.so
+            target/release/libonnxruntime.so
           if-no-files-found: error
           retention-days: 14

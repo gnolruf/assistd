@@ -1,26 +1,21 @@
-//! The `/wakeword` panel: the menu, the new-phrase input, and the listening
-//! computer that enrollment and testing share.
+//! The `/wakeword` panel: the configured phrase, and the listening computer
+//! a test session draws.
 
 use std::borrow::Cow;
 use std::time::Instant;
 
-use assistd_ipc::wakeword::MAX_WAKE_PHRASE_WORDS;
-use assistd_ipc::{SampleRejection, WakePhraseText};
-use assistd_voice::listen::wake_phrase::{DEFAULT_WAKE_PHRASE, PhraseStrength};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
-use textwrap::core::display_width;
 
 use super::super::app::{
-    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, ResetChoice,
-    SampleResult, SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus,
-    WakeWordView,
+    ComputerScene, LANE_COLUMNS, Mood, RECENT_RESULTS, StatusState, TestProgress, WakeWordPanel,
+    WakeWordStatus, WakeWordView,
 };
 use super::super::markdown::BLEY;
-use super::{rule_style, saturating_u16, selected_style};
+use super::saturating_u16;
 use crate::client::terminal_text::escape_controls_single_line;
 
 const COMPUTER: [&str; 23] = [
@@ -77,11 +72,8 @@ const LANE_ROW: usize = 8;
 /// Rows kept between the computer and the captions under it.
 const SCENE_GAP_ROWS: usize = 1;
 /// Caption rows kept under the computer however many results there are, so
-/// it holds still as they arrive: a prompt, a progress meter, a gap, then the results.
-const CAPTION_ROWS: usize = 3 + RECENT_RESULTS;
-const INPUT_MAX_COLS: u16 = 44;
-/// Columns beside the input box kept for the strength badge.
-const STRENGTH_COLS: u16 = 18;
+/// it holds still as they arrive: a prompt, a gap, then the results.
+const CAPTION_ROWS: usize = 2 + RECENT_RESULTS;
 
 /// Draw the panel over `area`, in place of the transcript and input line.
 pub(super) fn render_wake_word_panel(frame: &mut Frame<'_>, area: Rect, panel: &WakeWordPanel) {
@@ -97,21 +89,14 @@ pub(super) fn render_wake_word_panel(frame: &mut Frame<'_>, area: Rect, panel: &
     let inner = block.inner(area);
     frame.render_widget(block, area);
     match &panel.view {
-        WakeWordView::Menu(selected) => {
-            let body = menu_body(&panel.status, *selected);
-            frame.render_widget(wrapped(body), inner);
-        }
-        WakeWordView::Update(phrase) => render_update(frame, inner, phrase),
-        WakeWordView::Reset(selected) => frame.render_widget(wrapped(reset_body(*selected)), inner),
+        WakeWordView::Status => frame.render_widget(wrapped(status_body(&panel.status)), inner),
         WakeWordView::Session(session) => {
-            let captions = match &session.purpose {
-                SessionPurpose::Enroll(progress) => enroll_captions(progress),
-                SessionPurpose::Test(progress) => test_captions(progress),
-            };
-            render_scene(frame, inner, &session.scene, captions);
-        }
-        WakeWordView::Saved { phrase, variants } => {
-            frame.render_widget(wrapped(saved_body(phrase, variants)), inner);
+            render_scene(
+                frame,
+                inner,
+                &session.scene,
+                test_captions(&session.progress),
+            );
         }
     }
 }
@@ -119,85 +104,35 @@ pub(super) fn render_wake_word_panel(frame: &mut Frame<'_>, area: Rect, panel: &
 /// What the status line suggests while the panel is open.
 pub(super) fn wake_word_hint(view: &WakeWordView) -> &'static str {
     match view {
-        WakeWordView::Menu(_) => "↑/↓ select · Enter choose · Esc close",
-        WakeWordView::Update(_) => "Enter record · Ctrl+U clear · Esc back",
-        WakeWordView::Reset(_) => "↑/↓ select · Enter choose · Esc back",
-        WakeWordView::Session(session) => match session.purpose {
-            SessionPurpose::Enroll(_) => "Esc cancel",
-            SessionPurpose::Test(_) => "Esc stop",
-        },
-        WakeWordView::Saved { .. } => "t test · Enter back",
+        WakeWordView::Status => "Enter test · Esc close",
+        WakeWordView::Session(_) => "Esc stop",
     }
 }
 
 fn panel_title(view: &WakeWordView) -> &'static str {
     match view {
-        WakeWordView::Menu(_) => " Wake word ",
-        WakeWordView::Update(_) => " New wake word ",
-        WakeWordView::Reset(_) => " Reset wake word ",
-        WakeWordView::Session(session) => match session.purpose {
-            SessionPurpose::Enroll(_) => " Learning your wake word ",
-            SessionPurpose::Test(_) => " Testing your wake word ",
-        },
-        WakeWordView::Saved { .. } => " Wake word updated ",
+        WakeWordView::Status => " Wake word ",
+        WakeWordView::Session(_) => " Testing your wake word ",
     }
 }
 
-fn menu_body(status: &StatusState, selected: MenuItem) -> Vec<Line<'static>> {
+/// The phrase and whether listening is on, then how to change or test it.
+fn status_body(status: &StatusState) -> Vec<Line<'static>> {
     let mut body = status_rows(status);
-    body.push(Line::default());
-    body.extend(MenuItem::ALL.into_iter().map(|item| {
-        let (name, about) = menu_text(item);
-        let (marker, style) = if item == selected {
-            ("› ", selected_style())
-        } else {
-            ("  ", Style::default())
-        };
-        Line::from(vec![
-            Span::styled(format!("{marker}{name:<8}"), style),
-            Span::raw("  "),
-            Span::styled(about, dim()),
-        ])
-    }));
-    body
-}
-
-/// The question, what a reset deletes, then the choices.
-fn reset_body(selected: ResetChoice) -> Vec<Line<'static>> {
-    let mut body = vec![
-        Line::from(format!("Go back to \"{DEFAULT_WAKE_PHRASE}\"?")),
+    body.extend([
         Line::default(),
         Line::styled(
-            "This deletes the saved wake word, its learned variants and its recordings.",
+            "Change it as voice.wakeword.phrase in /settings, then restart the daemon.",
             dim(),
         ),
-        Line::default(),
-    ];
-    body.extend(ResetChoice::ALL.into_iter().map(|choice| {
-        let name = match choice {
-            ResetChoice::Reset => "Reset",
-            ResetChoice::Keep => "Keep",
-        };
-        if choice == selected {
-            Line::styled(format!("› {name}"), selected_style())
-        } else {
-            Line::raw(format!("  {name}"))
-        }
-    }));
+        Line::styled("Press Enter to say it and see whether I'd wake.", dim()),
+    ]);
     body
-}
-
-fn menu_text(item: MenuItem) -> (&'static str, String) {
-    match item {
-        MenuItem::Update => ("Update", "Record a new wake word".to_string()),
-        MenuItem::Test => ("Test", "Say it and see whether I'd wake".to_string()),
-        MenuItem::Reset => ("Reset", format!("Go back to \"{DEFAULT_WAKE_PHRASE}\"")),
-    }
 }
 
 fn status_rows(status: &StatusState) -> Vec<Line<'static>> {
     match status {
-        StatusState::Loading => vec![Line::styled("Reading the saved wake word…", dim())],
+        StatusState::Loading => vec![Line::styled("Reading the wake word…", dim())],
         StatusState::Failed(message) => vec![Line::styled(
             format!("Couldn't read the wake word: {}", escaped(message)),
             bad(),
@@ -207,25 +142,15 @@ fn status_rows(status: &StatusState) -> Vec<Line<'static>> {
 }
 
 fn loaded_status_rows(status: &WakeWordStatus) -> Vec<Line<'static>> {
-    let source = match status.samples {
-        0 => "built in".to_string(),
-        samples => format!("learned from {samples} samples"),
-    };
-    let variants = if status.variants.is_empty() {
-        "nothing else yet".to_string()
-    } else {
-        escaped(&status.variants.join(", ")).into_owned()
-    };
     let listening = if status.listening { "on" } else { "off" };
     vec![
         labelled(
             "Wake word",
-            vec![
-                Span::styled(format!("\"{}\"", escaped(&status.phrase)), bold()),
-                Span::styled(format!("  ({source})"), dim()),
-            ],
+            vec![Span::styled(
+                format!("\"{}\"", escaped(&status.phrase)),
+                bold(),
+            )],
         ),
-        labelled("Also hears", vec![Span::raw(variants)]),
         labelled("Listening", vec![Span::raw(listening)]),
     ]
 }
@@ -233,94 +158,6 @@ fn loaded_status_rows(status: &WakeWordStatus) -> Vec<Line<'static>> {
 fn labelled(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
     value.insert(0, Span::styled(format!("{label:<12}"), dim()));
     Line::from(value)
-}
-
-/// The prompt, the input box with the strength badge beside it, then a tip
-/// or the reason the phrase is refused.
-fn render_update(frame: &mut Frame<'_>, area: Rect, phrase: &str) {
-    let [prompt_area, _, input_row, _, tip_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(3),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
-    frame.render_widget(
-        Paragraph::new("Type a new wake word, then press Enter to record it."),
-        prompt_area,
-    );
-    let box_width = area
-        .width
-        .saturating_sub(STRENGTH_COLS)
-        .clamp(1, INPUT_MAX_COLS);
-    let [input_area, _, strength_area] = Layout::horizontal([
-        Constraint::Length(box_width),
-        Constraint::Length(2),
-        Constraint::Min(0),
-    ])
-    .areas(input_row);
-    render_phrase_input(frame, input_area, phrase);
-    let checked = (!phrase.trim().is_empty()).then(|| WakePhraseText::try_from(phrase.to_string()));
-    if let Some(Ok(valid)) = &checked {
-        let badge_area = Rect {
-            y: strength_area.y.saturating_add(1),
-            height: 1,
-            ..strength_area
-        };
-        frame.render_widget(
-            Paragraph::new(strength_badge(PhraseStrength::of(valid.as_str()))),
-            badge_area,
-        );
-    }
-    let tip = match checked {
-        Some(Err(refused)) => Line::styled(format!("Can't use that: {refused}."), bad()),
-        Some(Ok(_)) | None => Line::styled(
-            format!(
-                "Up to {MAX_WAKE_PHRASE_WORDS} words. Longer phrases wake by accident less \
-                 often: aim for 4 or more syllables, like \"{DEFAULT_WAKE_PHRASE}\"."
-            ),
-            dim(),
-        ),
-    };
-    frame.render_widget(wrapped(vec![tip]), tip_area);
-}
-
-/// The phrase in a rounded box, scrolled to keep its end and the cursor in view.
-fn render_phrase_input(frame: &mut Frame<'_>, area: Rect, phrase: &str) {
-    let phrase = escape_controls_single_line(phrase);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(rule_style())
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(area);
-    let typed = saturating_u16(display_width(&phrase));
-    let scroll = typed.saturating_sub(inner.width.saturating_sub(1));
-    let text = if phrase.is_empty() {
-        Span::styled("hey jarvis", Style::default().fg(Color::DarkGray))
-    } else {
-        Span::raw(phrase.into_owned())
-    };
-    frame.render_widget(Paragraph::new(text).scroll((0, scroll)).block(block), area);
-    if inner.width > 0 && inner.height > 0 {
-        let cursor_x = inner.x.saturating_add(typed - scroll);
-        frame.set_cursor_position(Position::new(cursor_x, inner.y));
-    }
-}
-
-fn strength_badge(strength: PhraseStrength) -> Line<'static> {
-    let (label, color) = match strength {
-        PhraseStrength::Low => ("low", Color::Red),
-        PhraseStrength::Medium => ("medium", Color::Yellow),
-        PhraseStrength::High => ("high", Color::Green),
-    };
-    Line::from(vec![
-        Span::styled("strength ", dim()),
-        Span::styled(
-            format!("● {label}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-    ])
 }
 
 /// The computer above `captions`, the two centred together in `area`; the
@@ -413,60 +250,6 @@ fn face_rows(mood: Mood) -> &'static [&'static str] {
     }
 }
 
-fn enroll_captions(progress: &EnrollProgress) -> Vec<Line<'static>> {
-    let phrase = escaped(&progress.phrase);
-    let mut captions = vec![
-        Line::styled(
-            format!(
-                "Say \"{phrase}\" until I've heard it clearly {} times.",
-                progress.required
-            ),
-            bold(),
-        ),
-        progress_meter(progress.confident, progress.required),
-        Line::default(),
-    ];
-    captions.extend(progress.results.iter().map(sample_line));
-    captions
-}
-
-fn progress_meter(confident: u8, required: u8) -> Line<'static> {
-    let filled = "●".repeat(usize::from(confident.min(required)));
-    let empty = "○".repeat(usize::from(required.saturating_sub(confident)));
-    Line::from(vec![
-        Span::styled(filled, good()),
-        Span::styled(empty, dim()),
-        Span::styled(format!("  {confident} of {required} clear"), dim()),
-    ])
-}
-
-fn sample_line(result: &SampleResult) -> Line<'static> {
-    match result {
-        SampleResult::Confident { heard } => {
-            Line::styled(format!("✓ heard \"{}\"", escaped(heard)), good())
-        }
-        SampleResult::Variant { heard } => Line::styled(
-            format!("~ heard \"{}\", kept as a variant", escaped(heard)),
-            Style::default().fg(Color::Yellow),
-        ),
-        SampleResult::Rejected { reason, heard } => {
-            let heard = heard.as_deref().map_or_else(String::new, |heard| {
-                format!(": heard \"{}\"", escaped(heard))
-            });
-            Line::styled(format!("✗ {}{heard}", rejection_text(*reason)), bad())
-        }
-    }
-}
-
-fn rejection_text(reason: SampleRejection) -> &'static str {
-    match reason {
-        SampleRejection::TooShort => "too short; say the whole phrase",
-        SampleRejection::TooLong => "too long; say just the phrase",
-        SampleRejection::Clipped => "clipped; turn the mic gain down",
-        SampleRejection::DidNotMatch => "didn't sound like the phrase",
-    }
-}
-
 fn test_captions(progress: &TestProgress) -> Vec<Line<'static>> {
     let ask = progress.phrase.as_deref().map_or_else(
         || "Say the wake word and I'll tell you whether I'd wake.".to_string(),
@@ -481,34 +264,14 @@ fn test_captions(progress: &TestProgress) -> Vec<Line<'static>> {
     if progress.results.is_empty() {
         captions.push(Line::styled("Listening…", dim()));
     }
-    captions.extend(progress.results.iter().map(|result| {
-        let heard = escaped(&result.heard);
-        if result.matched {
-            Line::styled(format!("✓ would wake: \"{heard}\""), good())
+    captions.extend(progress.results.iter().map(|&matched| {
+        if matched {
+            Line::styled("✓ heard the wake word: I'd wake", good())
         } else {
-            Line::styled(format!("✗ would not wake: \"{heard}\""), bad())
+            Line::styled("✗ heard speech without the wake word", bad())
         }
     }));
     captions
-}
-
-fn saved_body(phrase: &str, variants: &[String]) -> Vec<Line<'static>> {
-    let mut body = vec![Line::styled(
-        format!("✓ Wake word updated to \"{}\"", escaped(phrase)),
-        good().add_modifier(Modifier::BOLD),
-    )];
-    if !variants.is_empty() {
-        body.push(Line::raw(format!(
-            "  Also hears: {}",
-            escaped(&variants.join(", "))
-        )));
-    }
-    body.push(Line::default());
-    body.push(Line::styled(
-        "Press t to test it, or Enter to go back.",
-        dim(),
-    ));
-    body
 }
 
 fn wrapped(lines: Vec<Line<'static>>) -> Paragraph<'static> {

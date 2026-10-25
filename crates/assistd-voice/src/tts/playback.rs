@@ -11,8 +11,8 @@ use rodio::cpal::traits::HostTrait;
 use rodio::stream::DeviceSinkBuilder;
 use rodio::{ChannelCount, DeviceTrait, Player, SampleRate, cpal};
 
-use crate::piper::error::PiperError;
-use crate::piper::synth::SynthOutput;
+use crate::tts::engine::Utterance;
+use crate::tts::error::SpeechError;
 
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -40,13 +40,13 @@ impl RodioPlaybackWorker {
     /// Open the named output device (as listed by `aplay -L`), or the
     /// system default for `None`. A name that isn't found falls back
     /// to the default with a warning.
-    pub async fn start(device_name: Option<String>) -> Result<Self, PiperError> {
+    pub async fn start(device_name: Option<String>) -> Result<Self, SpeechError> {
         tokio::task::spawn_blocking(move || Self::open(device_name.as_deref()))
             .await
-            .map_err(|err| PiperError::Audio(format!("audio init task failed: {err}")))?
+            .map_err(|err| SpeechError::Audio(format!("audio init task failed: {err}")))?
     }
 
-    fn open(device_name: Option<&str>) -> Result<Self, PiperError> {
+    fn open(device_name: Option<&str>) -> Result<Self, SpeechError> {
         let host = cpal::default_host();
         let selected = select_output_device(&host, device_name);
 
@@ -56,8 +56,8 @@ impl RodioPlaybackWorker {
 
         let player = init_rx
             .recv()
-            .map_err(|_| PiperError::Audio("audio init thread died".into()))?
-            .map_err(PiperError::Audio)?;
+            .map_err(|_| SpeechError::Audio("audio init thread died".into()))?
+            .map_err(SpeechError::Audio)?;
 
         Ok(Self {
             player: Arc::new(player),
@@ -68,21 +68,14 @@ impl RodioPlaybackWorker {
 
     /// Queue an utterance. Returns once enqueued; see
     /// [`drain`](Self::drain) to wait for playback.
-    pub async fn play(&self, output: SynthOutput) -> Result<(), PiperError> {
+    pub async fn play(&self, utterance: Utterance) -> Result<(), SpeechError> {
         let channels: ChannelCount = NonZero::new(1u16).expect("1 is non-zero");
-        let sample_rate: SampleRate = NonZero::new(output.sample_rate).ok_or_else(|| {
-            PiperError::Audio("voice config reports sample_rate=0; check the .onnx.json".into())
-        })?;
-        let samples_f32: Vec<f32> = output
-            .samples
-            .iter()
-            .map(|&sample| f32::from(sample) / f32::from(i16::MAX))
-            .collect();
-        let buffer = SamplesBuffer::new(channels, sample_rate, samples_f32);
+        let sample_rate: SampleRate = utterance.sample_rate;
+        let buffer = SamplesBuffer::new(channels, sample_rate, utterance.samples);
         let player = self.player.clone();
         tokio::task::spawn_blocking(move || player.append(buffer))
             .await
-            .map_err(|err| PiperError::Audio(format!("playback append task failed: {err}")))?;
+            .map_err(|err| SpeechError::Audio(format!("playback append task failed: {err}")))?;
         tracing::debug!(
             target: "assistd::voice::latency",
             stage = "playback_enqueued",
@@ -145,7 +138,7 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
             .collect(),
         Err(err) => {
             tracing::warn!(
-                target: "assistd::voice::piper",
+                target: "assistd::voice::tts",
                 error = %err,
                 "could not enumerate cpal output devices; falling back to default"
             );
@@ -157,7 +150,7 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
         .map(|(_, device_name)| device_name.as_str())
         .collect();
     tracing::info!(
-        target: "assistd::voice::piper",
+        target: "assistd::voice::tts",
         available = ?names,
         "cpal output devices (set `voice.synthesis.output_device` to one of these)"
     );
@@ -171,7 +164,7 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
     {
         Some((device, _)) => {
             tracing::info!(
-                target: "assistd::voice::piper",
+                target: "assistd::voice::tts",
                 device = name,
                 "cpal output device (configured)"
             );
@@ -179,7 +172,7 @@ fn select_output_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::D
         }
         None => {
             tracing::warn!(
-                target: "assistd::voice::piper",
+                target: "assistd::voice::tts",
                 requested = name,
                 "cpal output device not found by name; falling back to default"
             );
@@ -192,12 +185,12 @@ fn default_output_device(host: &cpal::Host) -> Option<cpal::Device> {
     let device = host.default_output_device();
     match &device {
         Some(device) => tracing::info!(
-            target: "assistd::voice::piper",
+            target: "assistd::voice::tts",
             device = %device_name(device),
             "cpal default output device"
         ),
         None => tracing::warn!(
-            target: "assistd::voice::piper",
+            target: "assistd::voice::tts",
             "cpal reports no default output device"
         ),
     }
@@ -208,11 +201,11 @@ fn spawn_device_thread(
     device: Option<cpal::Device>,
     init_tx: mpsc::Sender<Result<Player, String>>,
     shutdown_rx: mpsc::Receiver<()>,
-) -> Result<thread::JoinHandle<()>, PiperError> {
+) -> Result<thread::JoinHandle<()>, SpeechError> {
     thread::Builder::new()
-        .name("piper-rodio".into())
+        .name("tts-rodio".into())
         .spawn(move || run_device_thread(device, &init_tx, &shutdown_rx))
-        .map_err(|err| PiperError::Audio(format!("spawn audio thread: {err}")))
+        .map_err(|err| SpeechError::Audio(format!("spawn audio thread: {err}")))
 }
 
 /// Report the connected player (or the open error) on `init_tx`, then hold
@@ -262,7 +255,7 @@ fn join_off_runtime(device_thread: thread::JoinHandle<()>) {
 fn join_with_timeout(device_thread: thread::JoinHandle<()>) {
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let spawned = thread::Builder::new()
-        .name("piper-rodio-drop-watchdog".into())
+        .name("tts-rodio-drop-watchdog".into())
         .spawn(move || {
             let _ = device_thread.join();
             let _ = done_tx.send(());
@@ -271,14 +264,14 @@ fn join_with_timeout(device_thread: thread::JoinHandle<()>) {
         Ok(_) => {
             if done_rx.recv_timeout(DROP_JOIN_TIMEOUT).is_err() {
                 tracing::error!(
-                    target: "assistd::voice::piper",
+                    target: "assistd::voice::tts",
                     timeout_secs = DROP_JOIN_TIMEOUT.as_secs(),
                     "rodio device thread did not exit within budget; abandoning join"
                 );
             }
         }
         Err(err) => tracing::warn!(
-            target: "assistd::voice::piper",
+            target: "assistd::voice::tts",
             error = %err,
             "could not spawn drop watchdog; device thread detached"
         ),

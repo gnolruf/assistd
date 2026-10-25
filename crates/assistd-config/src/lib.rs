@@ -43,4 +43,6 @@ pub use tools::{
     ToolsWriteConfig,
 };
 pub use top::Config;
-pub use voice::{SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, WakeWordConfig};
+pub use voice::{
+    SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, VoiceFamily, WakeWordConfig,
+};

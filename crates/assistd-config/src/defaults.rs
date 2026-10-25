@@ -59,20 +59,20 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are assistd, a concise local deskto
      running on a Linux workstation. When a question is about this machine or its files, \
      prefer calling a tool over guessing. Answer precisely and in a conversational tone.";
 
-pub const DEFAULT_WHISPER_MODEL: &str = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin";
-pub const DEFAULT_WHISPER_VAD_MODEL: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
-pub const DEFAULT_WHISPER_PREFER_GPU: bool = true;
-pub const DEFAULT_WHISPER_BEAMS: NonZeroU32 = nz32(1);
-pub const DEFAULT_WHISPER_VAD_ENABLED: bool = true;
+pub const DEFAULT_STT_MODEL: &str = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16\
+     @a6cc4e24ed264a93a17575dad416dacc4238497a:encoder.fp16.onnx";
+pub const DEFAULT_SILERO_VAD_MODEL: &str =
+    "Tinysoft/silero-vad-6.2@3034960e5d3beb943b860ec0ea1a857bdae4ae96:silero_vad.onnx";
+pub const DEFAULT_STT_PREFER_GPU: bool = false;
+pub const DEFAULT_STT_THREADS: NonZeroU32 = nz32(4);
+pub const DEFAULT_STT_VAD_ENABLED: bool = true;
 
-pub const DEFAULT_PIPER_ENABLED: bool = false;
-pub const DEFAULT_PIPER_BINARY: &str = "piper";
-pub const DEFAULT_PIPER_VOICE: &str =
-    "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx";
-pub const DEFAULT_PIPER_LENGTH_SCALE: f32 = 1.0;
-pub const DEFAULT_PIPER_DEADLINE_SECS: NonZeroU32 = nz32(30);
-pub const DEFAULT_PIPER_MAX_SENTENCE_CHARS: NonZeroU32 = nz32(400);
-pub const DEFAULT_PIPER_PARTIAL_FLUSH_MS: u32 = 750;
+pub const DEFAULT_TTS_ENABLED: bool = false;
+pub const DEFAULT_TTS_VOICE: &str = "csukuangfj/vits-piper-en_US-lessac-medium\
+     @83f7470750b36549037551ef7007fa3b4b8697e0:en_US-lessac-medium.onnx";
+pub const DEFAULT_TTS_LENGTH_SCALE: f32 = 1.0;
+pub const DEFAULT_TTS_MAX_SENTENCE_CHARS: NonZeroU32 = nz32(400);
+pub const DEFAULT_TTS_PARTIAL_FLUSH_MS: u32 = 750;
 
 pub const DEFAULT_WAKEWORD_ENABLED: bool = false;
 pub const DEFAULT_WAKEWORD_START_ON_LAUNCH: bool = false;
@@ -81,7 +81,8 @@ pub const DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS: NonZeroU32 = nz32(30);
 pub const DEFAULT_WAKEWORD_BARGE_IN: bool = true;
 pub const DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS: NonZeroU32 = nz32(4000);
 pub const DEFAULT_WAKEWORD_FOLLOW_UP_MS: u32 = 8000;
-pub const DEFAULT_WAKEWORD_MATCH_SIMILARITY: UnitInterval = unit(0.8);
+pub const DEFAULT_WAKE_PHRASE: &str = "hey computer";
+pub const DEFAULT_WAKEWORD_THRESHOLD: UnitInterval = unit(0.25);
 
 pub const DEFAULT_HOTKEY_PUSH_TO_TALK: &str = "Super+Space";
 

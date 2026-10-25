@@ -6,27 +6,25 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["whisper", "mic", "listen", "tts"]
-whisper = [
-    "dep:whisper-rs",
+default = ["stt", "mic", "listen", "tts"]
+stt = [
     "dep:nvml-wrapper",
     "dep:num-traits",
+    "dep:sherpa-onnx",
 ]
-# Requires `whisper` because `MicVoiceInput` wraps `WhisperTranscriber`.
-mic = ["whisper", "dep:cpal", "dep:ringbuf", "dep:rubato"]
-listen = ["mic", "dep:serde", "dep:serde_json", "dep:hound"]
-# Pulls in rodio (which itself uses cpal).
+# Requires `stt` because `MicVoiceInput` hands its audio to a `Transcriber`.
+mic = ["stt", "dep:cpal", "dep:ringbuf", "dep:rubato"]
+listen = ["mic", "dep:sentencepiece-rust"]
+# Pulls in rodio (which itself uses cpal) and sherpa-onnx.
 tts = [
     "dep:rodio",
-    "dep:serde",
-    "dep:serde_json",
+    "dep:sherpa-onnx",
 ]
-cuda = ["whisper", "whisper-rs/cuda"]
-test-support = ["whisper", "mic", "listen", "tts"]
+test-support = ["stt", "mic", "listen", "tts"]
 
 [[example]]
 name = "voice_latency_bench"
-required-features = ["whisper", "tts"]
+required-features = ["stt", "tts"]
 
 [dependencies]
 dirs = { workspace = true }
@@ -39,7 +37,6 @@ assistd-config = { workspace = true }
 assistd-utils = { workspace = true }
 parking_lot = { workspace = true }
 
-whisper-rs = { workspace = true, optional = true }
 nvml-wrapper = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
 
@@ -48,9 +45,8 @@ ringbuf = { workspace = true, optional = true }
 rubato = { workspace = true, optional = true }
 
 rodio = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
-hound = { workspace = true, optional = true }
+sherpa-onnx = { workspace = true, optional = true }
+sentencepiece-rust = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
@@ -61,6 +57,8 @@ tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
 hound = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

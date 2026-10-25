@@ -1,5 +1,5 @@
-//! Voice startup for the daemon: brings up Piper and Whisper behind a
-//! [`VoiceManager`] that already serves requests.
+//! Voice startup for the daemon: brings up the sherpa-onnx voice and
+//! transcriber behind a [`VoiceManager`] that already serves requests.
 
 use std::sync::Arc;
 
@@ -9,9 +9,8 @@ use assistd_core::{
 };
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
-    CpuFallbackFactory, MicContinuousListener, MicVoiceInput, PiperVoiceOutput, ProfileStore,
-    QueuedTranscriber, SileroVad, Transcriber, VoiceOutputController, WakePhrase,
-    WhisperTranscriberBuilder, build_cpu_fallback,
+    CpuFallbackFactory, MicContinuousListener, MicVoiceInput, QueuedTranscriber, SherpaTranscriber,
+    SherpaVoiceOutput, SileroVad, Transcriber, VoiceOutputController, WakeWordSpotter,
 };
 use tracing::info;
 
@@ -46,41 +45,44 @@ async fn init_capture(
         "voice: building mic input ({})",
         config.voice.transcription.model
     );
-    let primary = match WhisperTranscriberBuilder::from_config(&config.voice.transcription)
-        .build()
-        .await
-    {
+    let primary = match SherpaTranscriber::load(&config.voice.transcription).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("voice input failed to initialize: {e:#}; PTT commands will error");
-            return Readiness::Unavailable(format!("Whisper failed to initialize: {e:#}").into());
+            return Readiness::Unavailable(
+                format!("speech-to-text failed to initialize: {e:#}").into(),
+            );
         }
     };
     let is_gpu = primary.is_gpu();
     let transcriber = with_cpu_fallback(config, presence, vram, Arc::new(primary), is_gpu);
 
     let mic = MicVoiceInput::new(transcriber.clone(), config.voice.mic_device.clone());
-    let profiles = ProfileStore::default_location();
-    let listener = init_listener(config, &transcriber, speech, &profiles).await;
+    let (listener, spotter) = match init_listener(config, &transcriber, speech).await {
+        Some((listener, spotter)) => (listener, Some(spotter)),
+        None => (
+            Arc::new(NoContinuousListener::new()) as Arc<dyn ContinuousListener>,
+            None,
+        ),
+    };
     Readiness::Ready(VoiceCapture {
         input: Arc::new(mic),
         listener,
         transcriber,
-        profiles,
+        spotter,
     })
 }
 
-/// Wake-word listening, or a listener that refuses to start when it is off
-/// in config or its Silero model cannot be loaded.
+/// Wake-word listening and its spotter, or `None` when it is off in config
+/// or its Silero or keyword model cannot be loaded.
 async fn init_listener(
     config: &Config,
     transcriber: &Arc<dyn Transcriber>,
     speech: Arc<VoiceOutputController>,
-    profiles: &ProfileStore,
-) -> Arc<dyn ContinuousListener> {
+) -> Option<(Arc<dyn ContinuousListener>, Arc<WakeWordSpotter>)> {
     if !config.voice.wakeword.enabled {
         info!("voice.wakeword: disabled in config");
-        return Arc::new(NoContinuousListener::new());
+        return None;
     }
     let silero = match SileroVad::load(&config.voice.transcription).await {
         Ok(silero) => silero,
@@ -88,33 +90,29 @@ async fn init_listener(
             tracing::warn!(
                 "voice.wakeword: Silero VAD failed to load: {e:#}; listening unavailable"
             );
-            return Arc::new(NoContinuousListener::new());
+            return None;
+        }
+    };
+    let spotter = match WakeWordSpotter::load(&config.voice).await {
+        Ok(spotter) => Arc::new(spotter),
+        Err(e) => {
+            tracing::warn!("voice.wakeword: {e:#}; listening unavailable");
+            return None;
         }
     };
     info!(
-        "voice.wakeword: enabled (start_on_launch={})",
+        "voice.wakeword: listening for {:?} (start_on_launch={})",
+        spotter.phrase(),
         config.voice.wakeword.start_on_launch
     );
-    let listener = MicContinuousListener::new(transcriber.clone(), &config.voice, speech, silero);
-    listener.set_wake_phrase(enrolled_wake_phrase(config, profiles).await);
-    Arc::new(listener)
-}
-
-/// The enrolled phrase, or the built-in one when none is enrolled or the
-/// profile cannot be read.
-async fn enrolled_wake_phrase(config: &Config, profiles: &ProfileStore) -> WakePhrase {
-    let similarity = config.voice.wakeword.match_similarity;
-    match profiles.load().await {
-        Ok(Some(profile)) => {
-            info!("voice.wakeword: using enrolled phrase {:?}", profile.phrase);
-            profile.wake_phrase(similarity)
-        }
-        Ok(None) => WakePhrase::builtin(similarity),
-        Err(e) => {
-            tracing::warn!("voice.wakeword: {e}; using the built-in phrase");
-            WakePhrase::builtin(similarity)
-        }
-    }
+    let listener = MicContinuousListener::new(
+        transcriber.clone(),
+        &config.voice,
+        speech,
+        silero,
+        Arc::clone(&spotter),
+    );
+    Some((Arc::new(listener), spotter))
 }
 
 /// Wrap a GPU transcriber so it falls back to CPU while the GPU is
@@ -136,7 +134,7 @@ fn with_cpu_fallback(
     let cpu_factory: CpuFallbackFactory = Arc::new(move || {
         let cfg = cpu_cfg.clone();
         Box::pin(async move {
-            let fallback = build_cpu_fallback(&cfg, None).await?;
+            let fallback = SherpaTranscriber::load_cpu(&cfg).await?;
             Ok(Arc::new(fallback) as Arc<dyn Transcriber>)
         })
     });
@@ -155,17 +153,17 @@ async fn init_output(config: &Config) -> Readiness<Arc<dyn VoiceOutput>> {
         );
     }
     info!(
-        "voice.synthesis: starting Piper ({})",
+        "voice.synthesis: loading the voice ({})",
         config.voice.synthesis.voice
     );
-    match PiperVoiceOutput::start(config.voice.synthesis.clone()).await {
-        Ok(p) => {
-            info!("voice.synthesis: Piper ready");
-            Readiness::Ready(Arc::new(p))
+    match SherpaVoiceOutput::start(&config.voice.synthesis).await {
+        Ok(output) => {
+            info!("voice.synthesis: speech ready");
+            Readiness::Ready(Arc::new(output))
         }
         Err(e) => {
             tracing::warn!("voice.synthesis failed to initialize: {e:#}; speech output disabled");
-            Readiness::Unavailable(format!("Piper failed to start: {e:#}").into())
+            Readiness::Unavailable(format!("speech failed to start: {e:#}").into())
         }
     }
 }

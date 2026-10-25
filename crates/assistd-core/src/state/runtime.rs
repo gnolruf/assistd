@@ -99,7 +99,7 @@ pub struct RuntimeState {
     pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
     /// The chat's last focus report.
     pub(in crate::state) chat_focus: ChatFocusSlot,
-    /// The open wake-word enrollment or test session, which holds the mic.
+    /// The open wake-word test session, which holds the mic.
     pub(in crate::state) mic_session: StdMutex<Option<MicSession>>,
     events_bus: broadcast::Sender<Event>,
     /// Filters of the live [`BusSubscription`]s.

@@ -14,7 +14,7 @@ pub mod attachment;
 pub mod client;
 pub mod wakeword;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
-pub use wakeword::{EnrollEvent, InvalidWakePhrase, SampleRejection, WakePhraseText, WakeWordOp};
+pub use wakeword::WakeWordOp;
 
 /// An image on a [`Request::Query`]: `mime` is PNG, JPEG or WebP; `data_base64` is standard
 /// padded base64.
@@ -696,23 +696,15 @@ pub enum Event {
     WakeWordDetected { id: String },
     /// Whether TTS is enabled.
     VoiceOutputState { id: String, enabled: bool },
-    /// The saved wake phrase, or the built-in one with no variants or
-    /// samples; `listening` is whether the wake-word listener is running.
+    /// The configured wake phrase; `listening` is whether the wake-word
+    /// listener is running.
     WakeWordStatus {
         id: String,
         phrase: String,
-        variants: Vec<String>,
-        samples: u32,
         listening: bool,
     },
-    /// Progress of the enrollment session opened by this connection.
-    WakeWordEnrollment { id: String, event: EnrollEvent },
-    /// What a test session heard and whether the saved phrase matched it.
-    WakeWordTest {
-        id: String,
-        heard: String,
-        matched: bool,
-    },
+    /// Whether the wake phrase was spotted in one utterance of a test session.
+    WakeWordTest { id: String, matched: bool },
     /// Speech started (`true`) or ended (`false`) on the mic of the
     /// wake-word session opened by this connection.
     WakeWordSpeech { id: String, speaking: bool },
@@ -891,7 +883,6 @@ impl Event {
             | Event::WakeWordDetected { id }
             | Event::VoiceOutputState { id, .. }
             | Event::WakeWordStatus { id, .. }
-            | Event::WakeWordEnrollment { id, .. }
             | Event::WakeWordTest { id, .. }
             | Event::WakeWordSpeech { id, .. }
             | Event::Readiness { id, .. }
@@ -940,7 +931,6 @@ impl Event {
             Event::ContextSize { .. } => EventKind::ContextSize,
             Event::VoiceOutputState { .. }
             | Event::WakeWordStatus { .. }
-            | Event::WakeWordEnrollment { .. }
             | Event::WakeWordTest { .. }
             | Event::WakeWordSpeech { .. }
             | Event::SemanticHit { .. }

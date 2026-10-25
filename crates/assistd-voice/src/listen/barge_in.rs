@@ -6,7 +6,6 @@ use std::collections::HashSet;
 use tokio::sync::watch;
 
 use super::vad::{SAMPLE_RATE_HZ, UtteranceVad};
-use super::wake_phrase::normalized_words;
 
 /// Voiced speech before an utterance is first checked: 500 ms of 20 ms
 /// frames, longer than any bump or click.
@@ -22,7 +21,7 @@ const CHECK_WINDOW_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 5 / 2;
 const MIN_NOVEL_WORDS: usize = 2;
 
 /// Share of a transcript's words that the reply did not just say; echo
-/// that Whisper mishears yields a few novel words among many spoken ones.
+/// that the transcriber mishears yields a few novel words among many spoken ones.
 const MIN_NOVEL_SHARE: f32 = 0.5;
 
 /// Follows the VAD on the capture thread and says when speech that began
@@ -90,6 +89,23 @@ pub fn confirms_barge_in(transcript: &str, recent_speech: &[String]) -> bool {
     let heard = normalized_words(transcript);
     let novel = heard.iter().filter(|word| !spoken.contains(*word)).count();
     novel >= MIN_NOVEL_WORDS && novel as f32 >= heard.len() as f32 * MIN_NOVEL_SHARE
+}
+
+/// The lowercased words of `text`; apostrophes stay inside a word.
+fn normalized_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            word.extend(ch.to_lowercase());
+        } else if ch != '\'' && ch != '’' && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 #[cfg(test)]

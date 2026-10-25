@@ -3,9 +3,9 @@
 Continuous listening keeps the mic open while a reply is spoken, so
 through speakers it hears the daemon's own TTS. During a reply to a
 wake-word command, speech interrupts the reply (barge-in,
-`voice.wakeword.barge_in`) once Whisper confirms it holds words the
+`voice.wakeword.barge_in`) once its transcript holds words the
 reply did not just say. That rejects echo by text alone, which works
-through headphones but is unreliable through speakers: Whisper mishears
+through headphones but is unreliable through speakers: the transcriber mishears
 echo mixed with your voice, and a command you give over the reply
 carries some of the reply's words.
 
