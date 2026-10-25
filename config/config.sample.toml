@@ -41,36 +41,34 @@ enabled = false
 # mic_device = "hw:0,0"
 
 [voice.transcription]
-# model = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin"
-# prefer_gpu = true
-# threads = 8
-# beams = 1  # 1 = greedy, at most 8
+# model = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16@a6cc4e24ed264a93a17575dad416dacc4238497a:encoder.fp16.onnx"
+# prefer_gpu = true  # needs a build with sherpa-onnx's CUDA libraries
+# threads = 4
 # vad_enabled = true
-# vad_model = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin"
-# model_cache_dir = "/var/cache/assistd/whisper"
+# vad_model = "Tinysoft/silero-vad-6.2@3034960e5d3beb943b860ec0ea1a857bdae4ae96:silero_vad.onnx"
+# model_cache_dir = "/var/cache/assistd/stt"
 
 [voice.wakeword]
 # Hands-free listening: speech after the wake phrase is sent as a query.
 enabled = false
+# phrase = "hey computer"  # 1 to 6 words
+# threshold = 0.25  # 0-1; lower wakes more easily
 # start_on_launch = false
-# silence_ms = 800  # trailing silence that ends an utterance
+# silence_ms = 800  # trailing silence that ends an utterance; at most 1400
 # max_utterance_secs = 30  # at most 300
 # barge_in = true  # talking over a wake-word reply interrupts it and becomes the next command
 # command_timeout_ms = 4000  # after a bare wake phrase, how long to wait for the command
 # follow_up_ms = 8000  # after a reply, how long a reply needs no wake phrase; 0 disables
-# match_similarity = 0.8  # how closely Whisper's text must match the phrase (0-1)
 [voice.synthesis]
-# Speak replies with Piper TTS.
+# Speak replies through a sherpa-onnx voice; vits voices need espeak-ng on $PATH.
 enabled = false
-# binary_path = "piper"
-# voice = "rhasspy/piper-voices:en/en_US/lessac/medium/en_US-lessac-medium.onnx"
-# model_cache_dir = "/var/cache/assistd/piper"
+# voice = "csukuangfj/vits-piper-en_US-lessac-medium@83f7470750b36549037551ef7007fa3b4b8697e0:en_US-lessac-medium.onnx"
+# family = "vits"  # vits | kokoro
+# speaker_id = 0  # multi-speaker voices only
+# model_cache_dir = "/var/cache/assistd/tts"
 # length_scale = 1.0  # lower speaks faster
-# espeak_data_dir = "/usr/share/espeak-ng-data"
-# deadline_secs = 30
 # max_sentence_chars = 400  # 50..=2000
 # partial_flush_ms = 750  # 0 disables
-# use_cuda = false
 # output_device = "pipewire"  # as listed by `aplay -L`; unset uses the default
 
 [compositor]

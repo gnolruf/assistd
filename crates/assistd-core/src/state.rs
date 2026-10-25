@@ -15,7 +15,7 @@ use assistd_ipc::{Event, Request, Role, WakeWordOp};
 use assistd_llm::{LlmBackend, LlmError};
 use assistd_memory::{MemoryError, PersistedRole};
 use assistd_tools::ToolRegistry;
-use assistd_voice::{CaptureUnavailable, ListenError, ProfileError, VoiceInputError, VoiceManager};
+use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError, VoiceManager};
 
 use crate::{Config, PresenceError, PresenceManager};
 
@@ -75,9 +75,6 @@ pub enum DispatchError {
 
     #[error(transparent)]
     Listen(#[from] ListenError),
-
-    #[error(transparent)]
-    WakeWordProfile(#[from] ProfileError),
 }
 
 /// Shared, long-lived daemon state handed to every request handler.
@@ -161,7 +158,7 @@ impl AppState {
                 | Request::Query { .. }
                 | Request::PttStop { .. }
                 | Request::WakeWord {
-                    op: WakeWordOp::EnrollStart { .. } | WakeWordOp::TestStart,
+                    op: WakeWordOp::TestStart,
                     ..
                 }
         )

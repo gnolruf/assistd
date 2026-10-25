@@ -17,7 +17,7 @@ mod ipc_voice_proxy;
 mod tray;
 mod wm_backend;
 
-/// How long exit waits on `spawn_blocking` work (e.g. a Whisper model
+/// How long exit waits on `spawn_blocking` work (e.g. a speech model
 /// load abandoned by a shutdown during startup) before leaving it behind.
 const BLOCKING_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 

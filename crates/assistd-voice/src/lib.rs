@@ -1,6 +1,6 @@
 //! Voice subsystem: the [`VoiceInput`] (speech-to-text) and
-//! [`VoiceOutput`] (text-to-speech) traits, with Whisper, cpal, and
-//! Piper implementations behind cargo features.
+//! [`VoiceOutput`] (text-to-speech) traits, with sherpa-onnx and cpal
+//! implementations behind cargo features.
 
 use std::fmt;
 
@@ -9,12 +9,14 @@ use tokio::sync::watch;
 
 pub use assistd_ipc::VoiceCaptureState;
 
-#[cfg(feature = "whisper")]
+#[cfg(feature = "stt")]
 pub mod gpu;
-#[cfg(feature = "whisper")]
+#[cfg(feature = "stt")]
+pub mod stt;
+#[cfg(feature = "stt")]
 pub mod transcribe;
-#[cfg(feature = "whisper")]
-pub mod whisper;
+#[cfg(feature = "stt")]
+pub mod vad;
 
 #[cfg(feature = "mic")]
 pub mod mic;
@@ -23,7 +25,7 @@ pub mod mic;
 pub mod listen;
 
 #[cfg(feature = "tts")]
-pub mod piper;
+pub mod tts;
 
 pub mod controller;
 pub mod error;
@@ -35,9 +37,8 @@ pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
 pub use error::{VoiceInputError, VoiceOutputError};
 #[cfg(feature = "listen")]
 pub use listen::{
-    CapturedUtterance, ContinuousListener, Enrollment, Heard, ListenError, MicContinuousListener,
-    NoContinuousListener, PhraseStrength, ProfileError, ProfileStore, SessionAudio, SileroVad,
-    WakePhrase, WakeWordProfile,
+    CapturedUtterance, ContinuousListener, Heard, ListenError, MicContinuousListener,
+    NoContinuousListener, SessionAudio, SileroVad, SpotterError, WakeWordSpotter,
 };
 #[cfg(feature = "listen")]
 pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
@@ -45,16 +46,16 @@ pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
 pub use mic::{
     AudioCaptureError, DeviceValidationError, MicVoiceInput, capture::validate as mic_validate,
 };
-#[cfg(feature = "tts")]
-pub use piper::{PiperError, PiperVoiceOutput};
 pub use sentence::SentenceBuffer;
-#[cfg(feature = "whisper")]
+#[cfg(feature = "stt")]
+pub use stt::SherpaTranscriber;
+#[cfg(feature = "stt")]
 pub use transcribe::{
     BusyProbe, CpuFallbackFactory, NullBusyProbe, QueuedTranscriber, Transcriber,
     TranscriptionError,
 };
-#[cfg(feature = "whisper")]
-pub use whisper::{WhisperTranscriber, WhisperTranscriberBuilder, build_cpu_fallback};
+#[cfg(feature = "tts")]
+pub use tts::{SherpaVoiceOutput, SpeechError};
 
 /// Push-to-talk voice capture: buffer mic audio between
 /// [`start_recording`](VoiceInput::start_recording) and

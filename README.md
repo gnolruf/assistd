@@ -24,10 +24,11 @@ window-manager bindings), and integrates with the running compositor for context
   saves and looks up facts, and `reminisce` searches
   transcripts from earlier sessions.
 - **Voice in/out.** Push-to-talk and hands-free
-  [wake-word listening](docs/voice/wake-word.md) via `whisper.cpp`,
-  with the wake phrase enrolled to your voice in the chat TUI's
-  `/wakeword`; spoken responses via Piper TTS, streamed sentence by
-  sentence so playback starts before the model has finished, and
+  [wake-word listening](docs/voice/wake-word.md) via Parakeet speech-to-text,
+  with the wake phrase found by a keyword spotter and tested in the chat
+  TUI's `/wakeword`; spoken responses through a sherpa-onnx voice (Piper or
+  Kokoro) in a worker process the daemon supervises, streamed sentence
+  by sentence so playback starts before the model has finished, and
   interruptible by talking over them.
 - **Vision when the model has it.** `see photo.png` and `screenshot`
   attach images to the next turn whenever the loaded model has a
@@ -50,13 +51,12 @@ window-manager bindings), and integrates with the running compositor for context
 - Rust toolchain, stable channel (selected by `rust-toolchain.toml`;
   rustup installs it automatically on first build).
 - `cmake`, `clang`, `pkg-config` and the ALSA headers (`alsa-lib` /
-  `libasound2-dev`) to build. With GCC 15 or newer, build with
-  `CXXFLAGS=-fpermissive` until the bundled whisper.cpp is fixed.
+  `libasound2-dev`) to build.
 - `llama-server` from `llama.cpp` on your `$PATH`. The daemon spawns it
   as a child process.
 - `bubblewrap`. Without it the model gets no tools.
 
-Optional: `piper` for TTS, `grim` (Wayland) or `maim` (X11) for
+Optional: `espeak-ng` for TTS with Piper voices, `grim` (Wayland) or `maim` (X11) for
 screenshots, and SearXNG's `searxng-run` for web search (`searxng-git`
 on the AUR; enable with `[search] enabled = true`, see
 [web search](docs/web-search.md)).
@@ -69,6 +69,21 @@ binary and a systemd user unit (`systemctl --user enable --now assistd`).
 ```sh
 cargo build --release
 ```
+
+The build downloads sherpa-onnx's prebuilt libraries from its GitHub
+release; set `SHERPA_ONNX_ARCHIVE_DIR` to a directory holding
+`sherpa-onnx-v2.0.0-linux-x64-shared-lib.tar.bz2` to build offline.
+`libsherpa-onnx-c-api.so` and `libonnxruntime.so` land beside the binary
+in `target/release/`; if you copy `assistd` elsewhere, put them in the
+same directory or in `../lib/assistd/` relative to it.
+
+Speech-to-text runs on the CPU unless the binary ships sherpa-onnx's CUDA
+libraries. For GPU transcription, install `cuda` (13.x) and `cudnn`,
+extract `sherpa-onnx-v2.0.0-cuda-13.x-cudnn-9.x-onnxruntime1.28.2-linux-x64-gpu.tar.bz2`
+from the sherpa-onnx release, and build with
+`SHERPA_ONNX_LIB_DIR=<extracted>/lib cargo build --release`. With
+`[voice.transcription] prefer_gpu = true` (the default) the daemon then
+transcribes on CUDA, using about 2.6 GB of VRAM.
 
 ### 2. Configure
 
@@ -155,7 +170,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |
 | `assistd ptt-start/stop` | Push-to-talk start/stop, for compositors without hotkey support. |
 | `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |
-| `assistd voice-toggle`   | Toggle Piper TTS playback.                                    |
+| `assistd voice-toggle`   | Toggle TTS playback.                                          |
 | `assistd voice-skip`     | Abort the current spoken response.                            |
 | `assistd memory …`       | Inspect or mutate persistent memory; see `memory --help`.     |
 | `assistd tray`           | System tray icon and desktop notifications.                   |

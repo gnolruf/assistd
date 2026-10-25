@@ -32,7 +32,7 @@ fn only_another_process_growing_into_the_headroom_is_contention() {
             true,
         ),
         (
-            "our own Whisper or image turn fills the card",
+            "our own transcriber or image turn fills the card",
             snapshot(150, 13600, 600),
             false,
         ),

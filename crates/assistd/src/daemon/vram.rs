@@ -1,5 +1,5 @@
 //! Who holds the GPU's VRAM and how much the model needs, shared by the
-//! contention monitor, the pre-wake room check, and Whisper's GPU probe.
+//! contention monitor, the pre-wake room check, and transcription's GPU probe.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ const MAX_ANCESTOR_DEPTH: usize = 64;
 const FOREIGN_GROWTH_FLOOR_MB: u64 = 100;
 
 /// VRAM across every GPU, in MiB. The daemon's own allocations, such as
-/// Whisper's, count toward neither holder.
+/// transcription's, count toward neither holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VramSnapshot {
     pub(super) free_mb: u64,

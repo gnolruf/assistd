@@ -1,32 +1,27 @@
-//! The state machine that turns transcripts into wake-phrase detections
-//! and commands.
+//! The state machine that decides which utterances are addressed to
+//! assistd: those holding the wake phrase, and those inside a command window.
 
 use std::time::Duration;
 
 use assistd_ipc::ListenPhase;
 use tokio::time::Instant;
 
-use super::wake_phrase::WakePhrase;
-
-/// What one transcript amounts to once gated on the wake phrase.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What one utterance amounts to once gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
-    /// Not addressed to assistd.
+    /// Not addressed to assistd; never transcribed.
     Dropped,
-    /// The phrase alone; the next utterance is the command.
+    /// The wake phrase was spotted; any speech after it is the command.
     WakePhrase,
-    /// The phrase followed by this command.
-    WakePhraseAndCommand(String),
     /// An utterance inside a command window, taken whole as the command.
-    Command(String),
+    Command,
 }
 
-/// Admits a transcript when it opens with the wake phrase, or when it
+/// Admits an utterance when the wake phrase was spotted in it, or when it
 /// began inside a command window: `command_timeout` after a bare phrase,
 /// or `follow_up` after a reply ended. One utterance closes the window.
 #[derive(Debug)]
 pub struct WakeGate {
-    phrase: WakePhrase,
     command_timeout: Duration,
     /// `None` when follow-ups are disabled.
     follow_up: Option<Duration>,
@@ -47,9 +42,8 @@ impl CommandWindow {
 }
 
 impl WakeGate {
-    pub fn new(phrase: WakePhrase, command_timeout: Duration, follow_up: Option<Duration>) -> Self {
+    pub fn new(command_timeout: Duration, follow_up: Option<Duration>) -> Self {
         Self {
-            phrase,
             command_timeout,
             follow_up,
             window: None,
@@ -71,11 +65,6 @@ impl WakeGate {
         }
     }
 
-    /// The phrase to bias transcription toward.
-    pub fn phrase(&self) -> &str {
-        self.phrase.phrase()
-    }
-
     /// When the open command window closes, if one is open.
     pub fn command_deadline(&self) -> Option<Instant> {
         self.window.map(|window| window.closes)
@@ -89,25 +78,28 @@ impl WakeGate {
         }
     }
 
-    /// Gate `transcript`, whose speech began at `started`. Inside a window,
-    /// a transcript that opens with the phrase is still stripped of it.
-    pub fn admit(&mut self, transcript: &str, started: Instant) -> Admission {
+    /// Gate an utterance that began at `started`, `spotted` when the wake
+    /// phrase is in it. A spotted phrase wins over an open window.
+    pub fn admit(&mut self, spotted: bool, started: Instant) -> Admission {
         let in_window = self
             .window
             .take()
             .is_some_and(|window| window.contains(started));
-        match self.phrase.match_prefix(transcript) {
-            Some("") => {
-                self.window = Some(CommandWindow {
-                    opens: started,
-                    closes: Instant::now() + self.command_timeout,
-                });
-                Admission::WakePhrase
-            }
-            Some(command) => Admission::WakePhraseAndCommand(command.to_string()),
-            None if in_window => Admission::Command(transcript.to_string()),
-            None => Admission::Dropped,
+        match (spotted, in_window) {
+            (true, _) => Admission::WakePhrase,
+            (false, true) => Admission::Command,
+            (false, false) => Admission::Dropped,
         }
+    }
+
+    /// The phrase in the utterance that began at `started` had nothing after
+    /// it: take the next utterance that begins within `command_timeout` as
+    /// the command.
+    pub fn await_command(&mut self, started: Instant) {
+        self.window = Some(CommandWindow {
+            opens: started,
+            closes: Instant::now() + self.command_timeout,
+        });
     }
 }
 

@@ -22,7 +22,7 @@ flowchart TB
         core["<b>assistd-core</b><br/>AppState · Agent loop · socket server · presence"]
         llm["<b>assistd-llm</b><br/>chat client · router spec"]
         tools["<b>assistd-tools</b><br/>run tool · commands · policy gates"]
-        voice["<b>assistd-voice</b><br/>Whisper STT · Piper TTS"]
+        voice["<b>assistd-voice</b><br/>sherpa-onnx STT · TTS · VAD"]
         wm["<b>assistd-wm</b><br/>i3 / Sway IPC"]
         mcp["<b>assistd-mcp</b><br/>stdio client (rmcp)"]
         memory[("<b>assistd-memory</b><br/>SQLite stores")]
@@ -35,7 +35,6 @@ flowchart TB
         llama["llama-server<br/>:8385 /v1/chat/completions"]
         embedsrv["embedding llama-server<br/>:8386 /v1/embeddings"]
         searxng["SearXNG<br/>:8387 /search"]
-        piper["piper"]
         mcpsrv["MCP servers<br/>(user-defined)"]
     end
 
@@ -51,7 +50,6 @@ flowchart TB
     llm --> llama
     embed --> embedsrv
     search --> searxng
-    voice --> piper
     mcp --> mcpsrv
 ```
 
@@ -70,7 +68,7 @@ flowchart TB
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, `find_program` (a `PATH` lookup that says why a program cannot be run), child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
-| `assistd-voice`  | `VoiceInput` (Whisper STT, wake-word listening and enrollment) + `VoiceOutput` (Piper TTS) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
+| `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS in a supervised worker process) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; `SwayHotkeys` binds `[hotkeys]` over Sway IPC. | `utils`                                                                          |
 
 `utils` sits at the bottom with no internal dependencies; `config`
@@ -276,33 +274,36 @@ unavailable) until then, and per-turn context injection skips recall.
 `VoiceManager` owns voice for the daemon's lifetime. Capture (push-to-talk
 input and the continuous listener) and speech output each start as
 `Readiness::Starting` and become `Ready` or `Unavailable(reason)` once the
-background warmup brings up Whisper and Piper, so voice requests during
+background warmup brings up the transcriber and the voice, so voice requests during
 startup or after a failed load are refused with the reason. Both appear
 in `GetReadiness`, and `GetVoiceState` reports them too.
 
 Push-to-talk: the daemon receives `Request::PttStart` from a client
 or compositor binding, opens the configured microphone via cpal, and
 streams audio into a ring buffer. On `PttStop` it stops capture and
-hands the buffer to a `Transcriber` (Whisper via `whisper-rs`,
-loaded once at startup). Transcripts feed back into the agent loop
-as if the user had typed them.
+hands the buffer to a `Transcriber` (`SherpaTranscriber`: Parakeet, a
+NeMo transducer, through sherpa-onnx, loaded once at startup).
+Transcripts feed back into the agent loop as if the user had typed them.
 
 Continuous mode (`MicContinuousListener`) keeps the mic open and uses
 Silero VAD to chop the stream into utterances: every 160 ms it labels the
-newest frames speech or not, with the half second before as context, so
-music and room noise never hold an utterance open. Each is transcribed with
-the wake phrase as Whisper's initial prompt, and a `WakeGate` keeps only
-speech that opens with the phrase, the utterance after a bare phrase
+newest frames speech or not, so music and room noise never hold an
+utterance open. A `WakeWordSpotter` (sherpa-onnx keyword spotting with the
+GigaSpeech 3.3M zipformer, one CPU thread) checks each finished utterance
+on a fresh stream for `voice.wakeword.phrase`, which is tokenized at
+startup and refused there if the model cannot spell it. The `WakeGate`
+admits an utterance holding the phrase, the utterance after a bare phrase
 within `voice.wakeword.command_timeout_ms`, or the utterance that begins
 within `voice.wakeword.follow_up_ms` of a listen-started reply ending,
-speech included; everything else is dropped. A push-to-talk press takes
-the mic from the listener, which drops what it captured but has not acted
-on and resumes on release; it ends the voice conversation, so no follow-up
-window opens until the wake phrase starts a new one.
-The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`) and a
-`WakeWordDetected` event on the bus. The listener keeps running while
-presence sleeps, and a command wakes the model like any other query.
-Separately, whisper.cpp's Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
+speech included; only admitted audio is transcribed (from the phrase's
+end, when it has one), and everything else is dropped untranscribed. A
+push-to-talk press takes the mic from the listener, which drops what it
+captured but has not acted on and resumes on release; it ends the voice
+conversation, so no follow-up window opens until the wake phrase starts a
+new one. The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`)
+and a `WakeWordDetected` event on the bus. The listener keeps running
+while presence sleeps, and a command wakes the model like any other query.
+Separately, Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
 every recording before decoding. The mic stays open while replies are
 spoken, so the listener hears the daemon's own TTS; outside a
 listen-started reply it is wake-gated like any other speech, and the
@@ -314,32 +315,33 @@ confirmed only when most of its words are absent from the reply's recent
 sentences, which rejects bumps, noise, and echo. A confirmed barge-in
 interrupts the turn and its speech, and the whole utterance becomes the
 next command; unconfirmed speech over a reply is dropped, never wake-gated.
-A GPU Whisper shares the GPU with the model; the `QueuedTranscriber`
-routes to a lazily built CPU Whisper while presence is not `Active` or
-the `VramLedger` reports another process crowding the GPU.
+Transcription runs on CUDA only when `prefer_gpu` is set and the binary
+ships sherpa-onnx's CUDA libraries (`libonnxruntime_providers_cuda.so`
+beside it); the fp16 Parakeet then holds about 2.6 GB of VRAM. A GPU
+transcriber shares the GPU with the model; the `QueuedTranscriber` routes
+to a lazily built CPU transcriber of the same model while presence is not
+`Active` or the `VramLedger` reports another process crowding the GPU.
 
-The wake phrase is enrolled at runtime, not configured. A
-`Request::WakeWord` carries a `WakeWordOp` (`Status`, `EnrollStart`,
-`EnrollCancel`, `TestStart`, `TestStop`, `Reset`). Enrollment and test
-are sessions owned by the connection that opened them: one at a time,
-they pause the listener and take its capture stack through
-`capture_utterances`, refuse push-to-talk and `ListenStart`, and end on
-stop, disconnect, or two minutes idle. They stream `WakeWordEnrollment`,
-`WakeWordTest`, and `WakeWordSpeech` events; `Status` answers with
-`WakeWordStatus`. `Enrollment` screens each utterance (length, clipping),
-transcribes it with the phrase as prompt, learns each new spelling as a
-variant, and saves once five samples match the bare phrase.
-`ProfileStore` writes `profile.json` and `samples/NN.wav` owner-only
-under `$XDG_DATA_HOME/assistd/wakeword/`; saving or `Reset` swaps the
-phrase into the running listener, and the daemon loads the profile at
-startup, falling back to "hey computer". The user guide is
+The wake phrase is configured, not enrolled. A `Request::WakeWord`
+carries a `WakeWordOp` (`Status`, `TestStart`, `TestStop`). A test is a
+session owned by the connection that opened it: one at a time, it pauses
+the listener and takes its capture stack through `capture_utterances`,
+refuses push-to-talk and `ListenStart`, and ends on stop, disconnect, or
+two minutes idle. It streams a `WakeWordTest` (whether the phrase was
+spotted) per utterance and `WakeWordSpeech` at each start and end of
+speech; `Status` answers with `WakeWordStatus`. The user guide is
 [voice/wake-word.md](voice/wake-word.md).
 
 TTS: model output flows through a `SentenceBuffer` that segments the
-stream into speakable units, each handed to `PiperVoiceOutput`,
-which spawns the `piper` binary per utterance with `--output-raw`,
-writes the sentence to its stdin, reads raw PCM from its stdout, and
-plays it via rodio. Before each sentence, `VoiceOutputController`
+stream into speakable units, each handed to `SherpaVoiceOutput`, which
+synthesizes it with sherpa-onnx on the blocking pool and plays the PCM
+via rodio. The voice loads once at startup on a single ONNX Runtime
+thread, so it never spins on the cores the LLM's CPU layers use. Piper
+(VITS) voices are phonemized by spawning `espeak-ng` per clause, which
+keeps that GPL program out of the binary; Kokoro uses its own lexicon.
+sherpa-onnx links as shared libraries, so a CUDA build only swaps in
+the CUDA release's libraries; the `assistd` runpath finds them beside it
+or in `../lib/assistd`. Before each sentence, `VoiceOutputController`
 returns a `SpeakDecision`: speak it, or drop it because TTS is toggled
 off or the reply was skipped. Tunables live in `[voice.synthesis]`.
 

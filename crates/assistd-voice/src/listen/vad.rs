@@ -11,7 +11,10 @@ pub const FRAME_SAMPLES: usize = 320;
 
 const FRAME_MS: u32 = 20;
 const MIN_UTTERANCE_MS: u32 = 400;
-const PREROLL_MS: u32 = 300;
+/// Audio kept from before the onset is confirmed. Silero labels speech
+/// 300–400 ms after it starts, and the keyword spotter misses a phrase whose
+/// first sound is cut.
+const PREROLL_MS: u32 = 600;
 const ONSET_CONFIRM_MS: u32 = 60;
 
 /// VAD state-machine thresholds, in whole frames.

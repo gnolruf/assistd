@@ -30,11 +30,13 @@ use crate::voice::{SynthesisConfig, TranscriptionConfig, VoiceConfig};
 const CONFIG_DIR_MODE: u32 = 0o700;
 const CONFIG_FILE_MODE: u32 = 0o600;
 const GROUP_OR_WORLD_READABLE: u32 = 0o044;
-/// whisper.cpp's decoder limit.
-const MAX_WHISPER_BEAMS: u32 = 8;
+/// How a speech-to-text model's encoder file name starts.
+const STT_ENCODER_PREFIX: &str = "encoder";
 const MAX_UTTERANCE_SECS: u32 = 300;
 const WAKEWORD_COMMAND_TIMEOUT_MS: RangeInclusive<u32> = 500..=15000;
 const MAX_WAKEWORD_FOLLOW_UP_MS: u32 = 30_000;
+const MAX_WAKE_PHRASE_WORDS: usize = 6;
+const MAX_WAKEWORD_SILENCE_MS: u32 = 1400;
 const MIN_SENTENCE_CHARS: u32 = 50;
 const MAX_SENTENCE_CHARS: u32 = 2000;
 /// Matches the largest `limit` the `reminisce` tool accepts.
@@ -331,6 +333,13 @@ fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {
             MAX_UTTERANCE_SECS,
         );
         validate_wakeword_timeout(errors, voice.wakeword.command_timeout_ms);
+        validate_wake_phrase(errors, &voice.wakeword.phrase);
+        require_at_most(
+            errors,
+            "voice.wakeword.silence_ms",
+            voice.wakeword.silence_ms,
+            MAX_WAKEWORD_SILENCE_MS,
+        );
         if voice.wakeword.follow_up_ms > MAX_WAKEWORD_FOLLOW_UP_MS {
             errors.push(format!(
                 "voice.wakeword.follow_up_ms must be at most {MAX_WAKEWORD_FOLLOW_UP_MS}, got {}",
@@ -340,6 +349,19 @@ fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {
     }
     if voice.synthesis.enabled {
         validate_synthesis(errors, &voice.synthesis);
+    }
+}
+
+fn validate_wake_phrase(errors: &mut Vec<String>, phrase: &str) {
+    let words = phrase.split_whitespace().count();
+    let letters_only = phrase
+        .chars()
+        .all(|c| c.is_alphabetic() || c.is_whitespace() || c == '\'');
+    if words == 0 || words > MAX_WAKE_PHRASE_WORDS || !letters_only {
+        errors.push(format!(
+            "voice.wakeword.phrase must be 1 to {MAX_WAKE_PHRASE_WORDS} words of letters and \
+             apostrophes, got {phrase:?}"
+        ));
     }
 }
 
@@ -354,7 +376,19 @@ fn validate_wakeword_timeout(errors: &mut Vec<String>, timeout_ms: NonZeroU32) {
 }
 
 fn validate_transcription(errors: &mut Vec<String>, transcription: &TranscriptionConfig) {
-    require_hf_id(errors, "voice.transcription.model", &transcription.model);
+    if let Some(model) = require_hf_id(errors, "voice.transcription.model", &transcription.model)
+        && !model
+            .file()
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with(STT_ENCODER_PREFIX))
+    {
+        errors.push(format!(
+            "voice.transcription.model must name the model's encoder .onnx, a file whose \
+             name starts with `{STT_ENCODER_PREFIX}`, got {:?}",
+            model.file()
+        ));
+    }
     if transcription.vad_enabled {
         require_hf_id(
             errors,
@@ -362,12 +396,6 @@ fn validate_transcription(errors: &mut Vec<String>, transcription: &Transcriptio
             &transcription.vad_model,
         );
     }
-    require_at_most(
-        errors,
-        "voice.transcription.beams",
-        transcription.beams,
-        MAX_WHISPER_BEAMS,
-    );
     require_absolute_dir(
         errors,
         "voice.transcription.model_cache_dir",
@@ -376,10 +404,6 @@ fn validate_transcription(errors: &mut Vec<String>, transcription: &Transcriptio
 }
 
 fn validate_synthesis(errors: &mut Vec<String>, synthesis: &SynthesisConfig) {
-    if synthesis.binary_path.as_os_str().is_empty() {
-        errors
-            .push("voice.synthesis.binary_path must not be empty when synthesis is enabled".into());
-    }
     require_hf_id(errors, "voice.synthesis.voice", &synthesis.voice);
     if !synthesis.length_scale.is_finite() || synthesis.length_scale <= 0.0 {
         errors.push("voice.synthesis.length_scale must be a positive, finite number".into());
@@ -394,11 +418,6 @@ fn validate_synthesis(errors: &mut Vec<String>, synthesis: &SynthesisConfig) {
         errors,
         "voice.synthesis.model_cache_dir",
         synthesis.model_cache_dir.as_deref(),
-    );
-    require_absolute_dir(
-        errors,
-        "voice.synthesis.espeak_data_dir",
-        synthesis.espeak_data_dir.as_deref(),
     );
 }
 

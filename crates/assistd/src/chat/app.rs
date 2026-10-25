@@ -31,9 +31,8 @@ mod wire;
 
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
-    ComputerScene, EnrollProgress, LANE_COLUMNS, MenuItem, Mood, RECENT_RESULTS, ResetChoice,
-    SampleResult, SessionPurpose, StatusState, TestProgress, WakeWordPanel, WakeWordStatus,
-    WakeWordView,
+    ComputerScene, LANE_COLUMNS, Mood, RECENT_RESULTS, StatusState, TestProgress, WakeWordPanel,
+    WakeWordStatus, WakeWordView,
 };
 
 const SPINNER_CHARS: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];

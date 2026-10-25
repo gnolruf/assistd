@@ -4,14 +4,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use assistd_config::VoiceConfig;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::transcribe::Transcriber;
-use crate::whisper::WhisperTranscriberBuilder;
 use crate::{VoiceCaptureState, VoiceInput, VoiceInputError};
 
 pub mod capture;
@@ -41,15 +39,6 @@ struct PttState {
 }
 
 impl MicVoiceInput {
-    /// Build from config with a bare [`crate::WhisperTranscriber`] (no
-    /// queueing or CPU fallback). Downloads models on first use.
-    pub async fn from_config(config: &VoiceConfig) -> Result<Self, VoiceInputError> {
-        let transcriber = WhisperTranscriberBuilder::from_config(&config.transcription)
-            .build()
-            .await?;
-        Ok(Self::new(Arc::new(transcriber), config.mic_device.clone()))
-    }
-
     /// `mic_device` selects the cpal input device by name, `None` for
     /// the system default.
     pub fn new(transcriber: Arc<dyn Transcriber>, mic_device: Option<String>) -> Self {

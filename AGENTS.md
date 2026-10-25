@@ -135,7 +135,7 @@ and data-flow walkthrough.
 | `assistd-search` | SearXNG launch spec: the `ChildServerSpec` for the daemon-supervised search instance, run with a generated settings file, its `SEARXNG_*` environment replaced, and a per-launch secret; plus `SearxngClient`, a typed client for its JSON search API. |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
 | `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, capped child-output line forwarding, size-capped HTTP body reads, `find_program` (a `PATH` lookup that says why a program cannot be run), the `ProcessGroup` kill-on-drop guard, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor (spawn, `/health` poll checked against `/proc` listener ownership, restart, degrade) that both llama-servers run under. No internal deps. |
-| `assistd-voice`  | `VoiceInput` (Whisper STT via `whisper-rs`, push-to-talk and VAD continuous modes), `VoiceOutput` (Piper TTS streamed sentence-by-sentence), adaptive `SpeakDecision`. Feature-gated (`whisper`, `mic`, `listen`, `tts`, `cuda`). |
+| `assistd-voice`  | `VoiceInput` (Parakeet STT and Silero VAD through `sherpa-onnx`, push-to-talk and VAD continuous modes), `VoiceOutput` (sherpa-onnx TTS streamed sentence-by-sentence, Piper voices phonemized by spawning `espeak-ng`), adaptive `SpeakDecision`. Feature-gated (`stt`, `mic`, `listen`, `tts`). |
 | `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback. Backs both the system-prompt active-window injection and the `wm` command, including `wm open`'s launches through the compositor, and binds the daemon's hotkeys over Sway IPC. Feature-gated per compositor. |
 
 **Dependency direction.** Crates lower in the table do not depend on
@@ -161,7 +161,7 @@ stays where it is used.
   a feature-gated import into an unconditional dependency to
   silence a build error — fix the feature wiring.
 - **External processes are supervised, not assumed.** `llama-server`,
-  the embedding `llama-server`, `piper`, `whisper`, and MCP servers
+  the embedding `llama-server`, SearXNG, and MCP servers
   are all child processes with supervisors that handle restart and
   reconnect. New external integrations should follow the same
   pattern (health probe, exponential backoff, surface failures as

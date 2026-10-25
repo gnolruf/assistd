@@ -16,7 +16,7 @@ use tracing::warn;
 
 use super::consumer;
 
-/// Whisper's input rate; the consumer resamples the device rate to it.
+/// The transcriber's input rate; the consumer resamples the device rate to it.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 /// Native rate assumed when sizing the push-to-talk ring before the device is opened.

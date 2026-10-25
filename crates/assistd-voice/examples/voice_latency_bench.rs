@@ -1,5 +1,5 @@
 //! End-of-speech to first-audio latency benchmark: runs a 16 kHz mono WAV
-//! through Whisper, a running llama-server, and Piper N times, attributing
+//! through Parakeet, a running llama-server, and sherpa-onnx TTS N times, attributing
 //! `assistd::voice::latency` events to each iteration's `voice_turn` span.
 
 use std::collections::HashMap;
@@ -12,10 +12,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use assistd_config::{ChatConfig, ModelConfig, SynthesisConfig, TimeoutsConfig};
+use assistd_config::{
+    ChatConfig, ModelConfig, SynthesisConfig, TimeoutsConfig, TranscriptionConfig, VoiceFamily,
+};
 use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent};
 use assistd_voice::{
-    NoVoiceOutput, PiperVoiceOutput, SentenceBuffer, Transcriber, VoiceOutput, WhisperTranscriber,
+    NoVoiceOutput, SentenceBuffer, SherpaTranscriber, SherpaVoiceOutput, Transcriber, VoiceOutput,
 };
 use clap::Parser;
 use num_traits::ToPrimitive;
@@ -36,15 +38,14 @@ const DEFAULT_WAV_URL: &str =
 
 const STAGE_ORDER: &[&str] = &[
     "audio_capture_stop",
-    "whisper_start",
-    "whisper_done",
+    "stt_start",
+    "stt_done",
     "ensure_active_done",
     "llm_request_sent",
     "llm_first_token",
     "first_sentence_emitted",
-    "piper_spawn",
-    "piper_first_byte",
-    "piper_synth_done",
+    "tts_synth_start",
+    "tts_synth_done",
     "playback_enqueued",
 ];
 
@@ -74,33 +75,33 @@ struct Args {
     /// does not validate it, so a placeholder works.
     #[arg(long, default_value = "default")]
     model: String,
-    /// HuggingFace identifier of the Whisper GGML model, as in
-    /// `voice.transcription.model`. Tiny, base, and small all work.
-    #[arg(long, default_value = "ggerganov/whisper.cpp:ggml-tiny.en.bin")]
-    whisper_model: String,
-    /// Force CPU inference for Whisper. Otherwise the GPU is used when
-    /// CUDA is available.
+    /// Speech-to-text encoder, as in `voice.transcription.model`;
+    /// defaults to the config default.
+    #[arg(long)]
+    stt_model: Option<String>,
+    /// Transcribe on the CPU even when CUDA is usable.
     #[arg(long, default_value_t = false)]
-    whisper_cpu_only: bool,
+    stt_cpu_only: bool,
     /// Cap on LLM response tokens so each iteration completes promptly.
     /// Reasoning models spend tokens in a `<think>` block first; a
     /// budget below the thinking length yields no visible content, so
     /// `llm_first_token` and every later stage never fire.
     #[arg(long, default_value = "1024")]
     max_response_tokens: NonZeroU32,
-    /// Substitute the silent `NoVoiceOutput` for Piper, for Whisper and
-    /// LLM timings only. Piper stages and end-to-end timing are omitted.
+    /// Substitute the silent `NoVoiceOutput` for sherpa-onnx TTS, for
+    /// transcription and LLM timings only. TTS stages and end-to-end timing are
+    /// omitted.
     #[arg(long)]
-    no_piper: bool,
-    /// Piper binary name or path, e.g. `piper-tts` where the distro
-    /// package ships it under that name.
-    #[arg(long, default_value = "piper")]
-    piper_binary: String,
-    /// Pass `--cuda` to piper. Requires a piper built against
-    /// `onnxruntime-gpu`; most distro packages are CPU-only and fail
-    /// with "CUDA execution provider not available".
+    no_tts: bool,
+    /// Voice, as in `voice.synthesis.voice`; defaults to the config default.
     #[arg(long)]
-    piper_cuda: bool,
+    voice: Option<String>,
+    /// Model family of `--voice`: `vits` or `kokoro`.
+    #[arg(long, default_value = "vits")]
+    family: String,
+    /// Speaker index for multi-speaker voices.
+    #[arg(long, default_value_t = 0)]
+    speaker_id: u32,
     /// Prepend `/no_think ` to the transcribed prompt so Qwen3-style
     /// reasoning models skip the `<think>` block, cutting
     /// `llm_first_token` to roughly prefill plus one decoded token.
@@ -310,7 +311,7 @@ async fn main() -> Result<()> {
     init_tracing(collector.clone());
 
     let pcm = load_pcm(&args).await?;
-    let whisper = build_whisper(&args).await?;
+    let stt = build_stt(&args).await?;
 
     writeln!(
         io::stderr(),
@@ -319,9 +320,9 @@ async fn main() -> Result<()> {
         args.llama_port
     )?;
     let llm_settings = LlmSettings::from_args(&args);
-    let piper = start_piper(&args).await;
+    let speech = start_speech(&args).await?;
 
-    let runs = run_iterations(&args, &collector, &llm_settings, whisper, piper, &pcm).await?;
+    let runs = run_iterations(&args, &collector, &llm_settings, stt, speech, &pcm).await?;
     if runs.is_empty() {
         bail!("no successful iterations");
     }
@@ -360,65 +361,60 @@ async fn load_pcm(args: &Args) -> Result<Vec<i16>> {
     Ok(pcm)
 }
 
-async fn build_whisper(args: &Args) -> Result<Arc<dyn Transcriber>> {
-    writeln!(
-        io::stderr(),
-        "building Whisper ({}{})",
-        args.whisper_model,
-        if args.whisper_cpu_only { ", CPU" } else { "" }
-    )?;
-    let whisper = WhisperTranscriber::builder()
-        .model(args.whisper_model.clone())
-        .prefer_gpu(!args.whisper_cpu_only)
-        .beams(1)
-        .vad_enabled(false)
-        .build()
+async fn build_stt(args: &Args) -> Result<Arc<dyn Transcriber>> {
+    let defaults = TranscriptionConfig::default();
+    let config = TranscriptionConfig {
+        model: args.stt_model.clone().unwrap_or(defaults.model.clone()),
+        prefer_gpu: !args.stt_cpu_only,
+        vad_enabled: false,
+        ..defaults
+    };
+    writeln!(io::stderr(), "loading speech-to-text ({})", config.model)?;
+    let transcriber = SherpaTranscriber::load(&config)
         .await
-        .context("building whisper")?;
-    Ok(Arc::new(whisper))
+        .context("loading speech-to-text")?;
+    Ok(Arc::new(transcriber))
 }
 
-/// Falls back to `NoVoiceOutput` when piper cannot start, so Whisper and LLM
-/// timings stay comparable.
-async fn start_piper(args: &Args) -> Arc<dyn VoiceOutput> {
-    if args.no_piper {
-        let _ = writeln!(
+/// Falls back to `NoVoiceOutput` when the voice cannot load, so
+/// transcription and LLM timings stay comparable.
+async fn start_speech(args: &Args) -> Result<Arc<dyn VoiceOutput>> {
+    if args.no_tts {
+        writeln!(
             io::stderr(),
-            "Piper disabled (--no-piper); end-to-end timing will be omitted"
-        );
-        return Arc::new(NoVoiceOutput);
+            "TTS disabled (--no-tts); end-to-end timing will be omitted"
+        )?;
+        return Ok(Arc::new(NoVoiceOutput));
     }
-    let _ = writeln!(
-        io::stderr(),
-        "building Piper TTS (binary='{}', cuda={})...",
-        args.piper_binary,
-        args.piper_cuda
-    );
+    let family: VoiceFamily = serde_json::from_value(json!(args.family))
+        .with_context(|| format!("--family {:?} is not vits or kokoro", args.family))?;
+    let defaults = SynthesisConfig::default();
     let synthesis = SynthesisConfig {
-        binary_path: args.piper_binary.clone().into(),
-        use_cuda: args.piper_cuda,
-        ..SynthesisConfig::default()
+        voice: args.voice.clone().unwrap_or(defaults.voice.clone()),
+        family,
+        speaker_id: args.speaker_id,
+        ..defaults
     };
-    match PiperVoiceOutput::start(synthesis).await {
-        Ok(piper) => Arc::new(piper),
+    writeln!(io::stderr(), "loading the voice ({})...", synthesis.voice)?;
+    Ok(match SherpaVoiceOutput::start(&synthesis).await {
+        Ok(speech) => Arc::new(speech),
         Err(err) => {
-            let _ = writeln!(
+            writeln!(
                 io::stderr(),
-                "Piper unavailable ({err:#}); falling back to NoVoiceOutput. \
-                 End-to-end timing will be omitted. Install piper or pass \
-                 --no-piper to silence this warning."
-            );
+                "speech unavailable ({err:#}); falling back to NoVoiceOutput. \
+                 End-to-end timing will be omitted. Pass --no-tts to silence this warning."
+            )?;
             Arc::new(NoVoiceOutput)
         }
-    }
+    })
 }
 
 async fn run_iterations(
     args: &Args,
     collector: &LatencyCollector,
     llm_settings: &LlmSettings,
-    whisper: Arc<dyn Transcriber>,
-    piper: Arc<dyn VoiceOutput>,
+    stt: Arc<dyn Transcriber>,
+    speech: Arc<dyn VoiceOutput>,
     pcm: &[i16],
 ) -> Result<Vec<RunMetrics>> {
     let mut runs: Vec<RunMetrics> = Vec::with_capacity(args.iterations);
@@ -428,7 +424,7 @@ async fn run_iterations(
         let correlation_id = format!("bench-{iteration}");
         let span = tracing::info_span!("voice_turn", correlation_id = %correlation_id);
         let turn_start = Instant::now();
-        let outcome = run_one(whisper.clone(), llm, piper.clone(), pcm, args.no_think)
+        let outcome = run_one(stt.clone(), llm, speech.clone(), pcm, args.no_think)
             .instrument(span)
             .await;
         let stages = collector.take(&correlation_id);
@@ -458,9 +454,9 @@ async fn run_iterations(
 /// speak. `ensure_active_done` fires unconditionally since there is no presence
 /// manager to wait on.
 async fn run_one(
-    whisper: Arc<dyn Transcriber>,
+    stt: Arc<dyn Transcriber>,
     llm: Arc<dyn LlmBackend>,
-    piper: Arc<dyn VoiceOutput>,
+    speech: Arc<dyn VoiceOutput>,
     pcm: &[i16],
     no_think: bool,
 ) -> Result<()> {
@@ -470,7 +466,7 @@ async fn run_one(
         "voice latency stage"
     );
 
-    let prompt = transcribe_prompt(whisper.as_ref(), pcm, no_think).await?;
+    let prompt = transcribe_prompt(stt.as_ref(), pcm, no_think).await?;
 
     tracing::debug!(
         target: "assistd::voice::latency",
@@ -481,7 +477,7 @@ async fn run_one(
     let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
     let (speech_tx, speech_rx) = mpsc::channel::<String>(32);
     let llm_task = spawn_generation(llm, prompt, llm_tx);
-    let speech_task = spawn_speaker(piper, speech_rx);
+    let speech_task = spawn_speaker(speech, speech_rx);
 
     forward_sentences(llm_rx, speech_tx).await;
     let _ = speech_task.await;
@@ -491,17 +487,13 @@ async fn run_one(
 
 /// Transcribe `pcm`, prefixing `/no_think` when asked; reasoning models that
 /// honor it skip the `<think>` block and others ignore it.
-async fn transcribe_prompt(
-    whisper: &dyn Transcriber,
-    pcm: &[i16],
-    no_think: bool,
-) -> Result<String> {
-    let transcript = whisper
+async fn transcribe_prompt(stt: &dyn Transcriber, pcm: &[i16], no_think: bool) -> Result<String> {
+    let transcript = stt
         .transcribe(pcm, None)
         .await
-        .map_err(|err| anyhow::anyhow!("whisper failed: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("transcription failed: {err}"))?;
     if transcript.trim().is_empty() {
-        bail!("whisper returned empty transcript");
+        bail!("transcription returned an empty transcript");
     }
     Ok(if no_think {
         format!("/no_think {transcript}")
@@ -534,13 +526,13 @@ fn spawn_generation(
 /// Speaks each sentence without `wait_idle`: the bench measures
 /// `playback_enqueued`, not playback completion.
 fn spawn_speaker(
-    piper: Arc<dyn VoiceOutput>,
+    speech: Arc<dyn VoiceOutput>,
     mut speech_rx: mpsc::Receiver<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(
         async move {
             while let Some(sentence) = speech_rx.recv().await {
-                let _ = piper.speak(sentence).await;
+                let _ = speech.speak(sentence).await;
             }
         }
         .in_current_span(),
@@ -591,7 +583,7 @@ fn mark_first_sentence(first_emitted: &mut bool) {
 }
 
 /// Samples of a 16 kHz 16-bit signed mono WAV. Any other format is a
-/// clear error here rather than a confusing whisper failure later.
+/// clear error here rather than a confusing transcription failure later.
 fn load_wav_16k_mono(path: &Path) -> Result<Vec<i16>> {
     let mut reader =
         hound::WavReader::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -766,7 +758,7 @@ fn print_human(summary: &Summary) -> io::Result<()> {
         }
         None => writeln!(
             io::stdout(),
-            "no playback_enqueued events captured; pipeline did not reach Piper"
+            "no playback_enqueued events captured; pipeline did not reach TTS"
         )?,
     }
     Ok(())

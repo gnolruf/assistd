@@ -40,30 +40,30 @@ pub enum TranscriptionError {
     #[error("empty audio buffer")]
     EmptyAudio,
 
-    #[error("invalid model identifier {id:?}: {reason}")]
-    ModelParse { id: String, reason: String },
-
     #[error(transparent)]
     Download(#[from] assistd_utils::hf::download::DownloadError),
 
-    #[error("failed to initialize whisper context: {0}")]
-    WhisperInit(String),
+    #[error("failed to load the speech-to-text model: {0}")]
+    ModelLoad(String),
 
-    #[error("whisper inference failed: {0}")]
-    WhisperInference(String),
+    #[error("transcription failed: {0}")]
+    Inference(String),
+
+    #[error("failed to load Silero VAD: {0}")]
+    VadInit(String),
 
     #[error("tokio join error: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
 
-/// Answers "is the GPU available for Whisper right now?". An LLM stream in
-/// flight does not count: Whisper shares the GPU with it.
+/// Answers "is the GPU available for transcription right now?". An LLM stream
+/// in flight does not count: transcription shares the GPU with it.
 pub trait BusyProbe: fmt::Debug + Send + Sync + 'static {
     /// True when a process outside assistd holds meaningful VRAM, so
     /// waiting would not help.
     fn foreign_gpu_busy(&self) -> bool;
 
-    /// True when the GPU whisper context is safe to use. When false the
+    /// True when the GPU transcriber is safe to use. When false the
     /// context may be torn down concurrently and must not be touched.
     fn presence_active(&self) -> bool;
 }

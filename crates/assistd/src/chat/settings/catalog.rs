@@ -5,6 +5,7 @@ use assistd_config::{SettingInfo, setting_info};
 
 const COMPOSITOR_TYPES: &[&str] = &["auto", "i3", "sway", "hyprland"];
 const SANDBOX_MODES: &[&str] = &["auto", "bwrap", "none"];
+const VOICE_FAMILIES: &[&str] = &["vits", "kokoro"];
 
 pub(crate) const SECTIONS: &[Section] = &[
     section(
@@ -60,7 +61,6 @@ pub(crate) const SECTIONS: &[Section] = &[
             setting("voice.transcription.model", SettingKind::Text),
             setting("voice.transcription.prefer_gpu", SettingKind::Toggle),
             setting("voice.transcription.threads", SettingKind::Integer),
-            setting("voice.transcription.beams", SettingKind::Integer),
             setting("voice.transcription.vad_enabled", SettingKind::Toggle),
             setting("voice.transcription.vad_model", SettingKind::Text),
             setting("voice.transcription.model_cache_dir", SettingKind::Text),
@@ -72,13 +72,14 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("voice.wakeword.enabled"),
         &["voice.enabled"],
         &[
+            setting("voice.wakeword.phrase", SettingKind::Text),
             setting("voice.wakeword.start_on_launch", SettingKind::Toggle),
             setting("voice.wakeword.barge_in", SettingKind::Toggle),
             setting("voice.wakeword.follow_up_ms", SettingKind::Integer),
             setting("voice.wakeword.silence_ms", SettingKind::Integer),
             setting("voice.wakeword.max_utterance_secs", SettingKind::Integer),
             setting("voice.wakeword.command_timeout_ms", SettingKind::Integer),
-            setting("voice.wakeword.match_similarity", SettingKind::Decimal),
+            setting("voice.wakeword.threshold", SettingKind::Decimal),
         ],
     ),
     feature(
@@ -88,15 +89,16 @@ pub(crate) const SECTIONS: &[Section] = &[
         &[],
         &[
             setting("voice.synthesis.voice", SettingKind::Text),
+            setting(
+                "voice.synthesis.family",
+                SettingKind::Choice(VOICE_FAMILIES),
+            ),
+            setting("voice.synthesis.speaker_id", SettingKind::Integer),
             setting("voice.synthesis.output_device", SettingKind::Text),
             setting("voice.synthesis.length_scale", SettingKind::Decimal),
-            setting("voice.synthesis.binary_path", SettingKind::Text),
             setting("voice.synthesis.model_cache_dir", SettingKind::Text),
-            setting("voice.synthesis.espeak_data_dir", SettingKind::Text),
-            setting("voice.synthesis.deadline_secs", SettingKind::Integer),
             setting("voice.synthesis.max_sentence_chars", SettingKind::Integer),
             setting("voice.synthesis.partial_flush_ms", SettingKind::Integer),
-            setting("voice.synthesis.use_cuda", SettingKind::Toggle),
         ],
     ),
     section(

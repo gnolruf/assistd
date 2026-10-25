@@ -69,6 +69,24 @@ impl HfFileId {
     pub fn file(&self) -> &str {
         &self.file
     }
+
+    /// The file `name` in the same repo, revision and directory. Fails when
+    /// `name` is not a plain file name.
+    pub fn sibling(&self, name: &str) -> Result<Self, InvalidHfId> {
+        if !is_plain_name(name) {
+            return Err(InvalidHfId(
+                "sibling file name must be one segment using only [A-Za-z0-9._+-]",
+            ));
+        }
+        let file = match self.file.rsplit_once('/') {
+            Some((dir, _)) => format!("{dir}/{name}"),
+            None => name.to_string(),
+        };
+        Ok(Self {
+            file,
+            ..self.clone()
+        })
+    }
 }
 
 impl fmt::Display for HfFileId {

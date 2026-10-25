@@ -8,18 +8,19 @@ use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use thiserror::Error;
 
 use crate::{
-    ContinuousListener, ProfileStore, Transcriber, VoiceInput, VoiceOutput, VoiceOutputController,
+    ContinuousListener, Transcriber, VoiceInput, VoiceOutput, VoiceOutputController,
+    WakeWordSpotter,
 };
 
 /// Push-to-talk input and the continuous listener, which share one
-/// transcriber and so come up together, plus where the listener's enrolled
-/// wake phrase is kept.
+/// transcriber and so come up together, plus the listener's wake-phrase
+/// spotter; `None` when wake-word listening is off or failed to load.
 #[derive(Debug, Clone)]
 pub struct VoiceCapture {
     pub input: Arc<dyn VoiceInput>,
     pub listener: Arc<dyn ContinuousListener>,
     pub transcriber: Arc<dyn Transcriber>,
-    pub profiles: ProfileStore,
+    pub spotter: Option<Arc<WakeWordSpotter>>,
 }
 
 /// Voice capture is still starting, or unavailable this run.

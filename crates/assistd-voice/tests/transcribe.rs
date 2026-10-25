@@ -1,5 +1,5 @@
-//! End-to-end transcription against a small Whisper model and a known
-//! speech clip, both downloaded: checks accuracy, that whisper.cpp's VAD
+//! End-to-end transcription against Parakeet on the CPU and a known
+//! speech clip, both downloaded: checks accuracy, that Silero VAD
 //! trims silence padding, and a generous latency ceiling. Gated behind
 //! `test-support` so a plain `cargo test -p assistd-voice` stays offline.
 
@@ -8,10 +8,13 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use assistd_voice::{Transcriber, WhisperTranscriber};
+use assistd_config::TranscriptionConfig;
+use assistd_voice::{SherpaTranscriber, Transcriber};
 
-const TINY_MODEL_ID: &str = "ggerganov/whisper.cpp:ggml-tiny.en-q5_1.bin";
-const VAD_MODEL_ID: &str = "ggml-org/whisper-vad:ggml-silero-v6.2.0.bin";
+const CPU_MODEL_ID: &str = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8\
+     @1ab9323565ddb038682214b292f588070a538ce2:encoder.int8.onnx";
+const VAD_MODEL_ID: &str =
+    "Tinysoft/silero-vad-6.2@3034960e5d3beb943b860ec0ea1a857bdae4ae96:silero_vad.onnx";
 const SPEECH_URL: &str =
     "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav";
 
@@ -53,47 +56,40 @@ fn normalize(text: &str) -> String {
         .join(" ")
 }
 
-async fn make_transcriber(cache: &Path, vad: bool) -> WhisperTranscriber {
-    let mut builder = WhisperTranscriber::builder()
-        .model(TINY_MODEL_ID)
-        .cache_dir(Some(cache.to_path_buf()))
-        .prefer_gpu(true)
-        .beams(1)
-        .vad_enabled(vad);
-    if vad {
-        builder = builder.vad_model(VAD_MODEL_ID).vad_silence_secs(0.5);
-    }
-    builder.build().await.expect("transcriber builds")
+/// Models download to the user's cache, so only the first run fetches them.
+async fn make_transcriber(vad: bool) -> SherpaTranscriber {
+    let config = TranscriptionConfig {
+        model: CPU_MODEL_ID.into(),
+        vad_enabled: vad,
+        vad_model: VAD_MODEL_ID.into(),
+        ..TranscriptionConfig::default()
+    };
+    SherpaTranscriber::load_cpu(&config)
+        .await
+        .expect("transcriber loads")
 }
 
 struct Fixture {
     _tmp: tempfile::TempDir,
-    cache: PathBuf,
     wav: PathBuf,
 }
 
 async fn setup() -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let cache = tmp.path().join("cache");
-    std::fs::create_dir_all(&cache).unwrap();
     let wav = tmp.path().join("jfk.wav");
     fetch_to(&wav, SPEECH_URL).await;
-    Fixture {
-        _tmp: tmp,
-        cache,
-        wav,
-    }
+    Fixture { _tmp: tmp, wav }
 }
 
 #[tokio::test]
-#[ignore = "downloads ~80MB Whisper model + JFK clip; run with --ignored for real-fidelity coverage"]
+#[ignore = "downloads ~650MB Parakeet model + JFK clip; run with --ignored for real-fidelity coverage"]
 async fn transcribes_clear_english_speech() {
     init_tracing();
     let fixture = setup().await;
     let pcm = load_pcm_16k_mono(&fixture.wav);
     assert!(pcm.len() >= 16000 * 5, "fixture should be at least 5s");
 
-    let transcriber = make_transcriber(&fixture.cache, false).await;
+    let transcriber = make_transcriber(false).await;
     let started = Instant::now();
     let text = transcriber
         .transcribe(&pcm, None)
@@ -117,7 +113,7 @@ async fn transcribes_clear_english_speech() {
 }
 
 #[tokio::test]
-#[ignore = "downloads Whisper + Silero VAD models; run with --ignored for real-fidelity coverage"]
+#[ignore = "downloads Parakeet + Silero VAD models; run with --ignored for real-fidelity coverage"]
 async fn vad_trims_silence_padding() {
     init_tracing();
     let fixture = setup().await;
@@ -128,7 +124,7 @@ async fn vad_trims_silence_padding() {
     padded.extend_from_slice(&pcm);
     padded.extend_from_slice(&silence);
 
-    let transcriber = make_transcriber(&fixture.cache, true).await;
+    let transcriber = make_transcriber(true).await;
     let plain = transcriber
         .transcribe(&pcm, None)
         .await

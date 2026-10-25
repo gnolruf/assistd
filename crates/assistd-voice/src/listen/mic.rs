@@ -1,6 +1,6 @@
-//! cpal + Silero + whisper hands-free listener: ring buffer → resampler →
-//! Silero speech labels → utterance segmenter → transcriber → wake gate or
-//! barge-in check → broadcast.
+//! cpal + Silero + keyword-spotting hands-free listener: ring buffer →
+//! resampler → Silero speech labels → utterance segmenter → wake-phrase
+//! spotter and gate, or barge-in check → transcriber → broadcast.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,11 +17,11 @@ use tracing::{debug, info, trace, warn};
 
 use super::barge_in::{BargeInWatch, confirms_barge_in};
 use super::capture::{self, ListenCaptureSession};
-use super::enrollment::{CapturedUtterance, SessionAudio};
+use super::session::{CapturedUtterance, SessionAudio};
 use super::silero::{FrameClassifier, SileroVad};
+use super::spotter::WakeWordSpotter;
 use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTuning};
 use super::wake_gate::{Admission, WakeGate};
-use super::wake_phrase::WakePhrase;
 use super::{ContinuousListener, Heard, ListenError};
 use crate::controller::VoiceOutputController;
 use crate::mic::capture::AudioCaptureError;
@@ -35,6 +35,10 @@ const FRAME_CHANNEL_DEPTH: usize = 128;
 /// Utterances awaiting transcription; beyond this, new utterances are dropped
 /// rather than letting a slow transcriber accumulate audio.
 const PENDING_UTTERANCE_DEPTH: usize = 4;
+
+/// Shortest speech after the wake phrase worth transcribing as a command:
+/// 300 ms at 16 kHz.
+const MIN_COMMAND_SAMPLES: usize = 4_800;
 
 type CaptureJoin = JoinHandle<Result<(), AudioCaptureError>>;
 
@@ -97,7 +101,7 @@ pub struct MicContinuousListener {
     speech: Arc<VoiceOutputController>,
     barge_in: bool,
     replying_tx: watch::Sender<bool>,
-    wake_phrase: parking_lot::Mutex<WakePhrase>,
+    spotter: Arc<WakeWordSpotter>,
     command_timeout: Duration,
     follow_up: Option<Duration>,
     /// The latest signal for the running session; each session subscribes
@@ -152,14 +156,16 @@ impl ListenSession {
 }
 
 impl MicContinuousListener {
-    /// Listens for the built-in wake phrase. The audio device is opened on
-    /// [`Self::start`], not here. `speech` supplies the reply text that
-    /// barge-in checks reject as echo; `silero` decides which frames hold speech.
+    /// Listens for the wake phrase `spotter` finds. The audio device is
+    /// opened on [`Self::start`], not here. `speech` supplies the reply text
+    /// that barge-in checks reject as echo; `silero` decides which frames
+    /// hold speech.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         config: &VoiceConfig,
         speech: Arc<VoiceOutputController>,
         silero: SileroVad,
+        spotter: Arc<WakeWordSpotter>,
     ) -> Self {
         let tuning = tuning_from_config(&config.wakeword);
         let (phase_tx, _) = watch::channel(ListenPhase::Off);
@@ -172,9 +178,7 @@ impl MicContinuousListener {
             speech,
             barge_in: config.wakeword.barge_in,
             replying_tx: watch::channel(false).0,
-            wake_phrase: parking_lot::Mutex::new(WakePhrase::builtin(
-                config.wakeword.match_similarity,
-            )),
+            spotter,
             command_timeout: Duration::from_millis(config.wakeword.command_timeout_ms.get().into()),
             follow_up: (config.wakeword.follow_up_ms > 0)
                 .then(|| Duration::from_millis(config.wakeword.follow_up_ms.into())),
@@ -238,7 +242,7 @@ impl ContinuousListener for MicContinuousListener {
             return Ok(());
         }
         if self.capturing_utterances.load(Ordering::SeqCst) {
-            return Err(ListenError::Enrolling);
+            return Err(ListenError::Testing);
         }
         self.active.store(true, Ordering::SeqCst);
 
@@ -251,13 +255,12 @@ impl ContinuousListener for MicContinuousListener {
         } = capture::start(self.mic_device.as_deref(), frame_tx);
 
         let (pcm_tx, pcm_rx) = mpsc::channel::<ListenAudio>(PENDING_UTTERANCE_DEPTH);
-        let gate = WakeGate::new(
-            self.wake_phrase.lock().clone(),
-            self.command_timeout,
-            self.follow_up,
-        );
+        let gate = WakeGate::new(self.command_timeout, self.follow_up);
         let transcribe_handle = tokio::spawn(transcribe_loop(
-            self.transcriber.clone(),
+            Listeners {
+                transcriber: self.transcriber.clone(),
+                spotter: Arc::clone(&self.spotter),
+            },
             gate,
             ListenOutputs {
                 heard: self.heard.clone(),
@@ -332,10 +335,6 @@ impl ContinuousListener for MicContinuousListener {
         self.phase_tx.subscribe()
     }
 
-    fn set_wake_phrase(&self, phrase: WakePhrase) {
-        *self.wake_phrase.lock() = phrase;
-    }
-
     fn open_follow_up(&self) {
         self.conversation_tx
             .send_replace(Some(ConversationSignal::FollowUp(Instant::now())));
@@ -355,7 +354,7 @@ impl ContinuousListener for MicContinuousListener {
                 return Err(ListenError::Listening);
             }
             if self.capturing_utterances.swap(true, Ordering::SeqCst) {
-                return Err(ListenError::Enrolling);
+                return Err(ListenError::Testing);
             }
             UtteranceCaptureClaim(Arc::clone(&self.capturing_utterances))
         };
@@ -482,18 +481,6 @@ impl ListenOutputs {
         }
     }
 
-    fn publish(&self, admission: Admission) {
-        match admission {
-            Admission::Dropped => {}
-            Admission::WakePhrase => self.send_heard(Heard::WakePhrase),
-            Admission::WakePhraseAndCommand(command) => {
-                self.send_heard(Heard::WakePhrase);
-                self.send_heard(Heard::Command(command));
-            }
-            Admission::Command(command) => self.send_heard(Heard::Command(command)),
-        }
-    }
-
     fn set_phase(&self, phase: ListenPhase) {
         self.phase
             .send_if_modified(|current| std::mem::replace(current, phase) != phase);
@@ -571,20 +558,13 @@ fn queue_for_transcription(pcm_tx: &mpsc::Sender<ListenAudio>, segment: Segment)
     }
 }
 
-/// Hand an enrollment utterance to the session. False once it closed.
+/// Hand a test session's utterance to it. False once it closed.
 fn forward_captured(sink: &mpsc::Sender<SessionAudio>, segment: Segment) -> bool {
     let Segment::Utterance { event, .. } = segment else {
         return true;
     };
     let utterance = match event {
-        VadEvent::UtteranceComplete(pcm) => CapturedUtterance {
-            pcm,
-            truncated: false,
-        },
-        VadEvent::Truncated(pcm) => CapturedUtterance {
-            pcm,
-            truncated: true,
-        },
+        VadEvent::UtteranceComplete(pcm) | VadEvent::Truncated(pcm) => CapturedUtterance { pcm },
     };
     try_queue(sink, SessionAudio::Utterance(utterance))
 }
@@ -603,62 +583,123 @@ fn try_queue<T>(tx: &mpsc::Sender<T>, item: T) -> bool {
     }
 }
 
-/// Transcribes each utterance in turn and gates it on the wake phrase, or
-/// on barge-in when it was heard over a reply. A bare phrase or a
-/// follow-up opens a command window, reported as `Capturing` until it closes.
-async fn transcribe_loop(
+/// What the transcription worker hears utterances with.
+#[derive(Debug)]
+struct Listeners {
     transcriber: Arc<dyn Transcriber>,
+    spotter: Arc<WakeWordSpotter>,
+}
+
+/// Gates each utterance in turn on the wake phrase, or on barge-in when it
+/// was heard over a reply, transcribing only what is addressed to assistd.
+/// A bare phrase or a follow-up opens a command window, reported as
+/// `Capturing` until it closes.
+async fn transcribe_loop(
+    listeners: Listeners,
     mut gate: WakeGate,
     outputs: ListenOutputs,
     mut inputs: TranscribeInputs,
     mut barge_in: BargeIn,
 ) {
     while let Some(audio) = inputs.next_audio(&mut gate, &outputs).await {
-        if barge_in.already_confirmed(&audio) {
-            continue;
-        }
-        let transcript = transcribe_pcm(transcriber.as_ref(), &gate, audio.pcm()).await;
-        if transcript.is_some() && inputs.abandoned() {
+        let carry_on = match audio {
+            ListenAudio::Utterance(utterance) if !utterance.during_reply => {
+                let command = admit_utterance(&listeners, &mut gate, utterance, &outputs).await;
+                let abandoned = command.is_some() && inputs.abandoned();
+                if let Some(command) = command.filter(|_| !abandoned) {
+                    outputs.send_heard(Heard::Command(command));
+                }
+                !abandoned
+            }
+            audio => {
+                let transcriber = listeners.transcriber.as_ref();
+                settle_over_reply(transcriber, audio, &mut barge_in, &outputs, &inputs).await
+            }
+        };
+        if !carry_on {
             return;
-        }
-        match audio {
-            ListenAudio::BargeInCheck(_) => {
-                if let Some(transcript) = &transcript {
-                    barge_in.check(transcript, &outputs);
-                }
-            }
-            ListenAudio::Utterance(utterance) if utterance.during_reply => {
-                barge_in.finish_utterance(transcript, &outputs);
-            }
-            ListenAudio::Utterance(utterance) => {
-                if let Some(transcript) = transcript {
-                    admit_wake_phrase(&mut gate, &transcript, utterance.started, &outputs);
-                }
-            }
         }
         outputs.set_phase(gate.phase(Instant::now()));
     }
 }
 
-fn admit_wake_phrase(
-    gate: &mut WakeGate,
-    transcript: &str,
-    started: Instant,
+/// Check speech heard over a reply for barge-in; never wake-gated. False
+/// once push-to-talk took the mic.
+async fn settle_over_reply(
+    transcriber: &dyn Transcriber,
+    audio: ListenAudio,
+    barge_in: &mut BargeIn,
     outputs: &ListenOutputs,
-) {
-    let admission = gate.admit(transcript, started);
-    if admission == Admission::Dropped {
-        trace!(target: "assistd::voice::listen", %transcript, "no wake phrase; dropped");
+    inputs: &TranscribeInputs,
+) -> bool {
+    if barge_in.already_confirmed(&audio) {
+        return true;
     }
-    outputs.publish(admission);
+    let transcript = transcribe_pcm(transcriber, audio.pcm()).await;
+    if transcript.is_some() && inputs.abandoned() {
+        return false;
+    }
+    match audio {
+        ListenAudio::BargeInCheck(_) => {
+            if let Some(transcript) = &transcript {
+                barge_in.check(transcript, outputs);
+            }
+        }
+        ListenAudio::Utterance(_) => barge_in.finish_utterance(transcript, outputs),
+    }
+    true
 }
 
-async fn transcribe_pcm(
-    transcriber: &dyn Transcriber,
-    gate: &WakeGate,
-    pcm: &[i16],
+/// Spot the wake phrase in `utterance` and gate it; the command is the
+/// speech after the phrase, or a whole utterance inside a command window.
+/// A phrase with nothing after it opens the command window instead.
+async fn admit_utterance(
+    listeners: &Listeners,
+    gate: &mut WakeGate,
+    utterance: Utterance,
+    outputs: &ListenOutputs,
 ) -> Option<String> {
-    match transcriber.transcribe(pcm, Some(gate.phrase())).await {
+    let (pcm, phrase_end) = spot(&listeners.spotter, utterance.pcm).await;
+    let command_start = match gate.admit(phrase_end.is_some(), utterance.started) {
+        Admission::Dropped => {
+            trace!(target: "assistd::voice::listen", "no wake phrase; dropped untranscribed");
+            return None;
+        }
+        Admission::WakePhrase => {
+            outputs.send_heard(Heard::WakePhrase);
+            phrase_end.unwrap_or(0)
+        }
+        Admission::Command => 0,
+    };
+    let command_pcm = &pcm[command_start..];
+    let command = if command_pcm.len() >= MIN_COMMAND_SAMPLES {
+        transcribe_pcm(listeners.transcriber.as_ref(), command_pcm).await
+    } else {
+        None
+    };
+    if command.is_none() && phrase_end.is_some() {
+        gate.await_command(utterance.started);
+    }
+    command
+}
+
+/// Run the spotter off the runtime; returns `pcm` with where the phrase
+/// ends in it, if it is there.
+async fn spot(spotter: &Arc<WakeWordSpotter>, pcm: Vec<i16>) -> (Vec<i16>, Option<usize>) {
+    let spotter = Arc::clone(spotter);
+    tokio::task::spawn_blocking(move || {
+        let phrase_end = spotter.find(&pcm);
+        (pcm, phrase_end)
+    })
+    .await
+    .unwrap_or_else(|err| {
+        warn!(target: "assistd::voice::listen", "wake-phrase spotting failed: {err}");
+        (Vec::new(), None)
+    })
+}
+
+async fn transcribe_pcm(transcriber: &dyn Transcriber, pcm: &[i16]) -> Option<String> {
+    match transcriber.transcribe(pcm, None).await {
         Ok(text) => {
             let trimmed = text.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
