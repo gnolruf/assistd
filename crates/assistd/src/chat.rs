@@ -3,10 +3,11 @@
 //! service lives in the daemon. One chat may be open per user, since every
 //! chat drives the daemon's one session.
 
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{DirBuilder, File, Permissions, TryLockError};
 use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +24,7 @@ use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::{Picker, ProtocolType};
+use rustix::fs::{Mode, OFlags};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
@@ -55,6 +57,9 @@ const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const INSTANCE_LOCK_FILE: &str = "chat.lock";
+/// Owner-only modes for the log directory and the stderr log.
+const LOG_DIR_MODE: u32 = 0o700;
+const LOG_FILE_MODE: u32 = 0o600;
 const WINDOW_TITLE: &str = "assistd";
 /// xterm window-ops sequences that save and restore the terminal's title.
 const PUSH_WINDOW_TITLE: &str = "\x1b[22;0t";
@@ -167,10 +172,7 @@ struct StderrRedirect {
 impl StderrRedirect {
     fn to_log() -> Result<Self> {
         let path = log_dir()?.join("chat-stderr.log");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
+        let file = open_private_log(&path)
             .with_context(|| format!("opening stderr log {}", path.display()))?;
         let original = rustix::io::dup(io::stderr().as_fd()).context("dup stderr")?;
         rustix::stdio::dup2_stderr(&file)
@@ -613,10 +615,42 @@ fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {
     })
 }
 
+/// The owner-only chat log directory under the XDG state dir, else the
+/// runtime dir. Fails when neither is known or the directory is not a real
+/// directory owned by this user.
 fn log_dir() -> Result<PathBuf> {
-    let dir = dirs::state_dir().map_or_else(std::env::temp_dir, |state| state.join("assistd"));
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
+    let dir = dirs::state_dir()
+        .or_else(dirs::runtime_dir)
+        .context("no XDG state or runtime directory for chat logs")?
+        .join("assistd");
+    DirBuilder::new()
+        .recursive(true)
+        .mode(LOG_DIR_MODE)
+        .create(&dir)
+        .with_context(|| format!("creating log dir {}", dir.display()))?;
+    restrict_log_dir(&dir).with_context(|| format!("securing log dir {}", dir.display()))?;
     Ok(dir)
+}
+
+fn restrict_log_dir(dir: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(dir)?;
+    anyhow::ensure!(metadata.is_dir(), "not a directory");
+    anyhow::ensure!(
+        metadata.uid() == rustix::process::geteuid().as_raw(),
+        "owned by another user"
+    );
+    if metadata.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, Permissions::from_mode(LOG_DIR_MODE))?;
+    }
+    Ok(())
+}
+
+fn open_private_log(path: &Path) -> io::Result<OwnedFd> {
+    let flags =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(path, flags, Mode::from_raw_mode(LOG_FILE_MODE))?;
+    rustix::fs::fchmod(&fd, Mode::from_raw_mode(LOG_FILE_MODE))?;
+    Ok(fd)
 }
 
 fn init_file_tracing() -> Result<WorkerGuard> {
