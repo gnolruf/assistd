@@ -1,6 +1,7 @@
 //! Built-in commands dispatched by the chain executor.
 
 use std::io::{self, ErrorKind};
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use assistd_utils::text::human_size;
@@ -8,6 +9,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::chain::OUTPUT_MAX;
 use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
+use crate::policy::holds_credentials;
 
 pub mod bash;
 pub mod cat;
@@ -89,15 +91,34 @@ pub(crate) async fn read_regular_head(
 }
 
 /// Open `path` with its size on the blocking pool, refusing devices, FIFOs
-/// and sockets without opening or blocking on them. Directories fall through
-/// to `EISDIR`.
+/// and sockets without opening or blocking on them, and anything that holds
+/// credentials. Directories fall through to `EISDIR`.
 async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {
     let path = path.to_owned();
-    let (file, size) =
-        tokio::task::spawn_blocking(move || assistd_utils::fs::open_regular_or_dir(&path))
-            .await
-            .map_err(io::Error::other)??;
+    let (file, size) = tokio::task::spawn_blocking(move || {
+        let (file, size) = assistd_utils::fs::open_regular_or_dir(&path)?;
+        refuse_credentials(&file)?;
+        Ok::<_, io::Error>((file, size))
+    })
+    .await
+    .map_err(io::Error::other)??;
     Ok((tokio::fs::File::from_std(file), size))
+}
+
+/// Refuse an opened `file` whose real path, read back from the descriptor so
+/// a swapped symlink cannot redirect it, lies under a credential path.
+fn refuse_credentials(file: &std::fs::File) -> io::Result<()> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Ok(());
+    };
+    let real_path = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+    if holds_credentials(&real_path, Path::new(&home)) {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "holds credentials, which commands never read",
+        ));
+    }
+    Ok(())
 }
 
 /// Input for a stdin-or-files command: named files (concatenated, binary
