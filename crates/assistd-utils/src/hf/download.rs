@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::{Client, Response};
+use reqwest::{Client, ClientBuilder, Response, redirect};
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 
@@ -17,6 +18,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Largest file a download may write; well above any model assistd fetches.
 const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Header on a `resolve` redirect carrying the LFS file's SHA-256.
+const LINKED_ETAG: &str = "x-linked-etag";
 
 /// Errors from resolving or downloading a HuggingFace file.
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +42,13 @@ pub enum DownloadError {
 
     #[error("download of {url} exceeds the {limit_bytes}-byte size limit")]
     TooLarge { url: String, limit_bytes: u64 },
+
+    #[error("download of {url} has SHA-256 {actual}, expected {expected}")]
+    ChecksumMismatch {
+        url: String,
+        expected: String,
+        actual: String,
+    },
 
     #[error("I/O error at {path}: {source}")]
     Io {
@@ -91,10 +101,14 @@ pub async fn ensure_cached_id(id: &HfFileId, cache_dir: &Path) -> Result<PathBuf
 
 /// Download `id` to `dest` unless it already exists. The download lands in
 /// a `.part` temp file beside `dest`, deleted unless the download completes
-/// (including when this future is dropped) and renamed on success. Fails when
-/// connecting or any read stalls past its timeout, or the file exceeds 8 GiB.
+/// (including when this future is dropped), and is synced to disk before the
+/// rename. Fails when connecting or any read stalls past its timeout, the
+/// file exceeds 8 GiB, or it does not match the SHA-256 Hugging Face reports.
 pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError> {
-    if dest.exists() {
+    if tokio::fs::try_exists(dest)
+        .await
+        .map_err(|source| io_error(dest, source))?
+    {
         tracing::debug!(
             target: "assistd::hf::download",
             path = %dest.display(),
@@ -121,18 +135,39 @@ pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError
         "downloading"
     );
 
-    let client = download_client(READ_TIMEOUT).map_err(|source| DownloadError::Request {
+    let request_error = |source| DownloadError::Request {
         url: url.clone(),
         source,
-    })?;
-    let part = tempfile::Builder::new()
-        .suffix(".part")
-        .tempfile_in(parent)
-        .map_err(|source| io_error(parent, source))?;
+    };
+    let client = download_builder(READ_TIMEOUT)
+        .https_only(true)
+        .build()
+        .map_err(request_error)?;
+    let probe_client = download_builder(READ_TIMEOUT)
+        .https_only(true)
+        .redirect(redirect::Policy::none())
+        .build()
+        .map_err(request_error)?;
+    let expected_sha256 = fetch_expected_sha256(&probe_client, &url).await?;
+    let part = create_part_file(parent).await?;
     let response = fetch(&client, &url).await?;
-    stream_to_file(response, &url, &part).await?;
-    part.persist(dest)
-        .map_err(|err| io_error(dest, err.error))?;
+    let actual_sha256 = stream_to_file(response, &url, &part).await?;
+    match expected_sha256 {
+        Some(expected) if expected != actual_sha256 => {
+            return Err(DownloadError::ChecksumMismatch {
+                url,
+                expected,
+                actual: actual_sha256,
+            });
+        }
+        Some(_) => {}
+        None => tracing::debug!(
+            target: "assistd::hf::download",
+            %url,
+            "no LFS SHA-256 reported; skipping integrity check"
+        ),
+    }
+    persist_durably(part, dest).await?;
     tracing::info!(
         target: "assistd::hf::download",
         path = %dest.display(),
@@ -141,11 +176,65 @@ pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError
     Ok(())
 }
 
-fn download_client(read_timeout: Duration) -> reqwest::Result<Client> {
+fn download_builder(read_timeout: Duration) -> ClientBuilder {
     remote_client_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(read_timeout)
-        .build()
+}
+
+/// The lowercase hex SHA-256 from the `x-linked-etag` header on the
+/// unfollowed `HEAD` redirect for `url`; `None` for files outside LFS.
+async fn fetch_expected_sha256(
+    client: &Client,
+    url: &str,
+) -> Result<Option<String>, DownloadError> {
+    let response = client
+        .head(url)
+        .send()
+        .await
+        .map_err(|source| DownloadError::Request {
+            url: url.to_string(),
+            source,
+        })?;
+    Ok(response
+        .headers()
+        .get(LINKED_ETAG)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_sha256_etag))
+}
+
+fn parse_sha256_etag(etag: &str) -> Option<String> {
+    let digest = etag.trim_start_matches("W/").trim_matches('"');
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| digest.to_ascii_lowercase())
+}
+
+async fn create_part_file(parent: &Path) -> Result<NamedTempFile, DownloadError> {
+    let dir = parent.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        tempfile::Builder::new()
+            .suffix(".part")
+            .tempfile_in(&dir)
+            .map_err(|source| io_error(&dir, source))
+    })
+    .await
+    .map_err(|join| io_error(parent, io::Error::other(join)))?
+}
+
+/// Rename `part` onto `dest` and fsync the directory so the rename survives
+/// a crash.
+async fn persist_durably(part: NamedTempFile, dest: &Path) -> Result<(), DownloadError> {
+    let dest_path = dest.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        part.persist(&dest_path)
+            .map_err(|err| io_error(&dest_path, err.error))?;
+        let parent = dest_path.parent().expect("cache path always has a parent");
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|source| io_error(parent, source))
+    })
+    .await
+    .map_err(|join| io_error(dest, io::Error::other(join)))?
 }
 
 async fn fetch(client: &Client, url: &str) -> Result<Response, DownloadError> {
@@ -167,13 +256,14 @@ async fn fetch(client: &Client, url: &str) -> Result<Response, DownloadError> {
     Ok(response)
 }
 
-/// Write the response body to `part`, logging progress every 5% when the
-/// length is known. Stops once the body passes [`MAX_DOWNLOAD_BYTES`].
+/// Write the response body to `part` and sync it to disk, returning its
+/// lowercase hex SHA-256. Logs progress every 5% when the length is known
+/// and stops once the body passes [`MAX_DOWNLOAD_BYTES`].
 async fn stream_to_file(
     response: Response,
     url: &str,
     part: &NamedTempFile,
-) -> Result<(), DownloadError> {
+) -> Result<String, DownloadError> {
     let too_large = || DownloadError::TooLarge {
         url: url.to_string(),
         limit_bytes: MAX_DOWNLOAD_BYTES,
@@ -190,6 +280,7 @@ async fn stream_to_file(
         .map_err(|source| io_error(part_path, source))?;
 
     let mut stream = response.bytes_stream();
+    let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut next_progress_log: u64 = 0;
     while let Some(chunk) = stream.next().await {
@@ -200,6 +291,7 @@ async fn stream_to_file(
         out.write_all(&chunk)
             .await
             .map_err(|source| io_error(part_path, source))?;
+        hasher.update(&chunk);
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         if downloaded > MAX_DOWNLOAD_BYTES {
             return Err(too_large());
@@ -220,7 +312,15 @@ async fn stream_to_file(
     }
     out.flush()
         .await
-        .map_err(|source| io_error(part_path, source))
+        .map_err(|source| io_error(part_path, source))?;
+    out.sync_all()
+        .await
+        .map_err(|source| io_error(part_path, source))?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn io_error(path: &Path, source: io::Error) -> DownloadError {
@@ -233,6 +333,23 @@ fn io_error(path: &Path, source: io::Error) -> DownloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linked_etag_parses_only_quoted_sha256() {
+        let digest = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3";
+        assert_eq!(
+            parse_sha256_etag(&format!("\"{}\"", digest.to_ascii_uppercase())).as_deref(),
+            Some(digest)
+        );
+        assert_eq!(
+            parse_sha256_etag("\"d41d8cd98f00b204e9800998ecf8427e\""),
+            None
+        );
+        assert_eq!(
+            parse_sha256_etag(&format!("\"{}\"", digest.replace('a', "z"))),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn stalled_download_fails_instead_of_hanging() {
@@ -249,7 +366,9 @@ mod tests {
         });
 
         let part = NamedTempFile::new().unwrap();
-        let client = download_client(Duration::from_millis(200)).unwrap();
+        let client = download_builder(Duration::from_millis(200))
+            .build()
+            .unwrap();
         let download = async {
             let response = fetch(&client, &url).await?;
             stream_to_file(response, &url, &part).await
