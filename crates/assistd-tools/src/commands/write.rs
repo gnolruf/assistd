@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -110,8 +111,11 @@ impl WriteCommand {
         )
     }
 
-    async fn confirmed(&self, target: &Path, content: &[u8]) -> bool {
-        if self.scratch().is_some_and(|dir| target.starts_with(dir)) {
+    async fn confirmed(&self, target: &WriteTarget, content: &[u8]) -> bool {
+        if self
+            .scratch()
+            .is_some_and(|dir| target.path.starts_with(dir))
+        {
             return true;
         }
         let approval = self
@@ -123,10 +127,16 @@ impl WriteCommand {
 
     /// [`WritePolicyCfg::resolve`] against `$HOME` on the blocking pool,
     /// since it canonicalizes and stats the path.
-    async fn resolve(&self, raw_path: String) -> Result<PathBuf, PathResolveError> {
+    async fn resolve(&self, raw_path: String) -> Result<WriteTarget, PathResolveError> {
         let cfg = Arc::clone(&self.cfg);
+        let sandbox = Arc::clone(&self.sandbox);
         let home = std::env::var("HOME").ok();
-        on_blocking_pool(move || cfg.resolve(&raw_path, home.as_deref())).await
+        on_blocking_pool(move || {
+            let path = cfg.resolve(&raw_path, home.as_deref())?;
+            let runnable = is_executable(&path) || sandbox.is_in_command_dir(&path, home);
+            Ok(WriteTarget { path, runnable })
+        })
+        .await
     }
 
     fn scratch(&self) -> Option<&Path> {
@@ -210,8 +220,11 @@ impl Command for WriteCommand {
             );
         }
 
-        let hidden_by = self.sandbox.private_dir_hiding(write_target.clone()).await;
-        match write_without_symlinks(write_target, content).await {
+        let hidden_by = self
+            .sandbox
+            .private_dir_hiding(write_target.path.clone())
+            .await;
+        match write_without_symlinks(write_target.path, content).await {
             Ok(()) => CommandOutput {
                 stderr: hidden_by
                     .map(|dir| {
@@ -224,6 +237,15 @@ impl Command for WriteCommand {
             Err(failure) => failure.output(&raw_path),
         }
     }
+}
+
+/// A resolved write destination.
+#[derive(Debug)]
+struct WriteTarget {
+    path: PathBuf,
+    /// A shell could run the file: it is already executable, or it lies in
+    /// a directory shells look programs up in.
+    runnable: bool,
 }
 
 #[derive(Debug)]
@@ -400,6 +422,11 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
     Ok(assistd_utils::path::expand_tilde(raw, Path::new(home)))
 }
 
+fn is_executable(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
 fn has_hidden_component(path: &Path) -> bool {
     path.components()
         .any(|component| component.as_os_str().as_encoded_bytes().starts_with(b"."))
@@ -415,30 +442,40 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
 }
 
 /// The quoted target and size, then the content: whole when short,
-/// otherwise its head and tail around a count of the characters left out,
-/// at [`Risk::Elevated`] since the user cannot see all of it.
-fn confirmation_request(target: &Path, content: &[u8]) -> ConfirmationRequest {
+/// otherwise its head and tail around a count of the characters left out.
+/// [`Risk::Elevated`] when the user cannot see all of it or a shell could
+/// run the file.
+fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationRequest {
     let text = String::from_utf8_lossy(content);
     let mut script = format!(
         "write {:?} ({})\n",
-        target,
+        target.path,
         human_size(u64::try_from(content.len()).unwrap_or(u64::MAX))
     );
     let total = text.chars().count();
-    let risk = if total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS {
+    let fully_shown = total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS;
+    if fully_shown {
         script.push_str(&text);
-        Risk::Routine
     } else {
         let omitted = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
         script.extend(text.chars().take(PREVIEW_HEAD_CHARS));
         script.push_str(&format!("\n… {omitted} characters not shown …\n"));
         script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
+    }
+    let risk = if fully_shown && !target.runnable {
+        Risk::Routine
+    } else {
         Risk::Elevated
+    };
+    let matched_pattern = if target.runnable {
+        "writes a program a shell could run"
+    } else {
+        "writes a file outside the scratch directory"
     };
     ConfirmationRequest {
         tool: "write".to_string(),
         script,
-        matched_pattern: "writes a file outside the scratch directory".to_string(),
+        matched_pattern: matched_pattern.to_string(),
         always_allow: Vec::new(),
         risk,
     }

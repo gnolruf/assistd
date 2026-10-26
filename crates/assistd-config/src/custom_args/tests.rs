@@ -86,6 +86,10 @@ fn exposing_flags_are_rejected_in_both_spellings() {
         "--tools=all",
         "--path /",
         "--rpc 10.0.0.2:50052",
+        "--connect",
+        "-ag",
+        "--mcp-servers-json={}",
+        "--log-prompts-dir /tmp/prompts",
     ] {
         assert!(
             matches!(parse(source), Err(CustomArgsError::Exposing(_))),

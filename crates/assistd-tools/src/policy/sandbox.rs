@@ -170,6 +170,20 @@ impl SandboxInfo {
         }
     }
 
+    /// Whether `path` lies under a directory host shells look programs up
+    /// in: one on the host `PATH`, `~/bin`, or a visible `~/<entry>/bin`.
+    /// Resolves symlinks, so it blocks on the filesystem.
+    pub(crate) fn is_in_command_dir(&self, path: &Path, home: Option<String>) -> bool {
+        let home_dirs = SandboxHome::read(home)
+            .map(|home| home.existing_command_dirs(&[]))
+            .unwrap_or_default();
+        self.host_path
+            .iter()
+            .filter_map(|dir| std::fs::canonicalize(dir).ok())
+            .chain(home_dirs)
+            .any(|dir| path.starts_with(dir))
+    }
+
     /// The recovery clause of a note about a private directory: where a
     /// file both `bash` and the other commands need should go instead.
     pub(crate) fn sharing_hint(&self) -> String {

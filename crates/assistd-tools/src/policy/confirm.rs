@@ -42,7 +42,8 @@ pub enum Risk {
     /// off the allowlist, a file in the write allowlist, a launched app.
     Routine,
     /// A destructive pattern, a script no check can fully see, a protected
-    /// path, a new web host or an unapproved MCP tool.
+    /// path, a file a shell could run, a new web host or an unapproved MCP
+    /// tool.
     Elevated,
 }
 

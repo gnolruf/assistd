@@ -41,6 +41,16 @@ const SHARED_MANAGED_FLAGS: &[&str] = &[
 /// run tools, change server state, or send model data off the machine.
 const EXPOSING_FLAGS: &[&str] = &[
     "--tools",
+    "--tools-runtime",
+    "-ag",
+    "--agent",
+    "--mcp-servers-config",
+    "--mcp-servers-json",
+    "--ui-mcp-proxy",
+    "--webui-mcp-proxy",
+    "--connect",
+    "--connect-code",
+    "--log-prompts-dir",
     "--path",
     "--media-path",
     "--slot-save-path",
