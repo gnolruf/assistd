@@ -16,10 +16,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
-  # sherpa-onnx-sys reads its prebuilt library archive from here instead of
-  # downloading it from GitHub releases on every build.
+  # sherpa-onnx-sys links against the prebuilt libraries in
+  # SHERPA_ONNX_LIB_DIR instead of extracting them under target/, where
+  # rust-cache prunes them while keeping the build script's cached output.
   SHERPA_ONNX_ARCHIVE: sherpa-onnx-v2.0.0-linux-x64-shared-lib.tar.bz2
   SHERPA_ONNX_ARCHIVE_DIR: ${{ github.workspace }}/.sherpa-onnx
+  SHERPA_ONNX_LIB_DIR: ${{ github.workspace }}/.sherpa-onnx/sherpa-onnx-v2.0.0-linux-x64-shared-lib/lib
 
 jobs:
   ci:
@@ -66,6 +68,12 @@ jobs:
           mkdir -p "$SHERPA_ONNX_ARCHIVE_DIR"
           curl -fsSL -o "$SHERPA_ONNX_ARCHIVE_DIR/$SHERPA_ONNX_ARCHIVE" \
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.0/$SHERPA_ONNX_ARCHIVE"
+
+      - name: Extract sherpa-onnx libraries
+        run: |
+          [ -d "$SHERPA_ONNX_LIB_DIR" ] || \
+            tar -xjf "$SHERPA_ONNX_ARCHIVE_DIR/$SHERPA_ONNX_ARCHIVE" -C "$SHERPA_ONNX_ARCHIVE_DIR"
+          ls "$SHERPA_ONNX_LIB_DIR"/libsherpa-onnx-c-api.so "$SHERPA_ONNX_LIB_DIR"/libonnxruntime.so
 
       - name: Rustfmt (check)
         run: cargo fmt --all -- --check
@@ -118,7 +126,7 @@ jobs:
           name: assistd-linux-x86_64
           path: |
             target/release/assistd
-            target/release/libsherpa-onnx-c-api.so
-            target/release/libonnxruntime.so
+            ${{ env.SHERPA_ONNX_LIB_DIR }}/libsherpa-onnx-c-api.so
+            ${{ env.SHERPA_ONNX_LIB_DIR }}/libonnxruntime.so
           if-no-files-found: error
           retention-days: 14
