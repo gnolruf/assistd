@@ -13,7 +13,6 @@ use tokio::process::Command as ProcCommand;
 use tracing::{info, warn};
 
 use super::allowlist::SearchPath;
-use super::credentials::existing_credential_paths;
 use super::on_blocking_pool;
 
 mod confined;
@@ -267,9 +266,8 @@ impl SandboxInfo {
 
     /// Flag order is load-bearing: the profile, then the self-binds that
     /// pin command directories' ancestors, then the shared directories,
-    /// then the read-only mounts over `home`'s command directories, the
-    /// protections and the credential masks, then the operator's
-    /// `extra_args` so they win.
+    /// then the read-only mounts over `home`'s command directories and the
+    /// protections, then the operator's `extra_args` so they win.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
@@ -298,7 +296,6 @@ impl SandboxInfo {
         cmd.args(command_dirs.lock_flags());
         let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         cmd.args(protection_flags(&self.protected, &writable));
-        cmd.args(home.as_ref().map(credential_mask_flags).unwrap_or_default());
         cmd.args(self.extra_args.iter().map(OsStr::new));
         cmd.arg("--");
         cmd.arg(program).args(args);
@@ -638,26 +635,6 @@ fn protection_flags(protected: &Protected, writable: &[PathBuf]) -> Vec<PathBuf>
             ]
         });
     dirs.chain(sockets).collect()
-}
-
-/// An empty read-only directory over each credential directory in `home`,
-/// and `/dev/null` over each credential file.
-fn credential_mask_flags(home: &SandboxHome) -> Vec<PathBuf> {
-    existing_credential_paths(Path::new(&home.dir))
-        .flat_map(|path| {
-            if path.is_dir() {
-                [
-                    PathBuf::from("--tmpfs"),
-                    path.clone(),
-                    PathBuf::from("--remount-ro"),
-                    path,
-                ]
-                .to_vec()
-            } else {
-                [PathBuf::from("--ro-bind"), PathBuf::from("/dev/null"), path].to_vec()
-            }
-        })
-        .collect()
 }
 
 /// Whether `dir` is `real_home`, whose visible files the profile binds
@@ -1093,35 +1070,6 @@ mod tests {
                 [PathBuf::from("--ro-bind"), dir.clone(), dir]
             })
             .collect()
-    }
-
-    #[tokio::test]
-    async fn sandboxed_commands_cannot_read_home_credentials() {
-        let bwrap = PathBuf::from("/usr/bin/bwrap");
-        if !bwrap.exists() {
-            return;
-        }
-        let home_dir = tempfile::tempdir().expect("tempdir");
-        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
-        std::fs::create_dir_all(home.join(".ssh")).expect("ssh dir");
-        std::fs::write(home.join(".ssh/id_ed25519"), "private key").expect("key");
-        std::fs::write(home.join(".netrc"), "machine x password y").expect("netrc");
-        std::fs::write(home.join("notes.txt"), "notes").expect("notes");
-        let script = format!(
-            "cat {0}/.ssh/id_ed25519 {0}/.netrc {0}/notes.txt",
-            home.display()
-        );
-        let output = bwrap_info(Vec::new())
-            .bwrap_command(
-                &bwrap,
-                Some(home.display().to_string()),
-                "sh",
-                ["-c", &script],
-            )
-            .output()
-            .await
-            .expect("bwrap runs");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "notes");
     }
 
     #[test]

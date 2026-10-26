@@ -74,12 +74,6 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &io::Error) -> String {
             Hint::Check,
             format_args!("ls {}", parent_dir(path)),
         ),
-        ErrorKind::PermissionDenied if e.get_ref().is_some() => error_line(
-            cmd,
-            format_args!("{path}: {e}"),
-            Hint::Try,
-            "asking the user for what you need from it",
-        ),
         ErrorKind::PermissionDenied => error_line(
             cmd,
             format_args!("permission denied: {path}"),

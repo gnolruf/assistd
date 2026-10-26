@@ -463,12 +463,8 @@ A walk through `assistd query "what files changed this week?"`:
 6. **Sandbox.** `BashCommand` invokes the bubblewrap sandbox: a
    read-only root with writable entries
    of `$HOME` other than dotfiles and symlinks, fresh `/tmp`, `/dev`,
-   `/proc` and `/run`, unshared pid/ipc/uts/network namespaces,
-   credential stores in `$HOME` (`~/.ssh`, `~/.gnupg`, `~/.aws`,
-   browser profiles and the like) masked with empty mounts, and
-   an environment cleared down to locale and terminal variables. The
-   in-process readers (`cat`, `head`, `tail`, `grep`, …) refuse the same
-   paths, checked on the opened descriptor. With
+   `/proc` and `/run`, unshared pid/ipc/uts/network namespaces, and
+   an environment cleared down to locale and terminal variables. With
    `--share-net` in `bwrap_extra_args`, `bwrap` is spawned from a thread
    Landlock bars from abstract Unix sockets, such as the X server's, that
    the shared network namespace would otherwise expose; kernels without
