@@ -4,19 +4,83 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::{fmt, iter};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use super::approvals::{read_store, write_store};
+use super::review::program;
 
 /// File, beside the config file, that keeps "always allow" approvals.
 pub const APPROVALS_FILE: &str = "allowed_programs.toml";
 
+/// Shells, interpreters, and programs that run any command they are given
+/// (as root or elsewhere), named without a trailing version; "always
+/// allow" never covers them.
+const RUNS_ANY_CODE: &[&str] = &[
+    "ash",
+    "awk",
+    "bash",
+    "bun",
+    "busybox",
+    "chroot",
+    "csh",
+    "dash",
+    "deno",
+    "doas",
+    "elixir",
+    "erl",
+    "fish",
+    "flock",
+    "gawk",
+    "guile",
+    "irb",
+    "julia",
+    "ksh",
+    "lua",
+    "luajit",
+    "mawk",
+    "mksh",
+    "nawk",
+    "node",
+    "nodejs",
+    "nsenter",
+    "parallel",
+    "perl",
+    "php",
+    "pkexec",
+    "pwsh",
+    "pypy",
+    "python",
+    "r",
+    "rscript",
+    "ruby",
+    "run0",
+    "setsid",
+    "sh",
+    "ssh",
+    "strace",
+    "su",
+    "sudo",
+    "systemd-run",
+    "tclsh",
+    "tcsh",
+    "unshare",
+    "watch",
+    "wish",
+    "zsh",
+];
+
+/// The system's list of installed shells, one path per line, each matched
+/// like an entry of [`RUNS_ANY_CODE`].
+const SHELLS_FILE: &str = "/etc/shells";
+
 const APPROVALS_HEADER: &str = "\
 # Programs approved with \"always allow\". Each runs without confirmation
-# while its name still resolves to `path` on the command's PATH. Delete an
-# entry to be asked again.
+# while its name still resolves to `path` on the command's PATH: with
+# `subcommand` as its first argument, or with only options when there is
+# none. Delete an entry to be asked again.
 ";
 
 /// Directories bare command names are looked up in, as the command sees
@@ -50,11 +114,36 @@ pub enum AllowlistError {
     },
 }
 
+/// One "always allow" approval: a program and the runs of it it covers.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProgramApproval {
+    pub(super) name: String,
+    pub(super) scope: ApprovalScope,
+}
+
+impl fmt::Display for ProgramApproval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.scope {
+            ApprovalScope::OptionsOnly => write!(f, "{} [options]", self.name),
+            ApprovalScope::Subcommand(subcommand) => write!(f, "{} {subcommand} …", self.name),
+        }
+    }
+}
+
+/// Which runs of a program one approval covers.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum ApprovalScope {
+    /// No arguments, or only options.
+    OptionsOnly,
+    /// This first argument, whatever follows it.
+    Subcommand(String),
+}
+
 /// How the allowlist treats one command word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Verdict {
     Allowed,
-    /// `approvable` when "always allow" can add it.
+    /// `approvable` when "always allow" can add it for the scope asked about.
     Unlisted {
         approvable: bool,
     },
@@ -68,10 +157,12 @@ pub(super) enum Verdict {
 #[derive(Debug)]
 pub struct Allowlist {
     configured: BTreeSet<String>,
-    approved: RwLock<BTreeMap<String, PathBuf>>,
+    approved: RwLock<BTreeMap<ProgramApproval, PathBuf>>,
     search_path: SearchPath,
     /// The user cannot add programs to the search path.
     search_path_fixed: bool,
+    /// File names of the shells in [`SHELLS_FILE`] and of what they link to.
+    shells: BTreeSet<String>,
     store: Option<PathBuf>,
     saving: tokio::sync::Mutex<()>,
 }
@@ -87,8 +178,11 @@ impl Allowlist {
         search_path: SearchPath,
         store: PathBuf,
     ) -> Result<Self, AllowlistError> {
-        let approved = load_approvals(&store)?;
         let mut allowlist = Self::unsaved(configured, search_path);
+        let approved = load_approvals(&store)?
+            .into_iter()
+            .filter(|(approval, path)| !allowlist.runs_any_code(&approval.name, path))
+            .collect();
         allowlist.approved = RwLock::new(approved);
         allowlist.store = Some(store);
         Ok(allowlist)
@@ -106,28 +200,29 @@ impl Allowlist {
             approved: RwLock::default(),
             search_path,
             search_path_fixed,
+            shells: installed_shells(),
             store: None,
             saving: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// Approve `names` for good, pinning each to the file it resolves to
-    /// now, and save. Names that resolve to nothing are skipped, and no
-    /// names saves nothing.
+    /// Keep `approvals` for good, pinning each program to the file it
+    /// resolves to now, and save. Programs that resolve to nothing are
+    /// skipped, and no approvals saves nothing.
     ///
     /// # Errors
     /// [`AllowlistError::Write`] when saving fails; the approvals still hold
     /// until the daemon exits.
-    pub async fn approve(&self, names: &[String]) -> Result<(), AllowlistError> {
-        if names.is_empty() {
+    pub async fn approve(&self, approvals: &[ProgramApproval]) -> Result<(), AllowlistError> {
+        if approvals.is_empty() {
             return Ok(());
         }
         let _saving = self.saving.lock().await;
         let approved = {
             let mut approved = self.approved.write();
-            for name in names {
-                if let Some(path) = self.resolve(name) {
-                    approved.insert(name.clone(), path);
+            for approval in approvals {
+                if let Some(path) = self.resolve(&approval.name) {
+                    approved.insert(approval.clone(), path);
                 }
             }
             approved.clone()
@@ -144,20 +239,26 @@ impl Allowlist {
         self.search_path_fixed
     }
 
-    pub(super) fn verdict(&self, word: &str) -> Verdict {
+    /// How the allowlist treats `word` run with arguments in `scope`, which
+    /// is `None` when no approval could cover them.
+    pub(super) fn verdict(&self, word: &str, scope: Option<&ApprovalScope>) -> Verdict {
         if word.contains('/') {
-            self.path_verdict(word)
+            self.path_verdict(word, scope)
         } else {
-            self.name_verdict(word)
+            self.name_verdict(word, scope)
         }
     }
 
-    /// A configured path, the exact file an approved name is pinned to, or
-    /// an unmodifiable absolute path whose file name is configured.
-    fn path_verdict(&self, word: &str) -> Verdict {
+    /// A configured path, the exact file an approval in `scope` is pinned
+    /// to, or an unmodifiable absolute path whose file name is configured.
+    fn path_verdict(&self, word: &str, scope: Option<&ApprovalScope>) -> Verdict {
         let path = Path::new(word);
         let allowed = self.configured.contains(word)
-            || self.approved.read().values().any(|pinned| pinned == path)
+            || self
+                .approved
+                .read()
+                .iter()
+                .any(|(approval, pinned)| pinned == path && scope == Some(&approval.scope))
             || (path.is_absolute()
                 && path
                     .file_name()
@@ -171,7 +272,7 @@ impl Allowlist {
         }
     }
 
-    fn name_verdict(&self, word: &str) -> Verdict {
+    fn name_verdict(&self, word: &str, scope: Option<&ApprovalScope>) -> Verdict {
         let Some(found) = self.resolve(word) else {
             return Verdict::Missing;
         };
@@ -179,11 +280,32 @@ impl Allowlist {
             || found
                 .to_str()
                 .is_some_and(|path| self.configured.contains(path));
-        if configured || self.approved.read().get(word) == Some(&found) {
+        let approved = self.approved.read().iter().any(|(approval, pinned)| {
+            approval.name == word && scope == Some(&approval.scope) && *pinned == found
+        });
+        if configured || approved {
             Verdict::Allowed
         } else {
-            Verdict::Unlisted { approvable: true }
+            Verdict::Unlisted {
+                approvable: scope.is_some() && !self.runs_any_code(word, &found),
+            }
         }
+    }
+
+    /// Whether `name`, or the file `path` finally links to, is a shell or
+    /// one of [`RUNS_ANY_CODE`], with or without a version (`python3.12`).
+    fn runs_any_code(&self, name: &str, path: &Path) -> bool {
+        let real = std::fs::canonicalize(path).ok();
+        let real_name = real
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        iter::once(name).chain(real_name).any(|name| {
+            self.shells.contains(name)
+                || [name.to_ascii_lowercase(), program(name)]
+                    .iter()
+                    .any(|name| RUNS_ANY_CODE.contains(&name.as_str()))
+        })
     }
 
     fn resolve(&self, name: &str) -> Option<PathBuf> {
@@ -216,6 +338,24 @@ impl Allowlist {
     }
 }
 
+/// The file names of every shell [`SHELLS_FILE`] lists and of the files
+/// they link to; none when it cannot be read.
+fn installed_shells() -> BTreeSet<String> {
+    let listed = std::fs::read_to_string(SHELLS_FILE).unwrap_or_default();
+    listed
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('/'))
+        .flat_map(|line| {
+            let path = PathBuf::from(line);
+            let real = std::fs::canonicalize(&path).ok();
+            [Some(path), real]
+        })
+        .flatten()
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_string))
+        .collect()
+}
+
 /// Whether the daemon's user may write to a file with this metadata.
 pub(super) fn user_can_modify(meta: &Metadata) -> bool {
     let uid = rustix::process::geteuid();
@@ -242,11 +382,13 @@ struct Stored {
 #[serde(deny_unknown_fields)]
 struct StoredProgram {
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subcommand: Option<String>,
     path: PathBuf,
 }
 
 /// The approvals saved in `store`; none when it does not exist.
-fn load_approvals(store: &Path) -> Result<BTreeMap<String, PathBuf>, AllowlistError> {
+fn load_approvals(store: &Path) -> Result<BTreeMap<ProgramApproval, PathBuf>, AllowlistError> {
     let Some(text) = read_store(store)? else {
         return Ok(BTreeMap::new());
     };
@@ -257,15 +399,34 @@ fn load_approvals(store: &Path) -> Result<BTreeMap<String, PathBuf>, AllowlistEr
     Ok(stored
         .programs
         .into_iter()
-        .map(|program| (program.name, program.path))
+        .map(|program| {
+            let scope = program
+                .subcommand
+                .map_or(ApprovalScope::OptionsOnly, ApprovalScope::Subcommand);
+            let approval = ProgramApproval {
+                name: program.name,
+                scope,
+            };
+            (approval, program.path)
+        })
         .collect())
 }
 
-async fn save(store: &Path, approved: BTreeMap<String, PathBuf>) -> Result<(), AllowlistError> {
+async fn save(
+    store: &Path,
+    approved: BTreeMap<ProgramApproval, PathBuf>,
+) -> Result<(), AllowlistError> {
     let stored = Stored {
         programs: approved
             .into_iter()
-            .map(|(name, path)| StoredProgram { name, path })
+            .map(|(approval, path)| StoredProgram {
+                name: approval.name,
+                subcommand: match approval.scope {
+                    ApprovalScope::OptionsOnly => None,
+                    ApprovalScope::Subcommand(subcommand) => Some(subcommand),
+                },
+                path,
+            })
             .collect(),
     };
     let body = toml::to_string(&stored).map_err(|e| AllowlistError::Write {

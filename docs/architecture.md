@@ -199,7 +199,10 @@ Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
 intercept the dangerous paths: a `bash` script runs without asking only
 when every program it can run is on `[tools.bash] allowed_programs` and
 nothing in it matches a destructive pattern; otherwise the user confirms,
-and can "always allow" the programs it named. A redirection that writes
+and can "always allow" the programs it named. An approval covers one
+subcommand (`cargo build …`), or only options when the program was run
+without positional arguments; shells, interpreters and `sudo`-like
+wrappers are never offered it. A redirection that writes
 outside `/tmp` and `tools.scratch.dir` also needs confirmation. It then runs in the bubblewrap
 sandbox; tools never run unsandboxed, so when `bwrap` is missing (or
 `tools.bash.sandbox = "none"`) the model is offered no tools at all and
@@ -225,7 +228,7 @@ A query connection starts in manual mode, where every prompt goes to the
 client. A client can switch it to accept-commands mode with a mid-stream
 `Request::SetPermissionMode` (the TUI's Shift+Tab). That mode approves once,
 without asking, the prompts rated `Risk::Routine`: programs off the allowlist
-that "always allow" could cover, `wm open` of an app with no files or URLs,
+that "always allow" could cover and that do not delete or overwrite files, `wm open` of an app with no files or URLs,
 and `write` outside the scratch directory. Destructive patterns, scripts no
 check can fully see, protected paths, new web hosts and unapproved MCP tools
 still ask; the denylist still refuses, and nothing is added to the allowlist.
@@ -451,7 +454,7 @@ A walk through `assistd query "what files changed this week?"`:
    The agent emits `Event::ToolCall`, hands the args to `RunTool`,
    which parses the command line and dispatches to `BashCommand`.
    `git` is not on the default allowlist, so the user confirms the
-   command first unless they have already "always allowed" `git`;
+   command first unless they have already "always allowed" `git log`;
    `git log` matches no destructive pattern.
 
 6. **Sandbox.** `BashCommand` invokes the bubblewrap sandbox: a

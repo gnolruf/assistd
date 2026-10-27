@@ -3,6 +3,7 @@ use std::path::Path;
 
 use super::*;
 use crate::policy::SearchPath;
+use crate::policy::allowlist::APPROVALS_FILE;
 
 fn patterns() -> Vec<DestructivePattern> {
     [
@@ -699,17 +700,32 @@ impl Programs {
     }
 }
 
-fn unlisted(programs: &[&str], approvable: bool) -> Option<Confirmation> {
+/// Unlisted `programs`, approvable with `approvals` unless there are none.
+fn unlisted(programs: &[&str], approvals: &[&str]) -> Option<Confirmation> {
     Some(Confirmation::Unlisted {
         programs: programs.iter().map(ToString::to_string).collect(),
-        approvable,
+        approvals: (!approvals.is_empty()).then(|| approvals.iter().map(|a| approval(a)).collect()),
+        modifies_files: false,
     })
+}
+
+/// `"cargo build"` approves that subcommand; a bare name, options only.
+fn approval(spelled: &str) -> ProgramApproval {
+    let (name, scope) = match spelled.split_once(' ') {
+        Some((name, subcommand)) => (name, ApprovalScope::Subcommand(subcommand.to_string())),
+        None => (spelled, ApprovalScope::OptionsOnly),
+    };
+    ProgramApproval {
+        name: name.to_string(),
+        scope,
+    }
 }
 
 fn dev_machine() -> Programs {
     Programs::new(
         &[
             "cat", "env", "xargs", "nice", "bash", "sh", "cargo", "git", "sudo", "su", "python3",
+            "rm", "mv",
         ],
         &["cat", "env", "xargs", "nice"],
     )
@@ -730,7 +746,7 @@ fn words_inside_conditionals_and_brackets_are_not_programs() {
     }
     assert_eq!(
         machine.review("[[ -n x ]] && cargo build", &[]),
-        unlisted(&["cargo"], true)
+        unlisted(&["cargo"], &["cargo build"])
     );
 }
 
@@ -741,39 +757,45 @@ fn every_program_a_script_runs_must_be_allowed() {
         ("cat x", None),
         ("cat x | sort", None),
         ("nonexistent-tool", None),
-        ("cargo build", unlisted(&["cargo"], true)),
+        ("cargo build", unlisted(&["cargo"], &["cargo build"])),
         (
             "cat x | cargo build && git status",
-            unlisted(&["cargo", "git"], true),
+            unlisted(&["cargo", "git"], &["cargo build", "git status"]),
         ),
-        ("echo $(cargo --version)", unlisted(&["cargo"], true)),
-        ("sudo cat x", unlisted(&["sudo"], true)),
-        ("env FOO=1 cargo build", unlisted(&["cargo"], true)),
+        ("echo $(cargo --version)", unlisted(&["cargo"], &["cargo"])),
+        ("sudo cat x", unlisted(&["sudo"], &[])),
+        (
+            "env FOO=1 cargo build",
+            unlisted(&["cargo"], &["cargo build"]),
+        ),
         ("nice -n 10 cat x", None),
         ("find . | xargs -n 1 cat", None),
-        ("bash -c 'cat x'", unlisted(&["bash"], true)),
+        ("bash -c 'cat x'", unlisted(&["bash"], &[])),
         (
             "find . | xargs sh -c 'cat \"$@\"' _",
-            unlisted(&["sh"], true),
+            unlisted(&["sh"], &[]),
         ),
-        ("env -S 'cargo build'", unlisted(&["cargo"], true)),
-        ("su -c 'cargo build'", unlisted(&["su"], true)),
-        ("python3 -c 'print(1)'", unlisted(&["python3"], true)),
+        (
+            "env -S 'cargo build'",
+            unlisted(&["cargo"], &["cargo build"]),
+        ),
+        ("su -c 'cargo build'", unlisted(&["su"], &[])),
+        ("python3 -c 'print(1)'", unlisted(&["python3"], &[])),
         ("f() { cat x; }; f", None),
         ("cargo() { cat x; }; cargo", None),
-        ("cargo; cargo() { :; }", unlisted(&["cargo"], true)),
-        ("./build.sh", unlisted(&["./build.sh"], false)),
-        ("bash build.sh", unlisted(&["bash"], true)),
+        ("cargo; cargo() { :; }", unlisted(&["cargo"], &["cargo"])),
+        ("./build.sh", unlisted(&["./build.sh"], &[])),
+        ("bash build.sh", unlisted(&["bash"], &[])),
         (
             "source venv/bin/activate",
-            unlisted(&["source venv/bin/activate"], false),
+            unlisted(&["source venv/bin/activate"], &[]),
         ),
-        ("enable -f x.so y", unlisted(&["enable"], false)),
+        ("enable -f x.so y", unlisted(&["enable"], &[])),
         (
             "history -s x; history -w ~/repo/.git/config",
-            unlisted(&["history"], false),
+            unlisted(&["history"], &[]),
         ),
-        ("cargo build; ./x", unlisted(&["cargo", "./x"], false)),
+        ("cargo build; ./x", unlisted(&["cargo", "./x"], &[])),
     ] {
         assert_eq!(machine.review(script, &[]), expected, "{script:?}");
     }
@@ -802,7 +824,7 @@ fn env_options_with_attached_values_are_unverifiable() {
     }
     assert_eq!(
         machine.review("env -S 'cargo build'", &[]),
-        unlisted(&["cargo"], true)
+        unlisted(&["cargo"], &["cargo build"])
     );
 }
 
@@ -812,7 +834,7 @@ fn an_allowed_shell_runs_whatever_it_is_handed() {
     assert_eq!(machine.review("bash -c 'cargo build'", &[]), None);
     assert_eq!(
         machine.review("bash -c 'cargo build'; cargo test", &[]),
-        unlisted(&["cargo"], true)
+        unlisted(&["cargo"], &["cargo test"])
     );
 }
 
@@ -828,17 +850,17 @@ async fn an_approved_program_also_runs_by_the_exact_path_it_was_pinned_to() {
 
     assert_eq!(
         machine.review(&by_path(&pinned), &[]),
-        unlisted(&[&pinned.display().to_string()], false)
+        unlisted(&[&pinned.display().to_string()], &[])
     );
     machine
         .allowlist
-        .approve(&["btop".to_string()])
+        .approve(&[approval("btop")])
         .await
         .expect("unsaved approval");
     assert_eq!(machine.review(&by_path(&pinned), &[]), None);
     assert_eq!(
         machine.review(&by_path(&impostor), &[]),
-        unlisted(&[&impostor.display().to_string()], false)
+        unlisted(&[&impostor.display().to_string()], &[])
     );
 }
 
@@ -851,7 +873,27 @@ fn always_allow_is_offered_only_for_unlisted_named_programs() {
             .map(|c| c.always_allow().to_vec())
             .unwrap_or_default()
     };
-    assert_eq!(offered("cargo build && git status"), ["cargo", "git"]);
+    for (script, expected) in [
+        (
+            "cargo build --release && git status",
+            &["cargo build", "git status"][..],
+        ),
+        (
+            "cargo build; cargo test x",
+            &["cargo build", "cargo test"][..],
+        ),
+        ("cargo", &["cargo"][..]),
+        ("cargo --version -v", &["cargo"][..]),
+        ("git -C dir status", &[][..]),
+        ("cargo +nightly build", &[][..]),
+        ("git ./x", &[][..]),
+        ("cargo \"$cmd\"", &[][..]),
+        ("find . | xargs cargo", &[][..]),
+        ("find . -exec cargo {} \\;", &[][..]),
+    ] {
+        let expected: Vec<ProgramApproval> = expected.iter().map(|a| approval(a)).collect();
+        assert_eq!(offered(script), expected, "{script:?}");
+    }
     assert!(
         offered("cargo build; rm -rf ~").is_empty(),
         "a pattern match"
@@ -861,6 +903,63 @@ fn always_allow_is_offered_only_for_unlisted_named_programs() {
         "an unverifiable command"
     );
     assert!(offered("cargo build; ./x").is_empty(), "a path");
+}
+
+#[tokio::test]
+async fn programs_that_run_any_code_are_never_offered_always_allow() {
+    let machine = dev_machine();
+    for script in [
+        "python3 -c 'import os; os.remove(\"x\")'",
+        "sh -c 'cat x'",
+        "cargo build && env python3 x.py",
+        "sudo cat x",
+    ] {
+        let confirmation = machine.review(script, &[]).expect("needs confirmation");
+        assert!(confirmation.always_allow().is_empty(), "{script:?}");
+        assert_eq!(confirmation.risk(), Risk::Elevated, "{script:?}");
+    }
+    let store = tempfile::tempdir().expect("tempdir");
+    let store = store.path().join(APPROVALS_FILE);
+    std::fs::write(
+        &store,
+        format!(
+            "[[program]]\nname = \"python3\"\npath = \"{}\"\n",
+            machine.path().join("python3").display()
+        ),
+    )
+    .expect("write approvals");
+    let allowlist = Allowlist::load(
+        Vec::new(),
+        SearchPath {
+            dirs: vec![machine.path().to_path_buf()],
+            read_only: true,
+        },
+        store,
+    )
+    .expect("load");
+    assert_eq!(
+        allowlist.verdict("python3", Some(&ApprovalScope::OptionsOnly)),
+        Verdict::Unlisted { approvable: false },
+        "an interpreter approved before is asked about again"
+    );
+}
+
+#[test]
+fn unlisted_programs_that_modify_files_are_never_routine() {
+    let machine = dev_machine();
+    for (script, offered) in [
+        ("rm notes.txt", &["rm notes.txt"][..]),
+        ("cargo build && mv a b", &["cargo build", "mv a"][..]),
+    ] {
+        let confirmation = machine.review(script, &[]).expect("needs confirmation");
+        let offered: Vec<ProgramApproval> = offered.iter().map(|a| approval(a)).collect();
+        assert_eq!(confirmation.always_allow(), offered, "{script:?}");
+        assert_eq!(confirmation.risk(), Risk::Elevated, "{script:?}");
+    }
+    let cargo = machine
+        .review("cargo build", &[])
+        .expect("needs confirmation");
+    assert_eq!(cargo.risk(), Risk::Routine);
 }
 
 #[test]
@@ -873,7 +972,7 @@ fn a_program_on_a_path_is_allowed_only_where_it_is_trusted() {
     std::fs::copy(&cat, &planted).expect("copy");
     assert_eq!(
         machine.review(&format!("{} x", planted.display()), &[]),
-        unlisted(&[&planted.to_string_lossy()], false)
+        unlisted(&[&planted.to_string_lossy()], &[])
     );
 }
 
@@ -966,11 +1065,11 @@ fn programs_rg_options_run_must_be_allowed_whatever_the_patterns() {
     for (script, expected) in [
         (
             "rg --hostname-bin=make --hyperlink-format='file://{host}{path}' -H all Makefile",
-            unlisted(&["make"], true),
+            unlisted(&["make"], &[]),
         ),
-        ("rg --pre make x", unlisted(&["make"], true)),
-        ("make() { :; }; rg --pre=make x", unlisted(&["make"], true)),
-        ("nice rg --hostname-bin ./x y", unlisted(&["./x"], false)),
+        ("rg --pre make x", unlisted(&["make"], &[])),
+        ("make() { :; }; rg --pre=make x", unlisted(&["make"], &[])),
+        ("nice rg --hostname-bin ./x y", unlisted(&["./x"], &[])),
         ("rg --pre cat x", None),
         ("rg --pre-glob '*.pdf' --pre= x", None),
     ] {

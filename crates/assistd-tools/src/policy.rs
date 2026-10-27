@@ -150,7 +150,7 @@ impl SubprocessPolicy {
             tool: tool.to_string(),
             script: script.to_string(),
             matched_pattern: confirmation.to_string(),
-            always_allow: offered.to_vec(),
+            always_allow: offered.iter().map(ToString::to_string).collect(),
             risk: confirmation.risk(),
         };
         approvals::confirm_remembering(
