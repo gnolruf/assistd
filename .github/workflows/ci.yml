@@ -107,6 +107,8 @@ jobs:
             --features assistd-llm/test-support,assistd-voice/test-support
 
       - name: Test
+        env:
+          LD_LIBRARY_PATH: ${{ env.SHERPA_ONNX_LIB_DIR }}
         run: |
           cargo test --workspace --locked \
             --features assistd-llm/test-support,assistd-voice/test-support
