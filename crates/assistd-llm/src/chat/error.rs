@@ -1,3 +1,4 @@
+use assistd_utils::http::BodyError;
 use thiserror::Error;
 
 /// Errors produced by [`crate::LlamaChatClient`].
@@ -5,6 +6,9 @@ use thiserror::Error;
 pub enum ChatClientError {
     #[error("HTTP transport error: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("llama-server response: {0}")]
+    Body(#[from] BodyError),
 
     #[error("llama-server returned {status}: {body}")]
     Server { status: u16, body: String },

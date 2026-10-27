@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use assistd_utils::child_server::ChildServerError;
+use assistd_utils::http::BodyError;
 use thiserror::Error;
 
 /// Errors produced by the llama-server lifecycle manager and HTTP control plane.
@@ -11,6 +12,12 @@ pub enum LlamaServerError {
 
     #[error("HTTP client error: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("llama-server control response: {0}")]
+    Body(#[from] BodyError),
+
+    #[error("parse llama-server control response: {0}")]
+    Json(#[from] serde_json::Error),
 
     #[error("llama-server {method} {path} returned status {status}")]
     ControlHttp {

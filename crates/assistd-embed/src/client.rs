@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use assistd_utils::child_server::{ApiKey, ChildServerStatus};
-use assistd_utils::http::local_client_builder;
+use assistd_utils::http::{local_client_builder, read_capped};
 use async_trait::async_trait;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::{EmbedError, Embedder};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Largest accepted `/v1/embeddings` body: a full batch of 8192-dim vectors in JSON is under 8 MiB.
+const BODY_MAX: usize = 32 * 1024 * 1024;
+const ERROR_BODY_MAX: usize = 64 * 1024;
+const ERROR_BODY_CHARS: usize = 200;
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
@@ -115,13 +119,19 @@ impl LlamaEmbedder {
             .map_err(|source| EmbedError::Request { url, source })?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = read_capped(response, ERROR_BODY_MAX)
+                .await
+                .unwrap_or_default();
             return Err(EmbedError::Status {
                 status,
-                body: body.chars().take(200).collect(),
+                body: String::from_utf8_lossy(&body)
+                    .chars()
+                    .take(ERROR_BODY_CHARS)
+                    .collect(),
             });
         }
-        let parsed: EmbedResponse = response.json().await.map_err(EmbedError::Decode)?;
+        let body = read_capped(response, BODY_MAX).await?;
+        let parsed: EmbedResponse = serde_json::from_slice(&body).map_err(EmbedError::Decode)?;
         order_by_index(parsed.data, input.len())
     }
 }
@@ -146,13 +156,15 @@ impl Embedder for LlamaEmbedder {
             .await?
             .into_iter()
             .map(|raw| {
-                if raw.len() == self.dim {
-                    Ok(l2_normalize(raw))
-                } else {
+                if raw.len() != self.dim {
                     Err(EmbedError::DimMismatch {
                         got: raw.len(),
                         expected: self.dim,
                     })
+                } else if !raw.iter().all(|value| value.is_finite()) {
+                    Err(EmbedError::NonFinite)
+                } else {
+                    Ok(l2_normalize(raw))
                 }
             })
             .collect()
@@ -185,13 +197,14 @@ fn order_by_index(data: Vec<EmbedDatum>, expected: usize) -> Result<Vec<Vec<f32>
     Ok(slots.into_iter().flatten().collect())
 }
 
+/// Scale finite `vector` to unit length, leaving a zero vector as it is.
 fn l2_normalize(mut vector: Vec<f32>) -> Vec<f32> {
     let norm = vector
         .iter()
         .map(|&x| f64::from(x) * f64::from(x))
         .sum::<f64>()
         .sqrt();
-    if !norm.is_finite() || norm == 0.0 {
+    if norm == 0.0 {
         return vector;
     }
     let inverse_norm = (1.0 / norm).to_f32().unwrap_or(f32::MAX);
