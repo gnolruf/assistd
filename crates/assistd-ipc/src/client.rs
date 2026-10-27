@@ -68,8 +68,9 @@ impl IpcClient {
     pub async fn one_shot(&self, req: Request) -> Result<EventStream> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
-        write_frame(&mut write, &req).await?;
-        write.shutdown().await?;
+        if write_initial_frame(&mut write, &req).await? {
+            write.shutdown().await?;
+        }
         Ok(EventStream::new(read))
     }
 
@@ -78,7 +79,7 @@ impl IpcClient {
     pub async fn open_dialog(&self, initial: Request) -> Result<DialogConnection> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
-        write_frame(&mut write, &initial).await?;
+        write_initial_frame(&mut write, &initial).await?;
         Ok(DialogConnection {
             write,
             events: EventStream::new(read),
@@ -106,6 +107,23 @@ impl IpcClient {
 impl Default for IpcClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Write the opening request; `false` when the daemon had already closed the connection,
+/// leaving any [`Event::Error`] saying why for the event stream to report.
+async fn write_initial_frame(write: &mut OwnedWriteHalf, req: &Request) -> Result<bool> {
+    match write_frame(write, req).await {
+        Ok(()) => Ok(true),
+        Err(IpcClientError::Io(e))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
     }
 }
 

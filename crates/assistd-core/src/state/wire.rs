@@ -38,21 +38,22 @@ pub enum AttachmentError {
     },
 }
 
-/// Decode and validate every attachment, failing on the first that is not valid base64, is
-/// not a PNG, JPEG or WebP matching its declared MIME, or breaks a per-image or per-query cap.
+/// Decode and validate every attachment, dropping each base64 string once decoded. Fails on
+/// the first that is not valid base64, is not a PNG, JPEG or WebP matching its declared MIME,
+/// or breaks a per-image or per-query cap.
 pub(super) fn decode_wire_attachments(
-    wire: &[ImageAttachment],
+    wire: Vec<ImageAttachment>,
 ) -> Result<Vec<Attachment>, AttachmentError> {
     let mut total_bytes = 0u64;
-    wire.iter()
+    wire.into_iter()
         .map(|attachment| {
-            let bytes = decode_image(attachment)?;
+            let bytes = decode_image(&attachment)?;
             total_bytes += bytes.len() as u64;
             if total_bytes > MAX_QUERY_IMAGE_BYTES {
                 return Err(AttachmentError::QueryTooLarge);
             }
             Ok(Attachment::Image {
-                mime: attachment.mime.clone(),
+                mime: attachment.mime,
                 bytes,
             })
         })

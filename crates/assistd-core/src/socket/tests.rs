@@ -210,6 +210,35 @@ async fn oversize_request_is_rejected_at_its_kind_cap() {
     }
 }
 
+#[tokio::test]
+async fn client_past_the_connection_limit_is_told_why() {
+    let events = with_server(test_state(), |path| async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut held = Vec::with_capacity(MAX_CONNECTIONS);
+        for _ in 0..MAX_CONNECTIONS {
+            held.push(UnixStream::connect(&path).await.unwrap());
+        }
+        let request = Request::Query {
+            id: "full".to_string(),
+            text: "hi".to_string(),
+            attachments: Vec::new(),
+        };
+        let stream = assistd_ipc::client::IpcClient::with_path(&path)
+            .one_shot(request)
+            .await
+            .unwrap();
+        stream.collect().await.unwrap()
+    })
+    .await;
+    assert_eq!(
+        events,
+        [Event::Error {
+            id: String::new(),
+            message: format!("daemon is serving its limit of {MAX_CONNECTIONS} connections"),
+        }]
+    );
+}
+
 async fn write_past_cap(write: &mut OwnedWriteHalf, prefix: &[u8], cap: u64) {
     let chunk = vec![b'a'; 1024 * 1024];
     let mut remaining = usize::try_from(cap).expect("request cap fits usize") + 1;
@@ -933,7 +962,8 @@ async fn client_closing_mid_stream_is_not_a_connection_error() {
         .unwrap();
     let state = state_with_backend(Arc::new(FloodBackend));
     let (_drain_tx, drain_rx) = watch::channel(false);
-    let connection = tokio::spawn(handle_connection(server, state, drain_rx));
+    let large_frames = Arc::new(Semaphore::new(LARGE_FRAME_SLOTS));
+    let connection = tokio::spawn(handle_connection(server, state, large_frames, drain_rx));
 
     let mut reader = BufReader::new(client_read);
     assert!(read_event(&mut reader).await.is_some());
