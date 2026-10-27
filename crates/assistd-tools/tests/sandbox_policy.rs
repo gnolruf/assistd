@@ -394,3 +394,21 @@ async fn bwrap_blocks_writes_to_read_only_root() {
         "expected EROFS/EACCES-shaped error, got: {combined}"
     );
 }
+
+/// The bomb's depth is bounded, so it stays harmless if the cap regresses.
+#[tokio::test]
+async fn bwrap_caps_a_renamed_fork_bomb() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let bomb = "f(){ if (( $1 < 8 )); then f $(($1+1)) | f $(($1+1)) & wait; else sleep 1; fi; }; \
+                f 0; echo ended";
+    let out = cmd.run(input(bomb)).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.stdout, b"ended\n", "exit {}: {stderr}", out.exit_code);
+    assert!(
+        stderr.contains("fork: retry: Resource temporarily unavailable"),
+        "{stderr}"
+    );
+}

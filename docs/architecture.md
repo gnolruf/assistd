@@ -463,8 +463,10 @@ A walk through `assistd query "what files changed this week?"`:
 6. **Sandbox.** `BashCommand` invokes the bubblewrap sandbox: a
    read-only root with writable entries
    of `$HOME` other than dotfiles and symlinks, fresh `/tmp`, `/dev`,
-   `/proc` and `/run`, unshared pid/ipc/uts/network namespaces, and
-   an environment cleared down to locale and terminal variables. With
+   `/proc` and `/run`, unshared user/pid/ipc/uts/network namespaces,
+   an environment cleared down to locale and terminal variables, and
+   fixed `prlimit` caps of 512 tasks in the sandbox, 4 GiB of data
+   segment per process and 4 GiB per written file. With
    `--share-net` in `bwrap_extra_args`, `bwrap` is spawned from a thread
    Landlock bars from abstract Unix sockets, such as the X server's, that
    the shared network namespace would otherwise expose; kernels without
