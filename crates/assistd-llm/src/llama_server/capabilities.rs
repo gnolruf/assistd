@@ -15,8 +15,8 @@ pub struct VisionState {
     pub vision_supported: bool,
 }
 
-/// Probe the loaded model's capabilities through `control`, following a
-/// router's `/models` to the child hosting `model`. Fails closed: any error
+/// Probe the loaded model's capabilities through `control`, asking a router
+/// for the `/props` of the child hosting `model`. Fails closed: any error
 /// or missing field yields the default (no vision).
 pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str) -> VisionState {
     let Some(body) = props_or_warn(control.props().await) else {
@@ -30,11 +30,11 @@ pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str
         };
     }
 
-    let Some(child_port) = bound_child_port(control, model).await else {
+    if !model_is_loaded(control, model).await {
         return VisionState::default();
-    };
+    }
 
-    let Some(child_body) = props_or_warn(control.child_props(child_port).await) else {
+    let Some(child_body) = props_or_warn(control.model_props(model).await) else {
         return VisionState::default();
     };
     let vision_supported = parse_vision_supported(&child_body);
@@ -42,8 +42,7 @@ pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str
     let model_id = parse_model_id(&child_body).or_else(|| Some(model.to_string()));
     debug!(
         target: "assistd::llama_server",
-        "router child probe: model={model_id:?}, vision_supported={vision_supported}, \
-         child_port={child_port}"
+        "router child probe: model={model_id:?}, vision_supported={vision_supported}"
     );
     VisionState {
         model_id,
@@ -51,31 +50,23 @@ pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str
     }
 }
 
-async fn bound_child_port(control: &LlamaServerControl, model: &str) -> Option<u16> {
-    match control.find_loaded_child_port(model).await {
-        Ok(Some(port)) if port != 0 => Some(port),
-        Ok(Some(_)) => {
-            debug!(
-                target: "assistd::llama_server",
-                "router /models reports `--port 0` for {model}; child not yet bound — \
-                 reporting vision unsupported until the next probe"
-            );
-            None
-        }
-        Ok(None) => {
+async fn model_is_loaded(control: &LlamaServerControl, model: &str) -> bool {
+    match control.model_is_loaded(model).await {
+        Ok(true) => true,
+        Ok(false) => {
             debug!(
                 target: "assistd::llama_server",
                 "router /models has no loaded entry for {model}; reporting vision \
                  unsupported until the next probe"
             );
-            None
+            false
         }
         Err(e) => {
             warn!(
                 target: "assistd::llama_server",
                 "router /models lookup for {model} failed: {e}"
             );
-            None
+            false
         }
     }
 }
