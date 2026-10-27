@@ -109,12 +109,19 @@ async fn approvals_are_saved_and_loaded() {
 }
 
 #[test]
-fn a_program_that_runs_any_code_is_not_approvable_under_another_name() {
+fn a_program_that_runs_any_code_is_never_approved() {
     let bin = tempfile::tempdir().expect("tempdir");
+    let config = tempfile::tempdir().expect("tempdir");
     let python = executable(bin.path(), "python3.12");
     std::os::unix::fs::symlink(&python, bin.path().join("py")).expect("symlink");
     executable(bin.path(), "tool");
-    let allowlist = Allowlist::unsaved(Vec::new(), sandboxed(&[bin.path()]));
+    let store = config.path().join(APPROVALS_FILE);
+    let stored = format!(
+        "[[program]]\nname = \"py\"\npath = \"{}\"\n",
+        python.display()
+    );
+    std::fs::write(&store, stored).expect("write approvals");
+    let allowlist = Allowlist::load(Vec::new(), sandboxed(&[bin.path()]), store).expect("load");
     for name in ["python3.12", "py"] {
         assert_eq!(
             allowlist.verdict(name, OPTIONS_ONLY),

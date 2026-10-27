@@ -3,7 +3,6 @@ use std::path::Path;
 
 use super::*;
 use crate::policy::SearchPath;
-use crate::policy::allowlist::APPROVALS_FILE;
 
 fn patterns() -> Vec<DestructivePattern> {
     [
@@ -903,45 +902,6 @@ fn always_allow_is_offered_only_for_unlisted_named_programs() {
         "an unverifiable command"
     );
     assert!(offered("cargo build; ./x").is_empty(), "a path");
-}
-
-#[tokio::test]
-async fn programs_that_run_any_code_are_never_offered_always_allow() {
-    let machine = dev_machine();
-    for script in [
-        "python3 -c 'import os; os.remove(\"x\")'",
-        "sh -c 'cat x'",
-        "cargo build && env python3 x.py",
-        "sudo cat x",
-    ] {
-        let confirmation = machine.review(script, &[]).expect("needs confirmation");
-        assert!(confirmation.always_allow().is_empty(), "{script:?}");
-        assert_eq!(confirmation.risk(), Risk::Elevated, "{script:?}");
-    }
-    let store = tempfile::tempdir().expect("tempdir");
-    let store = store.path().join(APPROVALS_FILE);
-    std::fs::write(
-        &store,
-        format!(
-            "[[program]]\nname = \"python3\"\npath = \"{}\"\n",
-            machine.path().join("python3").display()
-        ),
-    )
-    .expect("write approvals");
-    let allowlist = Allowlist::load(
-        Vec::new(),
-        SearchPath {
-            dirs: vec![machine.path().to_path_buf()],
-            read_only: true,
-        },
-        store,
-    )
-    .expect("load");
-    assert_eq!(
-        allowlist.verdict("python3", Some(&ApprovalScope::OptionsOnly)),
-        Verdict::Unlisted { approvable: false },
-        "an interpreter approved before is asked about again"
-    );
 }
 
 #[test]
