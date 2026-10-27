@@ -23,6 +23,11 @@ pub(crate) use confined::ConfinedSpawner;
 /// daemon has no usable one.
 const SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
+/// The caps every sandboxed command runs under, as `prlimit` flags: tasks,
+/// threads included, in the sandbox's own user namespace; bytes of a
+/// process's data segment; bytes of any one file it writes.
+const RESOURCE_LIMITS: [&str; 3] = ["--nproc=512", "--data=4294967296", "--fsize=4294967296"];
+
 /// Variables sandboxed commands inherit, besides `LC_*`; the rest, such as
 /// agent sockets and tokens, are cleared.
 const KEPT_ENV: &[&str] = &["LANG", "LANGUAGE", "LOGNAME", "TERM", "TZ", "USER"];
@@ -64,6 +69,11 @@ pub enum ToolsDisabled {
     #[error("tools are disabled: cannot run bubblewrap (`bwrap`): {0}; install it to enable them")]
     BwrapMissing(ProgramError),
     #[error(
+        "tools are disabled: cannot run `prlimit` from the sandbox's PATH to cap sandboxed \
+         commands: {0}; install util-linux to enable them"
+    )]
+    PrlimitMissing(ProgramError),
+    #[error(
         "tools are disabled: tools.bash.bwrap_extra_args shares the network, and the kernel \
          cannot keep sandboxed commands off abstract sockets such as the X server's (needs \
          Landlock scoping, Linux 6.12+); drop --share-net to enable them"
@@ -75,9 +85,11 @@ pub enum ToolsDisabled {
 #[derive(Debug, Clone)]
 pub enum ResolvedSandboxMode {
     None,
-    /// `bwrap` was found at this absolute path.
+    /// `bwrap` was found at `path`, and `prlimit` at `prlimit` on the
+    /// sandbox's `PATH`.
     Bwrap {
         path: PathBuf,
+        prlimit: PathBuf,
     },
 }
 
@@ -245,8 +257,8 @@ impl SandboxInfo {
     {
         match &self.mode {
             ResolvedSandboxMode::None => self.unwrapped_command(program, args),
-            ResolvedSandboxMode::Bwrap { path } => {
-                self.bwrap_command(path, std::env::var("HOME").ok(), program, args)
+            ResolvedSandboxMode::Bwrap { path, prlimit } => {
+                self.bwrap_command(path, prlimit, std::env::var("HOME").ok(), program, args)
             }
         }
     }
@@ -267,10 +279,12 @@ impl SandboxInfo {
     /// Flag order is load-bearing: the profile, then the self-binds that
     /// pin command directories' ancestors, then the shared directories,
     /// then the read-only mounts over `home`'s command directories and the
-    /// protections, then the operator's `extra_args` so they win.
+    /// protections, then the operator's `extra_args` so they win. Inside,
+    /// `prlimit` applies [`RESOURCE_LIMITS`] before running `program`.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
+        prlimit: &Path,
         home: Option<String>,
         program: &str,
         args: I,
@@ -298,6 +312,7 @@ impl SandboxInfo {
         cmd.args(protection_flags(&self.protected, &writable));
         cmd.args(self.extra_args.iter().map(OsStr::new));
         cmd.arg("--");
+        cmd.arg(prlimit).args(RESOURCE_LIMITS).arg("--");
         cmd.arg(program).args(args);
         cmd
     }
@@ -311,6 +326,36 @@ pub enum SandboxError {
          Install bubblewrap, or set sandbox to \"auto\" to start with tools disabled."
     )]
     BwrapNotFound(ProgramError),
+    #[error(
+        "tools.bash.sandbox = \"bwrap\" but `prlimit` cannot be run from the sandbox's PATH: \
+         {0}. Install util-linux, or set sandbox to \"auto\" to start with tools disabled."
+    )]
+    PrlimitNotFound(ProgramError),
+}
+
+/// A program the bwrap sandbox needs and cannot run.
+#[derive(Debug)]
+enum MissingProgram {
+    Bwrap(ProgramError),
+    Prlimit(ProgramError),
+}
+
+impl From<MissingProgram> for SandboxError {
+    fn from(missing: MissingProgram) -> Self {
+        match missing {
+            MissingProgram::Bwrap(reason) => Self::BwrapNotFound(reason),
+            MissingProgram::Prlimit(reason) => Self::PrlimitNotFound(reason),
+        }
+    }
+}
+
+impl From<MissingProgram> for ToolsDisabled {
+    fn from(missing: MissingProgram) -> Self {
+        match missing {
+            MissingProgram::Bwrap(reason) => Self::BwrapMissing(reason),
+            MissingProgram::Prlimit(reason) => Self::PrlimitMissing(reason),
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -649,7 +694,7 @@ pub(crate) fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool
 
 /// Read-only root with (when bindable) the visible entries of `$HOME`
 /// writable, fresh `/tmp`, `/dev`, `/proc` and `/run`, isolated
-/// pid/ipc/uts namespaces, and no network; the operator restores it with
+/// user/pid/ipc/uts namespaces, and no network; the operator restores it with
 /// `--share-net` in `bwrap_extra_args`.
 fn default_bwrap_flags_for(home: Option<&SandboxHome>) -> Vec<String> {
     let mut flags: Vec<String> = ["--ro-bind", "/", "/", "--tmpfs", "/tmp"]
@@ -671,6 +716,7 @@ fn default_bwrap_flags_for(home: Option<&SandboxHome>) -> Vec<String> {
             "/proc",
             "--tmpfs",
             "/run",
+            "--unshare-user",
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
@@ -744,16 +790,19 @@ fn probe_sandbox_with_path(
     shared: SharedDirs,
     path_env: &OsStr,
 ) -> Result<ToolSandbox, SandboxError> {
-    let disabled = match (request, find_program(Path::new("bwrap"), path_env)) {
-        (SandboxRequest::Bwrap, Err(reason)) => return Err(SandboxError::BwrapNotFound(reason)),
+    let disabled = match (request, find_sandbox_programs(path_env)) {
+        (SandboxRequest::Bwrap, Err(missing)) => return Err(missing.into()),
         (SandboxRequest::None, _) => ToolsDisabled::ByConfig,
-        (SandboxRequest::Auto, Err(reason)) => ToolsDisabled::BwrapMissing(reason),
-        (SandboxRequest::Auto | SandboxRequest::Bwrap, Ok(bwrap)) => {
+        (SandboxRequest::Auto, Err(missing)) => missing.into(),
+        (SandboxRequest::Auto | SandboxRequest::Bwrap, Ok((bwrap, prlimit))) => {
             match confined_spawner(&bwrap, &extra_args) {
                 Ok(confined) => {
                     announce_bwrap(&bwrap);
                     return Ok(ToolSandbox::Bwrap(Arc::new(SandboxInfo {
-                        mode: ResolvedSandboxMode::Bwrap { path: bwrap },
+                        mode: ResolvedSandboxMode::Bwrap {
+                            path: bwrap,
+                            prlimit,
+                        },
                         extra_args,
                         protected,
                         shared,
@@ -767,6 +816,15 @@ fn probe_sandbox_with_path(
     };
     warn!(target: "assistd::policy", "{disabled}");
     Ok(ToolSandbox::Disabled(disabled))
+}
+
+/// `bwrap` on `path_env`, and `prlimit` on [`SANDBOX_PATH`], where the
+/// sandbox runs it.
+fn find_sandbox_programs(path_env: &OsStr) -> Result<(PathBuf, PathBuf), MissingProgram> {
+    let bwrap = find_program(Path::new("bwrap"), path_env).map_err(MissingProgram::Bwrap)?;
+    let prlimit = find_program(Path::new("prlimit"), OsStr::new(SANDBOX_PATH))
+        .map_err(MissingProgram::Prlimit)?;
+    Ok((bwrap, prlimit))
 }
 
 /// The spawner that keeps commands off abstract sockets, needed only when
@@ -834,6 +892,7 @@ mod tests {
         SandboxInfo {
             mode: ResolvedSandboxMode::Bwrap {
                 path: PathBuf::from("/usr/bin/bwrap"),
+                prlimit: PathBuf::from("/usr/bin/prlimit"),
             },
             extra_args,
             protected: Protected::default(),
@@ -863,15 +922,30 @@ mod tests {
         let home_dir = tempfile::tempdir().expect("tempdir");
         let home = Some(home_dir.path().to_string_lossy().into_owned());
         let info = bwrap_info(vec!["--share-net".into()]);
-        let tail = ["--share-net", "--", "make", "-j4"].map(String::from);
+        let limits = ["/usr/bin/prlimit"]
+            .into_iter()
+            .chain(RESOURCE_LIMITS)
+            .chain(["--"]);
+        let tail: Vec<String> = ["--share-net", "--"]
+            .into_iter()
+            .chain(limits)
+            .chain(["make", "-j4"])
+            .map(String::from)
+            .collect();
         let profile = default_bwrap_flags_for(SandboxHome::read(home.clone()).as_ref());
         for private in [["--tmpfs", "/tmp"], ["--tmpfs", "/run"]] {
             assert!(profile.windows(2).any(|w| w == private), "{private:?}");
         }
         assert!(profile.iter().any(|flag| flag == "--unshare-net"));
-        let cmd = info.bwrap_command(Path::new("/usr/bin/bwrap"), home, "make", ["-j4"]);
+        let cmd = info.bwrap_command(
+            Path::new("/usr/bin/bwrap"),
+            Path::new("/usr/bin/prlimit"),
+            home,
+            "make",
+            ["-j4"],
+        );
         assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
-        assert_eq!(argv_of(&cmd), [profile, tail.to_vec()].concat());
+        assert_eq!(argv_of(&cmd), [profile, tail].concat());
     }
 
     fn mounts_of(flags: &[&str]) -> Mounts {
@@ -1139,6 +1213,7 @@ mod tests {
         };
         let argv = argv_of(&info.bwrap_command(
             Path::new("/usr/bin/bwrap"),
+            Path::new("/usr/bin/prlimit"),
             Some(home.to_string_lossy().into_owned()),
             "true",
             [""; 0],
@@ -1301,6 +1376,7 @@ mod tests {
         };
         let argv = argv_of(&info.bwrap_command(
             Path::new("/usr/bin/bwrap"),
+            Path::new("/usr/bin/prlimit"),
             Some(path_of("")),
             "true",
             [""; 0],

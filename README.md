@@ -53,7 +53,8 @@ window-manager bindings), and integrates with the running compositor for context
   `libasound2-dev`) to build.
 - `llama-server` from `llama.cpp` on your `$PATH`. The daemon spawns it
   as a child process.
-- `bubblewrap`. Without it the model gets no tools.
+- `bubblewrap`, and `prlimit` from `util-linux`. Without them the model
+  gets no tools.
 
 Optional: `espeak-ng` for TTS with Piper voices, `grim` (Wayland) or `maim` (X11) for
 screenshots, and SearXNG's `searxng-run` for web search (`searxng-git`
