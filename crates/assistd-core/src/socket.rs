@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
@@ -46,10 +46,14 @@ const MAX_CONTROL_REQUEST_BYTES: u64 = 64 * 1024;
 /// may grow past [`MAX_CONTROL_REQUEST_BYTES`].
 const QUERY_FRAME_PREFIX: &[u8] = br#"{"type":"query""#;
 
+/// Connections that may hold a frame past [`MAX_CONTROL_REQUEST_BYTES`] at once; each keeps
+/// its slot until the connection ends, bounding the memory queued image queries pin.
+const LARGE_FRAME_SLOTS: usize = 4;
+
 /// How long a new connection may take to deliver its first frame.
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Connections served at once; further ones are closed on accept.
+/// Connections served at once; further ones are sent an error and closed on accept.
 const MAX_CONNECTIONS: usize = 128;
 
 /// Pause after EMFILE/ENFILE from `accept()`, which would otherwise spin.
@@ -164,6 +168,18 @@ impl StartupLock {
             }),
         }
     }
+}
+
+/// How much of the first frame was read.
+enum FrameRead {
+    /// Read up to `limit` bytes; `large_slot` is held when the frame may exceed
+    /// [`MAX_CONTROL_REQUEST_BYTES`].
+    Read {
+        limit: u64,
+        large_slot: Option<OwnedSemaphorePermit>,
+    },
+    /// The frame outgrew [`MAX_CONTROL_REQUEST_BYTES`] while every large-frame slot was taken.
+    NoLargeSlot,
 }
 
 /// Why a connection stopped forwarding events to its client.
@@ -301,6 +317,7 @@ where
     F: Future<Output = ()>,
 {
     let mut connections: JoinSet<()> = JoinSet::new();
+    let large_frames = Arc::new(Semaphore::new(LARGE_FRAME_SLOTS));
     let mut fd_exhausted = false;
     let (drain_tx, drain_rx) = watch::channel(false);
 
@@ -326,11 +343,16 @@ where
                                 limit = MAX_CONNECTIONS,
                                 "rejecting IPC connection: too many open connections"
                             );
+                            refuse_connection(
+                                &stream,
+                                format!("daemon is serving its limit of {MAX_CONNECTIONS} connections"),
+                            );
                         } else if peer_is_daemon_user(&stream) {
                             spawn_connection(
                                 &mut connections,
                                 stream,
                                 state.clone(),
+                                large_frames.clone(),
                                 drain_rx.clone(),
                             );
                         }
@@ -376,6 +398,25 @@ fn peer_is_daemon_user(stream: &UnixStream) -> bool {
     }
 }
 
+/// Tell a client turned away on accept why, without waiting on it; a fresh socket's
+/// send buffer always has room for the one event.
+fn refuse_connection(stream: &UnixStream, message: String) {
+    let event = Event::Error {
+        id: String::new(),
+        message,
+    };
+    let frame = match serde_json::to_string(&event) {
+        Ok(json) => json + "\n",
+        Err(e) => {
+            debug!("could not serialize connection refusal: {e}");
+            return;
+        }
+    };
+    if let Err(e) = stream.try_write(frame.as_bytes()) {
+        debug!("could not tell refused client why: {e}");
+    }
+}
+
 fn peer_pid(stream: &UnixStream) -> Option<u32> {
     let pid = stream.peer_cred().ok()?.pid()?;
     u32::try_from(pid).ok()
@@ -385,10 +426,11 @@ fn spawn_connection(
     connections: &mut JoinSet<()>,
     stream: UnixStream,
     state: Arc<AppState>,
+    large_frames: Arc<Semaphore>,
     drain: watch::Receiver<bool>,
 ) {
     connections.spawn(async move {
-        if let Err(e) = handle_connection(stream, state, drain).await {
+        if let Err(e) = handle_connection(stream, state, large_frames, drain).await {
             error!("connection error: {e}");
         }
     });
@@ -418,12 +460,15 @@ fn is_fd_exhaustion(err: &io::Error) -> bool {
 async fn handle_connection(
     stream: UnixStream,
     state: Arc<AppState>,
+    large_frames: Arc<Semaphore>,
     mut drain: watch::Receiver<bool>,
 ) -> Result<(), SocketError> {
     let peer_pid = peer_pid(&stream);
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    let Some(req) = read_initial_request(&mut reader, &mut write_half).await? else {
+    let Some((req, _large_slot)) =
+        read_initial_request(&mut reader, &mut write_half, large_frames).await?
+    else {
         return Ok(());
     };
 
@@ -479,17 +524,18 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Read and parse the connection's first frame. `None` means the client
-/// left, missed [`INITIAL_REQUEST_TIMEOUT`], or was already sent an error
-/// and closed.
+/// Read and parse the connection's first frame, with the large-frame slot it
+/// holds, if any. `None` means the client left, missed
+/// [`INITIAL_REQUEST_TIMEOUT`], or was already sent an error and closed.
 async fn read_initial_request(
     reader: &mut BufReader<OwnedReadHalf>,
     write_half: &mut OwnedWriteHalf,
-) -> Result<Option<Request>, SocketError> {
+    large_frames: Arc<Semaphore>,
+) -> Result<Option<(Request, Option<OwnedSemaphorePermit>)>, SocketError> {
     let mut line = Vec::new();
-    let Ok(limit) = tokio::time::timeout(
+    let Ok(frame) = tokio::time::timeout(
         INITIAL_REQUEST_TIMEOUT,
-        read_request_frame(reader, &mut line),
+        read_request_frame(reader, &mut line, large_frames),
     )
     .await
     else {
@@ -499,17 +545,24 @@ async fn read_initial_request(
         );
         return Ok(None);
     };
-    let limit = limit?;
+    let frame = frame?;
     if line.is_empty() {
         debug!("client disconnected without sending a request");
         return Ok(None);
     }
-    let rejection = if !line.ends_with(b"\n") {
-        format!("request exceeded {limit}-byte limit")
-    } else {
-        match serde_json::from_slice::<Request>(line.trim_ascii()) {
-            Ok(req) => return Ok(Some(req)),
-            Err(e) => format!("invalid request: {e}"),
+    let rejection = match frame {
+        FrameRead::NoLargeSlot => format!(
+            "{LARGE_FRAME_SLOTS} requests over {MAX_CONTROL_REQUEST_BYTES} bytes are already \
+             in flight; retry once one finishes"
+        ),
+        FrameRead::Read { limit, .. } if !line.ends_with(b"\n") => {
+            format!("request exceeded {limit}-byte limit")
+        }
+        FrameRead::Read { large_slot, .. } => {
+            match serde_json::from_slice::<Request>(line.trim_ascii()) {
+                Ok(req) => return Ok(Some((req, large_slot))),
+                Err(e) => format!("invalid request: {e}"),
+            }
         }
     };
     let err = Event::Error {
@@ -521,12 +574,13 @@ async fn read_initial_request(
     Ok(None)
 }
 
-/// Read one frame into `line`, stopping at the cap its prefix allows,
-/// which is returned.
+/// Read one frame into `line`, stopping at the cap its prefix allows. A
+/// frame past [`MAX_CONTROL_REQUEST_BYTES`] reads on only with a large-frame slot.
 async fn read_request_frame(
     reader: &mut BufReader<OwnedReadHalf>,
     line: &mut Vec<u8>,
-) -> io::Result<u64> {
+    large_frames: Arc<Semaphore>,
+) -> io::Result<FrameRead> {
     (&mut *reader)
         .take(MAX_CONTROL_REQUEST_BYTES)
         .read_until(b'\n', line)
@@ -534,13 +588,22 @@ async fn read_request_frame(
     let may_grow =
         !line.ends_with(b"\n") && line.trim_ascii_start().starts_with(QUERY_FRAME_PREFIX);
     if !may_grow {
-        return Ok(MAX_CONTROL_REQUEST_BYTES);
+        return Ok(FrameRead::Read {
+            limit: MAX_CONTROL_REQUEST_BYTES,
+            large_slot: None,
+        });
     }
+    let Ok(large_slot) = large_frames.try_acquire_owned() else {
+        return Ok(FrameRead::NoLargeSlot);
+    };
     reader
         .take(MAX_REQUEST_BYTES - MAX_CONTROL_REQUEST_BYTES)
         .read_until(b'\n', line)
         .await?;
-    Ok(MAX_REQUEST_BYTES)
+    Ok(FrameRead::Read {
+        limit: MAX_REQUEST_BYTES,
+        large_slot: Some(large_slot),
+    })
 }
 
 /// Write every dispatched event to the client, teeing it onto the bus

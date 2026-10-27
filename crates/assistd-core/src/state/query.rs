@@ -342,9 +342,7 @@ impl AppState {
         cancel: CancellationToken,
     ) -> Result<(), DispatchError> {
         let _cancel_on_return = cancel.clone().drop_guard();
-        let attachments = self
-            .prepare_attachments(&id, &wire_attachments, &tx)
-            .await?;
+        let attachments = self.prepare_attachments(&id, wire_attachments, &tx).await?;
         let Some((_request_guard, agent_guard)) = self.admit_turn(&id, &tx, &cancel).await? else {
             return finish_interrupted_before_start(&tx, id).await;
         };
@@ -395,7 +393,7 @@ impl AppState {
     async fn prepare_attachments(
         &self,
         id: &str,
-        wire: &[ImageAttachment],
+        wire: Vec<ImageAttachment>,
         tx: &mpsc::Sender<Event>,
     ) -> Result<Vec<Attachment>, DispatchError> {
         let decoded = decode_wire_attachments(wire).map_err(DispatchError::from);

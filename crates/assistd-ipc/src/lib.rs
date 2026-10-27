@@ -267,9 +267,9 @@ impl SubscribeFilter {
     }
 }
 
-/// Client-to-daemon request, one JSON line tagged by `"type"`. Its `id` is echoed on every
-/// [`Event`] in response. A client sends one request and closes its write half unless it must
-/// answer an [`Event::ConfirmRequest`].
+/// Client-to-daemon request, one JSON line tagged by `"type"`, its `id` echoed on every [`Event`].
+/// A line is capped at 64 KiB unless it opens with exactly `{"type":"query"`, which allows 64 MiB.
+/// A client sends one request and closes its write half unless answering [`Event::ConfirmRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
