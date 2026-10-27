@@ -106,7 +106,13 @@ jobs:
           cargo doc --workspace --no-deps --locked \
             --features assistd-llm/test-support,assistd-voice/test-support
 
+      # Test binaries in target/debug/deps find sherpa-onnx only through
+      # the build script's copies in target/debug, which rust-cache prunes
+      # while keeping the build script's cached output, so a full cache hit
+      # leaves them missing.
       - name: Test
+        env:
+          LD_LIBRARY_PATH: ${{ env.SHERPA_ONNX_LIB_DIR }}
         run: |
           cargo test --workspace --locked \
             --features assistd-llm/test-support,assistd-voice/test-support
