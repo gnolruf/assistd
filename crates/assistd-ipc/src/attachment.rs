@@ -127,23 +127,31 @@ impl std::error::Error for LoadImageError {
 }
 
 /// Read `path` and validate it is a supported image no larger than [`MAX_IMAGE_BYTES`]. The size
-/// is checked from metadata, before any read.
+/// is checked from metadata before the read, and the read stops past the limit.
 pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
     let display_path = || path.display().to_string();
     let io_error = |source: io::Error| LoadImageError::Io {
         path: display_path(),
         source,
     };
-    let (mut file, size) = open_regular(path).await.map_err(io_error)?;
+    let too_large = |size| LoadImageError::TooLarge {
+        path: display_path(),
+        size,
+        max: MAX_IMAGE_BYTES,
+    };
+    let (file, size) = open_regular(path).await.map_err(io_error)?;
     if size > MAX_IMAGE_BYTES {
-        return Err(LoadImageError::TooLarge {
-            path: display_path(),
-            size,
-            max: MAX_IMAGE_BYTES,
-        });
+        return Err(too_large(size));
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).await.map_err(io_error)?;
+    file.take(MAX_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(io_error)?;
+    let read = bytes.len() as u64;
+    if read > MAX_IMAGE_BYTES {
+        return Err(too_large(read));
+    }
     let mime = sniff_image(&bytes).map_err(|e| e.at_path(display_path()))?;
     Ok(LoadedImage {
         mime: mime.to_string(),

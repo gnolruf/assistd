@@ -11,7 +11,7 @@ use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
 use assistd_utils::child_server::ApiKey;
-use assistd_utils::http::local_client_builder;
+use assistd_utils::http::{local_client_builder, read_capped};
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -32,6 +32,8 @@ use crate::{
 };
 
 const ERROR_BODY_CAP: usize = 1024;
+/// Largest accepted non-streamed summary response; summaries are capped at a few thousand tokens.
+const SUMMARY_BODY_MAX: usize = 4 * 1024 * 1024;
 /// Written into the model's thinking where its budget ran out, so it moves
 /// on instead of starting over.
 const REASONING_BUDGET_MESSAGE: &str =
@@ -702,7 +704,8 @@ impl Summarizer for ContinuationSummarizer<'_> {
             });
         }
 
-        let body: wire::ChatResponse = response.json().await?;
+        let body: wire::ChatResponse =
+            serde_json::from_slice(&read_capped(response, SUMMARY_BODY_MAX).await?)?;
         let text = body
             .choices
             .into_iter()

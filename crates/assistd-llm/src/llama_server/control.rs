@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_utils::child_server::ApiKey;
-use assistd_utils::http::local_client_builder;
+use assistd_utils::http::{local_client_builder, read_capped};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::debug;
@@ -16,6 +17,8 @@ use crate::LlmHealthProbe;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const PROPS_TIMEOUT: Duration = Duration::from_secs(2);
+/// Largest accepted `/models` or `/props` body; both are a few KiB in practice.
+const BODY_MAX: usize = 4 * 1024 * 1024;
 
 /// HTTP client for the model-management endpoints on llama-server.
 /// Stateless apart from the connection pool, so it survives server restarts.
@@ -118,7 +121,7 @@ impl LlamaServerControl {
         if !status.is_success() {
             return Err(control_http_error("GET", "/models", status));
         }
-        Ok(resp.json().await?)
+        read_json(resp).await
     }
 
     async fn fetch_props(&self, query: &[(&str, &str)]) -> Result<Value, LlamaServerError> {
@@ -134,7 +137,7 @@ impl LlamaServerControl {
         if !status.is_success() {
             return Err(control_http_error("GET", "/props", status));
         }
-        Ok(resp.json().await?)
+        read_json(resp).await
     }
 
     async fn post_model_action(
@@ -153,6 +156,11 @@ impl LlamaServerControl {
         }
         Ok(())
     }
+}
+
+async fn read_json<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, LlamaServerError> {
+    let body = read_capped(resp, BODY_MAX).await?;
+    Ok(serde_json::from_slice(&body)?)
 }
 
 #[derive(Serialize)]

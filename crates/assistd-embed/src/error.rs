@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use assistd_utils::http::BodyError;
 use assistd_utils::readiness::NotReady;
 use thiserror::Error;
 
@@ -34,8 +35,11 @@ pub enum EmbedError {
         body: String,
     },
 
+    #[error("read /v1/embeddings response body: {0}")]
+    Body(#[from] BodyError),
+
     #[error("parse /v1/embeddings response body: {0}")]
-    Decode(#[source] reqwest::Error),
+    Decode(#[source] serde_json::Error),
 
     /// The response did not hold exactly one `data` entry per input.
     #[error("embed response had {got} data entries for {expected} inputs")]
@@ -52,6 +56,10 @@ pub enum EmbedError {
     #[error("embed server returned dim {got} but probe latched {expected}; refusing to mix")]
     DimMismatch { got: usize, expected: usize },
 
+    /// The server returned a vector holding a NaN or infinite component.
+    #[error("embed server returned a vector with a non-finite component")]
+    NonFinite,
+
     /// The batch this input was part of failed for a reason not tied to any one input.
     #[error("embed batch failed: {0}")]
     BatchFailed(Arc<EmbedError>),
@@ -62,7 +70,7 @@ impl EmbedError {
     pub fn is_input_caused(&self) -> bool {
         match self {
             Self::Status { status, .. } => status.is_client_error(),
-            Self::DimMismatch { .. } => true,
+            Self::DimMismatch { .. } | Self::NonFinite => true,
             _ => false,
         }
     }
