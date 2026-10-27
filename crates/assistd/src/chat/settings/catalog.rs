@@ -9,16 +9,6 @@ const VOICE_FAMILIES: &[&str] = &["vits", "kokoro"];
 
 pub(crate) const SECTIONS: &[Section] = &[
     section(
-        Tab::General,
-        "Hotkeys",
-        &[
-            setting("hotkeys.push_to_talk", SettingKind::Hotkey),
-            setting("hotkeys.toggle_listening", SettingKind::Hotkey),
-            setting("hotkeys.toggle_speech", SettingKind::Hotkey),
-            setting("hotkeys.skip_speech", SettingKind::Hotkey),
-        ],
-    ),
-    section(
         Tab::Model,
         "Model",
         &[
@@ -232,8 +222,6 @@ pub(crate) enum SettingKind {
     Text,
     /// Free text long enough to need a wrapped, multi-line box.
     Prose,
-    /// A key combination, set by pressing it.
-    Hotkey,
     /// One of a fixed set of strings, cycled in place.
     Choice(&'static [&'static str]),
     /// A TOML array, edited entry by entry.

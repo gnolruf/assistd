@@ -13,7 +13,6 @@ use assistd_core::{
     AppState, Config, MemoryStack, PresenceManager, RuntimeState, SessionContext, Subsystems,
     VisionRevalidator, VoiceManager,
 };
-use assistd_ipc::IpcClient;
 use assistd_llm::{HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::tracing_init::env_filter_or;
@@ -22,8 +21,6 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-use crate::hotkey;
-use crate::ipc_voice_proxy::IpcVoiceProxy;
 use embed_init::{EmbeddingHandles, EmbeddingService, EmbeddingStages, EmbeddingStartup};
 use mcp_init::{McpService, McpStartup};
 use memory_init::MemorySubsystem;
@@ -70,7 +67,6 @@ pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
-    hotkey::validate(&config.hotkeys, &config.voice)?;
     idle_monitor::validate(&config.sleep)?;
     assistd_voice::mic_validate(&config.voice)?;
 
@@ -141,7 +137,6 @@ async fn start(
         presence.set_wake_room(vram.clone());
     }
 
-    let hotkey_handle = spawn_hotkeys(&config, &voice, stages.intake.subscribe());
     let gpu_monitor_handle = gpu_monitor::spawn_monitor(
         &config.sleep,
         vram.clone(),
@@ -214,7 +209,6 @@ async fn start(
             window,
             mcp: background.mcp,
             intake_tasks: IntakeTasks {
-                hotkey: hotkey_handle,
                 gpu_monitor: gpu_monitor_handle,
                 idle_monitor: idle_monitor_handle,
                 warmup: background.warmup,
@@ -311,27 +305,6 @@ fn build_vision_revalidator(
         config.model.name.clone(),
         presence,
     ))
-}
-
-/// The daemon's own hotkeys route push-to-talk through its IPC socket,
-/// so the daemon and the chat TUI share one PTT path.
-fn spawn_hotkeys(
-    config: &Config,
-    voice: &Arc<VoiceManager>,
-    shutdown: watch::Receiver<bool>,
-) -> Option<JoinHandle<()>> {
-    let voice_proxy: Arc<dyn assistd_voice::VoiceInput> =
-        Arc::new(IpcVoiceProxy::new(Arc::new(IpcClient::new())));
-    hotkey::spawn_listener(
-        &config.hotkeys,
-        &config.voice,
-        config.compositor.resolve(),
-        hotkey::Subsystems {
-            ptt: voice_proxy,
-            voice: Some(voice.clone()),
-        },
-        shutdown,
-    )
 }
 
 fn build_chat_backend(

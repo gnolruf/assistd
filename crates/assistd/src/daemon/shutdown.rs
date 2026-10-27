@@ -97,7 +97,6 @@ impl DaemonShutdown {
 
 /// Tasks that start new work and stop on the `intake` stage.
 pub(super) struct IntakeTasks {
-    pub(super) hotkey: Option<JoinHandle<()>>,
     pub(super) gpu_monitor: Option<JoinHandle<()>>,
     pub(super) idle_monitor: Option<JoinHandle<()>>,
     /// Also runs the listen dispatcher once voice is up.
@@ -139,7 +138,7 @@ async fn forward_signals(shutdown_tx: watch::Sender<bool>) {
 }
 
 async fn join_intake_tasks(tasks: IntakeTasks) {
-    for handle in [tasks.hotkey, tasks.gpu_monitor, tasks.idle_monitor]
+    for handle in [tasks.gpu_monitor, tasks.idle_monitor]
         .into_iter()
         .flatten()
         .chain([tasks.warmup])

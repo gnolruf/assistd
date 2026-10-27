@@ -606,7 +606,6 @@ fn wire_spelling_helpers_agree_with_serde() {
         Component::Memory,
         Component::Wm,
         Component::Embed,
-        Component::Hotkey,
         Component::Daemon,
         Component::IdleMonitor,
         Component::GpuMonitor,

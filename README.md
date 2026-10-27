@@ -160,15 +160,15 @@ instead). Only one chat may be open at a time, since every chat
 drives the daemon's single conversation.
 
 `/settings` in the chat, or `assistd settings` on its own, opens the
-config in an editable panel: hotkeys first, then each section, with
+config in an editable panel, one section at a time, with
 its detailed keys behind an "advanced" toggle. Saved changes take
 effect when the daemon restarts.
 
 ## Window-manager integration
 
-The daemon binds the voice hotkeys in `[hotkeys]` itself on X11, Sway
-and i3. The other bindings (presence toggling, the TUI scratchpad) live
-in your compositor config. Start with the
+assistd binds no keys itself. Push-to-talk, presence toggling and the
+TUI scratchpad are bindings in your compositor config that run
+`assistd` commands. Start with the
 [shared setup page](docs/wm/README.md), then the [i3](docs/wm/i3.md)
 or [Sway](docs/wm/sway.md) guide.
 
@@ -184,7 +184,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | `assistd chat`           | Interactive ratatui TUI.                                      |
 | `assistd settings`       | Edit `config.toml` in a terminal panel (also `/settings` in chat). |
 | `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |
-| `assistd ptt-start/stop` | Push-to-talk start/stop, for compositors without hotkey support. |
+| `assistd ptt-start/stop` | Push-to-talk: bind to a key's press and release.              |
 | `assistd listen-toggle`  | Toggle [wake-word listening](docs/voice/wake-word.md).        |
 | `assistd voice-toggle`   | Toggle TTS playback.                                          |
 | `assistd voice-skip`     | Abort the current spoken response.                            |

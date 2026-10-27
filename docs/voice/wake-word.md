@@ -16,9 +16,6 @@ enabled = true
 enabled = true
 start_on_launch = true      # otherwise it waits for listen-toggle
 # phrase = "hey computer"
-
-[hotkeys]
-# toggle_listening = "Super+Shift+L"  # Sway, i3 and X11; elsewhere bind `assistd listen-toggle`
 ```
 
 Restart the daemon. `assistd listen-toggle` turns listening on and off,

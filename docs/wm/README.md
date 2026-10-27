@@ -1,34 +1,28 @@
 # Window-manager integration
 
-The daemon binds the voice keys in `[hotkeys]` itself; the other
-bindings that make `assistd` feel native (presence, the chat
-scratchpad) live in your compositor config and call the `assistd` IPC
-commands. This page covers what every setup shares; the [i3](i3.md)
-and [Sway](sway.md) guides have the config snippets.
+assistd binds no keys itself. Every key binding, voice included, lives
+in your compositor or desktop config and runs an `assistd` command
+over IPC, the same way you'd bind `playerctl` or `makoctl`. This page
+covers what every setup shares; the [i3](i3.md) and [Sway](sway.md)
+guides have the config snippets.
 
 ## Before you start
 
 - `assistd` on your `$PATH` and a config at
   `~/.config/assistd/config.toml` (`assistd init-config` writes one).
-- Set the voice keys in `[hotkeys]`. On Sway the daemon adds them as
-  bindings over IPC, re-adds them after `swaymsg reload`, and removes
-  them when it stops. On i3 and other X11 sessions it grabs them on
-  the root window. Push-to-talk defaults to `Super+Space`; the others
-  are empty, which leaves them unbound.
+- Bind push-to-talk to a key's press and release. On Sway:
 
-  ```toml
-  [hotkeys]
-  push_to_talk = "Super+Space"
-  toggle_listening = "Super+Shift+L"
+  ```
+  bindsym --no-repeat $mod+space exec assistd ptt-start
+  bindsym --release   $mod+space exec assistd ptt-stop
   ```
 
-- Remove any `bindsym … exec assistd ptt-start` (or `listen-*`,
-  `voice-*`) lines left from older setups, and any other binding on
-  the same keys. On Sway the daemon's binding replaces yours and Sway
-  warns about it; on i3 the daemon's grab fails and it logs a warning.
-- On Wayland compositors other than Sway (Hyprland, GNOME, KDE) the
-  daemon binds nothing; bind the `ptt-*`, `listen-*` and `voice-*`
-  commands below in the compositor instead.
+  i3 has no `--no-repeat`; a repeated `ptt-start` while the key is
+  held is ignored. Any compositor or desktop that runs a command on key press and on
+  release works the same way (Hyprland `bind` / `bindr`, or a
+  GNOME or KDE custom shortcut for the toggles).
+- Bind `listen-toggle`, `voice-toggle` and `voice-skip` the same way
+  if you want them; they act on press only.
 
 ## What the commands do
 
@@ -80,9 +74,7 @@ is visible. The chat logs to `~/.local/state/assistd/chat.log.<date>`.
 
 ## Troubleshooting
 
-- **A hotkey does nothing.** Check the daemon log for an
-  `assistd::hotkey` line naming the key; on i3 a failed grab means
-  another binding holds it.
 - **`bindsym` fires but nothing happens.** The daemon isn't running.
+  Run the bound command in a terminal to see its error.
 - **PTT transcribes nothing.** The default capture device is probably
   the wrong one; set `[voice] mic_device` to a name from `arecord -L`.

@@ -15,7 +15,6 @@ use crate::chat::ChatConfig;
 use crate::compositor::CompositorConfig;
 use crate::embedding::EmbeddingConfig;
 use crate::errors::ConfigError;
-use crate::hotkeys::HotkeysConfig;
 use crate::mcp::McpConfig;
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
@@ -51,7 +50,6 @@ pub struct Config {
     pub voice: VoiceConfig,
     pub compositor: CompositorConfig,
     pub sleep: SleepConfig,
-    pub hotkeys: HotkeysConfig,
     pub tools: ToolsConfig,
     pub memory: MemoryConfig,
     pub embedding: EmbeddingConfig,
@@ -69,7 +67,6 @@ impl DescribeSettings for Config {
         voice => nested,
         compositor => nested,
         sleep => nested,
-        hotkeys => nested,
         tools => nested,
         memory => nested,
         embedding => nested,

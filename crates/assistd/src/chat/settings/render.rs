@@ -172,9 +172,6 @@ fn row_line(
                 (true, PanelMode::Edit(editor)) if !editor.is_box() => {
                     Span::raw(editor_window(editor, value_width).0)
                 }
-                (true, PanelMode::CaptureHotkey) => {
-                    Span::styled("press the new key combination…", accent())
-                }
                 _ => value_span(panel, setting, value_width),
             };
             pointed_line(selected, vec![Span::raw(label), value])
@@ -304,7 +301,6 @@ fn hint(mode: &PanelMode) -> &'static str {
             ListState::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
             ListState::ConfirmDelete => "y delete · n keep",
         },
-        PanelMode::CaptureHotkey => "press keys to bind · Backspace clear · Esc cancel",
         PanelMode::ConfirmClose => {
             "unsaved changes: s save and close · d discard · Esc keep editing"
         }
@@ -315,7 +311,7 @@ fn has_box(mode: &PanelMode) -> bool {
     match mode {
         PanelMode::Edit(editor) => editor.is_box(),
         PanelMode::List(_) => true,
-        PanelMode::Browse | PanelMode::CaptureHotkey | PanelMode::ConfirmClose => false,
+        PanelMode::Browse | PanelMode::ConfirmClose => false,
     }
 }
 

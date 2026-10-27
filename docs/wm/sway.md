@@ -1,7 +1,7 @@
 # Getting Started with Sway
 
 Sway config snippets for `assistd`. Read the
-[shared setup page](README.md) first: it covers the hotkeys,
+[shared setup page](README.md) first: it covers the key bindings,
 what each command does, and how to verify the result.
 
 ## Terminal
@@ -36,14 +36,15 @@ exec systemctl --user import-environment SWAYSOCK WAYLAND_DISPLAY DISPLAY && sys
 `swaybar` shows the tray icon when built with tray support; Waybar's
 `tray` module works too.
 
-## Hotkeys
+## Push-to-talk
 
-The daemon binds `[hotkeys]` through Sway's IPC, so push-to-talk needs
-no lines in the Sway config. `Super+Space` becomes `Mod4+space`.
+```sway
+bindsym --no-repeat $mod+space exec assistd ptt-start
+bindsym --release   $mod+space exec assistd ptt-stop
+```
 
-The default Sway config binds `$mod+space` to `focus mode_toggle`.
-The daemon's binding replaces it while the daemon runs, and Sway warns
-about the clash, so remove that line or pick another key.
+The default Sway config binds `$mod+space` to `focus mode_toggle`;
+remove that line or pick another key.
 
 ## Presence
 
@@ -68,15 +69,13 @@ If the criteria never match, check the chat's `app_id` with
 
 ## Optional: continuous listening and TTS
 
-```toml
-[hotkeys]
-toggle_listening = "Super+Shift+L"
-toggle_speech = "Super+Shift+M"
-skip_speech = "Super+Shift+S"
+```sway
+bindsym $mod+Shift+l exec assistd listen-toggle
+bindsym $mod+Shift+m exec assistd voice-toggle
+bindsym $mod+Shift+s exec assistd voice-skip
 ```
 
 ## Window commands fail
 
 The daemon couldn't reach Sway, usually because it runs under systemd
-without `$SWAYSOCK`; import it as shown above. Hotkeys need the same
-socket.
+without `$SWAYSOCK`; import it as shown above.
