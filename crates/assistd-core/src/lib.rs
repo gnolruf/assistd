@@ -48,10 +48,9 @@ pub use recovery::{
 
 pub use assistd_config as config;
 pub use assistd_config::{
-    BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config, ConfigError,
-    HotkeysConfig, McpConfig, McpServerConfig, ModelConfig, SleepConfig, SynthesisConfig,
-    ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScratchConfig, ToolsWriteConfig,
-    VoiceConfig, WakeWordConfig,
+    BashSandboxMode, ChatConfig, CompositorConfig, CompositorType, Config, ConfigError, McpConfig,
+    McpServerConfig, ModelConfig, SleepConfig, SynthesisConfig, ToolsBashConfig, ToolsConfig,
+    ToolsOutputConfig, ToolsScratchConfig, ToolsWriteConfig, VoiceConfig, WakeWordConfig,
 };
 
 pub use assistd_ipc as ipc;

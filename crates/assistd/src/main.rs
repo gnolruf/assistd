@@ -11,8 +11,6 @@ use client::{listen, memory, presence, ptt, query, voice_ctl};
 mod chat;
 mod client;
 mod daemon;
-mod hotkey;
-mod ipc_voice_proxy;
 #[cfg(feature = "tray")]
 mod tray;
 mod wm_backend;
@@ -52,9 +50,8 @@ enum Commands {
     /// Drive a running daemon to Active (block until wake completes)
     Wake,
 
-    /// Begin a push-to-talk recording on the running daemon (for i3
-    /// `bindsym`; release handled by `ptt-stop` on the matching
-    /// `bindsym --release` line).
+    /// Begin a push-to-talk recording on the running daemon; bind to a
+    /// key's press, and `ptt-stop` to its release.
     PttStart,
 
     /// End the push-to-talk recording, transcribe, and dispatch as a query

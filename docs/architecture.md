@@ -69,7 +69,7 @@ flowchart TB
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, `find_program` (a `PATH` lookup that says why a program cannot be run), child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
-| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`; `SwayHotkeys` binds `[hotkeys]` over Sway IPC. | `utils`                                                                          |
+| `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `utils`                                                                          |
 
 `utils` sits at the bottom with no internal dependencies; `config`
 and `ipc` build only on it, and most other crates build on those
@@ -357,12 +357,6 @@ line and any copy of the block's delimiters inside them is
 neutralised before the text reaches the model. The `wm` command surfaces this same backend
 to the model as a tool: `run wm list`, `run wm focus 'firefox'`, and
 similar.
-
-`SwayHotkeys` binds the daemon's `[hotkeys]` as `bindsym … nop` tags
-over its own Sway connection, reports each `binding` event back to the
-hotkey listener, re-binds after a config reload or reconnect, and
-unbinds on shutdown. i3 cannot add bindings over IPC, so i3 sessions
-keep the `global-hotkey` X11 grab.
 
 If neither i3 nor Sway is reachable (no compositor running, or
 running an unsupported one like Hyprland today), `NoWindowManager`

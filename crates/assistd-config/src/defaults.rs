@@ -84,8 +84,6 @@ pub const DEFAULT_WAKEWORD_FOLLOW_UP_MS: u32 = 8000;
 pub const DEFAULT_WAKE_PHRASE: &str = "hey computer";
 pub const DEFAULT_WAKEWORD_THRESHOLD: UnitInterval = unit(0.25);
 
-pub const DEFAULT_HOTKEY_PUSH_TO_TALK: &str = "Super+Space";
-
 pub const DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS: u64 = 30;
 pub const DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS: u64 = 10;
 pub const DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS: u64 = 600;

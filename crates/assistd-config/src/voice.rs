@@ -159,7 +159,7 @@ impl DescribeSettings for WakeWordConfig {
         ),
         start_on_launch => (
             "listen from launch",
-            "Start listening at launch instead of waiting for the hotkey"
+            "Start listening at launch instead of waiting to be turned on"
         ),
         silence_ms => (
             "end-of-speech silence (ms)",

@@ -22,10 +22,6 @@ use crate::{
     WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
 };
 
-mod binder;
-
-pub use binder::SwayHotkeys;
-
 /// [`WindowManager`] over a single Sway IPC command socket.
 #[derive(Debug)]
 pub struct SwayBackend {

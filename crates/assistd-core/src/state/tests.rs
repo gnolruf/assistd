@@ -615,6 +615,58 @@ async fn interrupt_between_ptt_press_and_release_drops_the_prompt() {
     );
 }
 
+/// `VoiceInput` whose mic open blocks until `open` is notified, recording
+/// the order calls complete in.
+#[derive(Debug, Default)]
+struct GatedVoice {
+    open: Notify,
+    calls: StdMutex<Vec<&'static str>>,
+}
+
+#[async_trait::async_trait]
+impl VoiceInput for GatedVoice {
+    async fn start_recording(&self) -> Result<(), VoiceInputError> {
+        self.open.notified().await;
+        self.calls.lock().push("start");
+        Ok(())
+    }
+    async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
+        self.calls.lock().push("stop");
+        Ok(String::new())
+    }
+    fn state(&self) -> VoiceCaptureState {
+        VoiceCaptureState::Idle
+    }
+    fn subscribe(&self) -> watch::Receiver<VoiceCaptureState> {
+        watch::channel(VoiceCaptureState::Idle).1
+    }
+}
+
+#[tokio::test]
+async fn ptt_stop_waits_for_a_press_still_opening_the_mic() {
+    let voice = Arc::new(GatedVoice::default());
+    let state = StateParts {
+        voice: voice.clone(),
+        ..StateParts::default()
+    }
+    .build();
+    let press = tokio::spawn({
+        let state = state.clone();
+        async move { dispatch(&state, Request::PttStart { id: "p".into() }).await }
+    });
+    tokio::task::yield_now().await;
+    let release = tokio::spawn({
+        let state = state.clone();
+        async move { dispatch(&state, Request::PttStop { id: "s".into() }).await }
+    });
+    tokio::task::yield_now().await;
+    voice.open.notify_one();
+
+    press.await.unwrap().0.unwrap();
+    release.await.unwrap().0.unwrap();
+    assert_eq!(*voice.calls.lock(), ["start", "stop"]);
+}
+
 /// `ContinuousListener` that tracks whether it is listening.
 #[derive(Debug)]
 struct MockListener {

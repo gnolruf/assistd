@@ -47,9 +47,7 @@ assistd-utils  = { workspace = true }
 assistd-voice  = { workspace = true }
 assistd-wm     = { workspace = true }
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 clap = { workspace = true }
-global-hotkey = { workspace = true }
 nvml-wrapper = { workspace = true }
 parking_lot = { workspace = true }
 procfs = { workspace = true }

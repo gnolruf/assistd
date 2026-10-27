@@ -8,7 +8,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::super::ui::{locate_cursor, wrap_input};
 use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
-use super::hotkey_capture::{Capture, capture};
 use super::list_editor::{ListAction, ListEditor};
 
 /// Rows PgUp/PgDn move the selection.
@@ -41,8 +40,6 @@ pub(crate) enum PanelMode {
     Edit(TextEditor),
     /// Editing a list setting's entries.
     List(ListEditor),
-    /// Waiting for the key combination a hotkey setting is set to.
-    CaptureHotkey,
     /// Closing with unsaved changes; waits for save, discard or cancel.
     ConfirmClose,
 }
@@ -184,10 +181,6 @@ impl SettingsPanel {
                 self.on_list_key(ev);
                 ControlFlow::Continue(())
             }
-            PanelMode::CaptureHotkey => {
-                self.on_capture_key(ev);
-                ControlFlow::Continue(())
-            }
             PanelMode::ConfirmClose => self.on_confirm_close_key(ev),
         }
     }
@@ -237,21 +230,6 @@ impl SettingsPanel {
                 let text = editor.text.clone();
                 self.apply_text(&text);
             }
-        }
-    }
-
-    fn on_capture_key(&mut self, ev: KeyEvent) {
-        let Some(setting) = self.selected_setting() else {
-            return;
-        };
-        match capture(ev) {
-            Capture::Bind(spec) => self.apply(setting, &toml::Value::String(spec)),
-            Capture::Clear => self.apply(setting, &toml::Value::String(String::new())),
-            Capture::Cancel => {
-                self.mode = PanelMode::Browse;
-                self.feedback = None;
-            }
-            Capture::Unsupported(reason) => self.feedback = Some(Feedback::Error(reason)),
         }
     }
 
@@ -415,10 +393,6 @@ impl SettingsPanel {
             }
             SettingKind::List(item) => {
                 self.mode = PanelMode::List(ListEditor::new(item));
-                self.feedback = None;
-            }
-            SettingKind::Hotkey => {
-                self.mode = PanelMode::CaptureHotkey;
                 self.feedback = None;
             }
             SettingKind::Integer
@@ -720,7 +694,6 @@ fn parse_input(kind: SettingKind, text: &str) -> Result<toml::Value, String> {
         | SettingKind::Choice(_)
         | SettingKind::Text
         | SettingKind::Prose
-        | SettingKind::Hotkey
         | SettingKind::List(_)
         | SettingKind::External => Ok(toml::Value::String(text.to_string())),
     }

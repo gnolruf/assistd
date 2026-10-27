@@ -17,40 +17,55 @@ use super::{AppState, DispatchError, send_error};
 use crate::recovery::{Component, spawn_supervised};
 
 impl AppState {
+    /// Holds the capture slot until the mic is open, so a `ptt_stop` sent
+    /// while this press is still starting waits for it. A repeat while a
+    /// press is open, as key autorepeat sends, leaves that press alone.
     pub(super) async fn handle_ptt_start(
         self: Arc<Self>,
         id: String,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
+        let mut ptt_capture = self.runtime.ptt_capture.lock().await;
+        if ptt_capture.is_none() {
+            match self.open_ptt_capture(&id, &tx).await? {
+                Some(capture) => *ptt_capture = Some(capture),
+                None => return Ok(()),
+            }
+        }
+        drop(ptt_capture);
+        let _ = tx
+            .send(Event::VoiceState {
+                id: id.clone(),
+                state: VoiceCaptureState::Recording,
+            })
+            .await;
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
+    }
+
+    /// Stop speech and open the mic for a press; `None`, already reported,
+    /// when a wake-word test holds the mic.
+    async fn open_ptt_capture(
+        &self,
+        id: &str,
+        tx: &mpsc::Sender<Event>,
+    ) -> Result<Option<PttCapture>, DispatchError> {
         self.subsystems.voice.speech().interrupt().await;
-        let capture = self.ready_capture(&id, "ptt_start", &tx).await?;
+        let capture = self.ready_capture(id, "ptt_start", tx).await?;
         if self.mic_session_busy() {
-            send_error(&tx, id, TEST_IN_PROGRESS.into()).await;
-            return Ok(());
+            send_error(tx, id.to_string(), TEST_IN_PROGRESS.into()).await;
+            return Ok(None);
         }
-        match capture.input.start_recording().await {
-            Ok(()) => {
-                let resume_listening = take_mic_from_listening(&capture).await;
-                let capture = PttCapture {
-                    warmup: self.spawn_presence_warmup(),
-                    cancel: self.runtime.turn_cancellation(),
-                    resume_listening,
-                };
-                *self.runtime.ptt_capture.lock().await = Some(capture);
-                let _ = tx
-                    .send(Event::VoiceState {
-                        id: id.clone(),
-                        state: VoiceCaptureState::Recording,
-                    })
-                    .await;
-                let _ = tx.send(Event::Done { id }).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("ptt_start failed: {e}")).await;
-                Err(e.into())
-            }
+        if let Err(e) = capture.input.start_recording().await {
+            send_error(tx, id.to_string(), format!("ptt_start failed: {e}")).await;
+            return Err(e.into());
         }
+        let resume_listening = take_mic_from_listening(&capture).await;
+        Ok(Some(PttCapture {
+            warmup: self.spawn_presence_warmup(),
+            cancel: self.runtime.turn_cancellation(),
+            resume_listening,
+        }))
     }
 
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]

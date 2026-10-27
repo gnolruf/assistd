@@ -107,8 +107,8 @@ skip = [
     { name = "getrandom", version = "0.2" },
     # Transitive via ratatui (older) vs toml_edit/indexmap (newer).
     { name = "hashbrown", version = "0.15" },
-    # nvml-wrapper still pins thiserror 1; global-hotkey and
-    # tracing-appender pull thiserror 2.
+    # nvml-wrapper still pins thiserror 1; tracing-appender pulls
+    # thiserror 2.
     { name = "thiserror", version = "1" },
     { name = "thiserror-impl", version = "1" },
     # hashbrown 0.15 (rusqlite) brings foldhash 0.1; ratatui/vello are
