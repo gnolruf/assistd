@@ -26,14 +26,17 @@ impl VoiceOutput for RecordingOutput {
 }
 
 #[tokio::test]
-async fn set_enabled_false_cancels_inner_once() {
+async fn muting_cancels_once_and_silences_the_running_reply() {
     let inner = Arc::new(RecordingOutput::default());
     let ctrl = VoiceOutputController::ready(inner.clone(), true);
+    let start = ctrl.current_epoch();
     ctrl.set_enabled(false).await;
     assert!(!ctrl.enabled());
     assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
     ctrl.set_enabled(false).await;
     assert_eq!(inner.cancels.load(Ordering::SeqCst), 1);
+    ctrl.set_enabled(true).await;
+    assert_eq!(ctrl.should_speak(start), SpeakDecision::DropForSkip);
 }
 
 #[tokio::test]
