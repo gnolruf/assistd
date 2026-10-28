@@ -83,10 +83,63 @@ impl MicVoiceInput {
         })
     }
 
-    async fn cleanup_forwarder_and_idle(&self, forwarder: Option<JoinHandle<()>>) {
-        if let Some(forwarder) = forwarder {
+    /// Wait for the stopped capture and transcribe what it recorded.
+    async fn transcribe_session(
+        &self,
+        session: capture::CaptureSession,
+    ) -> Result<String, VoiceInputError> {
+        let pcm = session
+            .handle
+            .await
+            .map_err(VoiceInputError::ConsumerPanic)??;
+
+        let overrun = session.overrun.load(Ordering::Relaxed);
+        if overrun > 0 {
+            warn!(
+                target: "assistd::voice::mic",
+                overrun_samples = overrun,
+                "ring buffer overrun during PTT capture; audio was truncated"
+            );
+        }
+
+        if pcm.is_empty() {
+            return Ok(String::new());
+        }
+
+        log_captured_levels(&pcm);
+
+        let text = self.transcriber.transcribe(&pcm).await?;
+        info!(
+            target: "assistd::voice::mic",
+            pcm_samples = pcm.len(),
+            text_chars = text.chars().count(),
+            "transcription complete"
+        );
+        Ok(text)
+    }
+}
+
+/// Ends a press: aborts its state forwarder and publishes `Idle`, on drop
+/// too, so a cancelled release cannot leave the state stuck.
+struct PressCleanup<'a> {
+    state_tx: &'a watch::Sender<VoiceCaptureState>,
+    forwarder: Option<JoinHandle<()>>,
+}
+
+impl PressCleanup<'_> {
+    /// Wait for the forwarder to exit so it cannot publish after `Idle`.
+    async fn finish(mut self) {
+        if let Some(forwarder) = self.forwarder.take() {
             forwarder.abort();
             let _ = forwarder.await;
+        }
+    }
+}
+
+impl Drop for PressCleanup<'_> {
+    fn drop(&mut self) {
+        if let Some(forwarder) = self.forwarder.take() {
+            forwarder.abort();
         }
         let _ = self.state_tx.send(VoiceCaptureState::Idle);
     }
@@ -102,8 +155,13 @@ impl VoiceInput for MicVoiceInput {
 
         let session_id = self.active_session_id.fetch_add(1, Ordering::SeqCst) + 1;
 
-        let session = capture::start(self.mic_device.as_deref());
-        ptt.session = Some(session);
+        let session = ptt
+            .session
+            .insert(capture::start(self.mic_device.as_deref()));
+        if let Err(err) = await_capture_open(session).await {
+            ptt.session = None;
+            return Err(err);
+        }
 
         if let Some(transcriber_state) = self.transcriber.subscribe_state() {
             ptt.forwarder = Some(self.spawn_state_forwarder(transcriber_state, session_id));
@@ -124,50 +182,17 @@ impl VoiceInput for MicVoiceInput {
                 None => return Ok(String::new()),
             }
         };
+        let cleanup = PressCleanup {
+            state_tx: &self.state_tx,
+            forwarder,
+        };
 
         let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
         session.stop_flag.store(true, Ordering::SeqCst);
 
-        let pcm = match session.handle.await {
-            Ok(Ok(pcm)) => pcm,
-            Ok(Err(err)) => {
-                self.cleanup_forwarder_and_idle(forwarder).await;
-                return Err(err.into());
-            }
-            Err(join_err) => {
-                self.cleanup_forwarder_and_idle(forwarder).await;
-                return Err(VoiceInputError::ConsumerPanic(join_err));
-            }
-        };
-
-        let overrun = session.overrun.load(Ordering::Relaxed);
-        if overrun > 0 {
-            warn!(
-                target: "assistd::voice::mic",
-                overrun_samples = overrun,
-                "ring buffer overrun during PTT capture; audio was truncated"
-            );
-        }
-
-        if pcm.is_empty() {
-            self.cleanup_forwarder_and_idle(forwarder).await;
-            return Ok(String::new());
-        }
-
-        log_captured_levels(&pcm);
-
-        let result = self.transcriber.transcribe(&pcm).await;
-        self.cleanup_forwarder_and_idle(forwarder).await;
-
-        let text = result?;
-
-        info!(
-            target: "assistd::voice::mic",
-            pcm_samples = pcm.len(),
-            text_chars = text.chars().count(),
-            "transcription complete"
-        );
-        Ok(text)
+        let result = self.transcribe_session(session).await;
+        cleanup.finish().await;
+        result
     }
 
     fn state(&self) -> VoiceCaptureState {
@@ -177,6 +202,17 @@ impl VoiceInput for MicVoiceInput {
     fn subscribe(&self) -> watch::Receiver<VoiceCaptureState> {
         self.state_tx.subscribe()
     }
+}
+
+/// Wait until the capture is recording; its error if the device failed to open.
+async fn await_capture_open(session: &mut capture::CaptureSession) -> Result<(), VoiceInputError> {
+    if (&mut session.opened).await.is_ok() {
+        return Ok(());
+    }
+    (&mut session.handle)
+        .await
+        .map_err(VoiceInputError::ConsumerPanic)??;
+    Ok(())
 }
 
 fn log_captured_levels(pcm: &[i16]) {

@@ -10,10 +10,10 @@ use assistd_config::{VoiceConfig, WakeWordConfig};
 use assistd_ipc::ListenPhase;
 use async_trait::async_trait;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Mutex, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::barge_in::{BargeInWatch, confirms_barge_in};
 use super::capture::{self, ListenCaptureSession};
@@ -108,7 +108,7 @@ pub struct MicContinuousListener {
     /// at start, so signals sent while stopped are ignored.
     conversation_tx: watch::Sender<Option<ConversationSignal>>,
     last_push_to_talk: parking_lot::Mutex<Option<Instant>>,
-    active: AtomicBool,
+    active: Arc<AtomicBool>,
     capturing_utterances: Arc<AtomicBool>,
     phase_tx: watch::Sender<ListenPhase>,
     heard: broadcast::Sender<Heard>,
@@ -129,29 +129,69 @@ struct ListenState {
     session: Option<ListenSession>,
 }
 
+impl ListenState {
+    fn is_running(&self) -> bool {
+        self.session.as_ref().is_some_and(ListenSession::is_running)
+    }
+}
+
 #[derive(Debug)]
 struct ListenSession {
-    capture_stop: Arc<AtomicBool>,
-    capture_handle: CaptureJoin,
-    vad_handle: JoinHandle<()>,
-    transcribe_handle: JoinHandle<()>,
+    capture_stop: CaptureStop,
+    pipeline: JoinHandle<()>,
 }
 
 impl ListenSession {
-    /// Signal capture to stop, then wait for each worker in pipeline order.
+    /// False once the pipeline ended, whether stopped or because capture died.
+    fn is_running(&self) -> bool {
+        !self.pipeline.is_finished()
+    }
+
+    /// Signal capture to stop, then wait for the pipeline to drain.
     async fn shutdown(self) {
-        self.capture_stop.store(true, Ordering::SeqCst);
-        match self.capture_handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => warn!(target: "assistd::voice::listen", "capture worker error: {err}"),
-            Err(err) => warn!(target: "assistd::voice::listen", "capture worker panicked: {err}"),
+        self.capture_stop.request();
+        if let Err(err) = self.pipeline.await {
+            warn!(target: "assistd::voice::listen", "listen pipeline panicked: {err}");
         }
-        if let Err(err) = self.vad_handle.await {
+    }
+}
+
+/// Sets a capture's stop flag when dropped, so an abandoned session or
+/// cancelled caller releases the mic.
+#[derive(Debug)]
+struct CaptureStop(Arc<AtomicBool>);
+
+impl CaptureStop {
+    fn request(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for CaptureStop {
+    fn drop(&mut self) {
+        self.request();
+    }
+}
+
+/// The workers of one listening session.
+#[derive(Debug)]
+struct ListenWorkers {
+    capture: CaptureJoin,
+    vad: JoinHandle<()>,
+    transcribe: JoinHandle<()>,
+}
+
+impl ListenWorkers {
+    /// Wait for each worker in pipeline order; how capture ended.
+    async fn join(self) -> Result<(), ListenError> {
+        let captured = self.capture.await;
+        if let Err(err) = self.vad.await {
             warn!(target: "assistd::voice::listen", "VAD worker panicked: {err}");
         }
-        if let Err(err) = self.transcribe_handle.await {
+        if let Err(err) = self.transcribe.await {
             warn!(target: "assistd::voice::listen", "transcription worker panicked: {err}");
         }
+        Ok(captured??)
     }
 }
 
@@ -184,7 +224,7 @@ impl MicContinuousListener {
                 .then(|| Duration::from_millis(config.wakeword.follow_up_ms.into())),
             conversation_tx: watch::channel(None).0,
             last_push_to_talk: parking_lot::Mutex::new(None),
-            active: AtomicBool::new(false),
+            active: Arc::new(AtomicBool::new(false)),
             capturing_utterances: Arc::new(AtomicBool::new(false)),
             phase_tx,
             heard,
@@ -197,14 +237,72 @@ impl MicContinuousListener {
             .then(|| BargeInWatch::new(self.replying_tx.subscribe()))
     }
 
+    /// Spawn the VAD and transcription workers behind a capture that opened.
+    fn spawn_workers(
+        &self,
+        capture: CaptureJoin,
+        frame_rx: mpsc::Receiver<Box<[i16; FRAME_SAMPLES]>>,
+    ) -> ListenWorkers {
+        let (pcm_tx, pcm_rx) = mpsc::channel::<ListenAudio>(PENDING_UTTERANCE_DEPTH);
+        let gate = WakeGate::new(self.command_timeout, self.follow_up);
+        let transcribe = tokio::spawn(transcribe_loop(
+            Listeners {
+                transcriber: self.transcriber.clone(),
+                spotter: Arc::clone(&self.spotter),
+            },
+            gate,
+            ListenOutputs {
+                heard: self.heard.clone(),
+                phase: self.phase_tx.clone(),
+            },
+            TranscribeInputs {
+                utterances: pcm_rx,
+                signals: self.conversation_tx.subscribe(),
+            },
+            BargeIn::new(Arc::clone(&self.speech)),
+        ));
+        let tuning = self.tuning;
+        let barge_in = self.barge_in_watch();
+        let classifier = FrameClassifier::new(Arc::clone(&self.silero));
+        let vad = tokio::task::spawn_blocking(move || {
+            vad_loop(
+                tuning,
+                barge_in,
+                classifier,
+                frame_rx,
+                |segment| queue_for_transcription(&pcm_tx, segment),
+                |_| {},
+            );
+        });
+        ListenWorkers {
+            capture,
+            vad,
+            transcribe,
+        }
+    }
+
+    /// Drain a taken session, if any, and mark listening off.
+    async fn shut_down(&self, session: Option<ListenSession>) {
+        let Some(session) = session else {
+            self.active.store(false, Ordering::SeqCst);
+            return;
+        };
+        session.shutdown().await;
+        self.active.store(false, Ordering::SeqCst);
+        self.phase_tx.send_replace(ListenPhase::Off);
+        info!(target: "assistd::voice::listen", "wake-word listening stopped");
+    }
+
     /// Run capture and the VAD into `sink` until it closes or capture fails.
     async fn stream_utterances(&self, sink: mpsc::Sender<SessionAudio>) -> Result<(), ListenError> {
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
         let ListenCaptureSession {
             stop_flag,
             overrun: _,
+            opened: _,
             handle: mut capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
+        let stop = CaptureStop(stop_flag);
         let tuning = self.tuning;
         let classifier = FrameClassifier::new(Arc::clone(&self.silero));
         let vad_sink = sink.clone();
@@ -224,7 +322,7 @@ impl MicContinuousListener {
             result = &mut capture_handle => Some(result),
             () = sink.closed() => None,
         };
-        stop_flag.store(true, Ordering::SeqCst);
+        stop.request();
         let captured = match finished_early {
             Some(result) => result,
             None => capture_handle.await,
@@ -238,85 +336,56 @@ impl MicContinuousListener {
 impl ContinuousListener for MicContinuousListener {
     async fn start(&self) -> Result<(), ListenError> {
         let mut listen_state = self.listen_state.lock().await;
-        if listen_state.session.is_some() {
+        if listen_state.is_running() {
             return Ok(());
         }
         if self.capturing_utterances.load(Ordering::SeqCst) {
             return Err(ListenError::Testing);
         }
-        self.active.store(true, Ordering::SeqCst);
 
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
-
         let ListenCaptureSession {
-            stop_flag: capture_stop,
+            stop_flag,
             overrun: _,
-            handle: capture_handle,
+            opened,
+            handle: mut capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
+        let capture_stop = CaptureStop(Arc::clone(&stop_flag));
+        await_capture_open(opened, &mut capture_handle).await?;
 
-        let (pcm_tx, pcm_rx) = mpsc::channel::<ListenAudio>(PENDING_UTTERANCE_DEPTH);
-        let gate = WakeGate::new(self.command_timeout, self.follow_up);
-        let transcribe_handle = tokio::spawn(transcribe_loop(
-            Listeners {
-                transcriber: self.transcriber.clone(),
-                spotter: Arc::clone(&self.spotter),
-            },
-            gate,
-            ListenOutputs {
-                heard: self.heard.clone(),
-                phase: self.phase_tx.clone(),
-            },
-            TranscribeInputs {
-                utterances: pcm_rx,
-                signals: self.conversation_tx.subscribe(),
-            },
-            BargeIn::new(Arc::clone(&self.speech)),
+        self.active.store(true, Ordering::SeqCst);
+        self.phase_tx.send_replace(ListenPhase::Armed);
+        let workers = self.spawn_workers(capture_handle, frame_rx);
+        let pipeline = tokio::spawn(supervise_pipeline(
+            workers,
+            stop_flag,
+            Arc::clone(&self.active),
+            self.phase_tx.clone(),
         ));
-        let tuning = self.tuning;
-        let barge_in = self.barge_in_watch();
-        let classifier = FrameClassifier::new(Arc::clone(&self.silero));
-        let vad_handle = tokio::task::spawn_blocking(move || {
-            vad_loop(
-                tuning,
-                barge_in,
-                classifier,
-                frame_rx,
-                |segment| queue_for_transcription(&pcm_tx, segment),
-                |_| {},
-            );
-        });
-
         listen_state.session = Some(ListenSession {
             capture_stop,
-            capture_handle,
-            vad_handle,
-            transcribe_handle,
+            pipeline,
         });
-        self.phase_tx.send_replace(ListenPhase::Armed);
         info!(target: "assistd::voice::listen", "wake-word listening started");
         Ok(())
     }
 
     async fn stop(&self) -> Result<(), ListenError> {
         let session = self.listen_state.lock().await.session.take();
-        let Some(session) = session else {
-            self.active.store(false, Ordering::SeqCst);
-            return Ok(());
-        };
-
-        session.shutdown().await;
-
-        self.active.store(false, Ordering::SeqCst);
-        self.phase_tx.send_replace(ListenPhase::Off);
-        info!(target: "assistd::voice::listen", "wake-word listening stopped");
+        self.shut_down(session).await;
         Ok(())
     }
 
     async fn stop_for_push_to_talk(&self) -> Result<(), ListenError> {
         *self.last_push_to_talk.lock() = Some(Instant::now());
+        let session = self.listen_state.lock().await.session.take();
+        if let Some(session) = &session {
+            session.capture_stop.request();
+        }
         self.conversation_tx
             .send_replace(Some(ConversationSignal::Abandon));
-        self.stop().await
+        self.shut_down(session).await;
+        Ok(())
     }
 
     fn last_push_to_talk(&self) -> Option<Instant> {
@@ -350,7 +419,7 @@ impl ContinuousListener for MicContinuousListener {
     ) -> Result<(), ListenError> {
         let _claim = {
             let listen_state = self.listen_state.lock().await;
-            if listen_state.session.is_some() {
+            if listen_state.is_running() {
                 return Err(ListenError::Listening);
             }
             if self.capturing_utterances.swap(true, Ordering::SeqCst) {
@@ -715,6 +784,47 @@ async fn sleep_until_some(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
+    }
+}
+
+/// Wait until capture is recording; its error if the device failed to open.
+async fn await_capture_open(
+    opened: oneshot::Receiver<()>,
+    capture: &mut CaptureJoin,
+) -> Result<(), ListenError> {
+    if opened.await.is_ok() {
+        return Ok(());
+    }
+    capture.await??;
+    Ok(())
+}
+
+/// Run a session's workers to the end. Capture ending without a stop
+/// request turns listening off and reports why.
+async fn supervise_pipeline(
+    workers: ListenWorkers,
+    stop_requested: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
+    phase: watch::Sender<ListenPhase>,
+) {
+    let captured = workers.join().await;
+    if stop_requested.load(Ordering::SeqCst) {
+        if let Err(err) = captured {
+            warn!(target: "assistd::voice::listen", "capture worker error: {err}");
+        }
+        return;
+    }
+    active.store(false, Ordering::SeqCst);
+    phase.send_replace(ListenPhase::Off);
+    match captured {
+        Ok(()) => error!(
+            target: "assistd::voice::listen",
+            "wake-word capture ended unexpectedly; listening is off"
+        ),
+        Err(err) => error!(
+            target: "assistd::voice::listen",
+            "wake-word capture failed; listening is off: {err}"
+        ),
     }
 }
 

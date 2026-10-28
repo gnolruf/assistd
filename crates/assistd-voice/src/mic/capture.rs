@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use ringbuf::traits::{Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 use thiserror::Error;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -67,11 +68,13 @@ pub enum DeviceValidationError {
     NotFound { requested: String, listing: String },
 }
 
-/// Handles to a running push-to-talk capture.
+/// Handles to a running push-to-talk capture. `opened` resolves once the
+/// device is recording and errors if it failed to open.
 #[derive(Debug)]
 pub struct CaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,
+    pub opened: oneshot::Receiver<()>,
     pub handle: JoinHandle<Result<Vec<i16>, AudioCaptureError>>,
 }
 
@@ -189,15 +192,22 @@ pub fn start(device_hint: Option<&str>) -> CaptureSession {
     let overrun = Arc::new(AtomicU64::new(0));
     let device_hint_owned = device_hint.map(str::to_string);
 
+    let (opened_tx, opened) = oneshot::channel();
     let worker_stop = Arc::clone(&stop_flag);
     let worker_overrun = Arc::clone(&overrun);
     let handle = tokio::task::spawn_blocking(move || {
-        capture_ptt(device_hint_owned.as_deref(), &worker_stop, worker_overrun)
+        capture_ptt(
+            device_hint_owned.as_deref(),
+            &worker_stop,
+            worker_overrun,
+            opened_tx,
+        )
     });
 
     CaptureSession {
         stop_flag,
         overrun,
+        opened,
         handle,
     }
 }
@@ -206,6 +216,7 @@ fn capture_ptt(
     device_hint: Option<&str>,
     stop_flag: &AtomicBool,
     overrun: Arc<AtomicU64>,
+    opened: oneshot::Sender<()>,
 ) -> Result<Vec<i16>, AudioCaptureError> {
     let ring_capacity = ASSUMED_NATIVE_RATE * RING_SECS;
     let ProducerStream {
@@ -213,6 +224,7 @@ fn capture_ptt(
         native_rate,
         stream,
     } = open_producer_stream(device_hint, ring_capacity, overrun)?;
+    let _ = opened.send(());
 
     let max_pcm_samples = TARGET_SAMPLE_RATE as usize * MAX_RECORDING_SECS;
     let pcm = consumer::drain_to_pcm(consumer, native_rate, max_pcm_samples, stop_flag)?;

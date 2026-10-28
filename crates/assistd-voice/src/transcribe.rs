@@ -155,32 +155,38 @@ impl QueuedTranscriber {
 #[async_trait]
 impl Transcriber for QueuedTranscriber {
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
+        let _idle = IdleOnDrop(&self.state_tx);
         if !self.primary.is_gpu() {
             let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-            let result = self.primary.transcribe(pcm_i16_16k_mono).await;
-            let _ = self.state_tx.send(VoiceCaptureState::Idle);
-            return result;
+            return self.primary.transcribe(pcm_i16_16k_mono).await;
         }
 
         let _ = self.state_tx.send(VoiceCaptureState::Queued);
         let use_cpu = self.should_fall_back_to_cpu();
         let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
 
-        let result = if use_cpu {
+        if use_cpu {
             self.cpu_transcriber()
                 .await?
                 .transcribe(pcm_i16_16k_mono)
                 .await
         } else {
             self.primary.transcribe(pcm_i16_16k_mono).await
-        };
-
-        let _ = self.state_tx.send(VoiceCaptureState::Idle);
-        result
+        }
     }
 
     fn subscribe_state(&self) -> Option<watch::Receiver<VoiceCaptureState>> {
         Some(self.state_tx.subscribe())
+    }
+}
+
+/// Publishes `Idle` when dropped, so a transcription that fails or is
+/// cancelled still ends its `Transcribing` state.
+struct IdleOnDrop<'a>(&'a watch::Sender<VoiceCaptureState>);
+
+impl Drop for IdleOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.send(VoiceCaptureState::Idle);
     }
 }
 
