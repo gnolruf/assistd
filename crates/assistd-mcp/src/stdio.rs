@@ -44,8 +44,8 @@ const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 /// base64-encoded, plus envelope.
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
-/// Per-server stdio transport configuration. `Debug` lists env var names,
-/// never values.
+/// Per-server stdio transport configuration. `Debug` gives the arg count
+/// and env var names, never their values.
 #[derive(Clone)]
 pub struct StdioConfig {
     pub command: String,
@@ -76,7 +76,7 @@ impl fmt::Debug for StdioConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StdioConfig")
             .field("command", &self.command)
-            .field("args", &self.args)
+            .field("arg_count", &self.args.len())
             .field("env_names", &self.env.keys().collect::<BTreeSet<_>>())
             .field("request_timeout", &self.request_timeout)
             .field("label", &self.label)
