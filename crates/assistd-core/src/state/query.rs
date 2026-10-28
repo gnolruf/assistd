@@ -346,12 +346,7 @@ impl AppState {
         let Some((_request_guard, agent_guard)) = self.admit_turn(&id, &tx, &cancel).await? else {
             return finish_interrupted_before_start(&tx, id).await;
         };
-        if let Some(revalidator) = &self.subsystems.vision_revalidator {
-            revalidator
-                .revalidate_if_stale(&self.subsystems.presence)
-                .await;
-        }
-        if cancel.is_cancelled() {
+        if !self.revalidate_vision(&cancel).await {
             return finish_interrupted_before_start(&tx, id).await;
         }
         self.require_vision_for(&id, &attachments, &tx).await?;
@@ -437,6 +432,18 @@ impl AppState {
             biased;
             () = cancel.cancelled() => Ok(None),
             admitted = admission => admitted.map(Some),
+        }
+    }
+
+    /// Re-probe vision support if stale; `false` when `cancel` fired first.
+    async fn revalidate_vision(&self, cancel: &CancellationToken) -> bool {
+        let Some(revalidator) = &self.subsystems.vision_revalidator else {
+            return !cancel.is_cancelled();
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => false,
+            () = revalidator.revalidate_if_stale(&self.subsystems.presence) => true,
         }
     }
 

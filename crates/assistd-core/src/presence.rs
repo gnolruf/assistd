@@ -354,6 +354,13 @@ impl PresenceManager {
         })
     }
 
+    /// A [`RequestGuard`] if the daemon is `Active` now; `None` rather than
+    /// waking it. Does not count as activity for the idle timer.
+    pub async fn request_guard_if_active(&self) -> Option<RequestGuard> {
+        let guard = self.inflight.clone().read_owned().await;
+        (self.state() == PresenceState::Active).then_some(RequestGuard { _guard: guard })
+    }
+
     /// [`Self::ensure_active`] on a supervised task, so a dropped waiter
     /// stops waiting without aborting a half-done wake.
     async fn ensure_active_detached(self: &Arc<Self>) -> Result<(), PresenceError> {
@@ -376,12 +383,16 @@ impl PresenceManager {
         *self.wake_started.lock()
     }
 
-    /// Drive the manager to `target`.
+    /// Drive the manager to `target`. Cancel-safe for `Active`: dropping it
+    /// leaves the wake running.
     #[tracing::instrument(skip(self), fields(from = ?self.state()))]
-    pub async fn set_presence(&self, target: PresenceTarget) -> Result<(), PresenceError> {
+    pub async fn set_presence(
+        self: &Arc<Self>,
+        target: PresenceTarget,
+    ) -> Result<(), PresenceError> {
         self.mark_activity();
         match target {
-            PresenceTarget::Active => self.wake().await,
+            PresenceTarget::Active => self.ensure_active_detached().await,
             PresenceTarget::Drowsy => self.drowse().await,
             PresenceTarget::Sleeping => self.sleep().await,
         }

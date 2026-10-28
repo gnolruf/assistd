@@ -187,6 +187,7 @@ impl VisionRevalidator {
 
     /// Re-probe and update the gate if a load may have happened since the
     /// last successful probe. Call while holding presence `Active`.
+    /// Cancel-safe: a dropped probe reruns on the next call.
     pub async fn revalidate_if_stale(&self, presence: &PresenceManager) {
         let mut seen = self.seen.lock().await;
         if seen.take_stale(presence.llama_pid().await) {
@@ -205,12 +206,16 @@ struct SeenLoad {
 
 impl SeenLoad {
     /// Whether a probe is due: the last one failed, or the presence state
-    /// or llama-server child changed since. Marks both as seen either way.
+    /// or llama-server child changed since. Marks both as seen either way,
+    /// and a change as unprobed so a probe dropped midway reruns.
     fn take_stale(&mut self, llama_pid: Option<u32>) -> bool {
         let reloaded = self.presence.has_changed().unwrap_or(false) || self.llama_pid != llama_pid;
         self.presence.mark_unchanged();
         self.llama_pid = llama_pid;
-        reloaded || !self.probed
+        if reloaded {
+            self.probed = false;
+        }
+        !self.probed
     }
 }
 
@@ -560,9 +565,12 @@ mod tests {
         presence_tx.send(PresenceState::Sleeping).unwrap();
         presence_tx.send(PresenceState::Active).unwrap();
         assert!(seen.take_stale(Some(1)), "presence round trip");
+        assert!(seen.take_stale(Some(1)), "probe dropped before landing");
+        seen.probed = true;
         assert!(!seen.take_stale(Some(1)), "round trip already seen");
 
         assert!(seen.take_stale(Some(2)), "child restarted");
+        seen.probed = true;
         assert!(!seen.take_stale(Some(2)), "restart already seen");
 
         seen.probed = false;
