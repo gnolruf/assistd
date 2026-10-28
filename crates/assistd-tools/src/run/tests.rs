@@ -6,8 +6,7 @@ use tempfile::{TempDir, tempdir};
 use super::*;
 use crate::command::{Command, CommandInput};
 use crate::commands::{
-    CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand, SeeCommand, TailCommand,
-    WcCommand,
+    CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand, TailCommand, WcCommand, test_see,
 };
 use crate::fixtures::PNG_BYTES;
 
@@ -60,7 +59,7 @@ fn registry() -> Arc<CommandRegistry> {
     reg.register(GrepCommand);
     reg.register(LsCommand);
     reg.register(WcCommand);
-    reg.register(SeeCommand::default());
+    reg.register(test_see());
     Arc::new(reg)
 }
 

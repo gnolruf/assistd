@@ -1,3 +1,5 @@
+//! The `ChildServer` handle and the readiness state it broadcasts.
+
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -33,10 +35,9 @@ pub struct ChildServer {
 }
 
 impl ChildServer {
-    /// Spawn the supervisor and wait until the child reports `Ready`. Errors
-    /// with [`ChildServerError::ShutdownDuringHealth`] if the supervisor exits
-    /// first, or [`ChildServerError::StartupFailed`] once it goes `Degraded`.
-    /// Dropping the returned future aborts the supervisor.
+    /// Spawn the supervisor and wait for the child to report `Ready`; dropping the future aborts
+    /// it. Errors with [`ChildServerError::ShutdownDuringHealth`] if the supervisor exits first,
+    /// or [`ChildServerError::StartupFailed`] once it goes `Degraded`.
     #[tracing::instrument(skip(spec, shutdown_rx), fields(server = spec.name(), addr = %spec.listen_addr()))]
     pub async fn start<S: ChildServerSpec>(
         spec: S,

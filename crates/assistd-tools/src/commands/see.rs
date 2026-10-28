@@ -1,3 +1,5 @@
+//! `see`: attach an image file as vision input for the next model turn.
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -21,13 +23,6 @@ impl SeeCommand {
     /// vision support.
     pub fn new(gate: Arc<VisionGate>) -> Self {
         Self { gate }
-    }
-}
-
-#[cfg(test)]
-impl Default for SeeCommand {
-    fn default() -> Self {
-        Self::new(VisionGate::new(true))
     }
 }
 
@@ -140,6 +135,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::commands::test_see;
     use crate::fixtures::PNG_BYTES;
 
     async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
@@ -156,7 +152,7 @@ mod tests {
         let path = dir.path().join("shot.png");
         std::fs::write(&path, PNG_BYTES).unwrap();
         let path = path.to_string_lossy().into_owned();
-        let out = run_see(&SeeCommand::default(), &[&path]).await;
+        let out = run_see(&test_see(), &[&path]).await;
         assert_eq!(out.exit_code, 0);
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),

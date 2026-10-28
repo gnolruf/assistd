@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use super::desktop_entry::DesktopEntry;
 use super::*;
-use crate::commands::RecordingGate;
+use crate::commands::{RecordingGate, test_wm};
 
 fn id(n: u64) -> WindowId {
     WindowId::new(n).expect("test ids are non-zero")
@@ -81,7 +81,7 @@ impl WindowManager for StubWm {
 }
 
 async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
-    WmCommand::for_test(wm)
+    test_wm(wm)
         .run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: None,

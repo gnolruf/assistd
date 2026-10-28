@@ -1,7 +1,5 @@
-//! `assistd chat`: a terminal window onto the running daemon. Owns
-//! rendering, key handling, resource probes and attachment staging; every
-//! service lives in the daemon. One chat may be open per user, since every
-//! chat drives the daemon's one session.
+//! `assistd chat`: a terminal window onto the running daemon, which owns every service.
+//! One chat may be open per user, since every chat drives the daemon's one session.
 
 use std::fs::{DirBuilder, File, Permissions, TryLockError};
 use std::io::{self, Write};
@@ -449,10 +447,9 @@ fn apply_terminal_event(
     ControlFlow::Continue(())
 }
 
-/// Apply channel events that are already queued so a burst of deltas
-/// costs one frame, bounded so a producer that keeps pace cannot starve
-/// redraws. Terminal events stay with the select loop: polling
-/// `EventStream` outside it would drop its waker.
+/// Apply already-queued channel events so a burst of deltas costs one frame,
+/// bounded so a fast producer cannot starve redraws. Terminal events stay with
+/// the select loop: polling `EventStream` outside it would drop its waker.
 fn drain_queued(app: &mut App, chat_rx: &mut mpsc::Receiver<ChatEvent>) {
     for _ in 0..CHAT_CHANNEL_CAPACITY {
         let Ok(ev) = chat_rx.try_recv() else {

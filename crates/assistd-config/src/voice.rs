@@ -1,3 +1,5 @@
+//! Voice input, wake word and speech output configuration.
+
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 

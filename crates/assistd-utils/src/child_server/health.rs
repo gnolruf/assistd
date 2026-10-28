@@ -1,3 +1,5 @@
+//! Health polling that only trusts a listener owned by the child.
+
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};

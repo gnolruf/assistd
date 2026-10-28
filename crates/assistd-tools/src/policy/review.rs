@@ -147,12 +147,9 @@ const PROGRAM_OPTIONS: &[(&str, &[&str])] = &[("rg", &["--pre", "--hostname-bin"
 /// and files under `/tmp` or the scratch directory.
 const HARMLESS_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
-/// A destructive command: a name followed by arguments that must all be
-/// present, in any order, each word listing `|`-separated alternatives.
-/// `-rf` matches those short options in any cluster, `--force` the option
-/// or an abbreviation, `of=` any argument with that prefix, anything else
-/// itself, all ignoring ASCII case. A run-time argument (`"$f"`) stands in
-/// for one required argument; one that may split (`$opts`, `*`) for all.
+/// A destructive command: a name plus arguments that must all appear, in any order, ignoring ASCII
+/// case, each word listing `|`-separated alternatives. `-rf` matches any short-option cluster,
+/// `--force` an abbreviation, `of=` a prefix; `"$f"` stands in for one argument, `$opts` for all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestructivePattern {
     display: String,
@@ -337,10 +334,8 @@ pub struct Rules<'a> {
     pub scratch: Option<&'a Path>,
 }
 
-/// Why `script` needs confirmation, if it does: it matches a destructive
-/// pattern, can run something no check can see, or runs a program not on
-/// the allowlist (reported in that order). Every command bash would run is
-/// checked, including those behind builtins and default-allowed wrappers;
+/// Why `script` needs confirmation, if it does: a destructive pattern, something unseeable run,
+/// or a program off the allowlist, in that order. Every command bash would run is checked, but
 /// what an allowed program runs in turn (`sh -c`, `sudo`) is trusted.
 pub fn check_script(script: &str, rules: &Rules<'_>) -> Option<Confirmation> {
     let matcher = Matcher::new(rules);

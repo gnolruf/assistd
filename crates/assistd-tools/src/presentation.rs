@@ -1,6 +1,5 @@
-//! The per-result output budget every tool shares, and the rendering of a
-//! completed chain's [`CommandOutput`] within it: binary refused, long
-//! stdout and stderr cut (each spilled to a file), an `[exit:N | Mms]` footer.
+//! The per-result output budget every tool shares, and rendering a chain's [`CommandOutput`]
+//! within it: binary refused, long streams cut and spilled to a file, an `[exit:N | Mms]` footer.
 
 use std::cmp::Reverse;
 use std::fs::{DirEntry, Metadata, OpenOptions};

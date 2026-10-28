@@ -1,3 +1,5 @@
+//! A spawned child process whose output is forwarded to tracing.
+
 use std::io;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};

@@ -1,3 +1,5 @@
+//! System prompt, history window and sampling configuration.
+
 use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,5 @@
+//! `ls`: list directories and files as type, size and name rows.
+
 use std::fs::Metadata;
 use std::io::{self, ErrorKind};
 

@@ -16,10 +16,9 @@ pub(crate) mod query;
 pub(crate) mod terminal_text;
 pub(crate) mod voice_ctl;
 
-/// Send `req` and hand every event, terminal ones included, to
-/// `on_event`. Returns after `Done`; on `Error` prints the daemon's
-/// message and exits 1 after `on_event` has seen it. A connection that
-/// closes without a terminal event is an error.
+/// Send `req` and hand every event, terminal ones included, to `on_event`.
+/// Returns after `Done`; on `Error` prints the message and exits 1. A connection
+/// that closes without a terminal event is an error.
 async fn run_one_shot(req: Request, mut on_event: impl FnMut(&Event) -> Result<()>) -> Result<()> {
     let mut stream = IpcClient::new()
         .one_shot(req)

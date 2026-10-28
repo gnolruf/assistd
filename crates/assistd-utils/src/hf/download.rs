@@ -99,11 +99,9 @@ pub async fn ensure_cached_id(id: &HfFileId, cache_dir: &Path) -> Result<PathBuf
     Ok(dest)
 }
 
-/// Download `id` to `dest` unless it already exists. The download lands in
-/// a `.part` temp file beside `dest`, deleted unless the download completes
-/// (including when this future is dropped), and is synced to disk before the
-/// rename. Fails when connecting or any read stalls past its timeout, the
-/// file exceeds 8 GiB, or it does not match the SHA-256 Hugging Face reports.
+/// Download `id` to `dest` unless it exists, via a `.part` file beside it that is synced
+/// before the rename and deleted on any failure or drop. Fails when connecting or a read
+/// stalls past its timeout, the file exceeds 8 GiB, or its SHA-256 differs from Hugging Face's.
 pub async fn ensure_file(id: &HfFileId, dest: &Path) -> Result<(), DownloadError> {
     if tokio::fs::try_exists(dest)
         .await

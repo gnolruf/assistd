@@ -1,3 +1,5 @@
+//! llama-server lifecycle and control-plane errors.
+
 use std::time::Duration;
 
 use assistd_utils::child_server::ChildServerError;

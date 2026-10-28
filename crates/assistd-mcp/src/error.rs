@@ -1,3 +1,5 @@
+//! MCP errors and their rendering as model-facing tool error lines.
+
 use std::time::Duration;
 
 use rmcp::service::{ClientInitializeError, ServiceError};

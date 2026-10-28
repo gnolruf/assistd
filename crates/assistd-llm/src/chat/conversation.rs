@@ -664,9 +664,8 @@ impl Conversation {
         u32::try_from(headroom).unwrap_or(u32::MAX)
     }
 
-    /// Drop the oldest messages after any summary, then fold the oldest tool
-    /// steps of the current turn into its call log, until the conversation is
-    /// under a low-water mark well below the budget. The latest user message
+    /// Drop the oldest messages after any summary, then fold the current turn's oldest tool steps
+    /// into its call log, until under a low-water mark below the budget. The latest user message
     /// and the newest step always stay.
     pub fn truncate_to_budget(&mut self, chat: &ChatConfig, model: &ModelConfig) {
         let before = self.approx_total_tokens();

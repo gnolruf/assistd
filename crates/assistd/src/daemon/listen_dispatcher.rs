@@ -1,7 +1,5 @@
-//! Routes wake-word commands into the agent loop, interrupts a reply the
-//! user talks over, opens a follow-up window when each reply ends unless
-//! push-to-talk took over, and publishes the listener's phase; a command
-//! heard while the daemon sleeps wakes it.
+//! Routes wake-word commands into the agent loop (waking a sleeping daemon), interrupts
+//! talked-over replies, opens follow-up windows, and publishes the listener's phase.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,3 +1,5 @@
+//! SearXNG launch and search errors.
+
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

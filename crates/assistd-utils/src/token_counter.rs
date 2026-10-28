@@ -37,10 +37,9 @@ impl TokenCounter {
         self.chunk_count + self.unstreamed
     }
 
-    /// Record the conversation sizes the daemon sent with its latest request:
-    /// what it holds now, and its `total` counting what compaction removed.
-    /// Growth beyond the chunks streamed since the previous size counts toward
-    /// the turn; shrinkage from compaction does not.
+    /// Record the context sizes sent with the daemon's latest request: `tokens` held now and
+    /// `total` including what compaction removed. Growth beyond the chunks streamed since the
+    /// previous size counts toward the turn; shrinkage from compaction does not.
     pub fn on_context_size(&mut self, tokens: u32, total: u32) {
         if let Some(expected) = self.context_tokens() {
             self.unstreamed += u64::from(tokens).saturating_sub(expected);

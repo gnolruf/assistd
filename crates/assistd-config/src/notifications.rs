@@ -1,3 +1,5 @@
+//! Tray notification and tray icon configuration.
+
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{

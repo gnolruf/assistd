@@ -69,15 +69,9 @@ impl AttachmentBudget {
     }
 }
 
-/// Execute a parsed chain. Pipes run sequentially, the left stage's stdout
-/// becoming the right's stdin; every stage's stderr lines are kept, prefixed
-/// `[name]\t`, and a pipe exits with its rightmost nonzero stage status, as
-/// under `pipefail`. Short-circuited stages emit nothing. A pipe stage whose
-/// stdout passes [`OUTPUT_MAX`] stops the pipe; any other output past it,
-/// including the streams `;`, `&&` and `||` join, is replaced by an overflow
-/// failure.
-/// Attachments past the chain's first four, or past 32 MiB in all, are
-/// dropped as their stage finishes, and that stage exits 141.
+/// Execute a parsed chain, piping stages in sequence with `pipefail` exit status and stderr lines
+/// prefixed `[name]\t`. Output past [`OUTPUT_MAX`] fails with an overflow; attachments past the
+/// first four or 32 MiB in all are dropped and their stage exits 141.
 pub async fn execute(
     chain: &Chain,
     registry: &CommandRegistry,

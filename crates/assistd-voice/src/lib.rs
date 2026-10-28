@@ -1,6 +1,5 @@
-//! Voice subsystem: the [`VoiceInput`] (speech-to-text) and
-//! [`VoiceOutput`] (text-to-speech) traits, with sherpa-onnx and cpal
-//! implementations behind cargo features.
+//! Voice subsystem: the [`VoiceInput`] (speech-to-text) and [`VoiceOutput`] (text-to-speech)
+//! traits, with sherpa-onnx and cpal implementations behind cargo features.
 
 use std::fmt;
 
@@ -59,8 +58,7 @@ pub use tts::{SherpaVoiceOutput, SpeechError};
 
 /// Push-to-talk voice capture: buffer mic audio between
 /// [`start_recording`](VoiceInput::start_recording) and
-/// [`stop_and_transcribe`](VoiceInput::stop_and_transcribe), then
-/// transcribe it.
+/// [`stop_and_transcribe`](VoiceInput::stop_and_transcribe), then transcribe it.
 #[async_trait]
 pub trait VoiceInput: fmt::Debug + Send + Sync + 'static {
     /// Open the capture device and begin buffering. Recording runs

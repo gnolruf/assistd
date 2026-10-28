@@ -1,3 +1,5 @@
+//! Embedding client errors.
+
 use std::sync::Arc;
 
 use assistd_utils::http::BodyError;

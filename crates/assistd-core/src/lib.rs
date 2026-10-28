@@ -1,6 +1,5 @@
-//! Daemon orchestration: the agent loop, presence state machine, IPC
-//! socket server, and the `AppState` request dispatcher. Re-exports the
-//! subsystem crates so dependents need only this one.
+//! Daemon orchestration: the agent loop, presence state machine, IPC socket server and
+//! `AppState` dispatcher; re-exports the subsystem crates so dependents need only this one.
 
 use std::fs::{DirBuilder, DirEntry, Permissions};
 use std::net::SocketAddr;
@@ -142,11 +141,9 @@ pub struct BuildToolsDeps<'a> {
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
 }
 
-/// Keeps a [`VisionGate`] in step with the model llama-server has loaded.
-///
-/// The gate is re-probed only after a presence transition or a
-/// llama-server restart, since only those reload weights. A failed probe
-/// leaves the gate unchanged and is retried on the next revalidation.
+/// Keeps a [`VisionGate`] in step with the model llama-server has loaded, re-probing only
+/// after a presence transition or a llama-server restart. A failed probe leaves the gate
+/// unchanged and is retried on the next revalidation.
 #[derive(Debug)]
 pub struct VisionRevalidator {
     gate: Arc<VisionGate>,
@@ -219,13 +216,9 @@ impl SeenLoad {
     }
 }
 
-/// The sandbox the model's tools run in under `config`, keeping the
-/// directory of `config_path` read-only and sharing the scratch (created
-/// here) and spill directories, or why the model gets no tools.
-///
-/// # Errors
-/// [`BuildToolsError`] when the config directory cannot be resolved, the
-/// scratch directory cannot be created, or a required `bwrap` is missing.
+/// The tool sandbox for `config` (config dir read-only, scratch and spill dirs shared), or
+/// why the model gets no tools. Creates the scratch dir; errors if it or the config dir
+/// cannot be set up, or a required `bwrap` is missing.
 pub fn probe_tool_sandbox(
     config: &Config,
     config_path: &Path,
@@ -245,11 +238,8 @@ pub fn probe_tool_sandbox(
     )?)
 }
 
-/// The MCP tools approved with "always allow", kept beside the config file.
-///
-/// # Errors
-/// [`BuildToolsError`] when the config directory cannot be resolved or the
-/// approvals file cannot be read.
+/// The MCP tools approved with "always allow", kept beside the config file. Errors when
+/// the config directory cannot be resolved or the approvals file cannot be read.
 pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsError> {
     let config_dir = canonical_config_dir(config_path)?;
     Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)

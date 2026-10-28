@@ -1,3 +1,5 @@
+//! `echo`: write its arguments to stdout.
+
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};

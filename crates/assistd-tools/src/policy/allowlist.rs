@@ -168,11 +168,8 @@ pub struct Allowlist {
 }
 
 impl Allowlist {
-    /// An allowlist of `configured` names and absolute paths, with
-    /// approvals loaded from and saved to `store`.
-    ///
-    /// # Errors
-    /// [`AllowlistError`] when `store` exists but cannot be read or parsed.
+    /// An allowlist of `configured` names and absolute paths, with approvals loaded from and
+    /// saved to `store`. Fails when `store` exists but cannot be read or parsed.
     pub fn load(
         configured: impl IntoIterator<Item = String>,
         search_path: SearchPath,
@@ -206,13 +203,9 @@ impl Allowlist {
         }
     }
 
-    /// Keep `approvals` for good, pinning each program to the file it
-    /// resolves to now, and save. Programs that resolve to nothing are
-    /// skipped, and no approvals saves nothing.
-    ///
-    /// # Errors
-    /// [`AllowlistError::Write`] when saving fails; the approvals still hold
-    /// until the daemon exits.
+    /// Keep `approvals` for good, pinning each program to the file it resolves to now (skipping
+    /// any that resolve to nothing), and save. On [`AllowlistError::Write`] the approvals still
+    /// hold until the daemon exits.
     pub async fn approve(&self, approvals: &[ProgramApproval]) -> Result<(), AllowlistError> {
         if approvals.is_empty() {
             return Ok(());

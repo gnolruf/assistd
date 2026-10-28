@@ -1,6 +1,5 @@
-//! Names approved with "always allow" for gates outside the program
-//! allowlist, such as web hosts, MCP tools and launched applications, kept
-//! in a TOML file.
+//! Names approved with "always allow" for gates outside the program allowlist (web hosts, MCP
+//! tools, launched applications), kept in a TOML file.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -38,11 +37,8 @@ pub struct Approvals {
 }
 
 impl Approvals {
-    /// The approvals saved in `store`, and saved back there; none yet when
-    /// it does not exist.
-    ///
-    /// # Errors
-    /// [`AllowlistError`] when `store` exists but cannot be read or parsed.
+    /// The approvals saved in `store`, and saved back there; none when it does not exist.
+    /// Fails when `store` exists but cannot be read or parsed.
     pub fn load(store: PathBuf) -> Result<Self, AllowlistError> {
         let approved = match read_store(&store)? {
             Some(text) => {
@@ -76,10 +72,7 @@ impl Approvals {
         self.approved.read().contains(name)
     }
 
-    /// Approve `name` for good and save.
-    ///
-    /// # Errors
-    /// [`AllowlistError::Write`] when saving fails; the approval still holds
+    /// Approve `name` for good and save. On [`AllowlistError::Write`] the approval still holds
     /// until the daemon exits.
     pub async fn approve(&self, name: &str) -> Result<(), AllowlistError> {
         let _saving = self.saving.lock().await;

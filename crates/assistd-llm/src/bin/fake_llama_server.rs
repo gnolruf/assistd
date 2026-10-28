@@ -1,6 +1,5 @@
-//! Test-only fake llama-server, compiled under the `test-support` feature,
-//! for exercising lifecycle, presence, and chat-completion paths without a
-//! real llama-server binary.
+//! Test-only fake llama-server for exercising lifecycle, presence, and chat-completion paths
+//! without a real llama-server binary.
 
 use std::env;
 use std::io::{self, Write};
@@ -226,14 +225,9 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
     }
 }
 
-/// Serves one request. With `--api-key-file`, every route but `/health` and
+/// Serves one request: `/health`, `/models` (load, unload, state), `/v1/chat/completions` (SSE
+/// or JSON summary) and `/debug/counters`. With `--api-key-file`, every route but `/health` and
 /// `/debug/counters` answers 401 unless the request bears the key.
-/// - `GET /health`: 200 `{"status":"ok"}`, or 503 in never-ready mode.
-/// - `POST /models/load`, `POST /models/unload`: 200; counts the hit and
-///   updates the load state.
-/// - `GET /models`: the current load state.
-/// - `POST /v1/chat/completions`: an SSE stream or a JSON summary.
-/// - `GET /debug/counters`: load and unload counts and the loaded model.
 async fn serve_connection(
     mut sock: TcpStream,
     mode: Mode,

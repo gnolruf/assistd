@@ -1,3 +1,5 @@
+//! The top-level `Config`: loading, writing and cross-field validation.
+
 use std::collections::HashSet;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};

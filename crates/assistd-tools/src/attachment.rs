@@ -1,3 +1,5 @@
+//! Loading image files as command attachments.
+
 use std::path::Path;
 
 pub use assistd_ipc::attachment::{LoadImageError, MAX_IMAGE_BYTES};

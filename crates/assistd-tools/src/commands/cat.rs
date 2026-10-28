@@ -1,3 +1,5 @@
+//! `cat`: print text files or stdin, refusing binary files.
+
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 

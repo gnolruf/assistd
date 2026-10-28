@@ -1,6 +1,5 @@
-//! Silero speech detection over the live mic stream: each 20 ms frame is
-//! labelled speech or not, so music, noise and other non-speech sound never
-//! hold an utterance open.
+//! Silero speech detection over the live mic stream: each 20 ms frame is labelled speech or
+//! not, so music, noise and other non-speech sound never hold an utterance open.
 
 use std::sync::Arc;
 

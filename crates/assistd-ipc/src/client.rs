@@ -1,6 +1,5 @@
-//! Unix-socket client for the IPC protocol: [`IpcClient::one_shot`]
-//! for request/stream calls and [`IpcClient::open_dialog`] when the
-//! client must answer mid-stream prompts on the same connection.
+//! Unix-socket client for the IPC protocol: [`IpcClient::one_shot`] for request/stream
+//! calls, [`IpcClient::open_dialog`] when the client must answer mid-stream prompts.
 
 use std::fmt;
 use std::io;

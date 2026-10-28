@@ -1,7 +1,5 @@
-//! Minimal MCP server fixture: newline-delimited JSON-RPC on
-//! stdin/stdout, answering `initialize`, `ping`, `tools/list` and
-//! `tools/call` for the `echo`, `crash_me`, `never_answers`, `wedge`,
-//! `close_stdout`, `spawn_orphan_and_crash` and `env_names` tools.
+//! Minimal MCP server fixture speaking newline-delimited JSON-RPC on stdin/stdout, with `echo`
+//! plus misbehaving tools (`crash_me`, `never_answers`, `wedge`, `close_stdout`, ...).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;

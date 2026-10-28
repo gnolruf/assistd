@@ -104,16 +104,6 @@ impl ScreenshotCommand {
     }
 }
 
-#[cfg(test)]
-impl Default for ScreenshotCommand {
-    fn default() -> Self {
-        Self::new(
-            Arc::new(ScreenshotPolicyCfg::default()),
-            VisionGate::new(true),
-        )
-    }
-}
-
 #[async_trait]
 impl Command for ScreenshotCommand {
     fn name(&self) -> &'static str {

@@ -100,11 +100,9 @@ impl CircuitState {
     }
 }
 
-/// [`VoiceOutput`] backed by a sherpa-onnx voice and rodio playback. After
-/// three failures within a minute the service is degraded and `speak` drops
-/// utterances without error; once a minute has passed since the last
-/// failure, one utterance is let through and either re-arms the service or
-/// re-opens the breaker.
+/// [`VoiceOutput`] backed by a sherpa-onnx voice and rodio playback. Three failures within a
+/// minute degrade it and `speak` silently drops utterances; a minute after the last failure,
+/// one utterance is let through to re-arm the service or re-open the breaker.
 #[derive(Debug)]
 pub struct SherpaVoiceOutput {
     engine: Arc<Mutex<SpeechEngine>>,

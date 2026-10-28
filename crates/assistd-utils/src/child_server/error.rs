@@ -1,3 +1,5 @@
+//! Child server supervisor and process errors.
+
 use std::path::PathBuf;
 use std::time::Duration;
 

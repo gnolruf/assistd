@@ -1,6 +1,5 @@
-//! Streaming chat client for the locally-managed llama-server process:
-//! one conversation, wire types for `/v1/chat/completions`, and the SSE
-//! and `<think>` decoders the stream runs through.
+//! Streaming chat client for the locally-managed llama-server: one conversation, wire types
+//! for `/v1/chat/completions`, and the SSE and `<think>` decoders the stream runs through.
 
 pub mod client;
 pub mod conversation;

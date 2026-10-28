@@ -277,9 +277,8 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn>;
 
     /// Make `branch` the current branch of `session`. Errors with
-    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) or, when
-    /// `branch` is not one of the session's,
-    /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound).
+    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound), or
+    /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound) for another session's.
     async fn set_current_branch(&self, session: SessionId, branch: BranchId) -> Result<()>;
 
     /// Read the current branch pointer for `session`, if any.
@@ -310,10 +309,9 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         prefer_session: Option<SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>>;
 
-    /// Copy `src` into a new child branch `new_name` sharing all its messages and make it
-    /// its session's current branch, in one transaction. Errors with
-    /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound) or
-    /// [`MemoryError::BranchNameTaken`](crate::MemoryError::BranchNameTaken).
+    /// Copy `src` into a new child branch `new_name` sharing its messages and make it current,
+    /// in one transaction. Errors with [`BranchNotFound`](crate::MemoryError::BranchNotFound)
+    /// or [`BranchNameTaken`](crate::MemoryError::BranchNameTaken).
     async fn fork_and_switch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
 
     /// `branch`'s summary and the rows `scope` selects; empty when the branch is missing.

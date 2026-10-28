@@ -1,6 +1,5 @@
-//! Compact record of tool steps folded out of the current turn: each call,
-//! the exit status its result reported, and the first error line of a
-//! failure, without the rest of the output.
+//! Compact record of tool steps folded out of the current turn: each call, its reported exit
+//! status, and the first error line of a failure.
 
 use super::{Conversation, Message, ToolCallRecord, truncate_utf8};
 

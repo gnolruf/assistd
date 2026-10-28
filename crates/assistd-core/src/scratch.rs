@@ -12,12 +12,9 @@ use crate::{BuildToolsError, OVERFLOW_DIR_MODE, ToolsScratchConfig};
 
 const SECS_PER_DAY: u64 = 24 * 60 * 60;
 
-/// Create `scratch.dir` owner-only, remove what has not changed in
-/// `scratch.retention_days`, and return the directory's canonical path.
-///
-/// # Errors
-/// [`BuildToolsError::CreateScratchDir`] when the directory cannot be
-/// created, restricted or resolved; failures to remove entries are logged.
+/// Create `scratch.dir` owner-only, remove what has not changed in `scratch.retention_days`,
+/// and return its canonical path. Errors with [`BuildToolsError::CreateScratchDir`] when the
+/// directory cannot be created, restricted or resolved; failed removals are only logged.
 pub(crate) fn prepare(scratch: &ToolsScratchConfig) -> Result<PathBuf, BuildToolsError> {
     let scratch_dir = scratch.dir.as_path();
     let create_error = |source| BuildToolsError::CreateScratchDir {

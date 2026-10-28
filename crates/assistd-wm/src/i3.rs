@@ -1,6 +1,5 @@
-//! i3 backend for [`crate::WindowManager`], over `tokio-i3ipc`. One
-//! socket serves commands; a second feeds the event stream that keeps
-//! the focus snapshot current.
+//! i3 backend for [`crate::WindowManager`] over `tokio-i3ipc`: one socket serves commands, a
+//! second feeds the event stream that keeps the focus snapshot current.
 
 use std::sync::Arc;
 

@@ -1,3 +1,5 @@
+//! `wc`: count the lines, words and bytes of files or stdin.
+
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};

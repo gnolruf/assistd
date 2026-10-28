@@ -1,6 +1,5 @@
-//! ratatui render for the chat TUI. Mutates only layout outputs: the
-//! output pane's wrap cache, the app's last viewport height, and the
-//! confirmation prompt's clamped scroll.
+//! ratatui render for the chat TUI. Mutates only layout outputs: the wrap cache,
+//! the last viewport height, and the confirmation prompt's clamped scroll.
 
 use std::time::Instant;
 

@@ -1,6 +1,5 @@
-//! cpal + Silero + keyword-spotting hands-free listener: ring buffer →
-//! resampler → Silero speech labels → utterance segmenter → wake-phrase
-//! spotter and gate, or barge-in check → transcriber → broadcast.
+//! cpal + Silero + keyword-spotting hands-free listener: ring buffer → resampler → Silero →
+//! utterance segmenter → wake-phrase gate or barge-in check → transcriber → broadcast.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -196,10 +195,9 @@ impl ListenWorkers {
 }
 
 impl MicContinuousListener {
-    /// Listens for the wake phrase `spotter` finds. The audio device is
-    /// opened on [`Self::start`], not here. `speech` supplies the reply text
-    /// that barge-in checks reject as echo; `silero` decides which frames
-    /// hold speech.
+    /// Listens for the wake phrase `spotter` finds; the audio device opens on [`Self::start`].
+    /// `speech` supplies reply text that barge-in checks reject as echo; `silero` decides which
+    /// frames hold speech.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         config: &VoiceConfig,
@@ -577,11 +575,9 @@ fn next_segment(
     }
 }
 
-/// Blocking because Silero inference is CPU work. Frames reach the
-/// segmenter a stride at a time, once Silero has labelled them.
-/// `emit` and `speaking_changed`, told when an utterance starts and ends,
-/// must never wait: stalling here would back up the frame channel and
-/// silently truncate live audio. The loop ends when `emit` returns false.
+/// Feeds Silero-labelled frames to the segmenter a stride at a time, blocking on CPU inference.
+/// `emit` and `speaking_changed` must never wait, or the frame channel backs up and live audio
+/// is silently truncated. The loop ends when `emit` returns false.
 fn vad_loop(
     tuning: VadTuning,
     mut barge_in: Option<BargeInWatch>,
@@ -659,10 +655,9 @@ struct Listeners {
     spotter: Arc<WakeWordSpotter>,
 }
 
-/// Gates each utterance in turn on the wake phrase, or on barge-in when it
-/// was heard over a reply, transcribing only what is addressed to assistd.
-/// A bare phrase or a follow-up opens a command window, reported as
-/// `Capturing` until it closes.
+/// Gates each utterance on the wake phrase, or on barge-in when heard over a reply, and
+/// transcribes only what is addressed to assistd. A bare phrase or follow-up opens a command
+/// window, reported as `Capturing` until it closes.
 async fn transcribe_loop(
     listeners: Listeners,
     mut gate: WakeGate,

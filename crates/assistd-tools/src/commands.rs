@@ -45,7 +45,8 @@ pub use write::{WriteCommand, WritePolicyCfg};
 
 #[cfg(test)]
 pub(crate) use test_support::{
-    RecordingGate, hold_fifo_open, make_fifo, test_patterns, test_registry,
+    RecordingGate, hold_fifo_open, make_fifo, permissive_write, test_bash, test_patterns,
+    test_registry, test_screenshot, test_see, test_wm,
 };
 
 /// Largest file a command reads into memory; a bigger one would overflow

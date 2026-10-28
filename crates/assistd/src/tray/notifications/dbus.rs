@@ -1,6 +1,5 @@
 //! The freedesktop notification service on the session bus, driven by
-//! [`NotifierCommand`]s and reporting closes and actions back as
-//! [`DriverInput`]s.
+//! [`NotifierCommand`]s and reporting closes and actions as [`DriverInput`]s.
 
 use std::collections::HashMap;
 

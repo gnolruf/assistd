@@ -1,6 +1,5 @@
-//! Text to IPA phonemes for Piper voices, by running `espeak-ng` once per
-//! clause the way piper-phonemize splits text, so espeak-ng stays a separate
-//! program.
+//! Text to IPA phonemes for Piper voices, running `espeak-ng` as a separate program once per
+//! clause, split the way piper-phonemize splits text.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;

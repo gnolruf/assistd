@@ -11,13 +11,9 @@ const SELF_DELIMITING_TERMINATORS: &[char] = &[
     '。', '！', '？', '｡', '।', '॥', '؟', '۔', '።', '፧', '။', '։',
 ];
 
-/// Streaming sentence segmenter: [`push`](Self::push) deltas, then
-/// [`finish`](Self::finish) at end of stream or [`flush_idle`](Self::flush_idle) on a pause.
-///
-/// Boundaries, highest priority first: `\n\n`; a `\n- `/`\n* ` bullet; a terminator
-/// such as `。` or `।`, or `[.!?]` plus whitespace and a non-lowercase letter, digit, or
-/// newline (abbreviations and decimals excluded); the `max_len` cap in chars. A terminator
-/// at the buffer's end waits for context.
+/// Streaming sentence segmenter: [`push`](Self::push) deltas, then [`finish`](Self::finish).
+/// Splits on `\n\n`, bullets, then terminators (`。`, or `[.!?]` + space + non-lowercase, not
+/// abbreviations or decimals), then the `max_len` char cap; a trailing terminator waits.
 #[derive(Debug)]
 pub struct SentenceBuffer {
     buf: String,
@@ -61,10 +57,9 @@ impl SentenceBuffer {
         (!speech.is_empty()).then_some(speech)
     }
 
-    /// Flush up to the last whitespace, leaving a trailing partial
-    /// word buffered. `None` inside a code fence, when there is no
-    /// whitespace to cut on, or when the prefix is empty after
-    /// postprocessing. Fence state is preserved.
+    /// Flush up to the last whitespace, keeping a trailing partial word and the fence state.
+    /// `None` inside a code fence, with no whitespace to cut on, or if the prefix postprocesses
+    /// to empty.
     pub fn flush_idle(&mut self) -> Option<String> {
         if self.in_code_fence {
             return None;

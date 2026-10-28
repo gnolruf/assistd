@@ -15,10 +15,8 @@ pub enum SseEvent {
 /// Longest incomplete line the reader buffers before failing the stream.
 pub const LINE_MAX: usize = 4 * 1024 * 1024;
 
-/// Byte-buffered SSE line parser. Buffering raw bytes keeps a chunk
-/// boundary inside a multi-byte UTF-8 character safe; decoding happens
-/// per completed line. Only `data:` and `error:` lines yield events;
-/// other fields, comments and blank lines are skipped.
+/// Byte-buffered SSE line parser, so a chunk boundary inside a UTF-8 character is safe. Only
+/// `data:` and `error:` lines yield events; other fields, comments and blank lines are skipped.
 #[derive(Debug, Default)]
 pub struct SseLineReader {
     buf: Vec<u8>,

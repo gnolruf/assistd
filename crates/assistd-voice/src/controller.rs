@@ -1,7 +1,5 @@
-//! Runtime control over a [`VoiceOutput`] that may still be starting: a
-//! mute switch, a skip epoch that in-flight speech workers compare against
-//! to drop stale sentences, a speaking signal that gates the mic, and the
-//! reply's recent sentences, which the mic hears back as echo.
+//! Runtime control over a [`VoiceOutput`] that may still be starting: mute, a skip epoch that
+//! drops stale sentences, a speaking signal that gates the mic, and recent sentences for echo.
 
 use std::collections::VecDeque;
 use std::sync::Arc;

@@ -239,9 +239,8 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     /// sees them on its next [`Self::step`].
     async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()>;
 
-    /// Run one model invocation over the current conversation with the
-    /// given tool schemas, streaming text deltas through `tx`. Backends
-    /// without tool support ignore `tools` and return
+    /// Run one model invocation over the conversation with the given tool schemas, streaming text
+    /// deltas through `tx`. Backends without tool support ignore `tools` and return
     /// [`StepOutcome::Final`].
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome>;
 
