@@ -355,7 +355,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
                 app.on_chat_event(ev);
             }
             _ = tick.tick() => {
-                app.on_tick();
+                app.on_tick().context("a chat task panicked")?;
             }
             _ = glyph_tick.tick(), if app.output.glyph_live() => {
                 app.output.advance_live_glyphs();
