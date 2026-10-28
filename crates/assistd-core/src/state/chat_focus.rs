@@ -1,6 +1,7 @@
 //! Whether the user's chat window has keyboard focus, as last reported by
 //! the chat and checked against its process still running.
 
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -27,20 +28,46 @@ struct SlotState {
 struct ChatClient {
     /// `None` when the socket could not report the sender's PID; such a
     /// chat is never treated as dead.
-    pid: Option<u32>,
+    process: Option<ChatProcess>,
     focused: bool,
+}
+
+/// A process told apart from a later one reusing its PID by start time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChatProcess {
+    pid: u32,
+    /// `None` when the process was already gone when it reported.
+    started_at: Option<u64>,
+}
+
+impl ChatProcess {
+    fn of(pid: u32) -> Self {
+        Self {
+            pid,
+            started_at: process_start_ticks(pid),
+        }
+    }
+
+    fn is_alive(self) -> bool {
+        self.started_at
+            .is_some_and(|started_at| process_start_ticks(self.pid) == Some(started_at))
+    }
 }
 
 impl ChatFocusSlot {
     /// Record a focus report from the chat running as `pid`.
     fn report(&self, pid: Option<u32>, focused: bool) {
-        self.inner.lock().chat = Some(ChatClient { pid, focused });
+        let process = pid.map(ChatProcess::of);
+        self.inner.lock().chat = Some(ChatClient { process, focused });
     }
 
     /// Forget the chat running as `pid`; a report from another PID stays.
     fn close(&self, pid: Option<u32>) {
         let mut state = self.inner.lock();
-        if state.chat.is_some_and(|chat| chat.pid == pid) {
+        if state
+            .chat
+            .is_some_and(|chat| chat.process.map(|process| process.pid) == pid)
+        {
             state.chat = None;
         }
     }
@@ -52,7 +79,7 @@ impl ChatFocusSlot {
         let mut state = self.inner.lock();
         if state
             .chat
-            .is_some_and(|chat| chat.pid.is_some_and(|pid| !process_is_alive(pid)))
+            .is_some_and(|chat| chat.process.is_some_and(|process| !process.is_alive()))
         {
             state.chat = None;
         }
@@ -116,8 +143,12 @@ impl AppState {
     }
 }
 
-fn process_is_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+/// `pid`'s start time in clock ticks since boot, from `/proc/<pid>/stat`;
+/// `None` when no such process is running.
+fn process_start_ticks(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(Path::new("/proc").join(pid.to_string()).join("stat")).ok()?;
+    let (_, after_command) = stat.rsplit_once(')')?;
+    after_command.split_whitespace().nth(19)?.parse().ok()
 }
 
 #[cfg(test)]

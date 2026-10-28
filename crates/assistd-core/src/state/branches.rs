@@ -204,9 +204,18 @@ impl AppState {
         Some(title)
     }
 
-    /// Ask the LLM for a title summarising `user_text`. `None` when the
-    /// call fails or yields no usable text.
+    /// Ask the LLM for a title summarising `user_text`, between turns and
+    /// only while `Active`. `None` when asleep, or the call fails or yields
+    /// no usable text.
     async fn generate_title(&self, user_text: &str) -> Option<String> {
+        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let Some(_request_guard) = self.subsystems.presence.request_guard_if_active().await else {
+            debug!(
+                target: "assistd::chat",
+                "daemon not active; session stays untitled until its next turn"
+            );
+            return None;
+        };
         let prompt = format!(
             "Summarize this conversation in 4 to 6 words for use as a UI title. \
                 Reply with only the title — no quotes, no punctuation, no leading verbs \
