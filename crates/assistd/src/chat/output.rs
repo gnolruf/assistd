@@ -1,6 +1,7 @@
 //! Scrollable output pane: prose lines, markdown replies, tool blocks,
 //! thinking blocks and thumbnails, wrapped to the viewport width on render.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use textwrap::core::display_width;
 
 use super::markdown::{BLEY, render_markdown};
 use super::ui::compact_duration;
+use crate::client::terminal_text::escape_bidi_controls;
 
 /// Rows an inline thumbnail reserves.
 pub(super) const THUMBNAIL_ROWS: u16 = 8;
@@ -252,7 +254,7 @@ impl OutputPane {
             }
         };
         if let Some(OutputItem::Assistant(text)) = self.items.get_mut(idx) {
-            text.push_str(delta);
+            text.push_str(&escape_bidi_controls(delta));
             self.wrap.invalidate(idx);
         }
     }
@@ -279,8 +281,9 @@ impl OutputPane {
         duration_ms: u64,
     ) {
         self.close_open_assistant();
+        let output = without_bidi_controls(output);
         self.items.push(OutputItem::Tool(ToolBlock {
-            command,
+            command: without_bidi_controls(command),
             expanded: starts_expanded(&output),
             state: ToolState::Finished {
                 output,
@@ -293,7 +296,7 @@ impl OutputPane {
     pub(super) fn begin_tool_block(&mut self, command: String) {
         self.close_open_assistant();
         self.items.push(OutputItem::Tool(ToolBlock {
-            command,
+            command: without_bidi_controls(command),
             state: ToolState::Running {
                 started_at: Instant::now(),
             },
@@ -308,6 +311,7 @@ impl OutputPane {
             self.push_tool_block(UNANNOUNCED_COMMAND.into(), output, exit_code, duration_ms);
             return;
         };
+        let output = without_bidi_controls(output);
         block.expanded = starts_expanded(&output);
         block.state = ToolState::Finished {
             output,
@@ -371,7 +375,7 @@ impl OutputPane {
     fn push_thinking(&mut self, text: String, timing: BlockTiming) {
         self.close_open_assistant();
         self.items.push(OutputItem::Thinking(ThinkingBlock {
-            text,
+            text: without_bidi_controls(text),
             timing,
             expanded: false,
             glyph_frame: 0,
@@ -389,7 +393,7 @@ impl OutputPane {
             self.begin_thinking();
         }
         if let Some(OutputItem::Thinking(t)) = self.items.last_mut() {
-            t.text.push_str(delta);
+            t.text.push_str(&escape_bidi_controls(delta));
             self.wrap.invalidate(self.items.len() - 1);
         }
     }
@@ -1057,6 +1061,13 @@ fn body_line_count(output: &str) -> usize {
         n.saturating_sub(1)
     } else {
         n
+    }
+}
+
+fn without_bidi_controls(text: String) -> String {
+    match escape_bidi_controls(&text) {
+        Cow::Owned(escaped) => escaped,
+        Cow::Borrowed(_) => text,
     }
 }
 
