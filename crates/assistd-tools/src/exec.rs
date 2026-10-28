@@ -8,9 +8,12 @@ use std::pin::{Pin, pin};
 use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use rustix::process::Signal;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command as ProcCommand};
 use tokio::time::timeout;
+
+use assistd_utils::process_group::ProcessGroup;
 
 use crate::chain::OUTPUT_MAX;
 use crate::command::{CommandOutput, Hint, error_line};
@@ -81,7 +84,8 @@ pub(crate) async fn capture(
         Some(spawner) => spawner.spawn(cmd).await?,
         None => cmd.spawn()?,
     };
-    let pgid = child.id();
+    let mut group = ProcessGroup::led_by(&child)
+        .ok_or_else(|| io::Error::other("spawned child reported no pid"))?;
     let stdin_pipe = child.stdin.take();
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
@@ -96,13 +100,20 @@ pub(crate) async fn capture(
             )
         });
 
-        let (mut outcome, drained) =
-            wait_racing_readers(&mut child, stdin_pipe, stdin, limit, readers.as_mut()).await;
+        let (mut outcome, drained) = wait_racing_readers(
+            &mut child,
+            &mut group,
+            stdin_pipe,
+            stdin,
+            limit,
+            readers.as_mut(),
+        )
+        .await;
 
-        kill_group(pgid);
+        group.signal(Signal::KILL);
         if !matches!(outcome, WaitOutcome::Exited(_)) {
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            let _ = group.reap_leader(&mut child).await;
         }
 
         if !drained && let Ok(Err(Overflow)) = timeout(POST_EXIT_DRAIN, &mut readers).await {
@@ -122,6 +133,7 @@ pub(crate) async fn capture(
 /// wait ended and whether the readers already reached EOF.
 async fn wait_racing_readers<F>(
     child: &mut Child,
+    group: &mut ProcessGroup,
     stdin_pipe: Option<ChildStdin>,
     stdin: &[u8],
     limit: Duration,
@@ -130,7 +142,10 @@ async fn wait_racing_readers<F>(
 where
     F: Future<Output = Result<((), ()), Overflow>>,
 {
-    let mut wait = pin!(timeout(limit, wait_feeding(child, stdin_pipe, stdin)));
+    let mut wait = pin!(timeout(
+        limit,
+        wait_feeding(child, group, stdin_pipe, stdin)
+    ));
     let mut drained = false;
     loop {
         tokio::select! {
@@ -149,6 +164,7 @@ where
 
 async fn wait_feeding(
     child: &mut Child,
+    group: &mut ProcessGroup,
     pipe: Option<ChildStdin>,
     input: &[u8],
 ) -> io::Result<ExitStatus> {
@@ -158,12 +174,12 @@ async fn wait_feeding(
         }
     };
     let exited = tokio::select! {
-        status = child.wait() => Some(status),
+        status = group.reap_leader(child) => Some(status),
         () = feed => None,
     };
     match exited {
         Some(status) => status,
-        None => child.wait().await,
+        None => group.reap_leader(child).await,
     }
 }
 
@@ -255,20 +271,6 @@ async fn read_capped<R: AsyncRead + Unpin>(
         }
     }
 }
-
-#[cfg(unix)]
-fn kill_group(pgid: Option<u32>) {
-    if let Some(pgid) = pgid.and_then(|p| {
-        i32::try_from(p)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-    }) {
-        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_group(_pgid: Option<u32>) {}
 
 /// Shell-style exit code: the status code, or 128 plus the killing signal.
 pub(crate) fn exit_code(status: ExitStatus) -> i32 {

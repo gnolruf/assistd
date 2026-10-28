@@ -180,7 +180,7 @@ impl ChildLifeline {
     pub(crate) async fn wait_for_death(&mut self) {
         let service = self.service.take();
         tokio::select! {
-            status = self.child.wait() => debug!(
+            status = self.group.reap_leader(&mut self.child) => debug!(
                 target: "assistd::mcp",
                 server = %self.label,
                 "MCP child exited: {status:?}",
@@ -199,7 +199,7 @@ impl ChildLifeline {
         let Self {
             label,
             mut child,
-            group,
+            mut group,
             service,
             stderr_task,
         } = self;
@@ -207,7 +207,7 @@ impl ChildLifeline {
             let _ = service.close_with_timeout(SESSION_CLOSE_TIMEOUT).await;
         }
         group.signal(Signal::TERM);
-        match tokio::time::timeout(term_timeout, child.wait()).await {
+        match tokio::time::timeout(term_timeout, group.reap_leader(&mut child)).await {
             Ok(Ok(status)) => info!(
                 target: "assistd::mcp",
                 server = %label,
@@ -225,7 +225,7 @@ impl ChildLifeline {
                     "MCP server did not exit within {term_timeout:?}; sending SIGKILL",
                 );
                 group.signal(Signal::KILL);
-                let _ = child.wait().await;
+                let _ = group.reap_leader(&mut child).await;
             }
         }
         drop(group);
