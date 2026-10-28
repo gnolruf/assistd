@@ -273,8 +273,8 @@ pub struct SynthesisConfig {
     /// Speaking-rate scale: `1.0` is natural, lower is faster. Must be
     /// positive and finite.
     pub length_scale: f32,
-    /// Sentence length cap; longer text flushes at the last whitespace
-    /// before it. `50..=2000`.
+    /// Sentence length cap in Unicode chars; longer text flushes at the
+    /// last whitespace before it, or is hard-cut without one. `50..=2000`.
     pub max_sentence_chars: NonZeroU32,
     /// Idle gap, in ms, between LLM deltas after which buffered text is
     /// spoken unterminated. `0` disables; suspended during tool calls.
