@@ -125,18 +125,18 @@ impl ChildProcess {
     }
 }
 
-/// Names the environment variables the command sets or removes but never
-/// their values, which may be secrets.
+/// Logs the program, arg count and names of the environment variables the
+/// command sets or removes, but never arg or env values, which may be secrets.
 fn log_spawned(server: &'static str, pid: Option<u32>, cmd: &std::process::Command) {
     let env: Vec<_> = cmd.get_envs().map(|(name, _)| name).collect();
     info!(
         target: "assistd::child_server",
         server,
         pid,
+        arg_count = cmd.get_args().len(),
         ?env,
-        "spawned {server}: {:?} {:?}",
+        "spawned {server}: {:?}",
         cmd.get_program(),
-        cmd.get_args().collect::<Vec<_>>(),
     );
 }
 

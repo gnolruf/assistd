@@ -37,7 +37,7 @@ impl Default for McpConfig {
 
 /// One `[[mcp.servers]]` entry: a server run as a child process and
 /// spoken to with newline-delimited JSON-RPC over its stdin/stdout.
-/// `Debug` lists env var names, never their values.
+/// `Debug` gives the arg count and env var names, never their values.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
     /// Label in tool names (`mcp__<name>__<tool>`) and logs. Must be
@@ -46,6 +46,8 @@ pub struct McpServerConfig {
     pub name: String,
     /// Command to spawn; a bare name is resolved via `$PATH`.
     pub command: PathBuf,
+    /// Arguments passed to `command`. Logs show only their count; still,
+    /// put tokens and keys in `env` rather than here.
     #[serde(default)]
     pub args: Vec<String>,
     /// Environment variables for the child, which inherits from the daemon
@@ -64,7 +66,7 @@ impl fmt::Debug for McpServerConfig {
         f.debug_struct("McpServerConfig")
             .field("name", &self.name)
             .field("command", &self.command)
-            .field("args", &self.args)
+            .field("arg_count", &self.args.len())
             .field("env_names", &self.env.keys().collect::<BTreeSet<_>>())
             .field("request_timeout_secs", &self.request_timeout_secs)
             .finish()
