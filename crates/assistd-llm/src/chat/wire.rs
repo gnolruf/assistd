@@ -157,10 +157,23 @@ pub struct ChatChoiceMessage {
 /// One streamed chunk from `/v1/chat/completions` when `stream: true`.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionChunk {
+    #[serde(default)]
     pub choices: Vec<ChatChunkChoice>,
     /// Present only on the final chunk, and only when requested.
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// Set instead of `choices` when generation failed mid-stream.
+    #[serde(default)]
+    pub error: Option<StreamError>,
+}
+
+/// The error object llama-server sends in place of a chunk when
+/// generation fails after the response headers went out.
+#[derive(Debug, Deserialize)]
+pub struct StreamError {
+    /// The HTTP status the failure would have had before streaming began.
+    pub code: u16,
+    pub message: String,
 }
 
 /// Token counts the server measured for one request.

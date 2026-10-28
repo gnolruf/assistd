@@ -895,8 +895,8 @@ async fn step_discards_tool_calls_from_a_stream_cut_off_before_its_finish_chunk(
         .await
         .expect_err("a half-received tool call must not run");
     assert!(
-        matches!(err, LlmError::ToolCallParse(_)),
-        "expected a tool-call parse error, got {err:?}"
+        matches!(err, LlmError::Chat(ChatClientError::Sse(_))),
+        "expected a stream error, got {err:?}"
     );
 
     let outcome = client.step(Vec::new(), tx).await.unwrap();
@@ -953,6 +953,57 @@ async fn step_failing_before_any_output_drops_the_user_message() {
             {"role": "user", "content": "second try"},
         ])
     );
+}
+
+#[tokio::test]
+async fn step_fails_with_the_error_llama_server_reports_mid_stream() {
+    let partial = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+    let cases = [
+        (
+            "error object in a data line",
+            "data: {\"error\":{\"code\":500,\"message\":\"kv cache full\",\"type\":\"server_error\"}}\n\n",
+        ),
+        (
+            "error event",
+            "error: {\"code\":500,\"message\":\"kv cache full\",\"type\":\"server_error\"}\n\n",
+        ),
+    ];
+    for (label, error_frame) in cases {
+        let script = Script::new();
+        script
+            .push_stream(StreamResponse::RawFrames(vec![
+                partial.into(),
+                error_frame.into(),
+            ]))
+            .await;
+        script
+            .push_stream(StreamResponse::Deltas(vec!["fine".into()]))
+            .await;
+        let (port, _server) = spawn_fake(script.clone()).await;
+        let client = build_client(&chat_spec(port));
+        client.push_user("hi".into(), Vec::new()).await.unwrap();
+        let (tx, _rx) = mpsc::channel(32);
+
+        let err = client.step(Vec::new(), tx.clone()).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                LlmError::Chat(ChatClientError::Server { status: 500, body }) if body == "kv cache full"
+            ),
+            "{label}: {err:?}"
+        );
+        client.push_user("again".into(), Vec::new()).await.unwrap();
+        client.step(Vec::new(), tx).await.unwrap();
+        let captured = script.captured().await;
+        assert_eq!(
+            captured[1].body["messages"],
+            json!([
+                {"role": "system", "content": "test system prompt"},
+                {"role": "user", "content": "again"},
+            ]),
+            "{label}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1442,7 +1493,7 @@ async fn a_failed_stream_is_a_restart_only_when_the_supervisor_moved_on_mid_requ
         };
         let (step, ()) = tokio::join!(client.step(Vec::new(), tx), change_supervisor_mid_stream);
         match (restarted, &step) {
-            (true, Err(LlmError::ServerRestarting(_))) | (false, Ok(StepOutcome::Final)) => {}
+            (true, Err(LlmError::ServerRestarting(_))) | (false, Err(LlmError::Chat(_))) => {}
             _ => panic!("{label}: {step:?}"),
         }
     }

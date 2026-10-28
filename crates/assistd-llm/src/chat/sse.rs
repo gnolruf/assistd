@@ -3,10 +3,12 @@
 use super::error::ChatClientError;
 
 /// A parsed SSE event from a `/v1/chat/completions` stream: the payload
-/// of a `data:` line, or the terminal `data: [DONE]`.
+/// of a `data:` or `error:` line, or the terminal `data: [DONE]`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SseEvent {
     Data(String),
+    /// The server's report of a failed generation, sent before it closes the stream.
+    Error(String),
     Done,
 }
 
@@ -15,8 +17,8 @@ pub const LINE_MAX: usize = 4 * 1024 * 1024;
 
 /// Byte-buffered SSE line parser. Buffering raw bytes keeps a chunk
 /// boundary inside a multi-byte UTF-8 character safe; decoding happens
-/// per completed line. Only `data:` lines yield events; other fields,
-/// comments and blank lines are skipped.
+/// per completed line. Only `data:` and `error:` lines yield events;
+/// other fields, comments and blank lines are skipped.
 #[derive(Debug, Default)]
 pub struct SseLineReader {
     buf: Vec<u8>,
@@ -71,7 +73,7 @@ impl SseLineReader {
 }
 
 /// The event carried by one line, without its `\n`; `None` for lines
-/// that are not `data:` fields.
+/// that are not `data:` or `error:` fields.
 fn parse_line(line: &[u8]) -> Result<Option<SseEvent>, ChatClientError> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line.first().is_none_or(|b| *b == b':') {
@@ -79,14 +81,21 @@ fn parse_line(line: &[u8]) -> Result<Option<SseEvent>, ChatClientError> {
     }
     let line = std::str::from_utf8(line)
         .map_err(|e| ChatClientError::Sse(format!("line is not valid UTF-8: {e}")))?;
+    if let Some(rest) = line.strip_prefix("error:") {
+        return Ok(Some(SseEvent::Error(field_value(rest).to_string())));
+    }
     let Some(rest) = line.strip_prefix("data:") else {
         return Ok(None);
     };
-    let payload = rest.strip_prefix(' ').unwrap_or(rest);
+    let payload = field_value(rest);
     if payload == "[DONE]" {
         return Ok(Some(SseEvent::Done));
     }
     Ok(Some(SseEvent::Data(payload.to_string())))
+}
+
+fn field_value(rest: &str) -> &str {
+    rest.strip_prefix(' ').unwrap_or(rest)
 }
 
 #[cfg(test)]

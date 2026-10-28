@@ -10,7 +10,7 @@ fn drain_all(reader: &mut SseLineReader) -> Vec<SseEvent> {
 
 #[test]
 fn parses_complete_input() {
-    let cases: [(&str, &[u8], Vec<SseEvent>); 4] = [
+    let cases: [(&str, &[u8], Vec<SseEvent>); 5] = [
         (
             "events in order, then done",
             b"data: one\ndata: two\ndata: [DONE]\n\n",
@@ -34,6 +34,14 @@ fn parses_complete_input() {
             "non-data fields skipped",
             b"event: foo\nid: 42\nretry: 100\ndata: {}\n",
             vec![SseEvent::Data("{}".into())],
+        ),
+        (
+            "error event after data",
+            b"data: {}\nerror: {\"code\":500,\"message\":\"oom\"}\n\n",
+            vec![
+                SseEvent::Data("{}".into()),
+                SseEvent::Error(r#"{"code":500,"message":"oom"}"#.into()),
+            ],
         ),
     ];
     for (label, input, expected) in cases {
