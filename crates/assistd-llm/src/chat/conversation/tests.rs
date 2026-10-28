@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use assistd_config::defaults::{nz32, nz64};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use super::*;
 
@@ -37,6 +39,20 @@ impl Summarizer for FakeSummarizer {
     }
 }
 
+/// Pushes a user turn into the conversation it is summarizing, as a
+/// concurrent `push_user` would.
+struct PushingSummarizer {
+    conv: Arc<Mutex<Conversation>>,
+}
+
+#[async_trait]
+impl Summarizer for PushingSummarizer {
+    async fn summarize(&self, _request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
+        self.conv.lock().await.push_user("late message".into());
+        Ok("summary".into())
+    }
+}
+
 fn spec(max_history: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
     let chat = ChatConfig {
         system_prompt: "sys".into(),
@@ -59,6 +75,18 @@ fn spec(max_history: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
         ..ModelConfig::default()
     };
     (chat, model)
+}
+
+/// `c` after [`ensure_budget`] has compacted it with `summarizer`.
+async fn compact(
+    c: Conversation,
+    summarizer: &dyn Summarizer,
+    chat: &ChatConfig,
+    model: &ModelConfig,
+) -> Conversation {
+    let conv = Mutex::new(c);
+    ensure_budget(&conv, summarizer, chat, model).await.unwrap();
+    conv.into_inner()
 }
 
 fn message(role: Role, content: &str) -> Message {
@@ -336,7 +364,7 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
     let fake = FakeSummarizer::new("early chat covered topics 0 to 4");
     let (chat, model) = spec(400, 10_000);
     let rendered_before = serde_json::to_string(&c.as_wire_messages()).unwrap();
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    let c = compact(c, &fake, &chat, &model).await;
 
     let captured = fake.captured.lock().await;
     assert_eq!(
@@ -358,6 +386,33 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
 }
 
 #[tokio::test]
+async fn ensure_budget_releases_the_lock_while_summarizing() {
+    let mut c = Conversation::new("sys".into());
+    for i in 0..PAIRS {
+        c.push_user(format!("user {i} message with enough length to count"));
+        c.push_assistant(format!("assistant {i} message with enough length to count"));
+    }
+    c.push_user("current question with enough length to count".into());
+    let conv = Arc::new(Mutex::new(c));
+    let summarizer = PushingSummarizer {
+        conv: Arc::clone(&conv),
+    };
+    let (chat, model) = spec(400, 10_000);
+
+    timeout(
+        Duration::from_secs(5),
+        ensure_budget(&conv, &summarizer, &chat, &model),
+    )
+    .await
+    .expect("the summarizer must not wait on the conversation lock")
+    .unwrap();
+
+    let mut expected = expected_after_summary("[Conversation summary] summary");
+    expected.push("late message".into());
+    assert_eq!(contents(&*conv.lock().await), expected);
+}
+
+#[tokio::test]
 async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
     let user = |i: usize| format!("user {i} message with enough length to count");
     let assistant = |i: usize| format!("assistant {i} message with enough length to count");
@@ -374,7 +429,7 @@ async fn ensure_budget_folds_an_earlier_summary_into_the_new_one() {
 
     let fake = FakeSummarizer::new("second summary");
     let (chat, model) = spec(400, 10_000);
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    let c = compact(c, &fake, &chat, &model).await;
 
     let captured = fake.captured.lock().await;
     assert!(
@@ -515,7 +570,7 @@ async fn summarize_preserves_tool_call_pair_boundary() {
 
     let fake = FakeSummarizer::new("summary");
     let (chat, model) = spec(200, 10_000);
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    let c = compact(c, &fake, &chat, &model).await;
 
     let results = vec!["[tool:run]\nfoo\nbar\n"; calls.len()];
     assert_eq!(
@@ -565,7 +620,7 @@ async fn summarize_keeps_the_question_of_a_long_tool_loop() {
 
     let fake = FakeSummarizer::new("summary");
     let (chat, model) = spec(200, 10_000);
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    let c = compact(c, &fake, &chat, &model).await;
 
     assert_eq!(real_user_contents(&c), ["current question"]);
     assert_eq!(c.messages[0].content, "[Conversation summary] summary");
@@ -604,7 +659,7 @@ async fn a_long_tool_loop_folds_its_oldest_steps_into_the_summary_and_a_call_log
     let fake = FakeSummarizer::new("summary");
     let (chat, model) = spec(3000, 10_000);
     let total_before = c.total_tokens();
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    let mut c = compact(c, &fake, &chat, &model).await;
     assert_eq!(
         c.total_tokens(),
         total_before,
@@ -663,7 +718,7 @@ async fn replaying_a_tool_loop_compacted_mid_turn_renders_what_the_model_saw() {
     let persisted = c.messages.clone();
     let fake = FakeSummarizer::new("summary");
     let (chat, model) = spec(3000, 10_000);
-    c.ensure_budget(&fake, &chat, &model).await.unwrap();
+    let c = compact(c, &fake, &chat, &model).await;
 
     let (summary, cut) = c.summary_snapshot().unwrap();
     let kept_steps = cut.kept_steps.unwrap().get();

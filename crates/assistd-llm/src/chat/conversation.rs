@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::ops::Range;
+use std::sync::Arc;
 
 use assistd_config::{ChatConfig, ModelConfig};
 use assistd_tools::Attachment;
@@ -11,6 +12,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use super::error::ChatClientError;
@@ -101,9 +103,10 @@ pub struct ToolCallRecord {
     pub arguments: String,
 }
 
-/// An image encoded once, on entry, as the `data:` URI it is sent as.
+/// An image encoded once, on entry, as the `data:` URI it is sent as;
+/// clones share the encoded text.
 #[derive(Debug, Clone)]
-pub struct ImageDataUri(String);
+pub struct ImageDataUri(Arc<str>);
 
 impl ImageDataUri {
     fn encode(attachment: Attachment) -> Self {
@@ -116,7 +119,7 @@ impl ImageDataUri {
                 uri.push_str(&mime);
                 uri.push_str(";base64,");
                 B64.encode_string(bytes, &mut uri);
-                Self(uri)
+                Self(uri.into())
             }
         }
     }
@@ -193,7 +196,7 @@ pub trait Summarizer: Send + Sync {
 /// Mutable conversation state. `messages` never holds the system prompt,
 /// only turns plus at most one `SUMMARY_PREFIX` system message at index 0;
 /// the rendered form carries a single system message, at its head.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Conversation {
     system_prompt: String,
     pending_context: Option<String>,
@@ -204,6 +207,26 @@ pub struct Conversation {
     calibration: i32,
     /// Tokens compaction has removed since the message list was last replaced.
     compacted_tokens: u32,
+    /// Bumped whenever existing messages are removed or rewritten; appends
+    /// leave it alone, so a fold planned before them still applies.
+    revision: u64,
+}
+
+/// A summary fold planned on a snapshot of the conversation, applied once
+/// the summary is written if the history has not been rewritten meanwhile.
+struct CompactionPlan {
+    snapshot: Conversation,
+    instruction: String,
+    fold: Fold,
+    revision: u64,
+}
+
+/// Everything before `end` folds into the summary, except the current
+/// turn's question at `turn_start`.
+#[derive(Debug, Clone, Copy)]
+struct Fold {
+    end: usize,
+    turn_start: usize,
 }
 
 impl Conversation {
@@ -216,6 +239,7 @@ impl Conversation {
             messages: Vec::new(),
             calibration: 0,
             compacted_tokens: 0,
+            revision: 0,
         }
     }
 
@@ -314,6 +338,7 @@ impl Conversation {
             && let Some(user) = self.messages.pop()
         {
             self.pending_context = user.context;
+            self.revision += 1;
         }
     }
 
@@ -340,6 +365,7 @@ impl Conversation {
         self.transient_note = None;
         self.calibration = 0;
         self.compacted_tokens = 0;
+        self.revision += 1;
     }
 
     /// Drop everything from the latest non-tool-result user message onward
@@ -352,6 +378,7 @@ impl Conversation {
         self.messages.truncate(idx);
         self.pending_context = None;
         self.transient_note = None;
+        self.revision += 1;
         removed
     }
 
@@ -462,38 +489,55 @@ impl Conversation {
         ))
     }
 
-    /// Keep the approximate token total under budget by folding older
-    /// history into one summary: the oldest steps of the current turn when
-    /// that turn alone outgrows the budget, else the turns before the
-    /// preserved ones. Returns an error, with history unchanged, if the
-    /// summarizer fails or returns empty text; [`Self::truncate_to_budget`]
-    /// is the infallible fallback.
-    pub async fn ensure_budget(
+    /// Plan the summary fold that brings the conversation under budget, or
+    /// truncate in place and return `None` when nothing can be summarized.
+    /// `None` too when already under budget.
+    fn plan_compaction(
         &mut self,
-        summarizer: &dyn Summarizer,
         chat: &ChatConfig,
         model: &ModelConfig,
-    ) -> Result<(), ChatClientError> {
+    ) -> Option<CompactionPlan> {
         if !self.exceeds_budget(chat, model) {
-            return Ok(());
+            return None;
         }
-        let fold_end = self.fold_end(chat, model);
-        if fold_end <= self.summary_insertion_index() {
+        let fold = Fold {
+            end: self.fold_end(chat, model),
+            turn_start: self.current_turn_start(),
+        };
+        if fold.end <= self.summary_insertion_index() {
             debug!(
                 target: "assistd::chat",
                 "ensure_budget: nothing to summarize, falling through to truncation"
             );
             self.truncate_to_budget(chat, model);
-            return Ok(());
+            return None;
         }
+        Some(CompactionPlan {
+            instruction: self.summary_instruction(fold.end, chat.summary_target_tokens.get()),
+            fold,
+            revision: self.revision,
+            snapshot: self.clone(),
+        })
+    }
 
-        let request = SummaryRequest {
-            messages: self.as_wire_messages(),
-            instruction: self.summary_instruction(fold_end, chat.summary_target_tokens.get()),
-        };
-        let summary = summarize_bounded(summarizer, request, chat).await?;
-        self.fold_into_summary(fold_end, &summary);
-
+    /// Fold `summary` in as planned at `revision`, discarding it when the
+    /// history was rewritten since, then truncate if still over budget.
+    fn apply_compaction(
+        &mut self,
+        fold: Fold,
+        revision: u64,
+        summary: &str,
+        chat: &ChatConfig,
+        model: &ModelConfig,
+    ) {
+        if revision == self.revision {
+            self.fold_into_summary(fold, summary);
+        } else {
+            warn!(
+                target: "assistd::chat",
+                "ensure_budget: history was rewritten while summarizing, discarding the summary"
+            );
+        }
         if self.exceeds_budget(chat, model) {
             debug!(
                 target: "assistd::chat",
@@ -501,7 +545,6 @@ impl Conversation {
             );
             self.truncate_to_budget(chat, model);
         }
-        Ok(())
     }
 
     /// The instruction asking for a summary of everything before `fold_end`,
@@ -569,16 +612,15 @@ impl Conversation {
         kept.filter(|&start| start > turn_start + 1)
     }
 
-    /// Replace everything before `fold_end` with `summary`, keeping the
-    /// current turn's question and logging any of its steps folded away.
-    fn fold_into_summary(&mut self, fold_end: usize, summary: &str) {
+    /// Replace everything `fold` covers with `summary`, keeping the turn's
+    /// question and logging any of its steps folded away.
+    fn fold_into_summary(&mut self, fold: Fold, summary: &str) {
         let before = self.approx_total_tokens();
-        let turn_start = self.current_turn_start();
-        if fold_end > turn_start + 1 {
-            self.fold_steps_into_log(turn_start + 1..fold_end);
+        if fold.end > fold.turn_start + 1 {
+            self.fold_steps_into_log(fold.turn_start, fold.turn_start + 1..fold.end);
         }
         self.messages.splice(
-            ..fold_end.min(turn_start),
+            ..fold.end.min(fold.turn_start),
             [Message::text(
                 Role::System,
                 format!("{SUMMARY_PREFIX}{summary}"),
@@ -590,14 +632,14 @@ impl Conversation {
     fn record_compaction(&mut self, tokens_before: u32) {
         let removed = tokens_before.saturating_sub(self.approx_total_tokens());
         self.compacted_tokens = self.compacted_tokens.saturating_add(removed);
+        self.revision += 1;
     }
 
-    /// Remove `steps` from the current turn, recording their calls on its
-    /// question.
-    fn fold_steps_into_log(&mut self, steps: Range<usize>) {
+    /// Remove `steps` from the turn whose question is at `turn_start`,
+    /// recording their calls on that question.
+    fn fold_steps_into_log(&mut self, turn_start: usize, steps: Range<usize>) {
         let records = step_log::records(&self.messages[steps.clone()]);
         self.messages.drain(steps);
-        let turn_start = self.current_turn_start();
         if let Some(question) = self.messages.get_mut(turn_start) {
             step_log::append(&mut question.earlier_steps, records);
         }
@@ -638,8 +680,9 @@ impl Conversation {
                 break;
             };
             let pair = self.pair_range(idx);
-            if idx > self.current_turn_start() {
-                self.fold_steps_into_log(pair);
+            let turn_start = self.current_turn_start();
+            if idx > turn_start {
+                self.fold_steps_into_log(turn_start, pair);
             } else {
                 self.messages.drain(pair);
             }
@@ -922,6 +965,35 @@ fn quote_first_call(step: &Message) -> String {
             quote(&call.arguments)
         )
     })
+}
+
+/// Keep `conv` under budget by folding older history into one summary,
+/// releasing the lock while the summarizer runs. Returns an error, with
+/// history unchanged, if the summarizer fails or returns empty text.
+pub async fn ensure_budget(
+    conv: &Mutex<Conversation>,
+    summarizer: &dyn Summarizer,
+    chat: &ChatConfig,
+    model: &ModelConfig,
+) -> Result<(), ChatClientError> {
+    let Some(plan) = conv.lock().await.plan_compaction(chat, model) else {
+        return Ok(());
+    };
+    let CompactionPlan {
+        snapshot,
+        instruction,
+        fold,
+        revision,
+    } = plan;
+    let request = SummaryRequest {
+        messages: snapshot.as_wire_messages(),
+        instruction,
+    };
+    let summary = summarize_bounded(summarizer, request, chat).await?;
+    conv.lock()
+        .await
+        .apply_compaction(fold, revision, &summary, chat, model);
+    Ok(())
 }
 
 /// The summary `request` yields, cut to about `summary_target_tokens`.

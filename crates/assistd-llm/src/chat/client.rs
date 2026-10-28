@@ -14,13 +14,13 @@ use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::{local_client_builder, read_capped};
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, MutexGuard, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, info, warn};
 
 use super::conversation::{
     Conversation, Message, Role, Summarizer, SummaryRequest, TOOL_RESULT_PREFIX, ToolCallRecord,
-    approx_tokens_bytes,
+    approx_tokens_bytes, ensure_budget,
 };
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
@@ -45,8 +45,9 @@ const TOOL_CALL_MARKUP: &str = "<tool_call>";
 /// HTTP streaming chat client backed by a locally-managed llama-server.
 ///
 /// The conversation lock is held only while state is mutated before and
-/// after a request; the HTTP stream runs without it, so a hung server
-/// never blocks a concurrent `push_user` or `set_transient_context`.
+/// after a request; the HTTP stream and any compaction summary run without
+/// it, so a hung server never blocks a concurrent `push_user` or
+/// `set_transient_context`.
 #[derive(Debug)]
 pub struct LlamaChatClient {
     client: reqwest::Client,
@@ -237,36 +238,39 @@ impl LlamaChatClient {
         StreamOutcome::Ok(Box::new(accum))
     }
 
-    /// Compact `conv` when it is over budget, summarizing with the same
-    /// `tools` the coming request offers so its prompt prefix is unchanged.
+    /// Compact the conversation when it is over budget, summarizing with the
+    /// same `tools` the coming request offers so its prompt prefix is
+    /// unchanged, and return it locked for that request.
     async fn fit_budget(
         &self,
-        conv: &mut Conversation,
         tools: &[Value],
         tx: &mpsc::Sender<LlmEvent>,
-    ) {
+    ) -> MutexGuard<'_, Conversation> {
+        let conv = self.conv.lock().await;
         if !conv.exceeds_budget(&self.chat, &self.model) {
-            if self.compaction_headroom(conv).is_none() {
+            if self.compaction_headroom(&conv).is_none() {
                 send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
             }
-            return;
+            return conv;
         }
+        let before = (conv.message_count(), conv.approx_total_tokens());
+        drop(conv);
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
         let started_at = Instant::now();
-        let before = (conv.message_count(), conv.approx_total_tokens());
         let summarizer = ContinuationSummarizer {
             client: self,
             tools,
         };
-        if let Err(e) = conv
-            .ensure_budget(&summarizer, &self.chat, &self.model)
-            .await
-        {
+        let outcome = ensure_budget(&self.conv, &summarizer, &self.chat, &self.model).await;
+        let mut conv = self.conv.lock().await;
+        if let Err(e) = outcome {
             warn!(
                 target: "assistd::chat",
                 "ensure_budget failed ({e}); falling back to truncation"
             );
-            conv.truncate_to_budget(&self.chat, &self.model);
+            if conv.exceeds_budget(&self.chat, &self.model) {
+                conv.truncate_to_budget(&self.chat, &self.model);
+            }
         }
         info!(
             target: "assistd::chat",
@@ -286,6 +290,7 @@ impl LlamaChatClient {
                 .await;
         }
         send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
+        conv
     }
 
     /// `None` when compaction is already near, so it is announced once.
@@ -472,7 +477,8 @@ impl LlmBackend for LlamaChatClient {
                 );
             }
             conv.push_user(prompt);
-            self.fit_budget(&mut conv, &[], &tx).await;
+            drop(conv);
+            let mut conv = self.fit_budget(&[], &tx).await;
             send_context_size(&conv, &tx).await;
             let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
@@ -543,8 +549,7 @@ impl LlmBackend for LlamaChatClient {
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         let (body_bytes, estimated_tokens, compaction_headroom) = {
-            let mut conv = self.conv.lock().await;
-            self.fit_budget(&mut conv, &tools, &tx).await;
+            let conv = self.fit_budget(&tools, &tx).await;
             send_context_size(&conv, &tx).await;
             let mut payload = self.base_request(conv.as_wire_messages());
             offer_tools(&mut payload, tools);
