@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -15,11 +15,13 @@ use crate::mic::capture::{AudioCaptureError, ProducerStream, open_producer_strea
 const LISTEN_RING_SECONDS: usize = 5;
 const LISTEN_RING_NATIVE_RATE_ASSUMED: usize = 48_000;
 
-/// Handles to a running continuous capture.
+/// Handles to a running continuous capture. `opened` resolves once the
+/// device is recording and errors if it failed to open.
 #[derive(Debug)]
 pub struct ListenCaptureSession {
     pub stop_flag: Arc<AtomicBool>,
     pub overrun: Arc<AtomicU64>,
+    pub opened: oneshot::Receiver<()>,
     pub handle: JoinHandle<Result<(), AudioCaptureError>>,
 }
 
@@ -33,6 +35,7 @@ pub fn start(
     let overrun = Arc::new(AtomicU64::new(0));
     let device_hint_owned = device_hint.map(str::to_string);
 
+    let (opened_tx, opened) = oneshot::channel();
     let worker_stop = Arc::clone(&stop_flag);
     let worker_overrun = Arc::clone(&overrun);
     let handle = tokio::task::spawn_blocking(move || {
@@ -41,12 +44,14 @@ pub fn start(
             &worker_stop,
             &worker_overrun,
             &frame_tx,
+            opened_tx,
         )
     });
 
     ListenCaptureSession {
         stop_flag,
         overrun,
+        opened,
         handle,
     }
 }
@@ -56,6 +61,7 @@ fn capture_continuous(
     stop_flag: &AtomicBool,
     overrun: &Arc<AtomicU64>,
     frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
+    opened: oneshot::Sender<()>,
 ) -> Result<(), AudioCaptureError> {
     let ring_capacity = LISTEN_RING_SECONDS.saturating_mul(LISTEN_RING_NATIVE_RATE_ASSUMED);
     let ProducerStream {
@@ -63,6 +69,7 @@ fn capture_continuous(
         native_rate,
         stream,
     } = open_producer_stream(device_hint, ring_capacity, Arc::clone(overrun))?;
+    let _ = opened.send(());
 
     debug!(
         target: "assistd::voice::listen",
