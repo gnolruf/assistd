@@ -8,6 +8,10 @@ updates:
     commit-message:
       prefix: "deps"
       include: "scope"
+    ignore:
+      # Held at ksni's major so the tray builds one zbus.
+      - dependency-name: "zbus"
+        update-types: ["version-update:semver-major"]
     groups:
       cargo-minor-patch:
         update-types:

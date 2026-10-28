@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use futures_util::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use zbus::message::Message;
-use zbus::{Connection, Proxy, Variant};
+use zbus::zvariant::Value;
+use zbus::{Connection, Proxy};
 
 use super::driver::{DriverInput, NotifierCommand};
 use super::render::{Capabilities, HIDE_ACTION, Notification, render};
@@ -91,8 +92,8 @@ impl NotificationService {
     async fn show(&mut self, notification: &Notification) {
         let rendered = render(notification, self.caps);
         let hints = HashMap::from([
-            ("urgency", Variant::U8(rendered.urgency)),
-            ("x-dunst-stack-tag", Variant::from(STACK_TAG)),
+            ("urgency", Value::U8(rendered.urgency)),
+            ("x-dunst-stack-tag", Value::from(STACK_TAG)),
         ]);
         let args = (
             APP_NAME,

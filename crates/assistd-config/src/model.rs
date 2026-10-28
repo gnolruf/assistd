@@ -22,7 +22,8 @@ pub struct ModelConfig {
     pub context_length: NonZeroU32,
     /// Server binary path, or a name on `$PATH`. Must not be empty.
     pub server_binary: PathBuf,
-    /// Bind host. Must be loopback: the server has no authentication.
+    /// Bind host. Must be loopback: the per-launch API key travels over
+    /// plain HTTP.
     pub host: IpAddr,
     /// Bind port.
     pub port: NonZeroU16,

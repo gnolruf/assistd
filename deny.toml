@@ -117,9 +117,6 @@ skip = [
     # ratatui-core 0.1 sits on hashbrown 0.16; zbus's toml_edit pulls
     # hashbrown 0.17 transitively.
     { name = "hashbrown", version = "0.16" },
-    # bindgen 0.72 (whisper-rs-sys) is on itertools 0.13; ratatui-core
-    # 0.1 is on 0.14.
-    { name = "itertools", version = "0.13" },
     # ratatui-image 10 still depends directly on rand 0.8; the
     # quantette → icy_sixel path it also pulls is on rand 0.9.
     { name = "rand", version = "0.8" },
@@ -127,13 +124,12 @@ skip = [
     # The workspace is on base64 0.23; reqwest's hyper-util is still on
     # 0.22. Resolves when hyper-util bumps.
     { name = "base64", version = "0.22" },
-    # We use shlex 2 directly; bindgen 0.72 (whisper-rs-sys) and cc 1.2
-    # are still on shlex 1.
+    # We use shlex 2 directly; cc 1.2 is still on shlex 1.
     { name = "shlex", version = "1" },
     # The ecosystem is mid-migration to syn 3: serde_derive, async-trait,
     # clap_derive, futures-macro and thiserror-impl 2 are already there,
-    # while bindgen, zbus, darling and icu still pull
-    # syn 2. Drops out as those crates bump.
+    # while tokio-macros, tracing-attributes, zbus, darling and icu still
+    # pull syn 2. Drops out as those crates bump.
     { name = "syn", version = "2" },
 ]
 

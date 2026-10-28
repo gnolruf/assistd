@@ -162,6 +162,7 @@ pub struct ToolsBashConfig {
     /// word, so `"rm -r|--recursive"` matches `rm -vfr x` but not
     /// `echo "rm -rf"`.
     pub destructive_patterns: Vec<String>,
+    /// How spawned commands are sandboxed.
     pub sandbox: BashSandboxMode,
     /// Extra bubblewrap arguments, inserted before the trailing `--`: e.g.
     /// `["--share-net"]` giving `bash` the network (it has none by default;

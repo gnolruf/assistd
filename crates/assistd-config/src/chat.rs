@@ -40,6 +40,7 @@ pub struct ChatConfig {
     pub summary_temperature: f32,
     /// Nucleus sampling cutoff, `0.0..=1.0`.
     pub top_p: Option<f32>,
+    /// Top-k sampling cutoff: sample only from the k most likely tokens.
     pub top_k: Option<NonZeroU32>,
     /// Min-p sampling cutoff, `0.0..=1.0`.
     pub min_p: Option<f32>,

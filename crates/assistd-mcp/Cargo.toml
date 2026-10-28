@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 assistd-tools = { workspace = true }
 assistd-utils = { workspace = true }
@@ -22,6 +26,11 @@ parking_lot = { workspace = true }
 assistd-tools = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "io-util"] }
+
+[[bin]]
+name = "fake_mcp_server"
+path = "src/bin/fake_mcp_server.rs"
+required-features = ["test-support"]
 
 [lints]
 workspace = true

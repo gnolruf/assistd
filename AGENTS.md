@@ -87,7 +87,7 @@ Guidelines for AI agents (and humans) working in this repository.
 
 Any change to Rust code — new logic, bug fix, refactor, even a test
 update — must pass these in order. Run them from the workspace root.
-`$FEATURES` below is `assistd-llm/test-support,assistd-voice/test-support`,
+`$FEATURES` below is `assistd-llm/test-support,assistd-mcp/test-support,assistd-voice/test-support`,
 which CI enables so test-only code is linted and run too.
 
 1. **Format.** `cargo fmt --all` (or `cargo fmt --all -- --check` to

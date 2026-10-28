@@ -28,7 +28,7 @@ pub use confirm::{
     ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm, Risk,
     inherit_confirm_router,
 };
-pub use review::{Confirmation, DestructivePattern, Rules, check_argv, check_script};
+pub use review::{Confirmation, DestructivePattern, Rules, check_script};
 pub(crate) use sandbox::{ConfinedSpawner, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
@@ -71,7 +71,7 @@ impl Default for BashPolicyCfg {
 }
 
 impl BashPolicyCfg {
-    /// The rules [`check_script`] and [`check_argv`] apply.
+    /// The rules [`check_script`] applies.
     pub fn rules(&self) -> Rules<'_> {
         Rules {
             patterns: &self.destructive_patterns,
