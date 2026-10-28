@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 
 use super::input::InputLine;
 use super::output::OutputPane;
@@ -489,10 +489,14 @@ impl App {
         self.last_output_height = h;
     }
 
-    pub(super) fn on_tick(&mut self) {
+    /// Advance timers and reap finished tasks. Fails when a task panicked,
+    /// since the panic hook has already restored the terminal.
+    pub(super) fn on_tick(&mut self) -> Result<(), JoinError> {
         while let Some(res) = self.tasks.try_join_next() {
-            if let Err(e) = res {
-                tracing::warn!("chat task failed: {e}");
+            match res {
+                Err(e) if e.is_panic() => return Err(e),
+                Err(e) => tracing::warn!("chat task failed: {e}"),
+                Ok(()) => {}
             }
         }
         self.spinner = self.spinner.wrapping_add(1);
@@ -508,6 +512,7 @@ impl App {
                 self.output.refresh_live_block();
             }
         }
+        Ok(())
     }
 
     fn reset_transcript(&mut self) {
