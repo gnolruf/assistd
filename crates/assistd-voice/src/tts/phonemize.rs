@@ -2,13 +2,20 @@
 //! clause the way piper-phonemize splits text, so espeak-ng stays a separate
 //! program.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use assistd_utils::program::find_program;
+use parking_lot::Mutex;
 
 const PROGRAM: &str = "espeak-ng";
+
+/// How long one clause may take before `espeak-ng` is killed.
+const CLAUSE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Punctuation that ends a clause when followed by whitespace or the end.
 const CLAUSE_PUNCTUATION: &[char] = &[',', '.', ';', ':', '!', '?'];
@@ -71,21 +78,14 @@ impl Phonemizer {
         if clause.trim().is_empty() {
             return Ok(String::new());
         }
-        let mut child = Command::new(&self.program)
+        let child = Command::new(&self.program)
             .args(["-q", "--ipa", "-v", &self.voice])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| format!("spawn {}: {err}", self.program.display()))?;
-        let mut stdin = child.stdin.take().expect("stdin piped");
-        stdin
-            .write_all(clause.as_bytes())
-            .map_err(|err| format!("write to {PROGRAM}: {err}"))?;
-        drop(stdin);
-        let output = child
-            .wait_with_output()
-            .map_err(|err| format!("wait for {PROGRAM}: {err}"))?;
+        let output = run_with_deadline(child, clause.replace("[[", "").as_bytes())?;
         if !output.status.success() {
             return Err(format!(
                 "{PROGRAM} exited with {}: {}",
@@ -101,6 +101,72 @@ impl Phonemizer {
             .collect::<Vec<_>>()
             .join(" "))
     }
+}
+
+/// Feed `input` to `child` and collect its output, killing it if it runs past
+/// [`CLAUSE_DEADLINE`]. The child is always reaped.
+fn run_with_deadline(mut child: Child, input: &[u8]) -> Result<Output, String> {
+    let stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let child = Mutex::new(child);
+    let (finished_tx, finished_rx) = mpsc::channel::<()>();
+    let (exchanged, stderr_bytes, timed_out) = thread::scope(|scope| {
+        let child = &child;
+        let watchdog = scope.spawn(move || kill_after_deadline(child, &finished_rx));
+        let stderr_reader = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes);
+            bytes
+        });
+        let exchanged = exchange(stdin, stdout, input);
+        let stderr_bytes = stderr_reader.join().unwrap_or_default();
+        drop(finished_tx);
+        (exchanged, stderr_bytes, watchdog.join().unwrap_or(true))
+    });
+    let status = child
+        .into_inner()
+        .wait()
+        .map_err(|err| format!("wait for {PROGRAM}: {err}"))?;
+    if timed_out {
+        return Err(format!(
+            "{PROGRAM} did not finish within {}s and was killed",
+            CLAUSE_DEADLINE.as_secs()
+        ));
+    }
+    Ok(Output {
+        status,
+        stdout: exchanged?,
+        stderr: stderr_bytes,
+    })
+}
+
+/// Write `input` and close stdin, then read stdout to its end.
+fn exchange(
+    mut stdin: ChildStdin,
+    mut stdout: ChildStdout,
+    input: &[u8],
+) -> Result<Vec<u8>, String> {
+    let written = stdin.write_all(input);
+    drop(stdin);
+    let mut bytes = Vec::new();
+    let read = stdout.read_to_end(&mut bytes);
+    written.map_err(|err| format!("write to {PROGRAM}: {err}"))?;
+    read.map_err(|err| format!("read from {PROGRAM}: {err}"))?;
+    Ok(bytes)
+}
+
+/// Kill `child` unless `finished` hangs up within [`CLAUSE_DEADLINE`]; whether
+/// it was killed.
+fn kill_after_deadline(child: &Mutex<Child>, finished: &mpsc::Receiver<()>) -> bool {
+    if !matches!(
+        finished.recv_timeout(CLAUSE_DEADLINE),
+        Err(RecvTimeoutError::Timeout)
+    ) {
+        return false;
+    }
+    let _ = child.lock().kill();
+    true
 }
 
 fn push_sentence(sentences: &mut Vec<Vec<i32>>, current: &mut String) {

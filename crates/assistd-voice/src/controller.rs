@@ -73,12 +73,12 @@ impl VoiceOutputController {
         self.skip_epoch.load(Ordering::SeqCst)
     }
 
-    /// Turning off cancels queued audio. Turning on does not advance
-    /// the epoch, so a running worker resumes speaking.
+    /// Turning off advances the epoch and cancels queued audio, so a
+    /// sentence mid-synthesis is dropped and the running reply stays silent.
     pub async fn set_enabled(&self, on: bool) {
         let prev = self.enabled.swap(on, Ordering::SeqCst);
         if prev && !on {
-            self.cancel_queued().await;
+            self.skip().await;
         }
     }
 
