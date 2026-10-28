@@ -444,7 +444,7 @@ fn always_label(request: &ConfirmationRequest) -> String {
     match request.tool.as_str() {
         "web" => format!("Yes, allow all fetches from {names}"),
         tool if tool.starts_with("mcp__") => format!("Yes, always allow {names}"),
-        _ => format!("Yes, allow all {names} commands"),
+        _ => format!("Yes, and don't ask again for {names}"),
     }
 }
 

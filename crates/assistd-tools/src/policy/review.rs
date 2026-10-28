@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::{fmt, iter, mem};
 
-use super::allowlist::{Allowlist, Verdict};
+use super::allowlist::{Allowlist, ApprovalScope, ProgramApproval, Verdict};
 use super::confirm::Risk;
 use super::shell::{self, Redirect, Script, SimpleCommand, Word};
 use placeholder::Placeholder;
@@ -68,6 +68,30 @@ const RISKY_BUILTINS: &[&str] = &[
     "history",
     "mapfile",
     "readarray",
+];
+
+/// Programs that delete, overwrite, or change the permissions of the
+/// files they name, so running one unlisted is never routine.
+const MODIFIES_FILES: &[&str] = &[
+    "chattr",
+    "chgrp",
+    "chmod",
+    "chown",
+    "cp",
+    "dd",
+    "fallocate",
+    "install",
+    "ln",
+    "mv",
+    "rm",
+    "rmdir",
+    "rsync",
+    "setfacl",
+    "shred",
+    "tee",
+    "truncate",
+    "unlink",
+    "wipefs",
 ];
 
 /// Characters that make one word a command line rather than a program
@@ -252,32 +276,36 @@ pub enum Confirmation {
     Pattern(String),
     /// It may run something no check can see; holds why, for the prompt.
     Unverifiable(String),
-    /// It runs programs not on the allowlist. `approvable` when "always
-    /// allow" can add every one of them.
+    /// It runs programs not on the allowlist. `approvals` covers every run
+    /// of them when "always allow" can; `modifies_files` when one of them
+    /// deletes or overwrites the files it names.
     Unlisted {
         programs: Vec<String>,
-        approvable: bool,
+        approvals: Option<Vec<ProgramApproval>>,
+        modifies_files: bool,
     },
 }
 
 impl Confirmation {
-    /// The programs an "always allow" answer would add; possibly empty.
-    pub fn always_allow(&self) -> &[String] {
+    /// What an "always allow" answer would approve; possibly nothing.
+    pub fn always_allow(&self) -> &[ProgramApproval] {
         match self {
             Self::Unlisted {
-                programs,
-                approvable: true,
-            } => programs,
+                approvals: Some(approvals),
+                ..
+            } => approvals,
             _ => &[],
         }
     }
 
-    /// Routine when only the allowlist objects and "always allow" could
-    /// cover every program named.
+    /// Routine when only the allowlist objects, "always allow" could cover
+    /// every program run, and none of them modifies files.
     pub fn risk(&self) -> Risk {
         match self {
             Self::Unlisted {
-                approvable: true, ..
+                approvals: Some(_),
+                modifies_files: false,
+                ..
             } => Risk::Routine,
             Self::Pattern(_) | Self::Unverifiable(_) | Self::Unlisted { .. } => Risk::Elevated,
         }
@@ -349,7 +377,9 @@ struct Findings<'a> {
     pattern: Option<&'a DestructivePattern>,
     unverifiable: Option<String>,
     unlisted: Vec<String>,
+    approvals: Vec<ProgramApproval>,
     unapprovable: bool,
+    modifies_files: bool,
 }
 
 impl<'a> Findings<'a> {
@@ -365,10 +395,15 @@ impl<'a> Findings<'a> {
         }
     }
 
-    fn unlisted(&mut self, program: &str, approvable: bool) {
-        self.unapprovable |= !approvable;
-        if !self.unlisted.iter().any(|p| p == program) {
-            self.unlisted.push(program.to_string());
+    fn unlisted(&mut self, name: &str, approval: Option<ProgramApproval>) {
+        self.modifies_files |= MODIFIES_FILES.contains(&program(name).as_str());
+        match approval {
+            Some(approval) if !self.approvals.contains(&approval) => self.approvals.push(approval),
+            Some(_) => {}
+            None => self.unapprovable = true,
+        }
+        if !self.unlisted.iter().any(|p| p == name) {
+            self.unlisted.push(name.to_string());
         }
     }
 
@@ -386,7 +421,8 @@ impl<'a> Findings<'a> {
         }
         (!self.unlisted.is_empty()).then_some(Confirmation::Unlisted {
             programs: self.unlisted,
-            approvable: !self.unapprovable,
+            approvals: (!self.unapprovable).then_some(self.approvals),
+            modifies_files: self.modifies_files,
         })
     }
 }
@@ -506,7 +542,8 @@ impl<'a> Matcher<'a> {
                 return;
             }
             if may_be_command {
-                self.allowed(word, index, script, depth, out);
+                let scope = approval_scope(args, fed, &placeholders);
+                self.allowed(word, scope, index, script, depth, out);
                 self.runs(word, args, Site { cmd, script, depth }, out);
                 self.program_options(word, args, fed, out);
                 fed_wrapper =
@@ -522,11 +559,12 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    /// Record `word`, in command position, when what it runs is not
-    /// allowed.
+    /// Record `word`, in command position with arguments in `scope`, when
+    /// what it runs is not allowed.
     fn allowed(
         &self,
         word: &Word,
+        scope: Option<ApprovalScope>,
         index: usize,
         script: &Script,
         depth: usize,
@@ -545,19 +583,26 @@ impl<'a> Matcher<'a> {
             return;
         }
         if RISKY_BUILTINS.contains(&text) {
-            out.unlisted(text, false);
+            out.unlisted(text, None);
             return;
         }
-        self.listed(text, out);
+        self.listed(text, scope, out);
     }
 
-    /// Record `program` when the allowlist does not allow it.
-    fn listed(&self, program: &str, out: &mut Findings<'a>) {
-        match self.allowlist.verdict(program) {
+    /// Record `program`, run with arguments in `scope`, when the allowlist
+    /// does not allow it.
+    fn listed(&self, program: &str, scope: Option<ApprovalScope>, out: &mut Findings<'a>) {
+        match self.allowlist.verdict(program, scope.as_ref()) {
             Verdict::Allowed => {}
             Verdict::Missing if self.allowlist.search_path_fixed() => {}
-            Verdict::Missing => out.unlisted(program, false),
-            Verdict::Unlisted { approvable } => out.unlisted(program, approvable),
+            Verdict::Missing => out.unlisted(program, None),
+            Verdict::Unlisted { approvable } => {
+                let approval = scope.filter(|_| approvable).map(|scope| ProgramApproval {
+                    name: program.to_string(),
+                    scope,
+                });
+                out.unlisted(program, approval);
+            }
         }
     }
 
@@ -579,7 +624,7 @@ impl<'a> Matcher<'a> {
             return;
         }
         for program in option_values(args, options).filter(|value| !value.is_empty()) {
-            self.listed(program, out);
+            self.listed(program, None, out);
         }
     }
 
@@ -650,7 +695,7 @@ impl<'a> Matcher<'a> {
         } else if is_stdin_path(&file.text) {
             self.stdin_script(&word.text, inputs, depth, out);
         } else {
-            out.unlisted(&format!("{} {}", word.text, file.text), false);
+            out.unlisted(&format!("{} {}", word.text, file.text), None);
         }
     }
 
@@ -772,6 +817,39 @@ fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
         out.extend(scan.classify(at, word, words.get(at + 1)));
     }
     out
+}
+
+/// Which runs an "always allow" for a command run with `args` covers: those
+/// with the same subcommand as its first argument, or those with only
+/// options; `None` when the arguments make neither certain.
+fn approval_scope(
+    args: &[Word],
+    fed: bool,
+    placeholders: &[Placeholder<'_>],
+) -> Option<ApprovalScope> {
+    let known =
+        |arg: &Word| !arg.dynamic && !arg.splits && !placeholders.iter().any(|p| p.fills(arg));
+    match args.first() {
+        Some(first) if known(first) && is_subcommand(&first.text) => {
+            Some(ApprovalScope::Subcommand(first.text.clone()))
+        }
+        _ => {
+            let options_only = !fed
+                && args
+                    .iter()
+                    .all(|arg| known(arg) && arg.text.starts_with('-'));
+            options_only.then_some(ApprovalScope::OptionsOnly)
+        }
+    }
+}
+
+/// A word that reads as a subcommand (`build`, `run-tests`) rather than a
+/// path, pattern, or toolchain (`+nightly`).
+fn is_subcommand(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// `dir` as a script may spell it: as is, and via `~` or `$HOME` when it
@@ -1017,7 +1095,7 @@ pub(super) fn basename(word: &str) -> &str {
 
 /// A command word's last path component, lowercased, without a trailing
 /// version (`python3.12` is `python`).
-fn program(word: &str) -> String {
+pub(super) fn program(word: &str) -> String {
     let name = basename(word).to_ascii_lowercase();
     match name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-') {
         "" => name,

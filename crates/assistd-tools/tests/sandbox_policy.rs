@@ -222,7 +222,7 @@ async fn always_allow_adds_the_offered_programs_for_good() {
     let scratch = tempfile::tempdir().unwrap();
     let store = scratch.path().join("approvals.toml");
     let marker = scratch.path().join("made");
-    let script = format!("touch {}", marker.display());
+    let script = format!("cd {} && touch made", scratch.path().display());
 
     let gate = RecordingGate::answering(Approval::Always);
     let out = bash_allowing(&[], &store, gate.clone())
@@ -240,10 +240,11 @@ async fn always_allow_adds_the_offered_programs_for_good() {
         let [req] = asked.as_slice() else {
             panic!("expected exactly one confirmation, got {asked:?}");
         };
-        assert_eq!(req.always_allow, ["touch"]);
+        assert_eq!(req.always_allow, ["touch made …"]);
     }
     let saved = std::fs::read_to_string(&store).expect("approvals saved");
     assert!(saved.contains("name = \"touch\""), "{saved}");
+    assert!(saved.contains("subcommand = \"made\""), "{saved}");
 
     std::fs::remove_file(&marker).unwrap();
     let out = bash_allowing(&[], &store, Arc::new(PanicGate))

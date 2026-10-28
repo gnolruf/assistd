@@ -150,7 +150,8 @@ pub struct ToolsBashConfig {
     /// Programs that run without confirmation: absolute paths, or bare
     /// names resolved on `PATH` that count only if the file is not
     /// user-writable or is the one approved. "Always allow" approvals
-    /// persist in `allowed_programs.toml` beside the config file.
+    /// persist in `allowed_programs.toml` beside the config file; shells,
+    /// interpreters and `sudo`-like wrappers can only be listed here.
     pub allowed_programs: Vec<String>,
     /// Commands that need confirmation, and are refused when no one can
     /// confirm. Each is a command name (matching any path ending in it)
