@@ -107,6 +107,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
             "mcp__fake__echo",
             "mcp__fake__crash_me",
             "mcp__fake__never_answers",
+            "mcp__fake__wedge",
             "mcp__fake__close_stdout",
             "mcp__fake__spawn_orphan_and_crash",
             "mcp__fake__env_names",
@@ -167,6 +168,30 @@ async fn unanswered_call_times_out_and_the_server_keeps_answering() {
         .await
         .unwrap();
     assert_eq!(first_text(&after), Some("echo:after"), "{after:?}");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn server_that_stops_answering_is_killed_and_restarted() {
+    let mut cfg = StdioConfig::new("fake", fake_server_path());
+    cfg.request_timeout = Duration::from_millis(300);
+    let server = Arc::new(
+        McpServer::start("fake".into(), cfg)
+            .await
+            .expect("server should start"),
+    );
+    let tools = adapt_allowing(&server).await;
+    let echo = find(&tools, "mcp__fake__echo");
+
+    let _ = find(&tools, "mcp__fake__wedge").invoke(json!({})).await;
+    let stuck = echo.invoke(json!({"msg": "stuck"})).await.unwrap();
+    assert_eq!(stuck["type"], "error", "{stuck}");
+
+    assert!(
+        echo_answers_again(echo).await,
+        "a live server that keeps timing out must be killed and restarted"
+    );
 
     server.shutdown().await;
 }
