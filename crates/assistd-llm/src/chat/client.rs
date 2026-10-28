@@ -131,8 +131,8 @@ impl LlamaChatClient {
     }
 
     /// Classify a failed request: a restart-coincident failure becomes
-    /// [`StreamOutcome::ServerRestart`]; anything else keeps whatever
-    /// was already streamed or propagates `err` if nothing was.
+    /// [`StreamOutcome::ServerRestart`]; anything else keeps `err` along
+    /// with whatever was already streamed.
     async fn fail(
         &self,
         accum: StreamAccum,
@@ -153,7 +153,10 @@ impl LlamaChatClient {
                 accum.text.len(),
                 accum.tool_calls.len()
             );
-            StreamOutcome::PartialAfterEmit(Box::new(accum))
+            StreamOutcome::PartialAfterEmit {
+                accum: Box::new(accum),
+                err,
+            }
         } else {
             StreamOutcome::PreEmitError(err)
         }
@@ -227,6 +230,11 @@ impl LlamaChatClient {
             Err(outcome) => return outcome,
         };
         if !saw_done {
+            if accum.finish_reason.is_none() {
+                let err =
+                    ChatClientError::Sse("stream ended without [DONE] or a finish_reason".into());
+                return self.fail(accum, err, pid_at_request).await;
+            }
             warn!(
                 target: "assistd::chat",
                 "stream ended before [DONE] marker; accumulated {} bytes text, {} tool-call builders",
@@ -410,6 +418,10 @@ impl LlamaChatClient {
                         self.apply_chunk(&payload, accum, tx, pid_at_request)
                             .await?;
                     }
+                    Ok(Some(SseEvent::Error(payload))) => {
+                        let err = error_event(&payload);
+                        return Err(self.fail(take(accum), err, pid_at_request).await);
+                    }
                     Ok(Some(SseEvent::Done)) => return Ok(true),
                     Ok(None) => break,
                     Err(e) => return Err(self.fail(take(accum), e, pid_at_request).await),
@@ -434,6 +446,11 @@ impl LlamaChatClient {
                     .await);
             }
         };
+        if let Some(error) = parsed.error {
+            return Err(self
+                .fail(take(accum), server_error(error), pid_at_request)
+                .await);
+        }
         if let Some(usage) = parsed.usage {
             accum.prompt_tokens = Some(usage.prompt_tokens);
         }
@@ -502,7 +519,7 @@ impl LlmBackend for LlamaChatClient {
                 let _ = tx.send(LlmEvent::Done).await;
                 Ok(())
             }
-            StreamOutcome::PartialAfterEmit(accum) => {
+            StreamOutcome::PartialAfterEmit { accum, .. } => {
                 conv.push_assistant(accum.text);
                 let _ = tx.send(LlmEvent::Done).await;
                 Ok(())
@@ -569,15 +586,13 @@ impl LlmBackend for LlamaChatClient {
         let mut conv = self.conv.lock().await;
         calibrate_from(&mut conv, estimated_tokens, &outcome);
         match outcome {
-            StreamOutcome::Ok(accum)
-            | StreamOutcome::PartialAfterEmit(accum)
-            | StreamOutcome::ClientDisconnected(accum) => {
+            StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => {
                 let result = commit_step(&mut conv, *accum);
                 // Only a committed step consumes the note; a retry must see it again.
                 let _ = conv.consume_transient_note();
                 result
             }
-            StreamOutcome::PreEmitError(e) => {
+            StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
                 conv.rollback_last_user();
                 Err(LlmError::Chat(e))
             }
@@ -650,10 +665,10 @@ impl LlmBackend for LlamaChatClient {
         let drain = async { while rx.recv().await.is_some() {} };
         let (outcome, ()) = tokio::join!(stream, drain);
         match outcome {
-            StreamOutcome::Ok(accum)
-            | StreamOutcome::PartialAfterEmit(accum)
-            | StreamOutcome::ClientDisconnected(accum) => Ok(accum.text),
-            StreamOutcome::PreEmitError(e) => Err(LlmError::Chat(e)),
+            StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => Ok(accum.text),
+            StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
+                Err(LlmError::Chat(e))
+            }
             StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(
                 "llama-server crashed during complete_oneshot".into(),
             )),
@@ -826,10 +841,13 @@ struct ToolCallBuilder {
 }
 
 enum StreamOutcome {
-    /// Stream completed cleanly with a `[DONE]` marker (or EOF after deltas).
+    /// Stream ended with a `[DONE]` marker or a finish reason.
     Ok(Box<StreamAccum>),
-    /// Stream errored after deltas were forwarded; keep what arrived.
-    PartialAfterEmit(Box<StreamAccum>),
+    /// Stream failed after deltas were forwarded; `accum` holds what arrived.
+    PartialAfterEmit {
+        accum: Box<StreamAccum>,
+        err: ChatClientError,
+    },
     /// The consumer dropped the receiver mid-stream; stop quietly.
     ClientDisconnected(Box<StreamAccum>),
     /// Stream errored before any deltas were forwarded; propagate as `Err`.
@@ -845,9 +863,9 @@ enum StreamOutcome {
 impl StreamOutcome {
     fn prompt_tokens(&self) -> Option<u32> {
         match self {
-            Self::Ok(accum) | Self::PartialAfterEmit(accum) | Self::ClientDisconnected(accum) => {
-                accum.prompt_tokens
-            }
+            Self::Ok(accum)
+            | Self::PartialAfterEmit { accum, .. }
+            | Self::ClientDisconnected(accum) => accum.prompt_tokens,
             Self::PreEmitError(_) | Self::ServerRestart { .. } => None,
         }
     }
@@ -980,6 +998,22 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
         records,
     );
     Ok(StepOutcome::ToolCalls(parsed))
+}
+
+fn server_error(error: wire::StreamError) -> ChatClientError {
+    ChatClientError::Server {
+        status: error.code,
+        body: error.message,
+    }
+}
+
+/// The failure an `error:` event reports, keeping its raw payload when it
+/// is not llama-server's error object.
+fn error_event(payload: &str) -> ChatClientError {
+    serde_json::from_str(payload).map_or_else(
+        |_| ChatClientError::Sse(format!("error event: {payload}")),
+        server_error,
+    )
 }
 
 fn history_message(entry: HistoryEntry) -> Message {
