@@ -26,7 +26,8 @@ pub struct EmbeddingConfig {
     /// Server binary path, or a name on `$PATH`. Must not be empty when
     /// enabled.
     pub server_binary: PathBuf,
-    /// Bind host. Must be loopback: the server has no authentication.
+    /// Bind host. Must be loopback: the per-launch API key travels over
+    /// plain HTTP.
     pub host: IpAddr,
     /// Bind port. Must differ from `model.port`.
     pub port: NonZeroU16,

@@ -1,6 +1,8 @@
 //! End-to-end stdio-transport tests against the in-tree
 //! `fake_mcp_server` binary.
 
+#![cfg(feature = "test-support")]
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;

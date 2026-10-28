@@ -91,7 +91,7 @@ jobs:
       - name: Clippy (deny warnings)
         run: |
           cargo clippy --workspace --all-targets --locked \
-            --features assistd-llm/test-support,assistd-voice/test-support \
+            --features assistd-llm/test-support,assistd-mcp/test-support,assistd-voice/test-support \
             -- -D warnings
 
       - name: Clippy (no optional features)
@@ -104,14 +104,14 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc --workspace --no-deps --locked \
-            --features assistd-llm/test-support,assistd-voice/test-support
+            --features assistd-llm/test-support,assistd-mcp/test-support,assistd-voice/test-support
 
       - name: Test
         env:
           LD_LIBRARY_PATH: ${{ env.SHERPA_ONNX_LIB_DIR }}
         run: |
           cargo test --workspace --locked \
-            --features assistd-llm/test-support,assistd-voice/test-support
+            --features assistd-llm/test-support,assistd-mcp/test-support,assistd-voice/test-support
 
       - name: cargo-deny (advisories, licenses, bans)
         uses: EmbarkStudios/cargo-deny-action@v2

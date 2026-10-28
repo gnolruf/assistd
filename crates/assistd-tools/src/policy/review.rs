@@ -349,29 +349,6 @@ pub fn check_script(script: &str, rules: &Rules<'_>) -> Option<Confirmation> {
     findings.into_confirmation()
 }
 
-/// [`check_script`] for an argv executed without a shell. Each argument is
-/// also matched against the patterns as a script (`xterm -e "rm -rf ~"`).
-pub fn check_argv(argv: &[String], rules: &Rules<'_>) -> Option<Confirmation> {
-    let matcher = Matcher::new(rules);
-    let mut findings = Findings::default();
-    let command = SimpleCommand {
-        words: argv.iter().map(|arg| Word::literal(arg)).collect(),
-        ..SimpleCommand::default()
-    };
-    let script = Script::default();
-    matcher.protected_words(&command, &mut findings);
-    matcher.command(&command, 0, &script, 0, &mut findings);
-    for arg in argv {
-        if findings.settled() {
-            break;
-        }
-        if let Some(pattern) = matcher.patterns_in(arg, 1) {
-            findings.pattern(pattern);
-        }
-    }
-    findings.into_confirmation()
-}
-
 #[derive(Default)]
 struct Findings<'a> {
     pattern: Option<&'a DestructivePattern>,
@@ -488,13 +465,6 @@ impl<'a> Matcher<'a> {
             writes_outside_scratch(cmd, self.scratch, out);
             self.command(cmd, index, &script, depth, out);
         }
-    }
-
-    /// The pattern match in `src`, for text that may not be a script.
-    fn patterns_in(&self, src: &str, depth: usize) -> Option<&'a DestructivePattern> {
-        let mut scratch = Findings::default();
-        self.script(src, depth, &mut scratch);
-        scratch.pattern
     }
 
     fn protected_words(&self, cmd: &SimpleCommand, out: &mut Findings<'a>) {
