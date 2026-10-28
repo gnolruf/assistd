@@ -6,12 +6,18 @@ const ABBREVIATIONS: &[&str] = &[
     "U.S", "U.K", "approx", "Prof", "Gen", "Capt",
 ];
 
+/// Terminators that end a sentence without needing whitespace or a capital after them.
+const SELF_DELIMITING_TERMINATORS: &[char] = &[
+    '。', '！', '？', '｡', '।', '॥', '؟', '۔', '።', '፧', '။', '։',
+];
+
 /// Streaming sentence segmenter: [`push`](Self::push) deltas, then
 /// [`finish`](Self::finish) at end of stream or [`flush_idle`](Self::flush_idle) on a pause.
 ///
-/// Boundaries, highest priority first: `\n\n`; a `\n- `/`\n* ` bullet; `[.!?]`
-/// plus whitespace and an uppercase letter, digit, or newline (abbreviations and
-/// decimals excluded); the `max_len` cap. A terminator at the buffer's end waits for context.
+/// Boundaries, highest priority first: `\n\n`; a `\n- `/`\n* ` bullet; a terminator
+/// such as `。` or `।`, or `[.!?]` plus whitespace and a non-lowercase letter, digit, or
+/// newline (abbreviations and decimals excluded); the `max_len` cap in chars. A terminator
+/// at the buffer's end waits for context.
 #[derive(Debug)]
 pub struct SentenceBuffer {
     buf: String,
@@ -21,7 +27,7 @@ pub struct SentenceBuffer {
 }
 
 impl SentenceBuffer {
-    /// A segmenter cutting sentences at `max_len` bytes, raised to at least 50.
+    /// A segmenter cutting sentences at `max_len` chars, raised to at least 50.
     pub fn new(max_len: usize) -> Self {
         Self {
             buf: String::new(),
@@ -156,44 +162,48 @@ fn find_boundary(buf: &str, max_len: usize) -> Option<usize> {
         .or_else(|| length_cutoff(buf, max_len))
 }
 
-/// Offset just past the whitespace following a `.`, `!`, or `?` that
-/// ends a sentence.
+/// Offset just past a sentence terminator and the whitespace following it.
 fn find_terminator(buf: &str) -> Option<usize> {
-    let bytes = buf.as_bytes();
-    for (i, &c) in bytes.iter().enumerate() {
-        if !matches!(c, b'.' | b'!' | b'?') {
+    let mut chars = buf.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let &(next_at, next) = chars.peek()?;
+        if SELF_DELIMITING_TERMINATORS.contains(&c) {
+            return Some(next_at);
+        }
+        if !matches!(c, '.' | '!' | '?') || !next.is_whitespace() {
             continue;
         }
-        let &next = bytes.get(i + 1)?;
-        if !next.is_ascii_whitespace() {
+        if c == '.' && (is_decimal_point(buf.as_bytes(), i) || is_abbreviation_at(buf, i)) {
             continue;
         }
-        if c == b'.' && (is_decimal_point(bytes, i) || is_abbreviation_at(buf, i)) {
-            continue;
-        }
-        let after_ws = bytes[i + 1..]
-            .iter()
-            .position(|b| !b.is_ascii_whitespace())
-            .map(|off| i + 1 + off)?;
-        let succ = bytes[after_ws];
-        if succ.is_ascii_uppercase() || succ.is_ascii_digit() || next == b'\n' {
+        let (after_ws, successor) = buf[next_at..]
+            .char_indices()
+            .find(|(_, ch)| !ch.is_whitespace())
+            .map(|(off, ch)| (next_at + off, ch))?;
+        if starts_sentence(successor) || next == '\n' {
             return Some(after_ws);
         }
     }
     None
 }
 
+/// Uppercase or uncased letters (CJK, Devanagari, Arabic, ...) and digits.
+fn starts_sentence(c: char) -> bool {
+    c.is_ascii_digit() || (c.is_alphabetic() && !c.is_lowercase())
+}
+
 fn is_decimal_point(bytes: &[u8], i: usize) -> bool {
     i > 0 && bytes[i - 1].is_ascii_digit() && bytes.get(i + 2).is_some_and(u8::is_ascii_digit)
 }
 
-/// Cut at the last whitespace before `max_len`, or hard-cut at
-/// `max_len` when there is none.
+/// Cut at the last whitespace within the first `max_len` chars, or
+/// hard-cut after them when there is none.
 fn length_cutoff(buf: &str, max_len: usize) -> Option<usize> {
-    if buf.len() < max_len {
-        return None;
-    }
-    let window = buf.floor_char_boundary(max_len);
+    let window = buf
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(buf.len()))
+        .nth(max_len)?;
     let cut = buf[..window]
         .char_indices()
         .rev()
@@ -402,6 +412,18 @@ mod tests {
                     Some("End. then continue."),
                 ),
                 (
+                    "unspaced CJK terminators",
+                    &["你好。今天", "天气很好！你呢？"],
+                    &["你好。", "今天天气很好！"],
+                    Some("你呢？"),
+                ),
+                (
+                    "uncased script after period",
+                    &["It is done. यह ठीक है। Next one."],
+                    &["It is done.", "यह ठीक है।"],
+                    Some("Next one."),
+                ),
+                (
                     "paragraph break",
                     &["First paragraph\n\nSecond starts"],
                     &["First paragraph"],
@@ -486,9 +508,9 @@ mod tests {
         assert_eq!(emitted, vec!["a".repeat(50); 12]);
         assert_eq!(tail, None);
 
-        let (emitted, tail) = run(SentenceBuffer::new(50), &[&"😀".repeat(13)]);
-        assert_eq!(emitted, ["😀".repeat(12)]);
-        assert_eq!(tail.as_deref(), Some("😀"));
+        let (emitted, tail) = run(SentenceBuffer::new(50), &[&"字".repeat(60)]);
+        assert_eq!(emitted, ["字".repeat(50)]);
+        assert_eq!(tail, Some("字".repeat(10)));
     }
 
     #[test]
