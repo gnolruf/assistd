@@ -80,7 +80,7 @@ impl ChildProcess {
 
     /// Wait for the child to exit and return its status.
     pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.child.wait().await
+        self.group.reap_leader(&mut self.child).await
     }
 
     /// SIGTERM the process group, wait up to `term_timeout` for the child,
@@ -90,13 +90,13 @@ impl ChildProcess {
         let Self {
             server,
             mut child,
-            group,
+            mut group,
             stdout_task,
             stderr_task,
         } = self;
         group.signal(Signal::TERM);
 
-        match timeout(term_timeout, child.wait()).await {
+        match timeout(term_timeout, group.reap_leader(&mut child)).await {
             Ok(Ok(status)) => {
                 info!(
                     target: "assistd::child_server",
@@ -112,7 +112,7 @@ impl ChildProcess {
                     "{server} did not exit within {term_timeout:?}; sending SIGKILL",
                 );
                 group.signal(Signal::KILL);
-                let _ = child.wait().await;
+                let _ = group.reap_leader(&mut child).await;
             }
         }
         drop(group);
