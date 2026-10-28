@@ -1,3 +1,5 @@
+//! Chat model and llama-server process configuration.
+
 use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;

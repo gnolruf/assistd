@@ -1,3 +1,5 @@
+//! `grep`: filter lines of files, directories or stdin by an extended regex.
+
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;

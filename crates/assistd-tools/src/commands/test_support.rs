@@ -1,24 +1,25 @@
 //! Fixtures shared by the command tests.
 
 use std::os::fd::OwnedFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_wm::NoWindowManager;
+use assistd_wm::{NoWindowManager, WindowManager};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rustix::fs::{Mode, OFlags};
 
 use super::{
-    BashCommand, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand, ScreenshotCommand,
-    SeeCommand, SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand,
-    WriteCommand,
+    BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
+    ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand, TailCommand, UniqCommand,
+    WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
 };
 use crate::command::CommandRegistry;
 use crate::policy::{
     AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest,
-    DestructivePattern,
+    DestructivePattern, SandboxInfo,
 };
+use crate::vision::VisionGate;
 
 pub(crate) fn test_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
@@ -31,16 +32,52 @@ pub(crate) fn test_registry() -> CommandRegistry {
     registry.register(SortCommand);
     registry.register(UniqCommand);
     registry.register(EchoCommand);
-    registry.register(WriteCommand::permissive_for_tests());
-    registry.register(SeeCommand::default());
-    registry.register(ScreenshotCommand::default());
+    registry.register(permissive_write());
+    registry.register(test_see());
+    registry.register(test_screenshot());
     registry.register(WebCommand::new(
         ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
         None,
     ));
-    registry.register(BashCommand::default());
-    registry.register(WmCommand::for_test(Arc::new(NoWindowManager)));
+    registry.register(test_bash());
+    registry.register(test_wm(Arc::new(NoWindowManager)));
     registry
+}
+
+/// `write` with an allowlist of `/`, permitting any absolute path without asking.
+pub(crate) fn permissive_write() -> WriteCommand {
+    WriteCommand::new(
+        Arc::new(WritePolicyCfg::new(vec![PathBuf::from("/")]).expect("non-empty allowlist")),
+        Arc::new(AlwaysAllowGate),
+        SandboxInfo::none(),
+    )
+}
+
+pub(crate) fn test_see() -> SeeCommand {
+    SeeCommand::new(VisionGate::new(true))
+}
+
+pub(crate) fn test_screenshot() -> ScreenshotCommand {
+    ScreenshotCommand::new(
+        Arc::new(ScreenshotPolicyCfg::default()),
+        VisionGate::new(true),
+    )
+}
+
+pub(crate) fn test_bash() -> BashCommand {
+    BashCommand::new(
+        Arc::new(BashPolicyCfg::default()),
+        SandboxInfo::none(),
+        Arc::new(AlwaysAllowGate),
+    )
+}
+
+pub(crate) fn test_wm(wm: Arc<dyn WindowManager>) -> WmCommand {
+    WmCommand::new(
+        wm,
+        Arc::new(AlwaysAllowGate),
+        Arc::new(Approvals::unsaved()),
+    )
 }
 
 /// Destructive patterns from whitespace-separated strings.

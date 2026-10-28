@@ -238,10 +238,9 @@ impl SandboxInfo {
         }
     }
 
-    /// The [`ProcCommand`] that runs `program` with `args`, wrapped in
-    /// bubblewrap when the mode is
-    /// [`ResolvedSandboxMode::Bwrap`]. Unwrapped, `PATH` is limited to the
-    /// directories [`SandboxInfo::search_path`] reports.
+    /// The [`ProcCommand`] that runs `program` with `args`, in bubblewrap under
+    /// [`ResolvedSandboxMode::Bwrap`]; otherwise with `PATH` limited to
+    /// [`SandboxInfo::search_path`].
     pub async fn command(self: &Arc<Self>, program: &str, args: Vec<String>) -> ProcCommand {
         let info = Arc::clone(self);
         let program = program.to_owned();
@@ -276,11 +275,9 @@ impl SandboxInfo {
         cmd
     }
 
-    /// Flag order is load-bearing: the profile, then the self-binds that
-    /// pin command directories' ancestors, then the shared directories,
-    /// then the read-only mounts over `home`'s command directories and the
-    /// protections, then the operator's `extra_args` so they win. Inside,
-    /// `prlimit` applies [`RESOURCE_LIMITS`] before running `program`.
+    /// Flag order is load-bearing: profile, ancestor self-binds, shared directories, read-only
+    /// mounts over `home`'s command directories and protections, then `extra_args` so they win.
+    /// Inside, `prlimit` applies [`RESOURCE_LIMITS`] before running `program`.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
@@ -560,10 +557,8 @@ impl SandboxHome {
             .collect()
     }
 
-    /// The first directory missing `dir` would need created, under its
-    /// nearest existing ancestor with symlinks resolved. `None` unless that
-    /// ancestor is a directory this process may create in, inside a writable
-    /// entry.
+    /// The first missing directory `dir` needs created under its nearest existing ancestor,
+    /// symlinks resolved; `None` unless that ancestor is creatable-in and inside a writable entry.
     fn placeholder_for(&self, dir: &Path) -> Option<PathBuf> {
         let (existing, real_existing) = dir
             .ancestors()
@@ -692,10 +687,9 @@ pub(crate) fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool
     })
 }
 
-/// Read-only root with (when bindable) the visible entries of `$HOME`
-/// writable, fresh `/tmp`, `/dev`, `/proc` and `/run`, isolated
-/// user/pid/ipc/uts namespaces, and no network; the operator restores it with
-/// `--share-net` in `bwrap_extra_args`.
+/// Read-only root with `$HOME`'s visible entries writable when bindable, fresh `/tmp`, `/dev`,
+/// `/proc` and `/run`, isolated user/pid/ipc/uts namespaces, and no network (`--share-net` in
+/// `bwrap_extra_args` restores it).
 fn default_bwrap_flags_for(home: Option<&SandboxHome>) -> Vec<String> {
     let mut flags: Vec<String> = ["--ro-bind", "/", "/", "--tmpfs", "/tmp"]
         .map(String::from)
@@ -767,12 +761,9 @@ fn kept_env(vars: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<(OsStri
         .collect()
 }
 
-/// Resolve `request` against the environment, once per process. Without
-/// `bwrap`, `Auto` disables tools, as `None` always does.
-///
-/// # Errors
-/// [`SandboxError::BwrapNotFound`] when `request` is `Bwrap` and no `bwrap`
-/// is on `PATH`.
+/// Resolve `request` against the environment, once per process; `Auto` without `bwrap`, like
+/// `None`, disables tools. Fails with [`SandboxError::BwrapNotFound`] when `request` is `Bwrap`
+/// and no `bwrap` is on `PATH`.
 pub fn probe_sandbox(
     request: SandboxRequest,
     extra_args: Vec<String>,

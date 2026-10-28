@@ -5,8 +5,8 @@ use std::time::Duration;
 use super::*;
 use crate::chain::{execute, parse_chain};
 use crate::command::CommandRegistry;
-use crate::commands::RecordingGate;
 use crate::commands::test_patterns as patterns;
+use crate::commands::{RecordingGate, test_bash};
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
 
@@ -48,7 +48,7 @@ async fn glob_matches_reach_bash_as_file_names_not_code() {
     let planted = dir.path().join("a$(echo injected).txt");
     std::fs::write(&planted, b"").expect("planted file");
     let mut registry = CommandRegistry::new();
-    registry.register(BashCommand::default());
+    registry.register(test_bash());
     let line = format!("bash echo {}/*.txt", dir.path().display());
 
     let out = execute(&parse_chain(&line).expect("parses"), &registry, None).await;
@@ -63,7 +63,7 @@ async fn glob_matches_reach_bash_as_file_names_not_code() {
 #[tokio::test]
 async fn leading_dash_c_is_accepted_as_bash_would() {
     let mut registry = CommandRegistry::new();
-    registry.register(BashCommand::default());
+    registry.register(test_bash());
     let line = "bash -c 'n=$((1+4)); echo RESULT_$n | tr A-Z a-z'";
 
     let out = execute(&parse_chain(line).expect("parses"), &registry, None).await;
@@ -224,12 +224,7 @@ async fn unread_stdin_does_not_block_the_timeout() {
 
 #[tokio::test]
 async fn stdin_larger_than_a_pipe_buffer_arrives_whole() {
-    let out = run(
-        &BashCommand::default(),
-        "wc -c",
-        Some(vec![b'x'; 1024 * 1024]),
-    )
-    .await;
+    let out = run(&test_bash(), "wc -c", Some(vec![b'x'; 1024 * 1024])).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1048576");
 }

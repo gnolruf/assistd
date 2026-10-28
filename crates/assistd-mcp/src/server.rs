@@ -1,6 +1,5 @@
-//! One configured MCP server: started with the daemon, killed once it stops
-//! answering, restarted by the first call after it dies, and stopped on
-//! shutdown.
+//! One configured MCP server: started with the daemon, killed once it stops answering,
+//! restarted by the first call after it dies, and stopped on shutdown.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,11 +27,9 @@ const TERM_TIMEOUT: Duration = Duration::from_secs(10);
 /// and is killed.
 const HUNG_AFTER_TIMEOUTS: u32 = 2;
 
-/// A configured server. A call that finds its process dead restarts it,
-/// or fails with [`McpError::ServerDown`] while the restart backoff says
-/// to wait. A server whose requests keep timing out is killed, and one
-/// whose tools differ after a restart is logged. Dropping it SIGKILLs the
-/// live process group.
+/// A configured server. A call that finds its process dead restarts it, or fails with
+/// [`McpError::ServerDown`] while backoff says to wait; one whose requests keep timing out is
+/// killed. Dropping it SIGKILLs the live process group.
 #[derive(Debug)]
 pub struct McpServer {
     name: String,

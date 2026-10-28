@@ -32,17 +32,6 @@ impl BashCommand {
     }
 }
 
-#[cfg(test)]
-impl Default for BashCommand {
-    fn default() -> Self {
-        Self::new(
-            Arc::new(BashPolicyCfg::default()),
-            SandboxInfo::none(),
-            Arc::new(crate::policy::AlwaysAllowGate),
-        )
-    }
-}
-
 #[async_trait]
 impl Command for BashCommand {
     fn name(&self) -> &'static str {

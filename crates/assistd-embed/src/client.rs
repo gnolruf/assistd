@@ -45,10 +45,9 @@ pub struct LlamaEmbedder {
 }
 
 impl LlamaEmbedder {
-    /// Probe the server once to learn the vector dimension; `request_timeout` applies to
-    /// the probe and every later request, and `api_key`, when set, is sent with each. With
-    /// `server`, a request made while it is not serving fails with [`EmbedError::NotReady`]
-    /// without being sent.
+    /// Probe the server once for the vector dimension. `request_timeout` bounds the probe and
+    /// every later request, which carry `api_key` when set. With `server`, a request made while
+    /// it is not serving fails with [`EmbedError::NotReady`] without being sent.
     pub async fn new(
         addr: SocketAddr,
         model: String,

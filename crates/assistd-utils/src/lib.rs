@@ -1,7 +1,5 @@
-//! Helpers shared across the workspace: backoff and restart accounting,
-//! path, file, program-lookup, capped HTTP body and text helpers, per-turn
-//! token counting, Hugging Face file IDs and downloads, subsystem readiness,
-//! and the supervised child-server stack.
+//! Helpers shared across the workspace: backoff and restarts, path, file, HTTP and text
+//! utilities, token counting, Hugging Face downloads, readiness and child-server supervision.
 
 pub mod backoff;
 pub mod child_server;

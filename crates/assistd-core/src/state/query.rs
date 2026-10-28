@@ -12,7 +12,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, warn};
 
 use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
-use assistd_llm::{LlmError, LlmEvent, LlmHealthProbe, ToolCall};
+use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
 };
@@ -192,16 +192,7 @@ impl TurnTranslator {
                 name,
                 result,
             } => {
-                self.awaiting_tool_result = false;
-                self.persist_message(
-                    state,
-                    PersistedMessage::tool_result(
-                        tool_result_body(&result),
-                        call_id,
-                        name.clone(),
-                        tool_outcome(&result),
-                    ),
-                );
+                self.persist_tool_result(state, call_id, &name, &result);
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
             LlmEvent::ContextSize { tokens, total } => {
@@ -215,9 +206,7 @@ impl TurnTranslator {
                 message,
             } => {
                 if matches!(event, StatusKind::Restarting | StatusKind::OutputTruncated) {
-                    self.assistant_accum.clear();
-                    self.reasoning = None;
-                    let _ = sentence_buf.finish();
+                    self.discard_partial_response(sentence_buf);
                 }
                 (
                     Event::Status {
@@ -235,13 +224,7 @@ impl TurnTranslator {
                 cut,
                 elapsed,
             } => {
-                if let Some(target) = &self.persist {
-                    let cut = SummaryCut {
-                        kept_turns: cut.kept_turns,
-                        kept_steps: cut.kept_steps,
-                    };
-                    state.persist_summary_fire_and_forget(target.branch, summary, cut, elapsed);
-                }
+                self.persist_summary(state, summary, &cut, elapsed);
                 return None;
             }
             LlmEvent::Done => {
@@ -269,6 +252,47 @@ impl TurnTranslator {
         }
         let reasoning = self.take_reasoning();
         self.persist_message(state, tool_calls_message(narration, calls, reasoning));
+    }
+
+    fn persist_tool_result(
+        &mut self,
+        state: &AppState,
+        call_id: String,
+        name: &str,
+        result: &Value,
+    ) {
+        self.awaiting_tool_result = false;
+        self.persist_message(
+            state,
+            PersistedMessage::tool_result(
+                tool_result_body(result),
+                call_id,
+                name.to_owned(),
+                tool_outcome(result),
+            ),
+        );
+    }
+
+    fn discard_partial_response(&mut self, sentence_buf: &mut SentenceBuffer) {
+        self.assistant_accum.clear();
+        self.reasoning = None;
+        let _ = sentence_buf.finish();
+    }
+
+    fn persist_summary(
+        &self,
+        state: &AppState,
+        summary: String,
+        cut: &CompactionCut,
+        elapsed: Duration,
+    ) {
+        if let Some(target) = &self.persist {
+            let cut = SummaryCut {
+                kept_turns: cut.kept_turns,
+                kept_steps: cut.kept_steps,
+            };
+            state.persist_summary_fire_and_forget(target.branch, summary, cut, elapsed);
+        }
     }
 
     fn persist_final_text(&mut self, state: &AppState) {
@@ -583,10 +607,9 @@ impl AppState {
         )
     }
 
-    /// Forward the turn's events to `tx` and the speech worker until the
-    /// agent finishes. A client that leaves cancels the turn; the events it
-    /// winds down with are still persisted and published to the bus. Returns
-    /// whether `Done` was emitted.
+    /// Forward the turn's events to `tx` and the speech worker until the agent finishes; a
+    /// client that leaves cancels the turn, whose wind-down events are still persisted and
+    /// published. Returns whether `Done` was emitted.
     async fn drive_event_loop(
         &self,
         id: String,

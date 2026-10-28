@@ -4,8 +4,9 @@ use assistd_wm::NoWindowManager;
 
 use super::*;
 use crate::commands::{
-    BashCommand, CatCommand, GrepCommand, HeadCommand, LsCommand, ScreenshotCommand, SeeCommand,
-    SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WmCommand, WriteCommand,
+    BashCommand, CatCommand, GrepCommand, HeadCommand, LsCommand, SortCommand, TailCommand,
+    UniqCommand, WcCommand, WebCommand, WmCommand, permissive_write, test_screenshot, test_see,
+    test_wm,
 };
 use crate::policy::{AlwaysAllowGate, ApprovalGate, Approvals, BashPolicyCfg, SandboxInfo};
 
@@ -51,7 +52,7 @@ fn bash_denying_rm_rf() -> BashCommand {
 }
 
 fn wm_without_compositor() -> WmCommand {
-    WmCommand::for_test(Arc::new(NoWindowManager))
+    test_wm(Arc::new(NoWindowManager))
 }
 
 /// One failing invocation per command that has a failure mode (`echo` has
@@ -64,14 +65,14 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
         (
             "see",
             run_cmd(
-                SeeCommand::default(),
+                test_see(),
                 vec!["/nonexistent/assistd-convention-test.png".into()],
             )
             .await,
         ),
         (
             "screenshot",
-            run_cmd(ScreenshotCommand::default(), vec!["--bogus-flag".into()]).await,
+            run_cmd(test_screenshot(), vec!["--bogus-flag".into()]).await,
         ),
         (
             "grep",
@@ -80,7 +81,7 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
         (
             "write",
             run_cmd(
-                WriteCommand::permissive_for_tests(),
+                permissive_write(),
                 vec!["/nonexistent/assistd-convention-test".into(), "x".into()],
             )
             .await,

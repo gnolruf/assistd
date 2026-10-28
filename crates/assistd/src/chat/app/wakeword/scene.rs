@@ -1,6 +1,5 @@
-//! The listening computer's animation: audio flows into it from the left
-//! while someone speaks, every column it swallows leaves on the right as a
-//! bit, and its face wonders while audio flows in, then reacts to the verdict.
+//! The listening computer's animation: audio flows in from the left while
+//! someone speaks, leaves on the right as bits, and the face reacts to the verdict.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

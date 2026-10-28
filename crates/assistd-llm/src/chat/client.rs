@@ -42,12 +42,9 @@ const REASONING_BUDGET_MESSAGE: &str =
 /// to act instead of summarizing.
 const TOOL_CALL_MARKUP: &str = "<tool_call>";
 
-/// HTTP streaming chat client backed by a locally-managed llama-server.
-///
-/// The conversation lock is held only while state is mutated before and
-/// after a request; the HTTP stream and any compaction summary run without
-/// it, so a hung server never blocks a concurrent `push_user` or
-/// `set_transient_context`.
+/// HTTP streaming chat client backed by a locally-managed llama-server. The conversation lock
+/// is held only while state is mutated, never across the HTTP stream or a compaction summary,
+/// so a hung server never blocks `push_user` or `set_transient_context`.
 #[derive(Debug)]
 pub struct LlamaChatClient {
     client: reqwest::Client,
@@ -63,10 +60,9 @@ pub struct LlamaChatClient {
 }
 
 impl LlamaChatClient {
-    /// Build a client for the server at `model.host:model.port`, sending
-    /// `api_key` with every request when set. Pass `health: None` when no
-    /// supervisor is attached. With a probe, a request made while its child
-    /// is not serving fails with [`LlmError::ServerRestarting`] without being sent.
+    /// Build a client for `model.host:model.port`, sending `api_key` when set. With a `health`
+    /// probe, a request made while its child is not serving fails with
+    /// [`LlmError::ServerRestarting`] without being sent.
     pub fn new(
         chat: &ChatConfig,
         model: &ModelConfig,
@@ -587,10 +583,7 @@ impl LlmBackend for LlamaChatClient {
         calibrate_from(&mut conv, estimated_tokens, &outcome);
         match outcome {
             StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => {
-                let result = commit_step(&mut conv, *accum);
-                // Only a committed step consumes the note; a retry must see it again.
-                let _ = conv.consume_transient_note();
-                result
+                commit_step(&mut conv, *accum)
             }
             StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
                 conv.rollback_last_user();
@@ -957,10 +950,11 @@ async fn forward(
     Ok(())
 }
 
-/// Record the step in `conv`. Tool calls from a stream that ended before
-/// the model's finish chunk are discarded rather than run half-built, and a
-/// response cut off at the token limit is not recorded at all.
+/// Record the step in `conv` and consume its transient note, which a failed
+/// step leaves for the retry. Tool calls cut off before the finish chunk are
+/// discarded rather than run half-built; a token-limit cutoff is not recorded.
 fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<StepOutcome> {
+    conv.consume_transient_note();
     if accum.finish_reason.as_deref() == Some("length") {
         warn!(
             target: "assistd::chat",

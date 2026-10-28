@@ -1,3 +1,5 @@
+//! `write`: write a file at an allowlisted path, asking the user first outside the shared scratch.
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -77,10 +79,8 @@ impl WritePolicyCfg {
     }
 }
 
-/// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an
-/// absolute, allowlisted PATH, asking first unless it is under the
-/// sandbox's shared scratch directory.
-/// Policy refusals exit 126.
+/// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an absolute, allowlisted
+/// PATH, asking first unless it is under the shared scratch directory. Policy refusals exit 126.
 #[derive(Debug)]
 pub struct WriteCommand {
     cfg: Arc<WritePolicyCfg>,
@@ -98,17 +98,6 @@ impl WriteCommand {
         sandbox: Arc<SandboxInfo>,
     ) -> Self {
         Self { cfg, gate, sandbox }
-    }
-
-    /// A command whose allowlist is `/`, permitting any absolute path
-    /// without asking.
-    #[cfg(test)]
-    pub fn permissive_for_tests() -> Self {
-        Self::new(
-            Arc::new(WritePolicyCfg::new(vec![PathBuf::from("/")]).expect("non-empty allowlist")),
-            Arc::new(crate::policy::AlwaysAllowGate),
-            SandboxInfo::none(),
-        )
     }
 
     async fn confirmed(&self, target: &WriteTarget, content: &[u8]) -> bool {
@@ -441,10 +430,8 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
     )
 }
 
-/// The quoted target and size, then the content: whole when short,
-/// otherwise its head and tail around a count of the characters left out.
-/// [`Risk::Elevated`] when the user cannot see all of it or a shell could
-/// run the file.
+/// The target, size and content (head and tail only when long) for the user to confirm;
+/// [`Risk::Elevated`] when the content is cut or a shell could run the file.
 fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationRequest {
     let text = String::from_utf8_lossy(content);
     let mut script = format!(

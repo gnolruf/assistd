@@ -1,6 +1,5 @@
-//! Hands-free wake-word listening: VAD-cut utterances, transcribed and sent
-//! to clients only once a keyword spotter hears the wake phrase, unlike
-//! one-shot [`crate::VoiceInput`] presses.
+//! Hands-free wake-word listening: VAD-cut utterances, transcribed and sent to clients only
+//! once a keyword spotter hears the wake phrase, unlike one-shot [`crate::VoiceInput`] presses.
 
 use std::fmt;
 
@@ -95,10 +94,9 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// for the wake phrase.
     fn set_replying(&self, replying: bool);
 
-    /// Send every utterance the mic hears into `sink`, cut as listening
-    /// cuts it but not transcribed, and each start and end of speech, until
-    /// `sink` closes. Fails with [`ListenError::Listening`] while listening
-    /// is active.
+    /// Send every utterance the mic hears into `sink`, cut but not transcribed, plus each start
+    /// and end of speech, until `sink` closes. Fails with [`ListenError::Listening`] while
+    /// listening is active.
     async fn capture_utterances(&self, sink: mpsc::Sender<SessionAudio>)
     -> Result<(), ListenError>;
 }

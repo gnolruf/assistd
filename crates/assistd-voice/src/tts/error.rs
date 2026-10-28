@@ -1,3 +1,5 @@
+//! Text-to-speech errors.
+
 use thiserror::Error;
 
 /// Errors produced by the text-to-speech subsystem.

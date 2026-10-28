@@ -86,18 +86,8 @@ impl Op {
     }
 }
 
-/// Parse a shell-style command line into a [`Chain`] AST.
-///
-/// Grammar, lowest precedence first; all operators are left-associative,
-/// as in bash:
-///
-/// ```text
-/// seq     := andor ( ';'            andor? )*     (trailing ';' allowed)
-/// andor   := pipe  ( ('&&' | '||')  pipe   )*
-/// pipe    := cmd   ( '|'            cmd    )*
-/// cmd     := WORD+
-/// ```
-///
+/// Parse a command line into a [`Chain`]: `;` binds loosest, then `&&`/`||`, then `|`, all
+/// left-associative as in bash, with a trailing `;` allowed.
 /// Fails with [`ParseError::TooManyOperators`] past [`MAX_OPERATORS`].
 pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     let tokens = tokenize(input)?;

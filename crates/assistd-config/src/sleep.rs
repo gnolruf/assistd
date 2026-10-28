@@ -1,3 +1,5 @@
+//! Sleep and idle policy configuration.
+
 use std::num::NonZeroU64;
 
 use serde::{Deserialize, Serialize};

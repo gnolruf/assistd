@@ -1,3 +1,5 @@
+//! Tool subsystem configuration: scratch directory, output limits and per-command policy.
+
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 

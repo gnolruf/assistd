@@ -627,10 +627,9 @@ pub(super) struct ThumbnailSlot {
     pub height: usize,
 }
 
-/// Wrapped rows of the leading `starts.len()` items, valid for one
-/// `(width, verbose)` key. Every item mutated in place must be passed to
-/// [`Self::invalidate`] and every removal to [`Self::truncate`]; items
-/// appended past the cached prefix are picked up by [`Self::sync`].
+/// Wrapped rows of the leading `starts.len()` items, valid for one `(width, verbose)` key.
+/// Items mutated in place must go through [`Self::invalidate`] and removals through
+/// [`Self::truncate`]; appended items are picked up by [`Self::sync`].
 #[derive(Default)]
 struct WrapCache {
     key: Option<(u16, bool)>,

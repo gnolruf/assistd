@@ -152,10 +152,9 @@ impl StartupLock {
         Self::acquire_at(&assistd_ipc::socket_path())
     }
 
-    /// Take the lock beside `socket_path`, creating the socket directory
-    /// owner-only if needed. Fails with `AlreadyStarting` when another
-    /// process holds it; the lock is released when the guard drops or the
-    /// process exits.
+    /// Take the lock beside `socket_path`, creating the socket directory owner-only if
+    /// needed; it is released when the guard drops or the process exits. Fails with
+    /// `AlreadyStarting` when another process holds it.
     pub fn acquire_at(socket_path: &Path) -> Result<Self, SocketError> {
         let lock_path = socket_path.with_extension("lock");
         let file = open_private_lock_file(&lock_path)?;
@@ -199,11 +198,9 @@ where
     serve_at(&path, state, shutdown).await
 }
 
-/// Serve the IPC socket at `path` until `shutdown` resolves, then drain
-/// in-flight connections for a few seconds. The
-/// socket's directory must belong to this user and not be writable by
-/// others, and the socket is owner-only. A stale socket file at `path` is
-/// removed first; a live one is an error.
+/// Serve the IPC socket at `path` until `shutdown` resolves, then drain in-flight connections.
+/// The directory must be this user's and not writable by others; the socket is owner-only.
+/// A stale socket file at `path` is removed first; a live one is an error.
 pub async fn serve_at<F>(path: &Path, state: Arc<AppState>, shutdown: F) -> Result<(), SocketError>
 where
     F: Future<Output = ()>,
@@ -606,10 +603,8 @@ async fn read_request_frame(
     })
 }
 
-/// Write every dispatched event to the client, teeing it onto the bus
-/// unless this connection is itself a bus subscriber. Returns early,
-/// dropping the event receiver, once the client hangs up or a write finds
-/// it gone.
+/// Write every dispatched event to the client, teeing it onto the bus unless this connection
+/// is a bus subscriber. Returns early, dropping the receiver, once the client hangs up.
 async fn forward_events(
     mut rx: mpsc::Receiver<Event>,
     mut write_half: OwnedWriteHalf,

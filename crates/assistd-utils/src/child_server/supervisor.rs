@@ -1,3 +1,5 @@
+//! The supervisor loop: spawn, wait for health, and restart under the restart policy.
+
 use std::ops::ControlFlow;
 use std::process::ExitStatus;
 use std::sync::Arc;

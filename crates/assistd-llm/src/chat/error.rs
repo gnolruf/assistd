@@ -1,3 +1,5 @@
+//! Chat client errors.
+
 use assistd_utils::http::BodyError;
 use thiserror::Error;
 

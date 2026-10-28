@@ -1,6 +1,5 @@
-//! MCP (Model Context Protocol) client. Each server runs as a child
-//! process managed by [`McpServer`], and each tool it exposes becomes a
-//! [`Tool`] via [`adapt_client_as_tools`].
+//! MCP (Model Context Protocol) client: each server runs as a child process managed by
+//! [`McpServer`], and each tool it exposes becomes a [`Tool`] via [`adapt_client_as_tools`].
 
 use std::borrow::Cow;
 use std::fmt;
@@ -32,10 +31,9 @@ pub trait McpClient: fmt::Debug + Send + Sync + 'static {
     async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError>;
 }
 
-/// Exposes one MCP tool as a [`Tool`] under `registry_name`; the
-/// server-native name stays in `tool.name`. Each call asks the user
-/// first until the tool is approved for good; image results are dropped
-/// while `vision` reports no support.
+/// Exposes one MCP tool as a [`Tool`] under `registry_name`. Each call asks the user first
+/// until the tool is approved for good; image results are dropped while `vision` reports no
+/// support.
 #[derive(Debug)]
 struct McpToolAdapter {
     client: Arc<dyn McpClient>,
@@ -95,11 +93,9 @@ impl Tool for McpToolAdapter {
     }
 }
 
-/// [`Tool`] entries for every tool `client` exposes, named
-/// `mcp__<server_name>__<tool>`; tools with an invalid or duplicate name or
-/// an oversized description or schema are skipped with a warning. Each call asks
-/// first unless `approvals` holds the tool. Image results are replaced by a
-/// text note whenever `vision` reports the model cannot take images.
+/// [`Tool`] entries for every tool `client` exposes, named `mcp__<server_name>__<tool>`; tools
+/// with an invalid or duplicate name or oversized description or schema are skipped. Calls ask
+/// first unless `approvals` holds the tool; images become a text note when `vision` says no.
 pub async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     server_name: &str,
@@ -146,10 +142,9 @@ fn declined_envelope(tool_name: &str) -> Value {
     })
 }
 
-/// Render every content block of `result` as one tool-result envelope.
-/// Blocks are joined by newlines (non-text ones as JSON); with `vision`, images also go into `attachments[]` as is,
-/// and without it they become a note only. Without content,
-/// `structuredContent` is the body. An `isError` result is prefixed as a whole.
+/// Render `result`'s content blocks as one tool-result envelope, joined by newlines (non-text
+/// as JSON), falling back to `structuredContent`. Images go into `attachments[]` only with
+/// `vision`, else become a note; an `isError` result is prefixed as a whole.
 fn tool_result_to_json(result: CallToolResult, duration_ms: u128, vision: bool) -> Value {
     let (sections, attachments): (Vec<String>, Vec<Option<Value>>) = result
         .content

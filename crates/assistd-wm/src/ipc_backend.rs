@@ -1,6 +1,5 @@
-//! Connection machinery shared by the i3 and Sway backends: a timed
-//! command socket, an event socket feeding the focus snapshot, and a
-//! reconnecting supervisor. [`IpcProtocol`] abstracts the client crates.
+//! Connection machinery shared by the i3 and Sway backends: a timed command socket, an event
+//! socket feeding the focus snapshot, and a reconnecting supervisor over [`IpcProtocol`].
 
 use std::fmt;
 use std::future::Future;
@@ -113,6 +112,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
         let (mut cmd, events) = protocol.connect().await?;
         let initial = seed_snapshot::<P>(&mut cmd).await.unwrap_or_else(|e| {
             tracing::warn!(
+            target: "assistd::wm",
                 "{} seed_snapshot failed: {e:#}; starting with empty focus state",
                 P::NAME
             );
@@ -209,7 +209,11 @@ impl<P: IpcProtocol> IpcBackend<P> {
                     match next {
                         Some(Ok(event)) => self.apply_event(event).await,
                         Some(Err(e)) => {
-                            tracing::warn!("{} event stream error: {e}", P::NAME);
+                            tracing::warn!(
+                                target: "assistd::wm",
+                                "{} event stream error: {e}",
+                                P::NAME
+                            );
                             return true;
                         }
                         None => return true,
@@ -239,7 +243,10 @@ async fn supervise<P: IpcProtocol>(
 ) {
     let name = P::NAME;
     if !backend.drive_events(initial_events, &mut shutdown).await {
-        tracing::info!("{name} supervisor exited (shutdown during initial events stream)");
+        tracing::info!(
+            target: "assistd::wm",
+            "{name} supervisor exited (shutdown during initial events stream)"
+        );
         return;
     }
 
@@ -247,6 +254,7 @@ async fn supervise<P: IpcProtocol>(
     loop {
         backend.set_conn(&mut *backend.cmd.lock().await, None);
         tracing::warn!(
+            target: "assistd::wm",
             "{name} disconnected; reconnecting (attempt {})",
             attempt + 1
         );
@@ -255,7 +263,10 @@ async fn supervise<P: IpcProtocol>(
         tokio::select! {
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
-                    tracing::info!("{name} supervisor exited (shutdown during backoff)");
+                    tracing::info!(
+                        target: "assistd::wm",
+                        "{name} supervisor exited (shutdown during backoff)"
+                    );
                     return;
                 }
             }
@@ -269,14 +280,20 @@ async fn supervise<P: IpcProtocol>(
                 }
                 backend.set_conn(&mut *backend.cmd.lock().await, Some(cmd));
                 attempt = 0;
-                tracing::info!("{name} backend reconnected");
+                tracing::info!(target: "assistd::wm", "{name} backend reconnected");
                 if !backend.drive_events(events, &mut shutdown).await {
-                    tracing::info!("{name} supervisor exited (shutdown during events stream)");
+                    tracing::info!(
+                        target: "assistd::wm",
+                        "{name} supervisor exited (shutdown during events stream)"
+                    );
                     return;
                 }
             }
             Err(e) => {
-                tracing::warn!("{name} reconnect failed: {e}; will retry after backoff");
+                tracing::warn!(
+                    target: "assistd::wm",
+                    "{name} reconnect failed: {e}; will retry after backoff"
+                );
                 attempt = attempt.saturating_add(1);
             }
         }
@@ -298,7 +315,11 @@ async fn seed_snapshot<P: IpcProtocol>(cmd: &mut P::Cmd) -> WmResult<Snapshot> {
             .find(|workspace| workspace.focused)
             .map(|workspace| workspace.name),
         Err(e) => {
-            tracing::warn!("{} GET_WORKSPACES on seed failed: {e:#}", P::NAME);
+            tracing::warn!(
+                target: "assistd::wm",
+                "{} GET_WORKSPACES on seed failed: {e:#}",
+                P::NAME
+            );
             None
         }
     };

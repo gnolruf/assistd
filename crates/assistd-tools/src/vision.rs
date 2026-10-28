@@ -1,3 +1,5 @@
+//! The runtime flag for whether the loaded model accepts image input.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 

@@ -1,3 +1,5 @@
+//! Errors from loading, editing and validating configuration.
+
 use std::path::PathBuf;
 
 use thiserror::Error;

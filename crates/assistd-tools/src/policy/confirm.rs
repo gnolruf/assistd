@@ -150,10 +150,8 @@ impl ConfirmRouter {
         *self.mode.lock() = mode;
     }
 
-    /// In [`PermissionMode::AcceptCommands`], approve a [`Risk::Routine`]
-    /// request once; otherwise forward the prompt to the client and await
-    /// the answer. Every failure mode is [`Approval::Deny`]; cancelling the
-    /// future forgets the prompt.
+    /// Approve a [`Risk::Routine`] request once in [`PermissionMode::AcceptCommands`]; otherwise
+    /// prompt the client and await the answer. Every failure is [`Approval::Deny`].
     pub async fn ask(&self, req: ConfirmationRequest) -> Approval {
         if req.risk == Risk::Routine && *self.mode.lock() == PermissionMode::AcceptCommands {
             info!(
@@ -254,9 +252,7 @@ impl ConfirmRouter {
     }
 
     /// Deliver a client's answer to the matching pending prompt.
-    ///
-    /// # Errors
-    /// [`NoPendingConfirm`] when no prompt with that id is in flight.
+    /// Fails with [`NoPendingConfirm`] when no prompt with that id is in flight.
     pub fn route_response(
         &self,
         confirm_id: &str,
@@ -282,11 +278,6 @@ impl ConfirmRouter {
         for (_, tx) in drained {
             let _ = tx.send(Approval::Deny);
         }
-    }
-
-    #[cfg(test)]
-    fn pending_len(&self) -> usize {
-        self.pending.lock().prompts.len()
     }
 }
 
@@ -397,7 +388,7 @@ mod tests {
         let ask = router.ask(sample_request());
         let (approval, confirm_id) = tokio::join!(ask, recv_confirm_id(&mut rx));
         assert_eq!(approval, Approval::Deny);
-        assert_eq!(router.pending_len(), 0);
+        assert_eq!(router.pending.lock().prompts.len(), 0);
         router
             .route_response(&confirm_id, Approval::Once)
             .expect_err("a timed-out prompt is no longer routable");
@@ -413,7 +404,7 @@ mod tests {
 
         in_flight.abort();
         in_flight.await.expect_err("ask was aborted");
-        assert_eq!(router.pending_len(), 0);
+        assert_eq!(router.pending.lock().prompts.len(), 0);
         router
             .route_response(&confirm_id, Approval::Once)
             .expect_err("a cancelled prompt is no longer routable");
@@ -429,7 +420,7 @@ mod tests {
 
         router.close();
         assert_eq!(in_flight.await.expect("ask task"), Approval::Deny);
-        assert_eq!(router.pending_len(), 0);
+        assert_eq!(router.pending.lock().prompts.len(), 0);
 
         assert_eq!(router.ask(sample_request()).await, Approval::Deny);
         rx.try_recv()
@@ -450,7 +441,7 @@ mod tests {
         }
 
         assert_eq!(router.ask(sample_request()).await, Approval::Deny);
-        assert_eq!(router.pending_len(), MAX_PENDING_CONFIRMS);
+        assert_eq!(router.pending.lock().prompts.len(), MAX_PENDING_CONFIRMS);
         rx.try_recv()
             .expect_err("a denied ask must not put a prompt on the wire");
     }

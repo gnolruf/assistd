@@ -1,6 +1,5 @@
-//! `memory` subcommands. Everything goes through the daemon; the CLI
-//! never opens the SQLite file itself, because the daemon owns the
-//! writer.
+//! `memory` subcommands. Everything goes through the daemon, which owns the
+//! SQLite writer; the CLI never opens the file itself.
 
 use std::io::{self, Write};
 
@@ -20,10 +19,8 @@ pub(crate) struct MemoryArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum MemoryAction {
-    /// Semantic search over persisted session transcripts. Embeds the
-    /// query and ranks past messages by cosine similarity, so
-    /// paraphrased phrasings still hit. Requires the embedding
-    /// subsystem; with embeddings disabled it returns no hits.
+    /// Semantic search over persisted session transcripts, so paraphrases still hit.
+    /// Requires the embedding subsystem; with embeddings disabled it returns no hits.
     Reminisce {
         /// Natural-language query. The daemon embeds this and finds
         /// the top-`limit` most semantically similar past messages.
@@ -48,11 +45,9 @@ pub(crate) enum MemoryAction {
     Forget { id: i64 },
     /// Remove `key` from the store. No-op if absent.
     Delete { key: String },
-    /// Re-embed every memory and transcript chunk that has no
-    /// embedding under the daemon's currently-configured model.
-    /// Recovers from a model swap or from runs where the embedding
-    /// subsystem was unavailable. Prints one progress line per kind
-    /// (chunks, memories) updated as each item completes.
+    /// Re-embed every memory and transcript chunk that has no embedding under the
+    /// daemon's configured model, e.g. after a model swap or embedding outage.
+    /// Prints a progress line as each item completes.
     Reindex {
         /// Suppress the per-item progress lines; print only the final
         /// summary. Useful in scripts.

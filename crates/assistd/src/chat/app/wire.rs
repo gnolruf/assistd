@@ -35,9 +35,8 @@ impl App {
         self.own_turn_ids.push_back(id.to_string());
     }
 
-    /// Route a bus event: titles go to the status stream, and turns this
-    /// chat did not start are drawn like its own replies. A `Done` or
-    /// `Error` counts only when it closes the turn on screen, since every
+    /// Route a bus event, drawing turns this chat did not start like its own replies.
+    /// A `Done` or `Error` counts only when it closes the turn on screen, since every
     /// client's one-shot requests end with one.
     fn on_bus_event(&mut self, ev: Event) {
         if matches!(ev, Event::Transcription { .. }) {

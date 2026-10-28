@@ -1,6 +1,5 @@
-//! A bash lexer for policy checks: it finds every simple command a script
-//! can run. Where it cannot follow bash exactly it errs toward seeing
-//! commands that are not there, never toward hiding ones that are.
+//! A bash lexer that finds every simple command a script can run; where it cannot follow bash
+//! exactly it errs toward seeing commands that are not there, never toward hiding real ones.
 
 use std::mem;
 use std::ops::Range;
@@ -930,9 +929,7 @@ impl WordBuf {
 }
 
 /// Lex `src` into its simple commands.
-///
-/// # Errors
-/// [`TooDeep`] when constructs nest more than [`MAX_DEPTH`] levels deep.
+/// Fails with [`TooDeep`] when constructs nest more than [`MAX_DEPTH`] levels deep.
 pub(super) fn parse(src: &str) -> Result<Script, TooDeep> {
     let mut script = Script::default();
     let mut lexer = Lexer::new(src, &mut script, 0);

@@ -1,6 +1,5 @@
 //! Daemon connections: one-shot requests and the two-way query dialog.
-//! Each runs as an app task and reports a failure before its terminal
-//! event as a [`ChatEvent::WireError`] on its stream.
+//! Each reports a failure as [`ChatEvent::WireError`] before its terminal event.
 
 use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, PermissionMode, Request};
 use assistd_tools::Attachment;

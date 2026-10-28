@@ -151,17 +151,6 @@ impl WmCommand {
     }
 }
 
-#[cfg(test)]
-impl WmCommand {
-    pub(crate) fn for_test(wm: Arc<dyn WindowManager>) -> Self {
-        Self::new(
-            wm,
-            Arc::new(crate::policy::AlwaysAllowGate),
-            Arc::new(Approvals::unsaved()),
-        )
-    }
-}
-
 #[async_trait]
 impl Command for WmCommand {
     fn name(&self) -> &str {

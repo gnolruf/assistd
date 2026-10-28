@@ -1,3 +1,5 @@
+//! Compositor selection for window management and screenshots.
+
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{DescribeSettings, describe_fields};

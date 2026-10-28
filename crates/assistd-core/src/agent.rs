@@ -40,11 +40,9 @@ const TRUNCATION_NOTE: &str = "Your previous response reached the output-token l
      it finished, so it was discarded and none of its tool calls ran. Keep your reasoning \
      brief and your tool calls small: split a long script into several shorter calls.";
 
-/// Long-lived agent dependencies, reused across turns.
-///
-/// With a `health` probe the loop replays a step once after a
-/// llama-server crash; without one, a crash ends the turn. A tool still
-/// running after `tool_deadline` is reported to the model as failed.
+/// Long-lived agent dependencies, reused across turns. With a `health` probe the loop
+/// replays a step once after a llama-server crash; without one, a crash ends the turn.
+/// A tool still running after `tool_deadline` is reported to the model as failed.
 #[derive(Debug)]
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
@@ -70,12 +68,9 @@ impl Agent {
         }
     }
 
-    /// Run one agent turn, streaming events on `tx` until the model
-    /// answers. Stops without error when `tx` closes or `cancel` fires.
-    /// Turns must not run concurrently on one agent.
-    ///
-    /// Errors when the backend fails; an incomplete restart surfaces as
-    /// [`LlmError::ServerRestarting`].
+    /// Run one turn, streaming events on `tx` until the model answers or `tx` closes or
+    /// `cancel` fires. Turns must not run concurrently on one agent. Errors when the
+    /// backend fails; an incomplete restart surfaces as [`LlmError::ServerRestarting`].
     #[instrument(skip_all, name = "agent_turn")]
     pub async fn run_turn(
         &self,
@@ -243,10 +238,9 @@ impl Agent {
         }
     }
 
-    /// Announce the step's calls, then dispatch each in order. Once the
-    /// client leaves or the turn is cancelled, every call not yet run is
-    /// answered with a cancelled payload so the batch stays complete. The
-    /// flag is `true` when a call hit [`DUPLICATE_CALL_LIMIT`].
+    /// Announce the step's calls and dispatch each in order, answering any left unrun after
+    /// the client leaves or cancellation with a cancelled payload so the batch stays
+    /// complete. Returns `true` when a call hit [`DUPLICATE_CALL_LIMIT`].
     async fn dispatch_tool_calls(
         &self,
         turn: &mut Turn,
@@ -380,10 +374,9 @@ enum Replay {
     Abandoned(String),
 }
 
-/// Why the loop stopped accepting tool calls for the rest of the turn.
-///
-/// The schemas stay in the request after withdrawal; without them the
-/// server stops parsing tool-call markup and would stream it as text.
+/// Why the loop stopped accepting tool calls for the rest of the turn. The schemas
+/// stay in the request after withdrawal; without them the server stops parsing
+/// tool-call markup and would stream it as text.
 #[derive(Debug, Clone, Copy)]
 enum ToolBudgetExhausted {
     Repeating,

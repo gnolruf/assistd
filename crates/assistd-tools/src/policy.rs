@@ -196,10 +196,9 @@ where
         .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()))
 }
 
-/// The first of `patterns` found in `script`, ignoring ASCII case. A
-/// pattern ending in a non-alphanumeric only matches where a shell word
-/// ends (`rm -rf /` misses `rm -rf /tmp`); others also match a longer word
-/// (`mkfs` hits `mkfs.ext4`). Empty patterns never match.
+/// The first non-empty pattern found in `script`, ignoring ASCII case. A pattern ending in a
+/// non-alphanumeric only matches at a word end (`rm -rf /` misses `rm -rf /tmp`); others also
+/// match a longer word (`mkfs` hits `mkfs.ext4`).
 pub fn matches_denylist<'a>(script: &str, patterns: &'a [String]) -> Option<&'a str> {
     let haystack = script.to_ascii_lowercase();
     patterns

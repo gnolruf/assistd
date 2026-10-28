@@ -104,13 +104,8 @@ impl GlobWalk<'_> {
     }
 }
 
-/// Expand words into the argument list a command receives, reading
-/// directories on the blocking pool. Only unquoted words expand, and only
-/// `~` and globs; an unmatched glob stays as written.
-///
-/// # Errors
-/// A glob past [`MAX_GLOB_MATCHES`] or [`MAX_GLOB_ENTRIES`] fails the whole
-/// expansion.
+/// Expand `~` and globs in unquoted words into a command's arguments; an unmatched glob stays as
+/// written. Fails when a glob passes [`MAX_GLOB_MATCHES`] or [`MAX_GLOB_ENTRIES`].
 pub async fn expand_args(words: &[Word]) -> Result<Vec<String>, ExpandError> {
     let words = words.to_vec();
     tokio::task::spawn_blocking(move || expand_words(&words)).await?

@@ -1,3 +1,5 @@
+//! `uniq`: collapse adjacent duplicate lines of files or stdin.
+
 use async_trait::async_trait;
 
 use crate::command::{Command, CommandInput, CommandOutput};

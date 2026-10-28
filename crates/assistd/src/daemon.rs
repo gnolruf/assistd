@@ -1,6 +1,5 @@
-//! Daemon entrypoint: bring up the subsystems, serve the IPC socket while
-//! the model, voice, embedding, search and MCP servers start in the
-//! background, tear down in order.
+//! Daemon entrypoint: bring up the subsystems, serve IPC while the model, voice,
+//! embedding, search and MCP servers start in the background, tear down in order.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

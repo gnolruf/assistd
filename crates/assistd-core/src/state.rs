@@ -1,6 +1,7 @@
 //! `AppState` and the request dispatcher; each submodule adds the
 //! handlers for one family of `Request` variants.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,10 +107,9 @@ impl AppState {
         }
     }
 
-    /// Route one request from the client running as `peer_pid` to its
-    /// handler, streaming events back on `tx`. No events are sent after
-    /// this returns. Every request except `Subscribe` is bounded by the
-    /// dispatch envelope timeout.
+    /// Route one request from the client running as `peer_pid` to its handler, streaming
+    /// events on `tx` and none after returning. Every request except `Subscribe` is bounded
+    /// by the dispatch envelope timeout.
     pub async fn dispatch(
         self: Arc<Self>,
         req: Request,
@@ -176,85 +176,83 @@ impl AppState {
                 text,
                 attachments,
             } => {
-                return self
-                    .handle_query(id, text, attachments, TurnOrigin::Typed, tx)
-                    .await;
+                self.handle_query(id, text, attachments, TurnOrigin::Typed, tx)
+                    .await
             }
-            Request::SetPresence { id, target } => {
-                return self.handle_set_presence(id, target, tx).await;
-            }
-            Request::PttStart { id } => return self.handle_ptt_start(id, tx).await,
-            Request::PttStop { id } => return self.handle_ptt_stop(id, tx).await,
-            Request::ListenStart { id } => return self.handle_listen_start(id, tx).await,
-            Request::ListenStop { id } => return self.handle_listen_stop(id, tx).await,
-            Request::ListenToggle { id } => return self.handle_listen_toggle(id, tx).await,
-            Request::WakeWord { id, op } => return self.handle_wake_word(id, op, tx).await,
+            Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
+            Request::PttStart { id } => self.handle_ptt_start(id, tx).await,
+            Request::PttStop { id } => self.handle_ptt_stop(id, tx).await,
+            Request::ListenStart { id } => self.handle_listen_start(id, tx).await,
+            Request::ListenStop { id } => self.handle_listen_stop(id, tx).await,
+            Request::ListenToggle { id } => self.handle_listen_toggle(id, tx).await,
+            Request::WakeWord { id, op } => self.handle_wake_word(id, op, tx).await,
             Request::MemorySave { id, key, value } => {
-                return self.handle_memory_save(id, key, value, tx).await;
+                self.handle_memory_save(id, key, value, tx).await
             }
-            Request::MemoryLoad { id, key } => return self.handle_memory_load(id, key, tx).await,
-            Request::MemoryList { id, prefix } => {
-                return self.handle_memory_list(id, prefix, tx).await;
-            }
+            Request::MemoryLoad { id, key } => self.handle_memory_load(id, key, tx).await,
+            Request::MemoryList { id, prefix } => self.handle_memory_list(id, prefix, tx).await,
             Request::MemoryListAll { id, prefix, limit } => {
-                return self.handle_memory_list_all(id, prefix, limit, tx).await;
+                self.handle_memory_list_all(id, prefix, limit, tx).await
             }
-            Request::MemoryDelete { id, key } => {
-                return self.handle_memory_delete(id, key, tx).await;
-            }
+            Request::MemoryDelete { id, key } => self.handle_memory_delete(id, key, tx).await,
             Request::MemoryForget { id, memory_id } => {
-                return self.handle_memory_forget(id, memory_id, tx).await;
+                self.handle_memory_forget(id, memory_id, tx).await
             }
             Request::MemorySemanticSearch { id, query, limit } => {
-                return self
-                    .handle_memory_semantic_search(id, query, limit, tx)
-                    .await;
+                self.handle_memory_semantic_search(id, query, limit, tx)
+                    .await
             }
-            Request::MemoryReindex { id } => return self.handle_memory_reindex(id, tx).await,
-            Request::GetPresence { id } => self.handle_get_presence(id, tx).await,
-            Request::GetListenState { id } => self.handle_get_listen_state(id, tx).await,
-            Request::VoiceToggle { id } => self.handle_voice_toggle(id, tx).await,
-            Request::VoiceSkip { id } => self.handle_voice_skip(id, tx).await,
-            Request::InterruptTurn { id } => self.handle_interrupt_turn(id, tx).await,
-            Request::GetVoiceState { id } => self.handle_get_voice_state(id, tx).await,
-            Request::GetCapabilities { id } => self.handle_get_capabilities(id, tx).await,
-            Request::Fork { id, name } => self.handle_fork(id, name, tx).await,
-            Request::Branches { id } => self.handle_branches(id, tx).await,
-            Request::Switch { id, target } => self.handle_switch(id, target, tx).await,
-            Request::Undo { id } => self.handle_undo(id, tx).await,
+            Request::MemoryReindex { id } => self.handle_memory_reindex(id, tx).await,
+            Request::GetPresence { id } => replied(self.handle_get_presence(id, tx)).await,
+            Request::GetListenState { id } => replied(self.handle_get_listen_state(id, tx)).await,
+            Request::VoiceToggle { id } => replied(self.handle_voice_toggle(id, tx)).await,
+            Request::VoiceSkip { id } => replied(self.handle_voice_skip(id, tx)).await,
+            Request::InterruptTurn { id } => replied(self.handle_interrupt_turn(id, tx)).await,
+            Request::GetVoiceState { id } => replied(self.handle_get_voice_state(id, tx)).await,
+            Request::GetCapabilities { id } => replied(self.handle_get_capabilities(id, tx)).await,
+            Request::Fork { id, name } => replied(self.handle_fork(id, name, tx)).await,
+            Request::Branches { id } => replied(self.handle_branches(id, tx)).await,
+            Request::Switch { id, target } => replied(self.handle_switch(id, target, tx)).await,
+            Request::Undo { id } => replied(self.handle_undo(id, tx)).await,
             Request::ResumeOrNew { id, recency_secs } => {
-                self.handle_resume_or_new(id, recency_secs, tx).await;
+                replied(self.handle_resume_or_new(id, recency_secs, tx)).await
             }
-            Request::NewSession { id } => self.handle_new_session(id, tx).await,
+            Request::NewSession { id } => replied(self.handle_new_session(id, tx)).await,
             Request::ChatState { id, focused } => {
-                self.handle_chat_state(id, focused, peer_pid, tx).await;
+                replied(self.handle_chat_state(id, focused, peer_pid, tx)).await
             }
-            Request::ChatClosed { id } => self.handle_chat_closed(id, peer_pid, tx).await,
-            Request::GetChatFocus { id } => self.handle_get_chat_focus(id, tx).await,
-            Request::GetReadiness { id } => self.handle_get_readiness(id, tx).await,
-            Request::Subscribe { id, filter } => self.handle_subscribe(id, filter, tx).await,
+            Request::ChatClosed { id } => replied(self.handle_chat_closed(id, peer_pid, tx)).await,
+            Request::GetChatFocus { id } => replied(self.handle_get_chat_focus(id, tx)).await,
+            Request::GetReadiness { id } => replied(self.handle_get_readiness(id, tx)).await,
+            Request::Subscribe { id, filter } => {
+                replied(self.handle_subscribe(id, filter, tx)).await
+            }
             Request::ConfirmResponse { id, confirm_id, .. } => {
-                send_error(
+                replied(send_error(
                     &tx,
                     id,
                     format!(
                         "ConfirmResponse(confirm_id={confirm_id}) received with no matching \
                          ConfirmRequest in flight on this connection"
                     ),
-                )
-                .await;
+                ))
+                .await
             }
             Request::SetPermissionMode { id, .. } => {
-                send_error(
+                replied(send_error(
                     &tx,
                     id,
                     "SetPermissionMode is honored only on a Query connection".to_string(),
-                )
-                .await;
+                ))
+                .await
             }
         }
-        Ok(())
     }
+}
+
+async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {
+    reply.await;
+    Ok(())
 }
 
 async fn send_error(tx: &mpsc::Sender<Event>, id: String, message: String) {

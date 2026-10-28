@@ -1,6 +1,5 @@
-//! Notification driver: decides when the turn's notification is shown,
-//! updated, hidden, or turned into an interrupt. Nothing is shown while
-//! the chat has keyboard focus.
+//! Notification driver: decides when the turn's notification is shown, updated,
+//! hidden, or turned into an interrupt; nothing shows while the chat has focus.
 
 use std::time::Duration;
 
