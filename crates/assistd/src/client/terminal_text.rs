@@ -18,6 +18,12 @@ pub(crate) fn escape_controls_single_line(text: &str) -> Cow<'_, str> {
     escape_where(text, |c| c.is_control() || is_format(c) || is_separator(c))
 }
 
+/// `text` with only the bidi controls that would reorder it escaped.
+#[cfg(feature = "chat")]
+pub(crate) fn escape_bidi_controls(text: &str) -> Cow<'_, str> {
+    escape_where(text, is_bidi_control)
+}
+
 fn escape_where(text: &str, needs_escape: impl Fn(char) -> bool) -> Cow<'_, str> {
     if !text.chars().any(&needs_escape) {
         return Cow::Borrowed(text);
@@ -104,6 +110,15 @@ mod tests {
         assert_eq!(
             escape_controls("a\u{202E}b\u{2029}c\u{200D}d"),
             "a\\u{202e}b\\u{2029}c\u{200D}d"
+        );
+    }
+
+    #[cfg(feature = "chat")]
+    #[test]
+    fn bidi_only_escape_keeps_other_controls() {
+        assert_eq!(
+            escape_bidi_controls("\x1b[1mfdp.\u{202E}exe\u{200D}\u{2066}"),
+            "\x1b[1mfdp.\\u{202e}exe\u{200D}\\u{2066}"
         );
     }
 }
