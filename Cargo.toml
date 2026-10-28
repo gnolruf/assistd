@@ -82,7 +82,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 tokio-i3ipc = "0.16"
 swayipc-async = "3"
 url = { version = "2", features = ["serde"] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 ksni = { version = "0.3.4", default-features = false, features = ["tokio"] }
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 sherpa-onnx = { version = "2.0.0", default-features = false, features = ["shared"] }
