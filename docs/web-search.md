@@ -88,8 +88,19 @@ command = "/home/me/src/searxng/.venv/bin/searxng-run"
 Whatever you run must stay in the foreground, honour the
 `SEARXNG_SETTINGS_PATH`, `SEARXNG_BIND_ADDRESS`, `SEARXNG_PORT` and
 `SEARXNG_SECRET` variables the daemon sets, and answer `GET /healthz`.
-`searxng-run` does all of this. A uWSGI, Granian or container setup
-needs a small wrapper script that does too.
+`searxng-run` does all of this. A uWSGI or Granian setup needs a small
+wrapper script that does too.
+
+The listening socket must also belong to a process the daemon started:
+a `200` from `/healthz` only counts if a process in the command's
+process group holds the socket on `host:port`, so another program
+answering on that port can't pass as SearXNG. This rules out docker
+and podman. With port publishing the socket belongs to `docker-proxy`
+or `rootlessport`, and with host networking it belongs to a process
+under the container runtime, outside that process group.
+Either way the instance never becomes ready and search degrades
+after `ready_timeout_secs`. Run SearXNG directly from a package or a
+venv instead.
 
 ## Troubleshooting
 
@@ -115,7 +126,8 @@ is taken (`Address already in use`). Find the owner with
 instance with `[search] port = …`. The port must also differ from
 `model.port` and `embedding.port`; config validation enforces this.
 A slow first start (compiling, a cold venv) may need a larger
-`ready_timeout_secs`.
+`ready_timeout_secs`. If `search.command` starts a container, it never
+becomes ready; see [Manual install](#manual-install).
 
 **`web search: unavailable (failed to read the <engine> API key from …)`**
 or **`(the <engine> API key file … is empty)`.** Fix or fill that
