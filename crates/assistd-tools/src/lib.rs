@@ -19,8 +19,10 @@ pub mod memory_tools;
 pub mod policy;
 pub mod presentation;
 pub mod run;
+mod tool_output;
 pub mod vision;
 
+pub use assistd_ipc::ImageMime;
 pub use attachment::{LoadImageError, load_image_attachment};
 pub use catalog::ToolCatalog;
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
@@ -37,6 +39,7 @@ pub use policy::{
 pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use presentation::{OutputCap, PresentSpec};
 pub use run::RunTool;
+pub use tool_output::{RawStreams, ToolOutput};
 pub use vision::VisionGate;
 
 /// Prefix of every MCP-adapted tool's name (`mcp__<server>__<tool>`).
@@ -68,12 +71,12 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     /// JSON Schema for the `arguments` object [`Tool::invoke`] accepts.
     fn parameters_schema(&self) -> Value;
 
-    /// Execute the tool with JSON arguments and return a JSON result.
-    async fn invoke(&self, args: Value) -> Result<Value, ToolError>;
+    /// Execute the tool with JSON arguments.
+    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError>;
 }
 
 /// Lookup table of registered tools; cloning shares the tools. Every
-/// tool's text `output` is held to the registry's [`OutputCap`].
+/// tool's [`ToolOutput::output`] is held to the registry's [`OutputCap`].
 #[derive(Debug, Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
@@ -156,8 +159,8 @@ impl ToolRegistry {
     }
 }
 
-/// A registered tool whose string `output` is cut to `output_cap`, spilling
-/// under the tool's name and flagging the result `truncated`.
+/// A registered tool whose `output` is cut to `output_cap`, spilling under
+/// the tool's name and flagging the result `truncated`.
 #[derive(Debug)]
 struct CappedTool {
     inner: Box<dyn Tool>,
@@ -178,20 +181,15 @@ impl Tool for CappedTool {
         self.inner.parameters_schema()
     }
 
-    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
+    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let mut result = self.inner.invoke(args).await?;
-        let Some(Value::String(output)) = result.get_mut("output") else {
-            return Ok(result);
-        };
         let cut = self
             .output_cap
-            .cap(self.inner.name(), std::mem::take(output));
-        *output = cut.text;
-        if cut.truncated {
-            result["truncated"] = Value::Bool(true);
-        }
-        if let Some(path) = cut.overflow_file {
-            result["overflow_file"] = json!(path.to_string_lossy());
+            .cap(self.inner.name(), std::mem::take(&mut result.output));
+        result.output = cut.text;
+        result.truncated |= cut.truncated;
+        if cut.overflow_file.is_some() {
+            result.overflow_file = cut.overflow_file;
         }
         Ok(result)
     }
@@ -217,6 +215,8 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[derive(Debug)]
@@ -233,8 +233,8 @@ mod tests {
         fn parameters_schema(&self) -> Value {
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
-        async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
-            Ok(Value::Null)
+        async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::default())
         }
     }
 
@@ -252,8 +252,8 @@ mod tests {
         fn parameters_schema(&self) -> Value {
             json!({})
         }
-        async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
-            Ok(json!({"output": "x".repeat(10_000), "truncated": false}))
+        async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("x".repeat(10_000), Duration::ZERO))
         }
     }
 
@@ -270,10 +270,10 @@ mod tests {
 
         let result = reg.get("verbose").unwrap().invoke(json!({})).await.unwrap();
 
-        assert!(result["output"].as_str().unwrap().len() <= max_bytes);
-        assert_eq!(result["truncated"], json!(true));
+        assert!(result.output.len() <= max_bytes);
+        assert!(result.truncated);
         let spilled = dir.path().join("verbose-1.txt");
-        assert_eq!(result["overflow_file"], json!(spilled.to_string_lossy()));
+        assert_eq!(result.overflow_file.as_deref(), Some(spilled.as_path()));
         assert_eq!(std::fs::read(spilled).unwrap().len(), 10_000);
     }
 

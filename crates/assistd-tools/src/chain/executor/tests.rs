@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 
+use assistd_ipc::ImageMime;
+
 use super::*;
 use crate::chain::{MAX_OPERATORS, parse_chain};
 use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
@@ -152,7 +154,7 @@ impl Command for Picture {
     async fn run(&self, _input: CommandInput) -> CommandOutput {
         CommandOutput {
             attachments: vec![Attachment::Image {
-                mime: "image/png".to_string(),
+                mime: ImageMime::Png,
                 bytes: vec![0; self.size],
             }],
             ..CommandOutput::ok(b"attached\n".to_vec())

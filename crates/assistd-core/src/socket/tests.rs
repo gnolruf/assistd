@@ -742,7 +742,7 @@ impl assistd_tools::Tool for GatedTool {
     async fn invoke(
         &self,
         _args: serde_json::Value,
-    ) -> Result<serde_json::Value, assistd_tools::ToolError> {
+    ) -> Result<assistd_tools::ToolOutput, assistd_tools::ToolError> {
         let approved = assistd_tools::ConfirmationGate::confirm(
             &assistd_tools::IpcConfirmationGate,
             assistd_tools::ConfirmationRequest {
@@ -755,10 +755,10 @@ impl assistd_tools::Tool for GatedTool {
         )
         .await;
         let approved = approved != Approval::Deny;
-        Ok(serde_json::json!({
-            "output": if approved { "approved" } else { "denied" },
-            "exit_code": 0,
-        }))
+        Ok(assistd_tools::ToolOutput::text(
+            if approved { "approved" } else { "denied" },
+            Duration::ZERO,
+        ))
     }
 }
 
@@ -1081,7 +1081,7 @@ impl assistd_tools::Tool for SilentHangingTool {
     async fn invoke(
         &self,
         _args: serde_json::Value,
-    ) -> Result<serde_json::Value, assistd_tools::ToolError> {
+    ) -> Result<assistd_tools::ToolOutput, assistd_tools::ToolError> {
         let _flag = DropFlag(self.dropped.clone());
         std::future::pending::<()>().await;
         unreachable!("hanging tool must never resolve")

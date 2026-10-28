@@ -7,7 +7,6 @@ use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -31,7 +30,7 @@ use assistd_core::{
 use assistd_ipc::{Event, Request};
 use assistd_llm::{
     EchoBackend, LlamaChatClient, LlamaServerError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
-    LlmResult, ReadyState, StepOutcome, Thinking, ToolResultPayload,
+    LlmResult, ReadyState, StepOutcome, ToolResultPayload,
 };
 use assistd_tools::Attachment;
 
@@ -133,7 +132,7 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
     init_tracing();
     let port = grab_port().await;
     let (manager, _shutdown) = new_active_manager(&fake, port).await;
-    let pid_initial = manager.llama_pid().await.expect("child running");
+    let pid_initial = manager.llama_pid().expect("child running");
     let (load_initial, _, _) = get_counters(port).await;
 
     manager.drowse().await.unwrap();
@@ -145,7 +144,7 @@ async fn wake_from_drowsy_reuses_process_and_only_loads_model() {
         .expect("wake from Drowsy should succeed");
     assert_eq!(manager.state(), PresenceState::Active);
 
-    let pid_after = manager.llama_pid().await.expect("child still running");
+    let pid_after = manager.llama_pid().expect("child still running");
     assert_eq!(
         pid_initial, pid_after,
         "wake from Drowsy must not respawn the process"
@@ -167,7 +166,7 @@ async fn wake_from_sleeping_cold_starts_and_returns_active() {
     init_tracing();
     let port = grab_port().await;
     let (manager, _shutdown) = new_active_manager(&fake, port).await;
-    let pid_before = manager.llama_pid().await.expect("child running");
+    let pid_before = manager.llama_pid().expect("child running");
 
     manager.sleep().await.unwrap();
     assert!(wait_for_pid_gone(pid_before, Duration::from_secs(5)).await);
@@ -177,7 +176,7 @@ async fn wake_from_sleeping_cold_starts_and_returns_active() {
         .await
         .expect("wake from Sleeping should succeed");
     assert_eq!(manager.state(), PresenceState::Active);
-    let pid_after = manager.llama_pid().await.expect("child running after wake");
+    let pid_after = manager.llama_pid().expect("child running after wake");
     assert_ne!(
         pid_before, pid_after,
         "cold-start wake must spawn a new child"
@@ -193,7 +192,7 @@ async fn failed_wake_leaves_nothing_behind_for_sleep_to_miss() {
     init_tracing();
     let port = grab_port().await;
     let (manager, _shutdown) = new_active_manager(&fake, port).await;
-    let pid_before = manager.llama_pid().await.expect("child running");
+    let pid_before = manager.llama_pid().expect("child running");
 
     manager.sleep().await.unwrap();
     assert!(wait_for_pid_gone(pid_before, Duration::from_secs(5)).await);
@@ -207,7 +206,7 @@ async fn failed_wake_leaves_nothing_behind_for_sleep_to_miss() {
 
     assert_eq!(manager.state(), PresenceState::Sleeping);
     assert!(
-        manager.llama_pid().await.is_none(),
+        manager.llama_pid().is_none(),
         "a failed wake must not leave a handle the Sleeping manager cannot reach"
     );
     assert!(
@@ -242,7 +241,7 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
     )
     .await
     .expect("cold-start wake failed");
-    let pid = manager.llama_pid().await.expect("child running");
+    let pid = manager.llama_pid().expect("child running");
 
     let err = manager
         .sleep()
@@ -259,7 +258,7 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
         "the teardown signal cannot be recalled, so the state must follow it"
     );
     assert!(
-        manager.llama_pid().await.is_none(),
+        manager.llama_pid().is_none(),
         "an Active manager with an empty slot can never be woken or slept again"
     );
     assert!(
@@ -274,7 +273,7 @@ async fn sleep_cancelled_mid_teardown_can_still_wake() {
     let port = grab_port().await;
     let fake = FakeLlama::new("slow-term=3");
     let (manager, _shutdown) = new_active_manager(&fake, port).await;
-    let pid = manager.llama_pid().await.expect("child running");
+    let pid = manager.llama_pid().expect("child running");
     let mut states = manager.subscribe();
 
     let sleeper = Arc::clone(&manager);
@@ -293,7 +292,7 @@ async fn sleep_cancelled_mid_teardown_can_still_wake() {
     );
 
     assert_eq!(manager.state(), PresenceState::Sleeping);
-    assert!(manager.llama_pid().await.is_none(), "slot must be empty");
+    assert!(manager.llama_pid().is_none(), "slot must be empty");
     assert!(
         wait_for_pid_gone(pid, Duration::from_secs(5)).await,
         "the signalled supervisor should still wind the child down"
@@ -304,7 +303,7 @@ async fn sleep_cancelled_mid_teardown_can_still_wake() {
         .await
         .expect("wake after a cancelled sleep should cold-start");
     assert_eq!(manager.state(), PresenceState::Active);
-    let new_pid = manager.llama_pid().await.expect("child running after wake");
+    let new_pid = manager.llama_pid().expect("child running after wake");
     assert_ne!(new_pid, pid);
     assert!(pid_alive(new_pid));
 
@@ -331,32 +330,6 @@ fn presence_probed_client(
     .expect("build chat client")
 }
 
-/// Take and release the llama-server slot in a tight loop until `stop` flips.
-async fn contend_for_llama_slot(manager: Arc<PresenceManager>, stop: Arc<AtomicBool>) {
-    while !stop.load(Ordering::Relaxed) {
-        let _ = manager.llama_pid().await;
-        tokio::task::yield_now().await;
-    }
-}
-
-/// Run a one-shot completion and an agent step, asserting each succeeds.
-async fn complete_each_kind_of_request(client: &LlamaChatClient, round: usize) {
-    let oneshot = client
-        .complete_oneshot("title?".into(), Thinking::Disabled)
-        .await;
-    assert!(oneshot.is_ok(), "one-shot {round}: {oneshot:?}");
-    client
-        .push_user(format!("question {round}"), Vec::new())
-        .await
-        .unwrap();
-    let (tx, _rx) = mpsc::channel(32);
-    let step = client.step(Vec::new(), tx).await;
-    assert!(
-        matches!(step, Ok(StepOutcome::Final)),
-        "step {round}: {step:?}"
-    );
-}
-
 fn kill_child(pid: u32) {
     let pid = i32::try_from(pid)
         .ok()
@@ -380,7 +353,7 @@ async fn squat_on(port: u16) -> TcpListener {
 async fn wait_for_supervisor_restarting(manager: &PresenceManager) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !matches!(
-        manager.llama_health().await.map(|health| health.state),
+        manager.llama_health().map(|health| health.state),
         Some(ReadyState::Starting | ReadyState::BackingOff { .. })
     ) {
         assert!(
@@ -400,7 +373,7 @@ async fn nothing_reaches_a_listener_squatting_on_a_crashed_servers_port() {
     let client = presence_probed_client(&fake, port, &manager);
 
     fake.set_mode("bind-fail");
-    kill_child(manager.llama_pid().await.expect("child running"));
+    kill_child(manager.llama_pid().expect("child running"));
     let squatter = squat_on(port).await;
     wait_for_supervisor_restarting(&manager).await;
     assert_eq!(manager.state(), PresenceState::Active);
@@ -657,45 +630,6 @@ async fn concurrent_queries_during_wake_all_complete() {
     );
 
     daemon.stop().await;
-    manager.sleep().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn requests_wait_out_a_contended_llama_slot_instead_of_failing() {
-    let fake = FakeLlama::new("normal");
-    init_tracing();
-    let port = grab_port().await;
-    let (manager, _shutdown) = new_active_manager(&fake, port).await;
-    let client = presence_probed_client(&fake, port, &manager);
-    let stop = Arc::new(AtomicBool::new(false));
-    let contenders: Vec<_> = (0..2)
-        .map(|_| {
-            tokio::spawn(contend_for_llama_slot(
-                Arc::clone(&manager),
-                Arc::clone(&stop),
-            ))
-        })
-        .collect();
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut contended_snapshots = 0;
-    let mut requests = 0;
-    while contended_snapshots < 3 || requests < 50 {
-        assert!(
-            Instant::now() < deadline,
-            "slot seen contended {contended_snapshots} times in {requests} requests"
-        );
-        if manager.llama_pid_blocking().is_none() {
-            contended_snapshots += 1;
-        }
-        complete_each_kind_of_request(&client, requests).await;
-        requests += 1;
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    for contender in contenders {
-        contender.await.unwrap();
-    }
     manager.sleep().await.unwrap();
 }
 

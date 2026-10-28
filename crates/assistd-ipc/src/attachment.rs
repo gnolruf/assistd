@@ -5,14 +5,11 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 
 use assistd_utils::text::human_size;
-
-/// MIME types llama.cpp's vision adapters accept; `infer::is_image` alone also passes GIF, BMP,
-/// TIFF and HEIC.
-const SUPPORTED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
 /// Largest accepted image: room for a 4K PNG screenshot, small enough to reject video or RAW.
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -20,11 +17,49 @@ pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 /// Largest combined decoded size of every image on one query, matching the socket's query frame.
 pub const MAX_QUERY_IMAGE_BYTES: u64 = MAX_IMAGE_BYTES;
 
+/// An image format llama.cpp's vision adapters accept, serialized as its MIME type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ImageMime {
+    #[serde(rename = "image/png")]
+    Png,
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    #[serde(rename = "image/webp")]
+    Webp,
+}
+
+impl ImageMime {
+    const ALL: [ImageMime; 3] = [ImageMime::Png, ImageMime::Jpeg, ImageMime::Webp];
+
+    /// The MIME type, as in `image/png`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ImageMime::Png => "image/png",
+            ImageMime::Jpeg => "image/jpeg",
+            ImageMime::Webp => "image/webp",
+        }
+    }
+
+    /// The format whose MIME type is `mime`, or `None` for any other type.
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|format| format.as_str() == mime)
+    }
+
+    fn supported_list() -> String {
+        Self::ALL.map(Self::as_str).join(", ")
+    }
+}
+
+impl fmt::Display for ImageMime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A validated image read by [`load_image`].
 #[derive(Debug)]
 pub struct LoadedImage {
-    /// One of `image/png`, `image/jpeg` or `image/webp`.
-    pub mime: String,
+    pub mime: ImageMime,
     pub bytes: Vec<u8>,
 }
 
@@ -78,7 +113,7 @@ impl LoadImageError {
             }
             LoadImageError::UnsupportedFormat { path, mime } => format!(
                 "unsupported image format: {path} ({mime}). Supported: {}",
-                SUPPORTED_MIMES.join(", ")
+                ImageMime::supported_list()
             ),
         }
     }
@@ -91,7 +126,10 @@ pub enum ImageFormatError {
     Unrecognized,
     #[error("not an image (detected {detected})")]
     NotAnImage { detected: &'static str },
-    #[error("unsupported image format {mime}; supported: {}", SUPPORTED_MIMES.join(", "))]
+    #[error(
+        "unsupported image format {mime}; supported: {}",
+        ImageMime::supported_list()
+    )]
     UnsupportedFormat { mime: &'static str },
 }
 
@@ -153,23 +191,17 @@ pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
         return Err(too_large(read));
     }
     let mime = sniff_image(&bytes).map_err(|e| e.at_path(display_path()))?;
-    Ok(LoadedImage {
-        mime: mime.to_string(),
-        bytes,
-    })
+    Ok(LoadedImage { mime, bytes })
 }
 
-/// Detect the MIME type of `bytes` from its magic number, accepting only PNG, JPEG and WebP.
-pub fn sniff_image(bytes: &[u8]) -> Result<&'static str, ImageFormatError> {
+/// Detect the format of `bytes` from its magic number, accepting only PNG, JPEG and WebP.
+pub fn sniff_image(bytes: &[u8]) -> Result<ImageMime, ImageFormatError> {
     let detected = infer::get(bytes).ok_or(ImageFormatError::Unrecognized)?;
     let mime = detected.mime_type();
     if !infer::is_image(bytes) {
         return Err(ImageFormatError::NotAnImage { detected: mime });
     }
-    if !SUPPORTED_MIMES.contains(&mime) {
-        return Err(ImageFormatError::UnsupportedFormat { mime });
-    }
-    Ok(mime)
+    ImageMime::from_mime(mime).ok_or(ImageFormatError::UnsupportedFormat { mime })
 }
 
 async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {
@@ -189,7 +221,7 @@ mod tests {
 
     use super::*;
 
-    /// Minimal GIF89a: an image to `infer`, but outside [`SUPPORTED_MIMES`].
+    /// Minimal GIF89a: an image to `infer`, but not an [`ImageMime`].
     const GIF_BYTES: &[u8] = &[
         0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF,
         0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,

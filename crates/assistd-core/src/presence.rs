@@ -11,7 +11,7 @@ use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, mpsc, oneshot, watch};
 use tokio::time::timeout;
-use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{Instrument, debug, info, warn};
 
 #[cfg(test)]
@@ -29,6 +29,7 @@ use crate::recovery::spawn_supervised;
 const GUARD_ACQUIRE_RETRIES: usize = 3;
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const LOAD_PROGRESS_INTERVAL: Duration = Duration::from_secs(3);
+const TASK_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 type InnerShutdownSlot = Arc<StdMutex<Option<watch::Sender<bool>>>>;
 
@@ -65,9 +66,6 @@ pub enum PresenceError {
     /// The supervisor restarted or gave up on the child mid-load.
     #[error("llama-server left the ready state while loading {model}")]
     LeftReady { model: String },
-
-    #[error("llama-server handle missing while loading model")]
-    ServiceMissing,
 
     #[error("llama-server /models/unload failed for {model}: {source}")]
     Unload {
@@ -118,14 +116,15 @@ pub trait WakeRoom: fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub struct PresenceManager {
     /// The state the last transition left; `state_tx` overlays `Waking`.
-    settled: StdMutex<PresenceTarget>,
+    /// Never held across an await.
+    lifecycle: StdMutex<Lifecycle>,
     transition: AsyncMutex<()>,
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     api_key: ApiKey,
     control: LlamaServerControl,
-    /// `Some` iff state is `Active` or `Drowsy`.
-    llama: AsyncMutex<Option<ChildServer>>,
+    /// The shutdown forwarder and detached wakes, joined by [`Self::shutdown`].
+    tasks: TaskTracker,
     /// Flipped by `sleep()` to stop the current supervisor only.
     current_inner_shutdown: InnerShutdownSlot,
     state_tx: watch::Sender<PresenceState>,
@@ -176,17 +175,22 @@ impl PresenceManager {
         .map_err(PresenceError::Control)?;
 
         let current_inner_shutdown: InnerShutdownSlot = Arc::new(StdMutex::new(None));
-        spawn_shutdown_forwarder(daemon_shutdown.clone(), Arc::clone(&current_inner_shutdown));
+        let tasks = TaskTracker::new();
+        spawn_shutdown_forwarder(
+            &tasks,
+            daemon_shutdown.clone(),
+            Arc::clone(&current_inner_shutdown),
+        );
 
         let (state_tx, _) = watch::channel(PresenceState::Sleeping);
         Ok(Arc::new(Self {
-            settled: StdMutex::new(PresenceTarget::Sleeping),
+            lifecycle: StdMutex::new(Lifecycle::Sleeping),
             transition: AsyncMutex::new(()),
             model,
             timeouts,
             api_key,
             control,
-            llama: AsyncMutex::new(None),
+            tasks,
             current_inner_shutdown,
             state_tx,
             _daemon_shutdown_keepalive: daemon_shutdown,
@@ -208,16 +212,15 @@ impl PresenceManager {
     }
 
     fn settled(&self) -> PresenceTarget {
-        *self.settled.lock()
+        self.lifecycle.lock().target()
     }
 
     fn mark_activity(&self) {
         *self.last_activity.lock() = Instant::now();
     }
 
-    fn publish_state(&self, state: PresenceTarget) {
-        *self.settled.lock() = state;
-        self.state_tx.send_replace(state.into());
+    fn publish_settled(&self) {
+        self.state_tx.send_replace(self.settled().into());
     }
 
     /// Time since the last user-initiated interaction.
@@ -232,36 +235,24 @@ impl PresenceManager {
 
     /// PID of the managed llama-server child, or `None` if `Sleeping` or
     /// not yet spawned.
-    pub async fn llama_pid(&self) -> Option<u32> {
-        self.llama.lock().await.as_ref().and_then(ChildServer::pid)
+    pub fn llama_pid(&self) -> Option<u32> {
+        self.lifecycle.lock().server().and_then(ChildServer::pid)
     }
 
-    /// Non-blocking [`Self::llama_pid`]. Also `None` while a transition
-    /// holds the llama slot, so a `None` may be spurious.
-    pub fn llama_pid_blocking(&self) -> Option<u32> {
-        self.llama
-            .try_lock()
-            .ok()
-            .and_then(|svc| svc.as_ref().and_then(ChildServer::pid))
-    }
-
-    /// Whether a llama-server child is attached and serving. Waits for the
-    /// slot, so a transition holding it never reads as not serving.
-    pub async fn llama_serving(&self) -> bool {
-        self.llama
+    /// Whether a llama-server child is attached and serving.
+    pub fn llama_serving(&self) -> bool {
+        self.lifecycle
             .lock()
-            .await
-            .as_ref()
+            .server()
             .is_some_and(ChildServer::is_serving)
     }
 
-    /// The llama-server supervisor's state and child pid, read under one wait
-    /// for the slot. `None` when no service is attached.
-    pub async fn llama_health(&self) -> Option<HealthSnapshot> {
-        self.llama
+    /// The llama-server supervisor's state and child pid, read together.
+    /// `None` when no service is attached.
+    pub fn llama_health(&self) -> Option<HealthSnapshot> {
+        self.lifecycle
             .lock()
-            .await
-            .as_ref()
+            .server()
             .map(|service| HealthSnapshot {
                 state: service.state(),
                 pid: service.pid(),
@@ -272,13 +263,12 @@ impl PresenceManager {
     /// elapses. Fails immediately with `Degraded` once the supervisor has
     /// given up, and with `NoService` when nothing is attached.
     pub async fn wait_llama_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {
-        let mut rx = {
-            let guard = self.llama.lock().await;
-            match guard.as_ref() {
-                Some(svc) => svc.subscribe_ready(),
-                None => return Err(HealthWaitError::NoService),
-            }
-        };
+        let mut rx = self
+            .lifecycle
+            .lock()
+            .server()
+            .map(ChildServer::subscribe_ready)
+            .ok_or(HealthWaitError::NoService)?;
 
         if matches!(*rx.borrow(), ReadyState::Ready) {
             return Ok(());
@@ -369,10 +359,12 @@ impl PresenceManager {
         spawn_supervised(
             "request_wake",
             Component::Llm,
-            async move {
-                let _ = result_tx.send(presence.ensure_active().await);
-            }
-            .in_current_span(),
+            self.tasks.track_future(
+                async move {
+                    let _ = result_tx.send(presence.ensure_active().await);
+                }
+                .in_current_span(),
+            ),
         );
         result_rx
             .await
@@ -411,7 +403,7 @@ impl PresenceManager {
         let _inflight = self.inflight.write().await;
 
         let started = Instant::now();
-        let service = self.detach_llama_as_sleeping().await;
+        let service = self.detach_llama_as_sleeping();
         let outcome = self.join_llama_shutdown(service).await;
 
         info!(
@@ -424,11 +416,25 @@ impl PresenceManager {
         outcome
     }
 
-    async fn detach_llama_as_sleeping(&self) -> Option<ChildServer> {
-        let mut slot = self.llama.lock().await;
-        let service = slot.take();
+    /// Sleep for daemon shutdown, then wait up to five seconds for the
+    /// shutdown forwarder and any detached wake to finish.
+    pub async fn shutdown(&self) -> Result<(), PresenceError> {
+        let slept = self.sleep().await;
+        self.tasks.close();
+        if timeout(TASK_DRAIN_GRACE, self.tasks.wait()).await.is_err() {
+            warn!(
+                target: "assistd::presence",
+                remaining = self.tasks.len(),
+                "presence tasks still running after the shutdown grace"
+            );
+        }
+        slept
+    }
+
+    fn detach_llama_as_sleeping(&self) -> Option<ChildServer> {
+        let service = std::mem::take(&mut *self.lifecycle.lock()).into_server();
         self.signal_inner_shutdown();
-        self.publish_state(PresenceTarget::Sleeping);
+        self.publish_settled();
         service
     }
 
@@ -474,7 +480,8 @@ impl PresenceManager {
         let started = Instant::now();
         self.unload_model().await?;
 
-        self.publish_state(PresenceTarget::Drowsy);
+        self.lifecycle.lock().doze();
+        self.publish_settled();
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -486,7 +493,7 @@ impl PresenceManager {
     }
 
     async fn unload_model(&self) -> Result<(), PresenceError> {
-        if !self.llama_serving().await {
+        if !self.llama_serving() {
             return Err(PresenceError::Unload {
                 model: self.model.name.clone(),
                 source: LlamaServerError::NotReady,
@@ -519,18 +526,22 @@ impl PresenceManager {
         if prior == PresenceTarget::Active {
             return Ok(());
         }
-        self.ensure_room_to_wake().await?;
+        self.ensure_room_to_wake()?;
 
         let _wake_marker = WakeMarker::new(self);
 
         let started = Instant::now();
-        match prior {
-            PresenceTarget::Drowsy => self.reload_model().await?,
-            PresenceTarget::Sleeping => self.cold_start().await?,
-            PresenceTarget::Active => unreachable!("short-circuited above"),
+        let drowsy_ready_rx = self
+            .lifecycle
+            .lock()
+            .drowsy_server()
+            .map(|service| self.serving_ready_rx(service));
+        match drowsy_ready_rx {
+            Some(ready_rx) => self.reload_model(ready_rx?).await?,
+            None => self.cold_start().await?,
         }
 
-        self.publish_state(PresenceTarget::Active);
+        self.publish_settled();
         info!(
             target: "assistd::presence",
             prior = ?prior,
@@ -541,23 +552,23 @@ impl PresenceManager {
         Ok(())
     }
 
-    async fn ensure_room_to_wake(&self) -> Result<(), PresenceError> {
+    fn ensure_room_to_wake(&self) -> Result<(), PresenceError> {
         let Some(room) = self.wake_room.get() else {
             return Ok(());
         };
-        room.check(self.llama_pid().await).map_err(|shortfall| {
+        room.check(self.llama_pid()).map_err(|shortfall| {
             warn!(target: "assistd::presence", "wake refused: {shortfall}");
             PresenceError::NoRoom(shortfall)
         })
     }
 
-    async fn reload_model(&self) -> Result<(), PresenceError> {
-        let ready_rx = {
-            let slot = self.llama.lock().await;
-            let service = slot.as_ref().ok_or(PresenceError::ServiceMissing)?;
-            self.serving_ready_rx(service)?
-        };
-        self.load_model_and_wait(ready_rx).await
+    async fn reload_model(
+        &self,
+        ready_rx: watch::Receiver<ReadyState>,
+    ) -> Result<(), PresenceError> {
+        self.load_model_and_wait(ready_rx).await?;
+        self.lifecycle.lock().rouse();
+        Ok(())
     }
 
     async fn cold_start(&self) -> Result<(), PresenceError> {
@@ -581,7 +592,7 @@ impl PresenceManager {
         };
         match loaded {
             Ok(()) => {
-                *self.llama.lock().await = Some(service);
+                *self.lifecycle.lock() = Lifecycle::Active(service);
                 Ok(())
             }
             Err(e) => {
@@ -653,11 +664,17 @@ impl PresenceManager {
 
 #[cfg(test)]
 impl PresenceManager {
-    /// Manager in a fixed state with no llama child. Transitions that hit
-    /// the network (`drowse`, cold-start `wake`) error.
+    /// Manager in a fixed state whose llama-server has no supervisor or
+    /// child. Transitions that hit the network (`drowse`, cold-start `wake`) error.
     pub(crate) fn stub(state: PresenceTarget) -> Arc<Self> {
         let (_tx, rx) = watch::channel(false);
         let (state_tx, _) = watch::channel(state.into());
+        let stopped_server = || ChildServer::scripted(ReadyState::Starting, None).1;
+        let lifecycle = match state {
+            PresenceTarget::Active => Lifecycle::Active(stopped_server()),
+            PresenceTarget::Drowsy => Lifecycle::Drowsy(stopped_server()),
+            PresenceTarget::Sleeping => Lifecycle::Sleeping,
+        };
         let model = ModelConfig {
             name: "stub/model".into(),
             context_length: nz32(1024),
@@ -672,13 +689,13 @@ impl PresenceManager {
         let control = LlamaServerControl::new(SocketAddr::new(model.host, 1), None, None)
             .expect("dummy control");
         Arc::new(Self {
-            settled: StdMutex::new(state),
+            lifecycle: StdMutex::new(lifecycle),
             transition: AsyncMutex::new(()),
             model,
             timeouts: TimeoutsConfig::default(),
             api_key,
             control,
-            llama: AsyncMutex::new(None),
+            tasks: TaskTracker::new(),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),
             state_tx,
             _daemon_shutdown_keepalive: rx,
@@ -713,11 +730,68 @@ impl PresenceLlmHealthProbe {
 #[async_trait]
 impl LlmHealthProbe for PresenceLlmHealthProbe {
     async fn snapshot(&self) -> Option<HealthSnapshot> {
-        self.presence.llama_health().await
+        self.presence.llama_health()
     }
 
     async fn wait_for_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {
         self.presence.wait_llama_ready(budget).await
+    }
+}
+
+/// Where the llama-server stands; the server handle exists exactly while
+/// the model is loaded or merely unloaded.
+#[derive(Debug, Default)]
+enum Lifecycle {
+    #[default]
+    Sleeping,
+    Drowsy(ChildServer),
+    Active(ChildServer),
+}
+
+impl Lifecycle {
+    fn target(&self) -> PresenceTarget {
+        match self {
+            Lifecycle::Sleeping => PresenceTarget::Sleeping,
+            Lifecycle::Drowsy(_) => PresenceTarget::Drowsy,
+            Lifecycle::Active(_) => PresenceTarget::Active,
+        }
+    }
+
+    fn server(&self) -> Option<&ChildServer> {
+        match self {
+            Lifecycle::Sleeping => None,
+            Lifecycle::Drowsy(server) | Lifecycle::Active(server) => Some(server),
+        }
+    }
+
+    fn drowsy_server(&self) -> Option<&ChildServer> {
+        match self {
+            Lifecycle::Drowsy(server) => Some(server),
+            Lifecycle::Sleeping | Lifecycle::Active(_) => None,
+        }
+    }
+
+    fn into_server(self) -> Option<ChildServer> {
+        match self {
+            Lifecycle::Sleeping => None,
+            Lifecycle::Drowsy(server) | Lifecycle::Active(server) => Some(server),
+        }
+    }
+
+    /// `Active → Drowsy`, keeping the server; other states are unchanged.
+    fn doze(&mut self) {
+        *self = match std::mem::take(self) {
+            Lifecycle::Active(server) => Lifecycle::Drowsy(server),
+            other => other,
+        };
+    }
+
+    /// `Drowsy → Active`, keeping the server; other states are unchanged.
+    fn rouse(&mut self) {
+        *self = match std::mem::take(self) {
+            Lifecycle::Drowsy(server) => Lifecycle::Active(server),
+            other => other,
+        };
     }
 }
 
@@ -749,13 +823,14 @@ impl Drop for WakeMarker<'_> {
 
 /// Once `daemon_shutdown` flips, stop whichever supervisor epoch is current.
 fn spawn_shutdown_forwarder(
+    tasks: &TaskTracker,
     mut daemon_shutdown: watch::Receiver<bool>,
     current_inner_shutdown: InnerShutdownSlot,
 ) {
     spawn_supervised(
         "presence_shutdown_forwarder",
         Component::Daemon,
-        async move {
+        tasks.track_future(async move {
             if daemon_shutdown.wait_for(|v| *v).await.is_err() {
                 return;
             }
@@ -763,7 +838,7 @@ fn spawn_shutdown_forwarder(
             if let Some(tx) = tx {
                 let _ = tx.send(true);
             }
-        },
+        }),
     );
 }
 

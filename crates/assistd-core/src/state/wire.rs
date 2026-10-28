@@ -2,10 +2,10 @@
 
 use thiserror::Error;
 
-use assistd_ipc::ImageAttachment;
 use assistd_ipc::attachment::{
     ImageFormatError, MAX_IMAGE_BYTES, MAX_QUERY_IMAGE_BYTES, sniff_image,
 };
+use assistd_ipc::{ImageAttachment, ImageMime};
 use assistd_tools::Attachment;
 
 /// Why an image attachment from an IPC client was refused.
@@ -13,28 +13,28 @@ use assistd_tools::Attachment;
 pub enum AttachmentError {
     #[error("base64 decode failed for {mime}: {source}")]
     Base64 {
-        mime: String,
+        mime: ImageMime,
         #[source]
         source: base64::DecodeError,
     },
 
     #[error("{mime} image is {size} bytes; the limit is {MAX_IMAGE_BYTES}")]
-    ImageTooLarge { mime: String, size: u64 },
+    ImageTooLarge { mime: ImageMime, size: u64 },
 
     #[error("images total more than {MAX_QUERY_IMAGE_BYTES} bytes")]
     QueryTooLarge,
 
     #[error("declared {mime}: {source}")]
     Format {
-        mime: String,
+        mime: ImageMime,
         #[source]
         source: ImageFormatError,
     },
 
     #[error("declared {declared} but the content is {detected}")]
     MimeMismatch {
-        declared: String,
-        detected: &'static str,
+        declared: ImageMime,
+        detected: ImageMime,
     },
 }
 
@@ -61,27 +61,19 @@ pub(super) fn decode_wire_attachments(
 }
 
 fn decode_image(attachment: &ImageAttachment) -> Result<Vec<u8>, AttachmentError> {
-    let mime = &attachment.mime;
+    let mime = attachment.mime;
     let bytes = attachment
         .decode_bytes()
-        .map_err(|source| AttachmentError::Base64 {
-            mime: mime.clone(),
-            source,
-        })?;
+        .map_err(|source| AttachmentError::Base64 { mime, source })?;
     let size = bytes.len() as u64;
     if size > MAX_IMAGE_BYTES {
-        return Err(AttachmentError::ImageTooLarge {
-            mime: mime.clone(),
-            size,
-        });
+        return Err(AttachmentError::ImageTooLarge { mime, size });
     }
-    let detected = sniff_image(&bytes).map_err(|source| AttachmentError::Format {
-        mime: mime.clone(),
-        source,
-    })?;
+    let detected =
+        sniff_image(&bytes).map_err(|source| AttachmentError::Format { mime, source })?;
     if detected != mime {
         return Err(AttachmentError::MimeMismatch {
-            declared: mime.clone(),
+            declared: mime,
             detected,
         });
     }

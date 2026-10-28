@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
 use crate::memory::MemoryOps;
-use crate::{Tool, ToolError};
+use crate::{Tool, ToolError, ToolOutput};
 
 const SEARCH_LIMIT: usize = 50;
 
@@ -180,13 +180,13 @@ impl Tool for RememberTool {
     }
 
     #[tracing::instrument(skip(self, args))]
-    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
+    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let output = match RememberRequest::parse(&args)? {
             RememberRequest::Save { key, value } => self.save(&key, value).await?,
             RememberRequest::Search { query } => self.search(query).await?,
         };
-        Ok(tool_result(&output, start.elapsed().as_millis()))
+        Ok(ToolOutput::text(output, start.elapsed()))
     }
 }
 
@@ -258,7 +258,7 @@ impl Tool for ReminisceTool {
     }
 
     #[tracing::instrument(skip(self, args), fields(limit = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
+    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let query = required_str(&args, "query")?.to_string();
         let limit = reminisce_limit(&args)?;
@@ -268,7 +268,7 @@ impl Tool for ReminisceTool {
             Ok(embedder) => embedder,
             Err(e) => {
                 let note = format!("(past conversations cannot be searched: {e})");
-                return Ok(tool_result(&note, start.elapsed().as_millis()));
+                return Ok(ToolOutput::text(note, start.elapsed()));
             }
         };
         let query_vec = match embedder.embed(query).await {
@@ -279,10 +279,7 @@ impl Tool for ReminisceTool {
                     error = %e,
                     "reminisce embed failed; returning empty"
                 );
-                return Ok(tool_result(
-                    "(embedding unavailable)",
-                    start.elapsed().as_millis(),
-                ));
+                return Ok(ToolOutput::text("(embedding unavailable)", start.elapsed()));
             }
         };
         let current = *self.current_session.borrow();
@@ -291,15 +288,14 @@ impl Tool for ReminisceTool {
             .nearest_chunks(query_vec, limit, Some(current))
             .await?;
 
-        let output = format_chunks(&hits);
-        let duration_ms = start.elapsed().as_millis();
+        let result = ToolOutput::text(format_chunks(&hits), start.elapsed());
         tracing::info!(
             target: "assistd::embed",
             returned = hits.len(),
-            duration_ms = duration_ms,
+            duration_ms = result.duration_ms(),
             "reminisce returned chunks"
         );
-        Ok(tool_result(&output, duration_ms))
+        Ok(result)
     }
 }
 
@@ -359,15 +355,6 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
     args.get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::InvalidArgs(format!("`{name}` (string) is required")))
-}
-
-fn tool_result(output: &str, duration_ms: u128) -> Value {
-    json!({
-        "output":      output,
-        "exit_code":   0,
-        "duration_ms": duration_ms,
-        "truncated":   false,
-    })
 }
 
 #[cfg(test)]
@@ -577,11 +564,10 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            found["output"]
-                .as_str()
-                .unwrap()
+            found
+                .output
                 .starts_with("(saved memories cannot be searched"),
-            "{found}"
+            "{found:?}"
         );
     }
 

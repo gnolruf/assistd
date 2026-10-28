@@ -7,6 +7,8 @@ use std::io::{self, ErrorKind};
 
 use async_trait::async_trait;
 
+use assistd_ipc::ImageMime;
+
 /// The recovery label on an [`error_line`]: `Use`/`Try` offer an alternative,
 /// `Check`/`Available` a diagnostic, `Install` a package, `Note` a condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,9 +132,9 @@ pub struct CommandInput {
 
 /// A side-channel payload alongside stdout, carried through pipes untouched
 /// so `see X | wc` still surfaces the image.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attachment {
-    Image { mime: String, bytes: Vec<u8> },
+    Image { mime: ImageMime, bytes: Vec<u8> },
 }
 
 /// Output of a single chain stage. Failures are a non-zero `exit_code` plus

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::Compositor;
+use assistd_ipc::ImageMime;
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
@@ -200,7 +201,7 @@ fn attach_png(png: Vec<u8>, target: &Target, backend: Backend) -> CommandOutput 
         stderr: Vec::new(),
         exit_code: 0,
         attachments: vec![Attachment::Image {
-            mime: "image/png".to_string(),
+            mime: ImageMime::Png,
             bytes: png,
         }],
     }

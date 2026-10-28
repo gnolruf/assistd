@@ -56,6 +56,19 @@ impl ChildServer {
         Ok(child_server)
     }
 
+    /// A handle with no supervisor or child, reporting what the returned
+    /// sender scripts. Dropping the sender reads as a stopped supervisor.
+    #[cfg(feature = "test-support")]
+    pub fn scripted(state: ReadyState, pid: Option<u32>) -> (watch::Sender<ReadyState>, Self) {
+        let (ready_tx, status) = ChildServerStatus::scripted(state, pid);
+        let server = Self {
+            server: "scripted",
+            task: None,
+            status,
+        };
+        (ready_tx, server)
+    }
+
     async fn await_ready(&mut self) -> Result<(), ChildServerError> {
         loop {
             if self.status.ready_rx.changed().await.is_err() {

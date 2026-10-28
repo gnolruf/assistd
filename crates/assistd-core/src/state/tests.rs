@@ -7,8 +7,9 @@ use tokio::sync::{Notify, watch};
 
 use assistd_embed::EmbedderHandle;
 use assistd_ipc::{
-    Component, ComponentReadiness, ImageAttachment, ListenPhase, PresenceState, PresenceTarget,
-    StartupComponent, StatusKind, StatusSeverity, SubscribeFilter, VoiceCaptureState,
+    Component, ComponentReadiness, ImageAttachment, ImageMime, ListenPhase, PresenceState,
+    PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
+    VoiceCaptureState,
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{
@@ -16,7 +17,7 @@ use assistd_memory::{
     PersistedToolCall, SessionId, SqliteHandle, SqliteTranscriptStore, TranscriptStore,
 };
 use assistd_tools::{
-    CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolsDisabled,
+    CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolOutput, ToolsDisabled,
     commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
@@ -337,7 +338,7 @@ async fn dispatch_query_refuses_images_without_vision() {
         id: "q-img".into(),
         text: "what is this?".into(),
         attachments: vec![ImageAttachment::from_bytes(
-            "image/png",
+            ImageMime::Png,
             b"\x89PNG\r\n\x1a\n",
         )],
     };
@@ -360,7 +361,7 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
         id: "q-html".into(),
         text: "render this".into(),
         attachments: vec![ImageAttachment::from_bytes(
-            "text/html",
+            ImageMime::Jpeg,
             b"\x89PNG\r\n\x1a\n",
         )],
     };
@@ -1066,14 +1067,10 @@ impl assistd_tools::Tool for SleepTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        tokio::time::sleep(Duration::from_millis(self.ms)).await;
-        Ok(serde_json::json!({
-            "output": "slept",
-            "exit_code": 0,
-            "duration_ms": self.ms,
-            "truncated": false,
-        }))
+    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+        let duration = Duration::from_millis(self.ms);
+        tokio::time::sleep(duration).await;
+        Ok(ToolOutput::text("slept", duration))
     }
 }
 
@@ -1138,7 +1135,7 @@ impl assistd_tools::Tool for HangingTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let _flag = DropFlag(self.dropped.clone());
         self.entered.notify_one();
         std::future::pending::<()>().await;

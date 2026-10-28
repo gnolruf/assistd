@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::ToolError;
+use crate::{ToolError, ToolOutput};
 
 #[derive(Debug)]
 struct Named(&'static str);
@@ -20,8 +20,8 @@ impl Tool for Named {
     fn parameters_schema(&self) -> Value {
         json!({})
     }
-    async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
-        Ok(Value::Null)
+    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::default())
     }
 }
 

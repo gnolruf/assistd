@@ -46,7 +46,7 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
                 "r",
                 "describe this",
                 vec![ImageAttachment::from_bytes(
-                    "image/png",
+                    ImageMime::Png,
                     &[0xDE, 0xAD, 0xBE, 0xEF],
                 )],
             ),

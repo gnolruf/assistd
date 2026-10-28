@@ -2,6 +2,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use tempfile::tempdir;
 
+use assistd_ipc::ImageMime;
+
 use super::*;
 use crate::fixtures::PNG_BYTES;
 
@@ -176,7 +178,7 @@ fn present_binary_guard_suppresses_stdout_preserves_attachments() {
     let dir = tempdir().unwrap();
     let out = CommandOutput {
         attachments: vec![Attachment::Image {
-            mime: "image/png".into(),
+            mime: ImageMime::Png,
             bytes: PNG_BYTES.to_vec(),
         }],
         ..output(PNG_BYTES, b"", 0)

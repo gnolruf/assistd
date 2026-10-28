@@ -77,7 +77,7 @@ impl DaemonShutdown {
         drain_persistence(&self.persistence_tracker).await;
 
         stages.llm.send_replace(true);
-        if let Err(e) = self.presence.sleep().await {
+        if let Err(e) = self.presence.shutdown().await {
             tracing::error!("presence shutdown error: {e:#}");
         }
 

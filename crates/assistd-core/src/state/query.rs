@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{OwnedMutexGuard, broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
@@ -16,7 +15,7 @@ use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
 };
-use assistd_tools::{Attachment, inherit_confirm_router};
+use assistd_tools::{Attachment, ToolOutput, inherit_confirm_router};
 use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
@@ -193,6 +192,7 @@ impl TurnTranslator {
                 result,
             } => {
                 self.persist_tool_result(state, call_id, &name, &result);
+                let result = result.to_json();
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
             LlmEvent::ContextSize { tokens, total } => {
@@ -259,17 +259,16 @@ impl TurnTranslator {
         state: &AppState,
         call_id: String,
         name: &str,
-        result: &Value,
+        result: &ToolOutput,
     ) {
         self.awaiting_tool_result = false;
+        let outcome = ToolOutcome {
+            exit_code: result.exit_code.into(),
+            duration_ms: result.duration_ms(),
+        };
         self.persist_message(
             state,
-            PersistedMessage::tool_result(
-                tool_result_body(result),
-                call_id,
-                name.to_owned(),
-                tool_outcome(result),
-            ),
+            PersistedMessage::tool_result(result.output.clone(), call_id, name.to_owned(), outcome),
         );
     }
 
@@ -827,27 +826,6 @@ fn tool_calls_message(
         })
         .collect();
     PersistedMessage::assistant_tool_calls(content, persisted, reasoning)
-}
-
-/// Exit code and duration from a tool's raw result JSON; absent fields read as zero.
-fn tool_outcome(result: &Value) -> ToolOutcome {
-    ToolOutcome {
-        exit_code: result
-            .get("exit_code")
-            .and_then(Value::as_i64)
-            .unwrap_or_default(),
-        duration_ms: result
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
-    }
-}
-
-fn tool_result_body(result: &Value) -> String {
-    result
-        .get("output")
-        .and_then(|v| v.as_str())
-        .map_or_else(|| result.to_string(), ToString::to_string)
 }
 
 /// `LastDelta` carries the whole reply so far, so building one costs a

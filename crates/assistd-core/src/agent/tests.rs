@@ -7,7 +7,9 @@ use tokio::sync::Notify;
 
 use assistd_llm::{HealthSnapshot, LlmResult};
 use assistd_tools::commands::EchoCommand;
-use assistd_tools::{CommandRegistry, OutputCap, PresentSpec, RunTool, Tool, ToolError};
+use assistd_tools::{
+    CommandRegistry, OutputCap, PresentSpec, RunTool, Tool, ToolError, ToolOutput,
+};
 
 use super::*;
 
@@ -107,7 +109,7 @@ impl Tool for HangingTool {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object"})
     }
-    async fn invoke(&self, _args: Value) -> Result<Value, ToolError> {
+    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
         self.entered.notify_one();
         std::future::pending::<()>().await;
         unreachable!("hanging tool must never resolve")

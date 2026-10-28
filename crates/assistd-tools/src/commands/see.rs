@@ -85,7 +85,7 @@ impl Command for SeeCommand {
 
 fn attached(attachment: Attachment, size: usize, path: &str) -> CommandOutput {
     let mime = match &attachment {
-        Attachment::Image { mime, .. } => mime.clone(),
+        Attachment::Image { mime, .. } => *mime,
     };
     let stdout = format!(
         "attached {mime} ({}) from {path}\n",
@@ -134,6 +134,8 @@ fn load_failed(err: LoadImageError, path: &str) -> CommandOutput {
 mod tests {
     use tempfile::tempdir;
 
+    use assistd_ipc::ImageMime;
+
     use super::*;
     use crate::commands::test_see;
     use crate::fixtures::PNG_BYTES;
@@ -161,7 +163,7 @@ mod tests {
         let [Attachment::Image { mime, bytes }] = out.attachments.as_slice() else {
             panic!("expected one attachment: {:?}", out.attachments);
         };
-        assert_eq!(mime, "image/png");
+        assert_eq!(*mime, ImageMime::Png);
         assert_eq!(bytes.as_slice(), PNG_BYTES);
     }
 

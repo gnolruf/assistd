@@ -187,7 +187,7 @@ impl VisionRevalidator {
     /// Cancel-safe: a dropped probe reruns on the next call.
     pub async fn revalidate_if_stale(&self, presence: &PresenceManager) {
         let mut seen = self.seen.lock().await;
-        if seen.take_stale(presence.llama_pid().await) {
+        if seen.take_stale(presence.llama_pid()) {
             seen.probed = apply_probe(&self.gate, &self.probe().await);
         }
     }

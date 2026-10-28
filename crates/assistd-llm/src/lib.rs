@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 
 use assistd_ipc::{Component, StatusKind, StatusSeverity};
-use assistd_tools::Attachment;
+use assistd_tools::{Attachment, ToolOutput};
 
 pub mod chat;
 pub mod llama_server;
@@ -113,7 +113,7 @@ pub enum Thinking {
 }
 
 /// Events a backend streams during generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmEvent {
     /// A streamed chunk of model output.
     Delta { text: String },
@@ -128,11 +128,11 @@ pub enum LlmEvent {
         name: String,
         arguments: Value,
     },
-    /// A tool finished. `result` is the raw JSON the tool returned.
+    /// A tool finished with `result`.
     ToolResult {
         id: String,
         name: String,
-        result: Value,
+        result: Box<ToolOutput>,
     },
     /// Tokens in the conversation as sent with the request about to stream,
     /// and `total` the conversation has held, counting what compaction removed.

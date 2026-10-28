@@ -77,7 +77,7 @@ async fn run_monitor(
         tokio::select! {
             _ = tick.tick() => {
                 let state = presence.state();
-                let snapshot = match ledger.snapshot(presence.llama_pid().await) {
+                let snapshot = match ledger.snapshot(presence.llama_pid()) {
                     Ok(snapshot) => {
                         consecutive_errors = 0;
                         snapshot

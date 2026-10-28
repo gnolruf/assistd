@@ -305,6 +305,7 @@ dependencies = [
  "assistd-tools",
  "assistd-utils",
  "async-trait",
+ "base64 0.23.1",
  "parking_lot 0.13.0",
  "rmcp",
  "rustix 1.1.5",
