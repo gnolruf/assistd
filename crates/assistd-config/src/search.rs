@@ -21,8 +21,9 @@ pub struct SearchConfig {
     /// When `false`, no instance starts and web search is unavailable.
     pub enabled: bool,
     /// The entry point to run. It must honour the `SEARXNG_*` variables assistd
-    /// sets, serve `host:port` in the foreground, and answer `GET /healthz`
-    /// with 200; uWSGI, Granian and containers need a wrapper that does so.
+    /// sets, serve `host:port` from its own process group in the foreground,
+    /// and answer `GET /healthz` with 200. Containers cannot: their socket is
+    /// held outside that group, so the instance never becomes ready.
     pub command: SearchCommand,
     /// Bind host. Must be loopback: the instance has no authentication.
     pub host: IpAddr,
