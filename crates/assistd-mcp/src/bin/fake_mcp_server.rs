@@ -1,11 +1,12 @@
 //! Minimal MCP server fixture: newline-delimited JSON-RPC on
 //! stdin/stdout, answering `initialize`, `ping`, `tools/list` and
-//! `tools/call` for the `echo`, `crash_me`, `never_answers`,
+//! `tools/call` for the `echo`, `crash_me`, `never_answers`, `wedge`,
 //! `close_stdout`, `spawn_orphan_and_crash` and `env_names` tools.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -138,6 +139,11 @@ fn tools_list(id: &Value) -> Value {
                     "inputSchema": {"type": "object", "properties": {}}
                 },
                 {
+                    "name": "wedge",
+                    "description": "stops answering every request while staying alive",
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
                     "name": "close_stdout",
                     "description": "closes stdout without answering and stays alive",
                     "inputSchema": {"type": "object", "properties": {}}
@@ -181,6 +187,10 @@ fn call_tool(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
         }
         "crash_me" => std::process::exit(0),
         "never_answers" => None,
+        "wedge" => {
+            std::thread::sleep(Duration::from_secs(300));
+            None
+        }
         "close_stdout" => close_stdout(),
         "spawn_orphan_and_crash" => {
             let orphan = spawn_orphan();
