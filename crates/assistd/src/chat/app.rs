@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::PresenceState;
-use assistd_ipc::{Event, IpcClient, PermissionMode, Request, VoiceCaptureState};
+use assistd_ipc::{Event, ImageMime, IpcClient, PermissionMode, Request, VoiceCaptureState};
 use assistd_tools::{Approval, Attachment, ConfirmationRequest};
 use assistd_utils::token_counter::TokenCounter;
 use chrono::{DateTime, Utc};
@@ -46,7 +46,7 @@ const OWN_TURN_MEMORY: usize = 8;
 pub(super) struct PendingAttachment {
     /// File basename.
     pub name: String,
-    pub mime: String,
+    pub mime: ImageMime,
     pub bytes: Vec<u8>,
     /// `None` on terminals without graphics support.
     pub protocol: Option<StatefulProtocol>,
@@ -69,7 +69,7 @@ impl PendingAttachment {
 /// other variants.
 pub(super) struct AttachLoadedPayload {
     pub name: String,
-    pub mime: String,
+    pub mime: ImageMime,
     pub size: usize,
     pub bytes: Vec<u8>,
     pub protocol: Option<StatefulProtocol>,

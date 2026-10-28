@@ -4,18 +4,16 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
-use crate::command::{Attachment, CommandOutput, CommandRegistry, Hint, error_line};
+use crate::command::{CommandOutput, CommandRegistry, Hint, error_line};
 use crate::presentation::{OutputCap, PresentResult, PresentSpec, present};
-use crate::{Tool, ToolError};
+use crate::{RawStreams, Tool, ToolError, ToolOutput};
 
 /// The LLM-facing `run` tool, dispatching a command line through the chain
 /// parser and executor.
@@ -139,7 +137,7 @@ impl Tool for RunTool {
     }
 
     #[tracing::instrument(skip(self, args), fields(cmd = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
+    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -152,8 +150,11 @@ impl Tool for RunTool {
             Ok(chain) => execute(&chain, &self.registry, None).await,
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
-        let presented = present(out, &self.output_cap, start.elapsed());
-        Ok(build_result(&presented))
+        let duration = start.elapsed();
+        Ok(tool_output(
+            present(out, &self.output_cap, duration),
+            duration,
+        ))
     }
 }
 
@@ -188,38 +189,18 @@ fn parse_error_line(e: &ParseError) -> String {
     error_line("parse", e, hint, recovery)
 }
 
-fn build_result(presented: &PresentResult) -> Value {
-    let mut result = json!({
-        "output":      presented.output,
-        "stdout":      presented.stdout_raw,
-        "stderr":      presented.stderr_raw,
-        "exit_code":   presented.exit_code,
-        "truncated":   presented.truncated,
-        "duration_ms": presented.duration_ms,
-    });
-    if let Some(path) = &presented.overflow_file {
-        result["overflow_file"] = json!(path.to_string_lossy());
-    }
-    if let Some(path) = &presented.stderr_overflow_file {
-        result["stderr_overflow_file"] = json!(path.to_string_lossy());
-    }
-    if !presented.attachments.is_empty() {
-        let rendered: Vec<Value> = presented
-            .attachments
-            .iter()
-            .map(render_attachment)
-            .collect();
-        result["attachments"] = Value::Array(rendered);
-    }
-    result
-}
-
-fn render_attachment(attachment: &Attachment) -> Value {
-    match attachment {
-        Attachment::Image { mime, bytes } => json!({
-            "type": "image",
-            "mime": mime,
-            "data": B64.encode(bytes),
+fn tool_output(presented: PresentResult, duration: Duration) -> ToolOutput {
+    ToolOutput {
+        output: presented.output,
+        exit_code: presented.exit_code,
+        duration,
+        truncated: presented.truncated,
+        overflow_file: presented.overflow_file,
+        attachments: presented.attachments,
+        streams: Some(RawStreams {
+            stdout: presented.stdout_raw,
+            stderr: presented.stderr_raw,
+            stderr_overflow_file: presented.stderr_overflow_file,
         }),
     }
 }

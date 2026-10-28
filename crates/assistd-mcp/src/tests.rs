@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use assistd_tools::{AlwaysAllowGate, Approval, Approvals, ConfirmationGate, DenyAllGate};
 use parking_lot::Mutex;
+use serde_json::json;
 
 use super::*;
 
@@ -53,14 +54,11 @@ async fn failing_tool(err: McpError) -> Box<dyn Tool> {
     tools.pop().unwrap()
 }
 
-fn text_envelope_of(output: &str) -> Value {
-    json!({
-        "type": "text",
-        "output": output,
-        "exit_code": 0,
-        "duration_ms": 42,
-        "truncated": false,
-    })
+fn image_bytes(attachments: &[Attachment]) -> Vec<(ImageMime, &[u8])> {
+    attachments
+        .iter()
+        .map(|Attachment::Image { mime, bytes }| (*mime, bytes.as_slice()))
+        .collect()
 }
 
 #[test]
@@ -85,10 +83,10 @@ fn text_only_results_join_every_block() {
         ),
     ];
     for (result, expected) in cases {
-        assert_eq!(
-            tool_result_to_json(call_result(result), 42, true),
-            text_envelope_of(expected)
-        );
+        let output = tool_output(call_result(result), Duration::from_millis(42), true);
+        assert_eq!(output.output, expected);
+        assert_eq!(output.exit_code, 0);
+        assert!(output.attachments.is_empty());
     }
 }
 
@@ -100,13 +98,14 @@ fn mixed_results_keep_every_block_and_collect_images() {
             {"type": "image", "mimeType": "image/png", "data": "3q2+7w=="},
             {"type": "resource_link", "uri": "file:///a.txt", "name": "a.txt"},
             {"type": "image", "mimeType": "image/jpeg", "data": "AAAA"},
+            {"type": "image", "mimeType": "image/gif", "data": "AAAA"},
+            {"type": "image", "mimeType": "image/png", "data": "not base64!"},
         ]
     }));
-    let envelope = tool_result_to_json(result, 42, true);
-    let output = envelope["output"].as_str().unwrap();
-    let lines: Vec<&str> = output.lines().collect();
-    let [text, png, link, jpeg] = lines.as_slice() else {
-        panic!("expected four sections: {output}");
+    let result = tool_output(result, Duration::from_millis(42), true);
+    let lines: Vec<&str> = result.output.lines().collect();
+    let [text, png, link, jpeg, gif, garbled] = lines.as_slice() else {
+        panic!("expected six sections: {}", result.output);
     };
     assert_eq!(*text, "took screenshot");
     assert_eq!(*png, "(image: image/png)");
@@ -115,12 +114,17 @@ fn mixed_results_keep_every_block_and_collect_images() {
         "file:///a.txt"
     );
     assert_eq!(*jpeg, "(image: image/jpeg)");
+    assert_eq!(*gif, "(image omitted: image/gif; not PNG, JPEG or WebP)");
+    assert!(
+        garbled.starts_with("(image omitted: image/png; invalid base64"),
+        "{garbled}"
+    );
     assert_eq!(
-        envelope["attachments"],
-        json!([
-            {"type": "image", "mime": "image/png", "data": "3q2+7w=="},
-            {"type": "image", "mime": "image/jpeg", "data": "AAAA"},
-        ])
+        image_bytes(&result.attachments),
+        [
+            (ImageMime::Png, [0xDE, 0xAD, 0xBE, 0xEF].as_slice()),
+            (ImageMime::Jpeg, [0, 0, 0].as_slice()),
+        ]
     );
 }
 
@@ -149,12 +153,12 @@ async fn adapter_follows_the_vision_gate_on_every_call() {
         .await
         .unwrap();
     let without = tools[0].invoke(json!({})).await.unwrap();
-    assert!(without.get("attachments").is_none());
+    assert!(without.attachments.is_empty());
     vision.set(true);
     let with = tools[0].invoke(json!({})).await.unwrap();
     assert_eq!(
-        with["attachments"],
-        json!([{"type": "image", "mime": "image/png", "data": "AAAA"}])
+        image_bytes(&with.attachments),
+        [(ImageMime::Png, [0, 0, 0].as_slice())]
     );
 }
 
@@ -165,18 +169,9 @@ async fn adapter_turns_client_errors_into_error_envelopes() {
         message: "missing field 'query'".into(),
     };
     let tool = failing_tool(err()).await;
-    let mut out = tool.invoke(json!({})).await.unwrap();
-    assert!(out["duration_ms"].is_u64(), "{out}");
-    out.as_object_mut().unwrap().remove("duration_ms");
-    assert_eq!(
-        out,
-        json!({
-            "type": "error",
-            "output": mcp_error_line("mcp__web__search", &err()),
-            "exit_code": -1,
-            "truncated": false,
-        })
-    );
+    let out = tool.invoke(json!({})).await.unwrap();
+    assert_eq!(out.output, mcp_error_line("mcp__web__search", &err()));
+    assert_eq!(out.exit_code, -1);
 }
 
 /// Counts the calls that reach the server.
@@ -234,16 +229,10 @@ async fn declined_call_never_reaches_the_server() {
     let out = tool.invoke(json!({"path": "/x"})).await.unwrap();
     assert_eq!(client.calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        out,
-        json!({
-            "type": "error",
-            "output": "[error] mcp__files__delete: call cancelled by user. \
-                       Try: a different approach\n",
-            "exit_code": -1,
-            "duration_ms": 0,
-            "truncated": false,
-        })
+        out.output,
+        "[error] mcp__files__delete: call cancelled by user. Try: a different approach\n"
     );
+    assert_eq!(out.exit_code, -1);
 }
 
 #[tokio::test]

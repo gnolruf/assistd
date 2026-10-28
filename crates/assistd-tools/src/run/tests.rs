@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use regex::Regex;
 use tempfile::{TempDir, tempdir};
 
@@ -86,9 +88,12 @@ fn fresh_dir() -> TempDir {
     tempdir().expect("tempdir")
 }
 
+/// The result as IPC clients receive it.
 fn invoke(tool: &RunTool, cmd: &str) -> Value {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(tool.invoke(json!({ "command": cmd }))).unwrap()
+    rt.block_on(tool.invoke(json!({ "command": cmd })))
+        .unwrap()
+        .to_json()
 }
 
 fn assert_footer(output: &str, expected_exit: i32) {

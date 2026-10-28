@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::defaults::{nz32, nz64};
+use assistd_ipc::ImageMime;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
@@ -242,7 +243,7 @@ fn rollback_last_user_keeps_an_image_tool_result() {
         "see",
         "a picture",
         vec![Attachment::Image {
-            mime: "image/png".into(),
+            mime: ImageMime::Png,
             bytes: vec![0xAB],
         }],
     );
@@ -260,7 +261,7 @@ fn image_tool_results_do_not_close_the_turn() {
         "see",
         "a picture",
         vec![Attachment::Image {
-            mime: "image/png".into(),
+            mime: ImageMime::Png,
             bytes: vec![0xAB],
         }],
     );
@@ -310,7 +311,7 @@ fn push_user_with_attachments_renders_multimodal_wire() {
     c.push_user_with_attachments(
         "what is this?".into(),
         vec![Attachment::Image {
-            mime: "image/png".into(),
+            mime: ImageMime::Png,
             bytes: vec![0xAB, 0xCD],
         }],
     );

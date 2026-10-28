@@ -4,7 +4,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use base64::Engine;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -15,7 +14,7 @@ use assistd_llm::{
     HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
     ToolResultPayload,
 };
-use assistd_tools::{Attachment, ToolRegistry};
+use assistd_tools::{Attachment, ToolOutput, ToolRegistry};
 
 use crate::recovery::{Component, StatusSeverity};
 use crate::recovery_event;
@@ -145,9 +144,8 @@ impl Agent {
             .await;
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
-            let (payload, raw_result) = cancelled_tool_result(call, "ended; tools are unavailable");
-            send_tool_result(turn, &payload, raw_result).await;
-            results.push(payload);
+            let result = cancelled_tool_result(call, "ended; tools are unavailable");
+            results.push(send_tool_result(turn, call, result).await);
         }
         self.backend.push_tool_results(results).await?;
         let _ = turn.tx.send(LlmEvent::Done).await;
@@ -298,7 +296,7 @@ impl Agent {
             () = turn.cancel.cancelled() => None,
             r = dispatch_tool_call(&self.tools, call, turn.iteration, self.tool_deadline) => Some(r),
         };
-        let (payload, raw_result) = dispatched.unwrap_or_else(|| {
+        let result = dispatched.unwrap_or_else(|| {
             warn!(
                 target: "assistd::agent",
                 iteration = turn.iteration,
@@ -308,8 +306,10 @@ impl Agent {
             cancelled_tool_result(call, "cancelled during dispatch")
         });
         let cancelled_mid_dispatch = turn.cancel.is_cancelled();
-        send_tool_result(turn, &payload, raw_result).await;
-        (payload, cancelled_mid_dispatch)
+        (
+            send_tool_result(turn, call, result).await,
+            cancelled_mid_dispatch,
+        )
     }
 
     async fn withdraw_tools(&self, turn: &mut Turn, why: ToolBudgetExhausted) {
@@ -569,51 +569,43 @@ fn status_event(
 /// Answer a call that will never run, reporting the result like any other
 /// so the client and the transcript see the batch completed.
 async fn skip_tool_call(turn: &Turn, call: &ToolCall) -> ToolResultPayload {
-    let (payload, raw_result) = cancelled_tool_result(call, "cancelled before dispatch");
-    send_tool_result(turn, &payload, raw_result).await;
-    payload
+    send_tool_result(
+        turn,
+        call,
+        cancelled_tool_result(call, "cancelled before dispatch"),
+    )
+    .await
 }
 
-async fn send_tool_result(turn: &Turn, payload: &ToolResultPayload, raw_result: Value) {
+/// Report `result` to the client and return what the model is shown.
+async fn send_tool_result(turn: &Turn, call: &ToolCall, result: ToolOutput) -> ToolResultPayload {
+    let payload = ToolResultPayload {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        content: result.output.clone(),
+        attachments: result.attachments.clone(),
+    };
     let _ = turn
         .tx
         .send(LlmEvent::ToolResult {
-            id: payload.call_id.clone(),
-            name: payload.name.clone(),
-            result: raw_result,
+            id: call.id.clone(),
+            name: call.name.clone(),
+            result: Box::new(result),
         })
         .await;
+    payload
 }
 
-fn cancelled_tool_result(call: &ToolCall, reason: &str) -> (ToolResultPayload, Value) {
+fn cancelled_tool_result(call: &ToolCall, reason: &str) -> ToolOutput {
     error_tool_result(
-        call,
         &format!("[error] {}: agent turn {reason}.", call.name),
-        0,
+        Duration::ZERO,
     )
 }
 
-fn error_tool_result(
-    call: &ToolCall,
-    message: &str,
-    duration_ms: u128,
-) -> (ToolResultPayload, Value) {
-    let content = format!("{message}\n[exit:-1 | {duration_ms}ms]");
-    let raw = serde_json::json!({
-        "output": content,
-        "exit_code": -1,
-        "duration_ms": duration_ms,
-        "truncated": false,
-    });
-    (
-        ToolResultPayload {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            content,
-            attachments: Vec::new(),
-        },
-        raw,
-    )
+fn error_tool_result(message: &str, duration: Duration) -> ToolOutput {
+    let duration_ms = duration.as_millis();
+    ToolOutput::failed(format!("{message}\n[exit:-1 | {duration_ms}ms]"), duration)
 }
 
 async fn dispatch_tool_call(
@@ -621,53 +613,54 @@ async fn dispatch_tool_call(
     call: &ToolCall,
     iteration: u32,
     deadline: Duration,
-) -> (ToolResultPayload, Value) {
+) -> ToolOutput {
     let start = Instant::now();
 
     let Some(tool) = tools.get(&call.name) else {
-        return unknown_tool_result(tools, call, iteration, start.elapsed().as_millis());
+        return unknown_tool_result(tools, call, iteration, start.elapsed());
     };
 
     let Ok(result) = tokio::time::timeout(deadline, tool.invoke(call.arguments.clone())).await
     else {
-        let duration_ms = start.elapsed().as_millis();
+        let duration = start.elapsed();
         warn!(
             target: "assistd::agent",
             iteration,
             tool = %call.name,
-            duration_ms,
+            duration_ms = duration.as_millis(),
             "tool call exceeded its deadline; abandoning it"
         );
         return error_tool_result(
-            call,
             &format!(
                 "[error] {}: no result after {}s; call abandoned. Try: a faster or narrower command.",
                 call.name,
                 deadline.as_secs()
             ),
-            duration_ms,
+            duration,
         );
     };
-    let duration_ms = start.elapsed().as_millis();
+    let duration = start.elapsed();
 
     match result {
-        Ok(raw) => completed_tool_result(call, raw, iteration, duration_ms),
+        Ok(output) => {
+            log_completed_call(call, &output, iteration, duration);
+            output
+        }
         Err(e) => {
             warn!(
                 target: "assistd::agent",
                 iteration,
                 tool = %call.name,
-                duration_ms,
+                duration_ms = duration.as_millis(),
                 error = %e,
                 "tool invocation errored"
             );
             error_tool_result(
-                call,
                 &format!(
                     "[error] {}: tool invocation failed. Check: {e}. Try: a different command.",
                     call.name
                 ),
-                duration_ms,
+                duration,
             )
         }
     }
@@ -677,83 +670,41 @@ fn unknown_tool_result(
     tools: &ToolRegistry,
     call: &ToolCall,
     iteration: u32,
-    duration_ms: u128,
-) -> (ToolResultPayload, Value) {
+    duration: Duration,
+) -> ToolOutput {
     warn!(
         target: "assistd::agent",
         iteration,
         tool = %call.name,
-        duration_ms,
+        duration_ms = duration.as_millis(),
         "unknown tool"
     );
     let available = tools.names().collect::<Vec<_>>().join(", ");
     error_tool_result(
-        call,
         &format!(
             "[error] agent: unknown tool '{}'. Available: {available}.",
             call.name
         ),
-        duration_ms,
+        duration,
     )
 }
 
-fn completed_tool_result(
-    call: &ToolCall,
-    raw: Value,
-    iteration: u32,
-    duration_ms: u128,
-) -> (ToolResultPayload, Value) {
-    let content = raw
-        .get("output")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let exit_code = raw.get("exit_code").and_then(Value::as_i64).unwrap_or(0);
+fn log_completed_call(call: &ToolCall, output: &ToolOutput, iteration: u32, duration: Duration) {
     let command = call
         .arguments
         .get("command")
-        .and_then(|v| v.as_str())
+        .and_then(Value::as_str)
         .unwrap_or("");
-
     info!(
         target: "assistd::agent",
         iteration,
         tool = %call.name,
         command = %command,
-        exit_code,
-        output_size = content.len(),
-        duration_ms,
+        exit_code = output.exit_code,
+        output_size = output.output.len(),
+        duration_ms = duration.as_millis(),
         "tool call complete"
     );
-
-    let attachments = raw
-        .get("attachments")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(parse_attachment).collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    (
-        ToolResultPayload {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            content,
-            attachments,
-        },
-        raw,
-    )
-}
-
-fn parse_attachment(value: &Value) -> Option<Attachment> {
-    let kind = value.get("type")?.as_str()?;
-    if kind != "image" {
-        return None;
-    }
-    let mime = value.get("mime")?.as_str()?.to_string();
-    let data_b64 = value.get("data")?.as_str()?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .ok()?;
-    Some(Attachment::Image { mime, bytes })
 }
 
 #[cfg(test)]

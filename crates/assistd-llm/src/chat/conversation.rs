@@ -113,10 +113,10 @@ impl ImageDataUri {
         match attachment {
             Attachment::Image { mime, bytes } => {
                 let mut uri = String::with_capacity(
-                    "data:;base64,".len() + mime.len() + bytes.len().div_ceil(3) * 4,
+                    "data:;base64,".len() + mime.as_str().len() + bytes.len().div_ceil(3) * 4,
                 );
                 uri.push_str("data:");
-                uri.push_str(&mime);
+                uri.push_str(mime.as_str());
                 uri.push_str(";base64,");
                 B64.encode_string(bytes, &mut uri);
                 Self(uri.into())

@@ -13,22 +13,22 @@ use assistd_utils::readiness::NotReady;
 pub mod attachment;
 pub mod client;
 pub mod wakeword;
+pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use wakeword::WakeWordOp;
 
-/// An image on a [`Request::Query`]: `mime` is PNG, JPEG or WebP; `data_base64` is standard
-/// padded base64.
+/// An image on a [`Request::Query`]; `data_base64` is standard padded base64.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageAttachment {
-    pub mime: String,
+    pub mime: ImageMime,
     pub data_base64: String,
 }
 
 impl ImageAttachment {
     /// Encode raw image `bytes` as standard padded base64.
-    pub fn from_bytes(mime: impl Into<String>, bytes: &[u8]) -> Self {
+    pub fn from_bytes(mime: ImageMime, bytes: &[u8]) -> Self {
         Self {
-            mime: mime.into(),
+            mime,
             data_base64: STANDARD.encode(bytes),
         }
     }

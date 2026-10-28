@@ -51,7 +51,7 @@ async fn echo_answers_again(echo: &dyn Tool) -> bool {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let result = echo.invoke(json!({"msg": "after"})).await.unwrap();
-            if result["output"] == "echo:after" {
+            if result.output == "echo:after" {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -120,9 +120,8 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
         .invoke(json!({"msg": "hi"}))
         .await
         .unwrap();
-    assert_eq!(result["type"], "text");
-    assert_eq!(result["output"], "echo:hi");
-    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result.output, "echo:hi");
+    assert_eq!(result.exit_code, 0);
 
     server.shutdown().await;
 }
@@ -139,8 +138,7 @@ async fn crashed_server_fails_fast_then_restarts_on_a_later_call() {
         .await
         .expect("a call to a dead server must not hang")
         .unwrap();
-    assert_eq!(post["type"], "error", "{post}");
-    assert_eq!(post["exit_code"], -1, "{post}");
+    assert_eq!(post.exit_code, -1, "{post:?}");
     assert!(
         echo_answers_again(echo).await,
         "a call after the backoff must restart the server"
@@ -188,7 +186,7 @@ async fn server_that_stops_answering_is_killed_and_restarted() {
 
     let _ = find(&tools, "mcp__fake__wedge").invoke(json!({})).await;
     let stuck = echo.invoke(json!({"msg": "stuck"})).await.unwrap();
-    assert_eq!(stuck["type"], "error", "{stuck}");
+    assert_eq!(stuck.exit_code, -1, "{stuck:?}");
 
     assert!(
         echo_answers_again(echo).await,
@@ -224,10 +222,10 @@ async fn crashed_server_takes_its_process_group_with_it() {
         .invoke(json!({}))
         .await
         .unwrap();
-    let orphan: u32 = result["output"]
-        .as_str()
-        .and_then(|pid| pid.parse().ok())
-        .unwrap_or_else(|| panic!("fixture should answer with its orphan's pid: {result}"));
+    let orphan: u32 = result
+        .output
+        .parse()
+        .unwrap_or_else(|_| panic!("fixture should answer with its orphan's pid: {result:?}"));
 
     assert!(
         wait_until_process_is_gone(orphan).await,

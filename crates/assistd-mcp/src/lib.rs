@@ -4,13 +4,18 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use assistd_tools::attachment::MAX_IMAGE_BYTES;
-use assistd_tools::{ApprovalGate, ConfirmationRequest, Risk, Tool, ToolError, VisionGate};
+use assistd_tools::{
+    ApprovalGate, Attachment, ConfirmationRequest, ImageMime, Risk, Tool, ToolError, ToolOutput,
+    VisionGate,
+};
 use async_trait::async_trait;
-use rmcp::model::{CallToolResult, ContentBlock};
-use serde_json::{Value, json};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use rmcp::model::{CallToolResult, ContentBlock, ImageContent};
+use serde_json::Value;
 
 mod admission;
 mod error;
@@ -74,21 +79,20 @@ impl Tool for McpToolAdapter {
         self.tool.schema_as_json_value()
     }
 
-    /// Always `Ok`: a declined or failed call becomes an error envelope.
-    async fn invoke(&self, args: Value) -> Result<Value, ToolError> {
+    /// Always `Ok`: a declined or failed call becomes a failed [`ToolOutput`].
+    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
         if !self.confirmed(&args).await {
-            return Ok(declined_envelope(&self.registry_name));
+            return Ok(declined_output(&self.registry_name));
         }
         let start = Instant::now();
         let outcome = self.client.invoke(&self.tool.name, args).await;
-        let duration_ms = start.elapsed().as_millis();
+        let duration = start.elapsed();
         match outcome {
-            Ok(result) => Ok(tool_result_to_json(
-                result,
-                duration_ms,
-                self.vision.supported(),
+            Ok(result) => Ok(tool_output(result, duration, self.vision.supported())),
+            Err(err) => Ok(ToolOutput::failed(
+                mcp_error_line(&self.registry_name, &err),
+                duration,
             )),
-            Err(err) => Ok(error_envelope(&self.registry_name, &err, duration_ms)),
         }
     }
 }
@@ -117,36 +121,19 @@ pub async fn adapt_client_as_tools(
         .collect())
 }
 
-/// Same shape as a successful result, with `exit_code: -1` and an
-/// [`mcp_error_line`] as `output`.
-fn error_envelope(tool_name: &str, err: &McpError, duration_ms: u128) -> Value {
-    json!({
-        "type": "error",
-        "output": mcp_error_line(tool_name, err),
-        "exit_code": -1,
-        "duration_ms": duration_ms,
-        "truncated": false,
-    })
+/// The result of a call the user declined.
+fn declined_output(tool_name: &str) -> ToolOutput {
+    ToolOutput::failed(
+        format!("[error] {tool_name}: call cancelled by user. Try: a different approach\n"),
+        Duration::ZERO,
+    )
 }
 
-/// The error envelope of a call the user declined.
-fn declined_envelope(tool_name: &str) -> Value {
-    json!({
-        "type": "error",
-        "output": format!(
-            "[error] {tool_name}: call cancelled by user. Try: a different approach\n"
-        ),
-        "exit_code": -1,
-        "duration_ms": 0,
-        "truncated": false,
-    })
-}
-
-/// Render `result`'s content blocks as one tool-result envelope, joined by newlines (non-text
-/// as JSON), falling back to `structuredContent`. Images go into `attachments[]` only with
-/// `vision`, else become a note; an `isError` result is prefixed as a whole.
-fn tool_result_to_json(result: CallToolResult, duration_ms: u128, vision: bool) -> Value {
-    let (sections, attachments): (Vec<String>, Vec<Option<Value>>) = result
+/// Render `result`'s content blocks as one output, joined by newlines (non-text as JSON),
+/// falling back to `structuredContent`. Images become attachments only with `vision`, else a
+/// note; an `isError` result is prefixed as a whole.
+fn tool_output(result: CallToolResult, duration: Duration, vision: bool) -> ToolOutput {
+    let (sections, attachments): (Vec<String>, Vec<Option<Attachment>>) = result
         .content
         .into_iter()
         .map(|block| render_block(block, vision))
@@ -159,35 +146,25 @@ fn tool_result_to_json(result: CallToolResult, duration_ms: u128, vision: bool) 
         Some(true) => format!("[mcp tool error] {body}"),
         _ => body,
     };
-    let mut envelope = text_envelope(&body, duration_ms);
-    let attachments: Vec<Value> = attachments.into_iter().flatten().collect();
-    if !attachments.is_empty() {
-        envelope["attachments"] = Value::Array(attachments);
+    ToolOutput {
+        attachments: attachments.into_iter().flatten().collect(),
+        ..ToolOutput::text(body, duration)
     }
-    envelope
 }
 
-/// The text one content block contributes to the output, plus its
-/// attachment if it is an image, `vision` is on, and it decodes to at
-/// most [`MAX_IMAGE_BYTES`].
-fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Value>) {
+/// The text one content block contributes to the output, plus its attachment if it is an
+/// image and `vision` is on.
+fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Attachment>) {
     match block {
         ContentBlock::Text(text) => (text.text, None),
         ContentBlock::Image(image) if !vision => (
             format!("(image omitted: {}; model has no vision)", image.mime_type),
             None,
         ),
-        ContentBlock::Image(image) if decoded_len(&image.data) > MAX_IMAGE_BYTES => (
-            format!(
-                "(image omitted: {}; larger than {MAX_IMAGE_BYTES} bytes)",
-                image.mime_type
-            ),
-            None,
-        ),
-        ContentBlock::Image(image) => (
-            format!("(image: {})", image.mime_type),
-            Some(json!({"type": "image", "mime": image.mime_type, "data": image.data})),
-        ),
+        ContentBlock::Image(image) => match image_attachment(&image) {
+            Ok(attachment) => (format!("(image: {})", image.mime_type), Some(attachment)),
+            Err(why) => (format!("(image omitted: {}; {why})", image.mime_type), None),
+        },
         other => (
             serde_json::to_value(other).unwrap_or_default().to_string(),
             None,
@@ -195,19 +172,23 @@ fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Value>) {
     }
 }
 
+/// Decode `image`, or say why it cannot be shown to the model: an unsupported format, invalid
+/// base64, or more than [`MAX_IMAGE_BYTES`].
+fn image_attachment(image: &ImageContent) -> Result<Attachment, String> {
+    let mime = ImageMime::from_mime(&image.mime_type)
+        .ok_or_else(|| "not PNG, JPEG or WebP".to_string())?;
+    if decoded_len(&image.data) > MAX_IMAGE_BYTES {
+        return Err(format!("larger than {MAX_IMAGE_BYTES} bytes"));
+    }
+    let bytes = B64
+        .decode(&image.data)
+        .map_err(|e| format!("invalid base64: {e}"))?;
+    Ok(Attachment::Image { mime, bytes })
+}
+
 /// Bytes `base64` decodes to, give or take padding.
 fn decoded_len(base64: &str) -> u64 {
     base64.len() as u64 / 4 * 3
-}
-
-fn text_envelope(body: &str, duration_ms: u128) -> Value {
-    json!({
-        "type": "text",
-        "output": body,
-        "exit_code": 0,
-        "duration_ms": duration_ms,
-        "truncated": false,
-    })
 }
 
 #[cfg(test)]
