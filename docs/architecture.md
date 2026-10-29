@@ -115,7 +115,11 @@ other local processes cannot load, unload or query models; every client
 sends it as a bearer token. The chat server's `--slot-save-path` is a
 mode-0700 `$XDG_CACHE_HOME/assistd/slots` that the daemon empties at
 startup and before every spawn, since a saved slot is only valid for the
-server that wrote it. `assistd-utils`'s `ChildServer`
+server that wrote it. `MainSlot` uses it to save the main conversation's
+slot before a group of sub-agent requests and restore it after (skipping
+the restore if the child changed in between), deleting the file once the
+group ends; any failure only costs re-processing the main context on the
+next turn. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a
