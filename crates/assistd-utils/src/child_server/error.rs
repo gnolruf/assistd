@@ -19,6 +19,13 @@ pub enum ChildServerError {
         source: std::io::Error,
     },
 
+    #[error("failed to prepare {server} for spawning: {source}")]
+    Prepare {
+        server: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("{server} did not become ready within {timeout:?}")]
     HealthTimeout {
         server: &'static str,

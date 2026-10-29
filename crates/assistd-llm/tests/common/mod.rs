@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use assistd_llm::SlotDir;
 use assistd_utils::child_server::ApiKey;
 use tempfile::TempDir;
 
@@ -35,6 +36,11 @@ impl FakeLlama {
     /// A key for the specs and clients a test points at this fake.
     pub(crate) fn api_key(&self) -> &ApiKey {
         &self.api_key
+    }
+
+    /// A slot directory inside this fake's tempdir.
+    pub(crate) fn slot_dir(&self) -> SlotDir {
+        SlotDir::new(self.dir.path().join("slots"))
     }
 
     /// Select the mode for subsequent spawns; running children are unaffected.

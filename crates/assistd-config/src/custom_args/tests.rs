@@ -50,7 +50,14 @@ fn control_characters_inside_quotes_are_rejected() {
 
 #[test]
 fn managed_flags_are_rejected_in_both_spellings() {
-    for source in ["--host 0.0.0.0", "--host=0.0.0.0", "-c 4096", "-hf a/b:Q4"] {
+    for source in [
+        "--host 0.0.0.0",
+        "--host=0.0.0.0",
+        "-c 4096",
+        "-hf a/b:Q4",
+        "--slot-save-path /tmp/slots",
+        "--slot-save-path=/tmp/slots",
+    ] {
         assert!(
             matches!(parse(source), Err(CustomArgsError::Managed(_))),
             "{source:?}"
@@ -77,6 +84,10 @@ fn server_specific_flags_are_managed_only_on_their_server() {
     ));
     parse_for::<EmbeddingServer>("-c 8192 --ubatch-size 2048").expect("tuning is allowed");
     parse("--pooling cls").expect("pooling is not the chat server's concern");
+    assert!(matches!(
+        parse_for::<EmbeddingServer>("--slot-save-path /tmp/slots"),
+        Err(CustomArgsError::Exposing(_))
+    ));
 }
 
 #[test]

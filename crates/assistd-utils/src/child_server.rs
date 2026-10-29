@@ -1,6 +1,7 @@
 //! Supervises a child process that serves HTTP: spawn it in its own process
 //! group, poll its health endpoint, restart with backoff, and park once restart limits trip.
 
+use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -24,6 +25,11 @@ pub use service::{ChildServer, ChildServerStatus, ReadyState};
 pub trait ChildServerSpec: Send + Sync + 'static {
     /// Short name used in every log line and error about this server.
     fn name(&self) -> &'static str;
+
+    /// Runs before every spawn, restarts included; an error fails that attempt.
+    fn prepare_spawn(&self) -> io::Result<()> {
+        Ok(())
+    }
 
     /// The command to spawn. Stdio, the process group and the parent-death
     /// signal are set by the supervisor.

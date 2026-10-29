@@ -32,6 +32,8 @@ impl ChildProcess {
     /// Spawn `spec`'s command and forward its stdout and stderr to tracing.
     pub(super) fn spawn<S: ChildServerSpec>(spec: &S) -> Result<Self, ChildServerError> {
         let server = spec.name();
+        spec.prepare_spawn()
+            .map_err(|source| ChildServerError::Prepare { server, source })?;
         let mut cmd = spec.command();
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())

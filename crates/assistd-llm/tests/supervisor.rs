@@ -56,7 +56,11 @@ async fn answer_every_request_with_ok(listener: TcpListener) {
 async fn start_service(fake: &FakeLlama, port: u16) -> (ChildServer, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let service = ChildServer::start(
-        LlamaServerSpec::new(model_spec(fake, port), fake.api_key().clone()),
+        LlamaServerSpec::new(
+            model_spec(fake, port),
+            fake.api_key().clone(),
+            fake.slot_dir(),
+        ),
         shutdown_rx,
     )
     .await
@@ -141,7 +145,11 @@ async fn health_from_a_squatter_on_the_port_is_not_ready() {
     });
 
     let result = ChildServer::start(
-        LlamaServerSpec::new(model_spec(&fake, port), fake.api_key().clone()),
+        LlamaServerSpec::new(
+            model_spec(&fake, port),
+            fake.api_key().clone(),
+            fake.slot_dir(),
+        ),
         shutdown_rx,
     )
     .await;

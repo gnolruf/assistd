@@ -1,6 +1,7 @@
 //! How llama-server is launched: router mode, so no model is named on the
 //! command line and weights load on demand through `/models/load`.
 
+use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -8,17 +9,25 @@ use assistd_config::ModelConfig;
 use assistd_utils::child_server::{ApiKey, ChildServerSpec, remove_llama_env};
 use tokio::process::Command;
 
+use super::slots::SlotDir;
+
 /// Launch parameters for the supervised router-mode llama-server.
 #[derive(Debug)]
 pub struct LlamaServerSpec {
     model: ModelConfig,
     api_key: ApiKey,
+    slot_dir: SlotDir,
 }
 
 impl LlamaServerSpec {
-    /// A spec whose server accepts only requests bearing `api_key`.
-    pub fn new(model: ModelConfig, api_key: ApiKey) -> Self {
-        Self { model, api_key }
+    /// A spec whose server accepts only requests bearing `api_key` and saves
+    /// slot state only into `slot_dir`.
+    pub fn new(model: ModelConfig, api_key: ApiKey, slot_dir: SlotDir) -> Self {
+        Self {
+            model,
+            api_key,
+            slot_dir,
+        }
     }
 }
 
@@ -27,10 +36,14 @@ impl ChildServerSpec for LlamaServerSpec {
         "llama-server"
     }
 
+    fn prepare_spawn(&self) -> io::Result<()> {
+        self.slot_dir.reset()
+    }
+
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.model.server_binary);
         cmd.args(self.model.custom_args.as_slice());
-        push_managed_args(&mut cmd, &self.model, &self.api_key);
+        push_managed_args(&mut cmd, &self.model, &self.api_key, &self.slot_dir);
         remove_llama_env(&mut cmd);
         cmd
     }
@@ -46,9 +59,11 @@ impl ChildServerSpec for LlamaServerSpec {
 
 /// Appended after the custom args so these win wherever the server takes
 /// the last occurrence of a repeated flag.
-fn push_managed_args(cmd: &mut Command, model: &ModelConfig, api_key: &ApiKey) {
+fn push_managed_args(cmd: &mut Command, model: &ModelConfig, api_key: &ApiKey, slot_dir: &SlotDir) {
     cmd.arg("--jinja")
         .arg("--no-slots")
+        .arg("--slot-save-path")
+        .arg(slot_dir.path())
         .arg("--api-key-file")
         .arg(api_key.file_path())
         .arg("-ngl")

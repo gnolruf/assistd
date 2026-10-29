@@ -20,7 +20,7 @@ use assistd_config::{ModelConfig, TimeoutsConfig};
 use assistd_ipc::{Component, Event, PresenceState, PresenceTarget, StatusKind, StatusSeverity};
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec,
-    LlmHealthProbe, ReadyState,
+    LlmHealthProbe, ReadyState, SlotDir,
 };
 use assistd_utils::child_server::{ApiKey, ChildServer, ChildServerError};
 
@@ -122,6 +122,7 @@ pub struct PresenceManager {
     model: ModelConfig,
     timeouts: TimeoutsConfig,
     api_key: ApiKey,
+    slot_dir: SlotDir,
     control: LlamaServerControl,
     /// The shutdown forwarder and detached wakes, joined by [`Self::shutdown`].
     tasks: TaskTracker,
@@ -148,9 +149,10 @@ impl PresenceManager {
         model: ModelConfig,
         timeouts: TimeoutsConfig,
         api_key: ApiKey,
+        slot_dir: SlotDir,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
-        let manager = Self::new_sleeping(model, timeouts, api_key, daemon_shutdown)?;
+        let manager = Self::new_sleeping(model, timeouts, api_key, slot_dir, daemon_shutdown)?;
         manager
             .wake()
             .await
@@ -159,12 +161,14 @@ impl PresenceManager {
     }
 
     /// Create a manager in `Sleeping` with no llama-server started. Every
-    /// server it starts accepts only `api_key`. Flipping `daemon_shutdown`
+    /// server it starts accepts only `api_key` and saves slots only into
+    /// `slot_dir`. Flipping `daemon_shutdown`
     /// cancels any wake in flight.
     pub fn new_sleeping(
         model: ModelConfig,
         timeouts: TimeoutsConfig,
         api_key: ApiKey,
+        slot_dir: SlotDir,
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
         let control = LlamaServerControl::new(
@@ -189,6 +193,7 @@ impl PresenceManager {
             model,
             timeouts,
             api_key,
+            slot_dir,
             control,
             tasks,
             current_inner_shutdown,
@@ -576,7 +581,11 @@ impl PresenceManager {
         let (inner_tx, inner_rx) = watch::channel(false);
         *self.current_inner_shutdown.lock() = Some(inner_tx);
 
-        let spec = LlamaServerSpec::new(self.model.clone(), self.api_key.clone());
+        let spec = LlamaServerSpec::new(
+            self.model.clone(),
+            self.api_key.clone(),
+            self.slot_dir.clone(),
+        );
         let service = match ChildServer::start(spec, inner_rx).await {
             Ok(service) => service,
             Err(e) => {
@@ -694,6 +703,7 @@ impl PresenceManager {
             model,
             timeouts: TimeoutsConfig::default(),
             api_key,
+            slot_dir: SlotDir::new("/does/not/exist/slots".into()),
             control,
             tasks: TaskTracker::new(),
             current_inner_shutdown: Arc::new(StdMutex::new(None)),
