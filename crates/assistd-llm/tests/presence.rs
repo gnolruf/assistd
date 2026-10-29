@@ -71,6 +71,7 @@ async fn new_active_manager(
         model_spec(fake, port),
         TimeoutsConfig::default(),
         fake.api_key().clone(),
+        fake.slot_dir(),
         rx,
     )
     .await
@@ -237,6 +238,7 @@ async fn sleep_that_cannot_join_the_supervisor_still_commits_sleeping() {
         model_spec(&fake, port),
         timeouts,
         fake.api_key().clone(),
+        fake.slot_dir(),
         shutdown_rx,
     )
     .await
@@ -643,6 +645,7 @@ async fn shutdown_aborts_a_background_wake_and_sleep_still_runs() {
         model_spec(&fake, port),
         TimeoutsConfig::default(),
         fake.api_key().clone(),
+        fake.slot_dir(),
         shutdown_rx,
     )
     .expect("control client");

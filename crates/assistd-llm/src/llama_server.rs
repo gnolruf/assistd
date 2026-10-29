@@ -4,9 +4,11 @@
 pub mod capabilities;
 pub mod control;
 pub mod error;
+pub mod slots;
 pub mod spec;
 
 pub use capabilities::{VisionState, probe_capabilities_routed};
 pub use control::LlamaServerControl;
 pub use error::LlamaServerError;
+pub use slots::SlotDir;
 pub use spec::LlamaServerSpec;

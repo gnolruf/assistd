@@ -12,7 +12,9 @@ use assistd_core::{
     AppState, Config, MemoryStack, PresenceManager, RuntimeState, SessionContext, Subsystems,
     VisionRevalidator, VoiceManager,
 };
-use assistd_llm::{HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe};
+use assistd_llm::{
+    HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir,
+};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
@@ -124,6 +126,7 @@ async fn start(
         config.model.clone(),
         config.timeouts.clone(),
         api_key.clone(),
+        prepare_slot_dir()?,
         stages.llm.subscribe(),
     )?;
     let health_probe: Arc<dyn LlmHealthProbe> =
@@ -283,6 +286,20 @@ pub(crate) fn init_config() -> Result<()> {
     Config::write_default(&path)?;
     info!("wrote default config to {}", path.display());
     Ok(())
+}
+
+/// The chat server's slot directory under the user cache dir, emptied of
+/// slots a previous daemon left behind.
+fn prepare_slot_dir() -> Result<SlotDir> {
+    let cache_dir = dirs::cache_dir().context("no user cache directory for llama-server slots")?;
+    let slot_dir = SlotDir::new(cache_dir.join("assistd").join("slots"));
+    slot_dir.reset().with_context(|| {
+        format!(
+            "failed to prepare the slot directory {}",
+            slot_dir.path().display()
+        )
+    })?;
+    Ok(slot_dir)
 }
 
 /// The revalidator that keeps the vision gate in step with the model,

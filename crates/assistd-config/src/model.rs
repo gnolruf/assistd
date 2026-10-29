@@ -35,8 +35,9 @@ pub struct ModelConfig {
     /// Last-ditch cap, in seconds, on becoming healthy and loading the model;
     /// neither wait trips while progressing.
     pub ready_timeout_secs: NonZeroU64,
-    /// Extra server arguments. Flags assistd sets itself, or that expose
-    /// files, tools or state through the server, fail to parse.
+    /// Extra server arguments. Flags assistd sets itself, the slot save
+    /// directory included, or that expose files, tools or state through the
+    /// server, fail to parse.
     pub custom_args: CustomArgs<ChatServer>,
 }
 

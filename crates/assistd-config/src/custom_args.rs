@@ -76,6 +76,7 @@ impl ServerKind for ChatServer {
         "--no-jinja",
         "--embedding",
         "--embeddings",
+        "--slot-save-path",
     ];
 }
 

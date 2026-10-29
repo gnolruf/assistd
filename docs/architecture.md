@@ -112,7 +112,10 @@ the server's only source of options. Each daemon launch generates a
 random API key, written to a mode-0600 file under `$XDG_RUNTIME_DIR` and
 passed as `--api-key-file` to both llama-servers (with `--no-slots`), so
 other local processes cannot load, unload or query models; every client
-sends it as a bearer token. `assistd-utils`'s `ChildServer`
+sends it as a bearer token. The chat server's `--slot-save-path` is a
+mode-0700 `$XDG_CACHE_HOME/assistd/slots` that the daemon empties at
+startup and before every spawn, since a saved slot is only valid for the
+server that wrote it. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a

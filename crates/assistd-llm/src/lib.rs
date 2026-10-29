@@ -20,7 +20,8 @@ pub use assistd_utils::child_server::ReadyState;
 pub use chat::conversation::{CompactionCut, ToolCallRecord};
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use llama_server::{
-    LlamaServerControl, LlamaServerError, LlamaServerSpec, VisionState, probe_capabilities_routed,
+    LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotDir, VisionState,
+    probe_capabilities_routed,
 };
 
 /// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
