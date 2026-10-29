@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 
@@ -286,6 +286,19 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     async fn complete_oneshot(&self, _prompt: String, _thinking: Thinking) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),
+        ))
+    }
+
+    /// Answer `instruction`, appended to the conversation for this request only, with no
+    /// tools, no thinking, and a reply held by grammar to the JSON `schema`. The
+    /// conversation is left unchanged.
+    async fn complete_with_schema(
+        &self,
+        _instruction: String,
+        _schema: Map<String, Value>,
+    ) -> LlmResult<String> {
+        Err(LlmError::Unavailable(
+            "complete_with_schema not supported by this backend".into(),
         ))
     }
 

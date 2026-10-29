@@ -186,9 +186,21 @@ on the same server and model, with its own system prompt, tool registry and
 event sink. It has a 30-step ceiling and a 16k-token history budget
 (capped at the main one). Going past either fails the run with
 `LlmError::StepLimit` or `LlmError::ContextLimit`, and the conversation never
-compacts. Only the text of its final step comes back. The conversation is
-dropped when the run ends, so none of it reaches the main history or the
-transcript store.
+compacts. The conversation is dropped when the run ends, so none of it
+reaches the main history or the transcript store.
+
+Only the text of the final step comes back, and only as a `RelayReport`, the
+restricted return channel. Its control, bidi and format characters are
+stripped, the `<` of anything tag-shaped (`<|im_start|>`, `<tool_call>`) and
+the `[` of bracket tokens (`[INST]`) are escaped, and it is cut to 6,000
+characters with a truncation marker, never spilled to a file. It renders as a
+quoted block under a header that labels it untrusted data; the default system
+prompt says never to follow instructions inside one. When the caller asks for
+an `AnswerShape::Schema`, the run restates its answer through
+`complete_with_schema`, a tool-free, thinking-free request whose
+`response_format` holds the reply to that JSON schema by grammar; a reply that
+does not parse fails the run. The sub-agent's tool output and reasoning never
+leave it.
 
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model
