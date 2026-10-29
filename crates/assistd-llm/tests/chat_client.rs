@@ -414,6 +414,14 @@ async fn next_non_context_event(rx: &mut mpsc::Receiver<LlmEvent>) -> Option<Llm
     }
 }
 
+/// Push `text` as a user turn and run one step to completion.
+async fn ask(backend: &dyn LlmBackend, text: &str) {
+    backend.push_user(text.into(), Vec::new()).await.unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    backend.step(Vec::new(), tx).await.unwrap();
+    drain(&mut rx).await;
+}
+
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
     let mut out = Vec::new();
     while let Some(ev) = next_non_context_event(rx).await {
@@ -1276,6 +1284,66 @@ async fn transient_note_is_the_last_wire_message_for_exactly_one_step() {
         second.iter().all(|m| m["content"] != "answer now"),
         "note must not outlive the step it was set for: {second:?}"
     );
+}
+
+#[tokio::test]
+async fn isolated_conversation_never_reaches_the_main_conversation() {
+    let script = Script::new();
+    for reply in ["main answer", "sub answer", "main again"] {
+        script
+            .push_stream(StreamResponse::Deltas(vec![reply.into()]))
+            .await;
+    }
+    let (port, _server) = spawn_fake(script.clone()).await;
+    let main = build_client(&chat_spec(port));
+
+    ask(&main, "main question").await;
+    let sub = main
+        .isolated_conversation("sub prompt".into(), nz32(4000))
+        .unwrap();
+    ask(sub.as_ref(), "sub task").await;
+    drop(sub);
+    ask(&main, "follow up").await;
+
+    let captured = script.captured().await;
+    assert_eq!(
+        captured[1].body["messages"],
+        json!([
+            {"role": "system", "content": "sub prompt"},
+            {"role": "user", "content": "sub task"},
+        ])
+    );
+    assert_eq!(
+        captured[2].body["messages"],
+        json!([
+            {"role": "system", "content": "test system prompt"},
+            {"role": "user", "content": "main question"},
+            {"role": "assistant", "content": "main answer"},
+            {"role": "user", "content": "follow up"},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn isolated_conversation_over_budget_fails_instead_of_compacting() {
+    let script = Script::new();
+    let (port, _server) = spawn_fake(script.clone()).await;
+    let main = build_client(&chat_spec(port));
+    let sub = main
+        .isolated_conversation("sub prompt".into(), nz32(100))
+        .unwrap();
+    sub.push_user("word ".repeat(1000), Vec::new())
+        .await
+        .unwrap();
+
+    let (tx, _rx) = mpsc::channel(32);
+    let result = sub.step(Vec::new(), tx).await;
+
+    assert!(
+        matches!(result, Err(LlmError::ContextLimit { budget: 100, .. })),
+        "{result:?}"
+    );
+    assert!(script.captured().await.is_empty(), "nothing may be sent");
 }
 
 #[tokio::test]

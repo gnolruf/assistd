@@ -39,8 +39,9 @@ pub mod recovery;
 mod scratch;
 pub mod socket;
 pub mod state;
+pub mod subagent;
 
-pub use agent::Agent;
+pub use agent::{Agent, StepCeiling};
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,
 };
@@ -70,6 +71,7 @@ pub use state::{
     AppState, DispatchError, McpServerStatus, MemoryStack, RuntimeState, SessionContext,
     Subsystems, TurnOrigin, branch_replay,
 };
+pub use subagent::{SubAgentError, SubAgentRunner};
 
 /// Mode for the spill and scratch directories and any parents created for
 /// them.
