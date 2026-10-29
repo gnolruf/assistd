@@ -180,6 +180,16 @@ One per-query state machine, single-threaded per turn. The loop:
    stays in the request so a call made anyway is still parsed (and ends
    the turn) rather than streamed to the user as raw markup.
 
+A sub-agent run (`SubAgentRunner`) drives the same loop over
+an empty conversation that the main backend's `isolated_conversation` opens
+on the same server and model, with its own system prompt, tool registry and
+event sink. It has a 30-step ceiling and a 16k-token history budget
+(capped at the main one). Going past either fails the run with
+`LlmError::StepLimit` or `LlmError::ContextLimit`, and the conversation never
+compacts. Only the text of its final step comes back. The conversation is
+dropped when the run ends, so none of it reaches the main history or the
+transcript store.
+
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model
 emitted them. This keeps the conversation deterministic and the

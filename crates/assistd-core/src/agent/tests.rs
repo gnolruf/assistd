@@ -270,7 +270,7 @@ async fn step_ceiling_withdraws_tools_then_answer() {
     assert_eq!(counts.last(), Some(&1));
     assert_eq!(
         *backend.transient_notes.lock(),
-        [ToolBudgetExhausted::StepCeiling.model_note()]
+        [ToolBudgetExhausted::StepCeiling(MAX_TOOL_STEPS).model_note()]
     );
 }
 

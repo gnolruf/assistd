@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 use super::conversation::{
     Conversation, Message, Role, Summarizer, SummaryRequest, TOOL_RESULT_PREFIX, ToolCallRecord,
-    approx_tokens_bytes, ensure_budget,
+    approx_tokens_bytes, effective_budget, ensure_budget,
 };
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
@@ -57,6 +57,14 @@ pub struct LlamaChatClient {
     /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
+    overflow: Overflow,
+}
+
+/// What a step does with a conversation over its history budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Overflow {
+    Compact,
+    Fail,
 }
 
 impl LlamaChatClient {
@@ -88,6 +96,7 @@ impl LlamaChatClient {
             timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
             health,
+            overflow: Overflow::Compact,
         })
     }
 
@@ -244,18 +253,25 @@ impl LlamaChatClient {
 
     /// Compact the conversation when it is over budget, summarizing with the
     /// same `tools` the coming request offers so its prompt prefix is
-    /// unchanged, and return it locked for that request.
+    /// unchanged, and return it locked for that request. A conversation that
+    /// must not compact fails with [`LlmError::ContextLimit`] instead.
     async fn fit_budget(
         &self,
         tools: &[Value],
         tx: &mpsc::Sender<LlmEvent>,
-    ) -> MutexGuard<'_, Conversation> {
+    ) -> LlmResult<MutexGuard<'_, Conversation>> {
         let conv = self.conv.lock().await;
         if !conv.exceeds_budget(&self.chat, &self.model) {
-            if self.compaction_headroom(&conv).is_none() {
+            if self.overflow == Overflow::Compact && self.compaction_headroom(&conv).is_none() {
                 send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
             }
-            return conv;
+            return Ok(conv);
+        }
+        if self.overflow == Overflow::Fail {
+            return Err(LlmError::ContextLimit {
+                tokens: conv.approx_total_tokens(),
+                budget: effective_budget(&self.chat, &self.model),
+            });
         }
         let before = (conv.message_count(), conv.approx_total_tokens());
         drop(conv);
@@ -294,7 +310,7 @@ impl LlamaChatClient {
                 .await;
         }
         send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
-        conv
+        Ok(conv)
     }
 
     /// `None` when compaction is already near, so it is announced once.
@@ -491,7 +507,13 @@ impl LlmBackend for LlamaChatClient {
             }
             conv.push_user(prompt);
             drop(conv);
-            let mut conv = self.fit_budget(&[], &tx).await;
+            let mut conv = match self.fit_budget(&[], &tx).await {
+                Ok(conv) => conv,
+                Err(e) => {
+                    self.conv.lock().await.rollback_last_user();
+                    return Err(e);
+                }
+            };
             send_context_size(&conv, &tx).await;
             let payload = self.base_request(conv.as_wire_messages());
             match serde_json::to_vec(&payload) {
@@ -562,7 +584,7 @@ impl LlmBackend for LlamaChatClient {
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         let (body_bytes, estimated_tokens, compaction_headroom) = {
-            let conv = self.fit_budget(&tools, &tx).await;
+            let conv = self.fit_budget(&tools, &tx).await?;
             send_context_size(&conv, &tx).await;
             let mut payload = self.base_request(conv.as_wire_messages());
             offer_tools(&mut payload, tools);
@@ -666,6 +688,28 @@ impl LlmBackend for LlamaChatClient {
                 "llama-server crashed during complete_oneshot".into(),
             )),
         }
+    }
+
+    fn isolated_conversation(
+        &self,
+        system_prompt: String,
+        max_history_tokens: NonZeroU32,
+    ) -> LlmResult<Arc<dyn LlmBackend>> {
+        let chat = ChatConfig {
+            system_prompt: system_prompt.clone(),
+            max_history_tokens: max_history_tokens.min(self.chat.max_history_tokens),
+            ..self.chat.clone()
+        };
+        Ok(Arc::new(Self {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            chat,
+            model: self.model.clone(),
+            timeouts: self.timeouts.clone(),
+            conv: Mutex::new(Conversation::new(system_prompt)),
+            health: self.health.clone(),
+            overflow: Overflow::Fail,
+        }))
     }
 }
 

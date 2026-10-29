@@ -48,6 +48,24 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     health: Option<Arc<dyn LlmHealthProbe>>,
     tool_deadline: Duration,
+    step_ceiling: StepCeiling,
+}
+
+/// What a turn does once it has made a set number of tool-calling steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepCeiling {
+    /// Withdraw the tools and ask the model to answer from what it has.
+    Withdraw(u32),
+    /// End the turn with [`LlmError::StepLimit`].
+    Fail(u32),
+}
+
+impl StepCeiling {
+    fn steps(self) -> u32 {
+        match self {
+            Self::Withdraw(steps) | Self::Fail(steps) => steps,
+        }
+    }
 }
 
 impl Agent {
@@ -64,7 +82,14 @@ impl Agent {
             tools,
             health,
             tool_deadline,
+            step_ceiling: StepCeiling::Withdraw(MAX_TOOL_STEPS),
         }
+    }
+
+    /// Replace the default ceiling, which withdraws the tools after 200 steps.
+    pub fn with_step_ceiling(mut self, step_ceiling: StepCeiling) -> Self {
+        self.step_ceiling = step_ceiling;
+        self
     }
 
     /// Run one turn, streaming events on `tx` until the model answers or `tx` closes or
@@ -118,9 +143,7 @@ impl Agent {
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
                     self.backend.push_tool_results(results).await?;
                     turn.iteration += 1;
-                    if let Some(why) = ToolBudgetExhausted::check(stuck, turn.iteration) {
-                        self.withdraw_tools(&mut turn, why).await;
-                    }
+                    self.enforce_tool_budget(&mut turn, stuck).await?;
                 }
             }
         }
@@ -312,6 +335,27 @@ impl Agent {
         )
     }
 
+    /// Withdraw the tools once the model is stuck or at its step ceiling, or
+    /// fail the turn when the ceiling is [`StepCeiling::Fail`].
+    async fn enforce_tool_budget(&self, turn: &mut Turn, stuck: bool) -> Result<(), LlmError> {
+        let ceiling = self.step_ceiling.steps();
+        match (
+            ToolBudgetExhausted::check(stuck, turn.iteration, ceiling),
+            self.step_ceiling,
+        ) {
+            (Some(ToolBudgetExhausted::StepCeiling(steps)), StepCeiling::Fail(_)) => {
+                let error = LlmError::StepLimit(steps);
+                fail_turn(&turn.tx, &format!("{}: {error}", llm_error_label(&error))).await;
+                Err(error)
+            }
+            (Some(why), _) => {
+                self.withdraw_tools(turn, why).await;
+                Ok(())
+            }
+            (None, _) => Ok(()),
+        }
+    }
+
     async fn withdraw_tools(&self, turn: &mut Turn, why: ToolBudgetExhausted) {
         recovery_event!(
             StatusSeverity::Warning,
@@ -380,15 +424,15 @@ enum Replay {
 #[derive(Debug, Clone, Copy)]
 enum ToolBudgetExhausted {
     Repeating,
-    StepCeiling,
+    StepCeiling(u32),
 }
 
 impl ToolBudgetExhausted {
-    fn check(stuck: bool, iteration: u32) -> Option<Self> {
+    fn check(stuck: bool, iteration: u32, ceiling: u32) -> Option<Self> {
         if stuck {
             Some(Self::Repeating)
-        } else if iteration >= MAX_TOOL_STEPS {
-            Some(Self::StepCeiling)
+        } else if iteration >= ceiling {
+            Some(Self::StepCeiling(ceiling))
         } else {
             None
         }
@@ -399,8 +443,8 @@ impl ToolBudgetExhausted {
             Self::Repeating => {
                 format!("the same tool call was repeated {DUPLICATE_CALL_LIMIT} times in a row")
             }
-            Self::StepCeiling => {
-                format!("the turn reached its ceiling of {MAX_TOOL_STEPS} tool steps")
+            Self::StepCeiling(steps) => {
+                format!("the turn reached its ceiling of {steps} tool steps")
             }
         }
     }
@@ -445,6 +489,8 @@ fn llm_error_label(error: &LlmError) -> &'static str {
         LlmError::Unavailable(_) => "backend unavailable",
         LlmError::ServerRestarting(_) => "llm restarting",
         LlmError::OutputLimit(_) => "output limit",
+        LlmError::ContextLimit { .. } => "context limit",
+        LlmError::StepLimit(_) => "step limit",
     }
 }
 

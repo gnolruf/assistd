@@ -2,6 +2,8 @@
 //! and the child-process supervisor that keeps llama-server alive.
 
 use std::fmt;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -101,6 +103,15 @@ pub enum LlmError {
     /// consecutive steps, so the turn gave up.
     #[error("the model's response hit chat.max_response_tokens {0} times in a row")]
     OutputLimit(u32),
+
+    /// An isolated conversation needs about `tokens` tokens, past its
+    /// `budget`; it never compacts.
+    #[error("the conversation needs about {tokens} tokens, over its {budget}-token budget")]
+    ContextLimit { tokens: u32, budget: u32 },
+
+    /// The turn made this many tool-calling steps without answering.
+    #[error("the model made {0} tool-calling steps without answering")]
+    StepLimit(u32),
 }
 
 pub type LlmResult<T> = Result<T, LlmError>;
@@ -275,6 +286,19 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     async fn complete_oneshot(&self, _prompt: String, _thinking: Thinking) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),
+        ))
+    }
+
+    /// An empty conversation with `system_prompt` on this backend's server and model, held
+    /// to `max_history_tokens` (capped at this backend's own budget). Outgrowing it fails
+    /// the step with [`LlmError::ContextLimit`] rather than compacting.
+    fn isolated_conversation(
+        &self,
+        _system_prompt: String,
+        _max_history_tokens: NonZeroU32,
+    ) -> LlmResult<Arc<dyn LlmBackend>> {
+        Err(LlmError::Unavailable(
+            "isolated conversations not supported by this backend".into(),
         ))
     }
 }

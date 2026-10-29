@@ -936,7 +936,7 @@ fn encode_all(attachments: Vec<Attachment>) -> Vec<ImageDataUri> {
     attachments.into_iter().map(ImageDataUri::encode).collect()
 }
 
-fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {
+pub(super) fn effective_budget(chat: &ChatConfig, model: &ModelConfig) -> u32 {
     chat.max_history_tokens.get().min(model.context_budget())
 }
 
