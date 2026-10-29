@@ -10,5 +10,5 @@ pub mod spec;
 pub use capabilities::{VisionState, probe_capabilities_routed};
 pub use control::LlamaServerControl;
 pub use error::LlamaServerError;
-pub use slots::SlotDir;
+pub use slots::{MainSlot, SlotDir};
 pub use spec::LlamaServerSpec;

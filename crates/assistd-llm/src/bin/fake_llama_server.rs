@@ -3,7 +3,7 @@
 
 use std::env;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,14 +41,18 @@ struct Args {
     port: u16,
     mode: Mode,
     api_key: Option<String>,
+    slot_dir: Option<PathBuf>,
 }
 
 #[derive(Default)]
 struct ServerState {
     api_key: Option<String>,
+    slot_dir: Option<PathBuf>,
     loaded_model: Option<String>,
     load_count: u32,
     unload_count: u32,
+    save_count: u32,
+    restore_count: u32,
 }
 
 impl ServerState {
@@ -89,7 +93,8 @@ fn mode_beside(program: &str) -> Option<Mode> {
     Some(parse_mode(text.trim()).expect("invalid mode file"))
 }
 
-/// Parses `--host <addr> --port <port> --mode <mode> --api-key-file <path>`,
+/// Parses `--host <addr> --port <port> --mode <mode> --api-key-file <path>
+/// --slot-save-path <dir>`,
 /// skipping the other flags a router-mode spawn passes.
 fn parse_args() -> Args {
     let mut host = "127.0.0.1".to_string();
@@ -98,6 +103,7 @@ fn parse_args() -> Args {
     let program = argv.first().cloned().unwrap_or_default();
     let mut mode = mode_beside(&program).unwrap_or(Mode::Normal);
     let mut api_key = None;
+    let mut slot_dir = None;
 
     let mut i = 1;
     while i < argv.len() {
@@ -118,6 +124,10 @@ fn parse_args() -> Args {
                 api_key = Some(read_api_key(&argv[i + 1]));
                 i += 2;
             }
+            "--slot-save-path" => {
+                slot_dir = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+            }
             "--jinja" => i += 1,
             "-ngl" | "-c" => i += 2,
             _ => i += 1,
@@ -129,6 +139,7 @@ fn parse_args() -> Args {
         port,
         mode,
         api_key,
+        slot_dir,
     }
 }
 
@@ -186,6 +197,7 @@ async fn main() -> ExitCode {
 
     let state = Arc::new(Mutex::new(ServerState {
         api_key: args.api_key,
+        slot_dir: args.slot_dir,
         ..ServerState::default()
     }));
 
@@ -226,7 +238,7 @@ async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerSt
 }
 
 /// Serves one request: `/health`, `/models` (load, unload, state), `/v1/chat/completions` (SSE
-/// or JSON summary) and `/debug/counters`. With `--api-key-file`, every route but `/health` and
+/// or JSON summary), `/slots/0` (save, restore) and `/debug/counters`. With `--api-key-file`, every route but `/health` and
 /// `/debug/counters` answers 401 unless the request bears the key.
 async fn serve_connection(
     mut sock: TcpStream,
@@ -250,6 +262,8 @@ async fn serve_connection(
         ("POST", "/models/unload") => unload_response(&state, &body).await,
         ("GET", "/models") => list_models_response(&state).await,
         ("GET", "/debug/counters") => counters_response(&state).await,
+        ("POST", "/slots/0?action=save") => save_slot_response(&state, &body).await,
+        ("POST", "/slots/0?action=restore") => restore_slot_response(&state, &body).await,
         _ => (
             "HTTP/1.1 404 Not Found",
             "text/plain",
@@ -424,9 +438,63 @@ async fn counters_response(
         "pid": std::process::id(),
         "load_count": server.load_count,
         "unload_count": server.unload_count,
+        "save_count": server.save_count,
+        "restore_count": server.restore_count,
         "loaded_model": server.loaded_model,
     });
     ("HTTP/1.1 200 OK", "application/json", body.to_string())
+}
+
+/// Write the slot file a save request names, as a router does only when the
+/// body names the model.
+async fn save_slot_response(
+    state: &Arc<Mutex<ServerState>>,
+    body: &str,
+) -> (&'static str, &'static str, String) {
+    let Some(path) = slot_file(state, body).await else {
+        return bad_slot_request();
+    };
+    std::fs::write(&path, b"slot").expect("write slot file");
+    state.lock().await.save_count += 1;
+    (
+        "HTTP/1.1 200 OK",
+        "application/json",
+        json!({ "id_slot": 0, "n_saved": 42, "n_written": 4 }).to_string(),
+    )
+}
+
+/// Read back the slot file a restore request names; 400 when it is missing.
+async fn restore_slot_response(
+    state: &Arc<Mutex<ServerState>>,
+    body: &str,
+) -> (&'static str, &'static str, String) {
+    let Some(path) = slot_file(state, body).await.filter(|path| path.exists()) else {
+        return bad_slot_request();
+    };
+    state.lock().await.restore_count += 1;
+    let n_read = std::fs::metadata(path).map_or(0, |meta| meta.len());
+    (
+        "HTTP/1.1 200 OK",
+        "application/json",
+        json!({ "id_slot": 0, "n_restored": 42, "n_read": n_read }).to_string(),
+    )
+}
+
+/// The slot file a request names inside `--slot-save-path`, or `None` when
+/// the request lacks a model or filename or no directory was given.
+async fn slot_file(state: &Arc<Mutex<ServerState>>, body: &str) -> Option<PathBuf> {
+    let request: Value = serde_json::from_str(body).ok()?;
+    request.get("model")?.as_str().filter(|m| !m.is_empty())?;
+    let filename = request.get("filename")?.as_str()?;
+    Some(state.lock().await.slot_dir.as_ref()?.join(filename))
+}
+
+fn bad_slot_request() -> (&'static str, &'static str, String) {
+    (
+        "HTTP/1.1 400 Bad Request",
+        "application/json",
+        json!({ "error": { "message": "invalid slot request", "code": 400 } }).to_string(),
+    )
 }
 
 /// Answer `POST /v1/chat/completions` with `"hello"`: a chunked SSE stream
