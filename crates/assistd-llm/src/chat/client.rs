@@ -13,7 +13,7 @@ use assistd_tools::Attachment;
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::{local_client_builder, read_capped};
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::{Mutex, MutexGuard, mpsc};
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, info, warn};
@@ -119,6 +119,7 @@ impl LlamaChatClient {
             reasoning_budget_tokens: Some(self.chat.max_reasoning_tokens.get()),
             reasoning_budget_message: Some(REASONING_BUDGET_MESSAGE),
             chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
+            response_format: None,
         }
     }
 
@@ -249,6 +250,28 @@ impl LlamaChatClient {
         }
         flush_splitter(&mut accum, tx).await;
         StreamOutcome::Ok(Box::new(accum))
+    }
+
+    /// Stream one completion outside the conversation and return its text,
+    /// with reasoning discarded; `caller` names the request in a crash error.
+    async fn stream_text(&self, body: Vec<u8>, caller: &str) -> LlmResult<String> {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
+        let stream = async {
+            let outcome = self.stream_openai(body, None, &tx).await;
+            drop(tx);
+            outcome
+        };
+        let drain = async { while rx.recv().await.is_some() {} };
+        let (outcome, ()) = tokio::join!(stream, drain);
+        match outcome {
+            StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => Ok(accum.text),
+            StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
+                Err(LlmError::Chat(e))
+            }
+            StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(format!(
+                "llama-server crashed during {caller}"
+            ))),
+        }
     }
 
     /// Compact the conversation when it is over budget, summarizing with the
@@ -670,24 +693,29 @@ impl LlmBackend for LlamaChatClient {
             payload.chat_template_kwargs = self.template_kwargs(thinking);
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
+        self.stream_text(body_bytes, "complete_oneshot").await
+    }
 
-        let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
-        let stream = async {
-            let outcome = self.stream_openai(body_bytes, None, &tx).await;
-            drop(tx);
-            outcome
+    async fn complete_with_schema(
+        &self,
+        instruction: String,
+        schema: Map<String, Value>,
+    ) -> LlmResult<String> {
+        let body_bytes = {
+            let conv = self.conv.lock().await;
+            let mut messages = conv.as_wire_messages();
+            messages.push(wire::ChatMessage::plain(
+                Role::User.as_wire(),
+                wire::ContentBody::Text(instruction.as_str().into()),
+            ));
+            let mut payload = self.base_request(messages);
+            payload.chat_template_kwargs = self.template_kwargs(Thinking::Disabled);
+            payload.reasoning_budget_tokens = None;
+            payload.reasoning_budget_message = None;
+            payload.response_format = Some(wire::ResponseFormat::json_schema(&schema));
+            serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
-        let drain = async { while rx.recv().await.is_some() {} };
-        let (outcome, ()) = tokio::join!(stream, drain);
-        match outcome {
-            StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => Ok(accum.text),
-            StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
-                Err(LlmError::Chat(e))
-            }
-            StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(
-                "llama-server crashed during complete_oneshot".into(),
-            )),
-        }
+        self.stream_text(body_bytes, "complete_with_schema").await
     }
 
     fn isolated_conversation(

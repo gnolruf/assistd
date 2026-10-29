@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// Outgoing chat request. Borrows from the history wherever a message
 /// goes out verbatim, so rendering copies only the text it has to build.
@@ -42,6 +42,38 @@ pub struct ChatRequest<'a> {
     /// Extra variables handed to llama.cpp's Jinja chat template.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<ChatTemplateKwargs<'a>>,
+    /// Holds the reply to a JSON schema through llama-server's grammar sampler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat<'a>>,
+}
+
+/// OpenAI's `response_format`, in its `json_schema` form.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseFormat<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    json_schema: JsonSchemaFormat<'a>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonSchemaFormat<'a> {
+    name: &'static str,
+    strict: bool,
+    schema: &'a Map<String, Value>,
+}
+
+impl<'a> ResponseFormat<'a> {
+    /// A reply that must be a JSON value matching `schema`.
+    pub fn json_schema(schema: &'a Map<String, Value>) -> Self {
+        Self {
+            kind: "json_schema",
+            json_schema: JsonSchemaFormat {
+                name: "answer",
+                strict: true,
+                schema,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

@@ -71,7 +71,7 @@ pub use state::{
     AppState, DispatchError, McpServerStatus, MemoryStack, RuntimeState, SessionContext,
     Subsystems, TurnOrigin, branch_replay,
 };
-pub use subagent::{SubAgentError, SubAgentRunner};
+pub use subagent::{AnswerShape, RelayReport, SubAgentError, SubAgentRunner};
 
 /// Mode for the spill and scratch directories and any parents created for
 /// them.

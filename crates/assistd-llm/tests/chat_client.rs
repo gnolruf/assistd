@@ -1347,6 +1347,55 @@ async fn isolated_conversation_over_budget_fails_instead_of_compacting() {
 }
 
 #[tokio::test]
+async fn schema_completion_constrains_the_reply_and_leaves_the_conversation_alone() {
+    let script = Script::new();
+    for reply in ["free answer", r#"{"found":true}"#, "next"] {
+        script
+            .push_stream(StreamResponse::Deltas(vec![reply.into()]))
+            .await;
+    }
+    let (port, _server) = spawn_fake(script.clone()).await;
+    let main = build_client(&chat_spec(port));
+    let sub = main
+        .isolated_conversation("sub prompt".into(), nz32(4000))
+        .unwrap();
+    ask(sub.as_ref(), "task").await;
+    let schema = json!({"type": "object", "properties": {"found": {"type": "boolean"}}});
+
+    let reply = sub
+        .complete_with_schema("as json".into(), schema.as_object().unwrap().clone())
+        .await
+        .unwrap();
+    ask(sub.as_ref(), "again").await;
+
+    assert_eq!(reply, r#"{"found":true}"#);
+    let captured = script.captured().await;
+    let shaped = &captured[1].body;
+    assert_eq!(
+        shaped["response_format"],
+        json!({"type": "json_schema", "json_schema": {"name": "answer", "strict": true, "schema": schema}})
+    );
+    assert_eq!(
+        shaped["chat_template_kwargs"],
+        json!({"enable_thinking": false})
+    );
+    assert!(shaped.get("tools").is_none(), "{shaped}");
+    assert_eq!(
+        shaped["messages"][3],
+        json!({"role": "user", "content": "as json"})
+    );
+    assert_eq!(
+        captured[2].body["messages"],
+        json!([
+            {"role": "system", "content": "sub prompt"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "free answer"},
+            {"role": "user", "content": "again"},
+        ])
+    );
+}
+
+#[tokio::test]
 async fn reasoning_rides_along_with_its_tool_call_across_user_turns() {
     let script = Script::new();
     let mut frames = tool_call_frames("call-1", "run", &[r#"{"command":"ls"}"#]);
