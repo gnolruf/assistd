@@ -13,6 +13,7 @@ use crate::exec::POLICY_DENIED_EXIT;
 mod allowlist;
 mod approvals;
 mod confirm;
+mod egress;
 mod file_scope;
 mod review;
 mod sandbox;
@@ -29,9 +30,10 @@ pub use confirm::{
     ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm, Risk,
     inherit_confirm_router,
 };
+pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
 pub use review::{Confirmation, DestructivePattern, Rules, check_script};
-pub(crate) use sandbox::{ConfinedSpawner, is_within_visible_home_entry};
+pub(crate) use sandbox::{ConfinedSpawner, EgressRoute, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
     ToolSandbox, ToolsDisabled, probe_sandbox,

@@ -1,5 +1,6 @@
 //! A sub-agent's disposable world: one fresh directory per relay, holding
 //! copies of its inputs, and the only part of the host its commands can see.
+//! Its only way to the network, if any, is the relay's egress proxy.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -14,13 +15,21 @@ use tracing::warn;
 use crate::command::CommandRegistry;
 use crate::commands::{
     BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
-    SortCommand, TailCommand, UniqCommand, WcCommand, WriteCommand, WritePolicyCfg,
+    SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WriteCommand, WritePolicyCfg,
 };
-use crate::policy::{ConfinedRoot, ConfirmationGate, SandboxInfo, on_blocking_pool};
+use crate::policy::{
+    ApprovalGate, ConfinedRoot, ConfirmationGate, EgressPolicy, EgressRoute, SandboxInfo,
+    on_blocking_pool,
+};
+
+mod egress;
+
+use egress::EgressProxy;
 
 const INPUT_DIR: &str = "input";
 const HOME_DIR: &str = "home";
 const OUTPUT_DIR: &str = "output";
+const EGRESS_SOCKET: &str = "egress.sock";
 
 /// Why a quarantine could not be set up.
 #[derive(Debug, thiserror::Error)]
@@ -43,13 +52,28 @@ pub enum QuarantineError {
         #[source]
         source: io::Error,
     },
+    #[error("egress forwarder {} is not a file", .0.display())]
+    MissingForwarder(PathBuf),
+    #[error("cannot start the relay's egress proxy: {0}")]
+    Proxy(#[source] io::Error),
+}
+
+/// How a quarantine reaches the web: through a proxy that asks `hosts`
+/// about each host, from commands wrapped in the `forwarder` program.
+#[derive(Debug, Clone)]
+pub struct Egress {
+    pub hosts: ApprovalGate,
+    /// The `assistd-egress-forward` executable, run inside the sandbox.
+    pub forwarder: PathBuf,
 }
 
 /// A relay's directory and the sandbox over it: copied inputs read-only, a
 /// writable home, and a directory for spilled output, all at their host
-/// paths; no network. Dropping it, on cancel or panic too, removes it all.
+/// paths; no network but its egress proxy, if it has one. Dropping it, on
+/// cancel or panic too, closes the proxy and removes it all.
 #[derive(Debug)]
 pub struct Quarantine {
+    egress: Option<RelayEgress>,
     dir: RelayDir,
     root: Arc<ConfinedRoot>,
     sandbox: Arc<SandboxInfo>,
@@ -57,26 +81,37 @@ pub struct Quarantine {
 
 impl Quarantine {
     /// A new quarantine under `parent` wrapped as `sandbox` wraps, with each of `inputs` copied
-    /// into [`Quarantine::input_dir`] under its file name. Fails when `sandbox` does not wrap.
+    /// into [`Quarantine::input_dir`] under its file name, and with `egress` its proxied way
+    /// to the web. Fails when `sandbox` does not wrap.
     pub async fn create(
         parent: &Path,
         sandbox: &SandboxInfo,
         inputs: Vec<PathBuf>,
+        egress: Option<Egress>,
     ) -> Result<Self, QuarantineError> {
         let parent = parent.to_path_buf();
+        let forwarder = egress.as_ref().map(|egress| egress.forwarder.clone());
         let (dir, root) = on_blocking_pool(move || {
+            if let Some(forwarder) = forwarder.filter(|path| !path.is_file()) {
+                return Err(QuarantineError::MissingForwarder(forwarder));
+            }
             let (dir, root) = RelayDir::create(&parent)?;
             copy_inputs(&dir.path.join(INPUT_DIR), &inputs)?;
-            Ok::<_, QuarantineError>((dir, root))
+            Ok((dir, root))
         })
         .await?;
+        let egress = egress
+            .map(|egress| RelayEgress::start(&dir.path.join(EGRESS_SOCKET), egress))
+            .transpose()?;
         let sandbox = sandbox
             .quarantined(
                 dir.path.join(HOME_DIR),
                 vec![dir.path.join(INPUT_DIR), dir.path.join(OUTPUT_DIR)],
+                egress.as_ref().map(|egress| egress.route.clone()),
             )
             .ok_or(QuarantineError::Unsandboxed)?;
         Ok(Self {
+            egress,
             dir,
             root: Arc::new(root),
             sandbox: Arc::new(sandbox),
@@ -99,7 +134,8 @@ impl Quarantine {
     }
 
     /// The file commands, confined to this directory, plus `echo`, `write` limited to the home,
-    /// and `bash` in the quarantine sandbox under `bash`'s rules, asking `gate` as usual.
+    /// and `bash` in the quarantine sandbox under `bash`'s rules, asking `gate` as usual. With
+    /// egress, also `web fetch`, held to the same rule as the proxy.
     pub fn commands(
         &self,
         bash: &BashPolicyCfg,
@@ -130,7 +166,34 @@ impl Quarantine {
             Arc::clone(&self.sandbox),
             gate,
         ));
+        if let Some(egress) = &self.egress {
+            commands.register(WebCommand::under(egress.policy.clone()));
+        }
         commands
+    }
+}
+
+/// A relay's running egress proxy, the rule it holds tunnels to, and how
+/// the sandbox reaches it.
+#[derive(Debug)]
+struct RelayEgress {
+    _proxy: EgressProxy,
+    policy: EgressPolicy,
+    route: EgressRoute,
+}
+
+impl RelayEgress {
+    fn start(socket: &Path, egress: Egress) -> Result<Self, QuarantineError> {
+        let policy = EgressPolicy::https_only(egress.hosts);
+        let proxy = EgressProxy::bind(socket, policy.clone()).map_err(QuarantineError::Proxy)?;
+        Ok(Self {
+            _proxy: proxy,
+            policy,
+            route: EgressRoute {
+                socket: socket.to_path_buf(),
+                forwarder: egress.forwarder,
+            },
+        })
     }
 }
 

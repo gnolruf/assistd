@@ -50,7 +50,7 @@ fn redirect_to(location: &str) -> Vec<u8> {
 
 /// A command that may reach loopback test servers, and no other address.
 fn loopback_only(hosts: ApprovalGate) -> WebCommand {
-    WebCommand::connecting_to(|ip| ip.is_loopback(), hosts, Duration::from_secs(30))
+    WebCommand::under(EgressPolicy::any_port(hosts, |ip| ip.is_loopback()))
 }
 
 fn allowing_gate() -> ApprovalGate {
@@ -206,41 +206,6 @@ async fn name_resolving_only_to_loopback_is_refused() {
         "{}",
         stderr(&out)
     );
-}
-
-#[test]
-fn public_addresses_are_told_from_non_public_ones() {
-    let cases: [(&str, bool); 26] = [
-        ("1.1.1.1", true),
-        ("8.8.8.8", true),
-        ("100.63.255.255", true),
-        ("172.32.0.1", true),
-        ("0.0.0.0", false),
-        ("127.0.0.1", false),
-        ("10.1.2.3", false),
-        ("100.64.0.1", false),
-        ("169.254.169.254", false),
-        ("172.31.255.255", false),
-        ("192.168.1.1", false),
-        ("198.18.0.1", false),
-        ("224.0.0.1", false),
-        ("255.255.255.255", false),
-        ("2606:4700:4700::1111", true),
-        ("::ffff:8.8.8.8", true),
-        ("::1", false),
-        ("::", false),
-        ("::ffff:127.0.0.1", false),
-        ("fd00::1", false),
-        ("fe80::1", false),
-        ("2001:db8::1", false),
-        ("2002:808:808::1", true),
-        ("2002:7f00:1::", false),
-        ("2002:a9fe:a9fe::1", false),
-        ("2001:0:4136:e378:8000:63bf:3fff:fdd2", false),
-    ];
-    for (addr, public) in cases {
-        assert_eq!(is_public(addr.parse().unwrap()), public, "{addr}");
-    }
 }
 
 #[tokio::test]

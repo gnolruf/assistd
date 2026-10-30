@@ -23,7 +23,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "process"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "net", "process"] }
 tracing = { workspace = true }
 regex = { workspace = true }
 glob = { workspace = true }
@@ -38,6 +38,7 @@ parking_lot = { workspace = true }
 rustix = { workspace = true }
 landlock = { workspace = true }
 tempfile = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 assistd-tools = { workspace = true, features = ["test-support"] }

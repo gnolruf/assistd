@@ -40,7 +40,7 @@ pub use policy::{
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use presentation::{OutputCap, PresentSpec};
-pub use quarantine::{Quarantine, QuarantineError};
+pub use quarantine::{Egress, Quarantine, QuarantineError};
 pub use run::RunTool;
 pub use tool_output::{RawStreams, ToolOutput};
 pub use vision::VisionGate;
