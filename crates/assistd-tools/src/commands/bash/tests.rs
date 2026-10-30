@@ -38,6 +38,7 @@ async fn run(cmd: &BashCommand, script: &str, stdin: Option<Vec<u8>>) -> Command
     cmd.run(CommandInput {
         args: vec![script.into()],
         stdin,
+        scope: crate::FileScope::Host,
     })
     .await
 }

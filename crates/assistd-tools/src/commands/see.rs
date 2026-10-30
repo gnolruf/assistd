@@ -144,6 +144,7 @@ mod tests {
         cmd.run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
+            scope: crate::FileScope::Host,
         })
         .await
     }

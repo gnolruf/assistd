@@ -85,6 +85,7 @@ async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
         .run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
+            scope: crate::FileScope::Host,
         })
         .await
 }

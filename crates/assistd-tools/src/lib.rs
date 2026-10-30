@@ -18,6 +18,7 @@ pub mod memory;
 pub mod memory_tools;
 pub mod policy;
 pub mod presentation;
+pub mod quarantine;
 pub mod run;
 mod tool_output;
 pub mod vision;
@@ -31,13 +32,15 @@ pub use memory_tools::{RememberTool, ReminisceTool};
 pub use policy::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
     AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT,
-    ConfirmRouter, ConfirmationGate, ConfirmationRequest, DestructivePattern, IpcConfirmationGate,
-    NoPendingConfirm, Protected, Risk, SandboxError, SandboxInfo, SandboxRequest, SearchPath,
-    SharedDirs, ToolSandbox, ToolsDisabled, inherit_confirm_router, probe_sandbox,
+    ConfirmRouter, ConfirmationGate, ConfirmationRequest, DestructivePattern, FileScope,
+    IpcConfirmationGate, NoPendingConfirm, Protected, Risk, SandboxError, SandboxInfo,
+    SandboxRequest, SearchPath, SharedDirs, ToolSandbox, ToolsDisabled, inherit_confirm_router,
+    probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};
 pub use presentation::{OutputCap, PresentSpec};
+pub use quarantine::{Quarantine, QuarantineError};
 pub use run::RunTool;
 pub use tool_output::{RawStreams, ToolOutput};
 pub use vision::VisionGate;

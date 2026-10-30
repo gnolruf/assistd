@@ -42,7 +42,7 @@ impl Command for HeadCommand {
             Ok(v) => v,
             Err(e) => return count_error("head", e),
         };
-        let data = match collect_input("head", &files, input.stdin).await {
+        let data = match collect_input("head", &input.scope, &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
@@ -86,7 +86,7 @@ impl Command for TailCommand {
             Ok(v) => v,
             Err(e) => return count_error("tail", e),
         };
-        let data = match collect_input("tail", &files, input.stdin).await {
+        let data = match collect_input("tail", &input.scope, &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
@@ -209,6 +209,7 @@ mod tests {
         cmd.run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: Some(stdin.to_vec()),
+            scope: crate::FileScope::Host,
         })
         .await
     }

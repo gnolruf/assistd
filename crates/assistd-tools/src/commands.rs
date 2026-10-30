@@ -8,6 +8,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::chain::OUTPUT_MAX;
 use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
+use crate::policy::FileScope;
 
 pub mod bash;
 pub mod cat;
@@ -53,9 +54,12 @@ pub(crate) use test_support::{
 /// a pipeline stage anyway.
 pub(crate) const FILE_READ_MAX: u64 = OUTPUT_MAX as u64;
 
-/// Read `path` whole, refusing anything that is not a regular file or is
-/// (or grows while being read to be) larger than [`FILE_READ_MAX`].
-pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+/// Read `path` in `scope` whole, refusing anything that is not a regular file
+/// or is (or grows while being read to be) larger than [`FILE_READ_MAX`].
+pub(crate) async fn read_regular_file(
+    scope: &FileScope,
+    path: impl AsRef<Path>,
+) -> io::Result<Vec<u8>> {
     let too_large = || {
         io::Error::new(
             ErrorKind::FileTooLarge,
@@ -65,7 +69,7 @@ pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> io::Result<Vec<
             ),
         )
     };
-    let (file, size) = open_regular(path.as_ref()).await?;
+    let (file, size) = open_regular(scope, path.as_ref()).await?;
     if size > FILE_READ_MAX {
         return Err(too_large());
     }
@@ -77,13 +81,14 @@ pub(crate) async fn read_regular_file(path: impl AsRef<Path>) -> io::Result<Vec<
     Ok(bytes)
 }
 
-/// Read at most `limit` bytes from the start of `path` with the same
+/// Read at most `limit` bytes from the start of `path` in `scope` with the same
 /// file-type check as [`read_regular_file`]; returns them and the file size.
 pub(crate) async fn read_regular_head(
+    scope: &FileScope,
     path: impl AsRef<Path>,
     limit: u64,
 ) -> io::Result<(Vec<u8>, u64)> {
-    let (file, size) = open_regular(path.as_ref()).await?;
+    let (file, size) = open_regular(scope, path.as_ref()).await?;
     let mut head = Vec::new();
     file.take(limit).read_to_end(&mut head).await?;
     Ok((head, size))
@@ -92,20 +97,21 @@ pub(crate) async fn read_regular_head(
 /// Open `path` with its size on the blocking pool, refusing devices, FIFOs
 /// and sockets without opening or blocking on them. Directories fall through
 /// to `EISDIR`.
-async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {
+async fn open_regular(scope: &FileScope, path: &Path) -> io::Result<(tokio::fs::File, u64)> {
     let path = path.to_owned();
-    let (file, size) =
-        tokio::task::spawn_blocking(move || assistd_utils::fs::open_regular_or_dir(&path))
-            .await
-            .map_err(io::Error::other)??;
+    let scope = scope.clone();
+    let (file, size) = tokio::task::spawn_blocking(move || scope.open_regular_or_dir(&path))
+        .await
+        .map_err(io::Error::other)??;
     Ok((tokio::fs::File::from_std(file), size))
 }
 
-/// Input for a stdin-or-files command: named files (concatenated, binary
-/// refused, at most [`OUTPUT_MAX`] in all) win over stdin. `Ok(None)` means
-/// neither was supplied.
+/// Input for a stdin-or-files command: named files in `scope` (concatenated,
+/// binary refused, at most [`OUTPUT_MAX`] in all) win over stdin. `Ok(None)`
+/// means neither was supplied.
 pub(crate) async fn collect_input(
     cmd: &str,
+    scope: &FileScope,
     files: &[String],
     stdin: Option<Vec<u8>>,
 ) -> Result<Option<Vec<u8>>, CommandOutput> {
@@ -114,7 +120,7 @@ pub(crate) async fn collect_input(
     }
     let mut out = Vec::new();
     for path in files {
-        let bytes = read_regular_file(path)
+        let bytes = read_regular_file(scope, path)
             .await
             .map_err(|e| CommandOutput::failed(1, io_error_nav(cmd, path, &e).into_bytes()))?;
         if let Some(mime) = cat::sniff_binary(&bytes) {

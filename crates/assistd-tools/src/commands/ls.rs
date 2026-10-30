@@ -1,12 +1,13 @@
 //! `ls`: list directories and files as type, size and name rows.
 
-use std::fs::Metadata;
+use std::fs::{Metadata, ReadDir};
 use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use tokio::fs::ReadDir;
 
 use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
+use crate::policy::{FileScope, on_blocking_pool};
 
 /// `ls [-al] [PATH]...`: list each PATH (default CWD) as sorted
 /// `<type>\t<size>\t<name>` rows, without following symlinks.
@@ -46,9 +47,9 @@ impl Command for LsCommand {
             Err(msg) => return CommandOutput::usage_error("ls", msg, "ls -al PATH"),
         };
         let [path] = paths.as_slice() else {
-            return list_many(&paths, show_hidden).await;
+            return list_many(&input.scope, &paths, show_hidden).await;
         };
-        match list_path(path, show_hidden).await {
+        match list_path(&input.scope, path, show_hidden).await {
             Ok(Listing::Directory(rows) | Listing::Single(rows)) => {
                 CommandOutput::ok(rows.into_bytes())
             }
@@ -97,12 +98,12 @@ fn kind_and_size(md: &Metadata) -> (&'static str, u64) {
     (kind, md.len())
 }
 
-async fn list_many(paths: &[&str], show_hidden: bool) -> CommandOutput {
+async fn list_many(scope: &FileScope, paths: &[&str], show_hidden: bool) -> CommandOutput {
     let mut out = CommandOutput::ok(Vec::new());
     let mut files = Vec::new();
     let mut directories = Vec::new();
     for &path in paths {
-        match list_path(path, show_hidden).await {
+        match list_path(scope, path, show_hidden).await {
             Ok(Listing::Single(row)) => files.push((path, row)),
             Ok(Listing::Directory(rows)) => directories.push((path, rows)),
             Err(msg) => {
@@ -126,21 +127,23 @@ async fn list_many(paths: &[&str], show_hidden: bool) -> CommandOutput {
     out
 }
 
-async fn list_path(path: &str, show_hidden: bool) -> Result<Listing, String> {
-    let describe_error = |e: io::Error| io_error_nav("ls", path, &e);
-    let reader = match tokio::fs::read_dir(path).await {
+async fn list_path(scope: &FileScope, path: &str, show_hidden: bool) -> Result<Listing, String> {
+    let scope = scope.clone();
+    let target = PathBuf::from(path);
+    on_blocking_pool(move || read_listing(&scope, &target, show_hidden))
+        .await
+        .map_err(|e| io_error_nav("ls", path, &e))
+}
+
+fn read_listing(scope: &FileScope, path: &Path, show_hidden: bool) -> io::Result<Listing> {
+    let reader = match scope.read_dir(path) {
         Ok(reader) => reader,
         Err(e) if e.kind() == ErrorKind::NotADirectory => {
-            return file_row(path)
-                .await
-                .map(Listing::Single)
-                .map_err(describe_error);
+            return file_row(scope, path).map(Listing::Single);
         }
-        Err(e) => return Err(describe_error(e)),
+        Err(e) => return Err(e),
     };
-    let mut rows = read_rows(reader, show_hidden)
-        .await
-        .map_err(describe_error)?;
+    let mut rows = read_rows(reader, show_hidden)?;
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(Listing::Directory(
         rows.into_iter()
@@ -149,24 +152,22 @@ async fn list_path(path: &str, show_hidden: bool) -> Result<Listing, String> {
     ))
 }
 
-async fn file_row(path: &str) -> io::Result<String> {
-    let md = tokio::fs::symlink_metadata(path).await?;
+fn file_row(scope: &FileScope, path: &Path) -> io::Result<String> {
+    let md = scope.symlink_metadata(path)?;
     let (kind, size) = kind_and_size(&md);
-    Ok(format!("{kind}\t{size}\t{path}\n"))
+    Ok(format!("{kind}\t{size}\t{}\n", path.display()))
 }
 
-async fn read_rows(
-    mut reader: ReadDir,
-    show_hidden: bool,
-) -> io::Result<Vec<(String, &'static str, u64)>> {
+fn read_rows(reader: ReadDir, show_hidden: bool) -> io::Result<Vec<(String, &'static str, u64)>> {
     let mut rows = Vec::new();
-    while let Some(entry) = reader.next_entry().await? {
+    for entry in reader {
+        let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if !show_hidden && name.starts_with('.') {
             continue;
         }
-        let (kind, size) = tokio::fs::symlink_metadata(entry.path())
-            .await
+        let (kind, size) = entry
+            .metadata()
             .map_or(("file", 0), |md| kind_and_size(&md));
         rows.push((name, kind, size));
     }

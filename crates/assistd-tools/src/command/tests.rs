@@ -33,7 +33,12 @@ fn parent_dir_stops_at_the_first_metacharacter() {
 }
 
 async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
-    cmd.run(CommandInput { args, stdin: None }).await
+    cmd.run(CommandInput {
+        args,
+        stdin: None,
+        scope: FileScope::Host,
+    })
+    .await
 }
 
 fn contains_hint(s: &str) -> bool {

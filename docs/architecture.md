@@ -202,6 +202,24 @@ an `AnswerShape::Schema`, the run restates its answer through
 does not parse fails the run. The sub-agent's tool output and reasoning never
 leave it.
 
+A sub-agent's commands run in a `Quarantine`, which starts from an empty world:
+a fresh `relay-*` directory with copies of the inputs it was handed in `input/`
+(read-only), a writable `home/` that is `$HOME` and the working directory, and
+`output/` for spilled output. The directory is removed when the `Quarantine` is
+dropped, so on cancel or panic too, even if a script left subdirectories
+unwritable. Its `bash` runs in a separate bwrap profile: read-only `/usr` and
+the merged-`/usr` links, `/etc/ssl`, `/etc/ca-certificates`, `/etc/resolv.conf`
+and the loader config, fresh `/tmp`, `/dev` and `/proc`, the relay's three
+directories bound at their own host paths, the same `prlimit` caps, and always
+`--unshare-net`. `bwrap_extra_args` does not apply. The host home, `/run` and
+the daemon socket are not mounted. The in-process file commands (`cat`, `grep`,
+`head`, `tail`, `ls`, `sort`, `uniq`, `wc`) and glob and `~` expansion go
+through the registry's `FileScope`. In a quarantine that scope opens every path
+with `openat2(RESOLVE_BENEATH)` on the relay directory's descriptor, so the
+kernel refuses `..`, absolute symlinks and anything outside it. Relative paths
+start at `home/`, and `write` may only write under `home/`. `Quarantine::create`
+fails when the sandbox does not wrap.
+
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model
 emitted them. This keeps the conversation deterministic and the

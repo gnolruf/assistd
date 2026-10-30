@@ -57,7 +57,7 @@ impl Command for SortCommand {
             }
         };
 
-        let text = match collect_input("sort", &files, input.stdin).await {
+        let text = match collect_input("sort", &input.scope, &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
@@ -128,6 +128,7 @@ mod tests {
             .run(CommandInput {
                 args: args.iter().map(ToString::to_string).collect(),
                 stdin: Some(stdin.to_vec()),
+                scope: crate::FileScope::Host,
             })
             .await
     }

@@ -221,7 +221,7 @@ async fn run_command(
     };
 
     let args = if cmd.expands_args() {
-        match expand_args(&words[1..]).await {
+        match expand_args(&words[1..], registry.scope()).await {
             Ok(args) => args,
             Err(err) => return glob_failure(name, &err),
         }
@@ -232,7 +232,13 @@ async fn run_command(
         return CommandOutput::usage(cmd.help());
     }
 
-    let out = cmd.run(CommandInput { args, stdin }).await;
+    let out = cmd
+        .run(CommandInput {
+            args,
+            stdin,
+            scope: registry.scope().clone(),
+        })
+        .await;
 
     let stderr = if out.stderr.is_empty() {
         Vec::new()

@@ -72,7 +72,7 @@ impl Command for WcCommand {
             }
         }
 
-        let text = match collect_input("wc", &files, input.stdin).await {
+        let text = match collect_input("wc", &input.scope, &files, input.stdin).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return CommandOutput::usage(self.help()),
             Err(failure) => return failure,
@@ -121,6 +121,7 @@ mod tests {
             .run(CommandInput {
                 args: args.iter().map(ToString::to_string).collect(),
                 stdin: stdin.map(<[u8]>::to_vec),
+                scope: crate::FileScope::Host,
             })
             .await
     }

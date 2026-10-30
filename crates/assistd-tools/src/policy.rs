@@ -13,6 +13,7 @@ use crate::exec::POLICY_DENIED_EXIT;
 mod allowlist;
 mod approvals;
 mod confirm;
+mod file_scope;
 mod review;
 mod sandbox;
 mod shell;
@@ -28,6 +29,7 @@ pub use confirm::{
     ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm, Risk,
     inherit_confirm_router,
 };
+pub use file_scope::{ConfinedRoot, FileScope};
 pub use review::{Confirmation, DestructivePattern, Rules, check_script};
 pub(crate) use sandbox::{ConfinedSpawner, is_within_visible_home_entry};
 pub use sandbox::{

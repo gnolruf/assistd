@@ -7,6 +7,7 @@ async fn run_ls(args: &[&str]) -> CommandOutput {
         .run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
+            scope: FileScope::Host,
         })
         .await
 }

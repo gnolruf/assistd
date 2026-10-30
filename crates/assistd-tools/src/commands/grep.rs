@@ -1,5 +1,7 @@
 //! `grep`: filter lines of files, directories or stdin by an extended regex.
 
+use std::fs::Metadata;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -9,6 +11,7 @@ use crate::chain::OUTPUT_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::commands::cat::sniff_binary;
 use crate::commands::read_regular_file;
+use crate::policy::{FileScope, on_blocking_pool};
 
 /// BRE metacharacters spelled with a backslash, which the regex crate
 /// reads as the literal character.
@@ -102,6 +105,7 @@ enum Root<'a> {
 /// Running state of one `grep` over files: accumulated output, match
 /// total, and how many directory entries the walk may still visit.
 struct Search<'a> {
+    scope: &'a FileScope,
     re: &'a Regex,
     flags: &'a Flags,
     label_lines: bool,
@@ -116,7 +120,7 @@ impl Search<'_> {
     }
 
     async fn search_target(&mut self, target: &Target) -> Result<(), TargetError> {
-        let Some(text) = read_text(target).await? else {
+        let Some(text) = read_text(self.scope, target).await? else {
             return Ok(());
         };
         let display = target.path().to_string_lossy();
@@ -137,7 +141,7 @@ impl Search<'_> {
     async fn search_tree(&mut self, root: &Path) -> Result<(), TargetError> {
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            let (files, dirs) = list_dir(&dir, &mut self.entries_left).await;
+            let (files, dirs) = list_dir(self.scope, &dir, &mut self.entries_left).await;
             for file in files {
                 self.search_target(&Target::Found(file)).await?;
                 if self.is_full() {
@@ -173,13 +177,8 @@ impl Search<'_> {
 }
 
 enum TargetError {
-    Unreadable {
-        path: String,
-        source: std::io::Error,
-    },
-    DirectoryWithoutRecursion {
-        path: String,
-    },
+    Unreadable { path: String, source: io::Error },
+    DirectoryWithoutRecursion { path: String },
 }
 
 impl TargetError {
@@ -290,7 +289,7 @@ impl Command for GrepCommand {
             };
         }
 
-        match search_paths(&re, &flags, paths).await {
+        match search_paths(&input.scope, &re, &flags, paths).await {
             Ok(out) => annotate_dialect(out, pattern),
             Err(e) => CommandOutput::failed(2, e.error_line().into_bytes()),
         }
@@ -373,12 +372,14 @@ fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
 }
 
 async fn search_paths(
+    scope: &FileScope,
     re: &Regex,
     flags: &Flags,
     paths: &[String],
 ) -> Result<CommandOutput, TargetError> {
-    let roots = resolve_roots(paths, flags.recursive).await?;
+    let roots = resolve_roots(scope, paths, flags.recursive).await?;
     let mut search = Search {
+        scope,
         re,
         flags,
         label_lines: roots.len() > 1 || flags.recursive,
@@ -404,8 +405,8 @@ async fn search_paths(
 
 /// Text of `target`, or `None` when it is binary, not UTF-8, or an
 /// unreadable [`Target::Found`].
-async fn read_text(target: &Target) -> Result<Option<String>, TargetError> {
-    let bytes = match (read_regular_file(target.path()).await, target) {
+async fn read_text(scope: &FileScope, target: &Target) -> Result<Option<String>, TargetError> {
+    let bytes = match (read_regular_file(scope, target.path()).await, target) {
         (Ok(bytes), _) => bytes,
         (Err(_), Target::Found(_)) => return Ok(None),
         (Err(source), Target::Named(path)) => {
@@ -505,12 +506,16 @@ fn outcome(count: usize, stdout: Vec<u8>) -> CommandOutput {
     }
 }
 
-async fn resolve_roots(paths: &[String], recursive: bool) -> Result<Vec<Root<'_>>, TargetError> {
+async fn resolve_roots<'p>(
+    scope: &FileScope,
+    paths: &'p [String],
+    recursive: bool,
+) -> Result<Vec<Root<'p>>, TargetError> {
     let mut roots = Vec::with_capacity(paths.len());
     for raw in paths {
         let path = Path::new(raw);
         let meta =
-            tokio::fs::symlink_metadata(path)
+            symlink_metadata(scope, path)
                 .await
                 .map_err(|source| TargetError::Unreadable {
                     path: raw.clone(),
@@ -527,27 +532,55 @@ async fn resolve_roots(paths: &[String], recursive: bool) -> Result<Vec<Root<'_>
     Ok(roots)
 }
 
+async fn symlink_metadata(scope: &FileScope, path: &Path) -> io::Result<Metadata> {
+    let scope = scope.clone();
+    let path = path.to_path_buf();
+    on_blocking_pool(move || scope.symlink_metadata(&path)).await
+}
+
 /// Sorted file and subdirectory paths of `dir`, skipping symlinks and
 /// unreadable entries; reads at most `*entries_left` entries and
 /// subtracts what it read.
-async fn list_dir(dir: &Path, entries_left: &mut usize) -> (Vec<PathBuf>, Vec<PathBuf>) {
+async fn list_dir(
+    scope: &FileScope,
+    dir: &Path,
+    entries_left: &mut usize,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let scope = scope.clone();
+    let dir = dir.to_path_buf();
+    let mut left = *entries_left;
+    let (listing, left) = on_blocking_pool(move || {
+        let listing = read_dir_sorted(&scope, &dir, &mut left);
+        (listing, left)
+    })
+    .await;
+    *entries_left = left;
+    listing
+}
+
+fn read_dir_sorted(
+    scope: &FileScope,
+    dir: &Path,
+    entries_left: &mut usize,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut files = Vec::new();
     let mut dirs = Vec::new();
-    let Ok(mut reader) = tokio::fs::read_dir(dir).await else {
+    let Ok(mut reader) = scope.read_dir(dir) else {
         return (files, dirs);
     };
     while *entries_left > 0 {
-        let Ok(Some(entry)) = reader.next_entry().await else {
+        let Some(Ok(entry)) = reader.next() else {
             break;
         };
         *entries_left -= 1;
-        let Ok(kind) = entry.file_type().await else {
+        let Ok(kind) = entry.file_type() else {
             continue;
         };
+        let path = dir.join(entry.file_name());
         if kind.is_dir() {
-            dirs.push(entry.path());
+            dirs.push(path);
         } else if !kind.is_symlink() {
-            files.push(entry.path());
+            files.push(path);
         }
     }
     files.sort();
@@ -584,6 +617,7 @@ mod tests {
             .run(CommandInput {
                 args: args.iter().map(ToString::to_string).collect(),
                 stdin: Some(stdin.to_vec()),
+                scope: FileScope::Host,
             })
             .await
     }
