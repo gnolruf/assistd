@@ -240,16 +240,20 @@ query. Dropping the quarantine stops the proxy and closes every tunnel through
 it.
 
 The model starts a sub-agent with the `relay` tool (`task`, `inputs`,
-`profile`), registered in `assistd-core` beside `run` whenever tools are. A
+`profile`, or `steps`: a plan of up to five such steps), registered in `assistd-core` beside `run` whenever tools are. A
 `read` relay gets copies of `inputs` and no network; a `fetch` relay gets an
 `Egress` and no inputs. A `fetch` call naming inputs is refused as invalid
 arguments before a quarantine or conversation exists, since a relay that could
 both see private files and reach the network could leak them. Each call
 creates a fresh `Quarantine` under `~/.cache/assistd/relays` (emptied at daemon
 start), gives the sub-agent a registry holding only `run` over the
-quarantine's commands, and runs it inside `MainSlot::preserve_across`. The
-tool result is the rendered `RelayReport`; a failed run is a failed tool
-result, not a failed turn. A relay starts without confirmation; commands inside
+quarantine's commands, and runs it inside `MainSlot::preserve_across`. A
+plan's steps run back to back inside one `preserve_across`, each in its own
+quarantine and handed only the previous step's rendered `RelayReport` beneath
+its task. Since a report carries what its sub-agent read, a plan with a `fetch`
+step after a `read` step is refused as invalid arguments. The tool result is
+the last step's rendered `RelayReport`; a failed step ends the plan
+as a failed tool result, not a failed turn. A relay starts without confirmation; commands inside
 it ask the same `ConfirmationGate` as the main agent's. Cancelling the turn
 drops the call, which drops the run and removes the quarantine. A tool whose
 `bounded_by_tool_deadline` is `false` is exempt from `timeouts.tool_call_secs`;
