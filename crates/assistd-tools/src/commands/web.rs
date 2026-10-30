@@ -2,7 +2,7 @@
 //! instance, or HTTP GET a public URL.
 
 use std::fmt::Display;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +17,10 @@ use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
-use crate::policy::{ApprovalGate, ConfirmationRequest, Risk, on_blocking_pool};
+use crate::policy::{
+    ApprovalGate, ConfirmationRequest, EgressPolicy, NonPublic, Risk, is_public, on_blocking_pool,
+    reachable_addrs,
+};
 
 mod page;
 mod search;
@@ -26,6 +29,8 @@ use page::{Extent, HtmlPage};
 
 /// Hard cap on response bytes.
 pub const BODY_MAX: usize = 10 * 1024 * 1024;
+
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Redirects followed before a fetch fails.
 const MAX_REDIRECTS: usize = 10;
@@ -69,33 +74,6 @@ const FETCH_HELP: &str = "usage: web fetch [--raw | --full] <URL>\n\
     Exit 2 on usage errors (wrong arg count, non-http scheme), 126 when \
     the URL names a non-public address or the user declines.\n";
 
-/// IPv4 ranges that are not globally routable unicast, as (network, prefix length).
-const NON_PUBLIC_V4: [(Ipv4Addr, u32); 13] = [
-    (Ipv4Addr::new(0, 0, 0, 0), 8),
-    (Ipv4Addr::new(10, 0, 0, 0), 8),
-    (Ipv4Addr::new(100, 64, 0, 0), 10),
-    (Ipv4Addr::new(127, 0, 0, 0), 8),
-    (Ipv4Addr::new(169, 254, 0, 0), 16),
-    (Ipv4Addr::new(172, 16, 0, 0), 12),
-    (Ipv4Addr::new(192, 0, 0, 0), 24),
-    (Ipv4Addr::new(192, 0, 2, 0), 24),
-    (Ipv4Addr::new(192, 168, 0, 0), 16),
-    (Ipv4Addr::new(198, 18, 0, 0), 15),
-    (Ipv4Addr::new(198, 51, 100, 0), 24),
-    (Ipv4Addr::new(203, 0, 113, 0), 24),
-    (Ipv4Addr::new(224, 0, 0, 0), 3),
-];
-
-const GLOBAL_UNICAST_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2000, 0, 0, 0, 0, 0, 0, 0), 3);
-
-const DOCUMENTATION_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
-
-/// Teredo tunnels reach an obfuscated IPv4 client behind a relay, so the real target is unknowable.
-const TEREDO_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32);
-
-/// 6to4 addresses carry the IPv4 endpoint in bits 16..48.
-const SIX_TO_FOUR_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16);
-
 /// How a fetched HTML body is returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rendering {
@@ -109,8 +87,7 @@ enum Rendering {
 #[derive(Debug)]
 pub struct WebCommand {
     client: reqwest::Client,
-    hosts: ApprovalGate,
-    reachable: fn(IpAddr) -> bool,
+    egress: EgressPolicy,
     search: Option<SearxngClient>,
 }
 
@@ -121,16 +98,14 @@ impl WebCommand {
     pub fn new(hosts: ApprovalGate, search: Option<SearxngClient>) -> Self {
         Self {
             search,
-            ..Self::connecting_to(is_public, hosts, Duration::from_secs(30))
+            ..Self::under(EgressPolicy::any_port(hosts, is_public))
         }
     }
 
-    fn connecting_to(
-        reachable: fn(IpAddr) -> bool,
-        hosts: ApprovalGate,
-        timeout: Duration,
-    ) -> Self {
-        let redirect_hosts = hosts.clone();
+    /// A fetch-only command whose traffic is held to `egress`.
+    pub(crate) fn under(egress: EgressPolicy) -> Self {
+        let reachable = egress.reachable;
+        let redirect_egress = egress.clone();
         let client = remote_client_builder()
             .gzip(true)
             .brotli(true)
@@ -138,23 +113,23 @@ impl WebCommand {
             .no_proxy()
             .dns_resolver(FilteredResolver { reachable })
             .connect_timeout(Duration::from_secs(10))
-            .timeout(timeout)
+            .timeout(FETCH_TIMEOUT)
             .redirect(Policy::custom(move |attempt| {
-                follow_redirect(attempt, &redirect_hosts, reachable)
+                follow_redirect(attempt, &redirect_egress)
             }))
             .build()
             .expect("reqwest client builds with valid config");
         Self {
             client,
-            hosts,
-            reachable,
+            egress,
             search: None,
         }
     }
 
     async fn confirmed(&self, url: &Url) -> bool {
         let host = url.host_str().unwrap_or_default();
-        self.hosts
+        self.egress
+            .hosts
             .confirm(host, || ConfirmationRequest {
                 tool: NAME.to_string(),
                 script: format!("web fetch {url}"),
@@ -177,14 +152,14 @@ impl WebCommand {
                 "web fetch https://... or web fetch http://...",
             );
         };
-        if let Some(refusal) = unreachable_literal(&url, self.reachable) {
+        if let Some(refusal) = refusal_of(&url, &self.egress) {
             return CommandOutput::failed(
                 POLICY_DENIED_EXIT,
                 error_line(
                     NAME,
                     format_args!("fetch denied by policy: {refusal}"),
                     Hint::Try,
-                    "a URL on the public internet",
+                    refusal.recovery(),
                 )
                 .into_bytes(),
             );
@@ -310,26 +285,31 @@ impl Resolve for FilteredResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let reachable = self.reachable;
         Box::pin(async move {
-            let host = name.as_str();
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, 0))
-                .await?
-                .filter(|addr| reachable(addr.ip()))
-                .collect();
-            if addrs.is_empty() {
-                return Err(NonPublic::Name(host.to_string()).into());
-            }
+            let addrs = reachable_addrs(name.as_str(), 0, reachable).await?;
             Ok(Box::new(addrs.into_iter()) as Addrs)
         })
     }
 }
 
-/// A destination was refused because it is not on the public internet.
+/// A URL was refused before anything was resolved.
 #[derive(Debug, thiserror::Error)]
-enum NonPublic {
-    #[error("{0} is not a public address")]
-    Address(IpAddr),
-    #[error("{0} resolves only to non-public addresses")]
-    Name(String),
+enum Refused {
+    #[error("this agent may only fetch https:// URLs")]
+    Plaintext,
+    #[error("port {0} is not one this agent may connect to")]
+    Port(u16),
+    #[error(transparent)]
+    Address(NonPublic),
+}
+
+impl Refused {
+    fn recovery(&self) -> &'static str {
+        match self {
+            Self::Plaintext => "the https:// form of the URL",
+            Self::Port(_) => "the URL without its port, on 443",
+            Self::Address(_) => "a URL on the public internet",
+        }
+    }
 }
 
 /// A redirect was refused because it leaves for an unapproved host.
@@ -337,20 +317,16 @@ enum NonPublic {
 #[error("redirect to unapproved host {0}; fetch it directly to be asked")]
 struct UnapprovedRedirect(String);
 
-fn follow_redirect(
-    attempt: Attempt<'_>,
-    hosts: &ApprovalGate,
-    reachable: fn(IpAddr) -> bool,
-) -> reqwest::redirect::Action {
+fn follow_redirect(attempt: Attempt<'_>, egress: &EgressPolicy) -> reqwest::redirect::Action {
     if attempt.previous().len() > MAX_REDIRECTS {
         return attempt.error("too many redirects");
     }
-    if let Some(refusal) = unreachable_literal(attempt.url(), reachable) {
+    if let Some(refusal) = refusal_of(attempt.url(), egress) {
         return attempt.error(refusal);
     }
     let target = attempt.url().host_str().unwrap_or_default().to_string();
     let original = attempt.previous().first().and_then(Url::host_str);
-    if original == Some(target.as_str()) || hosts.contains(&target) {
+    if original == Some(target.as_str()) || egress.hosts.contains(&target) {
         attempt.follow()
     } else {
         attempt.error(UnapprovedRedirect(target))
@@ -438,47 +414,24 @@ fn web_url(raw: &str) -> Option<Url> {
         .filter(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
 }
 
-fn unreachable_literal(url: &Url, reachable: fn(IpAddr) -> bool) -> Option<NonPublic> {
+/// Why `egress` refuses `url` before any name is resolved: a scheme or port
+/// it does not allow, or a literal address it cannot reach.
+fn refusal_of(url: &Url, egress: &EgressPolicy) -> Option<Refused> {
+    if !egress.allows_scheme(url.scheme()) {
+        return Some(Refused::Plaintext);
+    }
+    if let Some(port) = url
+        .port_or_known_default()
+        .filter(|&port| !egress.allows_port(port))
+    {
+        return Some(Refused::Port(port));
+    }
     let ip = match url.host()? {
         Host::Ipv4(ip) => IpAddr::V4(ip),
         Host::Ipv6(ip) => IpAddr::V6(ip),
         Host::Domain(_) => return None,
     };
-    (!reachable(ip)).then_some(NonPublic::Address(ip))
-}
-
-fn is_public(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_public_v4(v4),
-        IpAddr::V6(v6) => embedded_v4(v6).map_or_else(|| is_public_v6(v6), is_public_v4),
-    }
-}
-
-fn is_public_v4(ip: Ipv4Addr) -> bool {
-    !NON_PUBLIC_V4.iter().any(|&range| in_v4_prefix(ip, range))
-}
-
-fn in_v4_prefix(ip: Ipv4Addr, (network, prefix_len): (Ipv4Addr, u32)) -> bool {
-    let mask = u32::MAX << (32 - prefix_len);
-    u32::from(ip) & mask == u32::from(network)
-}
-
-fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
-    ip.to_ipv4_mapped().or_else(|| {
-        let [_, _, a, b, c, d, ..] = ip.octets();
-        in_v6_prefix(ip, SIX_TO_FOUR_V6).then(|| Ipv4Addr::new(a, b, c, d))
-    })
-}
-
-fn is_public_v6(ip: Ipv6Addr) -> bool {
-    in_v6_prefix(ip, GLOBAL_UNICAST_V6)
-        && !in_v6_prefix(ip, DOCUMENTATION_V6)
-        && !in_v6_prefix(ip, TEREDO_V6)
-}
-
-fn in_v6_prefix(ip: Ipv6Addr, (network, prefix_len): (Ipv6Addr, u32)) -> bool {
-    let mask = u128::MAX << (128 - prefix_len);
-    u128::from(ip) & mask == u128::from(network)
+    (!(egress.reachable)(ip)).then_some(Refused::Address(NonPublic::Address(ip)))
 }
 
 fn error_chain(err: &dyn std::error::Error) -> String {

@@ -220,6 +220,23 @@ kernel refuses `..`, absolute symlinks and anything outside it. Relative paths
 start at `home/`, and `write` may only write under `home/`. `Quarantine::create`
 fails when the sandbox does not wrap.
 
+A quarantine created with an `Egress` keeps `--unshare-net` but gets one way
+out: an HTTP `CONNECT` proxy the daemon runs on `egress.sock` in the relay
+directory, bound read-only into the sandbox at `/run/assistd/egress.sock`. Most
+clients cannot speak to a proxy over a Unix socket, so each command runs under
+`assistd-egress-forward`, also bound in, which listens on `127.0.0.1:3128`
+inside the sandbox's network namespace, forwards each connection to the
+socket, and exits with the command's status. `HTTPS_PROXY`, `HTTP_PROXY` and
+their lowercase forms point at it. Relay traffic is HTTPS only, so nothing on
+the network path can read what a sub-agent sends or alter what it downloads:
+the proxy tunnels only `CONNECT` to port 443 and refuses plain-HTTP proxy
+requests. It asks the same approved-hosts `ApprovalGate` as `web fetch`, and
+refuses loopback, private, link-local and other non-public addresses, both as
+literals and after DNS resolution, so a relay cannot reach llama-server,
+SearXNG or the LAN. The quarantine's own `web fetch` is held to the same
+`EgressPolicy`, so it refuses `http://` URLs and redirects to them. Dropping
+the quarantine stops the proxy and closes every tunnel through it.
+
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model
 emitted them. This keeps the conversation deterministic and the
