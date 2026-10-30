@@ -65,6 +65,7 @@ async fn fetch(cmd: &WebCommand, url: &str) -> CommandOutput {
     cmd.run(CommandInput {
         args: vec!["fetch".to_string(), url.to_string()],
         stdin: None,
+        scope: crate::FileScope::Host,
     })
     .await
 }
@@ -286,7 +287,13 @@ async fn fetch_page(content_type: &str, page: &[u8], flag_sets: &[&[&str]]) -> V
             .map(String::from)
             .chain([format!("http://{addr}/blog/post")])
             .collect();
-        let out = allowing().run(CommandInput { args, stdin: None }).await;
+        let out = allowing()
+            .run(CommandInput {
+                args,
+                stdin: None,
+                scope: crate::FileScope::Host,
+            })
+            .await;
         assert_eq!(out.exit_code, 0, "{}", stderr(&out));
         bodies.push(String::from_utf8_lossy(&out.stdout).replace(&addr.to_string(), "HOST"));
     }

@@ -1,15 +1,14 @@
 //! Word expansion between parsing and dispatch: `~` to `$HOME` and globs
 //! to the files they name.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use assistd_utils::path::expand_tilde_from_env;
 use glob::{MatchOptions, Pattern};
 use thiserror::Error;
 use tokio::task::JoinError;
 
 use super::Word;
+use crate::policy::FileScope;
 
 /// Most paths a single glob may expand to.
 pub const MAX_GLOB_MATCHES: usize = 1_000;
@@ -46,6 +45,7 @@ enum Component {
 /// it reads against [`MAX_GLOB_ENTRIES`].
 struct GlobWalk<'a> {
     pattern: &'a str,
+    scope: &'a FileScope,
     entries_read: usize,
 }
 
@@ -60,7 +60,7 @@ impl GlobWalk<'_> {
             match component {
                 Component::Literal(name) => {
                     let child = parent.join(name);
-                    if fs::symlink_metadata(&child).is_ok() {
+                    if self.scope.symlink_metadata(&child).is_ok() {
                         children.push(child);
                     }
                 }
@@ -82,7 +82,7 @@ impl GlobWalk<'_> {
         } else {
             parent
         };
-        let Ok(entries) = fs::read_dir(dir) else {
+        let Ok(entries) = self.scope.read_dir(dir) else {
             return Ok(Vec::new());
         };
         let mut names = Vec::new();
@@ -104,32 +104,35 @@ impl GlobWalk<'_> {
     }
 }
 
-/// Expand `~` and globs in unquoted words into a command's arguments; an unmatched glob stays as
-/// written. Fails when a glob passes [`MAX_GLOB_MATCHES`] or [`MAX_GLOB_ENTRIES`].
-pub async fn expand_args(words: &[Word]) -> Result<Vec<String>, ExpandError> {
+/// Expand `~` and globs in unquoted words into a command's arguments, reading `scope`; an
+/// unmatched glob stays as written. Fails when a glob passes [`MAX_GLOB_MATCHES`] or
+/// [`MAX_GLOB_ENTRIES`].
+pub async fn expand_args(words: &[Word], scope: &FileScope) -> Result<Vec<String>, ExpandError> {
     let words = words.to_vec();
-    tokio::task::spawn_blocking(move || expand_words(&words)).await?
+    let scope = scope.clone();
+    tokio::task::spawn_blocking(move || expand_words(&words, &scope)).await?
 }
 
-fn expand_words(words: &[Word]) -> Result<Vec<String>, ExpandError> {
+fn expand_words(words: &[Word], scope: &FileScope) -> Result<Vec<String>, ExpandError> {
     let mut args = Vec::with_capacity(words.len());
     for word in words {
-        args.extend(expand_word(word)?);
+        args.extend(expand_word(word, scope)?);
     }
     Ok(args)
 }
 
-fn expand_word(word: &Word) -> Result<Vec<String>, ExpandError> {
+fn expand_word(word: &Word, scope: &FileScope) -> Result<Vec<String>, ExpandError> {
     if word.quoted {
         return Ok(vec![word.text.clone()]);
     }
-    let tilde = expand_tilde_from_env(&word.text)
+    let tilde = scope
+        .expand_tilde(&word.text)
         .to_string_lossy()
         .into_owned();
-    Ok(expand_glob(&tilde)?.unwrap_or_else(|| vec![tilde]))
+    Ok(expand_glob(&tilde, scope)?.unwrap_or_else(|| vec![tilde]))
 }
 
-fn expand_glob(pattern: &str) -> Result<Option<Vec<String>>, ExpandError> {
+fn expand_glob(pattern: &str, scope: &FileScope) -> Result<Option<Vec<String>>, ExpandError> {
     if !pattern.contains(['*', '?', '[']) {
         return Ok(None);
     }
@@ -138,6 +141,7 @@ fn expand_glob(pattern: &str) -> Result<Option<Vec<String>>, ExpandError> {
     };
     let mut walk = GlobWalk {
         pattern,
+        scope,
         entries_read: 0,
     };
     let root = if pattern.starts_with('/') {
@@ -150,7 +154,7 @@ fn expand_glob(pattern: &str) -> Result<Option<Vec<String>>, ExpandError> {
         paths = walk.descend(&paths, component)?;
     }
     if pattern.ends_with('/') {
-        paths.retain(|path| path.is_dir());
+        paths.retain(|path| scope.metadata(path).is_ok_and(|meta| meta.is_dir()));
     }
     if paths.len() > MAX_GLOB_MATCHES {
         return Err(ExpandError::TooManyMatches {

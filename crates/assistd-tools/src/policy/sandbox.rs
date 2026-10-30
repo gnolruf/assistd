@@ -32,6 +32,33 @@ const RESOURCE_LIMITS: [&str; 3] = ["--nproc=512", "--data=4294967296", "--fsize
 /// agent sockets and tokens, are cleared.
 const KEPT_ENV: &[&str] = &["LANG", "LANGUAGE", "LOGNAME", "TERM", "TZ", "USER"];
 
+/// The namespaces every sandboxed command gets of its own, network
+/// included, in its own session, killed with the daemon.
+const ISOLATION_FLAGS: [&str; 7] = [
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--unshare-net",
+    "--new-session",
+    "--die-with-parent",
+];
+
+/// The top-level system directories a quarantine mirrors from the host,
+/// as the symlinks into `/usr` they are on a merged-`/usr` system.
+const QUARANTINE_SYSTEM_LINKS: [&str; 4] = ["/bin", "/sbin", "/lib", "/lib64"];
+
+/// The `/etc` entries a quarantine exposes: certificates, name resolution
+/// and the dynamic loader's configuration.
+const QUARANTINE_ETC: [&str; 6] = [
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/resolv.conf",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+];
+
 /// The bwrap flags that mount a host path at their second argument.
 const BIND_FLAGS: &[&str] = &[
     "--bind",
@@ -107,6 +134,17 @@ pub struct SandboxInfo {
     /// Set when `extra_args` shares the network namespace, which abstract
     /// Unix sockets such as the X server's belong to.
     confined: Option<ConfinedSpawner>,
+    profile: Profile,
+}
+
+/// What of the host a bwrap sandbox mounts.
+#[derive(Debug, Clone)]
+enum Profile {
+    /// The host's root read-only, with `$HOME`'s visible entries writable.
+    Host,
+    /// Only `/usr`, a few `/etc` entries and the shared directories, with
+    /// `home` as `$HOME` and the working directory.
+    Quarantine { home: PathBuf },
 }
 
 /// Paths commands must not change, even inside the sandbox's writable
@@ -141,6 +179,7 @@ impl SandboxInfo {
             shared: SharedDirs::default(),
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
             confined: None,
+            profile: Profile::Host,
         })
     }
 
@@ -158,6 +197,28 @@ impl SandboxInfo {
             },
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
             confined: None,
+            profile: Profile::Host,
+        })
+    }
+
+    /// A bwrap sandbox that sees none of the host but its programs, `home`
+    /// (writable, and shared as the scratch directory) and `read_only`.
+    /// `None` when this configuration does not wrap.
+    pub(crate) fn quarantined(&self, home: PathBuf, read_only: Vec<PathBuf>) -> Option<Self> {
+        let ResolvedSandboxMode::Bwrap { .. } = self.mode else {
+            return None;
+        };
+        Some(Self {
+            mode: self.mode.clone(),
+            extra_args: Vec::new(),
+            protected: Protected::default(),
+            shared: SharedDirs {
+                scratch: Some(home.clone()),
+                read_only,
+            },
+            host_path: self.host_path.clone(),
+            confined: None,
+            profile: Profile::Quarantine { home },
         })
     }
 
@@ -256,9 +317,14 @@ impl SandboxInfo {
     {
         match &self.mode {
             ResolvedSandboxMode::None => self.unwrapped_command(program, args),
-            ResolvedSandboxMode::Bwrap { path, prlimit } => {
-                self.bwrap_command(path, prlimit, std::env::var("HOME").ok(), program, args)
-            }
+            ResolvedSandboxMode::Bwrap { path, prlimit } => match &self.profile {
+                Profile::Host => {
+                    self.bwrap_command(path, prlimit, std::env::var("HOME").ok(), program, args)
+                }
+                Profile::Quarantine { home } => {
+                    self.quarantine_command(path, prlimit, home, program, args)
+                }
+            },
         }
     }
 
@@ -308,11 +374,43 @@ impl SandboxInfo {
         let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         cmd.args(protection_flags(&self.protected, &writable));
         cmd.args(self.extra_args.iter().map(OsStr::new));
-        cmd.arg("--");
-        cmd.arg(prlimit).args(RESOURCE_LIMITS).arg("--");
-        cmd.arg(program).args(args);
+        run_limited(&mut cmd, prlimit, program, args);
         cmd
     }
+
+    /// The quarantine profile, then the shared directories, which `home` is
+    /// one of; no `extra_args`, so the network stays unshared.
+    fn quarantine_command<I, S>(
+        &self,
+        bwrap: &Path,
+        prlimit: &Path,
+        home: &Path,
+        program: &str,
+        args: I,
+    ) -> ProcCommand
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut cmd = ProcCommand::new(bwrap);
+        cmd.env_clear().envs(kept_env(std::env::vars_os()));
+        cmd.args(quarantine_flags(home));
+        cmd.args(shared_flags(&self.shared));
+        run_limited(&mut cmd, prlimit, program, args);
+        cmd
+    }
+}
+
+/// End `cmd`'s bwrap flags and run `program` with `args` under `prlimit`'s
+/// [`RESOURCE_LIMITS`].
+fn run_limited<I, S>(cmd: &mut ProcCommand, prlimit: &Path, program: &str, args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    cmd.arg("--");
+    cmd.arg(prlimit).args(RESOURCE_LIMITS).arg("--");
+    cmd.arg(program).args(args);
 }
 
 /// Why [`probe_sandbox`] could not satisfy the requested sandbox.
@@ -703,27 +801,43 @@ fn default_bwrap_flags_for(home: Option<&SandboxHome>) -> Vec<String> {
         ),
     }
     flags.extend(
-        [
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--tmpfs",
-            "/run",
-            "--unshare-user",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--unshare-net",
-            "--new-session",
-            "--die-with-parent",
-        ]
-        .map(String::from),
+        ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/run"]
+            .into_iter()
+            .chain(ISOLATION_FLAGS)
+            .map(String::from),
     );
     if let Some(home) = home {
         flags.extend(["--setenv".into(), "HOME".into(), home.dir.clone()]);
     }
     flags.extend(["--setenv".into(), "PATH".into(), SANDBOX_PATH.into()]);
+    flags
+}
+
+/// Read-only `/usr` and [`QUARANTINE_ETC`], the [`QUARANTINE_SYSTEM_LINKS`],
+/// fresh `/tmp`, `/dev` and `/proc`, [`ISOLATION_FLAGS`], and `home` as
+/// `$HOME` and working directory. Reads the host's system links.
+fn quarantine_flags(home: &Path) -> Vec<OsString> {
+    let mut flags: Vec<OsString> = ["--ro-bind", "/usr", "/usr"].map(OsString::from).into();
+    for link in QUARANTINE_SYSTEM_LINKS {
+        let mirror = match std::fs::read_link(link) {
+            Ok(target) => ["--symlink".into(), target.into_os_string(), link.into()],
+            Err(_) => ["--ro-bind-try", link, link].map(OsString::from),
+        };
+        flags.extend(mirror);
+    }
+    for entry in QUARANTINE_ETC {
+        flags.extend(["--ro-bind-try", entry, entry].map(OsString::from));
+    }
+    flags.extend(
+        ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+            .into_iter()
+            .chain(ISOLATION_FLAGS)
+            .map(OsString::from),
+    );
+    flags.extend(["--setenv", "HOME"].map(OsString::from));
+    flags.push(home.into());
+    flags.extend(["--setenv", "PATH", SANDBOX_PATH, "--chdir"].map(OsString::from));
+    flags.push(home.into());
     flags
 }
 
@@ -799,6 +913,7 @@ fn probe_sandbox_with_path(
                         shared,
                         host_path: host_path(path_env),
                         confined,
+                        profile: Profile::Host,
                     })));
                 }
                 Err(disabled) => disabled,
@@ -890,6 +1005,7 @@ mod tests {
             shared: SharedDirs::default(),
             host_path: Vec::new(),
             confined: None,
+            profile: Profile::Host,
         }
     }
 

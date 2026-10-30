@@ -269,6 +269,7 @@ mod tests {
             .run(CommandInput {
                 args: args(&["--full"]),
                 stdin: None,
+                scope: crate::FileScope::Host,
             })
             .await;
         assert_eq!(out.exit_code, 1);

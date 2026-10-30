@@ -43,6 +43,15 @@ impl WritePolicyCfg {
         })
     }
 
+    /// A policy permitting writes only beneath the canonical `dir`.
+    pub(crate) fn within(dir: PathBuf) -> Self {
+        Self {
+            first: dir,
+            rest: Vec::new(),
+            protected: Vec::new(),
+        }
+    }
+
     /// Also refuse anything under the canonical `dirs`, even inside a
     /// writable prefix.
     pub fn protecting(mut self, dirs: Vec<PathBuf>) -> Self {

@@ -4,10 +4,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, ErrorKind};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use assistd_ipc::ImageMime;
+
+use crate::policy::{ConfinedRoot, FileScope};
 
 /// The recovery label on an [`error_line`]: `Use`/`Try` offer an alternative,
 /// `Check`/`Available` a diagnostic, `Install` a package, `Note` a condition.
@@ -128,6 +131,9 @@ pub struct CommandInput {
     /// Bytes piped from the previous stage; `None` when nothing was piped,
     /// as distinct from an upstream stage that printed nothing.
     pub stdin: Option<Vec<u8>>,
+    /// Where the paths in `args` resolve; a command that opens files must
+    /// open them through it.
+    pub scope: FileScope,
 }
 
 /// A side-channel payload alongside stdout, carried through pipes untouched
@@ -228,16 +234,31 @@ pub trait Command: fmt::Debug + Send + Sync + 'static {
     async fn run(&self, input: CommandInput) -> CommandOutput;
 }
 
-/// Lookup table of registered commands, keyed by name.
+/// Lookup table of registered commands, keyed by name, and the
+/// [`FileScope`] their arguments resolve in.
 #[derive(Debug, Default)]
 pub struct CommandRegistry {
     commands: BTreeMap<String, Box<dyn Command>>,
+    scope: FileScope,
 }
 
 impl CommandRegistry {
-    /// Create an empty registry.
+    /// Create an empty registry whose commands see the host's files.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty registry whose commands, globs and `~` resolve only beneath `root`.
+    pub(crate) fn confined(root: Arc<ConfinedRoot>) -> Self {
+        Self {
+            commands: BTreeMap::new(),
+            scope: FileScope::Confined(root),
+        }
+    }
+
+    /// Where the registered commands' arguments resolve.
+    pub(crate) fn scope(&self) -> &FileScope {
+        &self.scope
     }
 
     /// Register a command by value.

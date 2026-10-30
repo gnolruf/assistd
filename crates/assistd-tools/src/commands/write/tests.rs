@@ -31,6 +31,7 @@ async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> Com
     .run(CommandInput {
         args: args.iter().map(ToString::to_string).collect(),
         stdin: stdin.map(<[u8]>::to_vec),
+        scope: crate::FileScope::Host,
     })
     .await
 }
@@ -218,6 +219,7 @@ async fn hidden_directory_listed_as_a_prefix_is_writable() {
     .run(CommandInput {
         args: vec![target.to_string_lossy().into_owned(), "hi".into()],
         stdin: None,
+        scope: crate::FileScope::Host,
     })
     .await;
     assert_eq!(
@@ -318,6 +320,7 @@ async fn refuses_a_protected_directory_inside_a_writable_one() {
     .run(CommandInput {
         args: vec![target.to_string_lossy().into_owned(), "x".into()],
         stdin: None,
+        scope: crate::FileScope::Host,
     })
     .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
@@ -407,6 +410,7 @@ async fn overwriting_an_executable_asks_at_elevated_risk() {
         .run(CommandInput {
             args: vec![tool.display().to_string(), "true".into()],
             stdin: None,
+            scope: crate::FileScope::Host,
         })
         .await;
     assert_eq!(out.exit_code, 0, "{out:?}");
@@ -434,6 +438,7 @@ async fn declined_write_outside_tmp_exits_126_without_writing() {
     .run(CommandInput {
         args: vec![target_str.clone(), "x".into()],
         stdin: None,
+        scope: crate::FileScope::Host,
     })
     .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use crate::chain::OUTPUT_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::commands::{read_regular_file, read_regular_head};
+use crate::policy::FileScope;
 
 /// How much of a file's head [`sniff_binary`] looks at for a NUL byte.
 const SNIFF_LEN: usize = 8192;
@@ -66,9 +67,9 @@ impl Command for CatCommand {
         let mut out = Vec::new();
         for path in &files {
             let chunk = if flags.metadata_only {
-                read_metadata(path).await
+                read_metadata(&input.scope, path).await
             } else {
-                read_text(path).await
+                read_text(&input.scope, path).await
             };
             match chunk {
                 Ok(bytes) => out.extend_from_slice(&bytes),
@@ -82,15 +83,15 @@ impl Command for CatCommand {
     }
 }
 
-async fn read_metadata(path: &str) -> Result<Vec<u8>, CommandOutput> {
-    let (head, size) = read_regular_head(path, SNIFF_LEN as u64)
+async fn read_metadata(scope: &FileScope, path: &str) -> Result<Vec<u8>, CommandOutput> {
+    let (head, size) = read_regular_head(scope, path, SNIFF_LEN as u64)
         .await
         .map_err(|e| read_failed(path, &e))?;
     Ok(describe(&head, size, Some(path)))
 }
 
-async fn read_text(path: &str) -> Result<Vec<u8>, CommandOutput> {
-    let bytes = read_regular_file(path)
+async fn read_text(scope: &FileScope, path: &str) -> Result<Vec<u8>, CommandOutput> {
+    let bytes = read_regular_file(scope, path)
         .await
         .map_err(|e| read_failed(path, &e))?;
     let Some(mime) = sniff_binary(&bytes) else {

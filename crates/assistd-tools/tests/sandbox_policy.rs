@@ -14,8 +14,8 @@ use assistd_tools::commands::{BashCommand, BashPolicyCfg, WriteCommand, WritePol
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
-    ConfirmationRequest, DenyAllGate, DestructivePattern, Protected, SandboxInfo, SandboxRequest,
-    SearchPath, SharedDirs,
+    ConfirmationRequest, DenyAllGate, DestructivePattern, FileScope, Protected, SandboxInfo,
+    SandboxRequest, SearchPath, SharedDirs,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
@@ -67,6 +67,7 @@ fn input(script: &str) -> CommandInput {
     CommandInput {
         args: vec![script.to_string()],
         stdin: None,
+        scope: FileScope::Host,
     }
 }
 
@@ -211,6 +212,7 @@ async fn allowed_programs_run_without_asking() {
         .run(CommandInput {
             args: vec!["tr a-z A-Z".into()],
             stdin: Some(b"hi".to_vec()),
+            scope: FileScope::Host,
         })
         .await;
     assert_eq!(out.exit_code, 0);
@@ -305,6 +307,7 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
         .run(CommandInput {
             args: vec![from_write.to_string_lossy().into_owned(), "hi".into()],
             stdin: None,
+            scope: FileScope::Host,
         })
         .await;
     assert_eq!(out.exit_code, 0);

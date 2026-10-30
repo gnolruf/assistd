@@ -11,6 +11,7 @@ async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
         .run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
+            scope: FileScope::Host,
         })
         .await
 }

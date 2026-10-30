@@ -1,3 +1,5 @@
+use std::fs;
+
 use tempfile::{TempDir, tempdir};
 
 use super::*;
@@ -17,7 +19,7 @@ fn joined(dir: &TempDir, name: &str) -> String {
 }
 
 fn expanded(word: Word) -> Vec<String> {
-    expand_words(&[word]).expect("expansion within budget")
+    expand_words(&[word], &FileScope::Host).expect("expansion within budget")
 }
 
 #[test]
@@ -64,6 +66,7 @@ fn glob_past_match_cap_fails() {
     for index in 0..=MAX_GLOB_MATCHES {
         fs::write(dir.path().join(index.to_string()), b"").expect("write fixture");
     }
-    let err = expand_words(&[Word::bare(joined(&dir, "*"))]).expect_err("over the cap");
+    let err =
+        expand_words(&[Word::bare(joined(&dir, "*"))], &FileScope::Host).expect_err("over the cap");
     assert!(matches!(err, ExpandError::TooManyMatches { .. }), "{err}");
 }
