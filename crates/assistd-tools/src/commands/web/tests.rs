@@ -50,7 +50,7 @@ fn redirect_to(location: &str) -> Vec<u8> {
 
 /// A command that may reach loopback test servers, and no other address.
 fn loopback_only(hosts: ApprovalGate) -> WebCommand {
-    WebCommand::under(EgressPolicy::any_port(hosts, |ip| ip.is_loopback()))
+    WebCommand::under(EgressPolicy::any_port(hosts, |ip| ip.is_loopback()), None)
 }
 
 fn allowing_gate() -> ApprovalGate {

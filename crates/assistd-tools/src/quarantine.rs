@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use tracing::warn;
 
+use assistd_search::SearxngClient;
+
 use crate::command::CommandRegistry;
 use crate::commands::{
     BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
@@ -59,12 +61,14 @@ pub enum QuarantineError {
 }
 
 /// How a quarantine reaches the web: through a proxy that asks `hosts`
-/// about each host, from commands wrapped in the `forwarder` program.
+/// about each host, from commands wrapped in the `forwarder` program, and
+/// through `search` for `web search` when it is enabled.
 #[derive(Debug, Clone)]
 pub struct Egress {
     pub hosts: ApprovalGate,
     /// The `assistd-egress-forward` executable, run inside the sandbox.
     pub forwarder: PathBuf,
+    pub search: Option<SearxngClient>,
 }
 
 /// A relay's directory and the sandbox over it: copied inputs read-only, a
@@ -135,7 +139,7 @@ impl Quarantine {
 
     /// The file commands, confined to this directory, plus `echo`, `write` limited to the home,
     /// and `bash` in the quarantine sandbox under `bash`'s rules, asking `gate` as usual. With
-    /// egress, also `web fetch`, held to the same rule as the proxy.
+    /// egress, also `web`, whose fetches are held to the same rule as the proxy.
     pub fn commands(
         &self,
         bash: &BashPolicyCfg,
@@ -167,19 +171,23 @@ impl Quarantine {
             gate,
         ));
         if let Some(egress) = &self.egress {
-            commands.register(WebCommand::under(egress.policy.clone()));
+            commands.register(WebCommand::under(
+                egress.policy.clone(),
+                egress.search.clone(),
+            ));
         }
         commands
     }
 }
 
-/// A relay's running egress proxy, the rule it holds tunnels to, and how
-/// the sandbox reaches it.
+/// A relay's running egress proxy, the rule it holds tunnels to, how the
+/// sandbox reaches it, and the relay's web search.
 #[derive(Debug)]
 struct RelayEgress {
     _proxy: EgressProxy,
     policy: EgressPolicy,
     route: EgressRoute,
+    search: Option<SearxngClient>,
 }
 
 impl RelayEgress {
@@ -193,6 +201,7 @@ impl RelayEgress {
                 socket: socket.to_path_buf(),
                 forwarder: egress.forwarder,
             },
+            search: egress.search,
         })
     }
 }

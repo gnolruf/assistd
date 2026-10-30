@@ -666,8 +666,13 @@ async fn dispatch_tool_call(
         return unknown_tool_result(tools, call, iteration, start.elapsed());
     };
 
-    let Ok(result) = tokio::time::timeout(deadline, tool.invoke(call.arguments.clone())).await
-    else {
+    let invocation = tool.invoke(call.arguments.clone());
+    let finished = if tool.bounded_by_tool_deadline() {
+        tokio::time::timeout(deadline, invocation).await.ok()
+    } else {
+        Some(invocation.await)
+    };
+    let Some(result) = finished else {
         let duration = start.elapsed();
         warn!(
             target: "assistd::agent",

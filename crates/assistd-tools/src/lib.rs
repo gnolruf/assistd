@@ -74,6 +74,12 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     /// JSON Schema for the `arguments` object [`Tool::invoke`] accepts.
     fn parameters_schema(&self) -> Value;
 
+    /// Whether a call is abandoned once it outlives the agent's tool deadline.
+    /// `false` only for tools that bound their own run time.
+    fn bounded_by_tool_deadline(&self) -> bool {
+        true
+    }
+
     /// Execute the tool with JSON arguments.
     async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError>;
 }
@@ -182,6 +188,10 @@ impl Tool for CappedTool {
 
     fn parameters_schema(&self) -> Value {
         self.inner.parameters_schema()
+    }
+
+    fn bounded_by_tool_deadline(&self) -> bool {
+        self.inner.bounded_by_tool_deadline()
     }
 
     async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {

@@ -33,9 +33,12 @@ use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::path::expand_tilde_from_env;
 use assistd_utils::readiness::ReadinessCell;
 
+use relay::{RelayPolicy, RelayTool};
+
 pub mod agent;
 pub mod presence;
 pub mod recovery;
+mod relay;
 mod scratch;
 pub mod socket;
 pub mod state;
@@ -45,6 +48,7 @@ pub use agent::{Agent, StepCeiling};
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,
 };
+pub use relay::RelayDeps;
 
 pub use assistd_config as config;
 pub use assistd_config::{
@@ -141,6 +145,7 @@ pub struct BuildToolsDeps<'a> {
     pub window_manager: Arc<dyn WindowManager>,
     /// Readiness of the SearXNG instance `web search` goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
+    pub relay: RelayDeps,
 }
 
 /// Keeps a [`VisionGate`] in step with the model llama-server has loaded, re-probing only
@@ -247,8 +252,8 @@ pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsErr
     Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)
 }
 
-/// Assemble the tool registry: the built-in commands behind `run` and,
-/// with `memory.enabled`, the memory tools. Removes earlier spill files from
+/// Assemble the tool registry: the built-in commands behind `run`, `relay`
+/// and, with `memory.enabled`, the memory tools. Removes earlier spill files from
 /// [`BuildToolsDeps::overflow_dir`].
 pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
     let BuildToolsDeps {
@@ -265,34 +270,13 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         current_session,
         window_manager,
         web_search,
+        relay,
     } = deps;
 
     clear_overflow_dir(&overflow_dir)?;
     let config_dir = canonical_config_dir(config_path)?;
-    let protected_dirs = vec![config_dir.clone()];
-    let allowlist = Allowlist::load(
-        config.tools.bash.allowed_programs.clone(),
-        sandbox.search_path(),
-        config_dir.join(APPROVALS_FILE),
-    )?;
     let scratch_dir = sandbox.shared.scratch.clone();
-    let bash_cfg = Arc::new(BashPolicyCfg {
-        timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
-        denylist: config.tools.bash.denylist.clone(),
-        destructive_patterns: parse_destructive_patterns(&config.tools.bash.destructive_patterns),
-        allowlist: Arc::new(allowlist),
-        protected: protected_dirs.clone(),
-        scratch: scratch_dir.clone(),
-    });
-    let writable_paths = resolve_writable_paths(&config.tools.write.writable_paths)
-        .into_iter()
-        .chain(scratch_dir.clone())
-        .collect();
-    let write_cfg = Arc::new(
-        WritePolicyCfg::new(writable_paths)
-            .ok_or(BuildToolsError::NoWritablePaths)?
-            .protecting(protected_dirs),
-    );
+    let (bash_cfg, write_cfg) = file_policies(config, &config_dir, &sandbox)?;
 
     let search = config
         .search
@@ -302,10 +286,25 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
             SearxngClient::new(addr, web_search)
         })
         .transpose()?;
+    let approved_hosts = ApprovalGate::new(
+        Arc::clone(&confirmation_gate),
+        Arc::new(Approvals::load(config_dir.join(APPROVED_HOSTS_FILE))?),
+    );
+    let relay = RelayTool::new(
+        relay,
+        RelayPolicy {
+            sandbox: Arc::clone(&sandbox),
+            bash: Arc::clone(&bash_cfg),
+            gate: Arc::clone(&confirmation_gate),
+            hosts: approved_hosts.clone(),
+            search: search.clone(),
+            output: config.tools.output.clone(),
+        },
+    );
     let commands = builtin_commands(BuiltinCommandDeps {
         bash_cfg,
         write_cfg,
-        approved_hosts: Arc::new(Approvals::load(config_dir.join(APPROVED_HOSTS_FILE))?),
+        approved_hosts,
         approved_apps: Arc::new(Approvals::load(config_dir.join(APPROVED_APPS_FILE))?),
         screenshot_cfg: Arc::new(ScreenshotPolicyCfg {
             compositor: config.compositor.resolve(),
@@ -328,6 +327,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         Some(scratch_dir) => run.with_scratch_dir(scratch_dir),
         None => run,
     });
+    tools.register(relay);
     if config.memory.enabled {
         tools.register(RememberTool::new(
             memory_ops,
@@ -340,10 +340,44 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
     Ok(Arc::new(tools))
 }
 
+/// The `bash` and `write` policies: `config_dir` protected, and the
+/// sandbox's scratch directory writable.
+fn file_policies(
+    config: &Config,
+    config_dir: &Path,
+    sandbox: &SandboxInfo,
+) -> Result<(Arc<BashPolicyCfg>, Arc<WritePolicyCfg>), BuildToolsError> {
+    let protected_dirs = vec![config_dir.to_path_buf()];
+    let allowlist = Allowlist::load(
+        config.tools.bash.allowed_programs.clone(),
+        sandbox.search_path(),
+        config_dir.join(APPROVALS_FILE),
+    )?;
+    let scratch_dir = sandbox.shared.scratch.clone();
+    let bash_cfg = Arc::new(BashPolicyCfg {
+        timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
+        denylist: config.tools.bash.denylist.clone(),
+        destructive_patterns: parse_destructive_patterns(&config.tools.bash.destructive_patterns),
+        allowlist: Arc::new(allowlist),
+        protected: protected_dirs.clone(),
+        scratch: scratch_dir.clone(),
+    });
+    let writable_paths = resolve_writable_paths(&config.tools.write.writable_paths)
+        .into_iter()
+        .chain(scratch_dir)
+        .collect();
+    let write_cfg = Arc::new(
+        WritePolicyCfg::new(writable_paths)
+            .ok_or(BuildToolsError::NoWritablePaths)?
+            .protecting(protected_dirs),
+    );
+    Ok((bash_cfg, write_cfg))
+}
+
 struct BuiltinCommandDeps {
     bash_cfg: Arc<BashPolicyCfg>,
     write_cfg: Arc<WritePolicyCfg>,
-    approved_hosts: Arc<Approvals>,
+    approved_hosts: ApprovalGate,
     approved_apps: Arc<Approvals>,
     screenshot_cfg: Arc<ScreenshotPolicyCfg>,
     sandbox: Arc<SandboxInfo>,
@@ -384,10 +418,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     ));
     commands.register(SeeCommand::new(vision_gate.clone()));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
-    commands.register(WebCommand::new(
-        ApprovalGate::new(confirmation_gate.clone(), approved_hosts),
-        search,
-    ));
+    commands.register(WebCommand::new(approved_hosts, search));
     commands.register(BashCommand::new(
         bash_cfg.clone(),
         sandbox.clone(),

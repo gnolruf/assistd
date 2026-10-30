@@ -234,8 +234,30 @@ requests. It asks the same approved-hosts `ApprovalGate` as `web fetch`, and
 refuses loopback, private, link-local and other non-public addresses, both as
 literals and after DNS resolution, so a relay cannot reach llama-server,
 SearXNG or the LAN. The quarantine's own `web fetch` is held to the same
-`EgressPolicy`, so it refuses `http://` URLs and redirects to them. Dropping
-the quarantine stops the proxy and closes every tunnel through it.
+`EgressPolicy`, so it refuses `http://` URLs and redirects to them; its
+`web search` goes through the daemon's SearXNG client, which only ever sees the
+query. Dropping the quarantine stops the proxy and closes every tunnel through
+it.
+
+The model starts a sub-agent with the `relay` tool (`task`, `inputs`,
+`profile`), registered in `assistd-core` beside `run` whenever tools are. A
+`read` relay gets copies of `inputs` and no network; a `fetch` relay gets an
+`Egress` and no inputs. A `fetch` call naming inputs is refused as invalid
+arguments before a quarantine or conversation exists, since a relay that could
+both see private files and reach the network could leak them. Each call
+creates a fresh `Quarantine` under `~/.cache/assistd/relays` (emptied at daemon
+start), gives the sub-agent a registry holding only `run` over the
+quarantine's commands, and runs it inside `MainSlot::preserve_across`. The
+tool result is the rendered `RelayReport`; a failed run is a failed tool
+result, not a failed turn. A relay starts without confirmation; commands inside
+it ask the same `ConfirmationGate` as the main agent's. Cancelling the turn
+drops the call, which drops the run and removes the quarantine. A tool whose
+`bounded_by_tool_deadline` is `false` is exempt from `timeouts.tool_call_secs`;
+`relay` is the only one, since its run is bounded by the sub-agent's step
+budget, each of its tool calls by that same deadline, and each step by the
+first-token and stream-inactivity timeouts and the response-token limit, as a
+main turn's steps are. The egress forwarder is looked up beside the `assistd` executable; without it,
+`fetch` relays fail.
 
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model
@@ -251,8 +273,8 @@ Rust handlers. So `cat /etc/hosts | grep -v '^#'` is one tool call
 that fans out into two in-process commands chained by a byte-level
 pipe.
 
-Two additional `Tool`s sit alongside `run`: `remember` (save or
-search facts) and `reminisce`. They don't fit the shell mold, so they're regular
+Three additional `Tool`s sit alongside `run`: `relay` (hand a task to a
+sub-agent), `remember` (save or search facts) and `reminisce`. They don't fit the shell mold, so they're regular
 LLM-facing tools with their own JSON schemas.
 
 Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,

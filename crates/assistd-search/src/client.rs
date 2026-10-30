@@ -22,8 +22,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// One page of results is tens of KiB; anything past this is not a results page.
 const BODY_MAX: usize = 512 * 1024;
 
-/// Client for one supervised SearXNG instance on loopback.
-#[derive(Debug)]
+/// Client for one supervised SearXNG instance on loopback; clones share
+/// the connection pool.
+#[derive(Debug, Clone)]
 pub struct SearxngClient {
     client: reqwest::Client,
     search_url: Url,
