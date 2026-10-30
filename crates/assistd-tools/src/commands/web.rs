@@ -96,14 +96,12 @@ impl WebCommand {
     /// from a host `hosts` has not approved; `search` is `None` when web
     /// search is disabled.
     pub fn new(hosts: ApprovalGate, search: Option<SearxngClient>) -> Self {
-        Self {
-            search,
-            ..Self::under(EgressPolicy::any_port(hosts, is_public))
-        }
+        Self::under(EgressPolicy::any_port(hosts, is_public), search)
     }
 
-    /// A fetch-only command whose traffic is held to `egress`.
-    pub(crate) fn under(egress: EgressPolicy) -> Self {
+    /// A command whose fetches are held to `egress`; `search` is `None` when
+    /// web search is disabled.
+    pub(crate) fn under(egress: EgressPolicy, search: Option<SearxngClient>) -> Self {
         let reachable = egress.reachable;
         let redirect_egress = egress.clone();
         let client = remote_client_builder()
@@ -122,7 +120,7 @@ impl WebCommand {
         Self {
             client,
             egress,
-            search: None,
+            search,
         }
     }
 

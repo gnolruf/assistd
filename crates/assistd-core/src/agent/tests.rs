@@ -116,6 +116,32 @@ impl Tool for HangingTool {
     }
 }
 
+/// A `run` tool that answers after `delay` and opts out of the tool deadline.
+#[derive(Debug)]
+struct SelfBoundedTool {
+    delay: Duration,
+}
+
+#[async_trait]
+impl Tool for SelfBoundedTool {
+    fn name(&self) -> &'static str {
+        "run"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "slow but bounded".into()
+    }
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({"type":"object"})
+    }
+    fn bounded_by_tool_deadline(&self) -> bool {
+        false
+    }
+    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolOutput::text("finished", self.delay))
+    }
+}
+
 fn call(id: &str, command: &str) -> ToolCall {
     ToolCall {
         id: id.into(),
@@ -517,6 +543,29 @@ async fn hung_tool_past_deadline_becomes_error_result_and_turn_continues() {
         "{:?}",
         pushed[0][0].content
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn self_bounded_tool_outlives_the_tool_deadline() {
+    let mut tools = ToolRegistry::new();
+    tools.register(SelfBoundedTool {
+        delay: Duration::from_secs(60),
+    });
+    let backend = MockBackend::with(vec![
+        StepOutcome::ToolCalls(vec![call("c-1", "relay")]),
+        StepOutcome::Final,
+    ]);
+    let agent = Agent::new(
+        backend.clone(),
+        Arc::new(tools),
+        None,
+        Duration::from_secs(2),
+    );
+
+    run_turn(agent, "go").await.0.unwrap();
+
+    let pushed = backend.pushed_results.lock();
+    assert_eq!(pushed[0][0].content, "finished");
 }
 
 #[derive(Debug)]

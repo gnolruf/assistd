@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use assistd_core::{BuildToolsDeps, Config, McpServerStatus, ToolRegistry, WindowManager};
+use assistd_core::{
+    BuildToolsDeps, Config, McpServerStatus, RelayDeps, ToolRegistry, WindowManager,
+};
 use assistd_memory::SessionId;
 use assistd_tools::{
     ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, ToolSandbox, ToolsDisabled,
@@ -38,6 +40,7 @@ pub(super) struct ToolDeps<'a> {
     pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
+    pub relay: RelayDeps,
 }
 
 /// Probe the sandbox, then build the registry and prepare the MCP
@@ -83,6 +86,7 @@ pub(super) fn init(
         current_session: deps.current_session,
         window_manager: deps.window_manager,
         web_search: deps.web_search,
+        relay: deps.relay,
     })?;
     info!(
         "tools: registered {} (overflow dir {})",

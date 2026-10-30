@@ -1,26 +1,31 @@
 //! Daemon entrypoint: bring up the subsystems, serve IPC while the model, voice,
 //! embedding, search and MCP servers start in the background, tear down in order.
 
+use std::fs::DirBuilder;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, Config, MemoryStack, PresenceManager, RuntimeState, SessionContext, Subsystems,
-    VisionRevalidator, VoiceManager,
+    AppState, Config, MemoryStack, PresenceManager, RelayDeps, RuntimeState, SessionContext,
+    SubAgentRunner, Subsystems, VisionRevalidator, VoiceManager,
 };
 use assistd_llm::{
-    HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir,
+    HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, MainSlot,
+    SlotDir,
 };
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 
 use embed_init::{EmbeddingHandles, EmbeddingService, EmbeddingStages, EmbeddingStartup};
 use mcp_init::{McpService, McpStartup};
@@ -48,6 +53,11 @@ mod wm_init;
 
 /// Log filter when `RUST_LOG` is unset.
 const DEFAULT_LOG_DIRECTIVES: &str = "info";
+
+/// Installed beside the `assistd` executable.
+const EGRESS_FORWARDER: &str = "assistd-egress-forward";
+
+const RELAY_DIR_MODE: u32 = 0o700;
 
 /// Command-line arguments for the `daemon` subcommand.
 #[derive(Args)]
@@ -122,11 +132,12 @@ async fn start(
     stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
     let api_key = ApiKey::generate().context("failed to write the model servers' API key")?;
+    let slot_dir = prepare_slot_dir()?;
     let presence = PresenceManager::new_sleeping(
         config.model.clone(),
         config.timeouts.clone(),
         api_key.clone(),
-        prepare_slot_dir()?,
+        slot_dir.clone(),
         stages.llm.subscribe(),
     )?;
     let health_probe: Arc<dyn LlmHealthProbe> =
@@ -156,6 +167,8 @@ async fn start(
 
     let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
 
+    let chat = build_chat_backend(&config, &api_key, Arc::clone(&health_probe))?;
+    let relay = build_relay_deps(&config, &api_key, slot_dir, &chat, &health_probe)?;
     let tools = tools_init::init(
         &config,
         config_path,
@@ -166,10 +179,10 @@ async fn start(
             current_session: session_ctx.session_updates(),
             window_manager: window.manager.clone(),
             web_search: web_search.clone(),
+            relay,
         },
     )?;
 
-    let chat = build_chat_backend(&config, &api_key, health_probe)?;
     let resumed_history = std::mem::take(&mut memory.resumed_history);
     replay_history(chat.as_ref(), resumed_history).await;
 
@@ -300,6 +313,63 @@ fn prepare_slot_dir() -> Result<SlotDir> {
         )
     })?;
     Ok(slot_dir)
+}
+
+/// What the `relay` tool runs sub-agents with: the chat backend they share, a guard on its
+/// main slot, an emptied directory for their quarantines, and the egress forwarder
+/// installed beside this executable.
+fn build_relay_deps(
+    config: &Config,
+    api_key: &ApiKey,
+    slot_dir: SlotDir,
+    chat: &Arc<dyn LlmBackend>,
+    health_probe: &Arc<dyn LlmHealthProbe>,
+) -> Result<RelayDeps> {
+    let main_slot = MainSlot::new(
+        SocketAddr::new(config.model.host, config.model.port.get()),
+        Some(api_key),
+        config.model.name.clone(),
+        slot_dir,
+        Some(Arc::clone(health_probe)),
+    )
+    .context("failed to construct the main-slot client for sub-agent runs")?;
+    let exe = std::env::current_exe().context("cannot locate the assistd executable")?;
+    Ok(RelayDeps {
+        runner: SubAgentRunner::new(
+            Arc::clone(chat),
+            Some(Arc::clone(health_probe)),
+            Duration::from_secs(config.timeouts.tool_call_secs),
+        ),
+        main_slot,
+        dir: prepare_relay_dir()?,
+        egress_forwarder: exe.with_file_name(EGRESS_FORWARDER),
+    })
+}
+
+/// The owner-only directory relay quarantines are created in, under the
+/// user cache dir, cleared of any a previous daemon left behind.
+fn prepare_relay_dir() -> Result<PathBuf> {
+    let cache_dir = dirs::cache_dir().context("no user cache directory for relay quarantines")?;
+    let relay_dir = cache_dir.join("assistd").join("relays");
+    if let Err(error) = std::fs::remove_dir_all(&relay_dir)
+        && error.kind() != ErrorKind::NotFound
+    {
+        warn!(
+            "cannot clear stale relay quarantines in {}: {error}",
+            relay_dir.display()
+        );
+    }
+    DirBuilder::new()
+        .recursive(true)
+        .mode(RELAY_DIR_MODE)
+        .create(&relay_dir)
+        .with_context(|| {
+            format!(
+                "failed to create the relay directory {}",
+                relay_dir.display()
+            )
+        })?;
+    Ok(relay_dir)
 }
 
 /// The revalidator that keeps the vision gate in step with the model,

@@ -112,6 +112,7 @@ async fn relay_egress_refuses_unapproved_hosts_loopback_and_plain_http() {
     let egress = Egress {
         hosts: ApprovalGate::new(Arc::new(DenyAllGate), Arc::new(Approvals::unsaved())),
         forwarder: env!("CARGO_BIN_EXE_assistd-egress-forward").into(),
+        search: None,
     };
     let quarantine = Quarantine::create(relays.path(), &sandbox, Vec::new(), Some(egress))
         .await
