@@ -313,6 +313,7 @@ mod tests {
                 script: "rm -rf /tmp/x".into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
+                source: crate::ConfirmSource::Main,
             };
             let mut out = serde_json::to_string(&confirm).unwrap();
             out.push('\n');

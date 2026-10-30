@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use assistd_tools::Risk;
+use assistd_tools::{ConfirmSource, Risk};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -307,6 +307,7 @@ fn open_prompt_offering(app: &mut App, always_allow: Vec<String>) {
             matched_pattern: "rm -rf".into(),
             always_allow,
             risk: Risk::Elevated,
+            source: ConfirmSource::Main,
         },
     );
 }

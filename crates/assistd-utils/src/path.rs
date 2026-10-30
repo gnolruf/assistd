@@ -1,6 +1,6 @@
-//! Home-directory expansion for user-supplied paths.
+//! Home-directory expansion and lexical cleaning for user-supplied paths.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// What follows the tilde when `raw` is exactly `~` or starts with `~/`;
 /// `None` for any other spelling, including `~user`.
@@ -28,6 +28,30 @@ pub fn expand_tilde_from_env(raw: &str) -> PathBuf {
         Some(home) => expand_tilde(raw, Path::new(&home)),
         None => PathBuf::from(raw),
     }
+}
+
+/// Collapse `.` and `..` components without touching disk. A leading
+/// `/..` is discarded, as the kernel does.
+pub fn lexical_clean(path: &Path) -> PathBuf {
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir) => {}
+                _ => out.push(component),
+            },
+            _ => out.push(component),
+        }
+    }
+    let mut result = PathBuf::new();
+    for component in out {
+        result.push(component.as_os_str());
+    }
+    result
 }
 
 #[cfg(test)]

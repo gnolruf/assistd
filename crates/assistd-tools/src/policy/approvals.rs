@@ -105,6 +105,11 @@ impl ApprovalGate {
         Self { gate, approvals }
     }
 
+    /// The same approvals, asking `gate` about the rest.
+    pub fn asking(&self, gate: Arc<dyn ConfirmationGate>) -> Self {
+        Self::new(gate, Arc::clone(&self.approvals))
+    }
+
     /// Whether `name` was approved for good.
     pub fn contains(&self, name: &str) -> bool {
         self.approvals.contains(name)

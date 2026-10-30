@@ -451,6 +451,7 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "rm -rf /tmp/foo".into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
+                source: ConfirmSource::Main,
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
         ),
@@ -462,8 +463,53 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "cargo build".into(),
                 matched_pattern: "not on the allowlist: cargo".into(),
                 always_allow: vec!["cargo".into()],
+                source: ConfirmSource::Main,
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"cargo build","matched_pattern":"not on the allowlist: cargo","always_allow":["cargo"]}"#,
+        ),
+        (
+            Event::ConfirmRequest {
+                id: id(),
+                confirm_id: "c-abc".into(),
+                tool: "bash".into(),
+                script: "curl example.com".into(),
+                matched_pattern: "not on the allowlist: curl".into(),
+                always_allow: Vec::new(),
+                source: ConfirmSource::Relay {
+                    task: "summarise the page".into(),
+                },
+            },
+            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"curl example.com","matched_pattern":"not on the allowlist: curl","source":{"agent":"relay","task":"summarise the page"}}"#,
+        ),
+        (
+            Event::Relay {
+                id: id(),
+                event: RelayEvent::Started {
+                    task: "find the release".into(),
+                    profile: RelayProfile::Fetch,
+                    step: 1,
+                    steps: 2,
+                },
+            },
+            r#"{"type":"relay","id":"r","event":{"kind":"started","task":"find the release","profile":"fetch","step":1,"steps":2}}"#,
+        ),
+        (
+            Event::Relay {
+                id: id(),
+                event: RelayEvent::Answered {
+                    answer_chars: 812,
+                    tool_steps: 4,
+                    truncated: false,
+                },
+            },
+            r#"{"type":"relay","id":"r","event":{"kind":"answered","answer_chars":812,"tool_steps":4,"truncated":false}}"#,
+        ),
+        (
+            Event::Relay {
+                id: id(),
+                event: RelayEvent::Compacted { duration_ms: 9100 },
+            },
+            r#"{"type":"relay","id":"r","event":{"kind":"compacted","duration_ms":9100}}"#,
         ),
         (
             Event::Capabilities {

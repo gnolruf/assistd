@@ -64,6 +64,8 @@ enum StreamResponse {
 #[derive(Clone)]
 enum SummaryResponse {
     Ok(String),
+    /// A reply of one tool call and no text.
+    ToolCall,
     HttpError(u16, String),
 }
 
@@ -261,23 +263,30 @@ async fn write_stream_response(sock: &mut TcpStream, response: StreamResponse) -
 }
 
 async fn write_summary_response(sock: &mut TcpStream, response: SummaryResponse) -> io::Result<()> {
-    match response {
-        SummaryResponse::Ok(text) => {
-            let body = format!(
-                "{{\"choices\":[{{\"message\":{{\"role\":\"assistant\",\"content\":{}}}}}]}}",
-                serde_json::to_string(&text).unwrap()
-            );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            sock.write_all(response.as_bytes()).await?;
-        }
+    let message = match response {
+        SummaryResponse::Ok(text) => json!({"role": "assistant", "content": text}),
+        SummaryResponse::ToolCall => json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "run", "arguments": "{\"command\":\"ls\"}"},
+            }],
+        }),
         SummaryResponse::HttpError(status, body) => {
             write_error(sock, status, &body).await?;
+            let _ = sock.shutdown().await;
+            return Ok(());
         }
-    }
+    };
+    let body = json!({"choices": [{"message": message}]}).to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    sock.write_all(response.as_bytes()).await?;
     let _ = sock.shutdown().await;
     Ok(())
 }
@@ -757,6 +766,59 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     assert!(
         captured.iter().any(|r| !r.stream),
         "summarize endpoint should have been attempted"
+    );
+}
+
+#[tokio::test]
+async fn a_summary_that_calls_a_tool_is_asked_again_without_tools() {
+    let script = Script::new();
+    script.push_summary(SummaryResponse::ToolCall).await;
+    script
+        .push_summary(SummaryResponse::Ok("what the task found so far".into()))
+        .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["next".into()]))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+    let mut spec = chat_spec(port);
+    spec.chat.max_history_tokens = nz32(100);
+    spec.chat.summary_target_tokens = nz32(10);
+    let client = build_client(&spec);
+    for turn in 0..8 {
+        client
+            .push_user(format!("turn {turn} {}", "word ".repeat(40)), Vec::new())
+            .await
+            .unwrap();
+    }
+    let tools = vec![json!({
+        "type": "function",
+        "function": {"name": "run", "parameters": {"type": "object"}},
+    })];
+
+    let (tx, mut rx) = mpsc::channel(32);
+    client.step(tools.clone(), tx).await.unwrap();
+    drain(&mut rx).await;
+
+    let captured = script.captured().await;
+    let summaries: Vec<_> = captured.iter().filter(|r| !r.stream).collect();
+    assert_eq!(summaries.len(), 2, "one retry after the tool call");
+    assert_eq!(summaries[0].body["tools"], json!(tools));
+    assert!(
+        summaries[1].body.get("tools").is_none(),
+        "{}",
+        summaries[1].body
+    );
+    let next_step = captured
+        .iter()
+        .find(|r| r.stream)
+        .expect("the step was sent");
+    assert!(
+        next_step
+            .body
+            .to_string()
+            .contains("what the task found so far"),
+        "the retried summary replaces the history: {}",
+        next_step.body
     );
 }
 
@@ -1298,9 +1360,7 @@ async fn isolated_conversation_never_reaches_the_main_conversation() {
     let main = build_client(&chat_spec(port));
 
     ask(&main, "main question").await;
-    let sub = main
-        .isolated_conversation("sub prompt".into(), nz32(4000))
-        .unwrap();
+    let sub = main.isolated_conversation("sub prompt".into()).unwrap();
     ask(sub.as_ref(), "sub task").await;
     drop(sub);
     ask(&main, "follow up").await;
@@ -1325,28 +1385,6 @@ async fn isolated_conversation_never_reaches_the_main_conversation() {
 }
 
 #[tokio::test]
-async fn isolated_conversation_over_budget_fails_instead_of_compacting() {
-    let script = Script::new();
-    let (port, _server) = spawn_fake(script.clone()).await;
-    let main = build_client(&chat_spec(port));
-    let sub = main
-        .isolated_conversation("sub prompt".into(), nz32(100))
-        .unwrap();
-    sub.push_user("word ".repeat(1000), Vec::new())
-        .await
-        .unwrap();
-
-    let (tx, _rx) = mpsc::channel(32);
-    let result = sub.step(Vec::new(), tx).await;
-
-    assert!(
-        matches!(result, Err(LlmError::ContextLimit { budget: 100, .. })),
-        "{result:?}"
-    );
-    assert!(script.captured().await.is_empty(), "nothing may be sent");
-}
-
-#[tokio::test]
 async fn schema_completion_constrains_the_reply_and_leaves_the_conversation_alone() {
     let script = Script::new();
     for reply in ["free answer", r#"{"found":true}"#, "next"] {
@@ -1356,9 +1394,7 @@ async fn schema_completion_constrains_the_reply_and_leaves_the_conversation_alon
     }
     let (port, _server) = spawn_fake(script.clone()).await;
     let main = build_client(&chat_spec(port));
-    let sub = main
-        .isolated_conversation("sub prompt".into(), nz32(4000))
-        .unwrap();
+    let sub = main.isolated_conversation("sub prompt".into()).unwrap();
     ask(sub.as_ref(), "task").await;
     let schema = json!({"type": "object", "properties": {"found": {"type": "boolean"}}});
 

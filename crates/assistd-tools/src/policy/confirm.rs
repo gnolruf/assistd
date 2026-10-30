@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use assistd_ipc::{Event, PermissionMode};
+use assistd_ipc::{ConfirmSource, Event, PermissionMode};
 
 /// Cap on confirmation prompts in flight on one connection.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
@@ -33,6 +33,8 @@ pub struct ConfirmationRequest {
     pub always_allow: Vec<String>,
     /// Whether [`PermissionMode::AcceptCommands`] may approve it unasked.
     pub risk: Risk,
+    /// The agent whose command it is.
+    pub source: ConfirmSource,
 }
 
 /// How much a [`ConfirmationRequest`] could do beyond what its tool shows.
@@ -176,6 +178,7 @@ impl ConfirmRouter {
             script: req.script.clone(),
             matched_pattern: req.matched_pattern.clone(),
             always_allow: req.always_allow.clone(),
+            source: req.source.clone(),
         };
         if self.wire.send(event).await.is_err() {
             warn!(
@@ -346,6 +349,7 @@ mod tests {
             matched_pattern: "rm -rf".into(),
             always_allow: Vec::new(),
             risk: Risk::Elevated,
+            source: ConfirmSource::Main,
         }
     }
 

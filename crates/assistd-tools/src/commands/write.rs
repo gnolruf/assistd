@@ -1,10 +1,11 @@
 //! `write`: write a file at an allowlisted path, asking the user first outside the shared scratch.
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_utils::path::tilde_remainder;
+use assistd_ipc::ConfirmSource;
+use assistd_utils::path::{lexical_clean, tilde_remainder};
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use rustix::fs::{FileType, Mode, OFlags};
@@ -474,31 +475,8 @@ fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationReq
         matched_pattern: matched_pattern.to_string(),
         always_allow: Vec::new(),
         risk,
+        source: ConfirmSource::Main,
     }
-}
-
-/// Collapse `.` and `..` components without touching disk. A leading
-/// `/..` is discarded, as the kernel does.
-pub(crate) fn lexical_clean(path: &Path) -> PathBuf {
-    let mut out: Vec<Component<'_>> = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => match out.last() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                Some(Component::RootDir) => {}
-                _ => out.push(component),
-            },
-            _ => out.push(component),
-        }
-    }
-    let mut result = PathBuf::new();
-    for component in out {
-        result.push(component.as_os_str());
-    }
-    result
 }
 
 /// Split `path` into its deepest existing ancestor and the remainder.

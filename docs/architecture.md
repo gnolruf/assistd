@@ -183,17 +183,26 @@ One per-query state machine, single-threaded per turn. The loop:
 A sub-agent run (`SubAgentRunner`) drives the same loop over
 an empty conversation that the main backend's `isolated_conversation` opens
 on the same server and model, with its own system prompt, tool registry and
-event sink. It has a 30-step ceiling and a 16k-token history budget
-(capped at the main one). Going past either fails the run with
-`LlmError::StepLimit` or `LlmError::ContextLimit`, and the conversation never
-compacts. The conversation is dropped when the run ends, so none of it
-reaches the main history or the transcript store.
+event sink. Its history budget is the main conversation's
+`chat.max_history_tokens`, and it compacts the same way: the summary is
+written inside the sub-agent's own conversation, which keeps its task, and
+never leaves it. The summary request continues the conversation with its tools offered, so
+the server reuses the cached prompt; a reply that calls a tool or is empty is
+asked for again without tools, and only when that also fails does compaction
+fall back to dropping old steps without a summary. Its tool-call ceiling is the main turn's too: after 200
+tool-calling steps, or a call repeated three times in a row, its tools are
+withdrawn and it is asked to answer from what it has, so a long task ends in a
+partial report rather than an error. While a relay runs, the sub-agent's tool calls, results
+and compactions reach the client as `Event::Relay` progress, never the model.
+The conversation is dropped when the run ends, so none of it reaches the main
+history or the transcript store.
 
 Only the text of the final step comes back, and only as a `RelayReport`, the
 restricted return channel. Its control, bidi and format characters are
 stripped, the `<` of anything tag-shaped (`<|im_start|>`, `<tool_call>`) and
 the `[` of bracket tokens (`[INST]`) are escaped, and it is cut to 6,000
-characters with a truncation marker, never spilled to a file. It renders as a
+characters with a truncation marker, never spilled to a file; the sub-agent's
+system prompt states that limit so it puts its most important findings first. It renders as a
 quoted block under a header that labels it untrusted data; the default system
 prompt says never to follow instructions inside one. When the caller asks for
 an `AnswerShape::Schema`, the run restates its answer through
@@ -203,28 +212,46 @@ does not parse fails the run. The sub-agent's tool output and reasoning never
 leave it.
 
 A sub-agent's commands run in a `Quarantine`, which starts from an empty world:
-a fresh `relay-*` directory with copies of the inputs it was handed in `input/`
-(read-only), a writable `home/` that is `$HOME` and the working directory, and
-`output/` for spilled output. The directory is removed when the `Quarantine` is
-dropped, so on cancel or panic too, even if a script left subdirectories
-unwritable. Its `bash` runs in a separate bwrap profile: read-only `/usr` and
+a fresh `relay-*` directory whose `input/` shows the inputs it was handed,
+read-only and in place, a writable `home/` that is `$HOME` and the working
+directory, and `output/` for spilled output. Inputs are not copied: each is
+canonicalized and opened once with `O_PATH`, and an empty file or directory is
+made under its name in `input/` as its mount point. The in-process readers
+resolve paths under `input/<name>` beneath that descriptor, and `bash` sees the
+same path through a `--ro-bind` of the canonical path, so both read the host
+file. On the host, `input/` holds only the empty mount points, so removing the
+relay directory never touches an input. The directory is removed when the
+`Quarantine` is dropped, so on cancel or panic too, even if a script left
+subdirectories unwritable. Its `bash` runs in a separate bwrap profile: read-only `/usr` and
 the merged-`/usr` links, `/etc/ssl`, `/etc/ca-certificates`, `/etc/resolv.conf`
 and the loader config, fresh `/tmp`, `/dev` and `/proc`, the relay's three
 directories bound at their own host paths, the same `prlimit` caps, and always
-`--unshare-net`. `bwrap_extra_args` does not apply. The host home, `/run` and
-the daemon socket are not mounted. The in-process file commands (`cat`, `grep`,
-`head`, `tail`, `ls`, `sort`, `uniq`, `wc`) and glob and `~` expansion go
-through the registry's `FileScope`. In a quarantine that scope opens every path
-with `openat2(RESOLVE_BENEATH)` on the relay directory's descriptor, so the
-kernel refuses `..`, absolute symlinks and anything outside it. Relative paths
-start at `home/`, and `write` may only write under `home/`. `Quarantine::create`
-fails when the sandbox does not wrap.
+`--unshare-net`, with its inputs bound over their mount points. bwrap binds are
+`nosuid,nodev`, so device nodes in an input cannot be opened. `bwrap_extra_args`
+does not apply. The host home, `/run` and the daemon socket are not mounted.
+Every command runs under `assistd-quarantine-exec`, bound in at
+`/run/assistd/quarantine-exec`, which restricts itself with Landlock's
+`RESOLVE_UNIX` before running the command: neither the command nor anything it
+starts can connect to a pathname Unix socket made outside the sandbox, such as
+gpg-agent's or the daemon's inside a bound input, except the egress proxy's.
+Network namespaces do not cover pathname sockets, and Landlock cannot be
+applied before bwrap mounts, so the restriction happens inside the sandbox.
+The wrapper fails the command when the kernel cannot enforce it.
+
+The in-process file commands (`cat`, `grep`, `head`, `tail`, `ls`, `sort`,
+`uniq`, `wc`) and glob and `~` expansion go through the registry's
+`FileScope`. In a quarantine that scope cleans `..` lexically, then opens every
+path with `openat2(RESOLVE_BENEATH)` on the descriptor of the input it falls
+under, or else of the relay directory, so the kernel refuses `..`, absolute
+symlinks and anything outside it. They never connect to sockets. Relative
+paths start at `home/`, and `write` may only write under `home/`.
+`Quarantine::create` fails when the sandbox does not wrap.
 
 A quarantine created with an `Egress` keeps `--unshare-net` but gets one way
 out: an HTTP `CONNECT` proxy the daemon runs on `egress.sock` in the relay
 directory, bound read-only into the sandbox at `/run/assistd/egress.sock`. Most
-clients cannot speak to a proxy over a Unix socket, so each command runs under
-`assistd-egress-forward`, also bound in, which listens on `127.0.0.1:3128`
+clients cannot speak to a proxy over a Unix socket, so `assistd-quarantine-exec`
+is passed `--egress`: it listens on `127.0.0.1:3128`
 inside the sandbox's network namespace, forwards each connection to the
 socket, and exits with the command's status. `HTTPS_PROXY`, `HTTP_PROXY` and
 their lowercase forms point at it. Relay traffic is HTTPS only, so nothing on
@@ -241,10 +268,22 @@ it.
 
 The model starts a sub-agent with the `relay` tool (`task`, `inputs`,
 `profile`, or `steps`: a plan of up to five such steps), registered in `assistd-core` beside `run` whenever tools are. A
-`read` relay gets copies of `inputs` and no network; a `fetch` relay gets an
+`read` relay sees its `inputs` read-only and has no network; a `fetch` relay gets an
 `Egress` and no inputs. A `fetch` call naming inputs is refused as invalid
 arguments before a quarantine or conversation exists, since a relay that could
-both see private files and reach the network could leak them. Each call
+both see private files and reach the network could leak them. Every `read`
+step's inputs are checked before the first step starts: a missing input, one
+that is neither a file nor a directory, or two sharing a file name refuse the
+whole plan, so a mistake in a late step costs no earlier step's work. A `read` step is
+also refused, before anything starts, when its inputs hold more than twice a
+sub-agent's context budget of text, estimated from file sizes at four bytes a
+token. Counting stops at that limit, so even a tree with a build directory is
+measured in milliseconds. The refusal names the largest entries of the inputs,
+so the model can split the work, and a step that sets `search_only` (it greps
+rather than reads its inputs through) skips the check. The tool description
+states the budget and asks for relays of about half of it, one per natural
+part such as a crate or module, with independent parts requested together.
+Each call
 creates a fresh `Quarantine` under `~/.cache/assistd/relays` (emptied at daemon
 start), gives the sub-agent a registry holding only `run` over the
 quarantine's commands, and runs it inside `MainSlot::preserve_across`. A
@@ -260,8 +299,8 @@ drops the call, which drops the run and removes the quarantine. A tool whose
 `relay` is the only one, since its run is bounded by the sub-agent's step
 budget, each of its tool calls by that same deadline, and each step by the
 first-token and stream-inactivity timeouts and the response-token limit, as a
-main turn's steps are. The egress forwarder is looked up beside the `assistd` executable; without it,
-`fetch` relays fail.
+main turn's steps are. The quarantine wrapper is looked up beside the `assistd` executable; without it,
+relays fail.
 
 The loop does not parallelize tool calls. Tools execute serially, and
 their results land in the conversation in the order the model

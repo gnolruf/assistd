@@ -195,6 +195,7 @@ impl TurnTranslator {
                 let result = result.to_json();
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
+            LlmEvent::Relay(event) => (Event::Relay { id, event }, Vec::new()),
             LlmEvent::ContextSize { tokens, total } => {
                 self.tokens.on_context_size(tokens, total);
                 (Event::ContextSize { id, tokens, total }, Vec::new())

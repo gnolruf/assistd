@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 use super::conversation::{
     Conversation, Message, Role, Summarizer, SummaryRequest, TOOL_RESULT_PREFIX, ToolCallRecord,
-    approx_tokens_bytes, effective_budget, ensure_budget,
+    approx_tokens_bytes, ensure_budget,
 };
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
@@ -57,14 +57,6 @@ pub struct LlamaChatClient {
     /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
-    overflow: Overflow,
-}
-
-/// What a step does with a conversation over its history budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Overflow {
-    Compact,
-    Fail,
 }
 
 impl LlamaChatClient {
@@ -96,7 +88,6 @@ impl LlamaChatClient {
             timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
             health,
-            overflow: Overflow::Compact,
         })
     }
 
@@ -276,8 +267,7 @@ impl LlamaChatClient {
 
     /// Compact the conversation when it is over budget, summarizing with the
     /// same `tools` the coming request offers so its prompt prefix is
-    /// unchanged, and return it locked for that request. A conversation that
-    /// must not compact fails with [`LlmError::ContextLimit`] instead.
+    /// unchanged, and return it locked for that request.
     async fn fit_budget(
         &self,
         tools: &[Value],
@@ -285,16 +275,10 @@ impl LlamaChatClient {
     ) -> LlmResult<MutexGuard<'_, Conversation>> {
         let conv = self.conv.lock().await;
         if !conv.exceeds_budget(&self.chat, &self.model) {
-            if self.overflow == Overflow::Compact && self.compaction_headroom(&conv).is_none() {
+            if self.compaction_headroom(&conv).is_none() {
                 send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
             }
             return Ok(conv);
-        }
-        if self.overflow == Overflow::Fail {
-            return Err(LlmError::ContextLimit {
-                tokens: conv.approx_total_tokens(),
-                budget: effective_budget(&self.chat, &self.model),
-            });
         }
         let before = (conv.message_count(), conv.approx_total_tokens());
         drop(conv);
@@ -718,14 +702,9 @@ impl LlmBackend for LlamaChatClient {
         self.stream_text(body_bytes, "complete_with_schema").await
     }
 
-    fn isolated_conversation(
-        &self,
-        system_prompt: String,
-        max_history_tokens: NonZeroU32,
-    ) -> LlmResult<Arc<dyn LlmBackend>> {
+    fn isolated_conversation(&self, system_prompt: String) -> LlmResult<Arc<dyn LlmBackend>> {
         let chat = ChatConfig {
             system_prompt: system_prompt.clone(),
-            max_history_tokens: max_history_tokens.min(self.chat.max_history_tokens),
             ..self.chat.clone()
         };
         Ok(Arc::new(Self {
@@ -736,7 +715,6 @@ impl LlmBackend for LlamaChatClient {
             timeouts: self.timeouts.clone(),
             conv: Mutex::new(Conversation::new(system_prompt)),
             health: self.health.clone(),
-            overflow: Overflow::Fail,
         }))
     }
 }
@@ -751,9 +729,10 @@ struct ContinuationSummarizer<'a> {
 
 #[async_trait]
 impl Summarizer for ContinuationSummarizer<'_> {
+    /// Ask with the request's tools first, so the cached prompt is reused; a
+    /// reply that calls a tool or is empty is asked again with no tools offered.
     async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
-        let client = self.client;
-        client.serving_pid().await?;
+        self.client.serving_pid().await?;
         let SummaryRequest {
             mut messages,
             instruction,
@@ -762,8 +741,29 @@ impl Summarizer for ContinuationSummarizer<'_> {
             Role::User.as_wire(),
             wire::ContentBody::Text(instruction.as_str().into()),
         ));
+        match self.request_summary(messages.clone(), self.tools).await {
+            Err(ChatClientError::Summarize(reason)) if !self.tools.is_empty() => {
+                warn!(
+                    target: "assistd::chat",
+                    %reason,
+                    "summary attempt failed; asking again without tools"
+                );
+                self.request_summary(messages, &[]).await
+            }
+            outcome => outcome,
+        }
+    }
+}
+
+impl ContinuationSummarizer<'_> {
+    async fn request_summary(
+        &self,
+        messages: Vec<wire::ChatMessage<'_>>,
+        tools: &[Value],
+    ) -> Result<String, ChatClientError> {
+        let client = self.client;
         let mut payload = client.base_request(messages);
-        offer_tools(&mut payload, self.tools.to_vec());
+        offer_tools(&mut payload, tools.to_vec());
         payload.stream = false;
         payload.stream_options = None;
         payload.temperature = client.chat.summary_temperature;
@@ -791,18 +791,13 @@ impl Summarizer for ContinuationSummarizer<'_> {
 
         let body: wire::ChatResponse =
             serde_json::from_slice(&read_capped(response, SUMMARY_BODY_MAX).await?)?;
-        let text = body
+        let message = body
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|choice| choice.message)
             .ok_or_else(|| ChatClientError::Summarize("no choices returned".into()))?;
-        if text.contains(TOOL_CALL_MARKUP) {
-            return Err(ChatClientError::Summarize(
-                "the model called a tool instead of summarizing".into(),
-            ));
-        }
-        Ok(text)
+        summary_text(message)
     }
 }
 
@@ -812,6 +807,23 @@ fn offer_tools(payload: &mut wire::ChatRequest<'_>, tools: Vec<Value>) {
         payload.tools = Some(tools);
         payload.tool_choice = Some("auto");
     }
+}
+
+/// The summary in `message`, refusing a reply that called a tool or said nothing.
+fn summary_text(message: wire::ChatChoiceMessage) -> Result<String, ChatClientError> {
+    let text = message.content.unwrap_or_default();
+    if message.tool_calls.is_some_and(|calls| !calls.is_empty()) || text.contains(TOOL_CALL_MARKUP)
+    {
+        return Err(ChatClientError::Summarize(
+            "the model called a tool instead of summarizing".into(),
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err(ChatClientError::Summarize(
+            "summarizer returned empty text".into(),
+        ));
+    }
+    Ok(text)
 }
 
 /// Running accumulator for one `stream_openai` call.

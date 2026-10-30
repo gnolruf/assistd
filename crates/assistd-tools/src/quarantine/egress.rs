@@ -14,6 +14,8 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 use url::Host;
 
+use assistd_ipc::ConfirmSource;
+
 use crate::policy::{ConfirmationRequest, EgressPolicy, NonPublic, Risk};
 
 /// Bytes of request head read before a request is refused as malformed.
@@ -221,6 +223,7 @@ async fn admit(target: &Target, policy: &EgressPolicy) -> Result<(), Refusal> {
             matched_pattern: format!("a sub-agent connects to {host}, which is not yet approved"),
             always_allow: vec![host.clone()],
             risk: Risk::Elevated,
+            source: ConfirmSource::Main,
         })
         .await;
     if approved {

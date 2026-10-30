@@ -55,7 +55,7 @@ mod wm_init;
 const DEFAULT_LOG_DIRECTIVES: &str = "info";
 
 /// Installed beside the `assistd` executable.
-const EGRESS_FORWARDER: &str = "assistd-egress-forward";
+const QUARANTINE_EXEC: &str = "assistd-quarantine-exec";
 
 const RELAY_DIR_MODE: u32 = 0o700;
 
@@ -316,7 +316,7 @@ fn prepare_slot_dir() -> Result<SlotDir> {
 }
 
 /// What the `relay` tool runs sub-agents with: the chat backend they share, a guard on its
-/// main slot, an emptied directory for their quarantines, and the egress forwarder
+/// main slot, an emptied directory for their quarantines, and the quarantine wrapper
 /// installed beside this executable.
 fn build_relay_deps(
     config: &Config,
@@ -342,7 +342,12 @@ fn build_relay_deps(
         ),
         main_slot,
         dir: prepare_relay_dir()?,
-        egress_forwarder: exe.with_file_name(EGRESS_FORWARDER),
+        quarantine_exec: exe.with_file_name(QUARANTINE_EXEC),
+        subagent_context_tokens: config
+            .chat
+            .max_history_tokens
+            .get()
+            .min(config.model.context_budget()),
     })
 }
 

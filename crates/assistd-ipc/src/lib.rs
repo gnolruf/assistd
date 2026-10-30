@@ -229,6 +229,79 @@ impl<T> From<Result<T, NotReady>> for ComponentReadiness {
     }
 }
 
+/// Who raised an [`Event::ConfirmRequest`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "agent", rename_all = "snake_case")]
+pub enum ConfirmSource {
+    /// The main conversation's agent.
+    #[default]
+    Main,
+    /// A relay's sub-agent, working from untrusted content on `task`.
+    Relay { task: String },
+}
+
+impl ConfirmSource {
+    pub fn is_main(&self) -> bool {
+        matches!(self, ConfirmSource::Main)
+    }
+}
+
+/// What a relay's sub-agent may reach: copied-in files or the web, never both.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayProfile {
+    Read,
+    Fetch,
+}
+
+impl RelayProfile {
+    /// Lower-case name, matching the wire form.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RelayProfile::Read => "read",
+            RelayProfile::Fetch => "fetch",
+        }
+    }
+}
+
+/// Progress of the relay inside the turn's running `relay` tool call; each
+/// step of a plan sends `Started`, its tool calls, then `Answered` or `Failed`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RelayEvent {
+    /// Step `step` of `steps`, counted from 1, handed `task` to a sub-agent.
+    Started {
+        task: String,
+        profile: RelayProfile,
+        step: u32,
+        steps: u32,
+    },
+    /// The sub-agent invoked a tool.
+    ToolCall {
+        name: String,
+        args: serde_json::Value,
+    },
+    /// A sub-agent tool finished; `result` is shaped as on [`Event::ToolResult`],
+    /// without attachments.
+    ToolResult {
+        name: String,
+        result: serde_json::Value,
+    },
+    /// The sub-agent's history outgrew its budget and is being compacted.
+    Compacting,
+    /// The compaction `Compacting` announced finished after `duration_ms`.
+    Compacted { duration_ms: u64 },
+    /// The sub-agent answered in `answer_chars` characters after `tool_steps`
+    /// tool-calling steps; `truncated` when its report was cut.
+    Answered {
+        answer_chars: u32,
+        tool_steps: u32,
+        truncated: bool,
+    },
+    /// The step ended without a report.
+    Failed { message: String },
+}
+
 /// Kinds of [`Event`] carried on the daemon-wide broadcast bus, selectable by a
 /// [`SubscribeFilter`]. Dialog-local events have no variant.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -251,6 +324,7 @@ pub enum EventKind {
     ChatFocus,
     Readiness,
     ContextSize,
+    Relay,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -774,6 +848,10 @@ pub enum Event {
         /// Programs an "always allow" answer adds to the allowlist; empty when not offered.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         always_allow: Vec<String>,
+
+        /// Which agent asked; a relay's prompt is never shown as lower risk than the main one's.
+        #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
+        source: ConfirmSource,
     },
     /// Runtime capabilities; `model_name` is the basename of the configured `model.name`.
     Capabilities {
@@ -781,6 +859,8 @@ pub enum Event {
         vision: bool,
         model_name: String,
     },
+    /// Progress of a relay running inside the turn's `relay` tool call.
+    Relay { id: String, event: RelayEvent },
     /// Tokens in the conversation as sent with the model request about to stream,
     /// and `total` the conversation has held, counting what compaction removed.
     ContextSize { id: String, tokens: u32, total: u32 },
@@ -896,6 +976,7 @@ impl Event {
             | Event::ConfirmRequest { id, .. }
             | Event::Capabilities { id, .. }
             | Event::ContextSize { id, .. }
+            | Event::Relay { id, .. }
             | Event::Status { id, .. }
             | Event::BranchInfo { id, .. }
             | Event::BranchSwitched { id, .. }
@@ -927,6 +1008,7 @@ impl Event {
             Event::ChatFocus { .. } => EventKind::ChatFocus,
             Event::Readiness { .. } => EventKind::Readiness,
             Event::ContextSize { .. } => EventKind::ContextSize,
+            Event::Relay { .. } => EventKind::Relay,
             Event::VoiceOutputState { .. }
             | Event::WakeWordStatus { .. }
             | Event::WakeWordTest { .. }

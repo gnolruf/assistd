@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use assistd_core::{PresenceState, VoiceCaptureState};
-use assistd_ipc::{PermissionMode, TurnStats};
+use assistd_ipc::{ConfirmSource, PermissionMode, TurnStats};
 use assistd_tools::ConfirmationRequest;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -33,6 +33,8 @@ const CONFIRM_BORDER_ROWS: usize = 2;
 /// Transcript rows kept above the confirmation prompt however tall it is.
 const TRANSCRIPT_MIN_ROWS: usize = 3;
 const SCRIPT_INDENT: &str = "  ";
+/// Rows of a relay's task a confirmation prompt shows before cutting it.
+const RELAY_TASK_ROWS: usize = 3;
 /// Rows of a thumbnail slot taken by its filename caption.
 const THUMBNAIL_CAPTION_ROWS: u16 = 1;
 const THUMBNAIL_MAX_COLS: u16 = 32;
@@ -314,11 +316,17 @@ fn render_confirmation_dock(
     let height = saturating_u16(body.len() + CONFIRM_BORDER_ROWS).min(area.height);
     let [output_area, prompt_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(area);
-    let accent = Style::default().fg(Color::Yellow);
-    let title = format!(
-        " Confirm {} ",
-        escape_controls_single_line(&prompt.request.tool)
-    );
+    let tool = escape_controls_single_line(&prompt.request.tool);
+    let (accent, title) = match prompt.request.source {
+        ConfirmSource::Main => (
+            Style::default().fg(Color::Yellow),
+            format!(" Confirm {tool} "),
+        ),
+        ConfirmSource::Relay { .. } => (
+            relay_accent(),
+            format!(" Confirm {tool} for a relay sub-agent "),
+        ),
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent)
@@ -327,15 +335,21 @@ fn render_confirmation_dock(
     output_area
 }
 
-/// The reason, the script, and the numbered choices, in at most
-/// `max_rows` rows unless even one script row would not fit.
+/// Who asks when it is a relay, the reason, the script, and the numbered
+/// choices, in at most `max_rows` rows unless even one script row would not fit.
 fn confirmation_body(
     prompt: &mut ConfirmationPrompt,
     width: usize,
     max_rows: usize,
 ) -> Vec<Line<'static>> {
     let reason_style = Style::default().add_modifier(Modifier::BOLD);
-    let mut body = indented_rows("", &prompt.request.matched_pattern, reason_style, width);
+    let mut body = relay_source_rows(&prompt.request.source, width);
+    body.extend(indented_rows(
+        "",
+        &prompt.request.matched_pattern,
+        reason_style,
+        width,
+    ));
     body.push(Line::default());
     let choices = choice_rows(prompt, width);
     let rows_around_script = body.len() + 2 + choices.len();
@@ -345,6 +359,37 @@ fn confirmation_body(
     body.push(Line::from("Do you want to proceed?"));
     body.extend(choices);
     body
+}
+
+/// For a relay's prompt, a warning and the sub-agent's task in at most
+/// [`RELAY_TASK_ROWS`] rows; nothing for the main agent's.
+fn relay_source_rows(source: &ConfirmSource, width: usize) -> Vec<Line<'static>> {
+    let ConfirmSource::Relay { task } = source else {
+        return Vec::new();
+    };
+    let warning = "Asked by a relay sub-agent working from untrusted content. Its task:";
+    let mut rows = indented_rows(
+        "",
+        warning,
+        relay_accent().add_modifier(Modifier::BOLD),
+        width,
+    );
+    let task_style = Style::default().add_modifier(Modifier::ITALIC);
+    let mut task_rows = indented_rows(SCRIPT_INDENT, task, task_style, width);
+    if task_rows.len() > RELAY_TASK_ROWS {
+        task_rows.truncate(RELAY_TASK_ROWS);
+        task_rows.push(Line::from(Span::styled(
+            format!("{SCRIPT_INDENT}…"),
+            task_style,
+        )));
+    }
+    rows.extend(task_rows);
+    rows.push(Line::default());
+    rows
+}
+
+fn relay_accent() -> Style {
+    Style::default().fg(Color::Magenta)
 }
 
 /// The script in at most `budget` rows: the first few behind a marker
@@ -829,6 +874,7 @@ mod tests {
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
                 risk: Risk::Elevated,
+                source: ConfirmSource::Main,
             },
         )
     }

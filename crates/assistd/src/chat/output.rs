@@ -10,9 +10,16 @@ use ratatui::text::{Line, Span};
 use ratatui_image::protocol::StatefulProtocol;
 use textwrap::core::display_width;
 
+use assistd_ipc::RelayProfile;
+
 use super::markdown::{BLEY, render_markdown};
 use super::ui::compact_duration;
 use crate::client::terminal_text::escape_bidi_controls;
+
+mod relay;
+
+pub(super) use relay::RelayStepOutcome;
+use relay::{RelayStepTrace, push_relay_steps};
 
 /// Rows an inline thumbnail reserves.
 pub(super) const THUMBNAIL_ROWS: u16 = 8;
@@ -50,6 +57,8 @@ pub(super) struct ToolBlock {
     pub command: String,
     pub state: ToolState,
     pub expanded: bool,
+    /// Sub-agent steps a `relay` call ran; empty for every other tool.
+    pub relay: Vec<RelayStepTrace>,
 }
 
 /// Whether a tool invocation has been answered yet.
@@ -285,6 +294,7 @@ impl OutputPane {
         self.items.push(OutputItem::Tool(ToolBlock {
             command: without_bidi_controls(command),
             expanded: starts_expanded(&output),
+            relay: Vec::new(),
             state: ToolState::Finished {
                 output,
                 exit_code,
@@ -301,7 +311,69 @@ impl OutputPane {
                 started_at: Instant::now(),
             },
             expanded: true,
+            relay: Vec::new(),
         }));
+    }
+
+    /// Open a relay step in the running tool block. No-op, like every relay
+    /// update, when no tool block is running.
+    pub(super) fn begin_relay_step(
+        &mut self,
+        task: &str,
+        profile: RelayProfile,
+        step: u32,
+        steps: u32,
+    ) {
+        self.update_running_relay(|trace| {
+            trace.push(RelayStepTrace::new(task, profile, step, steps));
+        });
+    }
+
+    pub(super) fn begin_relay_call(&mut self, command: &str) {
+        self.update_running_relay(|trace| {
+            if let Some(step) = trace.last_mut() {
+                step.begin_call(command);
+            }
+        });
+    }
+
+    pub(super) fn finish_relay_call(&mut self, exit_code: i32, duration_ms: u64) {
+        self.update_running_relay(|trace| {
+            if let Some(step) = trace.last_mut() {
+                step.finish_call(exit_code, duration_ms);
+            }
+        });
+    }
+
+    pub(super) fn begin_relay_compaction(&mut self) {
+        self.update_running_relay(|trace| {
+            if let Some(step) = trace.last_mut() {
+                step.begin_compaction();
+            }
+        });
+    }
+
+    pub(super) fn finish_relay_compaction(&mut self, duration_ms: u64) {
+        self.update_running_relay(|trace| {
+            if let Some(step) = trace.last_mut() {
+                step.finish_compaction(duration_ms);
+            }
+        });
+    }
+
+    pub(super) fn finish_relay_step(&mut self, outcome: RelayStepOutcome) {
+        self.update_running_relay(|trace| {
+            if let Some(step) = trace.last_mut() {
+                step.finish(outcome);
+            }
+        });
+    }
+
+    fn update_running_relay(&mut self, update: impl FnOnce(&mut Vec<RelayStepTrace>)) {
+        if let Some((idx, block)) = self.running_tool() {
+            update(&mut block.relay);
+            self.wrap.invalidate(idx);
+        }
     }
 
     /// A result whose call was never announced gets a finished block of its
@@ -909,6 +981,7 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, ve
         ToolState::Running { started_at } => {
             let bar = tool_bar(Color::Yellow);
             push_tool_header(out, &bar, &b.command, inner_w);
+            push_relay_steps(out, &bar, &b.relay, false, inner_w);
             let status = format!("running… ({}s)", started_at.elapsed().as_secs());
             push_barred(out, &bar, &status, tool_running_style(), inner_w);
         }
@@ -925,6 +998,7 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, ve
             let bar = tool_bar(bar_color);
             push_tool_header(out, &bar, &b.command, inner_w);
             let collapsible = !verbose && !b.expanded;
+            push_relay_steps(out, &bar, &b.relay, collapsible, inner_w);
             push_tool_body(out, &bar, output, collapsible, inner_w);
             let footer = format!("[exit:{exit_code} | {duration_ms}ms]");
             push_tool_footer(out, &bar, footer, bar_color, inner_w);

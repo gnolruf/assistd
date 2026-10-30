@@ -50,6 +50,7 @@ impl AnsweringParent {
             Arc::new(ToolRegistry::new()),
             shape,
             CancellationToken::new(),
+            &RelayProgress::default(),
         )
         .await
     }
@@ -77,11 +78,7 @@ impl LlmBackend for AnsweringParent {
         unimplemented!("parent is never driven")
     }
 
-    fn isolated_conversation(
-        &self,
-        _system_prompt: String,
-        _max_history_tokens: NonZeroU32,
-    ) -> LlmResult<Arc<dyn LlmBackend>> {
+    fn isolated_conversation(&self, _system_prompt: String) -> LlmResult<Arc<dyn LlmBackend>> {
         Ok(Arc::new(AnsweringConversation {
             answer: self.answer.clone(),
             structured: self.structured.clone(),
@@ -156,11 +153,7 @@ impl LlmBackend for HangingParent {
         unimplemented!("parent is never driven")
     }
 
-    fn isolated_conversation(
-        &self,
-        _system_prompt: String,
-        _max_history_tokens: NonZeroU32,
-    ) -> LlmResult<Arc<dyn LlmBackend>> {
+    fn isolated_conversation(&self, _system_prompt: String) -> LlmResult<Arc<dyn LlmBackend>> {
         Ok(Arc::new(HangingConversation {
             stepping: Arc::clone(&self.stepping),
         }))
@@ -197,12 +190,14 @@ async fn cancelling_the_parent_turn_stops_the_run() {
     let stepping = Arc::clone(&parent.stepping);
     let runner = SubAgentRunner::new(parent, None, Duration::from_secs(60));
     let parent_turn = CancellationToken::new();
+    let progress = RelayProgress::default();
     let run = runner.run(
         "sub".into(),
         "task".into(),
         Arc::new(ToolRegistry::new()),
         AnswerShape::Text,
         parent_turn.child_token(),
+        &progress,
     );
     let cancel_mid_step = async {
         stepping.notified().await;

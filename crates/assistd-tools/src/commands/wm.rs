@@ -4,6 +4,7 @@
 use std::fmt::{Display, Write};
 use std::sync::Arc;
 
+use assistd_ipc::ConfirmSource;
 use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 use async_trait::async_trait;
 
@@ -142,6 +143,7 @@ impl WmCommand {
             } else {
                 Risk::Routine
             },
+            source: ConfirmSource::Main,
         };
         if has_targets {
             self.gate.confirm(request()).await != Approval::Deny

@@ -3,10 +3,13 @@
 
 use std::time::{Duration, Instant};
 
-use assistd_ipc::{Event, ListenPhase, PresenceState, Role, StatusKind, StatusSeverity, TurnStats};
+use assistd_ipc::{
+    Event, ListenPhase, PresenceState, RelayEvent, Role, StatusKind, StatusSeverity, TurnStats,
+};
 use assistd_tools::{ConfirmationRequest, Risk};
 use serde_json::Value;
 
+use super::super::output::RelayStepOutcome;
 use super::super::ui::turn_summary;
 use super::{
     ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
@@ -80,6 +83,7 @@ impl App {
             | Event::ReasoningDelta { .. }
             | Event::ToolCall { .. }
             | Event::ToolResult { .. }
+            | Event::Relay { .. }
             | Event::ConfirmRequest { .. }
             | Event::Transcription { .. }) => self.on_turn_event(turn),
             state @ (Event::Presence { .. }
@@ -125,12 +129,14 @@ impl App {
             }
             Event::ToolCall { args, name, .. } => self.on_tool_call(name, &args),
             Event::ToolResult { result, .. } => self.on_tool_result(&result),
+            Event::Relay { event, .. } => self.on_relay_event(event),
             Event::ConfirmRequest {
                 confirm_id,
                 tool,
                 script,
                 matched_pattern,
                 always_allow,
+                source,
                 ..
             } => self.open_confirmation(
                 confirm_id,
@@ -140,6 +146,7 @@ impl App {
                     matched_pattern,
                     always_allow,
                     risk: Risk::Elevated,
+                    source,
                 },
             ),
             Event::Transcription { text, .. } if text.trim().is_empty() => {
@@ -162,17 +169,44 @@ impl App {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let exit_code = result
-            .get("exit_code")
-            .and_then(Value::as_i64)
-            .and_then(|code| i32::try_from(code).ok())
-            .unwrap_or(0);
-        let duration_ms = result
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let (exit_code, duration_ms) = tool_outcome(result);
         self.output
             .finish_tool_block(output, exit_code, duration_ms);
+    }
+
+    /// Draw a relay's progress inside the running `relay` tool block.
+    fn on_relay_event(&mut self, event: RelayEvent) {
+        match event {
+            RelayEvent::Started {
+                task,
+                profile,
+                step,
+                steps,
+            } => self.output.begin_relay_step(&task, profile, step, steps),
+            RelayEvent::ToolCall { name, args } => self
+                .output
+                .begin_relay_call(&tool_block_label(name, Some(&args))),
+            RelayEvent::ToolResult { result, .. } => {
+                let (exit_code, duration_ms) = tool_outcome(&result);
+                self.output.finish_relay_call(exit_code, duration_ms);
+            }
+            RelayEvent::Compacting => self.output.begin_relay_compaction(),
+            RelayEvent::Compacted { duration_ms } => {
+                self.output.finish_relay_compaction(duration_ms);
+            }
+            RelayEvent::Answered {
+                answer_chars,
+                tool_steps,
+                truncated,
+            } => self.output.finish_relay_step(RelayStepOutcome::Answered {
+                answer_chars,
+                tool_steps,
+                truncated,
+            }),
+            RelayEvent::Failed { message } => self
+                .output
+                .finish_relay_step(RelayStepOutcome::Failed { message }),
+        }
     }
 
     /// Daemon and model state the chat tracks between turns.
@@ -529,12 +563,27 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
         | Event::ReasoningDelta { id, .. }
         | Event::ToolCall { id, .. }
         | Event::ToolResult { id, .. }
+        | Event::Relay { id, .. }
         | Event::ConfirmRequest { id, .. }
         | Event::Done { id, .. }
         | Event::Error { id, .. } => Some(id),
         Event::Transcription { id, text } => (!text.trim().is_empty()).then_some(id.as_str()),
         _ => None,
     }
+}
+
+/// A tool result's exit code and duration in milliseconds, zero when absent.
+fn tool_outcome(result: &Value) -> (i32, u64) {
+    let exit_code = result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or(0);
+    let duration_ms = result
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (exit_code, duration_ms)
 }
 
 /// A tool block's header: the `command` argument when the call has one,
