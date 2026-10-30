@@ -12,7 +12,7 @@ use assistd_tools::{
     SharedDirs, Tool,
 };
 
-const SECRET: &str = "host-home-secret";
+const HOST_ONLY: &str = "host-home-only";
 const INPUT: &str = "handed-over-input";
 
 async fn run(tool: &RunTool, command: &str) -> (i32, String) {
@@ -38,8 +38,8 @@ async fn quarantined_bash_and_cat_read_inputs_but_not_the_host_home() {
         .prefix(".assistd-quarantine-test-")
         .tempdir_in(home)
         .expect("dir in the host home");
-    let secret = host.path().join("secret.txt");
-    std::fs::write(&secret, SECRET).expect("secret");
+    let host_only = host.path().join("host-only.txt");
+    std::fs::write(&host_only, HOST_ONLY).expect("host-only file");
     let input = host.path().join("notes.txt");
     std::fs::write(&input, INPUT).expect("input");
     let relays = tempfile::tempdir().expect("relay parent");
@@ -53,24 +53,24 @@ async fn quarantined_bash_and_cat_read_inputs_but_not_the_host_home() {
         ..PresentSpec::default()
     }));
     let tool = RunTool::new(Arc::new(commands), output_cap);
-    let secret = secret.display();
+    let host_only = host_only.display();
     let copied = quarantine.input_dir().join("notes.txt");
     let copied = copied.display();
 
     for command in [
-        format!("cat {secret}"),
-        format!("bash \"cat {secret}\""),
-        format!("bash \"ln -s {secret} link\" && cat ~/link"),
+        format!("cat {host_only}"),
+        format!("bash \"cat {host_only}\""),
+        format!("bash \"ln -s {host_only} link\" && cat ~/link"),
         format!(
             "cat {}/{}{}",
             quarantine.home_dir().display(),
             "../".repeat(32),
-            secret.to_string().trim_start_matches('/')
+            host_only.to_string().trim_start_matches('/')
         ),
     ] {
         let (exit_code, output) = run(&tool, &command).await;
         assert_ne!(exit_code, 0, "{command}: {output}");
-        assert!(!output.contains(SECRET), "{command}: {output}");
+        assert!(!output.contains(HOST_ONLY), "{command}: {output}");
     }
     for command in [format!("cat {copied}"), format!("bash \"cat {copied}\"")] {
         let (exit_code, output) = run(&tool, &command).await;
