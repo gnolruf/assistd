@@ -1,5 +1,7 @@
 use super::*;
-use crate::Seq;
+use crate::{
+    PersistedRelayEnd, PersistedRelayEntry, PersistedRelayProfile, PersistedRelayRun, Seq,
+};
 
 /// The returned temp dir must outlive the store.
 async fn fresh_store() -> (SqliteTranscriptStore, tempfile::TempDir) {
@@ -420,4 +422,104 @@ async fn find_resumable_session_returns_unended() {
 
     store.end_session(s).await.unwrap();
     assert_eq!(store.find_resumable_session().await.unwrap(), None);
+}
+
+fn relay_plan() -> Vec<PersistedRelayStep> {
+    let finished = ToolOutcome {
+        exit_code: 1,
+        duration_ms: 12,
+    };
+    let entries = vec![
+        PersistedRelayEntry::Reasoning {
+            text: "grep first".into(),
+            duration_ms: 900,
+        },
+        PersistedRelayEntry::Tool {
+            name: "run".into(),
+            arguments: serde_json::json!({"command": "grep -rn Error /in"}),
+            output: "no matches".into(),
+            outcome: Some(finished),
+        },
+        PersistedRelayEntry::Compaction {
+            duration_ms: Some(3000),
+        },
+        PersistedRelayEntry::Text("Nothing matched.".into()),
+        PersistedRelayEntry::Tool {
+            name: "run".into(),
+            arguments: serde_json::json!({"command": "cat /in/x"}),
+            output: String::new(),
+            outcome: None,
+        },
+        PersistedRelayEntry::Compaction { duration_ms: None },
+    ];
+    vec![
+        PersistedRelayStep {
+            task: "fetch the notes".into(),
+            profile: PersistedRelayProfile::Fetch,
+            run: Some(PersistedRelayRun {
+                end: PersistedRelayEnd::Answered { truncated: true },
+                duration_ms: 41_000,
+                tokens: Some(9000),
+                entries,
+            }),
+        },
+        PersistedRelayStep {
+            task: "compare them".into(),
+            profile: PersistedRelayProfile::Read,
+            run: Some(PersistedRelayRun {
+                end: PersistedRelayEnd::Failed {
+                    message: "server crashed".into(),
+                },
+                duration_ms: 500,
+                tokens: None,
+                entries: Vec::new(),
+            }),
+        },
+        PersistedRelayStep {
+            task: "summarise".into(),
+            profile: PersistedRelayProfile::Read,
+            run: None,
+        },
+    ]
+}
+
+#[tokio::test]
+async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
+    let (store, _temp) = fresh_store().await;
+    let branch = store
+        .begin_session_with_main_branch(SessionId::new(), 1)
+        .await
+        .unwrap();
+    let turn = store
+        .begin_turn(branch, PersistedMessage::user("research it"))
+        .await
+        .unwrap()
+        .turn;
+    let outcome = ToolOutcome {
+        exit_code: 1,
+        duration_ms: 42_000,
+    };
+    let result = PersistedMessage::tool_result("[error] relay: step 2", "c-1", "relay", outcome);
+    let appended = store
+        .append_relay_result(branch, turn, result, relay_plan())
+        .await
+        .unwrap();
+
+    let traces = store.load_relay_traces(branch).await.unwrap();
+    assert_eq!(traces.get(&appended.id), Some(&relay_plan()));
+    assert_eq!(traces.len(), 1);
+
+    let fork = store.fork_and_switch(branch, "fork").await.unwrap();
+    store.undo_last_turn(branch).await.unwrap();
+    let forked = store.load_relay_traces(fork).await.unwrap();
+    assert_eq!(forked.get(&appended.id), Some(&relay_plan()));
+
+    store.undo_last_turn(fork).await.unwrap();
+    let steps: i64 = store
+        .handle
+        .reader()
+        .call(|c| c.query_row("SELECT COUNT(*) FROM relay_steps", [], |r| r.get(0)))
+        .await
+        .unwrap();
+    assert_eq!(steps, 0, "undo on every branch deletes the trace");
 }

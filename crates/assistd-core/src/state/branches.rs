@@ -11,10 +11,11 @@ use tracing::{debug, warn};
 use assistd_ipc::Event;
 use assistd_llm::{HistoryEntry, HistoryReplay, HistoryRole, Thinking, ToolCallRecord};
 use assistd_memory::{
-    BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageKind,
-    PersistedToolCall, Seq, SessionId, TurnStats, UndoOutcome,
+    BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageId, MessageKind,
+    PersistedRelayStep, PersistedToolCall, Seq, SessionId, TurnStats, UndoOutcome,
 };
 
+use super::relay_trace::wire_relay_steps;
 use super::{AppState, send_error, wire_role, wire_timestamp};
 
 const MAX_TITLE_CHARS: usize = 80;
@@ -433,7 +434,12 @@ impl AppState {
             })
             .await;
         let mut call_arguments = tool_call_arguments(&rows);
+        let mut relay_traces = self.relay_traces_of(branch).await;
         for row in rows {
+            let relay = relay_traces
+                .remove(&row.message_id)
+                .map(wire_relay_steps)
+                .unwrap_or_default();
             let role = wire_role(row.message.role());
             let (reasoning, tool_name, tool_args, outcome) = match row.message.kind {
                 MessageKind::Tool {
@@ -466,10 +472,30 @@ impl AppState {
                         .filter(|(marker_seq, _)| *marker_seq == row.seq)
                         .map(|(_, duration_ms)| duration_ms),
                     turn_stats: row.turn_stats.map(wire_turn_stats),
+                    relay,
                 })
                 .await;
         }
         let _ = tx.send(Event::Done { id }).await;
+    }
+
+    /// The relay traces stored on `branch`'s rows; none when they cannot be read.
+    async fn relay_traces_of(
+        &self,
+        branch: BranchId,
+    ) -> HashMap<MessageId, Vec<PersistedRelayStep>> {
+        self.memory
+            .transcripts
+            .load_relay_traces(branch)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(
+                    target: "assistd::state",
+                    error = %e,
+                    "load_relay_traces failed; replaying relays without their traces"
+                );
+                HashMap::new()
+            })
     }
 
     /// Make a new, unsaved session active, clear the LLM history, and

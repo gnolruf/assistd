@@ -30,6 +30,7 @@ pub(crate) mod persistence;
 pub(crate) mod presence_handlers;
 pub(crate) mod query;
 pub(crate) mod readiness;
+pub(crate) mod relay_trace;
 pub(crate) mod runtime;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;

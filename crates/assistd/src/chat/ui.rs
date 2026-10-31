@@ -21,6 +21,7 @@ use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use super::settings::render_settings;
 use crate::client::terminal_text::escape_controls_single_line;
 
+mod agents;
 mod wakeword;
 
 const INPUT_PROMPT: &str = "> ";
@@ -50,6 +51,8 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_resume_picker(frame, main_area, picker, &app.model_name, Utc::now());
     } else if let Some(panel) = app.shown_wake_word_panel() {
         wakeword::render_wake_word_panel(frame, main_area, panel);
+    } else if let Some(panel) = app.shown_agent_panel() {
+        agents::render_agent_panel(frame, main_area, app, panel);
     } else if app.confirmation.is_none()
         && let Some(panel) = app.settings_panel.as_mut()
     {
@@ -317,15 +320,10 @@ fn render_confirmation_dock(
     let [output_area, prompt_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(area);
     let tool = escape_controls_single_line(&prompt.request.tool);
-    let (accent, title) = match prompt.request.source {
-        ConfirmSource::Main => (
-            Style::default().fg(Color::Yellow),
-            format!(" Confirm {tool} "),
-        ),
-        ConfirmSource::Relay { .. } => (
-            relay_accent(),
-            format!(" Confirm {tool} for a relay sub-agent "),
-        ),
+    let accent = confirm_accent();
+    let title = match prompt.request.source {
+        ConfirmSource::Main => format!(" Confirm {tool} "),
+        ConfirmSource::Relay { .. } => format!(" Confirm {tool} for a relay sub-agent "),
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -371,7 +369,7 @@ fn relay_source_rows(source: &ConfirmSource, width: usize) -> Vec<Line<'static>>
     let mut rows = indented_rows(
         "",
         warning,
-        relay_accent().add_modifier(Modifier::BOLD),
+        confirm_accent().add_modifier(Modifier::BOLD),
         width,
     );
     let task_style = Style::default().add_modifier(Modifier::ITALIC);
@@ -388,8 +386,8 @@ fn relay_source_rows(source: &ConfirmSource, width: usize) -> Vec<Line<'static>>
     rows
 }
 
-fn relay_accent() -> Style {
-    Style::default().fg(Color::Magenta)
+fn confirm_accent() -> Style {
+    Style::default().fg(Color::Yellow)
 }
 
 /// The script in at most `budget` rows: the first few behind a marker
@@ -645,7 +643,7 @@ pub(super) fn compact_duration(total_secs: u64) -> String {
 }
 
 /// `950`, `1.2k`, `34.5k`: one decimal place from a thousand up.
-fn compact_count(count: u64) -> String {
+pub(super) fn compact_count(count: u64) -> String {
     if count < 1000 {
         count.to_string()
     } else {
@@ -709,6 +707,8 @@ fn status_hint(app: &App) -> Option<String> {
         Some(notice.to_string())
     } else if let Some(panel) = app.shown_wake_word_panel() {
         Some(wakeword::wake_word_hint(&panel.view).to_string())
+    } else if let Some(panel) = app.shown_agent_panel() {
+        Some(agents::agent_panel_hint(panel).to_string())
     } else if app.output.scroll_offset() > 0 {
         Some(format!("↑{} · PgDn to follow", app.output.scroll_offset()))
     } else if app.generating() {

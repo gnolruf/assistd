@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui_image::protocol::StatefulProtocol;
+use serde_json::Value;
 use textwrap::core::display_width;
 
-use assistd_ipc::RelayProfile;
+use assistd_ipc::{RelayStepPlan, RelayStepRecord};
 
 use super::markdown::{BLEY, render_markdown};
 use super::ui::compact_duration;
@@ -18,8 +19,8 @@ use crate::client::terminal_text::escape_bidi_controls;
 
 mod relay;
 
-pub(super) use relay::RelayStepOutcome;
-use relay::{RelayStepTrace, push_relay_steps};
+use relay::{RelayRun, render_relay_block};
+pub(super) use relay::{RelayStepOutcome, RelayStepTrace, StepUpdate};
 
 /// Rows an inline thumbnail reserves.
 pub(super) const THUMBNAIL_ROWS: u16 = 8;
@@ -52,13 +53,12 @@ const BANNER_GAP: &str = "   ";
 const BANNER_RULE: &str = "─";
 
 /// One tool invocation, shown from the moment it is called.
-#[derive(Debug, Clone)]
 pub(super) struct ToolBlock {
     pub command: String,
     pub state: ToolState,
     pub expanded: bool,
-    /// Sub-agent steps a `relay` call ran; empty for every other tool.
-    pub relay: Vec<RelayStepTrace>,
+    /// The sub-agents a `relay` call planned, once it announced them.
+    pub relay: Option<RelayRun>,
 }
 
 /// Whether a tool invocation has been answered yet.
@@ -294,9 +294,32 @@ impl OutputPane {
         self.items.push(OutputItem::Tool(ToolBlock {
             command: without_bidi_controls(command),
             expanded: starts_expanded(&output),
-            relay: Vec::new(),
+            relay: None,
             state: ToolState::Finished {
                 output,
+                exit_code,
+                duration_ms,
+            },
+        }));
+    }
+
+    /// Append a finished `relay` tool block rebuilt from its stored `steps`,
+    /// collapsed.
+    pub(super) fn push_replayed_relay(
+        &mut self,
+        command: String,
+        output: String,
+        exit_code: i32,
+        duration_ms: u64,
+        steps: Vec<RelayStepRecord>,
+    ) {
+        self.close_open_assistant();
+        self.items.push(OutputItem::Tool(ToolBlock {
+            command: without_bidi_controls(command),
+            expanded: false,
+            relay: Some(RelayRun::replayed(steps)),
+            state: ToolState::Finished {
+                output: without_bidi_controls(output),
                 exit_code,
                 duration_ms,
             },
@@ -311,69 +334,63 @@ impl OutputPane {
                 started_at: Instant::now(),
             },
             expanded: true,
-            relay: Vec::new(),
+            relay: None,
         }));
     }
 
-    /// Open a relay step in the running tool block. No-op, like every relay
-    /// update, when no tool block is running.
-    pub(super) fn begin_relay_step(
-        &mut self,
-        task: &str,
-        profile: RelayProfile,
-        step: u32,
-        steps: u32,
-    ) {
-        self.update_running_relay(|trace| {
-            trace.push(RelayStepTrace::new(task, profile, step, steps));
-        });
-    }
-
-    pub(super) fn begin_relay_call(&mut self, command: &str) {
-        self.update_running_relay(|trace| {
-            if let Some(step) = trace.last_mut() {
-                step.begin_call(command);
-            }
-        });
-    }
-
-    pub(super) fn finish_relay_call(&mut self, exit_code: i32, duration_ms: u64) {
-        self.update_running_relay(|trace| {
-            if let Some(step) = trace.last_mut() {
-                step.finish_call(exit_code, duration_ms);
-            }
-        });
-    }
-
-    pub(super) fn begin_relay_compaction(&mut self) {
-        self.update_running_relay(|trace| {
-            if let Some(step) = trace.last_mut() {
-                step.begin_compaction();
-            }
-        });
-    }
-
-    pub(super) fn finish_relay_compaction(&mut self, duration_ms: u64) {
-        self.update_running_relay(|trace| {
-            if let Some(step) = trace.last_mut() {
-                step.finish_compaction(duration_ms);
-            }
-        });
-    }
-
-    pub(super) fn finish_relay_step(&mut self, outcome: RelayStepOutcome) {
-        self.update_running_relay(|trace| {
-            if let Some(step) = trace.last_mut() {
-                step.finish(outcome);
-            }
-        });
-    }
-
-    fn update_running_relay(&mut self, update: impl FnOnce(&mut Vec<RelayStepTrace>)) {
+    /// Turn the running tool block into a relay of `plan`'s steps. No-op,
+    /// like every relay update, when no tool block is running.
+    pub(super) fn begin_relay(&mut self, plan: Vec<RelayStepPlan>) {
         if let Some((idx, block)) = self.running_tool() {
-            update(&mut block.relay);
+            block.relay = Some(RelayRun::planned(plan));
             self.wrap.invalidate(idx);
         }
+    }
+
+    /// Start step `step` of the running relay, counted from 1.
+    pub(super) fn start_relay_step(&mut self, step: u32) {
+        self.update_running_relay(|run| run.start(step));
+    }
+
+    pub(super) fn apply_relay(&mut self, update: StepUpdate) {
+        self.update_running_relay(|run| run.apply(update));
+    }
+
+    fn update_running_relay(&mut self, update: impl FnOnce(&mut RelayRun)) {
+        if let Some((idx, block)) = self.running_tool()
+            && let Some(run) = block.relay.as_mut()
+        {
+            update(run);
+            self.wrap.invalidate(idx);
+        }
+    }
+
+    /// Every sub-agent that has started, oldest first.
+    pub(super) fn agents(&self) -> Vec<&RelayStepTrace> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::Tool(ToolBlock {
+                    relay: Some(run), ..
+                }) => Some(run),
+                _ => None,
+            })
+            .flat_map(RelayRun::started)
+            .collect()
+    }
+
+    /// The sub-agent at `index` of [`Self::agents`].
+    pub(super) fn agent_mut(&mut self, index: usize) -> Option<&mut RelayStepTrace> {
+        self.items
+            .iter_mut()
+            .filter_map(|item| match item {
+                OutputItem::Tool(ToolBlock {
+                    relay: Some(run), ..
+                }) => Some(run),
+                _ => None,
+            })
+            .flat_map(RelayRun::started_mut)
+            .nth(index)
     }
 
     /// A result whose call was never announced gets a finished block of its
@@ -384,7 +401,10 @@ impl OutputPane {
             return;
         };
         let output = without_bidi_controls(output);
-        block.expanded = starts_expanded(&output);
+        block.expanded = block.relay.is_none() && starts_expanded(&output);
+        if let Some(run) = block.relay.as_mut() {
+            run.end();
+        }
         block.state = ToolState::Finished {
             output,
             exit_code,
@@ -976,12 +996,22 @@ fn thinking_glyph(frame: u64) -> char {
 }
 
 fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, verbose: bool) {
+    if let Some(run) = &b.relay {
+        let running = matches!(b.state, ToolState::Running { .. });
+        render_relay_block(
+            out,
+            run,
+            &b.state,
+            !verbose && (running || !b.expanded),
+            width,
+        );
+        return;
+    }
     let inner_w = width.saturating_sub(2).max(1);
     match &b.state {
         ToolState::Running { started_at } => {
-            let bar = tool_bar(Color::Yellow);
+            let bar = tool_bar(Color::Gray);
             push_tool_header(out, &bar, &b.command, inner_w);
-            push_relay_steps(out, &bar, &b.relay, false, inner_w);
             let status = format!("running… ({}s)", started_at.elapsed().as_secs());
             push_barred(out, &bar, &status, tool_running_style(), inner_w);
         }
@@ -998,7 +1028,6 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, ve
             let bar = tool_bar(bar_color);
             push_tool_header(out, &bar, &b.command, inner_w);
             let collapsible = !verbose && !b.expanded;
-            push_relay_steps(out, &bar, &b.relay, collapsible, inner_w);
             push_tool_body(out, &bar, output, collapsible, inner_w);
             let footer = format!("[exit:{exit_code} | {duration_ms}ms]");
             push_tool_footer(out, &bar, footer, bar_color, inner_w);
@@ -1137,6 +1166,14 @@ fn body_line_count(output: &str) -> usize {
     }
 }
 
+/// A tool block's header: the `command` argument when the call has one,
+/// else the tool's name.
+pub(super) fn tool_block_label(name: String, args: Option<&Value>) -> String {
+    args.and_then(|args| args.get("command"))
+        .and_then(Value::as_str)
+        .map_or(name, str::to_string)
+}
+
 fn without_bidi_controls(text: String) -> String {
     match escape_bidi_controls(&text) {
         Cow::Owned(escaped) => escaped,
@@ -1182,7 +1219,7 @@ fn tool_result_style() -> Style {
 
 fn tool_running_style() -> Style {
     Style::default()
-        .fg(Color::Yellow)
+        .fg(Color::Gray)
         .add_modifier(Modifier::ITALIC)
 }
 

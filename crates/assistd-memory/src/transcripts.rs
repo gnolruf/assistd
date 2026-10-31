@@ -1,5 +1,6 @@
 //! Session transcripts: sessions, turns, branches, and their messages.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 
@@ -7,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchId, ChunkId, MessageId, Result, Seq, SessionId, TurnId};
+use crate::{BranchId, ChunkId, MessageId, PersistedRelayStep, Result, Seq, SessionId, TurnId};
 
 /// Role of a persisted message, stored as the `messages.role` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -294,6 +295,22 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         msg: PersistedMessage,
     ) -> Result<AppendedMessage>;
 
+    /// Append the `relay` tool result `msg` as [`append_message_to_branch`](Self::append_message_to_branch)
+    /// does, with the sub-agent `steps` behind it, in one transaction.
+    async fn append_relay_result(
+        &self,
+        branch: BranchId,
+        turn: TurnId,
+        msg: PersistedMessage,
+        steps: Vec<PersistedRelayStep>,
+    ) -> Result<AppendedMessage>;
+
+    /// The relay steps stored with each message on `branch`, in plan order.
+    async fn load_relay_traces(
+        &self,
+        branch: BranchId,
+    ) -> Result<HashMap<MessageId, Vec<PersistedRelayStep>>>;
+
     /// Every branch of every session, most recently active first, then by
     /// branch id.
     async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
@@ -402,6 +419,23 @@ impl TranscriptStore for NoTranscriptStore {
             id: MessageId(0),
             chunks: Vec::new(),
         })
+    }
+
+    async fn append_relay_result(
+        &self,
+        branch: BranchId,
+        turn: TurnId,
+        msg: PersistedMessage,
+        _steps: Vec<PersistedRelayStep>,
+    ) -> Result<AppendedMessage> {
+        self.append_message_to_branch(branch, turn, msg).await
+    }
+
+    async fn load_relay_traces(
+        &self,
+        _branch: BranchId,
+    ) -> Result<HashMap<MessageId, Vec<PersistedRelayStep>>> {
+        Ok(HashMap::new())
     }
 
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {

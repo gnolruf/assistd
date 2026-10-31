@@ -222,9 +222,66 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         memory_event_cases(),
         confirmation_and_status_event_cases(),
         session_event_cases(),
+        relay_history_event_cases(),
         wake_word_event_cases(),
     ]
     .concat()
+}
+
+/// A `relay` history row with every kind of stored sub-agent entry.
+fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
+    vec![(
+        Event::HistoryEntry {
+            id: id(),
+            seq: 5,
+            role: Role::Tool,
+            content: "report".into(),
+            reasoning: String::new(),
+            reasoning_ms: None,
+            tool_name: Some("relay".into()),
+            tool_args: None,
+            exit_code: Some(0),
+            duration_ms: Some(9000),
+            compaction_ms: None,
+            turn_stats: None,
+            relay: vec![
+                RelayStepRecord {
+                    task: "find it".into(),
+                    profile: RelayProfile::Fetch,
+                    run: Some(RelayStepRun {
+                        end: RelayStepEnd::Answered { truncated: false },
+                        duration_ms: 8000,
+                        tokens: Some(4100),
+                        entries: vec![
+                            RelayTraceEntry::Reasoning {
+                                text: "search".into(),
+                                duration_ms: 300,
+                            },
+                            RelayTraceEntry::Tool {
+                                name: "run".into(),
+                                args: serde_json::json!({"command": "web search it"}),
+                                output: "hit".into(),
+                                outcome: Some(RelayToolOutcome {
+                                    exit_code: 0,
+                                    duration_ms: 40,
+                                }),
+                            },
+                            RelayTraceEntry::Compaction { duration_ms: None },
+                            RelayTraceEntry::Text {
+                                text: "Found.".into(),
+                            },
+                        ],
+                    }),
+                },
+                RelayStepRecord {
+                    task: "read it".into(),
+                    profile: RelayProfile::Read,
+                    run: None,
+                },
+            ],
+        },
+        r#"{"type":"history_entry","id":"r","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","profile":"fetch","run":{"end":{"kind":"answered","truncated":false},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","profile":"read"}]}"#,
+    )]
 }
 
 fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
@@ -484,14 +541,21 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
         (
             Event::Relay {
                 id: id(),
-                event: RelayEvent::Started {
-                    task: "find the release".into(),
-                    profile: RelayProfile::Fetch,
-                    step: 1,
-                    steps: 2,
+                event: RelayEvent::Planned {
+                    steps: vec![RelayStepPlan {
+                        task: "find the release".into(),
+                        profile: RelayProfile::Fetch,
+                    }],
                 },
             },
-            r#"{"type":"relay","id":"r","event":{"kind":"started","task":"find the release","profile":"fetch","step":1,"steps":2}}"#,
+            r#"{"type":"relay","id":"r","event":{"kind":"planned","steps":[{"task":"find the release","profile":"fetch"}]}}"#,
+        ),
+        (
+            Event::Relay {
+                id: id(),
+                event: RelayEvent::Started { step: 1 },
+            },
+            r#"{"type":"relay","id":"r","event":{"kind":"started","step":1}}"#,
         ),
         (
             Event::Relay {
@@ -587,6 +651,7 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 duration_ms: None,
                 compaction_ms: None,
                 turn_stats: None,
+                relay: Vec::new(),
             },
             r#"{"type":"history_entry","id":"r","seq":3,"role":"assistant","content":"hello","reasoning":"greet back","reasoning_ms":1500,"tool_name":null}"#,
         ),
@@ -607,6 +672,7 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                     duration_ms: 5300,
                     tokens: 812,
                 }),
+                relay: Vec::new(),
             },
             r#"{"type":"history_entry","id":"r","seq":4,"role":"tool","content":"out","tool_name":"run","tool_args":{"command":"ls"},"exit_code":1,"duration_ms":7,"compaction_ms":4200,"turn_stats":{"duration_ms":5300,"tokens":812}}"#,
         ),

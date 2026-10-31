@@ -192,10 +192,13 @@ asked for again without tools, and only when that also fails does compaction
 fall back to dropping old steps without a summary. Its tool-call ceiling is the main turn's too: after 200
 tool-calling steps, or a call repeated three times in a row, its tools are
 withdrawn and it is asked to answer from what it has, so a long task ends in a
-partial report rather than an error. While a relay runs, the sub-agent's tool calls, results
-and compactions reach the client as `Event::Relay` progress, never the model.
+partial report rather than an error. While a relay runs, its plan, then each sub-agent's
+text, reasoning, context size, tool calls, results and compactions reach the client as
+`Event::Relay` progress, never the model. The TUI draws them as a compact block in place
+of the `relay` tool block, and `/agents` opens any sub-agent's full transcript.
 The conversation is dropped when the run ends, so none of it reaches the main
-history or the transcript store.
+history. What the client was shown is stored with the relay's tool result in
+`relay_steps` and `relay_entries`, never embedded, and replayed with branch history.
 
 Only the text of the final step comes back, and only as a `RelayReport`, the
 restricted return channel. Its control, bidi and format characters are

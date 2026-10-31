@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span};
 
 use assistd_config::ToolsOutputConfig;
-use assistd_ipc::{RelayEvent, RelayProfile};
+use assistd_ipc::{RelayEvent, RelayProfile, RelayStepPlan};
 use assistd_llm::MainSlot;
 use assistd_search::SearxngClient;
 use assistd_tools::commands::BashPolicyCfg;
@@ -185,6 +185,11 @@ impl RelayTool {
     ) -> Result<RelayReport, StepFailed> {
         let steps = plan.rest.len() + 1;
         let at = |step| StepPosition { step, steps };
+        progress
+            .report(RelayEvent::Planned {
+                steps: plan.steps().map(RelayStep::plan).collect(),
+            })
+            .await;
         let mut report = self.run_step(plan.first, None, at(1), progress).await?;
         for (index, step) in plan.rest.into_iter().enumerate() {
             report = self
@@ -212,10 +217,7 @@ impl RelayTool {
         );
         progress
             .report(RelayEvent::Started {
-                task: step.task.clone(),
-                profile,
                 step: u32::try_from(position.step).unwrap_or(u32::MAX),
-                steps: u32::try_from(position.steps).unwrap_or(u32::MAX),
             })
             .await;
         let outcome = self
@@ -481,6 +483,13 @@ impl RelayStep {
             profile,
             search_only,
         })
+    }
+
+    fn plan(&self) -> RelayStepPlan {
+        RelayStepPlan {
+            task: self.task.clone(),
+            profile: self.profile.wire(),
+        }
     }
 }
 

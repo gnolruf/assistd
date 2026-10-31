@@ -4,12 +4,13 @@
 use std::time::{Duration, Instant};
 
 use assistd_ipc::{
-    Event, ListenPhase, PresenceState, RelayEvent, Role, StatusKind, StatusSeverity, TurnStats,
+    Event, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role, StatusKind,
+    StatusSeverity, TurnStats,
 };
 use assistd_tools::{ConfirmationRequest, Risk};
 use serde_json::Value;
 
-use super::super::output::RelayStepOutcome;
+use super::super::output::{RelayStepOutcome, StepUpdate, tool_block_label};
 use super::super::ui::turn_summary;
 use super::{
     ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
@@ -164,49 +165,40 @@ impl App {
     }
 
     fn on_tool_result(&mut self, result: &Value) {
-        let output = result
-            .get("output")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
         let (exit_code, duration_ms) = tool_outcome(result);
         self.output
-            .finish_tool_block(output, exit_code, duration_ms);
+            .finish_tool_block(tool_output(result), exit_code, duration_ms);
     }
 
     /// Draw a relay's progress inside the running `relay` tool block.
     fn on_relay_event(&mut self, event: RelayEvent) {
-        match event {
-            RelayEvent::Started {
-                task,
-                profile,
-                step,
-                steps,
-            } => self.output.begin_relay_step(&task, profile, step, steps),
-            RelayEvent::ToolCall { name, args } => self
-                .output
-                .begin_relay_call(&tool_block_label(name, Some(&args))),
+        let update = match event {
+            RelayEvent::Planned { steps } => return self.output.begin_relay(steps),
+            RelayEvent::Started { step } => return self.output.start_relay_step(step),
+            RelayEvent::Delta { text } => StepUpdate::Delta(text),
+            RelayEvent::ReasoningDelta { text } => StepUpdate::Reasoning(text),
+            RelayEvent::ContextSize { total } => StepUpdate::ContextSize(total),
+            RelayEvent::ToolCall { name, args } => {
+                StepUpdate::ToolCall(tool_block_label(name, Some(&args)))
+            }
             RelayEvent::ToolResult { result, .. } => {
                 let (exit_code, duration_ms) = tool_outcome(&result);
-                self.output.finish_relay_call(exit_code, duration_ms);
+                StepUpdate::ToolResult {
+                    output: tool_output(&result),
+                    exit_code,
+                    duration_ms,
+                }
             }
-            RelayEvent::Compacting => self.output.begin_relay_compaction(),
-            RelayEvent::Compacted { duration_ms } => {
-                self.output.finish_relay_compaction(duration_ms);
+            RelayEvent::Compacting => StepUpdate::Compacting,
+            RelayEvent::Compacted { duration_ms } => StepUpdate::Compacted { duration_ms },
+            RelayEvent::Answered { truncated, .. } => {
+                StepUpdate::Finished(RelayStepOutcome::Answered { truncated })
             }
-            RelayEvent::Answered {
-                answer_chars,
-                tool_steps,
-                truncated,
-            } => self.output.finish_relay_step(RelayStepOutcome::Answered {
-                answer_chars,
-                tool_steps,
-                truncated,
-            }),
-            RelayEvent::Failed { message } => self
-                .output
-                .finish_relay_step(RelayStepOutcome::Failed { message }),
-        }
+            RelayEvent::Failed { message } => {
+                StepUpdate::Finished(RelayStepOutcome::Failed { message })
+            }
+        };
+        self.output.apply_relay(update);
     }
 
     /// Daemon and model state the chat tracks between turns.
@@ -336,6 +328,7 @@ impl App {
                 duration_ms,
                 compaction_ms,
                 turn_stats,
+                relay,
                 ..
             } => {
                 if let Some(ms) = reasoning_ms
@@ -345,7 +338,8 @@ impl App {
                         .push_replayed_thinking(reasoning, Duration::from_millis(ms));
                 }
                 let outcome = (exit_code, duration_ms);
-                self.on_history_entry(role, content, tool_name, tool_args.as_ref(), outcome);
+                let tool = (tool_name, tool_args.as_ref());
+                self.on_history_entry(role, content, tool, outcome, relay);
                 if let Some(ms) = compaction_ms {
                     self.output
                         .push_replayed_compaction(Duration::from_millis(ms));
@@ -388,14 +382,15 @@ impl App {
         }
     }
 
-    /// `outcome` is the tool row's exit code and duration, when stored.
+    /// `tool` is a tool row's name and arguments, `outcome` its exit code and
+    /// duration, and `relay` the sub-agent steps behind a `relay` row.
     fn on_history_entry(
         &mut self,
         role: Role,
         content: String,
-        tool_name: Option<String>,
-        tool_args: Option<&Value>,
+        (tool_name, tool_args): (Option<String>, Option<&Value>),
         outcome: (Option<i64>, Option<u64>),
+        relay: Vec<RelayStepRecord>,
     ) {
         match role {
             Role::User => self.output.push_user(&content),
@@ -407,15 +402,19 @@ impl App {
                 }
             }
             Role::Tool => {
-                let (exit_code, duration_ms) = outcome;
-                self.output.push_tool_block(
-                    tool_block_label(tool_name.unwrap_or_default(), tool_args),
-                    content,
-                    exit_code
-                        .and_then(|code| i32::try_from(code).ok())
-                        .unwrap_or(0),
-                    duration_ms.unwrap_or(0),
-                );
+                let label = tool_block_label(tool_name.unwrap_or_default(), tool_args);
+                let exit_code = outcome
+                    .0
+                    .and_then(|code| i32::try_from(code).ok())
+                    .unwrap_or(0);
+                let duration_ms = outcome.1.unwrap_or(0);
+                if relay.is_empty() {
+                    self.output
+                        .push_tool_block(label, content, exit_code, duration_ms);
+                } else {
+                    self.output
+                        .push_replayed_relay(label, content, exit_code, duration_ms, relay);
+                }
             }
             Role::System => self.output.push_info(&content),
         }
@@ -426,6 +425,7 @@ impl App {
             self.set_notice("nothing to undo");
             return;
         }
+        self.agent_panel = None;
         self.output.pop_last_user_exchange();
         let preview = last_user_text
             .map(|t| t.chars().take(48).collect::<String>())
@@ -572,6 +572,15 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
     }
 }
 
+/// A tool result's output text, empty when absent.
+fn tool_output(result: &Value) -> String {
+    result
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// A tool result's exit code and duration in milliseconds, zero when absent.
 fn tool_outcome(result: &Value) -> (i32, u64) {
     let exit_code = result
@@ -584,12 +593,4 @@ fn tool_outcome(result: &Value) -> (i32, u64) {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     (exit_code, duration_ms)
-}
-
-/// A tool block's header: the `command` argument when the call has one,
-/// else the tool's name.
-fn tool_block_label(name: String, args: Option<&Value>) -> String {
-    args.and_then(|args| args.get("command"))
-        .and_then(Value::as_str)
-        .map_or(name, str::to_string)
 }

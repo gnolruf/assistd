@@ -20,6 +20,8 @@ erDiagram
     messages ||--|{ branch_messages : "appears in"
     branches ||--o| branch_summaries : "compacted by"
     messages ||--o{ message_chunks : "split into"
+    messages ||--o{ relay_steps : "relayed by"
+    relay_steps ||--o{ relay_entries : "did"
     message_chunks ||--o| chunk_embeddings : "embedded as"
     memories ||--o| memory_embeddings : "embedded as"
 
@@ -73,6 +75,28 @@ erDiagram
         int steps_folded_through
         int compacted_after_seq
         text content
+        int duration_ms
+    }
+    relay_steps {
+        int id PK
+        int message_id FK
+        int step "from 1, unique per message"
+        text task
+        int profile "0 read, 1 fetch"
+        int outcome "0 answered, 1 failed, NULL never ran"
+        text failure
+        int truncated
+        int duration_ms
+        int tokens
+    }
+    relay_entries {
+        int step_id PK, FK
+        int seq PK
+        int kind "0 text, 1 reasoning, 2 tool, 3 compaction"
+        text content
+        text tool_name
+        text tool_args "JSON"
+        int tool_exit_code
         int duration_ms
     }
     memories {
@@ -139,6 +163,15 @@ cascades to the rows that hang off it.
   newest seq at the time. On resume the model gets the summary plus
   the rows from `kept_from_seq` on, while clients still see every row.
   Undoing a turn the summary covers drops the summary.
+- **`relay_steps`** / **`relay_entries`**: what the sub-agents behind a
+  `relay` tool result did, hung off that result's `messages` row so
+  forks share it and undo deletes it with the message. Each planned
+  step gets a row, one that never ran with a NULL `outcome`; its
+  entries are the sub-agent's reply text, reasoning, tool calls with
+  their output, and compactions, in order. They are written with the
+  tool result in one transaction, replayed to clients on resume, and
+  never reach the model's history or the embedding chunks, since they
+  come from untrusted files and pages.
 
 ## Key/value memories
 

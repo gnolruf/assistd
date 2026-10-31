@@ -1,5 +1,6 @@
 //! SQLite-backed [`TranscriptStore`] over sessions, turns, branches, and messages.
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
@@ -11,13 +12,17 @@ use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow,
-    HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage, PersistedRole,
-    PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq, SessionId, SummaryCut, ToolOutcome,
-    TranscriptStore, TurnId, TurnStats, UndoOutcome,
+    HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage,
+    PersistedRelayStep, PersistedRole, PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq,
+    SessionId, SummaryCut, ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
 use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
+
+mod relays;
+
+use relays::{insert_relay_steps, relay_traces};
 
 /// Columns [`branch_info`] reads, over `branches b JOIN sessions s`.
 const BRANCH_INFO_SELECT: &str = "
@@ -192,6 +197,47 @@ impl TranscriptStore for SqliteTranscriptStore {
                 "append_message_to_branch",
                 MemoryError::BranchNotFound(branch),
             ))
+    }
+
+    async fn append_relay_result(
+        &self,
+        branch: BranchId,
+        turn: TurnId,
+        msg: PersistedMessage,
+        steps: Vec<PersistedRelayStep>,
+    ) -> Result<AppendedMessage> {
+        let row = MessageRow::new(msg, now_millis());
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let slot = claim_next_seq(&tx, branch)?;
+                let appended = store_message(&tx, branch, slot, turn, &row)?;
+                insert_relay_steps(&tx, appended.id, &steps)?;
+                tx.commit()?;
+                Ok(appended)
+            })
+            .await
+            .map_err(MemoryError::sqlite_or_missing(
+                "append_relay_result",
+                MemoryError::BranchNotFound(branch),
+            ))
+    }
+
+    async fn load_relay_traces(
+        &self,
+        branch: BranchId,
+    ) -> Result<HashMap<MessageId, Vec<PersistedRelayStep>>> {
+        self.handle
+            .reader()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let traces = relay_traces(&tx, branch)?;
+                tx.commit()?;
+                Ok(traces)
+            })
+            .await
+            .map_err(MemoryError::sqlite("load_relay_traces"))
     }
 
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {

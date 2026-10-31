@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, EventKind, ImageAttachment, StatusKind};
+use assistd_ipc::{Event, EventKind, ImageAttachment, RelayEvent, StatusKind};
 use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
@@ -23,6 +23,7 @@ use assistd_voice::{
 
 use super::context::combine_context_blocks;
 use super::persistence::PersistTarget;
+use super::relay_trace::RelayTraceBuilder;
 use super::wire::decode_wire_attachments;
 use super::{AppState, DispatchError, RuntimeState, send_error};
 use crate::Agent;
@@ -122,6 +123,8 @@ struct TurnTranslator {
     assistant_accum: String,
     reasoning: Option<ReasoningTrace>,
     awaiting_tool_result: bool,
+    /// What the relay in the running tool call has done, once it announced its plan.
+    relay: Option<RelayTraceBuilder>,
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
     done_emitted: bool,
@@ -137,6 +140,7 @@ impl TurnTranslator {
             assistant_accum: String::new(),
             reasoning: None,
             awaiting_tool_result: false,
+            relay: None,
             last_emit_at: Instant::now()
                 .checked_sub(LAST_DELTA_DEBOUNCE)
                 .unwrap_or_else(Instant::now),
@@ -195,7 +199,10 @@ impl TurnTranslator {
                 let result = result.to_json();
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
-            LlmEvent::Relay(event) => (Event::Relay { id, event }, Vec::new()),
+            LlmEvent::Relay(event) => {
+                self.record_relay(&event);
+                (Event::Relay { id, event }, Vec::new())
+            }
             LlmEvent::ContextSize { tokens, total } => {
                 self.tokens.on_context_size(tokens, total);
                 (Event::ContextSize { id, tokens, total }, Vec::new())
@@ -267,10 +274,25 @@ impl TurnTranslator {
             exit_code: result.exit_code.into(),
             duration_ms: result.duration_ms(),
         };
-        self.persist_message(
-            state,
-            PersistedMessage::tool_result(result.output.clone(), call_id, name.to_owned(), outcome),
-        );
+        let msg =
+            PersistedMessage::tool_result(result.output.clone(), call_id, name.to_owned(), outcome);
+        match (self.relay.take(), &self.persist) {
+            (Some(trace), Some(target)) => {
+                state.persist_relay_result_fire_and_forget(target.clone(), msg, trace.finish());
+            }
+            _ => self.persist_message(state, msg),
+        }
+    }
+
+    /// Record `event` into the running relay's trace, starting one at its plan.
+    fn record_relay(&mut self, event: &RelayEvent) {
+        match (&mut self.relay, event) {
+            (Some(trace), event) => trace.record(event),
+            (None, RelayEvent::Planned { steps }) => {
+                self.relay = Some(RelayTraceBuilder::planned(steps));
+            }
+            (None, _) => {}
+        }
     }
 
     fn discard_partial_response(&mut self, sentence_buf: &mut SentenceBuffer) {

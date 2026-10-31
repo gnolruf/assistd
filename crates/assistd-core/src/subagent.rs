@@ -163,25 +163,24 @@ async fn answer_in_schema(
     Ok(value.to_string())
 }
 
-/// Collect the run's answer while showing `progress` its tool calls and
-/// compactions. The backend reports its context size as each step starts, so
-/// that report discards text streamed by the steps before it.
+/// Collect the run's answer while showing `progress` what the run streams.
+/// The backend reports its context size as each step starts, so that report
+/// discards text streamed by the steps before it.
 async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, progress: &RelayProgress) -> FinalAnswer {
     let mut text = String::new();
     let mut done = false;
     let mut tool_steps = 0;
     let mut compacting_since = None;
     while let Some(event) = rx.recv().await {
-        match event {
+        match &event {
             LlmEvent::ContextSize { .. } => text.clear(),
-            LlmEvent::Delta { text: delta } => text.push_str(&delta),
+            LlmEvent::Delta { text: delta } => text.push_str(delta),
             LlmEvent::ToolCallsRequested { .. } => tool_steps += 1,
             LlmEvent::Done => done = true,
-            event => {
-                if let Some(shown) = relay_event_of(event, &mut compacting_since) {
-                    progress.report(shown).await;
-                }
-            }
+            _ => {}
+        }
+        if let Some(shown) = relay_event_of(event, &mut compacting_since) {
+            progress.report(shown).await;
         }
     }
     FinalAnswer {
@@ -194,6 +193,9 @@ async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, progress: &RelayProgress
 /// announcement that starts it to the one that ends it.
 fn relay_event_of(event: LlmEvent, compacting_since: &mut Option<Instant>) -> Option<RelayEvent> {
     match event {
+        LlmEvent::Delta { text } => Some(RelayEvent::Delta { text }),
+        LlmEvent::ReasoningDelta { text } => Some(RelayEvent::ReasoningDelta { text }),
+        LlmEvent::ContextSize { total, .. } => Some(RelayEvent::ContextSize { total }),
         LlmEvent::ToolCall {
             name, arguments, ..
         } => Some(RelayEvent::ToolCall {
