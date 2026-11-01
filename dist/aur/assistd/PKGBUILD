@@ -53,14 +53,14 @@ build() {
   export CARGO_TARGET_DIR=target
 
   cargo build --release --frozen --locked
-  cargo build --release --frozen --locked -p assistd-tools --bin assistd-egress-forward
+  cargo build --release --frozen --locked -p assistd-tools --bin assistd-quarantine-exec
 }
 
 package() {
   cd "$pkgname-$pkgver"
 
   install -Dm755 target/release/assistd "$pkgdir/usr/bin/assistd"
-  install -Dm755 target/release/assistd-egress-forward "$pkgdir/usr/bin/assistd-egress-forward"
+  install -Dm755 target/release/assistd-quarantine-exec "$pkgdir/usr/bin/assistd-quarantine-exec"
   # sherpa-onnx for speech; the binary's runpath includes $ORIGIN/../lib/assistd.
   install -Dm644 -t "$pkgdir/usr/lib/assistd" \
     target/release/libsherpa-onnx-c-api.so target/release/libonnxruntime.so

@@ -67,7 +67,7 @@ impl Harness {
         .expect("main slot")
     }
 
-    fn sub_agent_client(&self) -> LlamaChatClient {
+    fn chat_client(&self) -> LlamaChatClient {
         LlamaChatClient::new(
             &ChatConfig::default(),
             &model_spec(&self.fake, self.port),
@@ -139,12 +139,12 @@ fn model_spec(fake: &FakeLlama, port: u16) -> ModelConfig {
     }
 }
 
-async fn sub_agent_request(client: &LlamaChatClient) {
+async fn chat_request(client: &LlamaChatClient) {
     let (tx, mut rx) = mpsc::channel(64);
     client
-        .generate("sub-agent task".into(), tx)
+        .generate("task".into(), tx)
         .await
-        .expect("sub-agent request");
+        .expect("chat request");
     while rx.recv().await.is_some() {}
 }
 
@@ -152,11 +152,11 @@ async fn sub_agent_request(client: &LlamaChatClient) {
 async fn a_cancelled_group_saves_once_before_and_restores_once_after() {
     let harness = Harness::start().await;
     let slot = harness.main_slot();
-    let client = harness.sub_agent_client();
+    let client = harness.chat_client();
 
     let sub_agents = async {
         for _ in 0..2 {
-            sub_agent_request(&client).await;
+            chat_request(&client).await;
             assert_eq!(harness.slot_actions().await, (1, 0));
         }
         std::future::pending::<()>().await;
@@ -188,4 +188,26 @@ async fn a_restart_inside_the_group_skips_the_restore() {
 
     assert_eq!(outcome, "finished");
     assert_eq!(harness.slot_actions().await, (0, 0));
+}
+
+#[tokio::test]
+async fn a_dropped_group_is_restored_before_the_next_main_request() {
+    let harness = Harness::start().await;
+    let slot = Arc::new(harness.main_slot());
+    let main = harness.chat_client().with_main_slot(Arc::clone(&slot));
+
+    let dropped = tokio::time::timeout(
+        Duration::from_secs(1),
+        slot.preserve_across(std::future::pending::<()>()),
+    )
+    .await;
+    assert!(dropped.is_err(), "the group should have been dropped");
+    assert_eq!(harness.slot_actions().await, (1, 0));
+
+    chat_request(&main).await;
+    assert_eq!(harness.slot_actions().await, (1, 1));
+    assert!(
+        !harness.has_slot_file(),
+        "the saved slot outlived its restore"
+    );
 }

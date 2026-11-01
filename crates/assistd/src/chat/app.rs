@@ -20,6 +20,7 @@ use super::input::InputLine;
 use super::output::OutputPane;
 use super::settings::SettingsPanel;
 
+mod agents;
 mod attach;
 mod commands;
 mod connection;
@@ -29,6 +30,7 @@ mod resume;
 mod wakeword;
 mod wire;
 
+pub(super) use agents::AgentPanel;
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
     ComputerScene, LANE_COLUMNS, Mood, RECENT_RESULTS, StatusState, TestProgress, WakeWordPanel,
@@ -253,6 +255,9 @@ pub(super) struct App {
     /// `/settings` panel, drawn in place of the transcript; `confirmation`
     /// takes precedence while both are open.
     pub settings_panel: Option<SettingsPanel>,
+    /// `/agents` panel, drawn in place of the transcript; `confirmation`
+    /// takes precedence while both are open.
+    agent_panel: Option<AgentPanel>,
     /// The config file `/settings` edits.
     config_path: PathBuf,
     /// Throttles rewraps for a live block's timer to 1 Hz.
@@ -443,6 +448,7 @@ impl App {
             slash_selected: 0,
             slash_dismissed: false,
             resume_picker: None,
+            agent_panel: None,
             wake_word_panel: None,
             settings_panel: None,
             config_path,
@@ -505,6 +511,9 @@ impl App {
         {
             self.notice = None;
         }
+        if let Some(agent) = self.viewed_agent_mut() {
+            agent.transcript_mut().refresh_live_block();
+        }
         let live_secs = self.output.live_block_seconds();
         if live_secs != self.last_live_seconds {
             self.last_live_seconds = live_secs;
@@ -516,6 +525,7 @@ impl App {
     }
 
     fn reset_transcript(&mut self) {
+        self.agent_panel = None;
         self.output.clear();
         self.output.push_banner(self.model_name.clone());
     }

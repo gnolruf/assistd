@@ -8,11 +8,19 @@ use std::time::{Duration, Instant};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui_image::protocol::StatefulProtocol;
+use serde_json::Value;
 use textwrap::core::display_width;
+
+use assistd_ipc::{RelayEvent, RelayStepPlan, RelayStepRecord};
 
 use super::markdown::{BLEY, render_markdown};
 use super::ui::compact_duration;
 use crate::client::terminal_text::escape_bidi_controls;
+
+mod relay;
+
+pub(super) use relay::RelayStepTrace;
+use relay::{RelayRun, render_relay_block};
 
 /// Rows an inline thumbnail reserves.
 pub(super) const THUMBNAIL_ROWS: u16 = 8;
@@ -45,11 +53,12 @@ const BANNER_GAP: &str = "   ";
 const BANNER_RULE: &str = "─";
 
 /// One tool invocation, shown from the moment it is called.
-#[derive(Debug, Clone)]
 pub(super) struct ToolBlock {
     pub command: String,
     pub state: ToolState,
     pub expanded: bool,
+    /// The sub-agents a `relay` call planned, once it announced them.
+    pub relay: Option<RelayRun>,
 }
 
 /// Whether a tool invocation has been answered yet.
@@ -285,8 +294,32 @@ impl OutputPane {
         self.items.push(OutputItem::Tool(ToolBlock {
             command: without_bidi_controls(command),
             expanded: starts_expanded(&output),
+            relay: None,
             state: ToolState::Finished {
                 output,
+                exit_code,
+                duration_ms,
+            },
+        }));
+    }
+
+    /// Append a finished `relay` tool block rebuilt from its stored `steps`,
+    /// collapsed.
+    pub(super) fn push_replayed_relay(
+        &mut self,
+        command: String,
+        output: String,
+        exit_code: i32,
+        duration_ms: u64,
+        steps: Vec<RelayStepRecord>,
+    ) {
+        self.close_open_assistant();
+        self.items.push(OutputItem::Tool(ToolBlock {
+            command: without_bidi_controls(command),
+            expanded: false,
+            relay: Some(RelayRun::replayed(steps)),
+            state: ToolState::Finished {
+                output: without_bidi_controls(output),
                 exit_code,
                 duration_ms,
             },
@@ -301,7 +334,55 @@ impl OutputPane {
                 started_at: Instant::now(),
             },
             expanded: true,
+            relay: None,
         }));
+    }
+
+    /// Turn the running tool block into a relay of `plan`'s steps. No-op,
+    /// like every relay update, when no tool block is running.
+    pub(super) fn begin_relay(&mut self, plan: Vec<RelayStepPlan>) {
+        if let Some((idx, block)) = self.running_tool() {
+            block.relay = Some(RelayRun::planned(plan));
+            self.wrap.invalidate(idx);
+        }
+    }
+
+    /// Apply `event` to the running relay.
+    pub(super) fn apply_relay(&mut self, event: RelayEvent) {
+        if let Some((idx, block)) = self.running_tool()
+            && let Some(run) = block.relay.as_mut()
+        {
+            run.apply(event);
+            self.wrap.invalidate(idx);
+        }
+    }
+
+    /// Every sub-agent that has started, oldest first.
+    pub(super) fn agents(&self) -> Vec<&RelayStepTrace> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::Tool(ToolBlock {
+                    relay: Some(run), ..
+                }) => Some(run),
+                _ => None,
+            })
+            .flat_map(RelayRun::started)
+            .collect()
+    }
+
+    /// The sub-agent at `index` of [`Self::agents`].
+    pub(super) fn agent_mut(&mut self, index: usize) -> Option<&mut RelayStepTrace> {
+        self.items
+            .iter_mut()
+            .filter_map(|item| match item {
+                OutputItem::Tool(ToolBlock {
+                    relay: Some(run), ..
+                }) => Some(run),
+                _ => None,
+            })
+            .flat_map(RelayRun::started_mut)
+            .nth(index)
     }
 
     /// A result whose call was never announced gets a finished block of its
@@ -312,7 +393,10 @@ impl OutputPane {
             return;
         };
         let output = without_bidi_controls(output);
-        block.expanded = starts_expanded(&output);
+        block.expanded = block.relay.is_none() && starts_expanded(&output);
+        if let Some(run) = block.relay.as_mut() {
+            run.end();
+        }
         block.state = ToolState::Finished {
             output,
             exit_code,
@@ -904,10 +988,21 @@ fn thinking_glyph(frame: u64) -> char {
 }
 
 fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, verbose: bool) {
+    if let Some(run) = &b.relay {
+        let running = matches!(b.state, ToolState::Running { .. });
+        render_relay_block(
+            out,
+            run,
+            &b.state,
+            !verbose && (running || !b.expanded),
+            width,
+        );
+        return;
+    }
     let inner_w = width.saturating_sub(2).max(1);
     match &b.state {
         ToolState::Running { started_at } => {
-            let bar = tool_bar(Color::Yellow);
+            let bar = tool_bar(Color::Gray);
             push_tool_header(out, &bar, &b.command, inner_w);
             let status = format!("running… ({}s)", started_at.elapsed().as_secs());
             push_barred(out, &bar, &status, tool_running_style(), inner_w);
@@ -1063,6 +1158,37 @@ fn body_line_count(output: &str) -> usize {
     }
 }
 
+/// A tool block's header: the `command` argument when the call has one,
+/// else the tool's name.
+pub(super) fn tool_block_label(name: String, args: Option<&Value>) -> String {
+    args.and_then(|args| args.get("command"))
+        .and_then(Value::as_str)
+        .map_or(name, str::to_string)
+}
+
+/// A tool result's output text, empty when absent.
+pub(super) fn tool_output(result: &Value) -> String {
+    result
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A tool result's exit code and duration in milliseconds, zero when absent.
+pub(super) fn tool_outcome(result: &Value) -> (i32, u64) {
+    let exit_code = result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or(0);
+    let duration_ms = result
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (exit_code, duration_ms)
+}
+
 fn without_bidi_controls(text: String) -> String {
     match escape_bidi_controls(&text) {
         Cow::Owned(escaped) => escaped,
@@ -1108,7 +1234,7 @@ fn tool_result_style() -> Style {
 
 fn tool_running_style() -> Style {
     Style::default()
-        .fg(Color::Yellow)
+        .fg(Color::Gray)
         .add_modifier(Modifier::ITALIC)
 }
 

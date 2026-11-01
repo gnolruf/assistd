@@ -9,6 +9,7 @@ use crate::chat::settings::SettingsPanel;
 
 /// A typed slash command with its trimmed argument.
 enum SlashCommand {
+    Agents,
     Attach(String),
     Exit,
     Fork(String),
@@ -29,6 +30,7 @@ impl SlashCommand {
             None => (trimmed, ""),
         };
         match verb {
+            "/agents" => Some(Self::Agents),
             "/attach" => Some(Self::Attach(arg.to_string())),
             "/exit" => Some(Self::Exit),
             "/fork" => Some(Self::Fork(arg.to_string())),
@@ -52,6 +54,7 @@ impl App {
 
     fn run_slash_command(&mut self, command: SlashCommand) {
         match command {
+            SlashCommand::Agents => self.open_agent_panel(),
             SlashCommand::Attach(_) if !self.vision_enabled => {
                 self.output.push_error(
                     "[error] attach: vision not available: model does not support \

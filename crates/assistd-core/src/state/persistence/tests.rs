@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use assistd_ipc::PresenceTarget;
 use assistd_llm::EchoBackend;
 use assistd_memory::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, HistoryScope, MessageId, OpenedTurn,
-    ResumeCandidate, SessionId, TranscriptStore, UndoOutcome,
+    PersistedRelayStep, ResumeCandidate, SessionId, TranscriptStore, UndoOutcome,
 };
 use assistd_tools::ToolRegistry;
 
@@ -91,6 +92,21 @@ impl TranscriptStore for SlowingStore {
     }
     async fn current_branch(&self, _s: SessionId) -> assistd_memory::Result<Option<BranchId>> {
         Ok(None)
+    }
+    async fn append_relay_result(
+        &self,
+        _b: BranchId,
+        _t: TurnId,
+        m: PersistedMessage,
+        _steps: Vec<PersistedRelayStep>,
+    ) -> assistd_memory::Result<AppendedMessage> {
+        Ok(self.arrive(m).await)
+    }
+    async fn load_relay_traces(
+        &self,
+        _b: BranchId,
+    ) -> assistd_memory::Result<HashMap<MessageId, Vec<PersistedRelayStep>>> {
+        Ok(HashMap::new())
     }
     async fn list_branches(&self) -> assistd_memory::Result<Vec<BranchInfo>> {
         Ok(Vec::new())

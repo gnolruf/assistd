@@ -8,8 +8,10 @@ use tracing::{debug, warn};
 
 use assistd_embed::{EmbedJob, enqueue_embed_job};
 use assistd_memory::{
-    BranchId, ChunkId, EmbeddingTarget, PersistedMessage, SessionId, SummaryCut, TurnId, TurnStats,
+    BranchId, ChunkId, EmbeddingTarget, PersistedMessage, PersistedRelayStep, SessionId,
+    SummaryCut, TurnId, TurnStats,
 };
+use assistd_utils::time::saturating_millis;
 
 use super::AppState;
 
@@ -103,6 +105,37 @@ impl AppState {
         });
     }
 
+    /// Persist the `relay` tool result `msg` to `target` with the sub-agent
+    /// `steps` behind it on a background task. Never embedded, like every tool
+    /// result; dropped when the turn's opening write failed.
+    pub(super) fn persist_relay_result_fire_and_forget(
+        &self,
+        target: PersistTarget,
+        msg: PersistedMessage,
+        steps: Vec<PersistedRelayStep>,
+    ) {
+        let transcripts = self.memory.transcripts.clone();
+        self.spawn_in_persist_chain(async move {
+            let Some(&turn) = target.turn.get() else {
+                debug!(
+                    target: "assistd::memory",
+                    "turn was never opened; dropping relay result"
+                );
+                return;
+            };
+            if let Err(e) = transcripts
+                .append_relay_result(target.branch, turn, msg, steps)
+                .await
+            {
+                warn!(
+                    target: "assistd::memory",
+                    error = %e,
+                    "failed to persist relay result (continuing)"
+                );
+            }
+        });
+    }
+
     /// Record `stats` on `target`'s turn on a background task, ordered after
     /// its messages. Dropped when the turn's opening write failed.
     pub(super) fn persist_turn_stats_fire_and_forget(
@@ -135,7 +168,7 @@ impl AppState {
         elapsed: Duration,
     ) {
         let transcripts = self.memory.transcripts.clone();
-        let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        let duration_ms = saturating_millis(elapsed);
         self.spawn_in_persist_chain(async move {
             if let Err(e) = transcripts
                 .record_branch_summary(branch, summary, cut, duration_ms)

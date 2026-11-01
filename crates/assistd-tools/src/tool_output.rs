@@ -7,6 +7,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 
+use assistd_utils::time::saturating_millis;
+
 use crate::command::Attachment;
 
 /// What a tool call produced: the text the model reads plus the outcome
@@ -58,7 +60,7 @@ impl ToolOutput {
 
     /// Whole milliseconds in `duration`, saturating.
     pub fn duration_ms(&self) -> u64 {
-        u64::try_from(self.duration.as_millis()).unwrap_or(u64::MAX)
+        saturating_millis(self.duration)
     }
 
     /// The JSON object sent to IPC clients, with attachments base64-encoded.

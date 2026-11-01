@@ -1,6 +1,7 @@
 //! `bash SCRIPT`: a real `bash -c` subprocess behind the subprocess policy
 //! (denylist, allowlist, destructive-pattern confirmation, sandbox, timeout).
 
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -87,11 +88,15 @@ impl Command for BashCommand {
             return denied;
         }
 
-        let cmd = self
+        let cmd = match self
             .policy
             .sandbox
             .command("bash", vec!["-c".to_string(), script.clone()])
-            .await;
+            .await
+        {
+            Ok(cmd) => cmd,
+            Err(error) => return spawn_failed(&error),
+        };
         let private_dirs = display_list(&self.policy.sandbox.private_dirs_named(&cmd, &script));
         let out = supervise(
             "bash",
@@ -101,18 +106,7 @@ impl Command for BashCommand {
             self.policy.cfg.timeout,
         )
         .await
-        .unwrap_or_else(|e| {
-            CommandOutput::failed(
-                SPAWN_FAILED_EXIT,
-                error_line(
-                    "bash",
-                    format_args!("spawn failed: {e}"),
-                    Hint::Check,
-                    "bash and (if configured) bwrap are on PATH",
-                )
-                .into_bytes(),
-            )
-        });
+        .unwrap_or_else(|error| spawn_failed(&error));
         if private_dirs.is_empty() {
             return out;
         }
@@ -123,6 +117,19 @@ impl Command for BashCommand {
         );
         with_private_dir_note(out, &private_dirs, &self.policy.sandbox.sharing_hint())
     }
+}
+
+fn spawn_failed(error: &io::Error) -> CommandOutput {
+    CommandOutput::failed(
+        SPAWN_FAILED_EXIT,
+        error_line(
+            "bash",
+            format_args!("spawn failed: {error}"),
+            Hint::Check,
+            "bash and (if configured) bwrap are on PATH",
+        )
+        .into_bytes(),
+    )
 }
 
 fn with_private_dir_note(mut out: CommandOutput, dirs: &str, sharing_hint: &str) -> CommandOutput {

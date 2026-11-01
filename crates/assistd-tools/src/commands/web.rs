@@ -12,6 +12,7 @@ use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
 use reqwest::redirect::{Attempt, Policy};
 use url::Host;
 
+use assistd_ipc::ConfirmSource;
 use assistd_search::SearxngClient;
 use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
 
@@ -134,6 +135,7 @@ impl WebCommand {
                 matched_pattern: format!("fetches from {host}, which is not yet approved"),
                 always_allow: vec![host.to_string()],
                 risk: Risk::Elevated,
+                source: ConfirmSource::Main,
             })
             .await
     }

@@ -1,15 +1,16 @@
-//! A sub-agent's disposable world: one fresh directory per relay, holding
-//! copies of its inputs, and the only part of the host its commands can see.
+//! A sub-agent's disposable world: one fresh directory per relay, showing its
+//! inputs read-only in place, and the only part of the host its commands can see.
 //! Its only way to the network, if any, is the relay's egress proxy.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, Permissions};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rustix::fs::{FileType, Mode, OFlags};
 use tracing::warn;
 
 use assistd_search::SearxngClient;
@@ -20,8 +21,8 @@ use crate::commands::{
     SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WriteCommand, WritePolicyCfg,
 };
 use crate::policy::{
-    ApprovalGate, ConfinedRoot, ConfirmationGate, EgressPolicy, EgressRoute, SandboxInfo,
-    on_blocking_pool,
+    ApprovalGate, ConfinedRoot, ConfirmationGate, EgressPolicy, EgressRoute, InputBind,
+    SandboxInfo, on_blocking_pool,
 };
 
 mod egress;
@@ -44,34 +45,31 @@ pub enum QuarantineError {
         #[source]
         source: io::Error,
     },
-    #[error("input {} has no file name to copy it under", .0.display())]
+    #[error("input {} has no file name to mount it under", .0.display())]
     UnnamedInput(PathBuf),
     #[error("more than one input is named {0:?}")]
     DuplicateInput(OsString),
-    #[error("cannot copy input {}: {source}", path.display())]
-    CopyInput {
+    #[error("cannot hand over input {}: {source}", path.display())]
+    Input {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("egress forwarder {} is not a file", .0.display())]
-    MissingForwarder(PathBuf),
+    #[error("quarantine wrapper {} is not a file", .0.display())]
+    MissingExec(PathBuf),
     #[error("cannot start the relay's egress proxy: {0}")]
     Proxy(#[source] io::Error),
 }
 
 /// How a quarantine reaches the web: through a proxy that asks `hosts`
-/// about each host, from commands wrapped in the `forwarder` program, and
-/// through `search` for `web search` when it is enabled.
+/// about each host, and through `search` for `web search` when it is enabled.
 #[derive(Debug, Clone)]
 pub struct Egress {
     pub hosts: ApprovalGate,
-    /// The `assistd-egress-forward` executable, run inside the sandbox.
-    pub forwarder: PathBuf,
     pub search: Option<SearxngClient>,
 }
 
-/// A relay's directory and the sandbox over it: copied inputs read-only, a
+/// A relay's directory and the sandbox over it: its inputs read-only, a
 /// writable home, and a directory for spilled output, all at their host
 /// paths; no network but its egress proxy, if it has one. Dropping it, on
 /// cancel or panic too, closes the proxy and removes it all.
@@ -84,24 +82,26 @@ pub struct Quarantine {
 }
 
 impl Quarantine {
-    /// A new quarantine under `parent` wrapped as `sandbox` wraps, with each of `inputs` copied
-    /// into [`Quarantine::input_dir`] under its file name, and with `egress` its proxied way
-    /// to the web. Fails when `sandbox` does not wrap.
+    /// A new quarantine under `parent` wrapped as `sandbox` wraps, showing each of `inputs`
+    /// read-only in [`Quarantine::input_dir`] under its file name, and with `egress` its proxied
+    /// way to the web. Each command runs under `exec`, the `assistd-quarantine-exec` program,
+    /// which keeps it off every Unix socket made outside the sandbox but the proxy's. Fails
+    /// when `sandbox` does not wrap.
     pub async fn create(
         parent: &Path,
         sandbox: &SandboxInfo,
+        exec: PathBuf,
         inputs: Vec<PathBuf>,
         egress: Option<Egress>,
     ) -> Result<Self, QuarantineError> {
         let parent = parent.to_path_buf();
-        let forwarder = egress.as_ref().map(|egress| egress.forwarder.clone());
-        let (dir, root) = on_blocking_pool(move || {
-            if let Some(forwarder) = forwarder.filter(|path| !path.is_file()) {
-                return Err(QuarantineError::MissingForwarder(forwarder));
+        let (dir, root, binds, exec) = on_blocking_pool(move || {
+            if !exec.is_file() {
+                return Err(QuarantineError::MissingExec(exec));
             }
-            let (dir, root) = RelayDir::create(&parent)?;
-            copy_inputs(&dir.path.join(INPUT_DIR), &inputs)?;
-            Ok((dir, root))
+            let (dir, mut root) = RelayDir::create(&parent)?;
+            let binds = mount_inputs(&mut root, &dir.path.join(INPUT_DIR), &inputs)?;
+            Ok((dir, root, binds, exec))
         })
         .await?;
         let egress = egress
@@ -111,6 +111,8 @@ impl Quarantine {
             .quarantined(
                 dir.path.join(HOME_DIR),
                 vec![dir.path.join(INPUT_DIR), dir.path.join(OUTPUT_DIR)],
+                binds,
+                exec,
                 egress.as_ref().map(|egress| egress.route.clone()),
             )
             .ok_or(QuarantineError::Unsandboxed)?;
@@ -119,6 +121,27 @@ impl Quarantine {
             dir,
             root: Arc::new(root),
             sandbox: Arc::new(sandbox),
+        })
+    }
+
+    /// Refuse `inputs` [`Quarantine::create`] could not mount: one with no file name, two
+    /// sharing one, or one missing or neither a regular file nor a directory. Touches the
+    /// filesystem, so call it on the blocking pool.
+    pub fn check_inputs(inputs: &[PathBuf]) -> Result<(), QuarantineError> {
+        input_names(inputs)?;
+        inputs.iter().try_for_each(|input| {
+            let meta = std::fs::metadata(input).map_err(|source| QuarantineError::Input {
+                path: input.clone(),
+                source,
+            })?;
+            if meta.is_file() || meta.is_dir() {
+                Ok(())
+            } else {
+                Err(QuarantineError::Input {
+                    path: input.clone(),
+                    source: not_a_file_or_dir(),
+                })
+            }
         })
     }
 
@@ -199,7 +222,6 @@ impl RelayEgress {
             policy,
             route: EgressRoute {
                 socket: socket.to_path_buf(),
-                forwarder: egress.forwarder,
             },
             search: egress.search,
         })
@@ -267,57 +289,64 @@ fn make_dirs_writable(dir: &Path) {
     }
 }
 
-fn copy_inputs(input_dir: &Path, inputs: &[PathBuf]) -> Result<(), QuarantineError> {
-    let mut names = HashSet::new();
-    for input in inputs {
-        let name = input
-            .file_name()
-            .ok_or_else(|| QuarantineError::UnnamedInput(input.clone()))?;
-        if !names.insert(name) {
-            return Err(QuarantineError::DuplicateInput(name.to_os_string()));
+/// Mount every input under its file name in `input_dir`, both for `root`'s
+/// readers and, through the returned binds, for the sandbox.
+fn mount_inputs(
+    root: &mut ConfinedRoot,
+    input_dir: &Path,
+    inputs: &[PathBuf],
+) -> Result<Vec<InputBind>, QuarantineError> {
+    let names = input_names(inputs)?;
+    inputs
+        .iter()
+        .zip(names)
+        .map(|(input, name)| {
+            mount_input(root, input, input_dir.join(name)).map_err(|source| {
+                QuarantineError::Input {
+                    path: input.clone(),
+                    source,
+                }
+            })
+        })
+        .collect()
+}
+
+/// Each input's file name, refusing one with none or two sharing one.
+fn input_names(inputs: &[PathBuf]) -> Result<Vec<&OsStr>, QuarantineError> {
+    let mut seen = HashSet::new();
+    inputs
+        .iter()
+        .map(|input| {
+            let name = input
+                .file_name()
+                .ok_or_else(|| QuarantineError::UnnamedInput(input.clone()))?;
+            if !seen.insert(name) {
+                return Err(QuarantineError::DuplicateInput(name.to_os_string()));
+            }
+            Ok(name)
+        })
+        .collect()
+}
+
+/// Open the regular file or directory at `source`, through a symlink if it is
+/// one, make an empty mount point of its kind at `at`, and mount it there for
+/// both the in-process readers and the sandbox, from the one descriptor.
+fn mount_input(root: &mut ConfinedRoot, source: &Path, at: PathBuf) -> io::Result<InputBind> {
+    let fd = rustix::fs::open(source, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())?;
+    match FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode) {
+        FileType::Directory => std::fs::create_dir(&at)?,
+        FileType::RegularFile => {
+            File::create_new(&at)?;
         }
-        copy_input(input, &input_dir.join(name)).map_err(|source| QuarantineError::CopyInput {
-            path: input.clone(),
-            source,
-        })?;
+        _ => return Err(not_a_file_or_dir()),
     }
-    Ok(())
+    root.mount(at.clone(), fd.try_clone()?)?;
+    Ok(InputBind {
+        fd: Arc::new(fd),
+        at,
+    })
 }
 
-/// Copy the regular file or directory tree at `source` to `dest`. Only
-/// `source` itself may be a symlink; links and special files inside a
-/// directory are left out.
-fn copy_input(source: &Path, dest: &Path) -> io::Result<()> {
-    let meta = std::fs::metadata(source)?;
-    if meta.is_dir() {
-        copy_tree(source, dest)
-    } else if meta.is_file() {
-        copy_file(source, dest)
-    } else {
-        Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "not a regular file or directory",
-        ))
-    }
-}
-
-fn copy_tree(source: &Path, dest: &Path) -> io::Result<()> {
-    std::fs::create_dir(dest)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        let target = dest.join(entry.file_name());
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            copy_file(&entry.path(), &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_file(source: &Path, dest: &Path) -> io::Result<()> {
-    let (mut file, _) = assistd_utils::fs::open_regular(source)?;
-    io::copy(&mut file, &mut File::create_new(dest)?)?;
-    Ok(())
+fn not_a_file_or_dir() -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, "not a regular file or directory")
 }

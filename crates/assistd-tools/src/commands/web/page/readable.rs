@@ -43,6 +43,9 @@ const NON_TEXT_TAGS: [&str; 3] = ["script", "style", "template"];
 /// Blocks whose text is scored.
 const SCORED_TAGS: [&str; 3] = ["p", "pre", "td"];
 
+/// Table parts html2text cannot render outside their `<table>`.
+const TABLE_PARTS: [&str; 6] = ["tbody", "thead", "tfoot", "tr", "td", "th"];
+
 /// Blocks with fewer characters than this are not scored.
 const MIN_BLOCK_CHARS: usize = 25;
 
@@ -211,6 +214,7 @@ fn scored_candidates(root: &Handle) -> Vec<Candidate> {
 }
 
 fn add_score(candidates: &mut Vec<Candidate>, node: Handle, score: f64) {
+    let node = enclosing_table(node);
     match candidates
         .iter_mut()
         .find(|candidate| Rc::ptr_eq(&candidate.node, &node))
@@ -218,6 +222,17 @@ fn add_score(candidates: &mut Vec<Candidate>, node: Handle, score: f64) {
         Some(candidate) => candidate.score += score,
         None => candidates.push(Candidate { node, score }),
     }
+}
+
+/// `node`, or the `<table>` around it when it is a table part.
+fn enclosing_table(mut node: Handle) -> Handle {
+    while tag(&node).is_some_and(|tag| TABLE_PARTS.contains(&tag)) {
+        let Some(parent) = element_parent(&node) else {
+            break;
+        };
+        node = parent;
+    }
+    node
 }
 
 /// `root` and every node below it, in document order.

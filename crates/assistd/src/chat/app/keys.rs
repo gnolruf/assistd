@@ -12,6 +12,7 @@ const MOUSE_WHEEL_STEP: u16 = 3;
 
 /// `(command, usage_hint)` pairs for the autocomplete popup.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/agents", ""),
     ("/attach", "<path>"),
     ("/exit", ""),
     ("/fork", "<name>"),
@@ -25,8 +26,12 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 impl App {
     pub(crate) fn on_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
-            MouseEventKind::ScrollUp => self.output.scroll_lines_up(MOUSE_WHEEL_STEP),
-            MouseEventKind::ScrollDown => self.output.scroll_lines_down(MOUSE_WHEEL_STEP),
+            MouseEventKind::ScrollUp => {
+                self.scroll_shown_pane(|pane| pane.scroll_lines_up(MOUSE_WHEEL_STEP));
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_shown_pane(|pane| pane.scroll_lines_down(MOUSE_WHEEL_STEP));
+            }
             _ => {}
         }
     }
@@ -38,6 +43,8 @@ impl App {
             self.on_wake_word_key(ev);
         } else if self.shown_settings_panel().is_some() {
             self.on_settings_key(ev);
+        } else if self.shown_agent_panel().is_some() {
+            self.on_agent_panel_key(ev);
         } else if ev.code == KeyCode::BackTab {
             self.toggle_permission_mode();
         } else if self.confirmation.is_some() {
@@ -90,7 +97,7 @@ impl App {
         }
     }
 
-    fn toggle_verbose(&mut self) {
+    pub(super) fn toggle_verbose(&mut self) {
         self.verbose = !self.verbose;
         self.output.set_verbose(self.verbose);
         self.set_notice(if self.verbose {

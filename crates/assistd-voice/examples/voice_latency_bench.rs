@@ -16,6 +16,7 @@ use assistd_config::{
     ChatConfig, ModelConfig, SynthesisConfig, TimeoutsConfig, TranscriptionConfig, VoiceFamily,
 };
 use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent};
+use assistd_utils::time::saturating_millis;
 use assistd_voice::{
     NoVoiceOutput, SentenceBuffer, SherpaTranscriber, SherpaVoiceOutput, Transcriber, VoiceOutput,
 };
@@ -256,9 +257,9 @@ impl RunMetrics {
     fn from_stages(turn_start: Instant, stages: &StageLog) -> Self {
         let mut per_stage = HashMap::new();
         for (name, when) in stages {
-            per_stage.entry(name.clone()).or_insert_with(|| {
-                u64::try_from(when.duration_since(turn_start).as_millis()).unwrap_or(u64::MAX)
-            });
+            per_stage
+                .entry(name.clone())
+                .or_insert_with(|| saturating_millis(when.duration_since(turn_start)));
         }
         let end_to_end_ms = per_stage.get("playback_enqueued").copied();
         Self {
@@ -562,6 +563,7 @@ async fn forward_sentences(mut llm_rx: mpsc::Receiver<LlmEvent>, speech_tx: mpsc
             LlmEvent::ToolCallsRequested { .. }
             | LlmEvent::ToolCall { .. }
             | LlmEvent::ToolResult { .. }
+            | LlmEvent::Relay(_)
             | LlmEvent::Status { .. }
             | LlmEvent::ContextSize { .. }
             | LlmEvent::HistoryCompacted { .. }

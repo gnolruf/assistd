@@ -2,7 +2,6 @@
 //! and the child-process supervisor that keeps llama-server alive.
 
 use std::fmt;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +11,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 
-use assistd_ipc::{Component, StatusKind, StatusSeverity};
+use assistd_ipc::{Component, RelayEvent, StatusKind, StatusSeverity};
 use assistd_tools::{Attachment, ToolOutput};
 
 pub mod chat;
@@ -103,15 +102,6 @@ pub enum LlmError {
     /// consecutive steps, so the turn gave up.
     #[error("the model's response hit chat.max_response_tokens {0} times in a row")]
     OutputLimit(u32),
-
-    /// An isolated conversation needs about `tokens` tokens, past its
-    /// `budget`; it never compacts.
-    #[error("the conversation needs about {tokens} tokens, over its {budget}-token budget")]
-    ContextLimit { tokens: u32, budget: u32 },
-
-    /// The turn made this many tool-calling steps without answering.
-    #[error("the model made {0} tool-calling steps without answering")]
-    StepLimit(u32),
 }
 
 pub type LlmResult<T> = Result<T, LlmError>;
@@ -146,6 +136,8 @@ pub enum LlmEvent {
         name: String,
         result: Box<ToolOutput>,
     },
+    /// Progress of a relay running inside the tool call in flight.
+    Relay(RelayEvent),
     /// Tokens in the conversation as sent with the request about to stream,
     /// and `total` the conversation has held, counting what compaction removed.
     ContextSize { tokens: u32, total: u32 },
@@ -302,14 +294,9 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
         ))
     }
 
-    /// An empty conversation with `system_prompt` on this backend's server and model, held
-    /// to `max_history_tokens` (capped at this backend's own budget). Outgrowing it fails
-    /// the step with [`LlmError::ContextLimit`] rather than compacting.
-    fn isolated_conversation(
-        &self,
-        _system_prompt: String,
-        _max_history_tokens: NonZeroU32,
-    ) -> LlmResult<Arc<dyn LlmBackend>> {
+    /// An empty conversation with `system_prompt` on this backend's server and model, with
+    /// this backend's history budget, compacted as this backend's own conversation is.
+    fn isolated_conversation(&self, _system_prompt: String) -> LlmResult<Arc<dyn LlmBackend>> {
         Err(LlmError::Unavailable(
             "isolated conversations not supported by this backend".into(),
         ))

@@ -751,6 +751,7 @@ impl assistd_tools::Tool for GatedTool {
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
                 risk: self.0,
+                source: assistd_tools::ConfirmSource::Main,
             },
         )
         .await;

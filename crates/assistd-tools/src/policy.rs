@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use tracing::warn;
 
+use assistd_ipc::ConfirmSource;
+
 use crate::command::{CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 
@@ -33,7 +35,7 @@ pub use confirm::{
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
 pub use review::{Confirmation, DestructivePattern, Rules, check_script};
-pub(crate) use sandbox::{ConfinedSpawner, EgressRoute, is_within_visible_home_entry};
+pub(crate) use sandbox::{ConfinedSpawner, EgressRoute, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
     ToolSandbox, ToolsDisabled, probe_sandbox,
@@ -156,6 +158,7 @@ impl SubprocessPolicy {
             matched_pattern: confirmation.to_string(),
             always_allow: offered.iter().map(ToString::to_string).collect(),
             risk: confirmation.risk(),
+            source: ConfirmSource::Main,
         };
         approvals::confirm_remembering(
             self.gate.as_ref(),
@@ -190,7 +193,7 @@ fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput
 
 /// Run filesystem-bound `work` on the blocking pool so a hung mount cannot
 /// pin an async worker; a panic in `work` resumes in the caller.
-pub(crate) async fn on_blocking_pool<T, F>(work: F) -> T
+pub async fn on_blocking_pool<T, F>(work: F) -> T
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,

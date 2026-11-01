@@ -355,8 +355,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
             _ = tick.tick() => {
                 app.on_tick().context("a chat task panicked")?;
             }
-            _ = glyph_tick.tick(), if app.output.glyph_live() => {
-                app.output.advance_live_glyphs();
+            _ = glyph_tick.tick(), if app.glyph_live() => {
+                app.advance_live_glyphs();
             }
             _ = scene_tick.tick(), if app.wake_word_scene_live() => {
                 app.advance_wake_word_scene();
@@ -575,6 +575,7 @@ async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
                 EventKind::ReasoningDelta,
                 EventKind::ToolCall,
                 EventKind::ToolResult,
+                EventKind::Relay,
                 EventKind::ContextSize,
                 EventKind::Done,
                 EventKind::Error,

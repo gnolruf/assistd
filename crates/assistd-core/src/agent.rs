@@ -1,9 +1,12 @@
 //! Per-turn agent loop: step the LLM, dispatch the tool calls it
 //! requests, feed the results back, repeat until it answers.
 
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +19,7 @@ use assistd_llm::{
 };
 use assistd_tools::{Attachment, ToolOutput, ToolRegistry};
 
-use crate::recovery::{Component, StatusSeverity};
+use crate::recovery::{Component, StatusSeverity, panic_message};
 use crate::recovery_event;
 
 /// How long a turn waits for an LLM restart: the supervisor's worst-case
@@ -39,6 +42,11 @@ const TRUNCATION_NOTE: &str = "Your previous response reached the output-token l
      it finished, so it was discarded and none of its tool calls ran. Keep your reasoning \
      brief and your tool calls small: split a long script into several shorter calls.";
 
+tokio::task_local! {
+    /// The event channel of the turn whose tool call is being dispatched.
+    pub(crate) static TOOL_CALL_EVENTS: mpsc::Sender<LlmEvent>;
+}
+
 /// Long-lived agent dependencies, reused across turns. With a `health` probe the loop
 /// replays a step once after a llama-server crash; without one, a crash ends the turn.
 /// A tool still running after `tool_deadline` is reported to the model as failed.
@@ -48,24 +56,6 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     health: Option<Arc<dyn LlmHealthProbe>>,
     tool_deadline: Duration,
-    step_ceiling: StepCeiling,
-}
-
-/// What a turn does once it has made a set number of tool-calling steps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepCeiling {
-    /// Withdraw the tools and ask the model to answer from what it has.
-    Withdraw(u32),
-    /// End the turn with [`LlmError::StepLimit`].
-    Fail(u32),
-}
-
-impl StepCeiling {
-    fn steps(self) -> u32 {
-        match self {
-            Self::Withdraw(steps) | Self::Fail(steps) => steps,
-        }
-    }
 }
 
 impl Agent {
@@ -82,14 +72,7 @@ impl Agent {
             tools,
             health,
             tool_deadline,
-            step_ceiling: StepCeiling::Withdraw(MAX_TOOL_STEPS),
         }
-    }
-
-    /// Replace the default ceiling, which withdraws the tools after 200 steps.
-    pub fn with_step_ceiling(mut self, step_ceiling: StepCeiling) -> Self {
-        self.step_ceiling = step_ceiling;
-        self
     }
 
     /// Run one turn, streaming events on `tx` until the model answers or `tx` closes or
@@ -143,7 +126,9 @@ impl Agent {
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
                     self.backend.push_tool_results(results).await?;
                     turn.iteration += 1;
-                    self.enforce_tool_budget(&mut turn, stuck).await?;
+                    if let Some(why) = ToolBudgetExhausted::check(stuck, turn.iteration) {
+                        self.withdraw_tools(&mut turn, why).await;
+                    }
                 }
             }
         }
@@ -317,7 +302,10 @@ impl Agent {
         let dispatched = tokio::select! {
             biased;
             () = turn.cancel.cancelled() => None,
-            r = dispatch_tool_call(&self.tools, call, turn.iteration, self.tool_deadline) => Some(r),
+            r = TOOL_CALL_EVENTS.scope(
+                turn.tx.clone(),
+                dispatch_tool_call(&self.tools, call, turn.iteration, self.tool_deadline),
+            ) => Some(r),
         };
         let result = dispatched.unwrap_or_else(|| {
             warn!(
@@ -333,27 +321,6 @@ impl Agent {
             send_tool_result(turn, call, result).await,
             cancelled_mid_dispatch,
         )
-    }
-
-    /// Withdraw the tools once the model is stuck or at its step ceiling, or
-    /// fail the turn when the ceiling is [`StepCeiling::Fail`].
-    async fn enforce_tool_budget(&self, turn: &mut Turn, stuck: bool) -> Result<(), LlmError> {
-        let ceiling = self.step_ceiling.steps();
-        match (
-            ToolBudgetExhausted::check(stuck, turn.iteration, ceiling),
-            self.step_ceiling,
-        ) {
-            (Some(ToolBudgetExhausted::StepCeiling(steps)), StepCeiling::Fail(_)) => {
-                let error = LlmError::StepLimit(steps);
-                fail_turn(&turn.tx, &format!("{}: {error}", llm_error_label(&error))).await;
-                Err(error)
-            }
-            (Some(why), _) => {
-                self.withdraw_tools(turn, why).await;
-                Ok(())
-            }
-            (None, _) => Ok(()),
-        }
     }
 
     async fn withdraw_tools(&self, turn: &mut Turn, why: ToolBudgetExhausted) {
@@ -424,15 +391,15 @@ enum Replay {
 #[derive(Debug, Clone, Copy)]
 enum ToolBudgetExhausted {
     Repeating,
-    StepCeiling(u32),
+    StepCeiling,
 }
 
 impl ToolBudgetExhausted {
-    fn check(stuck: bool, iteration: u32, ceiling: u32) -> Option<Self> {
+    fn check(stuck: bool, iteration: u32) -> Option<Self> {
         if stuck {
             Some(Self::Repeating)
-        } else if iteration >= ceiling {
-            Some(Self::StepCeiling(ceiling))
+        } else if iteration >= MAX_TOOL_STEPS {
+            Some(Self::StepCeiling)
         } else {
             None
         }
@@ -443,8 +410,8 @@ impl ToolBudgetExhausted {
             Self::Repeating => {
                 format!("the same tool call was repeated {DUPLICATE_CALL_LIMIT} times in a row")
             }
-            Self::StepCeiling(steps) => {
-                format!("the turn reached its ceiling of {steps} tool steps")
+            Self::StepCeiling => {
+                format!("the turn reached its ceiling of {MAX_TOOL_STEPS} tool steps")
             }
         }
     }
@@ -489,8 +456,6 @@ fn llm_error_label(error: &LlmError) -> &'static str {
         LlmError::Unavailable(_) => "backend unavailable",
         LlmError::ServerRestarting(_) => "llm restarting",
         LlmError::OutputLimit(_) => "output limit",
-        LlmError::ContextLimit { .. } => "context limit",
-        LlmError::StepLimit(_) => "step limit",
     }
 }
 
@@ -654,6 +619,30 @@ fn error_tool_result(message: &str, duration: Duration) -> ToolOutput {
     ToolOutput::failed(format!("{message}\n[exit:-1 | {duration_ms}ms]"), duration)
 }
 
+fn panicked_tool_result(
+    call: &ToolCall,
+    iteration: u32,
+    duration: Duration,
+    panic: &(dyn Any + Send),
+) -> ToolOutput {
+    let message = panic_message(panic);
+    warn!(
+        target: "assistd::agent",
+        iteration,
+        tool = %call.name,
+        duration_ms = duration.as_millis(),
+        panic = %message,
+        "tool invocation panicked"
+    );
+    error_tool_result(
+        &format!(
+            "[error] {}: the tool crashed ({message}). Try: a different command or source.",
+            call.name
+        ),
+        duration,
+    )
+}
+
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
     call: &ToolCall,
@@ -666,7 +655,7 @@ async fn dispatch_tool_call(
         return unknown_tool_result(tools, call, iteration, start.elapsed());
     };
 
-    let invocation = tool.invoke(call.arguments.clone());
+    let invocation = AssertUnwindSafe(tool.invoke(call.arguments.clone())).catch_unwind();
     let finished = if tool.bounded_by_tool_deadline() {
         tokio::time::timeout(deadline, invocation).await.ok()
     } else {
@@ -693,11 +682,12 @@ async fn dispatch_tool_call(
     let duration = start.elapsed();
 
     match result {
-        Ok(output) => {
+        Ok(Ok(output)) => {
             log_completed_call(call, &output, iteration, duration);
             output
         }
-        Err(e) => {
+        Err(panic) => panicked_tool_result(call, iteration, duration, panic.as_ref()),
+        Ok(Err(e)) => {
             warn!(
                 target: "assistd::agent",
                 iteration,

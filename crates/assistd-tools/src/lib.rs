@@ -23,7 +23,7 @@ pub mod run;
 mod tool_output;
 pub mod vision;
 
-pub use assistd_ipc::ImageMime;
+pub use assistd_ipc::{ConfirmSource, ImageMime};
 pub use attachment::{LoadImageError, load_image_attachment};
 pub use catalog::ToolCatalog;
 pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};

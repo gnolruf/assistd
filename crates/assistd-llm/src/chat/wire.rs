@@ -180,10 +180,14 @@ pub struct ChatChoice {
     pub message: ChatChoiceMessage,
 }
 
-/// The assistant message inside a non-streaming choice.
+/// The assistant message inside a non-streaming choice; `content` is null
+/// when the reply is only tool calls.
 #[derive(Debug, Deserialize)]
 pub struct ChatChoiceMessage {
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<Value>>,
 }
 
 /// One streamed chunk from `/v1/chat/completions` when `stream: true`.

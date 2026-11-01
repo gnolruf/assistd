@@ -345,3 +345,18 @@ async fn non_article_page_falls_back_to_the_pruned_page() {
     }
     assert!(!text.contains("Next page"), "{text}");
 }
+
+#[tokio::test]
+async fn table_laid_out_page_renders_its_enclosing_table() {
+    let cell = "<td>Minifigure from the 2007 set, with a printed torso, \
+        dark grey legs, a black cape and a lightsaber hilt, sold as used or new.</td>";
+    let page = format!(
+        "<html><body><table><tbody><tr>{}</tr></tbody></table></body></html>",
+        cell.repeat(8)
+    );
+    let [text] = fetch_page("text/html", page.as_bytes(), &[&[]])
+        .await
+        .try_into()
+        .unwrap();
+    assert!(text.contains("black cape"), "{text}");
+}

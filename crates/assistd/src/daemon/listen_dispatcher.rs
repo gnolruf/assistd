@@ -10,6 +10,7 @@ use assistd_core::{
     spawn_supervised,
 };
 use assistd_ipc::Event;
+use assistd_utils::time::saturating_millis;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -246,7 +247,7 @@ fn short_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        .map_or(0, saturating_millis);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{ts:x}-{n:x}")
 }
