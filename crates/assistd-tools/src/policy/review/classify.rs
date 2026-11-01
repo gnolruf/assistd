@@ -44,10 +44,6 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     ("expand", &[]),
     ("fgrep", &[]),
     (
-        "file",
-        &[Disqualifier::Short('C'), Disqualifier::Long("compile")],
-    ),
-    (
         "find",
         &[
             Disqualifier::Primary("-delete"),
@@ -63,7 +59,6 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     ("hexdump", &[]),
     ("id", &[]),
     ("join", &[]),
-    ("jq", &[]),
     ("ls", &[]),
     ("md5sum", &[]),
     ("nl", &[]),
@@ -73,13 +68,6 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     ("readlink", &[]),
     ("realpath", &[]),
     ("rev", &[]),
-    (
-        "rg",
-        &[
-            Disqualifier::Long("pre"),
-            Disqualifier::Long("hostname-bin"),
-        ],
-    ),
     ("seq", &[]),
     ("sha1sum", &[]),
     ("sha256sum", &[]),
@@ -98,10 +86,6 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     ("tac", &[]),
     ("tail", &[]),
     ("tr", &[]),
-    (
-        "tree",
-        &[Disqualifier::Short('o'), Disqualifier::Short('R')],
-    ),
     ("uname", &[]),
     ("unexpand", &[]),
     ("wc", &[]),
