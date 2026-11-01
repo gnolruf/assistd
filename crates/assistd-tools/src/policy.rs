@@ -32,7 +32,7 @@ pub use confirm::{
 };
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
-pub use review::{Confirmation, DestructivePattern, Rules, check_script};
+pub use review::{Class, Confirmation, Delete, DestructivePattern, Rules, check_script, classify};
 pub(crate) use sandbox::{ConfinedSpawner, EgressRoute, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,

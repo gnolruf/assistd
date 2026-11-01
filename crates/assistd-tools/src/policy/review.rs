@@ -9,8 +9,11 @@ use super::confirm::Risk;
 use super::shell::{self, Redirect, Script, SimpleCommand, Word};
 use placeholder::Placeholder;
 
+mod classify;
 mod evaluated;
 mod placeholder;
+
+pub use classify::{Class, Delete, classify};
 
 /// How many scripts deep (`eval`, `trap`, …) the matcher looks before
 /// calling a script unverifiable.
