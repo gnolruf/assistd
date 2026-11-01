@@ -76,7 +76,7 @@ const TARGET_PERCENT: u64 = 50;
 pub struct RelayDeps {
     pub runner: SubAgentRunner,
     /// Keeps the main conversation's slot across each relay.
-    pub main_slot: MainSlot,
+    pub main_slot: Arc<MainSlot>,
     /// The directory each relay's quarantine is created in.
     pub dir: PathBuf,
     /// The `assistd-quarantine-exec` executable every relay command runs under.
@@ -694,14 +694,16 @@ mod tests {
                     None,
                     Duration::from_secs(60),
                 ),
-                main_slot: MainSlot::new(
-                    SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
-                    None,
-                    "model".into(),
-                    SlotDir::new(dir.join("slots")),
-                    None,
-                )
-                .unwrap(),
+                main_slot: Arc::new(
+                    MainSlot::new(
+                        SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
+                        None,
+                        "model".into(),
+                        SlotDir::new(dir.join("slots")),
+                        None,
+                    )
+                    .unwrap(),
+                ),
                 dir: dir.to_path_buf(),
                 quarantine_exec: dir.join("quarantine-exec"),
                 subagent_context_tokens: 1000,

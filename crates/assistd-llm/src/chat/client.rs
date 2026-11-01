@@ -28,7 +28,7 @@ use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
     HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
-    LlmResult, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
+    LlmResult, MainSlot, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -57,6 +57,8 @@ pub struct LlamaChatClient {
     /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
+    /// The guard on this conversation's slot; `None` on isolated conversations.
+    main_slot: Option<Arc<MainSlot>>,
 }
 
 impl LlamaChatClient {
@@ -88,7 +90,21 @@ impl LlamaChatClient {
             timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
             health,
+            main_slot: None,
         })
+    }
+
+    /// Restore `main_slot` before each request when a dropped sub-agent group
+    /// left it saved.
+    pub fn with_main_slot(mut self, main_slot: Arc<MainSlot>) -> Self {
+        self.main_slot = Some(main_slot);
+        self
+    }
+
+    async fn restore_main_slot(&self) {
+        if let Some(main_slot) = &self.main_slot {
+            main_slot.restore_pending().await;
+        }
     }
 
     fn base_request<'a>(&'a self, messages: Vec<wire::ChatMessage<'a>>) -> wire::ChatRequest<'a> {
@@ -199,6 +215,7 @@ impl LlamaChatClient {
         compaction_headroom: Option<NonZeroU32>,
         tx: &mpsc::Sender<LlmEvent>,
     ) -> StreamOutcome {
+        self.restore_main_slot().await;
         let Ok(pid_at_request) = self.serving_pid().await else {
             return StreamOutcome::ServerRestart {
                 accum: Box::default(),
@@ -715,6 +732,7 @@ impl LlmBackend for LlamaChatClient {
             timeouts: self.timeouts.clone(),
             conv: Mutex::new(Conversation::new(system_prompt)),
             health: self.health.clone(),
+            main_slot: None,
         }))
     }
 }
@@ -732,6 +750,7 @@ impl Summarizer for ContinuationSummarizer<'_> {
     /// Ask with the request's tools first, so the cached prompt is reused; a
     /// reply that calls a tool or is empty is asked again with no tools offered.
     async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
+        self.client.restore_main_slot().await;
         self.client.serving_pid().await?;
         let SummaryRequest {
             mut messages,

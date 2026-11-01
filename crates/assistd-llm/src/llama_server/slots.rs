@@ -14,6 +14,7 @@ use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::{local_client_builder, read_capped};
 use assistd_utils::text::human_size;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use super::error::LlamaServerError;
@@ -69,6 +70,8 @@ pub struct MainSlot {
     model: String,
     slot_dir: SlotDir,
     health: Option<Arc<dyn LlmHealthProbe>>,
+    /// The save whose restore has not yet run.
+    pending: Mutex<Option<SavedSlot>>,
 }
 
 impl MainSlot {
@@ -96,20 +99,30 @@ impl MainSlot {
             model,
             slot_dir,
             health,
+            pending: Mutex::new(None),
         })
     }
 
     /// Run `group` between a save and a restore of the main slot. The restore
-    /// runs however `group` ends, but not if this future is dropped. Hold the
-    /// agent turn lock across the call so no main turn lands in between.
+    /// runs however `group` ends; if this future is dropped, the next
+    /// [`Self::restore_pending`] runs it. Hold the agent turn lock across the
+    /// call so no main turn lands in between.
     pub async fn preserve_across<F: Future>(&self, group: F) -> F::Output {
-        let saved = self.save().await;
+        *self.pending.lock().await = self.save().await;
         let output = group.await;
-        if let Some(saved) = saved {
+        self.restore_pending().await;
+        output
+    }
+
+    /// Restore a saved main slot whose restore has not run yet. Call before
+    /// every request on the main conversation.
+    pub async fn restore_pending(&self) {
+        let mut pending = self.pending.lock().await;
+        if let Some(saved) = *pending {
             self.restore(saved).await;
             self.remove_file().await;
+            *pending = None;
         }
-        output
     }
 
     async fn save(&self) -> Option<SavedSlot> {
@@ -208,6 +221,7 @@ impl MainSlot {
 }
 
 /// A main slot saved while the child with `pid` was serving.
+#[derive(Debug, Clone, Copy)]
 struct SavedSlot {
     pid: Option<u32>,
 }
