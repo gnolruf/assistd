@@ -142,6 +142,26 @@ impl Tool for SelfBoundedTool {
     }
 }
 
+/// A `run` tool whose invocation panics.
+#[derive(Debug)]
+struct PanickingTool;
+
+#[async_trait]
+impl Tool for PanickingTool {
+    fn name(&self) -> &'static str {
+        "run"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "panics".into()
+    }
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({"type":"object"})
+    }
+    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+        panic!("not implemented")
+    }
+}
+
 fn call(id: &str, command: &str) -> ToolCall {
     ToolCall {
         id: id.into(),
@@ -540,6 +560,34 @@ async fn hung_tool_past_deadline_becomes_error_result_and_turn_continues() {
         pushed[0][0]
             .content
             .starts_with("[error] run: no result after 2s; call abandoned."),
+        "{:?}",
+        pushed[0][0].content
+    );
+}
+
+#[tokio::test]
+async fn panicking_tool_becomes_error_result_and_turn_continues() {
+    let mut tools = ToolRegistry::new();
+    tools.register(PanickingTool);
+    let backend = MockBackend::with(vec![
+        StepOutcome::ToolCalls(vec![call("c-1", "web fetch https://example.com")]),
+        StepOutcome::Final,
+    ]);
+    let agent = Agent::new(
+        backend.clone(),
+        Arc::new(tools),
+        None,
+        Duration::from_secs(2),
+    );
+
+    run_turn(agent, "go").await.0.unwrap();
+
+    assert_eq!(backend.step_calls.load(Ordering::SeqCst), 2);
+    let pushed = backend.pushed_results.lock();
+    assert!(
+        pushed[0][0]
+            .content
+            .starts_with("[error] run: the tool crashed (not implemented)."),
         "{:?}",
         pushed[0][0].content
     );

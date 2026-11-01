@@ -231,6 +231,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "chrono",
+ "futures-util",
  "libc",
  "parking_lot 0.13.0",
  "rustix 1.1.6",

@@ -352,7 +352,7 @@ impl RelayStepTrace {
     pub(in crate::chat) fn style(&self) -> Style {
         match &self.state {
             StepState::Pending => pending_style(),
-            StepState::Running { .. } => Style::default().fg(Color::Gray),
+            StepState::Running { .. } => Style::default().fg(Color::DarkGray),
             StepState::Finished {
                 outcome: RelayStepOutcome::Answered { .. },
                 ..
@@ -754,7 +754,7 @@ fn tree_style() -> Style {
 
 fn running_style() -> Style {
     Style::default()
-        .fg(Color::Gray)
+        .fg(Color::DarkGray)
         .add_modifier(Modifier::ITALIC)
 }
 

@@ -1,9 +1,12 @@
 //! Per-turn agent loop: step the LLM, dispatch the tool calls it
 //! requests, feed the results back, repeat until it answers.
 
+use std::any::Any;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +19,7 @@ use assistd_llm::{
 };
 use assistd_tools::{Attachment, ToolOutput, ToolRegistry};
 
-use crate::recovery::{Component, StatusSeverity};
+use crate::recovery::{Component, StatusSeverity, panic_message};
 use crate::recovery_event;
 
 /// How long a turn waits for an LLM restart: the supervisor's worst-case
@@ -616,6 +619,30 @@ fn error_tool_result(message: &str, duration: Duration) -> ToolOutput {
     ToolOutput::failed(format!("{message}\n[exit:-1 | {duration_ms}ms]"), duration)
 }
 
+fn panicked_tool_result(
+    call: &ToolCall,
+    iteration: u32,
+    duration: Duration,
+    panic: &(dyn Any + Send),
+) -> ToolOutput {
+    let message = panic_message(panic);
+    warn!(
+        target: "assistd::agent",
+        iteration,
+        tool = %call.name,
+        duration_ms = duration.as_millis(),
+        panic = %message,
+        "tool invocation panicked"
+    );
+    error_tool_result(
+        &format!(
+            "[error] {}: the tool crashed ({message}). Try: a different command or source.",
+            call.name
+        ),
+        duration,
+    )
+}
+
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
     call: &ToolCall,
@@ -628,7 +655,7 @@ async fn dispatch_tool_call(
         return unknown_tool_result(tools, call, iteration, start.elapsed());
     };
 
-    let invocation = tool.invoke(call.arguments.clone());
+    let invocation = AssertUnwindSafe(tool.invoke(call.arguments.clone())).catch_unwind();
     let finished = if tool.bounded_by_tool_deadline() {
         tokio::time::timeout(deadline, invocation).await.ok()
     } else {
@@ -655,11 +682,12 @@ async fn dispatch_tool_call(
     let duration = start.elapsed();
 
     match result {
-        Ok(output) => {
+        Ok(Ok(output)) => {
             log_completed_call(call, &output, iteration, duration);
             output
         }
-        Err(e) => {
+        Err(panic) => panicked_tool_result(call, iteration, duration, panic.as_ref()),
+        Ok(Err(e)) => {
             warn!(
                 target: "assistd::agent",
                 iteration,
