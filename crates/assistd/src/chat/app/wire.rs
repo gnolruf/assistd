@@ -8,9 +8,10 @@ use assistd_ipc::{
     StatusSeverity, TurnStats,
 };
 use assistd_tools::{ConfirmationRequest, Risk};
+use assistd_utils::time::saturating_millis;
 use serde_json::Value;
 
-use super::super::output::{RelayStepOutcome, StepUpdate, tool_block_label};
+use super::super::output::{tool_block_label, tool_outcome, tool_output};
 use super::super::ui::turn_summary;
 use super::{
     ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
@@ -172,33 +173,10 @@ impl App {
 
     /// Draw a relay's progress inside the running `relay` tool block.
     fn on_relay_event(&mut self, event: RelayEvent) {
-        let update = match event {
-            RelayEvent::Planned { steps } => return self.output.begin_relay(steps),
-            RelayEvent::Started { step } => return self.output.start_relay_step(step),
-            RelayEvent::Delta { text } => StepUpdate::Delta(text),
-            RelayEvent::ReasoningDelta { text } => StepUpdate::Reasoning(text),
-            RelayEvent::ContextSize { total } => StepUpdate::ContextSize(total),
-            RelayEvent::ToolCall { name, args } => {
-                StepUpdate::ToolCall(tool_block_label(name, Some(&args)))
-            }
-            RelayEvent::ToolResult { result, .. } => {
-                let (exit_code, duration_ms) = tool_outcome(&result);
-                StepUpdate::ToolResult {
-                    output: tool_output(&result),
-                    exit_code,
-                    duration_ms,
-                }
-            }
-            RelayEvent::Compacting => StepUpdate::Compacting,
-            RelayEvent::Compacted { duration_ms } => StepUpdate::Compacted { duration_ms },
-            RelayEvent::Answered { truncated, .. } => {
-                StepUpdate::Finished(RelayStepOutcome::Answered { truncated })
-            }
-            RelayEvent::Failed { message } => {
-                StepUpdate::Finished(RelayStepOutcome::Failed { message })
-            }
-        };
-        self.output.apply_relay(update);
+        match event {
+            RelayEvent::Planned { steps } => self.output.begin_relay(steps),
+            event => self.output.apply_relay(event),
+        }
     }
 
     /// Daemon and model state the chat tracks between turns.
@@ -523,7 +501,7 @@ impl App {
         if let Some(started_at) = started_at {
             let elapsed = now.duration_since(started_at);
             let stats = TurnStats {
-                duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                duration_ms: saturating_millis(elapsed),
                 tokens: self.tokens.tokens(),
             };
             self.output.push_turn_summary(turn_summary(&stats));
@@ -570,27 +548,4 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
         Event::Transcription { id, text } => (!text.trim().is_empty()).then_some(id.as_str()),
         _ => None,
     }
-}
-
-/// A tool result's output text, empty when absent.
-fn tool_output(result: &Value) -> String {
-    result
-        .get("output")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// A tool result's exit code and duration in milliseconds, zero when absent.
-fn tool_outcome(result: &Value) -> (i32, u64) {
-    let exit_code = result
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or(0);
-    let duration_ms = result
-        .get("duration_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    (exit_code, duration_ms)
 }

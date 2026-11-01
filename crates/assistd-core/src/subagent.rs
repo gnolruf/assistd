@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use assistd_ipc::{RelayEvent, StatusKind};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_tools::{ToolOutput, ToolRegistry};
+use assistd_utils::time::saturating_millis;
 
 use crate::agent::{Agent, TOOL_CALL_EVENTS};
 
@@ -217,7 +218,7 @@ fn relay_event_of(event: LlmEvent, compacting_since: &mut Option<Instant>) -> Op
             event: StatusKind::HistoryCompacted,
             ..
         } => compacting_since.take().map(|since| RelayEvent::Compacted {
-            duration_ms: u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms: saturating_millis(since.elapsed()),
         }),
         _ => None,
     }

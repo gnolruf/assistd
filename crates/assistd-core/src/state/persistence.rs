@@ -11,6 +11,7 @@ use assistd_memory::{
     BranchId, ChunkId, EmbeddingTarget, PersistedMessage, PersistedRelayStep, SessionId,
     SummaryCut, TurnId, TurnStats,
 };
+use assistd_utils::time::saturating_millis;
 
 use super::AppState;
 
@@ -167,7 +168,7 @@ impl AppState {
         elapsed: Duration,
     ) {
         let transcripts = self.memory.transcripts.clone();
-        let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        let duration_ms = saturating_millis(elapsed);
         self.spawn_in_persist_chain(async move {
             if let Err(e) = transcripts
                 .record_branch_summary(branch, summary, cut, duration_ms)

@@ -8,10 +8,14 @@ use ratatui::text::{Line, Span};
 use textwrap::core::display_width;
 
 use assistd_ipc::{
-    RelayProfile, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayTraceEntry,
+    RelayEvent, RelayProfile, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun,
+    RelayTraceEntry,
 };
 
-use super::{OutputPane, ToolState, elapsed_text, split_body, tool_block_label, tool_result_style};
+use super::{
+    OutputPane, ToolState, elapsed_text, split_body, tool_block_label, tool_outcome, tool_output,
+    tool_result_style,
+};
 use crate::chat::markdown::BLEY;
 use crate::chat::ui::compact_count;
 use crate::client::terminal_text::{escape_controls, escape_controls_single_line};
@@ -58,24 +62,30 @@ impl RelayRun {
     }
 
     /// Start step `step`, counted from 1; an unknown step is ignored.
-    pub(super) fn start(&mut self, step: u32) {
+    fn start(&mut self, step: u32) {
         let index = usize::try_from(step).unwrap_or(usize::MAX);
         if let Some(trace) = index.checked_sub(1).and_then(|i| self.steps.get_mut(i)) {
             trace.start();
         }
     }
 
-    /// Apply `update` to the running step; with none running, it is dropped.
-    pub(super) fn apply(&mut self, update: StepUpdate) {
-        if let Some(step) = self.steps.iter_mut().find(|step| step.is_running()) {
-            step.apply(update);
+    /// Start the step `event` names, or apply `event` to the running step;
+    /// with none running, it is dropped.
+    pub(super) fn apply(&mut self, event: RelayEvent) {
+        match event {
+            RelayEvent::Started { step } => self.start(step),
+            event => {
+                if let Some(step) = self.steps.iter_mut().find(|step| step.is_running()) {
+                    step.apply(event);
+                }
+            }
         }
     }
 
     /// Fail a step still running when the relay's tool call ends.
     pub(super) fn end(&mut self) {
         for step in self.steps.iter_mut().filter(|step| step.is_running()) {
-            step.finish(RelayStepOutcome::Failed {
+            step.finish(RelayStepEnd::Failed {
                 message: STOPPED_MESSAGE.into(),
             });
         }
@@ -104,7 +114,7 @@ impl RelayRun {
     fn failure(&self) -> Option<&str> {
         self.steps.iter().find_map(|step| match &step.state {
             StepState::Finished {
-                outcome: RelayStepOutcome::Failed { message },
+                outcome: RelayStepEnd::Failed { message },
                 ..
             } => Some(message.as_str()),
             _ => None,
@@ -166,17 +176,13 @@ impl RelayStepTrace {
             self.replay_entry(entry);
         }
         self.transcript.finish_assistant();
-        let outcome = match run.end {
-            RelayStepEnd::Answered { truncated } => RelayStepOutcome::Answered { truncated },
-            RelayStepEnd::Failed { message } => {
-                self.transcript.push_error(&escape_controls(&message));
-                RelayStepOutcome::Failed { message }
-            }
-        };
+        if let RelayStepEnd::Failed { message } = &run.end {
+            self.transcript.push_error(&escape_controls(message));
+        }
         self.tokens = run.tokens;
         self.state = StepState::Finished {
             elapsed: Duration::from_millis(run.duration_ms),
-            outcome,
+            outcome: run.end,
         };
     }
 
@@ -223,15 +229,17 @@ impl RelayStepTrace {
         }
     }
 
-    fn apply(&mut self, update: StepUpdate) {
-        match update {
-            StepUpdate::Delta(text) => {
+    fn apply(&mut self, event: RelayEvent) {
+        match event {
+            RelayEvent::Planned { .. } | RelayEvent::Started { .. } => {}
+            RelayEvent::Delta { text } => {
                 self.transcript.finish_thinking();
                 self.transcript.append_assistant(&text);
             }
-            StepUpdate::Reasoning(text) => self.transcript.append_thinking(&text),
-            StepUpdate::ContextSize(total) => self.tokens = Some(total),
-            StepUpdate::ToolCall(command) => {
+            RelayEvent::ReasoningDelta { text } => self.transcript.append_thinking(&text),
+            RelayEvent::ContextSize { total } => self.tokens = Some(total),
+            RelayEvent::ToolCall { name, args } => {
+                let command = tool_block_label(name, Some(&args));
                 self.calls.push(RelayEntry::Call {
                     command: escape_controls_single_line(&command).into_owned(),
                     result: None,
@@ -239,27 +247,27 @@ impl RelayStepTrace {
                 self.transcript.finish_thinking();
                 self.transcript.begin_tool_block(command);
             }
-            StepUpdate::ToolResult {
-                output,
-                exit_code,
-                duration_ms,
-            } => {
+            RelayEvent::ToolResult { result, .. } => {
+                let (exit_code, duration_ms) = tool_outcome(&result);
                 self.finish_call(exit_code, duration_ms);
                 self.transcript
-                    .finish_tool_block(output, exit_code, duration_ms);
+                    .finish_tool_block(tool_output(&result), exit_code, duration_ms);
             }
-            StepUpdate::Compacting => {
+            RelayEvent::Compacting => {
                 self.calls.push(RelayEntry::Compaction {
                     started_at: Instant::now(),
                     took: None,
                 });
                 self.transcript.begin_compaction();
             }
-            StepUpdate::Compacted { duration_ms } => {
+            RelayEvent::Compacted { duration_ms } => {
                 self.finish_compaction(duration_ms);
                 self.transcript.finish_compaction();
             }
-            StepUpdate::Finished(outcome) => self.finish(outcome),
+            RelayEvent::Answered { truncated, .. } => {
+                self.finish(RelayStepEnd::Answered { truncated });
+            }
+            RelayEvent::Failed { message } => self.finish(RelayStepEnd::Failed { message }),
         }
     }
 
@@ -285,14 +293,14 @@ impl RelayStepTrace {
         }
     }
 
-    fn finish(&mut self, outcome: RelayStepOutcome) {
+    fn finish(&mut self, outcome: RelayStepEnd) {
         let StepState::Running { started_at } = self.state else {
             return;
         };
         self.transcript.finish_thinking();
         self.transcript.finish_assistant();
         self.transcript.abandon_running_tool();
-        if let RelayStepOutcome::Failed { message } = &outcome {
+        if let RelayStepEnd::Failed { message } = &outcome {
             self.transcript.push_error(&escape_controls(message));
         }
         self.state = StepState::Finished {
@@ -338,11 +346,11 @@ impl RelayStepTrace {
             StepState::Running { started_at } => ("Running…", started_at.elapsed()),
             StepState::Finished {
                 elapsed,
-                outcome: RelayStepOutcome::Answered { .. },
+                outcome: RelayStepEnd::Answered { .. },
             } => ("Done", *elapsed),
             StepState::Finished {
                 elapsed,
-                outcome: RelayStepOutcome::Failed { .. },
+                outcome: RelayStepEnd::Failed { .. },
             } => ("Failed", *elapsed),
         };
         format!("{verb} ({})", stats(self.tool_uses(), self.tokens, elapsed))
@@ -354,11 +362,11 @@ impl RelayStepTrace {
             StepState::Pending => pending_style(),
             StepState::Running { .. } => Style::default().fg(Color::DarkGray),
             StepState::Finished {
-                outcome: RelayStepOutcome::Answered { .. },
+                outcome: RelayStepEnd::Answered { .. },
                 ..
             } => Style::default().fg(Color::Green),
             StepState::Finished {
-                outcome: RelayStepOutcome::Failed { .. },
+                outcome: RelayStepEnd::Failed { .. },
                 ..
             } => failed_style(),
         }
@@ -377,11 +385,11 @@ impl RelayStepTrace {
             StepState::Pending => '○',
             StepState::Running { .. } => '●',
             StepState::Finished {
-                outcome: RelayStepOutcome::Answered { .. },
+                outcome: RelayStepEnd::Answered { .. },
                 ..
             } => '✓',
             StepState::Finished {
-                outcome: RelayStepOutcome::Failed { .. },
+                outcome: RelayStepEnd::Failed { .. },
                 ..
             } => '✗',
         }
@@ -402,14 +410,14 @@ impl RelayStepTrace {
         }
         match &self.state {
             StepState::Finished {
-                outcome: RelayStepOutcome::Failed { message },
+                outcome: RelayStepEnd::Failed { message },
                 ..
             } => rows.push((
                 format!("✗ {}", escape_controls_single_line(message)),
                 failed_style(),
             )),
             StepState::Finished {
-                outcome: RelayStepOutcome::Answered { truncated: true },
+                outcome: RelayStepEnd::Answered { truncated: true },
                 ..
             } if all => rows.push(("report cut to fit".into(), hint_style())),
             _ => {}
@@ -425,7 +433,7 @@ enum StepState {
     },
     Finished {
         elapsed: Duration,
-        outcome: RelayStepOutcome,
+        outcome: RelayStepEnd,
     },
 }
 
@@ -441,30 +449,6 @@ enum RelayEntry {
         started_at: Instant,
         took: Option<Duration>,
     },
-}
-
-/// How a relay step ended.
-pub(in crate::chat) enum RelayStepOutcome {
-    Answered { truncated: bool },
-    Failed { message: String },
-}
-
-/// What the running sub-agent of a relay streamed.
-pub(in crate::chat) enum StepUpdate {
-    Delta(String),
-    Reasoning(String),
-    ContextSize(u32),
-    ToolCall(String),
-    ToolResult {
-        output: String,
-        exit_code: i32,
-        duration_ms: u64,
-    },
-    Compacting,
-    Compacted {
-        duration_ms: u64,
-    },
-    Finished(RelayStepOutcome),
 }
 
 /// The first row's prefix and the one every later row is indented by.

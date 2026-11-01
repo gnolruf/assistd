@@ -1,7 +1,7 @@
 //! A relay's sub-agent trace: recorded from the progress its tool call streams,
 //! stored with the call's tool result, and replayed with branch history.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -13,6 +13,7 @@ use assistd_memory::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayProfile, PersistedRelayRun,
     PersistedRelayStep, ToolOutcome,
 };
+use assistd_utils::time::saturating_millis;
 
 /// How a step still running when its relay's tool call ended is stored.
 const STOPPED_MESSAGE: &str = "stopped before it reported";
@@ -143,7 +144,7 @@ impl StepBuilder {
             && let Some(since) = self.reasoning_since
         {
             text.push_str(delta);
-            *duration_ms = millis(since.elapsed());
+            *duration_ms = saturating_millis(since.elapsed());
             return;
         }
         self.reasoning_since = Some(Instant::now());
@@ -194,7 +195,7 @@ impl StepBuilder {
         if let StepProgress::Running { started_at } = self.progress {
             self.progress = StepProgress::Ended {
                 end,
-                duration_ms: millis(started_at.elapsed()),
+                duration_ms: saturating_millis(started_at.elapsed()),
             };
         }
     }
@@ -206,7 +207,7 @@ impl StepBuilder {
                 PersistedRelayEnd::Failed {
                     message: STOPPED_MESSAGE.into(),
                 },
-                millis(started_at.elapsed()),
+                saturating_millis(started_at.elapsed()),
             )),
             StepProgress::Ended { end, duration_ms } => Some((end, duration_ms)),
         };
@@ -274,10 +275,6 @@ fn wire_relay_entry(entry: PersistedRelayEntry) -> RelayTraceEntry {
             RelayTraceEntry::Compaction { duration_ms }
         }
     }
-}
-
-fn millis(elapsed: Duration) -> u64 {
-    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

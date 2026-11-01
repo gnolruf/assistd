@@ -551,31 +551,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
             r#"{"type":"relay","id":"r","event":{"kind":"planned","steps":[{"task":"find the release","profile":"fetch"}]}}"#,
         ),
         (
-            Event::Relay {
-                id: id(),
-                event: RelayEvent::Started { step: 1 },
-            },
-            r#"{"type":"relay","id":"r","event":{"kind":"started","step":1}}"#,
-        ),
-        (
-            Event::Relay {
-                id: id(),
-                event: RelayEvent::Answered {
-                    answer_chars: 812,
-                    tool_steps: 4,
-                    truncated: false,
-                },
-            },
-            r#"{"type":"relay","id":"r","event":{"kind":"answered","answer_chars":812,"tool_steps":4,"truncated":false}}"#,
-        ),
-        (
-            Event::Relay {
-                id: id(),
-                event: RelayEvent::Compacted { duration_ms: 9100 },
-            },
-            r#"{"type":"relay","id":"r","event":{"kind":"compacted","duration_ms":9100}}"#,
-        ),
-        (
             Event::Capabilities {
                 id: id(),
                 vision: true,

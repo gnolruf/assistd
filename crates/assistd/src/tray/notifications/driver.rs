@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use assistd_config::NotificationsConfig;
 use assistd_ipc::{Event, IpcClient, Request};
+use assistd_utils::time::saturating_millis;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior, interval};
@@ -240,7 +241,7 @@ impl Driver {
         let expire_ms = if pinned {
             0
         } else {
-            u64::try_from(self.idle_timeout().as_millis()).unwrap_or(u64::MAX)
+            saturating_millis(self.idle_timeout())
         };
         let _ = self.commands.send(NotifierCommand::Show(Notification {
             view: self.tracker.snapshot(),

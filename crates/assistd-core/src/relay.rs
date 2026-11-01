@@ -2,7 +2,6 @@
 //! quarantine, and return only its report.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -292,7 +291,8 @@ impl RelayTool {
         let (limit, target) = (budget * REFUSAL_BUDGETS, budget * TARGET_PERCENT / 100);
         on_blocking_pool(move || {
             reads.iter().try_for_each(|(step, search_only, inputs)| {
-                check_handover(inputs)
+                Quarantine::check_inputs(inputs)
+                    .map_err(|error| error.to_string())
                     .and_then(|()| {
                         if *search_only {
                             Ok(())
@@ -562,28 +562,6 @@ fn parse_inputs(args: &Value) -> Result<Vec<PathBuf>, String> {
             }
         })
         .collect()
-}
-
-/// Refuse `inputs` a quarantine could not mount: missing, neither a regular
-/// file nor a directory, or sharing a file name with another input.
-fn check_handover(inputs: &[PathBuf]) -> Result<(), String> {
-    let mut names = HashSet::new();
-    inputs.iter().try_for_each(|input| {
-        let meta = std::fs::metadata(input)
-            .map_err(|error| format!("cannot hand over input {}: {error}", input.display()))?;
-        if !meta.is_file() && !meta.is_dir() {
-            return Err(format!(
-                "input {} is not a regular file or directory",
-                input.display()
-            ));
-        }
-        match input.file_name() {
-            Some(name) if !names.insert(name) => {
-                Err(format!("more than one input is named {name:?}"))
-            }
-            _ => Ok(()),
-        }
-    })
 }
 
 fn step_schema() -> Value {

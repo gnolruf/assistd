@@ -16,6 +16,7 @@ use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
 };
 use assistd_tools::{Attachment, ToolOutput, inherit_confirm_router};
+use assistd_utils::time::saturating_millis;
 use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
@@ -109,7 +110,7 @@ impl ReasoningTrace {
         let elapsed = self.last_delta_at.duration_since(self.started_at);
         Reasoning {
             text: self.text,
-            duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            duration_ms: saturating_millis(elapsed),
         }
     }
 }
@@ -337,7 +338,7 @@ impl TurnTranslator {
         };
         let elapsed = self.started_at.elapsed();
         let stats = TurnStats {
-            duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            duration_ms: saturating_millis(elapsed),
             generated_tokens: self.tokens.tokens(),
         };
         state.persist_turn_stats_fire_and_forget(target.clone(), stats);

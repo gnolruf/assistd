@@ -3,7 +3,7 @@
 //! Its only way to the network, if any, is the relay's egress proxy.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, Permissions};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::PermissionsExt;
@@ -121,6 +121,27 @@ impl Quarantine {
             dir,
             root: Arc::new(root),
             sandbox: Arc::new(sandbox),
+        })
+    }
+
+    /// Refuse `inputs` [`Quarantine::create`] could not mount: one with no file name, two
+    /// sharing one, or one missing or neither a regular file nor a directory. Touches the
+    /// filesystem, so call it on the blocking pool.
+    pub fn check_inputs(inputs: &[PathBuf]) -> Result<(), QuarantineError> {
+        input_names(inputs)?;
+        inputs.iter().try_for_each(|input| {
+            let meta = std::fs::metadata(input).map_err(|source| QuarantineError::Input {
+                path: input.clone(),
+                source,
+            })?;
+            if meta.is_file() || meta.is_dir() {
+                Ok(())
+            } else {
+                Err(QuarantineError::Input {
+                    path: input.clone(),
+                    source: not_a_file_or_dir(),
+                })
+            }
         })
     }
 
@@ -275,22 +296,34 @@ fn mount_inputs(
     input_dir: &Path,
     inputs: &[PathBuf],
 ) -> Result<Vec<InputBind>, QuarantineError> {
-    let mut names = HashSet::new();
+    let names = input_names(inputs)?;
     inputs
         .iter()
-        .map(|input| {
-            let name = input
-                .file_name()
-                .ok_or_else(|| QuarantineError::UnnamedInput(input.clone()))?;
-            if !names.insert(name) {
-                return Err(QuarantineError::DuplicateInput(name.to_os_string()));
-            }
+        .zip(names)
+        .map(|(input, name)| {
             mount_input(root, input, input_dir.join(name)).map_err(|source| {
                 QuarantineError::Input {
                     path: input.clone(),
                     source,
                 }
             })
+        })
+        .collect()
+}
+
+/// Each input's file name, refusing one with none or two sharing one.
+fn input_names(inputs: &[PathBuf]) -> Result<Vec<&OsStr>, QuarantineError> {
+    let mut seen = HashSet::new();
+    inputs
+        .iter()
+        .map(|input| {
+            let name = input
+                .file_name()
+                .ok_or_else(|| QuarantineError::UnnamedInput(input.clone()))?;
+            if !seen.insert(name) {
+                return Err(QuarantineError::DuplicateInput(name.to_os_string()));
+            }
+            Ok(name)
         })
         .collect()
 }
@@ -305,13 +338,12 @@ fn mount_input(root: &mut ConfinedRoot, source: &Path, at: PathBuf) -> io::Resul
         FileType::RegularFile => {
             File::create_new(&at)?;
         }
-        _ => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "not a regular file or directory",
-            ));
-        }
+        _ => return Err(not_a_file_or_dir()),
     }
     root.mount(at.clone(), fd)?;
     Ok(InputBind { source, at })
+}
+
+fn not_a_file_or_dir() -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, "not a regular file or directory")
 }

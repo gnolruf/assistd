@@ -927,7 +927,7 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         always_allow: Vec<String>,
 
-        /// Which agent asked; a relay's prompt is never shown as lower risk than the main one's.
+        /// Which agent asked.
         #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
         source: ConfirmSource,
     },

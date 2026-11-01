@@ -23,6 +23,7 @@ use assistd_llm::{
     LlmHealthProbe, ReadyState, SlotDir,
 };
 use assistd_utils::child_server::{ApiKey, ChildServer, ChildServerError};
+use assistd_utils::time::saturating_millis;
 
 use crate::recovery::spawn_supervised;
 
@@ -415,7 +416,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceTarget::Sleeping,
-            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms = saturating_millis(started.elapsed()),
             "transitioned {prior:?} → Sleeping"
         );
         outcome
@@ -491,7 +492,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceTarget::Drowsy,
-            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms = saturating_millis(started.elapsed()),
             "transitioned Active → Drowsy"
         );
         Ok(())
@@ -551,7 +552,7 @@ impl PresenceManager {
             target: "assistd::presence",
             prior = ?prior,
             new = ?PresenceTarget::Active,
-            duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            duration_ms = saturating_millis(started.elapsed()),
             "transitioned {prior:?} → Active"
         );
         Ok(())

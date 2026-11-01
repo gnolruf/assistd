@@ -11,7 +11,7 @@ use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 use textwrap::core::display_width;
 
-use assistd_ipc::{RelayStepPlan, RelayStepRecord};
+use assistd_ipc::{RelayEvent, RelayStepPlan, RelayStepRecord};
 
 use super::markdown::{BLEY, render_markdown};
 use super::ui::compact_duration;
@@ -19,8 +19,8 @@ use crate::client::terminal_text::escape_bidi_controls;
 
 mod relay;
 
+pub(super) use relay::RelayStepTrace;
 use relay::{RelayRun, render_relay_block};
-pub(super) use relay::{RelayStepOutcome, RelayStepTrace, StepUpdate};
 
 /// Rows an inline thumbnail reserves.
 pub(super) const THUMBNAIL_ROWS: u16 = 8;
@@ -347,20 +347,12 @@ impl OutputPane {
         }
     }
 
-    /// Start step `step` of the running relay, counted from 1.
-    pub(super) fn start_relay_step(&mut self, step: u32) {
-        self.update_running_relay(|run| run.start(step));
-    }
-
-    pub(super) fn apply_relay(&mut self, update: StepUpdate) {
-        self.update_running_relay(|run| run.apply(update));
-    }
-
-    fn update_running_relay(&mut self, update: impl FnOnce(&mut RelayRun)) {
+    /// Apply `event` to the running relay.
+    pub(super) fn apply_relay(&mut self, event: RelayEvent) {
         if let Some((idx, block)) = self.running_tool()
             && let Some(run) = block.relay.as_mut()
         {
-            update(run);
+            run.apply(event);
             self.wrap.invalidate(idx);
         }
     }
@@ -1172,6 +1164,29 @@ pub(super) fn tool_block_label(name: String, args: Option<&Value>) -> String {
     args.and_then(|args| args.get("command"))
         .and_then(Value::as_str)
         .map_or(name, str::to_string)
+}
+
+/// A tool result's output text, empty when absent.
+pub(super) fn tool_output(result: &Value) -> String {
+    result
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A tool result's exit code and duration in milliseconds, zero when absent.
+pub(super) fn tool_outcome(result: &Value) -> (i32, u64) {
+    let exit_code = result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or(0);
+    let duration_ms = result
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (exit_code, duration_ms)
 }
 
 fn without_bidi_controls(text: String) -> String {
