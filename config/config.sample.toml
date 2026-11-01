@@ -87,17 +87,6 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 [tools.bash]
 # Policy for the scripts `bash` runs.
 # timeout_secs = 30
-# Substrings refused outright.
-# denylist = [
-#     "rm -rf /",
-#     "rm -rf /*",
-#     "rm -rf /home",
-#     "mkfs",
-#     "dd if=/dev/zero",
-#     ":(){ :|:& };:",
-#     "> /dev/sda",
-#     "> /dev/nvme",
-# ]
 # Programs that run without asking; "always allow" approvals go to allowed_programs.toml.
 # allowed_programs = [
 #     "[", "b2sum", "base64", "basename", "cat", "cksum", "cmp", "column", "comm", "cut",

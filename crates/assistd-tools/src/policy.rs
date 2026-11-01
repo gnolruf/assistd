@@ -1,11 +1,9 @@
-//! Command-execution policy: the denylist, command review, confirmation
-//! gates, and the bwrap sandbox.
+//! Command-execution policy: command review, confirmation gates, and the
+//! bwrap sandbox.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-
-use tracing::warn;
 
 use assistd_ipc::ConfirmSource;
 
@@ -42,12 +40,10 @@ pub use sandbox::{
 };
 
 /// Policy for the commands that spawn subprocesses. A command runs
-/// unasked only when [`check_script`] clears it; the denylist refuses
-/// outright.
+/// unasked only when [`check_script`] clears it.
 #[derive(Debug, Clone)]
 pub struct BashPolicyCfg {
     pub timeout: Duration,
-    pub denylist: Vec<String>,
     pub destructive_patterns: Vec<DestructivePattern>,
     /// Programs that run without confirmation, shared by every
     /// subprocess-spawning command so an approval applies to all of them.
@@ -64,7 +60,6 @@ impl Default for BashPolicyCfg {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
-            denylist: Vec::new(),
             destructive_patterns: Vec::new(),
             allowlist: Arc::new(Allowlist::unsaved(
                 assistd_config::defaults::default_bash_allowed_programs(),
@@ -104,8 +99,8 @@ impl SubprocessPolicy {
         on_blocking_pool(move || check_script(&script, &cfg.rules())).await
     }
 
-    /// Refuse `script` when it hits the denylist, or when the review's
-    /// `confirmation` is set and the gate declines. `tool` and `op` name
+    /// Refuse `script` when the review's `confirmation` is set and the
+    /// gate declines. `tool` and `op` name
     /// the command and operation in the error line.
     pub(crate) async fn authorize(
         &self,
@@ -114,7 +109,6 @@ impl SubprocessPolicy {
         script: &str,
         confirmation: Option<Confirmation>,
     ) -> Result<(), CommandOutput> {
-        self.refuse_denylisted(tool, op, script)?;
         let Some(confirmation) = confirmation else {
             return Ok(());
         };
@@ -123,29 +117,6 @@ impl SubprocessPolicy {
         } else {
             Err(cancelled(tool, op, &confirmation))
         }
-    }
-
-    fn refuse_denylisted(&self, tool: &str, op: &str, script: &str) -> Result<(), CommandOutput> {
-        let Some(pat) = matches_denylist(script, &self.cfg.denylist) else {
-            return Ok(());
-        };
-        warn!(
-            target: "assistd::policy",
-            tool = %tool,
-            script = %script,
-            matched = %pat,
-            "denied by denylist"
-        );
-        Err(CommandOutput::failed(
-            POLICY_DENIED_EXIT,
-            error_line(
-                tool,
-                format_args!("{op} denied by policy. Matched denylist pattern: {pat}"),
-                Hint::Try,
-                "a non-destructive alternative",
-            )
-            .into_bytes(),
-        ))
     }
 
     /// Ask the gate; an "always" answer also adds the offered programs to
@@ -201,59 +172,4 @@ where
     tokio::task::spawn_blocking(work)
         .await
         .unwrap_or_else(|err| std::panic::resume_unwind(err.into_panic()))
-}
-
-/// The first non-empty pattern found in `script`, ignoring ASCII case. A pattern ending in a
-/// non-alphanumeric only matches at a word end (`rm -rf /` misses `rm -rf /tmp`); others also
-/// match a longer word (`mkfs` hits `mkfs.ext4`).
-pub fn matches_denylist<'a>(script: &str, patterns: &'a [String]) -> Option<&'a str> {
-    let haystack = script.to_ascii_lowercase();
-    patterns
-        .iter()
-        .find(|pattern| denylist_hit(&haystack, &pattern.to_ascii_lowercase()))
-        .map(String::as_str)
-}
-
-fn denylist_hit(haystack: &str, needle: &str) -> bool {
-    let Some(last) = needle.chars().next_back() else {
-        return false;
-    };
-    if last.is_ascii_alphanumeric() {
-        return haystack.contains(needle);
-    }
-    haystack
-        .char_indices()
-        .filter_map(|(at, _)| haystack[at..].strip_prefix(needle))
-        .any(ends_word)
-}
-
-fn ends_word(rest: &str) -> bool {
-    rest.chars()
-        .next()
-        .is_none_or(|c| c.is_whitespace() || ";&|()<>'\"`".contains(c))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn denylist_returns_first_case_insensitive_substring_match() {
-        let patterns = ["", "rm -rf /", "mkfs", "> /dev/nvme"].map(String::from);
-        for (script, expected) in [
-            ("rm -rf /", Some("rm -rf /")),
-            ("RM -RF /", Some("rm -rf /")),
-            ("sudo mkfs.ext4 /dev/sda1", Some("mkfs")),
-            ("mkfs /dev/sda1 && rm -rf /", Some("rm -rf /")),
-            ("ls -l /tmp", None),
-            ("rm -rf / --no-preserve-root", Some("rm -rf /")),
-            ("rm -rf /;true", Some("rm -rf /")),
-            ("bash -c 'rm -rf /'", Some("rm -rf /")),
-            ("rm -rf /tmp/build", None),
-            ("rm -rf /tmp/build && rm -rf /", Some("rm -rf /")),
-            ("echo x > /dev/nvme0n1", Some("> /dev/nvme")),
-        ] {
-            assert_eq!(matches_denylist(script, &patterns), expected, "{script:?}");
-        }
-    }
 }

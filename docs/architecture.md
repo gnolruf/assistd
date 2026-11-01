@@ -373,7 +373,7 @@ without asking, the prompts rated `Risk::Routine`: programs off the allowlist
 that "always allow" could cover and that do not delete or overwrite files,
 `wm open` of an app with no files or URLs, and `write` outside the scratch
 directory. Destructive patterns, scripts no check can fully see, protected
-paths, new web hosts and unapproved MCP tools still ask; the denylist still refuses, and nothing is added to the allowlist.
+paths, new web hosts and unapproved MCP tools still ask, and nothing is added to the allowlist.
 
 ### Memory (`assistd-memory` + `assistd-embed`)
 

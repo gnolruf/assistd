@@ -128,7 +128,6 @@ pub(crate) const SECTIONS: &[Section] = &[
                 "tools.write.writable_paths",
                 SettingKind::List(ListItem::Text),
             ),
-            setting("tools.bash.denylist", SettingKind::List(ListItem::Text)),
             setting(
                 "tools.bash.allowed_programs",
                 SettingKind::List(ListItem::Text),

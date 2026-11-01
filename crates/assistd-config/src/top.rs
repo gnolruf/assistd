@@ -125,8 +125,8 @@ impl Config {
         for key in config.unknown_keys(&raw)? {
             tracing::warn!(
                 target: "assistd::config",
-                "ignoring unknown key `{key}` in {} (it may be left over from an older assistd; \
-                 see config.sample.toml for the current schema)",
+                "ignoring `{key}` in {}: assistd has no such setting \
+                 (see config.sample.toml for the ones it reads)",
                 path.display()
             );
         }

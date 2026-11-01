@@ -1,5 +1,5 @@
 //! `bash SCRIPT`: a real `bash -c` subprocess behind the subprocess policy
-//! (denylist, allowlist, destructive-pattern confirmation, sandbox, timeout).
+//! (allowlist, destructive-pattern confirmation, sandbox, timeout).
 
 use std::io;
 use std::path::PathBuf;
@@ -57,7 +57,7 @@ impl Command for BashCommand {
              Stdin is forwarded to the script's stdin. Stdout/stderr/exit-code \
              are captured. Exit 137 on timeout ({timeout_secs}s default), 127 \
              if the spawn itself failed, 126 if the script is blocked by \
-             policy (denylist match or user-cancelled confirmation).\n\
+             policy (user-cancelled confirmation).\n\
              \n\
              The script runs sandboxed: /tmp, /run and any other tmpfs the \
              sandbox mounts are empty and private to each call, so files the other commands put there (including \
