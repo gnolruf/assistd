@@ -1,5 +1,5 @@
 //! The rule outgoing web traffic is held to: approved hosts, public
-//! addresses only, and for sub-agents only HTTPS.
+//! addresses only, HTTPS first for the main agent and only HTTPS for sub-agents.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -38,8 +38,8 @@ const SIX_TO_FOUR_V6: (Ipv6Addr, u32) = (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0,
 /// What traffic an [`EgressPolicy`] lets through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Transport {
-    /// Either scheme, to any port.
-    Any,
+    /// HTTPS to any port; plain HTTP only for a single fetch the user confirms.
+    PreferHttps,
     /// Only HTTPS, to port 443, so nothing on the path can read or alter it.
     Https,
 }
@@ -54,12 +54,13 @@ pub(crate) struct EgressPolicy {
 }
 
 impl EgressPolicy {
-    /// HTTP or HTTPS to any port of a host reachable as `reachable` says.
+    /// HTTPS, or plain HTTP once the user confirms it for that fetch, to any
+    /// port of a host reachable as `reachable` says.
     pub(crate) fn any_port(hosts: ApprovalGate, reachable: fn(IpAddr) -> bool) -> Self {
         Self {
             hosts,
             reachable,
-            transport: Transport::Any,
+            transport: Transport::PreferHttps,
         }
     }
 
@@ -73,11 +74,12 @@ impl EgressPolicy {
     }
 
     pub(crate) fn allows_port(&self, port: u16) -> bool {
-        self.transport == Transport::Any || port == HTTPS_PORT
+        self.transport == Transport::PreferHttps || port == HTTPS_PORT
     }
 
-    pub(crate) fn allows_scheme(&self, scheme: &str) -> bool {
-        self.transport == Transport::Any || scheme == "https"
+    /// Whether a plain-HTTP fetch may go ahead once the user confirms it.
+    pub(crate) fn allows_plaintext(&self) -> bool {
+        self.transport == Transport::PreferHttps
     }
 
     /// The addresses `host` resolves to that this policy may reach, with

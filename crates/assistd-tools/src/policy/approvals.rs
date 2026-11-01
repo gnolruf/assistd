@@ -124,6 +124,12 @@ impl ApprovalGate {
         }
         confirm_remembering(self.gate.as_ref(), request(), self.approvals.approve(name)).await
     }
+
+    /// Whether the gate approves `request`, asked even about approved names;
+    /// an "always" answer counts only for this use.
+    pub async fn confirm_once(&self, request: ConfirmationRequest) -> bool {
+        self.gate.confirm(request).await != Approval::Deny
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
