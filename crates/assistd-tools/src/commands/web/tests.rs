@@ -1,16 +1,20 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use super::*;
 use crate::commands::test_support::RecordingGate;
 use crate::policy::{AlwaysAllowGate, Approval, ApprovalGate, Approvals, DenyAllGate};
 
-/// A server answering one connection per entry of `responses`, in order,
-/// each with that raw HTTP response.
+/// First byte of a TLS handshake record, which opens every HTTPS connection.
+const TLS_HANDSHAKE: u8 = 0x16;
+
+/// A plain-HTTP server answering one connection per entry of `responses`,
+/// in order, each with that raw HTTP response.
 async fn serve(responses: Vec<Vec<u8>>) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -18,9 +22,18 @@ async fn serve(responses: Vec<Vec<u8>>) -> (SocketAddr, JoinHandle<()>) {
 }
 
 fn answer(listener: TcpListener, responses: Vec<Vec<u8>>) -> JoinHandle<()> {
+    answer_counting(listener, responses, Arc::default())
+}
+
+/// Like [`answer`], closing each HTTPS attempt unanswered and counting it in `tls_attempts`.
+fn answer_counting(
+    listener: TcpListener,
+    responses: Vec<Vec<u8>>,
+    tls_attempts: Arc<AtomicUsize>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         for response in responses {
-            let Ok((mut stream, _)) = listener.accept().await else {
+            let Some(mut stream) = next_plaintext(&listener, &tls_attempts).await else {
                 return;
             };
             let mut buf = [0u8; 1024];
@@ -28,6 +41,17 @@ fn answer(listener: TcpListener, responses: Vec<Vec<u8>>) -> JoinHandle<()> {
             let _ = stream.write_all(&response).await;
         }
     })
+}
+
+async fn next_plaintext(listener: &TcpListener, tls_attempts: &AtomicUsize) -> Option<TcpStream> {
+    loop {
+        let (stream, _) = listener.accept().await.ok()?;
+        let mut first = [0u8; 1];
+        if stream.peek(&mut first).await.ok()? == 1 && first[0] != TLS_HANDSHAKE {
+            return Some(stream);
+        }
+        tls_attempts.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn response(status_line: &str, body: &[u8]) -> Vec<u8> {
@@ -95,13 +119,49 @@ async fn declined_fetch_exits_126_without_connecting() {
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(
         stderr(&out),
-        "[error] web: fetch cancelled by user: http://example.com/?secret=x. \
+        "[error] web: fetch cancelled by user: https://example.com/?secret=x. \
          Try: answering without this page\n"
     );
 }
 
 #[tokio::test]
-async fn approved_host_is_fetched_without_asking() {
+async fn plain_http_is_tried_over_https_and_asked_for_every_time() {
+    let hosts = Arc::new(Approvals::unsaved());
+    hosts.approve("127.0.0.1").await.expect("unsaved approve");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let tls_attempts = Arc::<AtomicUsize>::default();
+    let server = answer_counting(
+        listener,
+        vec![response("HTTP/1.1 200 OK", b"ok"); 2],
+        Arc::clone(&tls_attempts),
+    );
+    let gate = RecordingGate::answering(Approval::Always);
+    let cmd = loopback_only(ApprovalGate::new(gate.clone(), Arc::clone(&hosts)));
+    let url = format!("http://{addr}/");
+    for _ in 0..2 {
+        let out = fetch(&cmd, &url).await;
+        assert_eq!(out.exit_code, 0, "{}", stderr(&out));
+        assert_eq!(out.stdout, b"ok");
+        assert!(
+            stderr(&out).contains("over unencrypted HTTP"),
+            "{}",
+            stderr(&out)
+        );
+    }
+    server.await.unwrap();
+    assert_eq!(tls_attempts.load(Ordering::SeqCst), 2);
+    let asked = gate.requests();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    for request in asked {
+        assert_eq!(request.script, format!("web fetch {url}"));
+        assert!(request.always_allow.is_empty());
+        assert_eq!(request.risk, Risk::Elevated);
+    }
+}
+
+#[tokio::test]
+async fn declined_plain_http_is_not_fetched() {
     let hosts = Arc::new(Approvals::unsaved());
     hosts.approve("127.0.0.1").await.expect("unsaved approve");
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
@@ -111,9 +171,41 @@ async fn approved_host_is_fetched_without_asking() {
         &format!("http://{addr}/"),
     )
     .await;
-    server.await.unwrap();
-    assert_eq!(out.exit_code, 0, "{}", stderr(&out));
-    assert!(gate.requests().is_empty());
+    server.abort();
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert!(
+        stderr(&out).contains("the user declined plain HTTP"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn redirects_reach_plain_http_only_on_the_host_allowed_it() {
+    let cases: [(&[&str], &str, bool); 5] = [
+        (&["https://a.example/"], "http://a.example/next", true),
+        (
+            &["http://a.example/", "https://a.example/"],
+            "http://a.example/next",
+            true,
+        ),
+        (&["http://a.example/"], "http://b.example/", true),
+        (&["http://a.example/"], "http://a.example/next", false),
+        (&["https://a.example/"], "https://b.example/", false),
+    ];
+    for (previous, target, refused) in cases {
+        let previous: Vec<Url> = previous
+            .iter()
+            .map(|hop| Url::parse(hop).unwrap())
+            .collect();
+        let target = Url::parse(target).unwrap();
+        assert_eq!(
+            is_downgrade(&target, &previous),
+            refused,
+            "{previous:?} -> {target}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -122,18 +214,20 @@ async fn always_answer_approves_the_host_for_good() {
     let hosts = Arc::new(Approvals::unsaved());
     let cmd = loopback_only(ApprovalGate::new(gate.clone(), Arc::clone(&hosts)));
     let (addr, server) = serve(vec![response("HTTP/1.1 200 OK", b"ok")]).await;
-    let url = format!("http://{addr}/page");
-    let out = fetch(&cmd, &url).await;
+    let out = fetch(&cmd, &format!("http://{addr}/page")).await;
     server.await.unwrap();
     assert_eq!(out.exit_code, 0, "{}", stderr(&out));
     assert!(hosts.contains("127.0.0.1"));
     let asked = gate.requests();
-    let [request] = asked.as_slice() else {
-        panic!("expected one prompt, got {asked:?}");
+    let [host_request, _plaintext_request] = asked.as_slice() else {
+        panic!("expected a host and a plain-HTTP prompt, got {asked:?}");
     };
-    assert_eq!(request.tool, "web");
-    assert_eq!(request.script, format!("web fetch {url}"));
-    assert_eq!(request.always_allow, ["127.0.0.1"]);
+    assert_eq!(host_request.tool, "web");
+    assert_eq!(
+        host_request.script,
+        format!("web fetch https://{addr}/page")
+    );
+    assert_eq!(host_request.always_allow, ["127.0.0.1"]);
 }
 
 #[tokio::test]

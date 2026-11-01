@@ -1,15 +1,17 @@
 //! `web <search|fetch>`: search the web through the supervised SearXNG
 //! instance, or HTTP GET a public URL.
 
+use std::error::Error;
 use std::fmt::Display;
+use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Url;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
 use reqwest::redirect::{Attempt, Policy};
+use reqwest::{Response, Url};
 use url::Host;
 
 use assistd_ipc::ConfirmSource;
@@ -61,6 +63,10 @@ const FETCH_HELP: &str = "usage: web fetch [--raw | --full] <URL>\n\
     and redirects are followed only to the same or an approved host. \
     Loopback, private, link-local, and other non-public addresses are \
     never fetched.\n\
+    \n\
+    http:// URLs are fetched over https:// instead. Only when HTTPS cannot \
+    connect is the user asked to allow plain HTTP for that one fetch. \
+    Redirects from HTTPS to http:// are refused.\n\
     \n\
     HTML pages come back as plain text: the page title first, then the \
     article or main content when the page has one, with navigation, \
@@ -125,7 +131,7 @@ impl WebCommand {
         }
     }
 
-    async fn confirmed(&self, url: &Url) -> bool {
+    async fn host_confirmed(&self, url: &Url) -> bool {
         let host = url.host_str().unwrap_or_default();
         self.egress
             .hosts
@@ -140,17 +146,40 @@ impl WebCommand {
             .await
     }
 
+    async fn plaintext_confirmed(&self, url: &Url, https_error: &str) -> bool {
+        let host = url.host_str().unwrap_or_default();
+        self.egress
+            .hosts
+            .confirm_once(ConfirmationRequest {
+                tool: NAME.to_string(),
+                script: format!("web fetch {url}"),
+                matched_pattern: format!(
+                    "fetches from {host} over unencrypted HTTP, which anything on the network \
+                     path can read or rewrite, because HTTPS failed: {https_error}"
+                ),
+                always_allow: Vec::new(),
+                risk: Risk::Elevated,
+                source: ConfirmSource::Main,
+            })
+            .await
+    }
+
     async fn fetch_command(&self, args: &[String]) -> CommandOutput {
         let (rendering, raw) = match fetch_args(args) {
             Ok(parsed) => parsed,
             Err(usage) => return usage,
         };
-        let Some(url) = web_url(raw) else {
+        let Some(requested) = web_url(raw) else {
             return CommandOutput::usage_error(
                 NAME,
                 format_args!("only http(s):// URLs are allowed: {raw}"),
                 "web fetch https://... or web fetch http://...",
             );
+        };
+        let (url, plaintext) = if requested.scheme() == "http" && self.egress.allows_plaintext() {
+            (https_form(&requested), Some(requested))
+        } else {
+            (requested, None)
         };
         if let Some(refusal) = refusal_of(&url, &self.egress) {
             return CommandOutput::failed(
@@ -164,60 +193,51 @@ impl WebCommand {
                 .into_bytes(),
             );
         }
-        if !self.confirmed(&url).await {
-            return CommandOutput::failed(
-                POLICY_DENIED_EXIT,
-                error_line(
-                    NAME,
-                    format_args!("fetch cancelled by user: {url}"),
-                    Hint::Try,
-                    "answering without this page",
-                )
-                .into_bytes(),
-            );
+        if !self.host_confirmed(&url).await {
+            return declined(format_args!("fetch cancelled by user: {url}"));
         }
-        self.fetch(url, rendering).await
+        match plaintext {
+            Some(plain) => self.fetch_upgraded(url, plain, rendering).await,
+            None => self.fetch(url, rendering).await,
+        }
     }
 
     async fn fetch(&self, url: Url, rendering: Rendering) -> CommandOutput {
-        let response = match self.client.get(url.clone()).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return fetch_failed(
-                    format_args!("transport error: {url}: {}", error_chain(&e)),
-                    UNREACHABLE,
-                );
+        match self.client.get(url.clone()).send().await {
+            Ok(response) => read_response(response, &url, rendering).await,
+            Err(e) => transport_failed(&url, &e),
+        }
+    }
+
+    /// Fetches `secure`, the HTTPS form of `plain`, falling back to `plain`
+    /// only when HTTPS cannot connect and the user allows it for this fetch.
+    async fn fetch_upgraded(&self, secure: Url, plain: Url, rendering: Rendering) -> CommandOutput {
+        match self.client.get(secure.clone()).send().await {
+            Ok(response) => {
+                let output = read_response(response, &secure, rendering).await;
+                with_note(format_args!("fetched {secure} instead of {plain}"), output)
             }
-        };
-        let status = response.status();
-        if !status.is_success() {
-            return fetch_failed(
-                format_args!(
-                    "HTTP {} {}: {url}",
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or("")
-                ),
-                UNREACHABLE,
-            );
+            Err(e) if e.is_connect() && !is_non_public(&e) => {
+                self.fetch_plaintext(plain, &error_chain(&e), rendering)
+                    .await
+            }
+            Err(e) => transport_failed(&secure, &e),
         }
-        let html_page = match rendering {
-            Rendering::Text(extent) => HtmlPage::of(&response, extent),
-            Rendering::Raw => None,
-        };
-        match read_capped(response, BODY_MAX).await {
-            Ok(body) => match html_page {
-                Some(page) => CommandOutput::ok(on_blocking_pool(move || page.render(body)).await),
-                None => CommandOutput::ok(body),
-            },
-            Err(BodyError::TooLarge { .. }) => fetch_failed(
-                format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
-                "a URL path that returns less content",
-            ),
-            Err(BodyError::Read(e)) => fetch_failed(
-                format_args!("body read failed: {url}: {e}"),
-                "re-running or a different URL",
-            ),
+    }
+
+    async fn fetch_plaintext(
+        &self,
+        url: Url,
+        https_error: &str,
+        rendering: Rendering,
+    ) -> CommandOutput {
+        if !self.plaintext_confirmed(&url, https_error).await {
+            return declined(format_args!(
+                "HTTPS failed ({https_error}) and the user declined plain HTTP: {url}"
+            ));
         }
+        let note = format!("HTTPS failed, so {url} was fetched over unencrypted HTTP");
+        with_note(note, self.fetch(url, rendering).await)
     }
 }
 
@@ -317,6 +337,12 @@ impl Refused {
 #[error("redirect to unapproved host {0}; fetch it directly to be asked")]
 struct UnapprovedRedirect(String);
 
+/// A redirect was refused because it leaves HTTPS, or the host the user
+/// allowed plain HTTP for, for an `http://` URL.
+#[derive(Debug, thiserror::Error)]
+#[error("redirect to unencrypted {0}; fetch it directly to be asked")]
+struct PlaintextRedirect(Url);
+
 fn follow_redirect(attempt: Attempt<'_>, egress: &EgressPolicy) -> reqwest::redirect::Action {
     if attempt.previous().len() > MAX_REDIRECTS {
         return attempt.error("too many redirects");
@@ -326,11 +352,14 @@ fn follow_redirect(attempt: Attempt<'_>, egress: &EgressPolicy) -> reqwest::redi
     }
     let target = attempt.url().host_str().unwrap_or_default().to_string();
     let original = attempt.previous().first().and_then(Url::host_str);
-    if original == Some(target.as_str()) || egress.hosts.contains(&target) {
-        attempt.follow()
-    } else {
-        attempt.error(UnapprovedRedirect(target))
+    if original != Some(target.as_str()) && !egress.hosts.contains(&target) {
+        return attempt.error(UnapprovedRedirect(target));
     }
+    if is_downgrade(attempt.url(), attempt.previous()) {
+        let target = attempt.url().clone();
+        return attempt.error(PlaintextRedirect(target));
+    }
+    attempt.follow()
 }
 
 fn request_headers() -> HeaderMap {
@@ -417,7 +446,7 @@ fn web_url(raw: &str) -> Option<Url> {
 /// Why `egress` refuses `url` before any name is resolved: a scheme or port
 /// it does not allow, or a literal address it cannot reach.
 fn refusal_of(url: &Url, egress: &EgressPolicy) -> Option<Refused> {
-    if !egress.allows_scheme(url.scheme()) {
+    if url.scheme() == "http" && !egress.allows_plaintext() {
         return Some(Refused::Plaintext);
     }
     if let Some(port) = url
@@ -434,8 +463,68 @@ fn refusal_of(url: &Url, egress: &EgressPolicy) -> Option<Refused> {
     (!(egress.reachable)(ip)).then_some(Refused::Address(NonPublic::Address(ip)))
 }
 
-fn error_chain(err: &dyn std::error::Error) -> String {
-    std::iter::successors(Some(err), |e| e.source())
+async fn read_response(response: Response, url: &Url, rendering: Rendering) -> CommandOutput {
+    let status = response.status();
+    if !status.is_success() {
+        return fetch_failed(
+            format_args!(
+                "HTTP {} {}: {url}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("")
+            ),
+            UNREACHABLE,
+        );
+    }
+    let html_page = match rendering {
+        Rendering::Text(extent) => HtmlPage::of(&response, extent),
+        Rendering::Raw => None,
+    };
+    match read_capped(response, BODY_MAX).await {
+        Ok(body) => match html_page {
+            Some(page) => CommandOutput::ok(on_blocking_pool(move || page.render(body)).await),
+            None => CommandOutput::ok(body),
+        },
+        Err(BodyError::TooLarge { .. }) => fetch_failed(
+            format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
+            "a URL path that returns less content",
+        ),
+        Err(BodyError::Read(e)) => fetch_failed(
+            format_args!("body read failed: {url}: {e}"),
+            "re-running or a different URL",
+        ),
+    }
+}
+
+/// `url` with its `http` scheme swapped for `https`, keeping any explicit port.
+fn https_form(url: &Url) -> Url {
+    let mut secure = url.clone();
+    secure
+        .set_scheme("https")
+        .expect("http and https are both special schemes");
+    secure
+}
+
+/// Whether a redirect to `target` after `previous` would carry the fetch over
+/// plain HTTP the user did not agree to: from an HTTPS hop, or to another host.
+fn is_downgrade(target: &Url, previous: &[Url]) -> bool {
+    target.scheme() == "http"
+        && !previous
+            .iter()
+            .all(|hop| hop.scheme() == "http" && hop.host_str() == target.host_str())
+}
+
+/// Whether `err` failed because the host resolves only to unreachable addresses.
+fn is_non_public(err: &reqwest::Error) -> bool {
+    std::iter::successors(Some(err as &dyn Error), |&e| e.source()).any(|e| {
+        matches!(
+            e.downcast_ref::<io::Error>().and_then(io::Error::get_ref),
+            Some(inner) if inner.is::<NonPublic>()
+        )
+    })
+}
+
+fn error_chain(err: &dyn Error) -> String {
+    std::iter::successors(Some(err), |&e| e.source())
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(": ")
@@ -443,6 +532,29 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 
 fn fetch_failed(what: impl Display, recovery: &str) -> CommandOutput {
     CommandOutput::failed(1, error_line(NAME, what, Hint::Try, recovery).into_bytes())
+}
+
+fn transport_failed(url: &Url, err: &reqwest::Error) -> CommandOutput {
+    fetch_failed(
+        format_args!("transport error: {url}: {}", error_chain(err)),
+        UNREACHABLE,
+    )
+}
+
+fn declined(what: impl Display) -> CommandOutput {
+    CommandOutput::failed(
+        POLICY_DENIED_EXIT,
+        error_line(NAME, what, Hint::Try, "answering without this page").into_bytes(),
+    )
+}
+
+/// `output` with `[note] web: <note>` ahead of its stderr.
+fn with_note(note: impl Display, output: CommandOutput) -> CommandOutput {
+    CommandOutput {
+        stderr: format!("[note] {NAME}: {note}\n").into_bytes(),
+        ..CommandOutput::default()
+    }
+    .then(output)
 }
 
 #[cfg(test)]
