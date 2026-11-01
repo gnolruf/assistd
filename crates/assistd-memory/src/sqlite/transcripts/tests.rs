@@ -1,7 +1,5 @@
 use super::*;
-use crate::{
-    PersistedRelayEnd, PersistedRelayEntry, PersistedRelayProfile, PersistedRelayRun, Seq,
-};
+use crate::{PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, Seq};
 
 /// The returned temp dir must outlive the store.
 async fn fresh_store() -> (SqliteTranscriptStore, tempfile::TempDir) {
@@ -455,7 +453,7 @@ fn relay_plan() -> Vec<PersistedRelayStep> {
     vec![
         PersistedRelayStep {
             task: "fetch the notes".into(),
-            profile: PersistedRelayProfile::Fetch,
+            agent: "web_research".into(),
             run: Some(PersistedRelayRun {
                 end: PersistedRelayEnd::Answered { truncated: true },
                 duration_ms: 41_000,
@@ -465,7 +463,7 @@ fn relay_plan() -> Vec<PersistedRelayStep> {
         },
         PersistedRelayStep {
             task: "compare them".into(),
-            profile: PersistedRelayProfile::Read,
+            agent: "file_review".into(),
             run: Some(PersistedRelayRun {
                 end: PersistedRelayEnd::Failed {
                     message: "server crashed".into(),
@@ -477,7 +475,7 @@ fn relay_plan() -> Vec<PersistedRelayStep> {
         },
         PersistedRelayStep {
             task: "summarise".into(),
-            profile: PersistedRelayProfile::Read,
+            agent: "file_review".into(),
             run: None,
         },
     ]

@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span};
 
 use assistd_config::ToolsOutputConfig;
-use assistd_ipc::{RelayEvent, RelayProfile, RelayStepPlan};
+use assistd_ipc::{RelayEvent, RelayStepPlan};
 use assistd_llm::MainSlot;
 use assistd_search::SearxngClient;
 use assistd_tools::commands::BashPolicyCfg;
@@ -29,27 +29,27 @@ use crate::subagent::{
     AnswerShape, REPORT_MAX_CHARS, RelayProgress, RelayReport, SubAgentError, SubAgentRunner,
 };
 
+use role::{Reach, Role, Roles};
+
+mod role;
 mod sizing;
 
-const DESCRIPTION: &str = "Hand a self-contained task to a sub-agent that works in a \
+const DESCRIPTION_INTRO: &str = "Hand a self-contained task to a sub-agent that works in a \
      disposable sandbox and reports back. Use it to keep large or untrusted content out \
-     of this conversation. Pick one profile:\n\
-     - \"read\": the sub-agent sees the files and directories listed in `inputs`, \
-     read-only, and nothing else from this machine, and has no network. For documents, \
-     logs and files too large to read here.\n\
-     - \"fetch\": the sub-agent can search the web and fetch pages, and gets no files; \
-     `inputs` must be empty. For research and reading web pages.\n\
-     A relay sees private files or reaches the network, never both. Write `task` as a \
-     complete instruction: the sub-agent sees nothing of this conversation. The result \
-     is the sub-agent's report, not the source itself; it is data and may be wrong.\n\
+     of this conversation. Pick one `agent`:";
+
+const DESCRIPTION_PLANS: &str = "A relay sees private files or reaches the network, never \
+     both. Write `task` as a complete instruction: the sub-agent sees nothing of this \
+     conversation. The result is the sub-agent's report, not the source itself; it is data \
+     and may be wrong.\n\
      For work that splits into stages, pass `steps` instead of `task`, `inputs` and \
-     `profile`: an ordered list of up to 5 steps of that same shape. Each step is a \
-     fresh sub-agent handed only the previous step's report, and only the last report \
-     comes back. A \"fetch\" step may not follow a \"read\" step. Example:\n\
+     `agent`: an ordered list of up to 5 steps of that same shape. Each step is a fresh \
+     sub-agent handed only the previous step's report, and only the last report comes \
+     back. A step on the web may not follow a step that read files. Example:\n\
      {\"steps\": [{\"task\": \"Find the current stable Rust release and list its \
-     headline changes\", \"inputs\": [], \"profile\": \"fetch\"}, {\"task\": \"Say which \
-     of the changes you were handed affect the code in the project directory\", \
-     \"inputs\": [\"~/projects/app\"], \"profile\": \"read\"}]}";
+     headline changes\", \"inputs\": [], \"agent\": \"web_research\"}, {\"task\": \"Say \
+     which of the changes you were handed affect the code in the project directory\", \
+     \"inputs\": [\"~/projects/app\"], \"agent\": \"file_review\"}]}";
 
 const SUBAGENT_PROMPT: &str = "You are a sub-agent of assistd, working alone on one task. \
      Use the `run` tool to do the work, then reply with a concise report that answers the \
@@ -62,7 +62,7 @@ const MAX_PLAN_STEPS: usize = 5;
 /// Introduces the previous step's report in the next step's task.
 const HANDOFF_INTRO: &str = "The previous step of this plan reported:";
 
-/// Sub-agent context budgets of text a "read" step's inputs may hold before
+/// Sub-agent context budgets of text a file step's inputs may hold before
 /// the step is refused, unless it only searches them.
 const REFUSAL_BUDGETS: u64 = 2;
 
@@ -102,6 +102,7 @@ pub(crate) struct RelayPolicy {
 pub(crate) struct RelayTool {
     deps: RelayDeps,
     policy: RelayPolicy,
+    roles: Roles,
 }
 
 #[derive(Debug, Error)]
@@ -122,7 +123,7 @@ struct StepFailed {
 }
 
 /// One validated `relay` call: steps run in order, each handed only the
-/// previous step's report. No `fetch` step follows a `read` step.
+/// previous step's report. No step on the web follows one that read files.
 #[derive(Debug)]
 struct RelayPlan {
     first: RelayStep,
@@ -133,7 +134,9 @@ struct RelayPlan {
 #[derive(Debug)]
 struct RelayStep {
     task: String,
-    profile: Profile,
+    role: Arc<Role>,
+    /// Handed over only when the role reaches files; empty otherwise.
+    inputs: Vec<PathBuf>,
     /// The task searches its inputs rather than reading them through, so
     /// their size is not checked.
     search_only: bool,
@@ -153,16 +156,13 @@ struct RelayStepGate {
     task: String,
 }
 
-/// What the sub-agent may reach: private inputs or the network, never both.
-#[derive(Debug)]
-enum Profile {
-    Read { inputs: Vec<PathBuf> },
-    Fetch,
-}
-
 impl RelayTool {
     pub(crate) fn new(deps: RelayDeps, policy: RelayPolicy) -> Self {
-        Self { deps, policy }
+        Self {
+            deps,
+            policy,
+            roles: Roles::built_in(),
+        }
     }
 
     /// Runs every step inside one main-slot guard, so the swap is paid once per plan.
@@ -207,12 +207,11 @@ impl RelayTool {
         position: StepPosition,
         progress: &RelayProgress,
     ) -> Result<RelayReport, StepFailed> {
-        let profile = step.profile.wire();
         let span = info_span!(
             "relay_step",
             step = position.step,
             steps = position.steps,
-            profile = profile.as_str()
+            agent = step.role.name
         );
         progress
             .report(RelayEvent::Started {
@@ -245,10 +244,9 @@ impl RelayTool {
             inner: Arc::clone(&self.policy.gate),
             task: step.task.clone(),
         });
-        let networked = matches!(step.profile, Profile::Fetch);
-        let (inputs, egress) = match step.profile {
-            Profile::Read { inputs } => (inputs, None),
-            Profile::Fetch => (Vec::new(), Some(self.egress(Arc::clone(&gate)))),
+        let (inputs, egress) = match step.role.reach {
+            Reach::Files => (step.inputs, None),
+            Reach::Web => (Vec::new(), Some(self.egress(Arc::clone(&gate)))),
         };
         let quarantine = Quarantine::create(
             &self.deps.dir,
@@ -266,7 +264,7 @@ impl RelayTool {
             .deps
             .runner
             .run(
-                subagent_prompt(networked, &quarantine),
+                subagent_prompt(&step.role, &quarantine),
                 task,
                 self.subagent_tools(&quarantine, gate),
                 AnswerShape::Text,
@@ -276,17 +274,15 @@ impl RelayTool {
             .await?)
     }
 
-    /// Refuse a plan with a "read" step whose inputs cannot be handed over, or
+    /// Refuse a plan with a file step whose inputs cannot be handed over, or
     /// hold more than one sub-agent could get through, before any step starts.
     async fn check_inputs(&self, plan: &RelayPlan) -> Result<(), ToolError> {
         let budget = u64::from(self.deps.subagent_context_tokens);
         let reads: Vec<(usize, bool, Vec<PathBuf>)> = plan
             .steps()
             .enumerate()
-            .filter_map(|(index, step)| match &step.profile {
-                Profile::Read { inputs } => Some((index + 1, step.search_only, inputs.clone())),
-                Profile::Fetch => None,
-            })
+            .filter(|(_, step)| step.role.reach == Reach::Files)
+            .map(|(index, step)| (index + 1, step.search_only, step.inputs.clone()))
             .collect();
         let (limit, target) = (budget * REFUSAL_BUDGETS, budget * TARGET_PERCENT / 100);
         on_blocking_pool(move || {
@@ -330,6 +326,22 @@ impl RelayTool {
         tools.register(run);
         Arc::new(tools)
     }
+
+    /// One line per role for the tool description: its name, what it
+    /// reaches and when to pick it.
+    fn roles_described(&self) -> String {
+        self.roles
+            .iter()
+            .map(|role| {
+                format!(
+                    "- \"{}\": the sub-agent {}. {}\n",
+                    role.name,
+                    role.reach.capability(),
+                    role.summary
+                )
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -341,16 +353,17 @@ impl Tool for RelayTool {
     fn description(&self) -> Cow<'_, str> {
         let budget = u64::from(self.deps.subagent_context_tokens);
         format!(
-            "{DESCRIPTION}\nEach sub-agent's context holds about {}k tokens (roughly {} KB of \
+            "{DESCRIPTION_INTRO}\n{}{DESCRIPTION_PLANS}\nEach sub-agent's context holds about {}k tokens (roughly {} KB of \
              text). It can read past that by compacting its history, but loses detail each \
              time, so give each relay about {}k tokens to read at most: check how big the \
              inputs are first (for example with `wc -c`), leave out build output and \
              dependencies, and split larger work along its natural parts, such as one relay \
              per crate, package, module or directory. Make several relay calls in one reply \
              for parts that do not depend on each other; they run one after another, and you \
-             combine their reports. A \"read\" step whose inputs hold more than about {}k \
-             tokens is refused with a list of their largest parts, unless it sets \
-             \"search_only\": true because the task only searches them.",
+             combine their reports. A step whose files hold more than about {}k tokens is \
+             refused with a list of their largest parts, unless it sets \"search_only\": \
+             true because the task only searches them.",
+            self.roles_described(),
             budget / 1000,
             budget * 4 / 1000,
             budget * TARGET_PERCENT / 100 / 1000,
@@ -360,7 +373,7 @@ impl Tool for RelayTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        let step = step_schema();
+        let step = step_schema(&self.roles);
         let mut properties = step["properties"].clone();
         properties["steps"] = json!({
             "type": "array",
@@ -383,12 +396,12 @@ impl Tool for RelayTool {
         false
     }
 
-    #[tracing::instrument(skip_all, fields(profiles = tracing::field::Empty))]
+    #[tracing::instrument(skip_all, fields(agents = tracing::field::Empty))]
     async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
-        let plan = RelayPlan::parse(&args)?;
+        let plan = RelayPlan::parse(&args, &self.roles)?;
         self.check_inputs(&plan).await?;
-        tracing::Span::current().record("profiles", plan.profiles());
+        tracing::Span::current().record("agents", plan.agents());
         info!(target: "assistd::relay", "relay started");
         let progress = RelayProgress::of_current_tool_call();
         Ok(match self.relay(plan, &progress).await {
@@ -412,18 +425,18 @@ impl ConfirmationGate for RelayStepGate {
 }
 
 impl RelayPlan {
-    /// Takes either `steps` or a single step's `task`, `inputs` and `profile`.
-    fn parse(args: &Value) -> Result<Self, ToolError> {
+    /// Takes either `steps` or a single step's `task`, `inputs` and `agent`.
+    fn parse(args: &Value, roles: &Roles) -> Result<Self, ToolError> {
         let steps = match args.get("steps").filter(|steps| !steps.is_null()) {
             Some(_) if args.get("task").is_some_and(|task| !task.is_null()) => {
                 return Err(ToolError::InvalidArgs(
-                    "pass either `steps` or `task`, `inputs` and `profile`, not both".into(),
+                    "pass either `steps` or `task`, `inputs` and `agent`, not both".into(),
                 ));
             }
-            Some(steps) => parse_steps(steps)?,
-            None => vec![RelayStep::parse(args).map_err(ToolError::InvalidArgs)?],
+            Some(steps) => parse_steps(steps, roles)?,
+            None => vec![RelayStep::parse(args, roles).map_err(ToolError::InvalidArgs)?],
         };
-        refuse_fetch_after_read(&steps)?;
+        refuse_web_after_files(&steps)?;
         let mut steps = steps.into_iter();
         let first = steps
             .next()
@@ -438,18 +451,18 @@ impl RelayPlan {
         std::iter::once(&self.first).chain(&self.rest)
     }
 
-    fn profiles(&self) -> String {
+    fn agents(&self) -> String {
         self.steps()
-            .map(|step| step.profile.name())
+            .map(|step| step.role.name.as_str())
             .collect::<Vec<_>>()
             .join(">")
     }
 }
 
 impl RelayStep {
-    /// Refuses a `fetch` step that names inputs, and inputs that are not
-    /// absolute after `~` expansion.
-    fn parse(args: &Value) -> Result<Self, String> {
+    /// Refuses an `agent` that is not one of `roles`, inputs for a role on the
+    /// web, and inputs that are not absolute after `~` expansion.
+    fn parse(args: &Value, roles: &Roles) -> Result<Self, String> {
         let task = args
             .get("task")
             .and_then(Value::as_str)
@@ -457,30 +470,29 @@ impl RelayStep {
             .ok_or("`task` (non-empty string) is required")?
             .to_string();
         let inputs = parse_inputs(args)?;
-        let profile = match args.get("profile").and_then(Value::as_str) {
-            Some("read") => Profile::Read { inputs },
-            Some("fetch") if inputs.is_empty() => Profile::Fetch,
-            Some("fetch") => {
-                return Err(
-                    "a \"fetch\" relay gets no `inputs`: a relay may see private files \
-                            or reach the network, never both. Relay the files with \"read\" \
-                            instead."
-                        .into(),
-                );
-            }
-            other => {
-                return Err(format!(
-                    "`profile` must be \"read\" or \"fetch\" (got {other:?})"
-                ));
-            }
-        };
+        let agent = args.get("agent").and_then(Value::as_str);
+        let role = agent.and_then(|name| roles.named(name)).ok_or_else(|| {
+            format!(
+                "`agent` must be one of {} (got {agent:?})",
+                roles.quoted_names(None)
+            )
+        })?;
+        if role.reach == Reach::Web && !inputs.is_empty() {
+            return Err(format!(
+                "a \"{}\" relay gets no `inputs`: a relay may see private files or reach \
+                 the network, never both. Relay the files with {} instead.",
+                role.name,
+                roles.quoted_names(Some(Reach::Files))
+            ));
+        }
         let search_only = args
             .get("search_only")
             .and_then(Value::as_bool)
             .unwrap_or(false);
         Ok(Self {
             task,
-            profile,
+            role: Arc::clone(role),
+            inputs,
             search_only,
         })
     }
@@ -488,25 +500,12 @@ impl RelayStep {
     fn plan(&self) -> RelayStepPlan {
         RelayStepPlan {
             task: self.task.clone(),
-            profile: self.profile.wire(),
+            agent: self.role.name.clone(),
         }
     }
 }
 
-impl Profile {
-    fn name(&self) -> &'static str {
-        self.wire().as_str()
-    }
-
-    fn wire(&self) -> RelayProfile {
-        match self {
-            Self::Read { .. } => RelayProfile::Read,
-            Self::Fetch => RelayProfile::Fetch,
-        }
-    }
-}
-
-fn parse_steps(steps: &Value) -> Result<Vec<RelayStep>, ToolError> {
+fn parse_steps(steps: &Value, roles: &Roles) -> Result<Vec<RelayStep>, ToolError> {
     let steps = steps
         .as_array()
         .ok_or_else(|| ToolError::InvalidArgs("`steps` must be an array of steps".into()))?;
@@ -520,7 +519,7 @@ fn parse_steps(steps: &Value) -> Result<Vec<RelayStep>, ToolError> {
         .iter()
         .enumerate()
         .map(|(index, step)| {
-            RelayStep::parse(step)
+            RelayStep::parse(step, roles)
                 .map_err(|message| ToolError::InvalidArgs(format!("step {}: {message}", index + 1)))
         })
         .collect()
@@ -528,15 +527,13 @@ fn parse_steps(steps: &Value) -> Result<Vec<RelayStep>, ToolError> {
 
 /// A step's report carries what its sub-agent saw on to the next step, so
 /// once a step has read private files no later step may reach the network.
-fn refuse_fetch_after_read(steps: &[RelayStep]) -> Result<(), ToolError> {
-    let fetch_after_read = steps
-        .iter()
-        .skip_while(|step| matches!(step.profile, Profile::Fetch))
-        .any(|step| matches!(step.profile, Profile::Fetch));
-    if fetch_after_read {
+fn refuse_web_after_files(steps: &[RelayStep]) -> Result<(), ToolError> {
+    let on_web = |step: &&RelayStep| step.role.reach == Reach::Web;
+    let web_after_files = steps.iter().skip_while(on_web).any(|step| on_web(&step));
+    if web_after_files {
         return Err(ToolError::InvalidArgs(
-            "a \"fetch\" step may not follow a \"read\" step: its report would carry \
-             private files to the network. Put the \"fetch\" steps first."
+            "a step on the web may not follow a step that read files: its report would \
+             carry private files to the network. Put the web steps first."
                 .into(),
         ));
     }
@@ -564,7 +561,8 @@ fn parse_inputs(args: &Value) -> Result<Vec<PathBuf>, String> {
         .collect()
 }
 
-fn step_schema() -> Value {
+fn step_schema(roles: &Roles) -> Value {
+    let names: Vec<&str> = roles.iter().map(|role| role.name.as_str()).collect();
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -578,13 +576,12 @@ fn step_schema() -> Value {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Absolute or ~/ paths of files and directories \
-                                a \"read\" relay sees read-only. Empty for \"fetch\"."
+                                the sub-agent sees read-only. Empty for an agent on the web."
             },
-            "profile": {
+            "agent": {
                 "type": "string",
-                "enum": ["read", "fetch"],
-                "description": "\"read\": the inputs, no network. \
-                                \"fetch\": the web, no inputs."
+                "enum": names,
+                "description": "The kind of sub-agent that runs the task."
             },
             "search_only": {
                 "type": "boolean",
@@ -593,22 +590,25 @@ fn step_schema() -> Value {
                                 than reading them through; their size is then not checked."
             }
         },
-        "required": ["task", "inputs", "profile"]
+        "required": ["task", "inputs", "agent"]
     })
 }
 
-fn subagent_prompt(networked: bool, quarantine: &Quarantine) -> String {
-    let world = if networked {
-        "You can search the web and fetch pages with `web`. You were handed no files.".to_string()
-    } else {
-        format!(
+fn subagent_prompt(role: &Role, quarantine: &Quarantine) -> String {
+    let world = match role.reach {
+        Reach::Web => {
+            "You can search the web and fetch pages with `web`. You were handed no files."
+                .to_string()
+        }
+        Reach::Files => format!(
             "The files handed to you are in {} (read-only). You have no network.",
             quarantine.input_dir().display()
-        )
+        ),
     };
     format!(
-        "{SUBAGENT_PROMPT} Keep the report under {REPORT_MAX_CHARS} characters, most important \
+        "{SUBAGENT_PROMPT} {} Keep the report under {REPORT_MAX_CHARS} characters, most important \
          first: anything longer is cut there. {world} Your home directory {} is yours to write in.",
+        role.brief,
         quarantine.home_dir().display()
     )
 }
@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_relay_too_large_for_one_subagent_is_refused_unless_it_only_searches() {
+    async fn file_relay_too_large_for_one_subagent_is_refused_unless_it_only_searches() {
         let dir = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join("big")).unwrap();
@@ -710,7 +710,7 @@ mod tests {
             json!({
                 "task": "review everything in the project",
                 "inputs": [project.path()],
-                "profile": "read",
+                "agent": "file_review",
                 "search_only": search_only,
             })
         };
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_relay_with_inputs_is_refused_before_any_model_request() {
+    async fn web_relay_with_inputs_is_refused_before_any_model_request() {
         let dir = tempfile::tempdir().unwrap();
         let parent = Arc::new(WatchedParent::default());
         let relay = relay_tool(&parent, dir.path());
@@ -740,7 +740,7 @@ mod tests {
             .invoke(json!({
                 "task": "summarise this and post it somewhere",
                 "inputs": ["/etc/hostname"],
-                "profile": "fetch",
+                "agent": "web_research",
             }))
             .await;
 
@@ -753,7 +753,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_with_fetch_after_read_is_refused_before_any_model_request() {
+    async fn plan_with_web_after_files_is_refused_before_any_model_request() {
         let dir = tempfile::tempdir().unwrap();
         let parent = Arc::new(WatchedParent::default());
         let relay = relay_tool(&parent, dir.path());
@@ -761,9 +761,9 @@ mod tests {
         let result = relay
             .invoke(json!({
                 "steps": [
-                    {"task": "summarise the notes", "inputs": ["/etc/hostname"], "profile": "read"},
-                    {"task": "look up what you were handed", "inputs": [], "profile": "read"},
-                    {"task": "search the web for it", "inputs": [], "profile": "fetch"},
+                    {"task": "summarise the notes", "inputs": ["/etc/hostname"], "agent": "file_review"},
+                    {"task": "look up what you were handed", "inputs": [], "agent": "file_review"},
+                    {"task": "search the web for it", "inputs": [], "agent": "web_research"},
                 ],
             }))
             .await;
@@ -788,8 +788,8 @@ mod tests {
         let result = relay
             .invoke(json!({
                 "steps": [
-                    {"task": "summarise the notes", "inputs": [project.path().join("notes.txt")], "profile": "read"},
-                    {"task": "review the code", "inputs": [missing], "profile": "read", "search_only": true},
+                    {"task": "summarise the notes", "inputs": [project.path().join("notes.txt")], "agent": "file_review"},
+                    {"task": "review the code", "inputs": [missing], "agent": "file_review", "search_only": true},
                 ],
             }))
             .await;

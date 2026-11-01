@@ -329,10 +329,10 @@ fn input_names(inputs: &[PathBuf]) -> Result<Vec<&OsStr>, QuarantineError> {
 }
 
 /// Open the regular file or directory at `source`, through a symlink if it is
-/// one, make an empty mount point of its kind at `at`, and mount it there.
+/// one, make an empty mount point of its kind at `at`, and mount it there for
+/// both the in-process readers and the sandbox, from the one descriptor.
 fn mount_input(root: &mut ConfinedRoot, source: &Path, at: PathBuf) -> io::Result<InputBind> {
-    let source = std::fs::canonicalize(source)?;
-    let fd = rustix::fs::open(&source, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())?;
+    let fd = rustix::fs::open(source, OFlags::PATH | OFlags::CLOEXEC, Mode::empty())?;
     match FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode) {
         FileType::Directory => std::fs::create_dir(&at)?,
         FileType::RegularFile => {
@@ -340,8 +340,11 @@ fn mount_input(root: &mut ConfinedRoot, source: &Path, at: PathBuf) -> io::Resul
         }
         _ => return Err(not_a_file_or_dir()),
     }
-    root.mount(at.clone(), fd)?;
-    Ok(InputBind { source, at })
+    root.mount(at.clone(), fd.try_clone()?)?;
+    Ok(InputBind {
+        fd: Arc::new(fd),
+        at,
+    })
 }
 
 fn not_a_file_or_dir() -> io::Error {

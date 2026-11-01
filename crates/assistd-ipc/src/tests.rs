@@ -247,7 +247,7 @@ fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
             relay: vec![
                 RelayStepRecord {
                     task: "find it".into(),
-                    profile: RelayProfile::Fetch,
+                    agent: "web_research".into(),
                     run: Some(RelayStepRun {
                         end: RelayStepEnd::Answered { truncated: false },
                         duration_ms: 8000,
@@ -275,12 +275,12 @@ fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
                 },
                 RelayStepRecord {
                     task: "read it".into(),
-                    profile: RelayProfile::Read,
+                    agent: "file_review".into(),
                     run: None,
                 },
             ],
         },
-        r#"{"type":"history_entry","id":"r","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","profile":"fetch","run":{"end":{"kind":"answered","truncated":false},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","profile":"read"}]}"#,
+        r#"{"type":"history_entry","id":"r","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered","truncated":false},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
     )]
 }
 
@@ -544,11 +544,11 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 event: RelayEvent::Planned {
                     steps: vec![RelayStepPlan {
                         task: "find the release".into(),
-                        profile: RelayProfile::Fetch,
+                        agent: "web_research".into(),
                     }],
                 },
             },
-            r#"{"type":"relay","id":"r","event":{"kind":"planned","steps":[{"task":"find the release","profile":"fetch"}]}}"#,
+            r#"{"type":"relay","id":"r","event":{"kind":"planned","steps":[{"task":"find the release","agent":"web_research"}]}}"#,
         ),
         (
             Event::Capabilities {

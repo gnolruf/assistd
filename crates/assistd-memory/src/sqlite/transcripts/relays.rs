@@ -6,12 +6,10 @@ use rusqlite::types::{FromSqlError, Type};
 use rusqlite::{Row, Transaction};
 
 use crate::{
-    BranchId, MessageId, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayProfile,
-    PersistedRelayRun, PersistedRelayStep, ToolOutcome,
+    BranchId, MessageId, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun,
+    PersistedRelayStep, ToolOutcome,
 };
 
-const PROFILE_READ: i64 = 0;
-const PROFILE_FETCH: i64 = 1;
 const OUTCOME_ANSWERED: i64 = 0;
 const OUTCOME_FAILED: i64 = 1;
 const KIND_TEXT: i64 = 0;
@@ -109,7 +107,7 @@ pub(super) fn insert_relay_steps(
 ) -> rusqlite::Result<()> {
     let mut insert = tx.prepare_cached(
         "INSERT INTO relay_steps
-            (message_id, step, task, profile, outcome, failure, truncated, duration_ms, tokens)
+            (message_id, step, task, agent, outcome, failure, truncated, duration_ms, tokens)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          RETURNING id",
     )?;
@@ -120,7 +118,7 @@ pub(super) fn insert_relay_steps(
                 message,
                 index + 1,
                 step.task,
-                profile_code(step.profile),
+                step.agent,
                 columns.outcome,
                 columns.failure,
                 columns.truncated,
@@ -170,7 +168,7 @@ pub(super) fn relay_traces(
     let mut entries = relay_entries(tx, branch)?;
     let mut traces: HashMap<MessageId, Vec<PersistedRelayStep>> = HashMap::new();
     let mut select = tx.prepare_cached(
-        "SELECT rs.message_id, rs.id, rs.task, rs.profile, rs.outcome, rs.failure,
+        "SELECT rs.message_id, rs.id, rs.task, rs.agent, rs.outcome, rs.failure,
                 rs.truncated, rs.duration_ms, rs.tokens
          FROM branch_messages bm JOIN relay_steps rs ON rs.message_id = bm.message_id
          WHERE bm.branch_id = ?1
@@ -232,14 +230,9 @@ fn step_row(row: &Row<'_>) -> rusqlite::Result<(MessageId, i64, PersistedRelaySt
             })
         })
         .transpose()?;
-    let profile = match row.get(3)? {
-        PROFILE_READ => PersistedRelayProfile::Read,
-        PROFILE_FETCH => PersistedRelayProfile::Fetch,
-        code => return Err(out_of_range(3, code)),
-    };
     let step = PersistedRelayStep {
         task: row.get(2)?,
-        profile,
+        agent: row.get(3)?,
         run,
     };
     Ok((row.get(0)?, row.get(1)?, step))
@@ -278,13 +271,6 @@ fn entry_row(row: &Row<'_>) -> rusqlite::Result<PersistedRelayEntry> {
         },
         code => return Err(out_of_range(1, code)),
     })
-}
-
-fn profile_code(profile: PersistedRelayProfile) -> i64 {
-    match profile {
-        PersistedRelayProfile::Read => PROFILE_READ,
-        PersistedRelayProfile::Fetch => PROFILE_FETCH,
-    }
 }
 
 fn out_of_range(idx: usize, code: i64) -> rusqlite::Error {

@@ -2,12 +2,14 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use assistd_utils::program::{ProgramError, find_program};
+use command_fds::CommandFdExt;
 use rustix::fs::Access;
 use tokio::process::Command as ProcCommand;
 use tracing::{info, warn};
@@ -77,6 +79,7 @@ const BIND_FLAGS: &[&str] = &[
     "--bind-try",
     "--ro-bind",
     "--ro-bind-try",
+    "--ro-bind-fd",
     "--dev-bind",
     "--dev-bind-try",
 ];
@@ -169,10 +172,10 @@ struct QuarantineProfile {
 }
 
 /// A host file or directory a quarantine sees read-only at `at`, over a mount
-/// point already there.
+/// point already there, bound from `fd`, its `O_PATH` descriptor.
 #[derive(Debug, Clone)]
 pub(crate) struct InputBind {
-    pub(crate) source: PathBuf,
+    pub(crate) fd: Arc<OwnedFd>,
     pub(crate) at: PathBuf,
 }
 
@@ -331,7 +334,7 @@ impl SandboxInfo {
     /// The tmpfs mount that hides the host's `path` from sandboxed
     /// commands, if any.
     pub async fn private_dir_hiding(self: &Arc<Self>, path: PathBuf) -> Option<PathBuf> {
-        let cmd = self.command("true", Vec::new()).await;
+        let cmd = self.command("true", Vec::new()).await.ok()?;
         self.mounts_of(&cmd)?.private_dir_of(&path).cloned()
     }
 
@@ -351,8 +354,13 @@ impl SandboxInfo {
 
     /// The [`ProcCommand`] that runs `program` with `args`, in bubblewrap under
     /// [`ResolvedSandboxMode::Bwrap`]; otherwise with `PATH` limited to
-    /// [`SandboxInfo::search_path`].
-    pub async fn command(self: &Arc<Self>, program: &str, args: Vec<String>) -> ProcCommand {
+    /// [`SandboxInfo::search_path`]. Fails when a quarantine input's
+    /// descriptor cannot be duplicated for the command.
+    pub async fn command(
+        self: &Arc<Self>,
+        program: &str,
+        args: Vec<String>,
+    ) -> io::Result<ProcCommand> {
         let info = Arc::clone(self);
         let program = program.to_owned();
         on_blocking_pool(move || info.build_command(&program, args)).await
@@ -360,17 +368,21 @@ impl SandboxInfo {
 
     /// Reads `$HOME` and the command directories to build the bwrap
     /// profile, so it blocks on the filesystem.
-    fn build_command<I, S>(&self, program: &str, args: I) -> ProcCommand
+    fn build_command<I, S>(&self, program: &str, args: I) -> io::Result<ProcCommand>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         match &self.mode {
-            ResolvedSandboxMode::None => self.unwrapped_command(program, args),
+            ResolvedSandboxMode::None => Ok(self.unwrapped_command(program, args)),
             ResolvedSandboxMode::Bwrap { path, prlimit } => match &self.profile {
-                Profile::Host => {
-                    self.bwrap_command(path, prlimit, std::env::var("HOME").ok(), program, args)
-                }
+                Profile::Host => Ok(self.bwrap_command(
+                    path,
+                    prlimit,
+                    std::env::var("HOME").ok(),
+                    program,
+                    args,
+                )),
                 Profile::Quarantine(quarantine) => {
                     self.quarantine_command(path, prlimit, quarantine, program, args)
                 }
@@ -429,7 +441,8 @@ impl SandboxInfo {
     }
 
     /// The quarantine profile, then the shared directories, which its home is
-    /// one of, then its inputs over their mount points in them; no
+    /// one of, then its inputs bound from their descriptors over their mount
+    /// points in them; no
     /// `extra_args`, so the network stays unshared. `program` runs under the
     /// quarantine wrapper, which keeps it off the host's Unix sockets and,
     /// with egress, forwards the proxy port.
@@ -440,7 +453,7 @@ impl SandboxInfo {
         quarantine: &QuarantineProfile,
         program: &str,
         args: I,
-    ) -> ProcCommand
+    ) -> io::Result<ProcCommand>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -449,9 +462,7 @@ impl SandboxInfo {
         cmd.env_clear().envs(kept_env(std::env::vars_os()));
         cmd.args(quarantine_flags(&quarantine.home));
         cmd.args(shared_flags(&self.shared));
-        for input in &quarantine.inputs {
-            cmd.arg("--ro-bind").arg(&input.source).arg(&input.at);
-        }
+        bind_inputs(&mut cmd, &quarantine.inputs)?;
         cmd.arg("--ro-bind")
             .arg(&quarantine.exec)
             .arg(QUARANTINE_EXEC);
@@ -468,8 +479,24 @@ impl SandboxInfo {
             QUARANTINE_EXEC,
             wrapper_args.into_iter().chain(args),
         );
-        cmd
+        Ok(cmd)
     }
+}
+
+/// Bind each of `inputs` from a duplicate of its descriptor that only `cmd`'s
+/// child inherits, so every command sees what the quarantine opened.
+fn bind_inputs(cmd: &mut ProcCommand, inputs: &[InputBind]) -> io::Result<()> {
+    let fds = inputs
+        .iter()
+        .map(|input| input.fd.try_clone())
+        .collect::<io::Result<Vec<_>>>()?;
+    for (fd, input) in fds.iter().zip(inputs) {
+        cmd.arg("--ro-bind-fd")
+            .arg(fd.as_raw_fd().to_string())
+            .arg(&input.at);
+    }
+    cmd.preserved_fds(fds);
+    Ok(())
 }
 
 /// End `cmd`'s bwrap flags and run `program` with `args` under `prlimit`'s
@@ -1199,7 +1226,7 @@ mod tests {
             "/tmp/assistd-output",
             "/tmp/assistd-output",
         ];
-        let argv = argv_of(&info.build_command("true", [""; 0]));
+        let argv = argv_of(&info.build_command("true", [""; 0]).expect("command"));
         assert!(argv.windows(binds.len()).any(|w| w == binds), "{argv:?}");
         for shared in [
             "/run/user/1000/assistd/scratch/out.txt",
@@ -1242,7 +1269,9 @@ mod tests {
     #[test]
     fn bwrap_process_starts_from_a_cleared_environment() {
         let info = bwrap_info(Vec::new());
-        let cmd = info.build_command("true", Vec::<String>::new());
+        let cmd = info
+            .build_command("true", Vec::<String>::new())
+            .expect("command");
         let expected: Vec<_> = kept_env(std::env::vars_os())
             .into_iter()
             .map(|(name, value)| (name, Some(value)))

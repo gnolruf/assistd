@@ -7,16 +7,10 @@ use crate::ToolOutcome;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedRelayStep {
     pub task: String,
-    pub profile: PersistedRelayProfile,
+    /// The name of the kind of sub-agent the step ran; never empty.
+    pub agent: String,
     /// How the step ran; `None` when the plan ended before it started.
     pub run: Option<PersistedRelayRun>,
-}
-
-/// What a relay step's sub-agent could reach.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PersistedRelayProfile {
-    Read,
-    Fetch,
 }
 
 /// A relay step that started: how it ended, what it did, and what it cost.

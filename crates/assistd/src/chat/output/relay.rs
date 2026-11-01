@@ -8,8 +8,7 @@ use ratatui::text::{Line, Span};
 use textwrap::core::display_width;
 
 use assistd_ipc::{
-    RelayEvent, RelayProfile, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun,
-    RelayTraceEntry,
+    RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayTraceEntry,
 };
 
 use super::{
@@ -125,7 +124,7 @@ impl RelayRun {
 /// One plan step: its task, where it stands, and what its sub-agent did.
 pub(in crate::chat) struct RelayStepTrace {
     task: String,
-    profile: RelayProfile,
+    agent: String,
     /// Position in the plan, counted from 1, and the plan's length.
     step: usize,
     steps: usize,
@@ -140,7 +139,7 @@ impl RelayStepTrace {
     fn pending(planned: RelayStepPlan, step: usize, steps: usize) -> Self {
         Self {
             task: planned.task,
-            profile: planned.profile,
+            agent: planned.agent,
             step,
             steps,
             state: StepState::Pending,
@@ -153,7 +152,7 @@ impl RelayStepTrace {
     fn replayed(record: RelayStepRecord, step: usize, steps: usize) -> Self {
         let planned = RelayStepPlan {
             task: record.task,
-            profile: record.profile,
+            agent: record.agent,
         };
         let mut trace = Self::pending(planned, step, steps);
         if let Some(run) = record.run {
@@ -324,7 +323,7 @@ impl RelayStepTrace {
             .count()
     }
 
-    /// `● read · step 2/3 · <task>`, on one row.
+    /// `● file_review · step 2/3 · <task>`, on one row.
     pub(in crate::chat) fn label(&self) -> String {
         let position = if self.steps > 1 {
             format!(" · step {}/{}", self.step, self.steps)
@@ -334,7 +333,7 @@ impl RelayStepTrace {
         format!(
             "{} {}{position} · {}",
             self.icon(),
-            self.profile.as_str(),
+            self.agent,
             preview(&self.task)
         )
     }
@@ -490,7 +489,7 @@ pub(super) fn render_relay_block(
     let bullet_style = Style::default().fg(bullet).add_modifier(Modifier::BOLD);
     match run.steps.as_slice() {
         [only] => {
-            let lead = format!("relay · {} · ", only.profile.as_str());
+            let lead = format!("relay · {} · ", only.agent);
             let header = fitted_row(&lead, &only.task, "", block_cols(width, HEADER_BULLET));
             push_gutter_row(
                 out,
@@ -540,7 +539,7 @@ fn push_plan_steps(out: &mut Vec<Line<'static>>, steps: &[RelayStepTrace], all: 
         } else {
             ("  ├─ ", "  │  ")
         };
-        let lead = format!("{} {} · ", step.icon(), step.profile.as_str());
+        let lead = format!("{} {} · ", step.icon(), step.agent);
         let tail = if step.has_started() {
             format!(" · {}", step.status())
         } else {

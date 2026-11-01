@@ -246,29 +246,12 @@ impl ConfirmSource {
     }
 }
 
-/// What a relay's sub-agent may reach: copied-in files or the web, never both.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RelayProfile {
-    Read,
-    Fetch,
-}
-
-impl RelayProfile {
-    /// Lower-case name, matching the wire form.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            RelayProfile::Read => "read",
-            RelayProfile::Fetch => "fetch",
-        }
-    }
-}
-
 /// One step of a relay's plan, as announced before any step runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayStepPlan {
     pub task: String,
-    pub profile: RelayProfile,
+    /// The name of the kind of sub-agent the step runs, such as `web_research`.
+    pub agent: String,
 }
 
 /// Progress of the relay inside the turn's running `relay` tool call: `Planned`
@@ -317,7 +300,8 @@ pub enum RelayEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayStepRecord {
     pub task: String,
-    pub profile: RelayProfile,
+    /// The name of the kind of sub-agent the step ran.
+    pub agent: String,
     /// How the step ran; `None` when the plan ended before it started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RelayStepRun>,

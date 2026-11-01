@@ -167,7 +167,7 @@ CREATE TABLE relay_steps (
     message_id  INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     step        INTEGER NOT NULL CHECK (step >= 1),
     task        TEXT NOT NULL,
-    profile     INTEGER NOT NULL CHECK (profile BETWEEN 0 AND 1),
+    agent       TEXT NOT NULL CHECK (agent <> ''),
     outcome     INTEGER CHECK (outcome BETWEEN 0 AND 1),
     failure     TEXT,
     truncated   INTEGER CHECK (truncated IN (0, 1)),

@@ -8,11 +8,12 @@ fn plan() -> Vec<RelayStepPlan> {
         .enumerate()
         .map(|(index, task)| RelayStepPlan {
             task: task.into(),
-            profile: if index == 0 {
-                RelayProfile::Fetch
+            agent: if index == 0 {
+                "web_research"
             } else {
-                RelayProfile::Read
-            },
+                "file_review"
+            }
+            .into(),
         })
         .collect()
 }

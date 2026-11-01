@@ -6,12 +6,11 @@ use std::time::Instant;
 use serde_json::Value;
 
 use assistd_ipc::{
-    RelayEvent, RelayProfile, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun,
-    RelayToolOutcome, RelayTraceEntry,
+    RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayToolOutcome,
+    RelayTraceEntry,
 };
 use assistd_memory::{
-    PersistedRelayEnd, PersistedRelayEntry, PersistedRelayProfile, PersistedRelayRun,
-    PersistedRelayStep, ToolOutcome,
+    PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep, ToolOutcome,
 };
 use assistd_utils::time::saturating_millis;
 
@@ -25,7 +24,7 @@ pub(super) struct RelayTraceBuilder {
 
 struct StepBuilder {
     task: String,
-    profile: PersistedRelayProfile,
+    agent: String,
     progress: StepProgress,
     tokens: Option<u32>,
     entries: Vec<PersistedRelayEntry>,
@@ -85,10 +84,7 @@ impl StepBuilder {
     fn pending(plan: &RelayStepPlan) -> Self {
         Self {
             task: plan.task.clone(),
-            profile: match plan.profile {
-                RelayProfile::Read => PersistedRelayProfile::Read,
-                RelayProfile::Fetch => PersistedRelayProfile::Fetch,
-            },
+            agent: plan.agent.clone(),
             progress: StepProgress::Pending,
             tokens: None,
             entries: Vec::new(),
@@ -213,7 +209,7 @@ impl StepBuilder {
         };
         PersistedRelayStep {
             task: self.task,
-            profile: self.profile,
+            agent: self.agent,
             run: ended.map(|(end, duration_ms)| PersistedRelayRun {
                 end,
                 duration_ms,
@@ -230,10 +226,7 @@ pub(super) fn wire_relay_steps(steps: Vec<PersistedRelayStep>) -> Vec<RelayStepR
         .into_iter()
         .map(|step| RelayStepRecord {
             task: step.task,
-            profile: match step.profile {
-                PersistedRelayProfile::Read => RelayProfile::Read,
-                PersistedRelayProfile::Fetch => RelayProfile::Fetch,
-            },
+            agent: step.agent,
             run: step.run.map(wire_relay_run),
         })
         .collect()

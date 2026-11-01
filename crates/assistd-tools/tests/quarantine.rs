@@ -107,6 +107,36 @@ async fn input_dirs_are_read_in_place_but_their_sockets_are_out_of_reach() {
 }
 
 #[tokio::test]
+async fn an_input_replaced_on_the_host_after_handover_stays_the_one_handed_over() {
+    let Some(sandbox) = bwrap_sandbox() else {
+        return;
+    };
+    let parent = tempfile::tempdir().expect("input parent");
+    let project = parent.path().join("project");
+    std::fs::create_dir(&project).expect("input dir");
+    std::fs::write(project.join("notes.txt"), INPUT).expect("input");
+    let relays = tempfile::tempdir().expect("relay parent");
+
+    let quarantine =
+        Quarantine::create(relays.path(), &sandbox, exec(), vec![project.clone()], None)
+            .await
+            .expect("quarantine");
+    std::fs::rename(&project, parent.path().join("moved")).expect("move the input away");
+    std::fs::create_dir(&project).expect("replacement dir");
+    std::fs::write(project.join("notes.txt"), HOST_ONLY).expect("replacement");
+    let tool = run_tool(&quarantine);
+    let mounted = quarantine.input_dir().join("project/notes.txt");
+    let mounted = mounted.display();
+
+    for command in [format!("cat {mounted}"), format!("bash \"cat {mounted}\"")] {
+        let (exit_code, output) = run(&tool, &command).await;
+        assert_eq!(exit_code, 0, "{command}: {output}");
+        assert!(output.contains(INPUT), "{command}: {output}");
+        assert!(!output.contains(HOST_ONLY), "{command}: {output}");
+    }
+}
+
+#[tokio::test]
 async fn quarantined_bash_and_cat_read_inputs_but_not_the_host_home() {
     let Some(sandbox) = bwrap_sandbox() else {
         return;

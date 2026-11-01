@@ -219,11 +219,13 @@ leave it.
 A sub-agent's commands run in a `Quarantine`, which starts from an empty world:
 a fresh `relay-*` directory whose `input/` shows the inputs it was handed,
 read-only and in place, a writable `home/` that is `$HOME` and the working
-directory, and `output/` for spilled output. Each input is canonicalized and
-opened once with `O_PATH`, and an empty file or directory is made under its
-name in `input/` as its mount point. The in-process readers resolve paths under
-`input/<name>` beneath that descriptor, and `bash` sees the same path through a
-`--ro-bind` of the canonical path, so both read the host file. On the host,
+directory, and `output/` for spilled output. Each input is opened once with
+`O_PATH`, and an empty file or directory is made under its name in `input/` as
+its mount point. The in-process readers resolve paths under `input/<name>`
+beneath that descriptor, and each `bash` gets a duplicate of it, inherited by
+bwrap alone, for a `--ro-bind-fd` over the mount point, so both read the file
+opened at handover even if the host path is later renamed or replaced. bwrap
+closes the descriptor before the command starts. On the host,
 `input/` holds only the empty mount points, so removing the relay directory
 never touches an input. The directory is removed when the `Quarantine` is
 dropped, so on cancel or panic too, even if a script left subdirectories
@@ -272,15 +274,20 @@ query. Dropping the quarantine stops the proxy and closes every tunnel through
 it.
 
 The model starts a sub-agent with the `relay` tool (`task`, `inputs`,
-`profile`, or `steps`: a plan of up to five such steps), registered in
-`assistd-core` beside `run` whenever tools are. A `read` relay sees its
-`inputs` read-only and has no network; a `fetch` relay gets an `Egress` and no
-inputs. A `fetch` call naming inputs is refused as invalid arguments before a
-quarantine or conversation exists, since a relay that could both see private
-files and reach the network could leak them. Every `read` step's inputs are
+`agent`, or `steps`: a plan of up to five such steps), registered in
+`assistd-core` beside `run` whenever tools are. `agent` names a `Role`: its
+name, when the model should pick it, a brief opening its system prompt, and
+its `Reach`, either files or the web, never both. The roles are built in and
+fixed: `file_review` reaches files, seeing its `inputs` read-only with no
+network; `web_research` reaches the web, getting an `Egress` and no inputs.
+The tool's schema and description list the roles, and the wire and the
+database carry a step's role by name. A web step naming inputs is refused as
+invalid arguments before a quarantine or conversation exists, since a relay
+that could both see private files and reach the network could leak them, and
+a web step's quarantine is never handed inputs. Every file step's inputs are
 checked before the first step starts: a missing input, one that is neither a
 file nor a directory, or two sharing a file name refuse the whole plan, so a
-mistake in a late step costs no earlier step's work. A `read` step is also
+mistake in a late step costs no earlier step's work. A file step is also
 refused, before anything starts, when its inputs hold more than twice a
 sub-agent's context budget of text, estimated from file sizes at four bytes a
 token. Counting stops at that limit, so even a tree with a build directory is
@@ -294,8 +301,8 @@ start), gives the sub-agent a registry holding only `run` over the quarantine's
 commands, and runs it inside `MainSlot::preserve_across`. A plan's steps run
 back to back inside one `preserve_across`, each in its own quarantine and
 handed only the previous step's rendered `RelayReport` beneath its task. Since
-a report carries what its sub-agent read, a plan with a `fetch` step after a
-`read` step is refused as invalid arguments. The tool result is the last step's
+a report carries what its sub-agent read, a plan with a web step after a
+file step is refused as invalid arguments. The tool result is the last step's
 rendered `RelayReport`; a failed step ends the plan as a failed tool result,
 not a failed turn. A relay starts without confirmation; commands inside it ask
 the same `ConfirmationGate` as the main agent's, with the prompt marked

@@ -82,7 +82,7 @@ erDiagram
         int message_id FK
         int step "from 1, unique per message"
         text task
-        int profile "0 read, 1 fetch"
+        text agent "the kind of sub-agent, as web_research"
         int outcome "0 answered, 1 failed, NULL never ran"
         text failure
         int truncated

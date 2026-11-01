@@ -37,6 +37,7 @@ uuid = { workspace = true }
 parking_lot = { workspace = true }
 rustix = { workspace = true }
 landlock = { workspace = true }
+command-fds = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }
 
