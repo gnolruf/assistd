@@ -1,8 +1,10 @@
 //! A relay's quarantine: what its commands can read and reach.
-//! Returns early when `bwrap` is not on PATH.
+//! Returns early when `bwrap` is not on PATH or the kernel predates Landlock's
+//! Unix socket access right (Linux 7.1).
 
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use serde_json::json;
@@ -19,6 +21,9 @@ const INPUT: &str = "handed-over-input";
 const PYTHON: &str = "/usr/bin/python3";
 
 fn bwrap_sandbox() -> Option<Arc<SandboxInfo>> {
+    if !exec_can_bar_host_sockets() {
+        return None;
+    }
     match probe_sandbox(
         SandboxRequest::Bwrap,
         Vec::new(),
@@ -32,6 +37,14 @@ fn bwrap_sandbox() -> Option<Arc<SandboxInfo>> {
 
 fn exec() -> PathBuf {
     env!("CARGO_BIN_EXE_assistd-quarantine-exec").into()
+}
+
+fn exec_can_bar_host_sockets() -> bool {
+    Command::new(exec())
+        .args(["--", "true"])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn run_tool(quarantine: &Quarantine) -> RunTool {
