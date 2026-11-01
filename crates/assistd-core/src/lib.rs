@@ -356,7 +356,6 @@ fn file_policies(
     let scratch_dir = sandbox.shared.scratch.clone();
     let bash_cfg = Arc::new(BashPolicyCfg {
         timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
-        denylist: config.tools.bash.denylist.clone(),
         destructive_patterns: parse_destructive_patterns(&config.tools.bash.destructive_patterns),
         allowlist: Arc::new(allowlist),
         protected: protected_dirs.clone(),

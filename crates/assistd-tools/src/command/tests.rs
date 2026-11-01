@@ -8,7 +8,9 @@ use crate::commands::{
     UniqCommand, WcCommand, WebCommand, WmCommand, permissive_write, test_screenshot, test_see,
     test_wm,
 };
-use crate::policy::{AlwaysAllowGate, ApprovalGate, Approvals, BashPolicyCfg, SandboxInfo};
+use crate::policy::{
+    AlwaysAllowGate, ApprovalGate, Approvals, BashPolicyCfg, DenyAllGate, SandboxInfo,
+};
 
 #[test]
 fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
@@ -45,14 +47,11 @@ fn contains_hint(s: &str) -> bool {
     s.contains("Use:") || s.contains("Try:") || s.contains("Check:") || s.contains("Available:")
 }
 
-fn bash_denying_rm_rf() -> BashCommand {
+fn bash_declining_every_confirmation() -> BashCommand {
     BashCommand::new(
-        Arc::new(BashPolicyCfg {
-            denylist: vec!["rm -rf /".into()],
-            ..Default::default()
-        }),
+        Arc::new(BashPolicyCfg::default()),
         SandboxInfo::none(),
-        Arc::new(AlwaysAllowGate),
+        Arc::new(DenyAllGate),
     )
 }
 
@@ -112,7 +111,11 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
         ),
         (
             "bash",
-            run_cmd(bash_denying_rm_rf(), vec!["rm -rf /".into()]).await,
+            run_cmd(
+                bash_declining_every_confirmation(),
+                vec!["touch /nonexistent/assistd-convention-test".into()],
+            )
+            .await,
         ),
         (
             "wm",

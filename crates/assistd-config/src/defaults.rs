@@ -161,20 +161,6 @@ pub fn default_tools_scratch_dir() -> PathBuf {
     base.join("assistd").join("scratch")
 }
 
-/// Literal command substrings rejected before spawn.
-pub fn default_bash_denylist() -> Vec<String> {
-    vec![
-        "rm -rf /".into(),
-        "rm -rf /*".into(),
-        "rm -rf /home".into(),
-        "mkfs".into(),
-        "dd if=/dev/zero".into(),
-        ":(){ :|:& };:".into(),
-        "> /dev/sda".into(),
-        "> /dev/nvme".into(),
-    ]
-}
-
 /// Programs that run without confirmation: tools that neither run another
 /// program nor write files except through options the destructive patterns
 /// catch, plus wrappers whose command is checked itself.

@@ -86,23 +86,6 @@ async fn bash_timeout_returns_137_with_timeout_message() {
 }
 
 #[tokio::test]
-async fn denylist_match_is_rejected_before_spawn() {
-    let cmd = bash_with_cfg(
-        BashPolicyCfg {
-            denylist: vec!["rm -rf /".into()],
-            ..Default::default()
-        },
-        Arc::new(AlwaysAllowGate),
-    );
-    let out = run(&cmd, "rm -rf /", None).await;
-    assert_eq!(out.exit_code, 126);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "[error] bash: command denied by policy. Matched denylist pattern: rm -rf /. Try: a non-destructive alternative\n"
-    );
-}
-
-#[tokio::test]
 async fn destructive_pattern_is_cancelled_when_denied() {
     let cmd = rm_rf_is_destructive(Arc::new(DenyAllGate));
     let out = run(&cmd, "rm -rf /tmp/this-directory-does-not-exist-XYZ", None).await;

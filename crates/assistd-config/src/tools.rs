@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, default_bash_allowed_programs, default_bash_denylist,
+    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, default_bash_allowed_programs,
     default_bash_destructive_patterns, default_tools_overflow_dir, default_tools_scratch_dir,
     default_writable_paths,
 };
@@ -138,17 +138,13 @@ pub enum BashSandboxMode {
 
 /// Policy for the scripts `bash` runs. A script runs
 /// without confirmation only when every program it can run is allowed and
-/// it matches no destructive pattern; the denylist refuses outright.
+/// it matches no destructive pattern.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsBashConfig {
     /// `bash` timeout in seconds; on expiry the process group is killed
     /// (exit 137).
     pub timeout_secs: NonZeroU64,
-    /// Case-insensitive substrings that reject a script before spawn (exit
-    /// 126). An entry ending in a non-alphanumeric must also end a shell
-    /// word: `"rm -rf /"` rejects `rm -rf /` but not `rm -rf /tmp/build`.
-    pub denylist: Vec<String>,
     /// Programs that run without confirmation: absolute paths, or bare
     /// names resolved on `PATH` that count only if the file is not
     /// user-writable or is the one approved. "Always allow" approvals
@@ -177,11 +173,6 @@ pub struct ToolsBashConfig {
 impl DescribeSettings for ToolsBashConfig {
     describe_fields! {
         timeout_secs => ("command timeout (s)", "Longest a bash command runs before it is killed"),
-        denylist => (
-            "blocked commands",
-            "Case-insensitive substrings that reject a script outright",
-            advanced
-        ),
         allowed_programs => (
             "programs run without asking",
             "Programs that run without asking for confirmation",
@@ -205,7 +196,6 @@ impl Default for ToolsBashConfig {
     fn default() -> Self {
         Self {
             timeout_secs: DEFAULT_BASH_TIMEOUT_SECS,
-            denylist: default_bash_denylist(),
             allowed_programs: default_bash_allowed_programs(),
             destructive_patterns: default_bash_destructive_patterns(),
             sandbox: BashSandboxMode::default(),

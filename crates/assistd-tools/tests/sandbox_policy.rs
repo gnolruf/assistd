@@ -1,4 +1,4 @@
-//! The bash command's denylist, confirmation gate and bwrap sandbox.
+//! The bash command's confirmation gate and bwrap sandbox.
 //! Bwrap tests return early when `bwrap` is not on PATH.
 
 use std::os::linux::net::SocketAddrExt;
@@ -21,14 +21,12 @@ use assistd_tools::{
 const POLICY_DENIED_EXIT: i32 = 126;
 
 fn bash_with(
-    denylist: Vec<&str>,
     destructive: Vec<Vec<&str>>,
     gate: Arc<dyn ConfirmationGate>,
     sandbox: Arc<SandboxInfo>,
 ) -> BashCommand {
     let cfg = BashPolicyCfg {
         timeout: Duration::from_secs(10),
-        denylist: denylist.into_iter().map(ToString::to_string).collect(),
         destructive_patterns: destructive
             .into_iter()
             .map(|pattern| DestructivePattern::new(pattern).expect("valid pattern"))
@@ -125,21 +123,9 @@ impl ConfirmationGate for RecordingGate {
 }
 
 #[tokio::test]
-async fn denylist_bypasses_confirmation_gate() {
-    let cmd = bash_with(
-        vec!["rm -rf"],
-        vec![vec!["rm", "-rf"]],
-        Arc::new(PanicGate),
-        no_sandbox(),
-    );
-    let out = cmd.run(input("rm -rf /tmp/whatever")).await;
-    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
-}
-
-#[tokio::test]
 async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
     let gate = RecordingGate::answering(Approval::Once);
-    let cmd = bash_with(vec![], vec![vec!["true"]], gate.clone(), no_sandbox());
+    let cmd = bash_with(vec![vec!["true"]], gate.clone(), no_sandbox());
     let out = cmd.run(input("true && echo ran")).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"ran\n");
@@ -160,12 +146,7 @@ async fn run_time_command_names_ask_the_gate() {
         std::fs::write(&target, b"x").unwrap();
         let script = template.replace("{}", &target.to_string_lossy());
 
-        let cmd = bash_with(
-            vec![],
-            vec![vec!["rm", "-rf"]],
-            Arc::new(DenyAllGate),
-            no_sandbox(),
-        );
+        let cmd = bash_with(vec![vec!["rm", "-rf"]], Arc::new(DenyAllGate), no_sandbox());
         let out = cmd.run(input(&script)).await;
         assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -189,7 +170,7 @@ async fn running_a_script_file_asks_the_gate_without_offering_always() {
     );
 
     let gate = RecordingGate::answering(Approval::Deny);
-    let cmd = bash_with(vec![], vec![], gate.clone(), no_sandbox());
+    let cmd = bash_with(vec![], gate.clone(), no_sandbox());
     let out = cmd.run(input(&script)).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
     assert!(target.exists(), "{script}: the script must not have run");
@@ -267,7 +248,7 @@ async fn bwrap_hides_the_host_tmp() {
         return;
     };
     let host_file = tempfile::NamedTempFile::new_in("/tmp").expect("host /tmp file");
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd
         .run(input(&format!("test -e {}", host_file.path().display())))
         .await;
@@ -317,7 +298,7 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let bash = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let bash = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
     let from_bash = scratch.path().join("from-bash.txt");
     let script = format!(
         "cat {} {} > {}; touch {} 2>/dev/null || echo read-only",
@@ -342,7 +323,7 @@ async fn bwrap_unshares_network_namespace() {
         return;
     };
     let host = std::fs::read_link("/proc/self/ns/net").expect("host net namespace");
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input("readlink /proc/self/ns/net")).await;
     assert_eq!(out.exit_code, 0);
     let inside = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -369,7 +350,7 @@ async fn networked_bwrap_cannot_reach_abstract_sockets() {
         "python3 -I -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"\\0{name}\"); \
          print(\"connected\")'"
     );
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input(&probe)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.stdout.is_empty(), "reached the host's abstract socket");
@@ -377,26 +358,70 @@ async fn networked_bwrap_cannot_reach_abstract_sockets() {
 }
 
 #[tokio::test]
-async fn bwrap_blocks_writes_to_read_only_root() {
+async fn bwrap_blocks_writes_under_usr_and_etc() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
-    let unique = format!("/usr/assistd-sandbox-test-{}", std::process::id());
-    let out = cmd.run(input(&format!("touch {unique}"))).await;
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_ne!(out.exit_code, 0, "write under /usr succeeded: {combined}");
-    let lower = combined.to_ascii_lowercase();
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    for dir in ["/usr", "/etc"] {
+        let unique = format!("{dir}/assistd-sandbox-test-{}", std::process::id());
+        let out = cmd.run(input(&format!("touch {unique}"))).await;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_ne!(out.exit_code, 0, "write under {dir} succeeded: {combined}");
+        let lower = combined.to_ascii_lowercase();
+        assert!(
+            lower.contains("read-only")
+                || lower.contains("permission denied")
+                || lower.contains("operation not permitted"),
+            "expected EROFS/EACCES-shaped error under {dir}, got: {combined}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bwrap_dev_holds_no_block_devices() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd.run(input("find /dev -type b")).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.exit_code, 0, "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{stderr}");
+}
+
+#[tokio::test]
+async fn bwrap_proc_shows_only_the_sandbox_processes() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let list_commands = "for p in /proc/[0-9]*; do read -r c < \"$p/comm\" && echo \"$c\"; done";
+    let out = cmd.run(input(list_commands)).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.exit_code, 0, "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.lines().any(|name| name == "bash"), "{stdout}");
     assert!(
-        lower.contains("read-only")
-            || lower.contains("permission denied")
-            || lower.contains("operation not permitted"),
-        "expected EROFS/EACCES-shaped error, got: {combined}"
+        stdout.lines().all(|name| ["bwrap", "bash"].contains(&name)),
+        "a process outside the sandbox is visible: {stdout}"
     );
+}
+
+#[tokio::test]
+async fn bwrap_run_holds_no_dbus_socket() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd.run(input("find /run -type s")).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.exit_code, 0, "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{stderr}");
 }
 
 /// The bomb's depth is bounded, so it stays harmless if the cap regresses.
@@ -405,7 +430,7 @@ async fn bwrap_caps_a_renamed_fork_bomb() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    let cmd = bash_with(vec![], vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
     let bomb = "f(){ if (( $1 < 8 )); then f $(($1+1)) | f $(($1+1)) & wait; else sleep 1; fi; }; \
                 f 0; echo ended";
     let out = cmd.run(input(bomb)).await;
