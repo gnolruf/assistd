@@ -1,4 +1,4 @@
-//! Differential test of the script reviewer: every script it clears runs under real bash in
+//! Differential tests of the script reviewer and classifier: scripts run under real bash in
 //! bwrap, where each program is a shim logging its name. Returns early when `bwrap` cannot run.
 
 use std::collections::BTreeSet;
@@ -10,7 +10,7 @@ use std::thread;
 
 use tempfile::TempDir;
 
-use assistd_tools::policy::{Allowlist, Rules, SearchPath, check_script};
+use assistd_tools::policy::{Allowlist, Class, Rules, SearchPath, check_script, classify};
 
 /// Scripts each run in every context; every program they name is allowed except [`FORBIDDEN`].
 const CORPUS: &[&str] = &[
@@ -119,10 +119,76 @@ g",
     "if ! command -v jq >/dev/null; then echo missing; fi",
     "echo 'rm a' | bash",
     "echo rm a | xargs",
+    "mkdir -p out && touch out/x && cp a out/y && ln -s a l",
+    "tee c < a > /dev/null",
+    "sort -o b a",
+    "ls | xargs sort",
+    "cat a | sort | uniq -c",
+    "find . -name '*.txt' -exec grep -l line {} +",
 ];
 
 /// Programs off the allowlist; every other shimmed name is on it.
 const FORBIDDEN: &[&str] = &["chmod", "curl", "dd", "mv", "rm", "shred", "wget"];
+
+/// Programs the classifier may call read-only; bash builtins are never shimmed.
+const READ_ONLY: &[&str] = &[
+    "b2sum",
+    "base64",
+    "basename",
+    "cat",
+    "cksum",
+    "cmp",
+    "column",
+    "comm",
+    "cut",
+    "date",
+    "df",
+    "diff",
+    "dirname",
+    "du",
+    "egrep",
+    "expand",
+    "fgrep",
+    "file",
+    "find",
+    "fold",
+    "grep",
+    "head",
+    "hexdump",
+    "id",
+    "join",
+    "jq",
+    "ls",
+    "md5sum",
+    "nl",
+    "od",
+    "paste",
+    "printenv",
+    "readlink",
+    "realpath",
+    "rev",
+    "rg",
+    "seq",
+    "sha1sum",
+    "sha256sum",
+    "sha512sum",
+    "sleep",
+    "sort",
+    "stat",
+    "strings",
+    "tac",
+    "tail",
+    "tr",
+    "tree",
+    "uname",
+    "unexpand",
+    "wc",
+    "which",
+    "whoami",
+];
+
+/// Programs that write or delete the paths they name.
+const EDIT: &[&str] = &["cp", "ln", "mkdir", "mv", "rm", "tee", "touch"];
 
 /// Allowed programs that run a command; their shims run the real program.
 const REAL_WRAPPERS: &[&str] = &["env", "find", "nice", "nohup", "stdbuf", "timeout", "xargs"];
@@ -213,8 +279,8 @@ impl Harness {
         check_script(script, &rules).is_none()
     }
 
-    /// The forbidden programs bash started, directly or through a wrapper, running `script`.
-    fn forbidden_runs(&self, id: usize, script: &str) -> Vec<String> {
+    /// The shimmed programs bash started, directly or through a wrapper, running `script`.
+    fn runs(&self, id: usize, script: &str) -> Vec<String> {
         let run = self.root.path().join(format!("run{id}"));
         let work = run.join("work");
         fs::create_dir_all(&work).expect("work dir");
@@ -227,7 +293,6 @@ impl Harness {
         fs::read_to_string(run.join("log"))
             .unwrap_or_default()
             .lines()
-            .filter(|name| FORBIDDEN.contains(name))
             .map(str::to_string)
             .collect()
     }
@@ -284,7 +349,7 @@ fn cleared_scripts_run_only_allowed_programs() {
         .filter(|s| harness.clears(s))
         .collect();
     assert!(!cleared.is_empty(), "the reviewer cleared no script");
-    let bypasses = run_all(&harness, &cleared);
+    let bypasses = run_all(&harness, &cleared, &is_forbidden);
     assert!(
         bypasses.is_empty(),
         "cleared scripts ran forbidden programs:\n{}",
@@ -299,13 +364,62 @@ fn cleared_scripts_run_only_allowed_programs() {
         .filter(|s| !harness.clears(s))
         .collect();
     assert!(
-        !run_all(&harness, &flagged).is_empty(),
+        !run_all(&harness, &flagged, &is_forbidden).is_empty(),
         "no flagged script ran a forbidden program, so the shims log nothing"
     );
 }
 
-/// Run every script on a pool of threads, returning those that started a forbidden program.
-fn run_all<'s>(harness: &Harness, scripts: &[&'s str]) -> Vec<(&'s str, Vec<String>)> {
+#[test]
+fn classified_scripts_run_only_the_programs_their_class_allows() {
+    if !bwrap_runs() {
+        return;
+    }
+    let scripts: Vec<String> = CORPUS.iter().flat_map(|script| variants(script)).collect();
+    let harness = Harness::new(&shim_names(&scripts));
+    let classes: Vec<(&str, Class)> = scripts
+        .iter()
+        .map(|script| (script.as_str(), classify(script, None)))
+        .collect();
+    let of_class = |wanted: fn(&Class) -> bool| -> Vec<&str> {
+        classes
+            .iter()
+            .filter(|(_, class)| wanted(class))
+            .map(|(script, _)| *script)
+            .collect()
+    };
+    let read_only = of_class(|class| *class == Class::ReadOnly);
+    let edits = of_class(|class| matches!(class, Class::Edit { .. }));
+    assert!(
+        !read_only.is_empty() && !edits.is_empty(),
+        "the classifier found no read-only or no edit script"
+    );
+    let not_read_only = |name: &str| !READ_ONLY.contains(&name) && !REAL_WRAPPERS.contains(&name);
+    let not_edit = |name: &str| not_read_only(name) && !EDIT.contains(&name);
+    let mismatches: Vec<_> = run_all(&harness, &read_only, &not_read_only)
+        .into_iter()
+        .chain(run_all(&harness, &edits, &not_edit))
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "classified scripts ran programs their class does not allow:\n{}",
+        mismatches
+            .iter()
+            .map(|(script, ran)| format!("{ran:?} from:\n{script}\n"))
+            .collect::<String>()
+    );
+}
+
+fn is_forbidden(name: &str) -> bool {
+    FORBIDDEN.contains(&name)
+}
+
+/// Run every script on a pool of threads, returning those that started a `disallowed` program,
+/// with the programs.
+fn run_all<'s>(
+    harness: &Harness,
+    scripts: &[&'s str],
+    disallowed: &(dyn Fn(&str) -> bool + Sync),
+) -> Vec<(&'s str, Vec<String>)> {
     let threads = thread::available_parallelism().map_or(4, usize::from);
     let chunk = scripts.len().div_ceil(threads).max(1);
     thread::scope(|scope| {
@@ -318,7 +432,8 @@ fn run_all<'s>(harness: &Harness, scripts: &[&'s str]) -> Vec<(&'s str, Vec<Stri
                         .iter()
                         .enumerate()
                         .map(|(at, script)| {
-                            let ran = harness.forbidden_runs(worker * chunk + at, script);
+                            let mut ran = harness.runs(worker * chunk + at, script);
+                            ran.retain(|name| disallowed(name));
                             (*script, ran)
                         })
                         .filter(|(_, ran)| !ran.is_empty())
