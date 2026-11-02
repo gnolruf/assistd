@@ -14,38 +14,27 @@ use assistd_tools::commands::{BashCommand, BashPolicyCfg, WriteCommand, WritePol
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
-    ConfirmationRequest, DenyAllGate, DestructivePattern, FileScope, Protected, SandboxInfo,
-    SandboxRequest, SearchPath, SharedDirs, Unattended,
+    ConfirmationRequest, DenyAllGate, FileScope, Protected, SandboxInfo, SandboxRequest,
+    SearchPath, SharedDirs, Unattended,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
 
-fn bash_with(
-    destructive: Vec<Vec<&str>>,
-    gate: Arc<dyn ConfirmationGate>,
-    sandbox: Arc<SandboxInfo>,
-) -> BashCommand {
+fn bash_with(gate: Arc<dyn ConfirmationGate>, sandbox: Arc<SandboxInfo>) -> BashCommand {
     let cfg = BashPolicyCfg {
         timeout: Duration::from_secs(10),
-        destructive_patterns: destructive
-            .into_iter()
-            .map(|pattern| DestructivePattern::new(pattern).expect("valid pattern"))
-            .collect(),
         ..BashPolicyCfg::default()
     };
     BashCommand::new(Arc::new(cfg), sandbox, gate)
 }
 
-/// Bash allowing `allowed` on a read-only system search path, with
-/// approvals kept in `store`.
-fn bash_allowing(allowed: &[&str], store: &Path, gate: Arc<dyn ConfirmationGate>) -> BashCommand {
+/// Bash on the system search path, with "always allow" approvals kept in `store`.
+fn bash_approving(store: &Path, gate: Arc<dyn ConfirmationGate>) -> BashCommand {
     let allowlist = Allowlist::load(
-        allowed.iter().map(ToString::to_string),
         SearchPath {
             dirs: ["/usr/local/bin", "/usr/bin", "/bin"]
                 .map(Into::into)
                 .into(),
-            read_only: true,
         },
         store.to_path_buf(),
     )
@@ -123,9 +112,9 @@ impl ConfirmationGate for RecordingGate {
 }
 
 #[tokio::test]
-async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
+async fn an_unvetted_program_asks_the_gate_and_runs_when_approved() {
     let gate = RecordingGate::answering(Approval::Once);
-    let cmd = bash_with(vec![vec!["nproc"]], gate.clone(), no_sandbox());
+    let cmd = bash_with(gate.clone(), no_sandbox());
     let out = cmd.run(input("nproc >/dev/null && echo ran")).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"ran\n");
@@ -135,7 +124,11 @@ async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
     };
     assert_eq!(req.tool, "bash");
     assert_eq!(req.script, "nproc >/dev/null && echo ran");
-    assert_eq!(req.matched_pattern, "nproc");
+    assert_eq!(
+        req.matched_pattern,
+        "`nproc` is on neither the read-only nor the edit list"
+    );
+    assert_eq!(req.always_allow, ["nproc [options]"]);
 }
 
 #[tokio::test]
@@ -186,12 +179,12 @@ async fn run_time_command_names_ask_the_gate() {
         std::fs::write(&target, b"x").unwrap();
         let script = template.replace("{}", &target.to_string_lossy());
 
-        let cmd = bash_with(vec![vec!["rm", "-rf"]], Arc::new(DenyAllGate), no_sandbox());
+        let cmd = bash_with(Arc::new(DenyAllGate), no_sandbox());
         let out = cmd.run(input(&script)).await;
         assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stderr.contains("Could not rule out a destructive command"),
+            stderr.contains("It could not be vetted"),
             "{script}: {stderr}"
         );
         assert!(target.exists(), "{script}: the script must not have run");
@@ -210,7 +203,7 @@ async fn running_a_script_file_asks_the_gate_without_offering_always() {
     );
 
     let gate = RecordingGate::answering(Approval::Deny);
-    let cmd = bash_with(vec![], gate.clone(), no_sandbox());
+    let cmd = bash_with(gate.clone(), no_sandbox());
     let out = cmd.run(input(&script)).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
     assert!(target.exists(), "{script}: the script must not have run");
@@ -222,13 +215,8 @@ async fn running_a_script_file_asks_the_gate_without_offering_always() {
 }
 
 #[tokio::test]
-async fn allowed_programs_run_without_asking() {
-    let scratch = tempfile::tempdir().unwrap();
-    let cmd = bash_allowing(
-        &["tr"],
-        &scratch.path().join("approvals.toml"),
-        Arc::new(PanicGate),
-    );
+async fn read_only_programs_run_without_asking() {
+    let cmd = bash_with(Arc::new(PanicGate), no_sandbox());
     let out = cmd
         .run(CommandInput {
             args: vec!["tr a-z A-Z".into()],
@@ -244,12 +232,11 @@ async fn allowed_programs_run_without_asking() {
 async fn always_allow_adds_the_offered_programs_for_good() {
     let scratch = tempfile::tempdir().unwrap();
     let store = scratch.path().join("approvals.toml");
-    let marker = scratch.path().join("made");
-    let script = format!("cd {} && touch made", scratch.path().display());
+    let script = "nproc --all";
 
     let gate = RecordingGate::answering(Approval::Always);
-    let out = bash_allowing(&[], &store, gate.clone())
-        .run(input(&script))
+    let out = bash_approving(&store, gate.clone())
+        .run(input(script))
         .await;
     assert_eq!(
         out.exit_code,
@@ -257,21 +244,18 @@ async fn always_allow_adds_the_offered_programs_for_good() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(marker.exists());
     {
         let asked = gate.asked.lock();
         let [req] = asked.as_slice() else {
             panic!("expected exactly one confirmation, got {asked:?}");
         };
-        assert_eq!(req.always_allow, ["touch made …"]);
+        assert_eq!(req.always_allow, ["nproc [options]"]);
     }
     let saved = std::fs::read_to_string(&store).expect("approvals saved");
-    assert!(saved.contains("name = \"touch\""), "{saved}");
-    assert!(saved.contains("subcommand = \"made\""), "{saved}");
+    assert!(saved.contains("name = \"nproc\""), "{saved}");
 
-    std::fs::remove_file(&marker).unwrap();
-    let out = bash_allowing(&[], &store, Arc::new(PanicGate))
-        .run(input(&script))
+    let out = bash_approving(&store, Arc::new(PanicGate))
+        .run(input(script))
         .await;
     assert_eq!(
         out.exit_code,
@@ -279,7 +263,7 @@ async fn always_allow_adds_the_offered_programs_for_good() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(marker.exists());
+    assert!(!out.stdout.is_empty());
 }
 
 #[tokio::test]
@@ -288,7 +272,7 @@ async fn bwrap_hides_the_host_tmp() {
         return;
     };
     let host_file = tempfile::NamedTempFile::new_in("/tmp").expect("host /tmp file");
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd
         .run(input(&format!("test -e {}", host_file.path().display())))
         .await;
@@ -338,7 +322,7 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let bash = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let bash = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let from_bash = scratch.path().join("from-bash.txt");
     let script = format!(
         "cat {} {} > {}; touch {} 2>/dev/null || echo read-only",
@@ -363,7 +347,7 @@ async fn bwrap_unshares_network_namespace() {
         return;
     };
     let host = std::fs::read_link("/proc/self/ns/net").expect("host net namespace");
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input("readlink /proc/self/ns/net")).await;
     assert_eq!(out.exit_code, 0);
     let inside = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -390,7 +374,7 @@ async fn networked_bwrap_cannot_reach_abstract_sockets() {
         "python3 -I -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"\\0{name}\"); \
          print(\"connected\")'"
     );
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input(&probe)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.stdout.is_empty(), "reached the host's abstract socket");
@@ -402,7 +386,7 @@ async fn bwrap_blocks_writes_under_usr_and_etc() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     for dir in ["/usr", "/etc"] {
         let unique = format!("{dir}/assistd-sandbox-test-{}", std::process::id());
         let out = cmd.run(input(&format!("touch {unique}"))).await;
@@ -427,7 +411,7 @@ async fn bwrap_dev_holds_no_block_devices() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input("find /dev -type b")).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.exit_code, 0, "{stderr}");
@@ -439,7 +423,7 @@ async fn bwrap_proc_shows_only_the_sandbox_processes() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let list_commands = "for p in /proc/[0-9]*; do read -r c < \"$p/comm\" && echo \"$c\"; done";
     let out = cmd.run(input(list_commands)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -457,7 +441,7 @@ async fn bwrap_run_holds_no_dbus_socket() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let out = cmd.run(input("find /run -type s")).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.exit_code, 0, "{stderr}");
@@ -470,7 +454,7 @@ async fn bwrap_caps_a_renamed_fork_bomb() {
     let Some(sandbox) = bwrap_or_none() else {
         return;
     };
-    let cmd = bash_with(vec![], Arc::new(AlwaysAllowGate), sandbox);
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let bomb = "f(){ if (( $1 < 8 )); then f $(($1+1)) | f $(($1+1)) & wait; else sleep 1; fi; }; \
                 f 0; echo ended";
     let out = cmd.run(input(bomb)).await;

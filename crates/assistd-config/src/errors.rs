@@ -31,6 +31,13 @@ pub enum ConfigError {
         source: toml_edit::TomlError,
     },
 
+    #[error("{} sets `{key}`, which was removed: {replacement}; delete it", path.display())]
+    Removed {
+        path: PathBuf,
+        key: &'static str,
+        replacement: &'static str,
+    },
+
     #[error("cannot set `{key}`: {reason}")]
     Edit { key: String, reason: String },
 

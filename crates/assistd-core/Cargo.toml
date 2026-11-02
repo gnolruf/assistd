@@ -27,7 +27,6 @@ futures-util = { workspace = true }
 libc = { workspace = true }
 rustix = { workspace = true }
 serde_json = { workspace = true }
-shlex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "net", "signal"] }
 tokio-util = { workspace = true }

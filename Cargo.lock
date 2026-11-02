@@ -236,7 +236,6 @@ dependencies = [
  "parking_lot 0.13.0",
  "rustix 1.1.6",
  "serde_json",
- "shlex 2.0.1",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

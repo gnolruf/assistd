@@ -130,14 +130,6 @@ pub(crate) const SECTIONS: &[Section] = &[
                 SettingKind::List(ListItem::Text),
             ),
             setting(
-                "tools.bash.allowed_programs",
-                SettingKind::List(ListItem::Text),
-            ),
-            setting(
-                "tools.bash.destructive_patterns",
-                SettingKind::List(ListItem::Text),
-            ),
-            setting(
                 "tools.bash.bwrap_extra_args",
                 SettingKind::List(ListItem::Text),
             ),

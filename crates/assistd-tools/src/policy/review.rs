@@ -1,13 +1,11 @@
-//! Command review: whether a script or argv may run without the user's
-//! confirmation.
+//! Command review: the classifier, the shell-word helpers it shares, and why a script needs the
+//! user's confirmation.
 
-use std::path::{Path, PathBuf};
-use std::{fmt, iter, mem};
+use std::{fmt, mem};
 
-use super::allowlist::{Allowlist, ApprovalScope, ProgramApproval, Verdict};
+use super::allowlist::ProgramApproval;
 use super::confirm::Risk;
-use super::shell::{self, Redirect, Script, SimpleCommand, Word};
-use placeholder::Placeholder;
+use super::shell::{self, Script, Word};
 
 mod classify;
 mod evaluated;
@@ -15,8 +13,8 @@ mod placeholder;
 
 pub use classify::{Action, Analysis, Class, Delete, Effect, analyze, classify};
 
-/// How many scripts deep (`eval`, `trap`, …) the matcher looks before
-/// calling a script unverifiable.
+/// How many scripts deep (`eval`, `trap`, …) the classifier looks before
+/// calling a script unvetted.
 const MAX_NESTED_SCRIPTS: usize = 16;
 
 /// Reserved words that leave the word after them in command position.
@@ -24,8 +22,8 @@ const COMMAND_PREFIX_WORDS: &[&str] = &[
     "!", "{", "if", "then", "else", "elif", "do", "while", "until",
 ];
 
-/// Builtins and default-allowed wrappers that run a command given as their
-/// arguments, with the number of operands before that command.
+/// Builtins and programs that run a command given as their arguments, with
+/// the number of operands before that command.
 const WRAPPERS: &[(&str, usize)] = &[
     ("builtin", 0),
     ("command", 0),
@@ -53,24 +51,6 @@ const SAFE_BUILTINS: &[&str] = &[
     "logout", "popd", "printf", "pushd", "pwd", "read", "readonly", "return", "set", "shift",
     "shopt", "suspend", "test", "times", "true", "type", "typeset", "ulimit", "umask", "unalias",
     "unset", "wait",
-];
-
-/// Builtins and keywords whose arguments are checked in their place.
-const RUNS_ITS_ARGUMENTS: &[&str] = &[
-    ".", "alias", "builtin", "command", "coproc", "eval", "exec", "source", "time", "trap",
-];
-
-/// Builtins that can run or load code no check can see, or write files
-/// no redirection names (`history -w`), so they always ask.
-const RISKY_BUILTINS: &[&str] = &[
-    "bind",
-    "compgen",
-    "complete",
-    "enable",
-    "fc",
-    "history",
-    "mapfile",
-    "readarray",
 ];
 
 /// Characters that make one word a command line rather than a program
@@ -118,145 +98,18 @@ const INPUT_PLACEHOLDER: &str = "{}";
 /// `find` flags after which it runs a command.
 const FIND_EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
-/// Options whose value names a program the command runs, checked like a
-/// command word whatever the destructive patterns say.
-const PROGRAM_OPTIONS: &[(&str, &[&str])] = &[("rg", &["--pre", "--hostname-bin"])];
-
 /// Files a redirection may write without confirmation, besides `/dev/fd/N`
 /// and files under `/tmp` or the scratch directory.
 const HARMLESS_TARGETS: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr"];
 
-/// A destructive command: a name plus arguments that must all appear, in any order, ignoring ASCII
-/// case, each word listing `|`-separated alternatives. `-rf` matches any short-option cluster,
-/// `--force` an abbreviation, `of=` a prefix; `"$f"` stands in for one argument, `$opts` for all.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DestructivePattern {
-    display: String,
-    names: Vec<String>,
-    args: Vec<Vec<ArgSpec>>,
-}
-
-impl DestructivePattern {
-    /// `None` when there are no words or a word has no alternatives.
-    pub fn new<I, S>(words: I) -> Option<Self>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let words: Vec<String> = words.into_iter().map(|w| w.as_ref().to_string()).collect();
-        let (name, args) = words.split_first()?;
-        let names: Vec<String> = alternatives(name).map(str::to_ascii_lowercase).collect();
-        if names.is_empty() {
-            return None;
-        }
-        let args = args
-            .iter()
-            .map(|arg| {
-                let specs: Vec<ArgSpec> = alternatives(arg).map(ArgSpec::parse).collect();
-                (!specs.is_empty()).then_some(specs)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Self {
-            display: words.join(" "),
-            names,
-            args,
-        })
-    }
-
-    fn invoked_by(&self, command: &Word, args: &[Word], fed: bool) -> bool {
-        let program = basename(&command.text);
-        if !self
-            .names
-            .iter()
-            .any(|n| command.text.eq_ignore_ascii_case(n) || program.eq_ignore_ascii_case(n))
-        {
-            return false;
-        }
-        if fed || args.iter().any(|a| a.splits) {
-            return true;
-        }
-        let unknown = args.iter().filter(|a| a.dynamic).count();
-        let missing = self
-            .args
-            .iter()
-            .filter(|alts| !alts.iter().any(|spec| spec.satisfied_by(args)))
-            .count();
-        missing <= unknown
-    }
-}
-
-impl fmt::Display for DestructivePattern {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.display)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ArgSpec {
-    ShortFlags(String),
-    Long(String),
-    Prefix(String),
-    Exact(String),
-}
-
-impl ArgSpec {
-    fn parse(alt: &str) -> Self {
-        let alt = alt.to_ascii_lowercase();
-        if alt.ends_with('=') {
-            return Self::Prefix(alt);
-        }
-        if let Some(long) = alt.strip_prefix("--").filter(|l| !l.is_empty()) {
-            return Self::Long(long.to_string());
-        }
-        match alt.strip_prefix('-') {
-            Some(flags) if !flags.is_empty() && flags.chars().all(|c| c.is_ascii_alphabetic()) => {
-                Self::ShortFlags(flags.to_string())
-            }
-            _ => Self::Exact(alt),
-        }
-    }
-
-    fn satisfied_by(&self, args: &[Word]) -> bool {
-        match self {
-            Self::ShortFlags(flags) => flags.chars().all(|flag| {
-                args.iter().any(|a| {
-                    short_options(&a.text)
-                        .is_some_and(|opts| opts.chars().any(|o| o.eq_ignore_ascii_case(&flag)))
-                })
-            }),
-            Self::Long(name) => args.iter().any(|a| {
-                a.text
-                    .strip_prefix("--")
-                    .map(|opt| opt.split_once('=').map_or(opt, |(opt, _)| opt))
-                    .is_some_and(|opt| {
-                        !opt.is_empty()
-                            && name
-                                .get(..opt.len())
-                                .is_some_and(|abbrev| abbrev.eq_ignore_ascii_case(opt))
-                    })
-            }),
-            Self::Prefix(prefix) => args.iter().any(|a| {
-                a.text
-                    .get(..prefix.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-            }),
-            Self::Exact(exact) => args.iter().any(|a| a.text.eq_ignore_ascii_case(exact)),
-        }
-    }
-}
-
 /// Why a command needs the user's confirmation before it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirmation {
-    /// It runs a command matching this destructive pattern.
-    Pattern(String),
-    /// It may run something no check can see; holds why, for the prompt.
-    Unverifiable(String),
-    /// It runs programs not on the allowlist. `approvals` covers every run
-    /// of them when "always allow" can.
-    Unlisted {
-        programs: Vec<String>,
-        approvals: Option<Vec<ProgramApproval>>,
+    /// Neither the read-only nor the edit list vets something it does; holds why, for the
+    /// prompt, and what an "always allow" answer would approve, possibly nothing.
+    Unvetted {
+        why: String,
+        always_allow: Vec<ProgramApproval>,
     },
     /// It touches a sensitive path, so it asks every time; holds what and where.
     Sensitive(String),
@@ -268,11 +121,8 @@ impl Confirmation {
     /// What an "always allow" answer would approve; possibly nothing.
     pub fn always_allow(&self) -> &[ProgramApproval] {
         match self {
-            Self::Unlisted {
-                approvals: Some(approvals),
-                ..
-            } => approvals,
-            _ => &[],
+            Self::Unvetted { always_allow, .. } => always_allow,
+            Self::Sensitive(_) | Self::Edit(_) => &[],
         }
     }
 
@@ -280,10 +130,7 @@ impl Confirmation {
     pub fn risk(&self) -> Risk {
         match self {
             Self::Edit(_) => Risk::Routine,
-            Self::Pattern(_)
-            | Self::Unverifiable(_)
-            | Self::Unlisted { .. }
-            | Self::Sensitive(_) => Risk::Elevated,
+            Self::Unvetted { .. } | Self::Sensitive(_) => Risk::Elevated,
         }
     }
 }
@@ -291,372 +138,9 @@ impl Confirmation {
 impl fmt::Display for Confirmation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Pattern(pattern) => f.write_str(pattern),
-            Self::Unverifiable(why) | Self::Sensitive(why) => f.write_str(why),
-            Self::Unlisted { programs, .. } => {
-                write!(f, "not on the allowlist: {}", programs.join(", "))
-            }
+            Self::Unvetted { why, .. } | Self::Sensitive(why) => f.write_str(why),
             Self::Edit(paths) if paths.is_empty() => f.write_str("edits files"),
             Self::Edit(paths) => write!(f, "edits `{}`", paths.join("`, `")),
-        }
-    }
-}
-
-/// What commands are checked against.
-#[derive(Debug, Clone, Copy)]
-pub struct Rules<'a> {
-    /// Commands that need confirmation even when every program is allowed.
-    pub patterns: &'a [DestructivePattern],
-    pub allowlist: &'a Allowlist,
-    /// Directories a command may not name without confirmation.
-    pub protected: &'a [PathBuf],
-    /// The sandbox's shared scratch directory, where a redirection may
-    /// write without confirmation, as it may under `/tmp`.
-    pub scratch: Option<&'a Path>,
-}
-
-/// Why `script` needs confirmation, if it does: a destructive pattern, something unseeable run,
-/// or a program off the allowlist, in that order. Every command bash would run is checked, but
-/// what an allowed program runs in turn (`sh -c`, `sudo`) is trusted.
-pub fn check_script(script: &str, rules: &Rules<'_>) -> Option<Confirmation> {
-    let matcher = Matcher::new(rules);
-    let mut findings = Findings::default();
-    matcher.script(script, 0, &mut findings);
-    findings.into_confirmation()
-}
-
-#[derive(Default)]
-struct Findings<'a> {
-    pattern: Option<&'a DestructivePattern>,
-    unverifiable: Option<String>,
-    unlisted: Vec<String>,
-    approvals: Vec<ProgramApproval>,
-    unapprovable: bool,
-}
-
-impl<'a> Findings<'a> {
-    fn pattern(&mut self, pattern: &'a DestructivePattern) {
-        if self.pattern.is_none() {
-            self.pattern = Some(pattern);
-        }
-    }
-
-    fn unverifiable(&mut self, why: impl FnOnce() -> String) {
-        if self.unverifiable.is_none() {
-            self.unverifiable = Some(why());
-        }
-    }
-
-    fn unlisted(&mut self, name: &str, approval: Option<ProgramApproval>) {
-        match approval {
-            Some(approval) if !self.approvals.contains(&approval) => self.approvals.push(approval),
-            Some(_) => {}
-            None => self.unapprovable = true,
-        }
-        if !self.unlisted.iter().any(|p| p == name) {
-            self.unlisted.push(name.to_string());
-        }
-    }
-
-    /// A pattern match outranks anything found after it.
-    fn settled(&self) -> bool {
-        self.pattern.is_some()
-    }
-
-    fn into_confirmation(self) -> Option<Confirmation> {
-        if let Some(pattern) = self.pattern {
-            return Some(Confirmation::Pattern(pattern.to_string()));
-        }
-        if let Some(why) = self.unverifiable {
-            return Some(Confirmation::Unverifiable(why));
-        }
-        (!self.unlisted.is_empty()).then_some(Confirmation::Unlisted {
-            programs: self.unlisted,
-            approvals: (!self.unapprovable).then_some(self.approvals),
-        })
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Site<'s> {
-    cmd: &'s SimpleCommand,
-    script: &'s Script,
-    depth: usize,
-}
-
-struct Matcher<'a> {
-    patterns: &'a [DestructivePattern],
-    allowlist: &'a Allowlist,
-    /// Every spelling of the protected directories.
-    protected: Vec<String>,
-    scratch: Option<&'a str>,
-}
-
-impl<'a> Matcher<'a> {
-    fn new(rules: &Rules<'a>) -> Self {
-        let home = std::env::var("HOME").ok();
-        let protected = rules
-            .protected
-            .iter()
-            .filter_map(|dir| dir.to_str())
-            .flat_map(|dir| spellings(dir, home.as_deref()))
-            .collect();
-        Self {
-            patterns: rules.patterns,
-            allowlist: rules.allowlist,
-            protected,
-            scratch: rules.scratch.and_then(Path::to_str),
-        }
-    }
-
-    fn script(&self, src: &str, depth: usize, out: &mut Findings<'a>) {
-        let too_deep = || "the script nests too deeply to check".to_string();
-        if depth > MAX_NESTED_SCRIPTS {
-            out.unverifiable(too_deep);
-            return;
-        }
-        let Ok(script) = shell::parse(src) else {
-            out.unverifiable(too_deep);
-            return;
-        };
-        if script.incomplete {
-            out.unverifiable(|| "the script ends inside a quote or substitution".into());
-        }
-        if let Some(variable) = changed_sensitive_variable(&script) {
-            out.unverifiable(|| {
-                format!("the script changes {variable}, so the programs it names cannot be checked")
-            });
-        }
-        if let Some(why) = evaluated::in_script(&script) {
-            out.unverifiable(|| why);
-        }
-        for (index, cmd) in script.commands.iter().enumerate() {
-            if out.settled() {
-                return;
-            }
-            self.protected_words(cmd, out);
-            writes_outside_scratch(cmd, self.scratch, out);
-            self.command(cmd, index, &script, depth, out);
-        }
-    }
-
-    fn protected_words(&self, cmd: &SimpleCommand, out: &mut Findings<'a>) {
-        if let Some(word) = cmd
-            .words
-            .iter()
-            .chain(cmd.redirects.iter().map(|redirect| &redirect.target))
-            .find(|w| self.protected.iter().any(|p| w.text.contains(p.as_str())))
-        {
-            out.unverifiable(|| format!("`{}` touches assistd's own configuration", word.text));
-        }
-    }
-
-    fn command(
-        &self,
-        cmd: &SimpleCommand,
-        index: usize,
-        script: &Script,
-        depth: usize,
-        out: &mut Findings<'a>,
-    ) {
-        let words = &cmd.words;
-        let Some(start) = command_start(words) else {
-            return;
-        };
-        let mut fed = false;
-        let mut fed_wrapper: Option<&Word> = None;
-        let mut placeholders: Vec<Placeholder<'_>> = Vec::new();
-        for Candidate { at, may_be_command } in candidates(words, start) {
-            if out.settled() {
-                return;
-            }
-            let word = &words[at];
-            if word.dynamic_name || placeholders.iter().any(|p| p.fills(word)) {
-                if may_be_command {
-                    out.unverifiable(|| {
-                        format!("command `{}` is only known at run time", word.text)
-                    });
-                }
-                continue;
-            }
-            let args = &words[at + 1..];
-            if let Some(pattern) = self.patterns.iter().find(|p| p.invoked_by(word, args, fed)) {
-                out.pattern(pattern);
-                return;
-            }
-            if may_be_command {
-                let scope = approval_scope(args, fed, &placeholders);
-                self.allowed(word, scope, index, script, depth, out);
-                self.runs(word, args, Site { cmd, script, depth }, out);
-                self.program_options(word, args, fed, out);
-                fed_wrapper =
-                    (fed && wrapper_operands(word, args.first()).is_some()).then_some(word);
-                fed |= program(&word.text) == FEEDS_ARGUMENTS;
-                placeholders.extend(placeholder::placeholders(word, args));
-            }
-        }
-        if let Some(wrapper) = fed_wrapper {
-            out.unverifiable(|| {
-                format!("`{}` runs a command xargs reads from stdin", wrapper.text)
-            });
-        }
-    }
-
-    /// Record `word`, in command position with arguments in `scope`, when
-    /// what it runs is not allowed.
-    fn allowed(
-        &self,
-        word: &Word,
-        scope: Option<ApprovalScope>,
-        index: usize,
-        script: &Script,
-        depth: usize,
-        out: &mut Findings<'a>,
-    ) {
-        let text = word.text.as_str();
-        if word.dynamic {
-            out.unverifiable(|| format!("program `{text}` is only known at run time"));
-            return;
-        }
-        if is_command_line(word) {
-            self.script(text, depth + 1, out);
-            return;
-        }
-        if needs_no_allowlist(word, index, script) {
-            return;
-        }
-        if RISKY_BUILTINS.contains(&text) {
-            out.unlisted(text, None);
-            return;
-        }
-        self.listed(text, scope, out);
-    }
-
-    /// Record `program`, run with arguments in `scope`, when the allowlist
-    /// does not allow it.
-    fn listed(&self, program: &str, scope: Option<ApprovalScope>, out: &mut Findings<'a>) {
-        match self.allowlist.verdict(program, scope.as_ref()) {
-            Verdict::Allowed => {}
-            Verdict::Missing if self.allowlist.search_path_fixed() => {}
-            Verdict::Missing => out.unlisted(program, None),
-            Verdict::Unlisted { approvable } => {
-                let approval = scope.filter(|_| approvable).map(|scope| ProgramApproval {
-                    name: program.to_string(),
-                    scope,
-                });
-                out.unlisted(program, approval);
-            }
-        }
-    }
-
-    /// Check the programs `word` runs through its [`PROGRAM_OPTIONS`],
-    /// which any argument known only at run time may name.
-    fn program_options(&self, word: &Word, args: &[Word], fed: bool, out: &mut Findings<'a>) {
-        let options = program_options(word);
-        if options.is_empty() {
-            return;
-        }
-        if fed || args.iter().any(|arg| arg.dynamic || arg.splits) {
-            out.unverifiable(|| {
-                format!(
-                    "`{}` may be given `{}` at run time, which runs a program",
-                    word.text,
-                    options.join("` or `")
-                )
-            });
-            return;
-        }
-        for program in option_values(args, options).filter(|value| !value.is_empty()) {
-            self.listed(program, None, out);
-        }
-    }
-
-    /// What `word`, run with `args`, runs in turn: a script handed to a
-    /// builtin, a subscript a builtin evaluates, or a command line hidden
-    /// in an `env` option.
-    fn runs(&self, word: &Word, args: &[Word], site: Site<'_>, out: &mut Findings<'a>) {
-        let Site { cmd, script, depth } = site;
-        let program = program(&word.text);
-        match program.as_str() {
-            "eval" => {
-                let joined: Vec<&str> = args.iter().map(|a| a.text.as_str()).collect();
-                self.script(&joined.join(" "), depth + 1, out);
-            }
-            "source" | "." => {
-                if let Some(file) = args.first() {
-                    self.sourced(word, file, script.inputs_of(cmd), depth, out);
-                }
-            }
-            "hash"
-                if args
-                    .iter()
-                    .any(|a| short_options(&a.text).is_some_and(|o| o.contains('p'))) =>
-            {
-                out.unverifiable(|| "`hash -p` makes a command name run another program".into());
-            }
-            "trap" => {
-                if let Some(action) = args.iter().find(|a| !a.text.starts_with('-')) {
-                    self.script(&action.text, depth + 1, out);
-                }
-            }
-            "alias" => {
-                for (_, body) in args.iter().filter_map(|a| a.text.split_once('=')) {
-                    self.script(body, depth + 1, out);
-                }
-            }
-            "env" => {
-                if let Some(option) = env_attached_option(args) {
-                    out.unverifiable(|| {
-                        format!("`env {option}` may run a command no check can see")
-                    });
-                }
-            }
-            _ => {
-                if let Some(why) = evaluated::by_builtin(&program, args) {
-                    out.unverifiable(|| why);
-                }
-            }
-        }
-    }
-
-    /// Check `word file`, where `word` is `source` or `.`.
-    fn sourced<'i>(
-        &self,
-        word: &Word,
-        file: &Word,
-        inputs: impl Iterator<Item = &'i str>,
-        depth: usize,
-        out: &mut Findings<'a>,
-    ) {
-        if file.dynamic {
-            out.unverifiable(|| {
-                format!(
-                    "`{} {}` runs a script only known at run time",
-                    word.text, file.text
-                )
-            });
-        } else if is_stdin_path(&file.text) {
-            self.stdin_script(&word.text, inputs, depth, out);
-        } else {
-            out.unlisted(&format!("{} {}", word.text, file.text), None);
-        }
-    }
-
-    /// A script `name` reads from stdin: the here-documents and
-    /// here-strings spelled out for it, or unverifiable when there are none.
-    fn stdin_script<'i>(
-        &self,
-        name: &str,
-        inputs: impl Iterator<Item = &'i str>,
-        depth: usize,
-        out: &mut Findings<'a>,
-    ) {
-        let mut inputs = inputs.peekable();
-        if inputs.peek().is_none() {
-            out.unverifiable(|| format!("`{name}` runs a script read from stdin"));
-        }
-        for input in inputs {
-            self.script(input, depth + 1, out);
         }
     }
 }
@@ -762,30 +246,6 @@ fn candidates(words: &[Word], start: usize) -> Vec<Candidate> {
     out
 }
 
-/// Which runs an "always allow" for a command run with `args` covers: those
-/// with the same subcommand as its first argument, or those with only
-/// options; `None` when the arguments make neither certain.
-fn approval_scope(
-    args: &[Word],
-    fed: bool,
-    placeholders: &[Placeholder<'_>],
-) -> Option<ApprovalScope> {
-    let known =
-        |arg: &Word| !arg.dynamic && !arg.splits && !placeholders.iter().any(|p| p.fills(arg));
-    match args.first() {
-        Some(first) if known(first) && is_subcommand(&first.text) => {
-            Some(ApprovalScope::Subcommand(first.text.clone()))
-        }
-        _ => {
-            let options_only = !fed
-                && args
-                    .iter()
-                    .all(|arg| known(arg) && arg.text.starts_with('-'));
-            options_only.then_some(ApprovalScope::OptionsOnly)
-        }
-    }
-}
-
 /// A word that reads as a subcommand (`build`, `run-tests`) rather than a
 /// path, pattern, or toolchain (`+nightly`).
 fn is_subcommand(text: &str) -> bool {
@@ -793,31 +253,6 @@ fn is_subcommand(text: &str) -> bool {
         && text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
-/// `dir` as a script may spell it: as is, and via `~` or `$HOME` when it
-/// lies under `home`.
-fn spellings(dir: &str, home: Option<&str>) -> impl Iterator<Item = String> {
-    let under_home = home
-        .and_then(|home| dir.strip_prefix(home))
-        .filter(|rest| rest.starts_with('/'));
-    iter::once(dir.to_string()).chain(
-        under_home
-            .into_iter()
-            .flat_map(|rest| ["~", "$HOME", "${HOME}"].map(|home| format!("{home}{rest}"))),
-    )
-}
-
-/// Record a redirection in `cmd` that writes a file other than
-/// [`HARMLESS_TARGETS`], `/dev/fd/N`, or one under `/tmp` or `scratch`.
-fn writes_outside_scratch(cmd: &SimpleCommand, scratch: Option<&str>, out: &mut Findings<'_>) {
-    if let Some(Redirect { operator, target }) = cmd
-        .redirects
-        .iter()
-        .find(|redirect| redirect.writes() && !is_harmless_target(&redirect.target, scratch))
-    {
-        out.unverifiable(|| format!("`{operator}` writes to `{}`, outside /tmp", target.text));
-    }
 }
 
 /// A literal redirection target that is a standard stream, `/dev/null`, or
@@ -848,22 +283,9 @@ fn path_components(path: &str) -> impl Iterator<Item = &str> {
         .filter(|component| !matches!(*component, "" | "."))
 }
 
-/// Keywords, builtins, and functions defined before command `index`,
-/// none of which need the allowlist.
-fn needs_no_allowlist(word: &Word, index: usize, script: &Script) -> bool {
-    let text = word.text.as_str();
-    (!word.quoted && KEYWORDS.contains(&text))
-        || SAFE_BUILTINS.contains(&text)
-        || RUNS_ITS_ARGUMENTS.contains(&text)
-        || script
-            .functions
-            .iter()
-            .any(|(name, defined)| name == text && *defined <= index)
-}
-
-/// The first variable the script may change that the checks cannot see
+/// The first variable the script may change that the classifier cannot see
 /// past: the search path, the dynamic loader's, bash's startup file, or a
-/// file of options an allowed program reads (`rg --pre`).
+/// file of options a program reads (`rg --pre`).
 fn changed_sensitive_variable(script: &Script) -> Option<&str> {
     script
         .commands
@@ -905,10 +327,6 @@ fn changed_variables(text: &str) -> impl Iterator<Item = &str> {
         .chain(assigned)
         .chain(value)
         .chain(defaults)
-}
-
-fn alternatives(word: &str) -> impl Iterator<Item = &str> {
-    word.split('|').filter(|alt| !alt.is_empty())
 }
 
 fn short_options(arg: &str) -> Option<&str> {
@@ -960,33 +378,6 @@ fn is_command_line(word: &Word) -> bool {
 
 fn exec_flags(word: &Word) -> Option<&'static [&'static str]> {
     (!word.dynamic_name && program(&word.text) == "find").then_some(FIND_EXEC_FLAGS)
-}
-
-fn program_options(word: &Word) -> &'static [&'static str] {
-    if word.dynamic_name {
-        return &[];
-    }
-    let program = program(&word.text);
-    PROGRAM_OPTIONS
-        .iter()
-        .find(|&&(p, _)| p == program)
-        .map_or(&[], |&(_, options)| options)
-}
-
-/// The values `args` give `options`, as `--option value` or
-/// `--option=value`.
-fn option_values<'w>(
-    args: &'w [Word],
-    options: &'static [&'static str],
-) -> impl Iterator<Item = &'w str> {
-    args.iter().enumerate().flat_map(move |(at, arg)| {
-        options
-            .iter()
-            .filter_map(move |option| match arg.text.strip_prefix(option)? {
-                "" => args.get(at + 1).map(|value| value.text.as_str()),
-                attached => attached.strip_prefix('='),
-            })
-    })
 }
 
 fn value_options(program: &str) -> &'static [&'static str] {
@@ -1045,6 +436,3 @@ pub(super) fn program(word: &str) -> String {
         trimmed => trimmed.to_string(),
     }
 }
-
-#[cfg(test)]
-mod tests;

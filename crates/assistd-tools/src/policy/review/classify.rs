@@ -1,6 +1,7 @@
 //! Sorts a script into read-only, edit or unvetted by the programs it runs and the files its
-//! redirections write, using short lists of programs whose effects are known, and lists the
-//! paths those programs read, write, delete or change the mode or owner of.
+//! redirections write, using short lists of programs whose effects are known and the user's
+//! "always allow" approvals, and lists the paths those programs read, write, delete or change
+//! the mode or owner of.
 
 use std::path::Path;
 
@@ -9,8 +10,9 @@ use super::{
     Candidate, FEEDS_ARGUMENTS, FIND_EXEC_FLAGS, KEYWORDS, MAX_NESTED_SCRIPTS, SAFE_BUILTINS,
     WRAPPERS, basename, candidates, changed_sensitive_variable, changed_variables, command_start,
     env_attached_option, evaluated, exec_flags, is_command_line, is_harmless_target, is_stdin_path,
-    program, short_options, wrapper_operands,
+    is_subcommand, program, short_options, wrapper_operands,
 };
+use crate::policy::allowlist::{Allowlist, ApprovalScope, ProgramApproval, Verdict};
 use crate::policy::shell::{self, Script, SimpleCommand, Word};
 
 /// Builtins that change the working directory, after which relative targets are unknown.
@@ -268,7 +270,7 @@ pub enum Class {
         writes: Vec<String>,
         deletes: Vec<Delete>,
     },
-    /// It may do something neither list vets; `why` names the first such thing.
+    /// It may do something neither list nor an approval vets; `why` names the first such thing.
     Unvetted { why: String },
 }
 
@@ -286,6 +288,10 @@ pub struct Delete {
 pub struct Analysis {
     pub class: Class,
     pub effects: Vec<Effect>,
+    /// What "always allow" would approve so that an unvetted script is vetted next time; empty
+    /// when it is vetted, or when something other than a program approvals can cover leaves it
+    /// unvetted.
+    pub always_allow: Vec<ProgramApproval>,
 }
 
 /// A file operation a script performs on `path`: as written, with `$HOME` spelled `~`, or
@@ -419,6 +425,7 @@ impl Directory {
 #[derive(Default)]
 struct Classifier<'a> {
     scratch: Option<&'a str>,
+    approvals: Option<&'a Allowlist>,
     effects: Vec<Effect>,
     runs_edit_program: bool,
     directory: Directory,
@@ -430,6 +437,10 @@ struct Classifier<'a> {
     relative_after_cd: Option<String>,
     /// Why the first command neither list vets is unvetted.
     unvetted: Option<String>,
+    /// Approvals that would vet the programs on neither list.
+    always_allow: Vec<ProgramApproval>,
+    /// Something approvals cannot cover leaves the script unvetted.
+    unapprovable: bool,
 }
 
 impl Classifier<'_> {
@@ -473,6 +484,35 @@ impl Classifier<'_> {
     fn vet(&mut self, outcome: Result<(), String>) {
         if let Err(why) = outcome {
             self.unvetted.get_or_insert(why);
+            self.unapprovable = true;
+        }
+    }
+
+    /// Vet `name`, a program on neither list, when an approval covers this run of it; else
+    /// leave the script unvetted and note the approval that would.
+    fn unlisted(&mut self, name: &str, args: &[Word], invocation: &Invocation<'_>) {
+        let scope = approval_scope(args, invocation);
+        let verdict = self
+            .approvals
+            .map(|approvals| approvals.verdict(name, scope.as_ref()));
+        if verdict == Some(Verdict::Approved) {
+            return;
+        }
+        self.unvetted.get_or_insert_with(|| {
+            format!("`{name}` is on neither the read-only nor the edit list")
+        });
+        let approvable = verdict == Some(Verdict::Unapproved { approvable: true });
+        match scope.filter(|_| approvable) {
+            Some(scope) => {
+                let approval = ProgramApproval {
+                    name: name.to_string(),
+                    scope,
+                };
+                if !self.always_allow.contains(&approval) {
+                    self.always_allow.push(approval);
+                }
+            }
+            None => self.unapprovable = true,
         }
     }
 
@@ -638,9 +678,10 @@ impl Classifier<'_> {
         }
         match EDIT_PROGRAMS.iter().find(|edit| edit.name == name) {
             Some(edit) => self.edit(edit, args, invocation),
-            None => Err(format!(
-                "`{name}` is on neither the read-only nor the edit list"
-            )),
+            None => {
+                self.unlisted(name, args, invocation);
+                Ok(())
+            }
         }
     }
 
@@ -818,6 +859,7 @@ impl Classifier<'_> {
     }
 
     fn into_analysis(self, outcome: Result<(), String>) -> Analysis {
+        let approvable = !self.unapprovable && outcome.is_ok() && self.relative_after_cd.is_none();
         let why = self
             .unvetted
             .or(outcome.err())
@@ -829,20 +871,27 @@ impl Classifier<'_> {
         Analysis {
             class,
             effects: self.effects,
+            always_allow: if approvable {
+                self.always_allow
+            } else {
+                Vec::new()
+            },
         }
     }
 }
 
-/// Classify `script` as read-only, an edit of the paths it names, or unvetted. Redirections
-/// into `scratch`, like those into `/tmp`, are not edits.
+/// Classify `script` as read-only, an edit of the paths it names, or unvetted, with nothing
+/// approved. Redirections into `scratch`, like those into `/tmp`, are not edits.
 pub fn classify(script: &str, scratch: Option<&Path>) -> Class {
-    analyze(script, scratch).class
+    analyze(script, scratch, None).class
 }
 
-/// [`classify`] `script`, and list the file operations its commands perform.
-pub fn analyze(script: &str, scratch: Option<&Path>) -> Analysis {
+/// [`classify`] `script`, counting a program on neither list as vetted where `approvals`
+/// cover it, and list the file operations its commands perform.
+pub fn analyze(script: &str, scratch: Option<&Path>, approvals: Option<&Allowlist>) -> Analysis {
     let mut classifier = Classifier {
         scratch: scratch.and_then(Path::to_str),
+        approvals,
         ..Classifier::default()
     };
     let outcome = classifier.script(script, 0);
@@ -851,6 +900,25 @@ pub fn analyze(script: &str, scratch: Option<&Path>) -> Analysis {
 
 fn changed_directory_why(path: &str) -> String {
     format!("the script changes directory, so where `{path}` is cannot be known")
+}
+
+/// Which runs an "always allow" for a program run with `args` covers: those with the same
+/// subcommand as its first argument, or those with only options; `None` when the arguments
+/// make neither certain.
+fn approval_scope(args: &[Word], invocation: &Invocation<'_>) -> Option<ApprovalScope> {
+    let known = |arg: &Word| !arg.dynamic && !arg.splits && !invocation.fills(arg);
+    match args.first() {
+        Some(first) if known(first) && is_subcommand(&first.text) => {
+            Some(ApprovalScope::Subcommand(first.text.clone()))
+        }
+        _ => {
+            let options_only = !invocation.fed
+                && args
+                    .iter()
+                    .all(|arg| known(arg) && arg.text.starts_with('-'));
+            options_only.then_some(ApprovalScope::OptionsOnly)
+        }
+    }
 }
 
 /// The class of a vetted script with `effects`.

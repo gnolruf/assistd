@@ -338,14 +338,26 @@ Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
 `write`.
 
 Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
-intercept the dangerous paths: a `bash` script runs without asking only
-when every program it can run is on `[tools.bash] allowed_programs` and
-nothing in it matches a destructive pattern; otherwise the user confirms,
-and can "always allow" the programs it named. An approval covers one
-subcommand (`cargo build …`), or only options when the program was run
-without positional arguments; shells, interpreters and `sudo`-like
-wrappers are never offered it. A redirection that writes
-outside `/tmp` and `tools.scratch.dir` also needs confirmation. It then runs in the bubblewrap
+intercept the dangerous paths. Before a `bash` script runs, the
+classifier sorts it, through every wrapper, substitution and
+evaluated string bash would run, as read-only (only programs on a
+short read-only list, redirecting only to standard streams, `/tmp` or
+the scratch directory), an edit (also programs on a short list that
+write or delete the literal paths they name, or redirections to a
+literal path), or unvetted (anything else: another program, a path or
+command only known at run time, a changed `PATH`/`LD_*`/`GIT_*`, a
+disqualifying option such as `sort -o` or `find -exec`). The path guards
+then resolve every target: destroying `$HOME`, a personal folder or a
+git work tree is refused in every mode, and touching credentials, an
+owner-only file in `$HOME`, a startup file, a shell profile or a
+directory on `PATH` always asks. Asking for an unvetted script offers
+"always allow" for the programs on neither list, saved in
+`allowed_programs.toml` beside the config and pinned to the file the
+name resolved to; an approval covers one subcommand (`cargo build …`),
+or only options when the program was run without positional arguments,
+and counts that run as vetted from then on. Shells, interpreters,
+`sudo`-like wrappers and builtins that shadow a program are never
+offered it. A script then runs in the bubblewrap
 sandbox; tools never run unsandboxed, so when `bwrap` is missing (or
 `tools.bash.sandbox = "none"`) the model is offered no tools at all and
 clients are told why. `wm open` is the one way out of the sandbox: it
@@ -599,9 +611,9 @@ A walk through `assistd query "what files changed this week?"`:
    `{"command":"git log --since='1 week ago' --name-only --pretty="}`.
    The agent emits `Event::ToolCall`, hands the args to `RunTool`,
    which parses the command line and dispatches to `BashCommand`.
-   `git` is not on the default allowlist, so the user confirms the
-   command first unless they have already "always allowed" `git log`;
-   `git log` matches no destructive pattern.
+   `git` is on neither the read-only nor the edit list, so the script
+   is unvetted and the user confirms it first, unless they have
+   already "always allowed" `git log`, which makes it read-only.
 
 6. **Sandbox.** `BashCommand` invokes the bubblewrap sandbox: a
    read-only root with writable entries
