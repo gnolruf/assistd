@@ -382,6 +382,20 @@ impl Conversation {
         removed
     }
 
+    /// The text of the newest `limit` real user messages, oldest first.
+    pub fn recent_user_messages(&self, limit: usize) -> Vec<String> {
+        let mut texts: Vec<String> = self
+            .messages
+            .iter()
+            .rev()
+            .filter(|m| Self::is_real_user(m))
+            .take(limit)
+            .map(|m| m.content.clone())
+            .collect();
+        texts.reverse();
+        texts
+    }
+
     /// Estimated prompt size in tokens: [`Self::heuristic_tokens`] shifted
     /// by the error the server last measured in it.
     pub fn approx_total_tokens(&self) -> u32 {

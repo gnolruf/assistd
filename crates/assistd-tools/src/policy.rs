@@ -15,6 +15,7 @@ mod approvals;
 mod confirm;
 mod egress;
 mod file_scope;
+mod judge;
 mod path_class;
 mod review;
 mod sandbox;
@@ -33,6 +34,7 @@ pub use confirm::{
 };
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
+pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub(crate) use path_class::split_at_existing;
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
 pub use review::{

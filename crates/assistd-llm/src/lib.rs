@@ -15,11 +15,13 @@ use assistd_ipc::{Component, RelayEvent, StatusKind, StatusSeverity};
 use assistd_tools::{Attachment, ToolOutput};
 
 pub mod chat;
+mod judge;
 pub mod llama_server;
 
 pub use assistd_utils::child_server::ReadyState;
 pub use chat::conversation::{CompactionCut, ToolCallRecord};
 pub use chat::{ChatClientError, LlamaChatClient};
+pub use judge::BackendJudgeModel;
 pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaServerSpec, MainSlot, SlotDir, VisionState,
     probe_capabilities_routed,
@@ -112,6 +114,15 @@ pub type LlmResult<T> = Result<T, LlmError>;
 pub enum Thinking {
     Enabled,
     Disabled,
+}
+
+/// The reply a [`LlmBackend::complete_oneshot`] asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OneShotReply {
+    /// Free text, thinking first when enabled.
+    Text(Thinking),
+    /// JSON held by grammar to this schema, sampled greedily with thinking off.
+    Json(Map<String, Value>),
 }
 
 /// Events a backend streams during generation.
@@ -275,10 +286,16 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
 
     /// Answer `prompt` outside the conversation within the summary token
     /// allowance, returning the final text with reasoning discarded.
-    async fn complete_oneshot(&self, _prompt: String, _thinking: Thinking) -> LlmResult<String> {
+    async fn complete_oneshot(&self, _prompt: String, _reply: OneShotReply) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),
         ))
+    }
+
+    /// The text of the newest `limit` messages the user wrote, oldest first, leaving out tool
+    /// results, assistant text and injected context.
+    async fn recent_user_messages(&self, _limit: usize) -> Vec<String> {
+        Vec::new()
     }
 
     /// Answer `instruction`, appended to the conversation for this request only, with no

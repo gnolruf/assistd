@@ -9,7 +9,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use assistd_ipc::Event;
-use assistd_llm::{HistoryEntry, HistoryReplay, HistoryRole, Thinking, ToolCallRecord};
+use assistd_llm::{
+    HistoryEntry, HistoryReplay, HistoryRole, OneShotReply, Thinking, ToolCallRecord,
+};
 use assistd_memory::{
     BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageId, MessageKind,
     PersistedRelayStep, PersistedToolCall, Seq, SessionId, TurnStats, UndoOutcome,
@@ -225,7 +227,7 @@ impl AppState {
         let raw = match self
             .subsystems
             .llm
-            .complete_oneshot(prompt, Thinking::Disabled)
+            .complete_oneshot(prompt, OneShotReply::Text(Thinking::Disabled))
             .await
         {
             Ok(raw) => raw,
