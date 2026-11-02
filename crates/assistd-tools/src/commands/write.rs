@@ -16,6 +16,7 @@ use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Approval, ConfirmationGate, ConfirmationRequest, Risk, SandboxInfo, on_blocking_pool,
+    split_at_existing,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.
@@ -132,8 +133,13 @@ impl WriteCommand {
         let home = std::env::var("HOME").ok();
         on_blocking_pool(move || {
             let path = cfg.resolve(&raw_path, home.as_deref())?;
-            let runnable = is_executable(&path) || sandbox.is_in_command_dir(&path, home);
-            Ok(WriteTarget { path, runnable })
+            let executable = is_executable(&path);
+            let sensitive = sandbox.path_guards().sensitive_write(&path);
+            Ok(WriteTarget {
+                path,
+                executable,
+                sensitive,
+            })
         })
         .await
     }
@@ -242,9 +248,11 @@ impl Command for WriteCommand {
 #[derive(Debug)]
 struct WriteTarget {
     path: PathBuf,
-    /// A shell could run the file: it is already executable, or it lies in
-    /// a directory shells look programs up in.
-    runnable: bool,
+    /// The file is already executable, so a shell could run it.
+    executable: bool,
+    /// Why the path is sensitive, if it is: a directory on `PATH`, a shell
+    /// profile, a startup file or credentials.
+    sensitive: Option<String>,
 }
 
 #[derive(Debug)]
@@ -441,7 +449,7 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
 }
 
 /// The target, size and content (head and tail only when long) for the user to confirm;
-/// [`Risk::Elevated`] when the content is cut or a shell could run the file.
+/// [`Risk::Elevated`] when the content is cut, the file is executable or the path is sensitive.
 fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationRequest {
     let text = String::from_utf8_lossy(content);
     let mut script = format!(
@@ -459,46 +467,23 @@ fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationReq
         script.push_str(&format!("\n… {omitted} characters not shown …\n"));
         script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
     }
-    let risk = if fully_shown && !target.runnable {
+    let risk = if fully_shown && !target.executable && target.sensitive.is_none() {
         Risk::Routine
     } else {
         Risk::Elevated
     };
-    let matched_pattern = if target.runnable {
-        "writes a program a shell could run"
-    } else {
-        "writes a file outside the scratch directory"
+    let matched_pattern = match (&target.sensitive, target.executable) {
+        (Some(why), _) => why.clone(),
+        (None, true) => "writes a program a shell could run".to_string(),
+        (None, false) => "writes a file outside the scratch directory".to_string(),
     };
     ConfirmationRequest {
         tool: "write".to_string(),
         script,
-        matched_pattern: matched_pattern.to_string(),
+        matched_pattern,
         always_allow: Vec::new(),
         risk,
         source: ConfirmSource::Main,
-    }
-}
-
-/// Split `path` into its deepest existing ancestor and the remainder.
-fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
-    let mut anchor = path.to_path_buf();
-    let mut tail = PathBuf::new();
-    loop {
-        if anchor.symlink_metadata().is_ok() {
-            return (anchor, tail);
-        }
-        let Some(parent) = anchor.parent() else {
-            return (path.to_path_buf(), PathBuf::new());
-        };
-        let Some(file_name) = anchor.file_name() else {
-            return (anchor, tail);
-        };
-        let mut new_tail = PathBuf::from(file_name);
-        if !tail.as_os_str().is_empty() {
-            new_tail.push(&tail);
-        }
-        tail = new_tail;
-        anchor = parent.to_path_buf();
     }
 }
 

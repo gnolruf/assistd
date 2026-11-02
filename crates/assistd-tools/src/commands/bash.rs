@@ -79,10 +79,10 @@ impl Command for BashCommand {
             return CommandOutput::usage(self.help());
         }
         let script = script_words.join(" ");
-        let confirmation = self.policy.review_script(script.clone()).await;
+        let review = self.policy.review_script(script.clone()).await;
         if let Err(denied) = self
             .policy
-            .authorize("bash", "command", &script, confirmation)
+            .authorize("bash", "command", &script, review)
             .await
         {
             return denied;

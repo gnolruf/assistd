@@ -15,6 +15,7 @@ mod approvals;
 mod confirm;
 mod egress;
 mod file_scope;
+mod path_class;
 mod review;
 mod sandbox;
 mod shell;
@@ -32,7 +33,12 @@ pub use confirm::{
 };
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
-pub use review::{Class, Confirmation, Delete, DestructivePattern, Rules, check_script, classify};
+pub(crate) use path_class::split_at_existing;
+pub use path_class::{GuardRoots, PathGuards, PathVerdict};
+pub use review::{
+    Action, Analysis, Class, Confirmation, Delete, DestructivePattern, Effect, Rules, analyze,
+    check_script, classify,
+};
 pub(crate) use sandbox::{ConfinedSpawner, EgressRoute, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
@@ -83,6 +89,15 @@ impl BashPolicyCfg {
     }
 }
 
+/// What the policy decided about a script before it runs.
+#[derive(Debug)]
+pub(crate) enum Review {
+    Clear,
+    Ask(Confirmation),
+    /// It would destroy a catastrophic path; holds what and where.
+    Refuse(String),
+}
+
 /// The policy, sandbox and gate a command runs model-chosen argv under.
 #[derive(Debug)]
 pub(crate) struct SubprocessPolicy {
@@ -92,30 +107,40 @@ pub(crate) struct SubprocessPolicy {
 }
 
 impl SubprocessPolicy {
-    /// [`check_script`] on the blocking pool, since the allowlist reads
-    /// the filesystem for each program `script` runs.
-    pub(crate) async fn review_script(&self, script: String) -> Option<Confirmation> {
+    /// The path guards, then [`check_script`] when they find nothing guarded, on the blocking
+    /// pool, since both read the filesystem.
+    pub(crate) async fn review_script(&self, script: String) -> Review {
         let cfg = Arc::clone(&self.cfg);
-        on_blocking_pool(move || check_script(&script, &cfg.rules())).await
+        let sandbox = Arc::clone(&self.sandbox);
+        on_blocking_pool(move || {
+            let analysis = analyze(&script, cfg.scratch.as_deref());
+            match sandbox.path_guards().verdict(analysis) {
+                PathVerdict::Refused(why) => Review::Refuse(why),
+                PathVerdict::Sensitive(why) => Review::Ask(Confirmation::Sensitive(why)),
+                PathVerdict::Ordinary(_) => {
+                    check_script(&script, &cfg.rules()).map_or(Review::Clear, Review::Ask)
+                }
+            }
+        })
+        .await
     }
 
-    /// Refuse `script` when the review's `confirmation` is set and the
-    /// gate declines. `tool` and `op` name
-    /// the command and operation in the error line.
+    /// Refuse `script` when `review` refuses it, or asks and the gate declines. `tool` and `op`
+    /// name the command and operation in the error line.
     pub(crate) async fn authorize(
         &self,
         tool: &str,
         op: &str,
         script: &str,
-        confirmation: Option<Confirmation>,
+        review: Review,
     ) -> Result<(), CommandOutput> {
-        let Some(confirmation) = confirmation else {
-            return Ok(());
-        };
-        if self.confirmed(tool, script, &confirmation).await {
-            Ok(())
-        } else {
-            Err(cancelled(tool, op, &confirmation))
+        match review {
+            Review::Clear => Ok(()),
+            Review::Refuse(why) => Err(refused(tool, op, &why)),
+            Review::Ask(confirmation) if self.confirmed(tool, script, &confirmation).await => {
+                Ok(())
+            }
+            Review::Ask(confirmation) => Err(cancelled(tool, op, &confirmation)),
         }
     }
 
@@ -149,6 +174,7 @@ fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput
         Confirmation::Unlisted { programs, .. } => {
             format!("Not on the allowlist: {}", programs.join(", "))
         }
+        Confirmation::Sensitive(why) => format!("It {why}"),
     };
     CommandOutput::failed(
         POLICY_DENIED_EXIT,
@@ -157,6 +183,19 @@ fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput
             format_args!("{op} cancelled by user. {reason}"),
             Hint::Try,
             "a different approach",
+        )
+        .into_bytes(),
+    )
+}
+
+fn refused(tool: &str, op: &str, why: &str) -> CommandOutput {
+    CommandOutput::failed(
+        POLICY_DENIED_EXIT,
+        error_line(
+            tool,
+            format_args!("{op} refused in every mode: it {why}"),
+            Hint::Try,
+            "deleting a specific subtree instead, such as a build or cache directory",
         )
         .into_bytes(),
     )

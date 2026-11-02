@@ -18,7 +18,8 @@ fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
 fn shown_target(path: &str) -> WriteTarget {
     WriteTarget {
         path: PathBuf::from(path),
-        runnable: false,
+        executable: false,
+        sensitive: None,
     }
 }
 

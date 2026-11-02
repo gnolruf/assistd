@@ -184,7 +184,9 @@ const READ_ONLY: &[&str] = &[
 ];
 
 /// Programs that write or delete the paths they name.
-const EDIT: &[&str] = &["cp", "ln", "mkdir", "mv", "rm", "tee", "touch"];
+const EDIT: &[&str] = &[
+    "chgrp", "chmod", "chown", "cp", "ln", "mkdir", "mv", "rm", "tee", "touch",
+];
 
 /// Allowed programs that run a command; their shims run the real program.
 const REAL_WRAPPERS: &[&str] = &["env", "find", "nice", "nohup", "stdbuf", "timeout", "xargs"];

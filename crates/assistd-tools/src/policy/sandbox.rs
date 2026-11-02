@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use super::allowlist::SearchPath;
 use super::on_blocking_pool;
+use super::path_class::{GuardRoots, PathGuards};
 
 mod confined;
 
@@ -146,6 +147,9 @@ pub struct SandboxInfo {
     pub shared: SharedDirs,
     /// Absolute directories unsandboxed commands look programs up in.
     host_path: Vec<PathBuf>,
+    /// Directories systemd loads user units from, as `systemd-analyze`
+    /// reported them at startup.
+    unit_dirs: Vec<PathBuf>,
     /// Set when `extra_args` shares the network namespace, which abstract
     /// Unix sockets such as the X server's belong to.
     confined: Option<ConfinedSpawner>,
@@ -217,6 +221,7 @@ impl SandboxInfo {
             protected: Protected::default(),
             shared: SharedDirs::default(),
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
+            unit_dirs: Vec::new(),
             confined: None,
             profile: Profile::Host,
         })
@@ -235,6 +240,7 @@ impl SandboxInfo {
                 read_only: Vec::new(),
             },
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
+            unit_dirs: Vec::new(),
             confined: None,
             profile: Profile::Host,
         })
@@ -265,6 +271,7 @@ impl SandboxInfo {
                 read_only,
             },
             host_path: self.host_path.clone(),
+            unit_dirs: self.unit_dirs.clone(),
             confined: None,
             profile: Profile::Quarantine(QuarantineProfile {
                 home,
@@ -296,18 +303,49 @@ impl SandboxInfo {
         }
     }
 
-    /// Whether `path` lies under a directory host shells look programs up
-    /// in: one on the host `PATH`, `~/bin`, or a visible `~/<entry>/bin`.
-    /// Resolves symlinks, so it blocks on the filesystem.
-    pub(crate) fn is_in_command_dir(&self, path: &Path, home: Option<String>) -> bool {
-        let home_dirs = SandboxHome::read(home)
+    /// The path guards for commands run under this configuration: its
+    /// `$HOME`, XDG directories and working directory, with the directories
+    /// host shells look programs up in (the host `PATH`, `~/bin`, every
+    /// visible `~/<entry>/bin`) and the user unit path sensitive. Resolves
+    /// symlinks, so it blocks on the filesystem.
+    pub(crate) fn path_guards(&self) -> PathGuards {
+        let host_home = std::env::var("HOME").ok();
+        let home_dirs = SandboxHome::read(host_home.clone())
             .map(|home| home.existing_command_dirs(&[]))
             .unwrap_or_default();
-        self.host_path
+        let command_dirs = self
+            .host_path
             .iter()
             .filter_map(|dir| std::fs::canonicalize(dir).ok())
             .chain(home_dirs)
-            .any(|dir| path.starts_with(dir))
+            .collect();
+        let exempt = self
+            .shared
+            .scratch
+            .iter()
+            .chain(&self.shared.read_only)
+            .cloned()
+            .collect();
+        let roots = GuardRoots {
+            command_dirs,
+            unit_dirs: self.unit_dirs.clone(),
+            exempt,
+            ..GuardRoots::default()
+        };
+        PathGuards::read(match &self.profile {
+            Profile::Quarantine(quarantine) => GuardRoots {
+                home: Some(quarantine.home.clone()),
+                cwd: Some(quarantine.home.clone()),
+                ..roots
+            },
+            Profile::Host => GuardRoots {
+                home: host_home.map(PathBuf::from),
+                config_home: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+                data_home: std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+                cwd: std::env::current_dir().ok(),
+                ..roots
+            },
+        })
     }
 
     /// The recovery clause of a note about a private directory: where a
@@ -1025,6 +1063,7 @@ fn probe_sandbox_with_path(
                         protected,
                         shared,
                         host_path: host_path(path_env),
+                        unit_dirs: user_unit_dirs(path_env),
                         confined,
                         profile: Profile::Host,
                     })));
@@ -1079,6 +1118,34 @@ fn announce_bwrap(bwrap: &Path) {
     );
 }
 
+/// The absolute directories `systemd-analyze` on `path_env` says user units
+/// load from; empty when it cannot run, leaving the spec's paths guarded.
+fn user_unit_dirs(path_env: &OsStr) -> Vec<PathBuf> {
+    let output = find_program(Path::new("systemd-analyze"), path_env)
+        .ok()
+        .and_then(|program| {
+            std::process::Command::new(program)
+                .args(["--user", "unit-paths"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+        })
+        .filter(|output| output.status.success());
+    let Some(output) = output else {
+        info!(
+            target: "assistd::policy",
+            "systemd-analyze cannot list the user unit path; guarding the XDG defaults only"
+        );
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .collect()
+}
+
 /// The absolute directories of `path_env`, or [`SANDBOX_PATH`]'s when it
 /// has none. Relative entries resolve against whatever directory a command
 /// happens to be in, so they are dropped.
@@ -1117,6 +1184,7 @@ mod tests {
             protected: Protected::default(),
             shared: SharedDirs::default(),
             host_path: Vec::new(),
+            unit_dirs: Vec::new(),
             confined: None,
             profile: Profile::Host,
         }
@@ -1431,6 +1499,7 @@ mod tests {
                 read_only: Vec::new(),
             },
             host_path: vec![go_bin.clone(), tools_bin.clone()],
+            unit_dirs: Vec::new(),
             ..bwrap_info(Vec::new())
         };
         let argv = argv_of(&info.bwrap_command(
@@ -1594,6 +1663,7 @@ mod tests {
                 read_only: Vec::new(),
             },
             host_path: vec![home.join("projects/tools/bin")],
+            unit_dirs: Vec::new(),
             ..bwrap_info(Vec::new())
         };
         let argv = argv_of(&info.bwrap_command(

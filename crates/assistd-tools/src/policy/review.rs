@@ -13,7 +13,7 @@ mod classify;
 mod evaluated;
 mod placeholder;
 
-pub use classify::{Class, Delete, classify};
+pub use classify::{Action, Analysis, Class, Delete, Effect, analyze, classify};
 
 /// How many scripts deep (`eval`, `trap`, …) the matcher looks before
 /// calling a script unverifiable.
@@ -284,6 +284,8 @@ pub enum Confirmation {
         approvals: Option<Vec<ProgramApproval>>,
         modifies_files: bool,
     },
+    /// It touches a sensitive path, so it asks every time; holds what and where.
+    Sensitive(String),
 }
 
 impl Confirmation {
@@ -307,7 +309,10 @@ impl Confirmation {
                 modifies_files: false,
                 ..
             } => Risk::Routine,
-            Self::Pattern(_) | Self::Unverifiable(_) | Self::Unlisted { .. } => Risk::Elevated,
+            Self::Pattern(_)
+            | Self::Unverifiable(_)
+            | Self::Unlisted { .. }
+            | Self::Sensitive(_) => Risk::Elevated,
         }
     }
 }
@@ -316,7 +321,7 @@ impl fmt::Display for Confirmation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pattern(pattern) => f.write_str(pattern),
-            Self::Unverifiable(why) => f.write_str(why),
+            Self::Unverifiable(why) | Self::Sensitive(why) => f.write_str(why),
             Self::Unlisted { programs, .. } => {
                 write!(f, "not on the allowlist: {}", programs.join(", "))
             }
