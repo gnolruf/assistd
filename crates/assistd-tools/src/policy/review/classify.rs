@@ -30,6 +30,10 @@ const DYNAMIC_CHARS: &[char] = &['$', '`', '*', '?', '[', '{', '('];
 /// The spellings of `$HOME` a path may start with.
 const HOME_VARIABLES: &[&str] = &["${HOME}", "$HOME"];
 
+/// Characters that start an expansion whose value may name any path, `..` and absolute paths
+/// included; a glob only matches existing entries below its directory.
+const ANY_PATH_CHARS: &[char] = &['$', '`', '{'];
+
 /// Programs that only read, each with the options that make it write a file or run a program.
 const READ_ONLY_PROGRAMS: &[(&str, &[Flag])] = &[
     ("b2sum", &[]),
@@ -763,13 +767,20 @@ impl Classifier<'_> {
         }
     }
 
-    /// Record a read of `word`; one only known at run time reads all of its static directory.
+    /// Record a read of `word`; one only known at run time reads all of its static directory,
+    /// and one an expansion may send anywhere leaves the script unvetted.
     fn read(&mut self, word: &Word, recursive: bool) {
         match static_path(word, self.home_changed) {
             Some(path) => self.target(Action::Read, path, recursive),
             None => {
-                let prefix = static_prefix(&spelled(word, self.home_changed));
-                self.target(Action::Read, prefix, true);
+                let spelled = spelled(word, self.home_changed);
+                if spelled.contains(ANY_PATH_CHARS) {
+                    self.vet(Err(format!(
+                        "`{}` reads a path only known at run time, which may lie anywhere",
+                        word.text
+                    )));
+                }
+                self.target(Action::Read, static_prefix(&spelled), true);
             }
         }
     }

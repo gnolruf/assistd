@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use assistd_tools::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::{
-    ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, ImageMime, Risk, Tool, ToolError,
-    ToolOutput, Unattended, VisionGate,
+    ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext,
+    JudgedClass, Risk, Tool, ToolError, ToolOutput, Unattended, VisionGate,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -60,7 +60,14 @@ impl McpToolAdapter {
                 matched_pattern: "calls an MCP tool that is not yet approved".to_string(),
                 always_allow: vec![name.to_string()],
                 risk: Risk::Elevated,
-                unattended: Unattended::Never,
+                unattended: Unattended::Judged(JudgeContext {
+                    class: JudgedClass::McpTool,
+                    cwd: None,
+                    why: format!(
+                        "it calls the MCP tool `{name}`, which is not yet approved, with these \
+                         JSON arguments"
+                    ),
+                }),
                 source: ConfirmSource::Main,
             })
             .await

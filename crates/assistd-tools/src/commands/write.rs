@@ -1,6 +1,5 @@
 //! `write`: write a file at an allowlisted path, asking the user first outside the shared scratch.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,8 +14,9 @@ use tokio::io::AsyncWriteExt;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    Approval, ConfirmationGate, ConfirmationRequest, Risk, SandboxInfo, Unattended,
-    on_blocking_pool, split_at_existing,
+    Action, Analysis, Approval, Class, Confirmation, ConfirmationGate, ConfirmationRequest, Effect,
+    PathGuards, Review, Risk, SandboxInfo, Unattended, guarded_review, on_blocking_pool,
+    split_at_existing,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.
@@ -91,7 +91,8 @@ impl WritePolicyCfg {
 }
 
 /// `write PATH [CONTENT...]`: write the joined args (or else stdin) to an absolute, allowlisted
-/// PATH, asking first unless it is under the shared scratch directory. Policy refusals exit 126.
+/// PATH as an edit under the path guards; the shared scratch directory never asks. Policy
+/// refusals exit 126.
 #[derive(Debug)]
 pub struct WriteCommand {
     cfg: Arc<WritePolicyCfg>,
@@ -111,35 +112,45 @@ impl WriteCommand {
         Self { cfg, gate, sandbox }
     }
 
-    async fn confirmed(&self, target: &WriteTarget, content: &[u8]) -> bool {
+    /// The path to write once the write may go ahead: it lands in the shared scratch, the
+    /// review clears it, or the gate approves. `Err` holds the refusal or cancellation.
+    async fn authorized(
+        &self,
+        target: WriteTarget,
+        content: &[u8],
+        raw_path: &str,
+    ) -> Result<PathBuf, CommandOutput> {
         if self
             .scratch()
             .is_some_and(|dir| target.path.starts_with(dir))
         {
-            return true;
+            return Ok(target.path);
         }
-        let approval = self
-            .gate
-            .confirm(confirmation_request(target, content))
-            .await;
-        approval != Approval::Deny
+        match target.review {
+            Review::Clear => Ok(target.path),
+            Review::Refuse(why) => Err(write_refused(raw_path, &why)),
+            Review::Ask(confirmation, unattended) => {
+                let request =
+                    confirmation_request(&target.path, content, &confirmation, unattended);
+                if self.gate.confirm(request).await == Approval::Deny {
+                    Err(self.write_cancelled(raw_path))
+                } else {
+                    Ok(target.path)
+                }
+            }
+        }
     }
 
-    /// [`WritePolicyCfg::resolve`] against `$HOME` on the blocking pool,
-    /// since it canonicalizes and stats the path.
+    /// [`WritePolicyCfg::resolve`] against `$HOME`, then [`review_write`] under the path
+    /// guards, on the blocking pool, since both stat the path.
     async fn resolve(&self, raw_path: String) -> Result<WriteTarget, PathResolveError> {
         let cfg = Arc::clone(&self.cfg);
         let sandbox = Arc::clone(&self.sandbox);
         let home = std::env::var("HOME").ok();
         on_blocking_pool(move || {
             let path = cfg.resolve(&raw_path, home.as_deref())?;
-            let executable = is_executable(&path);
-            let sensitive = sandbox.path_guards().sensitive_write(&path);
-            Ok(WriteTarget {
-                path,
-                executable,
-                sensitive,
-            })
+            let review = review_write(&sandbox.path_guards(), &path, &cfg);
+            Ok(WriteTarget { path, review })
         })
         .await
     }
@@ -148,14 +159,24 @@ impl WriteCommand {
         self.sandbox.shared.scratch.as_deref()
     }
 
-    fn declined_recovery(&self) -> String {
-        match self.scratch() {
+    fn write_cancelled(&self, raw_path: &str) -> CommandOutput {
+        let recovery = match self.scratch() {
             Some(scratch) => format!(
                 "a path under {}, or ask the user to make this change",
                 scratch.display()
             ),
             None => "asking the user to make this change".to_string(),
-        }
+        };
+        CommandOutput::failed(
+            POLICY_DENIED_EXIT,
+            error_line(
+                "write",
+                format_args!("{raw_path}: write cancelled by user"),
+                Hint::Try,
+                recovery,
+            )
+            .into_bytes(),
+        )
     }
 }
 
@@ -182,7 +203,9 @@ impl Command for WriteCommand {
          under one of the prefixes in `[tools.write] writable_paths`. \
          Symlinks, devices, pipes, sockets, and hidden (dot) entries at any \
          depth below a prefix, are refused. Writes outside the shared scratch \
-         directory ask the user first. A file under /tmp \
+         directory ask the user first unless the permission mode accepts edits; \
+         credentials, startup files, shell profiles and directories on PATH \
+         always ask. A file under /tmp \
          or /run is not visible to `bash` scripts, which get empty ones of \
          their own; for a file they must see, use {sharing_hint}. \
          Tilde expansion is supported. Exit 126 on policy denial or a \
@@ -212,24 +235,13 @@ impl Command for WriteCommand {
             }
         };
 
-        if !self.confirmed(&write_target, &content).await {
-            return CommandOutput::failed(
-                POLICY_DENIED_EXIT,
-                error_line(
-                    "write",
-                    format_args!("{raw_path}: write cancelled by user"),
-                    Hint::Try,
-                    self.declined_recovery(),
-                )
-                .into_bytes(),
-            );
-        }
+        let path = match self.authorized(write_target, &content, &raw_path).await {
+            Ok(path) => path,
+            Err(refusal) => return refusal,
+        };
 
-        let hidden_by = self
-            .sandbox
-            .private_dir_hiding(write_target.path.clone())
-            .await;
-        match write_without_symlinks(write_target.path, content).await {
+        let hidden_by = self.sandbox.private_dir_hiding(path.clone()).await;
+        match write_without_symlinks(path, content).await {
             Ok(()) => CommandOutput {
                 stderr: hidden_by
                     .map(|dir| {
@@ -244,15 +256,11 @@ impl Command for WriteCommand {
     }
 }
 
-/// A resolved write destination.
+/// A resolved write destination and what the path guards make of writing it.
 #[derive(Debug)]
 struct WriteTarget {
     path: PathBuf,
-    /// The file is already executable, so a shell could run it.
-    executable: bool,
-    /// Why the path is sensitive, if it is: a directory on `PATH`, a shell
-    /// profile, a startup file or credentials.
-    sensitive: Option<String>,
+    review: Review,
 }
 
 #[derive(Debug)]
@@ -429,11 +437,6 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
     Ok(assistd_utils::path::expand_tilde(raw, Path::new(home)))
 }
 
-fn is_executable(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
 fn has_hidden_component(path: &Path) -> bool {
     path.components()
         .any(|component| component.as_os_str().as_encoded_bytes().starts_with(b"."))
@@ -448,35 +451,54 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
     )
 }
 
-/// The target, size and content (head and tail only when long) for the user to confirm;
-/// [`Risk::Elevated`], and never run unasked, when the content is cut, the file is executable
-/// or the path is sensitive.
-fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationRequest {
+/// Writing `path` as an edit under the path guards: refused when catastrophic, always asked
+/// when sensitive, and unattended in accept-edits mode inside `cfg`'s writable prefixes.
+fn review_write(guards: &PathGuards, path: &Path, cfg: &WritePolicyCfg) -> Review {
+    let written = path.display().to_string();
+    let analysis = Analysis {
+        class: Class::Edit {
+            writes: vec![written.clone()],
+            deletes: Vec::new(),
+        },
+        effects: vec![Effect {
+            action: Action::Write,
+            path: written,
+            recursive: false,
+        }],
+        always_allow: Vec::new(),
+    };
+    let edit_scope: Vec<PathBuf> = cfg.prefixes().cloned().collect();
+    guarded_review(guards, analysis, &edit_scope, &cfg.protected)
+}
+
+/// The target, size and content (head and tail only when long) for the user to confirm. Content
+/// too long to show in full is [`Risk::Elevated`] and never runs unasked.
+fn confirmation_request(
+    path: &Path,
+    content: &[u8],
+    confirmation: &Confirmation,
+    unattended: Unattended,
+) -> ConfirmationRequest {
     let text = String::from_utf8_lossy(content);
     let mut script = format!(
-        "write {:?} ({})\n",
-        target.path,
+        "write {path:?} ({})\n",
         human_size(u64::try_from(content.len()).unwrap_or(u64::MAX))
     );
     let total = text.chars().count();
     let fully_shown = total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS;
-    if fully_shown {
+    let (risk, unattended, matched_pattern) = if fully_shown {
         script.push_str(&text);
+        (confirmation.risk(), unattended, confirmation.to_string())
     } else {
         let omitted = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
         script.extend(text.chars().take(PREVIEW_HEAD_CHARS));
         script.push_str(&format!("\n… {omitted} characters not shown …\n"));
         script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
-    }
-    let (risk, unattended) = if fully_shown && !target.executable && target.sensitive.is_none() {
-        (Risk::Routine, Unattended::ScopedEdit)
-    } else {
-        (Risk::Elevated, Unattended::Never)
-    };
-    let matched_pattern = match (&target.sensitive, target.executable) {
-        (Some(why), _) => why.clone(),
-        (None, true) => "writes a program a shell could run".to_string(),
-        (None, false) => "writes a file outside the scratch directory".to_string(),
+        (
+            Risk::Elevated,
+            Unattended::Never,
+            format!("{confirmation}, with content too long to show in full"),
+        )
     };
     ConfirmationRequest {
         tool: "write".to_string(),
@@ -487,6 +509,19 @@ fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationReq
         unattended,
         source: ConfirmSource::Main,
     }
+}
+
+fn write_refused(raw_path: &str, why: &str) -> CommandOutput {
+    CommandOutput::failed(
+        POLICY_DENIED_EXIT,
+        error_line(
+            "write",
+            format_args!("{raw_path}: refused in every mode: it {why}"),
+            Hint::Try,
+            "a path inside the folder instead",
+        )
+        .into_bytes(),
+    )
 }
 
 #[cfg(test)]

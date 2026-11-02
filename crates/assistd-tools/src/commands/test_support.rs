@@ -1,13 +1,18 @@
 //! Fixtures shared by the command tests.
 
+use std::error::Error;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use assistd_ipc::{Event, PermissionMode};
 use assistd_wm::{NoWindowManager, WindowManager};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rustix::fs::{Mode, OFlags};
+use serde_json::{Map, Value};
+use tokio::sync::mpsc;
 
 use super::{
     BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
@@ -16,8 +21,8 @@ use super::{
 };
 use crate::command::CommandRegistry;
 use crate::policy::{
-    AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest,
-    SandboxInfo,
+    AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate,
+    ConfirmationRequest, JudgeModel, SafetyJudge, SandboxInfo,
 };
 use crate::vision::VisionGate;
 
@@ -144,4 +149,33 @@ impl ConfirmationGate for RecordingGate {
         self.requests.lock().push(req);
         self.answer
     }
+}
+
+/// A judge model that always gives the decision it holds, `"allow"` or `"ask"`.
+#[derive(Debug)]
+pub(crate) struct FixedJudge(pub(crate) &'static str);
+
+#[async_trait]
+impl JudgeModel for FixedJudge {
+    async fn user_messages(&self, _limit: usize) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn reply(
+        &self,
+        _prompt: String,
+        _schema: Map<String, Value>,
+    ) -> Result<String, Box<dyn Error + Send + Sync>> {
+        Ok(format!(r#"{{"decision":"{}","reason":"stub"}}"#, self.0))
+    }
+}
+
+/// A router in `mode` whose safety judge allows everything and whose prompts are denied
+/// unanswered at once, and the wire those prompts go out on.
+pub(crate) fn router_in(mode: PermissionMode) -> (Arc<ConfirmRouter>, mpsc::Receiver<Event>) {
+    let (tx, rx) = mpsc::channel(4);
+    let judge = SafetyJudge::new(Arc::new(FixedJudge("allow")), Duration::from_secs(5));
+    let router = ConfirmRouter::new("r".into(), tx, Duration::from_millis(10), Some(judge));
+    router.set_mode(mode);
+    (router, rx)
 }

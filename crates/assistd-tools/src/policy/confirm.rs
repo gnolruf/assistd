@@ -69,6 +69,10 @@ pub enum JudgedClass {
     /// An edit with a target outside the edit scope.
     Edit,
     Unvetted,
+    /// A `wm open` launch the user has not approved for good.
+    Launch,
+    /// A call to an MCP tool the user has not approved for good.
+    McpTool,
 }
 
 impl fmt::Display for JudgedClass {
@@ -76,6 +80,8 @@ impl fmt::Display for JudgedClass {
         f.write_str(match self {
             Self::Edit => "edit",
             Self::Unvetted => "unvetted",
+            Self::Launch => "launch",
+            Self::McpTool => "mcp tool",
         })
     }
 }
@@ -85,8 +91,8 @@ impl fmt::Display for JudgedClass {
 pub enum Risk {
     /// Edits files the prompt names, or launches an app.
     Routine,
-    /// Anything else: an unvetted command, a sensitive path, a file a shell could run, a new
-    /// web host or an unapproved MCP tool.
+    /// Anything else: an unvetted command, a sensitive path, a write too long to show in full, a
+    /// new web host or an unapproved MCP tool.
     Elevated,
 }
 
@@ -437,12 +443,8 @@ impl ConfirmationGate for IpcConfirmationGate {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
-
-    use serde_json::{Map, Value};
-
     use super::*;
-    use crate::policy::JudgeModel;
+    use crate::commands::test_support::FixedJudge;
     use PermissionMode::{AcceptEdits, Auto, Manual};
 
     fn sample_request() -> ConfirmationRequest {
@@ -454,25 +456,6 @@ mod tests {
             risk: Risk::Elevated,
             unattended: Unattended::Never,
             source: ConfirmSource::Main,
-        }
-    }
-
-    /// A judge model that always gives `decision`.
-    #[derive(Debug)]
-    struct FixedJudge(&'static str);
-
-    #[async_trait]
-    impl JudgeModel for FixedJudge {
-        async fn user_messages(&self, _limit: usize) -> Vec<String> {
-            Vec::new()
-        }
-
-        async fn reply(
-            &self,
-            _prompt: String,
-            _schema: Map<String, Value>,
-        ) -> Result<String, Box<dyn Error + Send + Sync>> {
-            Ok(format!(r#"{{"decision":"{}","reason":"stub"}}"#, self.0))
         }
     }
 

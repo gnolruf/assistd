@@ -102,23 +102,7 @@ impl SubprocessPolicy {
         on_blocking_pool(move || {
             let guards = sandbox.path_guards();
             let analysis = analyze(&script, cfg.scratch.as_deref(), Some(&cfg.allowlist));
-            let effects = analysis.effects.clone();
-            let always_allow = analysis.always_allow.clone();
-            match guards.verdict(analysis) {
-                PathVerdict::Refused(why) => Review::Refuse(why),
-                PathVerdict::Sensitive(why) => {
-                    Review::Ask(Confirmation::Sensitive(why), Unattended::Never)
-                }
-                PathVerdict::Ordinary(Class::ReadOnly) => Review::Clear,
-                PathVerdict::Ordinary(Class::Edit { .. }) => edit_review(&guards, &effects, &cfg),
-                PathVerdict::Ordinary(Class::Unvetted { why }) => Review::Ask(
-                    Confirmation::Unvetted {
-                        why: why.clone(),
-                        always_allow,
-                    },
-                    judged(JudgedClass::Unvetted, &guards, why),
-                ),
-            }
+            guarded_review(&guards, analysis, &cfg.edit_scope, &cfg.protected)
         })
         .await
     }
@@ -176,9 +160,41 @@ impl SubprocessPolicy {
     }
 }
 
+/// What the path guards make of `analysis`: an edit is checked against `edit_scope`, minus
+/// `excluded`, and an unvetted script asks. Blocks on the filesystem.
+pub(crate) fn guarded_review(
+    guards: &PathGuards,
+    analysis: Analysis,
+    edit_scope: &[PathBuf],
+    excluded: &[PathBuf],
+) -> Review {
+    let effects = analysis.effects.clone();
+    let always_allow = analysis.always_allow.clone();
+    match guards.verdict(analysis) {
+        PathVerdict::Refused(why) => Review::Refuse(why),
+        PathVerdict::Sensitive(why) => Review::Ask(Confirmation::Sensitive(why), Unattended::Never),
+        PathVerdict::Ordinary(Class::ReadOnly) => Review::Clear,
+        PathVerdict::Ordinary(Class::Edit { .. }) => {
+            edit_review(guards, &effects, edit_scope, excluded)
+        }
+        PathVerdict::Ordinary(Class::Unvetted { why }) => Review::Ask(
+            Confirmation::Unvetted {
+                why: why.clone(),
+                always_allow,
+            },
+            judged(JudgedClass::Unvetted, guards, why),
+        ),
+    }
+}
+
 /// An ask for an edit with `effects`: unattended in accept-edits mode when every change lands
-/// inside the edit scope, else put to the judge in auto mode.
-fn edit_review(guards: &PathGuards, effects: &[Effect], cfg: &BashPolicyCfg) -> Review {
+/// inside `edit_scope` and outside `excluded`, else put to the judge in auto mode.
+fn edit_review(
+    guards: &PathGuards,
+    effects: &[Effect],
+    edit_scope: &[PathBuf],
+    excluded: &[PathBuf],
+) -> Review {
     let confirmation = Confirmation::Edit(
         effects
             .iter()
@@ -186,7 +202,7 @@ fn edit_review(guards: &PathGuards, effects: &[Effect], cfg: &BashPolicyCfg) -> 
             .map(|effect| effect.path.clone())
             .collect(),
     );
-    let unattended = match guards.first_out_of_scope(effects, &cfg.edit_scope, &cfg.protected) {
+    let unattended = match guards.first_out_of_scope(effects, edit_scope, excluded) {
         None => Unattended::ScopedEdit,
         Some(path) => judged(
             JudgedClass::Edit,

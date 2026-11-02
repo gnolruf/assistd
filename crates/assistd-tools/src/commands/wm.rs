@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, Risk, Unattended,
-    on_blocking_pool,
+    Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, JudgeContext,
+    JudgedClass, Risk, Unattended, on_blocking_pool,
 };
 
 mod desktop_entry;
@@ -119,8 +119,8 @@ impl WmCommand {
         }
     }
 
-    /// Whether the user lets `launch` run. Approvals cover a launch with no
-    /// files, URLs, or `--cwd`; one with any of them always asks.
+    /// Whether the user, or in auto mode the safety judge, lets `launch` run. Approvals cover a
+    /// launch with no files, URLs, or `--cwd`; one with any of them is never approved for good.
     async fn confirmed(&self, args: &OpenArgs, launch: &PreparedLaunch) -> bool {
         let entry = &launch.entry;
         let key = entry.path.to_string_lossy().into_owned();
@@ -143,7 +143,15 @@ impl WmCommand {
             } else {
                 Risk::Routine
             },
-            unattended: Unattended::Never,
+            unattended: Unattended::Judged(JudgeContext {
+                class: JudgedClass::Launch,
+                cwd: None,
+                why: format!(
+                    "it launches {} ({key}) as the user, outside the sandbox, and the launch is \
+                     not yet approved",
+                    entry.name
+                ),
+            }),
             source: ConfirmSource::Main,
         };
         if has_targets {

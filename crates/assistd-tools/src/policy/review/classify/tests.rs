@@ -60,6 +60,11 @@ const SHIPPED_BYPASSES: &[&str] = &[
     "trap 'rm a' EXIT",
     "alias ll='rm -i'",
     "echo hi > out.txt",
+    "f=~/.ssh/id_ed25519; cat $f",
+    "d=~/.ssh; cat $d/id_ed25519",
+    "cat \"$(echo ~/.ssh/id_ed25519)\"",
+    "cat {..,x}/{..,y}/.ssh/id_ed25519",
+    "wc -c < $f",
 ];
 
 /// Scripts that hide a command or a write somewhere bash runs one: after operators, in
