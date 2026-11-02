@@ -1,11 +1,9 @@
 //! A relay's quarantine: what its commands can read and reach.
-//! Returns early when `bwrap` is not on PATH or the kernel predates Landlock's
-//! Unix socket access right (Linux 7.1).
+//! Returns early when `bwrap` is not on PATH.
 
 use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -22,9 +20,6 @@ const INPUT: &str = "handed-over-input";
 const PYTHON: &str = "/usr/bin/python3";
 
 fn bwrap_sandbox() -> Option<Arc<SandboxInfo>> {
-    if !exec_can_bar_host_sockets() {
-        return None;
-    }
     match probe_sandbox(
         SandboxRequest::Bwrap,
         Vec::new(),
@@ -34,18 +29,6 @@ fn bwrap_sandbox() -> Option<Arc<SandboxInfo>> {
         Ok(ToolSandbox::Bwrap(sandbox)) => Some(sandbox),
         _ => None,
     }
-}
-
-fn exec() -> PathBuf {
-    env!("CARGO_BIN_EXE_assistd-quarantine-exec").into()
-}
-
-fn exec_can_bar_host_sockets() -> bool {
-    Command::new(exec())
-        .args(["--", "true"])
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 fn run_tool(quarantine: &Quarantine) -> RunTool {
@@ -80,7 +63,6 @@ async fn input_dirs_are_read_in_place_but_their_sockets_are_out_of_reach() {
     let quarantine = Quarantine::create(
         relays.path(),
         &sandbox,
-        exec(),
         vec![project.path().to_path_buf()],
         None,
     )
@@ -113,6 +95,13 @@ async fn input_dirs_are_read_in_place_but_their_sockets_are_out_of_reach() {
             socket.accept().is_err(),
             "the sandbox reached a host socket"
         );
+        let io_uring_setup = format!(
+            "bash \"{PYTHON} -I -c 'import ctypes; libc = ctypes.CDLL(None, use_errno=True); \
+             print(libc.syscall(425, 8, ctypes.create_string_buffer(120)), ctypes.get_errno())'\""
+        );
+        let (exit_code, output) = run(&tool, &io_uring_setup).await;
+        assert_eq!(exit_code, 0, "{output}");
+        assert!(output.contains("-1 38"), "io_uring is open: {output}");
     }
 
     drop((tool, quarantine));
@@ -131,10 +120,9 @@ async fn an_input_replaced_on_the_host_after_handover_stays_the_one_handed_over(
     std::fs::write(project.join("notes.txt"), INPUT).expect("input");
     let relays = tempfile::tempdir().expect("relay parent");
 
-    let quarantine =
-        Quarantine::create(relays.path(), &sandbox, exec(), vec![project.clone()], None)
-            .await
-            .expect("quarantine");
+    let quarantine = Quarantine::create(relays.path(), &sandbox, vec![project.clone()], None)
+        .await
+        .expect("quarantine");
     std::fs::rename(&project, parent.path().join("moved")).expect("move the input away");
     std::fs::create_dir(&project).expect("replacement dir");
     std::fs::write(project.join("notes.txt"), HOST_ONLY).expect("replacement");
@@ -166,7 +154,7 @@ async fn quarantined_bash_and_cat_read_inputs_but_not_the_host_home() {
     std::fs::write(&input, INPUT).expect("input");
     let relays = tempfile::tempdir().expect("relay parent");
 
-    let quarantine = Quarantine::create(relays.path(), &sandbox, exec(), vec![input], None)
+    let quarantine = Quarantine::create(relays.path(), &sandbox, vec![input], None)
         .await
         .expect("quarantine");
     let tool = run_tool(&quarantine);
@@ -225,7 +213,7 @@ async fn a_web_relay_reaches_the_network_only_through_web() {
         hosts: ApprovalGate::new(Arc::new(DenyAllGate), Arc::new(Approvals::unsaved())),
         search: None,
     };
-    let quarantine = Quarantine::create(relays.path(), &sandbox, exec(), Vec::new(), Some(egress))
+    let quarantine = Quarantine::create(relays.path(), &sandbox, Vec::new(), Some(egress))
         .await
         .expect("quarantine");
     let tool = run_tool(&quarantine);

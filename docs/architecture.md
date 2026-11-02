@@ -236,14 +236,15 @@ directories bound at their own host paths, the same `prlimit` caps, and always
 `--unshare-net`, with its inputs bound over their mount points. bwrap binds are
 `nosuid,nodev`, so device nodes in an input cannot be opened.
 `bwrap_extra_args` does not apply. The host home, `/run` and the daemon socket
-are not mounted. Every command runs under `assistd-quarantine-exec`, bound in
-at `/run/assistd/quarantine-exec`, which restricts itself with Landlock's
-`RESOLVE_UNIX` before running the command: neither the command nor anything it
-starts can connect to a pathname Unix socket made outside the sandbox, such as
-gpg-agent's or the daemon's inside a bound input.
-Network namespaces do not cover pathname sockets, and Landlock cannot be
-applied before bwrap mounts, so the restriction happens inside the sandbox. The
-wrapper fails the command when the kernel cannot enforce it.
+are not mounted. Network namespaces do not cover pathname sockets, so the
+daemon also hands bwrap a seccomp filter (`--seccomp`, from a memfd) that
+fails `socket(AF_UNIX, ...)` with `EACCES`: the command and everything it
+starts can create no Unix socket, and so cannot connect to one made outside
+the sandbox, such as gpg-agent's or the daemon's inside a bound input.
+`io_uring_setup` fails with `ENOSYS`, since `IORING_OP_SOCKET` would get
+around the rule, and the filter kills any system call from a foreign ABI
+(i386, x32), whose arguments it cannot read. Abstract sockets need no rule;
+they belong to the unshared network namespace.
 
 The in-process file commands (`cat`, `grep`, `head`, `tail`, `ls`, `sort`,
 `uniq`, `wc`) and glob and `~` expansion go through the registry's

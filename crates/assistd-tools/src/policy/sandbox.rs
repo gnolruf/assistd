@@ -19,6 +19,7 @@ use super::on_blocking_pool;
 use super::path_class::{GuardRoots, PathGuards};
 
 mod confined;
+mod seccomp;
 
 pub(crate) use confined::ConfinedSpawner;
 
@@ -61,9 +62,6 @@ const QUARANTINE_ETC: [&str; 6] = [
     "/etc/ld.so.conf",
     "/etc/ld.so.conf.d",
 ];
-
-/// Where a quarantine sees the program every command runs under.
-const QUARANTINE_EXEC: &str = "/run/assistd/quarantine-exec";
 
 /// The bwrap flags that mount a host path at their second argument.
 const BIND_FLAGS: &[&str] = &[
@@ -156,13 +154,12 @@ enum Profile {
 }
 
 /// Only `/usr`, a few `/etc` entries, the shared directories and `inputs`,
-/// with `home` as `$HOME` and the working directory, every command run under
-/// the `exec` wrapper, and no network.
+/// with `home` as `$HOME` and the working directory, no network, and no
+/// `AF_UNIX` sockets.
 #[derive(Debug, Clone)]
 struct QuarantineProfile {
     home: PathBuf,
     inputs: Vec<InputBind>,
-    exec: PathBuf,
 }
 
 /// A host file or directory a quarantine sees read-only at `at`, over a mount
@@ -231,15 +228,14 @@ impl SandboxInfo {
 
     /// A bwrap sandbox that sees none of the host but its programs, `home`
     /// (writable, and shared as the scratch directory), `read_only` and
-    /// `inputs`, with no network, running each command under the
-    /// `assistd-quarantine-exec` program at `exec`. `None` when this
-    /// configuration does not wrap.
+    /// `inputs`, with no network and no `AF_UNIX` sockets, so no Unix socket
+    /// made outside it is reachable. `None` when this configuration does not
+    /// wrap.
     pub(crate) fn quarantined(
         &self,
         home: PathBuf,
         read_only: Vec<PathBuf>,
         inputs: Vec<InputBind>,
-        exec: PathBuf,
     ) -> Option<Self> {
         let ResolvedSandboxMode::Bwrap { .. } = self.mode else {
             return None;
@@ -255,7 +251,7 @@ impl SandboxInfo {
             host_path: self.host_path.clone(),
             unit_dirs: self.unit_dirs.clone(),
             confined: None,
-            profile: Profile::Quarantine(QuarantineProfile { home, inputs, exec }),
+            profile: Profile::Quarantine(QuarantineProfile { home, inputs }),
         })
     }
 
@@ -455,9 +451,8 @@ impl SandboxInfo {
 
     /// The quarantine profile, then the shared directories, which its home is
     /// one of, then its inputs bound from their descriptors over their mount
-    /// points in them; no
-    /// `extra_args`, so the network stays unshared. `program` runs under the
-    /// quarantine wrapper, which keeps it off the host's Unix sockets.
+    /// points in them, and the seccomp filter that keeps `program` off every
+    /// Unix socket; no `extra_args`, so the network stays unshared.
     fn quarantine_command<I, S>(
         &self,
         bwrap: &Path,
@@ -474,24 +469,19 @@ impl SandboxInfo {
         cmd.env_clear().envs(kept_env(std::env::vars_os()));
         cmd.args(quarantine_flags(&quarantine.home));
         cmd.args(shared_flags(&self.shared));
-        bind_inputs(&mut cmd, &quarantine.inputs)?;
-        cmd.arg("--ro-bind")
-            .arg(&quarantine.exec)
-            .arg(QUARANTINE_EXEC);
-        let args = args.into_iter().map(|arg| arg.as_ref().to_os_string());
-        run_limited(
-            &mut cmd,
-            prlimit,
-            QUARANTINE_EXEC,
-            ["--", program].map(OsString::from).into_iter().chain(args),
-        );
+        let mut fds = bind_inputs(&mut cmd, &quarantine.inputs)?;
+        let filter = seccomp::filter_fd()?;
+        cmd.arg("--seccomp").arg(filter.as_raw_fd().to_string());
+        fds.push(filter);
+        cmd.preserved_fds(fds);
+        run_limited(&mut cmd, prlimit, program, args);
         Ok(cmd)
     }
 }
 
-/// Bind each of `inputs` from a duplicate of its descriptor that only `cmd`'s
-/// child inherits, so every command sees what the quarantine opened.
-fn bind_inputs(cmd: &mut ProcCommand, inputs: &[InputBind]) -> io::Result<()> {
+/// Bind each of `inputs` from a duplicate of its descriptor, returned for only
+/// `cmd`'s child to inherit, so every command sees what the quarantine opened.
+fn bind_inputs(cmd: &mut ProcCommand, inputs: &[InputBind]) -> io::Result<Vec<OwnedFd>> {
     let fds = inputs
         .iter()
         .map(|input| input.fd.try_clone())
@@ -501,8 +491,7 @@ fn bind_inputs(cmd: &mut ProcCommand, inputs: &[InputBind]) -> io::Result<()> {
             .arg(fd.as_raw_fd().to_string())
             .arg(&input.at);
     }
-    cmd.preserved_fds(fds);
-    Ok(())
+    Ok(fds)
 }
 
 /// End `cmd`'s bwrap flags and run `program` with `args` under `prlimit`'s
