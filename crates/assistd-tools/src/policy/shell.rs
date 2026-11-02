@@ -10,8 +10,8 @@ const MAX_DEPTH: usize = 64;
 /// Redirection operators other than here-documents, longest first.
 const REDIRECT_OPERATORS: &[&str] = &["&>>", "&>", ">>", ">|", ">&", "<&", "<>", ">", "<"];
 
-/// Reserved words after which bash still reads `[[` as a reserved word.
-const BEFORE_CONDITIONAL: &[&str] = &[
+/// Reserved words after which bash still reads a reserved word such as `[[` or `case`.
+const BEFORE_RESERVED_WORD: &[&str] = &[
     "!", "{", "if", "then", "else", "elif", "do", "while", "until", "time",
 ];
 
@@ -102,6 +102,76 @@ impl Script {
 #[derive(Debug)]
 pub(super) struct TooDeep;
 
+/// How far the lexer has read into one open `case` command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaseState {
+    /// After `case`, before the word it matches.
+    Subject,
+    /// After the subject, before `in`.
+    In,
+    /// In a pattern list up to its `)`; `fresh` until the list's first word.
+    Pattern { fresh: bool },
+    /// In the commands of a clause.
+    Body,
+}
+
+/// The `case` commands open in one command list, innermost last.
+#[derive(Debug, Default)]
+struct OpenCases(Vec<CaseState>);
+
+impl OpenCases {
+    fn innermost(&self) -> Option<CaseState> {
+        self.0.last().copied()
+    }
+
+    fn set_innermost(&mut self, state: CaseState) {
+        if let Some(innermost) = self.0.last_mut() {
+            *innermost = state;
+        }
+    }
+
+    fn in_pattern(&self) -> bool {
+        matches!(self.innermost(), Some(CaseState::Pattern { .. }))
+    }
+
+    fn at_pattern_start(&self) -> bool {
+        self.innermost() == Some(CaseState::Pattern { fresh: true })
+    }
+
+    /// After `;;`, `;&` or `;;&`: the next clause's patterns follow.
+    fn end_clause(&mut self) {
+        if self.innermost() == Some(CaseState::Body) {
+            self.set_innermost(CaseState::Pattern { fresh: true });
+        }
+    }
+
+    /// Advance past the last of `words`, the words of the command being lexed.
+    fn word(&mut self, words: &[Word]) {
+        let Some((last, before)) = words.split_last() else {
+            return;
+        };
+        match self.innermost() {
+            Some(CaseState::Subject) => self.set_innermost(CaseState::In),
+            Some(CaseState::In) if is_bare(last, "in") => {
+                self.set_innermost(CaseState::Pattern { fresh: true });
+            }
+            Some(CaseState::Pattern { fresh: true }) if is_bare(last, "esac") => {
+                self.0.pop();
+            }
+            Some(CaseState::Pattern { .. }) => {
+                self.set_innermost(CaseState::Pattern { fresh: false });
+            }
+            Some(CaseState::Body) if is_bare(last, "esac") && at_command_start(before) => {
+                self.0.pop();
+            }
+            _ if is_bare(last, "case") && at_command_start(before) => {
+                self.0.push(CaseState::Subject);
+            }
+            _ => {}
+        }
+    }
+}
+
 struct Heredoc {
     input: usize,
     delimiter: String,
@@ -178,6 +248,7 @@ impl<'s, 'o> Lexer<'s, 'o> {
         self.descend()?;
         let mut cmd = SimpleCommand::default();
         let mut conditional = false;
+        let mut cases = OpenCases::default();
         loop {
             conditional &= !cmd.words.is_empty();
             let Some(c) = self.peek() else {
@@ -189,6 +260,12 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 '\n' if conditional => self.skip(1),
                 '&' | '|' if conditional && self.peek_at(1) == Some(c) => {
                     self.conditional_operator(&mut cmd, 2);
+                }
+                '(' if !conditional && cases.at_pattern_start() => self.skip(1),
+                ')' if !conditional && cases.in_pattern() => {
+                    self.skip(1);
+                    self.end_command(&mut cmd);
+                    cases.set_innermost(CaseState::Body);
                 }
                 '(' | ')' => {
                     if conditional {
@@ -207,6 +284,9 @@ impl<'s, 'o> Lexer<'s, 'o> {
                 }
                 '#' => self.skip_comment(),
                 ';' | '|' => {
+                    if c == ';' && matches!(self.peek_at(1), Some(';' | '&')) {
+                        cases.end_clause();
+                    }
                     self.skip(1);
                     self.end_command(&mut cmd);
                 }
@@ -218,7 +298,9 @@ impl<'s, 'o> Lexer<'s, 'o> {
                     self.redirect(&mut cmd)?;
                 }
                 _ => {
-                    self.command_word(&mut cmd, conditional)?;
+                    if self.command_word(&mut cmd, conditional)? && !conditional {
+                        cases.word(&cmd.words);
+                    }
                     conditional = if conditional {
                         !cmd.words.last().is_some_and(|word| is_bare(word, "]]"))
                     } else {
@@ -268,15 +350,20 @@ impl<'s, 'o> Lexer<'s, 'o> {
     }
 
     /// Lex one word into `cmd`, dropping a file-descriptor prefix on a
-    /// redirection outside a `conditional`.
-    fn command_word(&mut self, cmd: &mut SimpleCommand, conditional: bool) -> Result<(), TooDeep> {
-        if let Some(word) = self.word()? {
-            let fd = !conditional && matches!(self.peek(), Some('<' | '>')) && is_fd(&word);
-            if !fd {
-                cmd.words.push(word);
-            }
+    /// redirection outside a `conditional`; returns whether `cmd` gained a word.
+    fn command_word(
+        &mut self,
+        cmd: &mut SimpleCommand,
+        conditional: bool,
+    ) -> Result<bool, TooDeep> {
+        let Some(word) = self.word()? else {
+            return Ok(false);
+        };
+        let fd = !conditional && matches!(self.peek(), Some('<' | '>')) && is_fd(&word);
+        if !fd {
+            cmd.words.push(word);
         }
-        Ok(())
+        Ok(!fd)
     }
 
     /// After a `(`: whether it opens a `name ()` function definition. If
@@ -945,16 +1032,19 @@ pub(super) fn is_name(text: &str) -> bool {
 }
 
 fn opens_conditional(words: &[Word]) -> bool {
-    let Some((last, before)) = words.split_last() else {
-        return false;
-    };
-    is_bare(last, "[[")
-        && before.iter().enumerate().all(|(at, word)| {
-            BEFORE_CONDITIONAL
-                .iter()
-                .any(|keyword| is_bare(word, keyword))
-                || (is_bare(word, "-p") && at > 0 && is_bare(&before[at - 1], "time"))
-        })
+    words
+        .split_last()
+        .is_some_and(|(last, before)| is_bare(last, "[[") && at_command_start(before))
+}
+
+/// Whether a word after `before` is where bash reads a reserved word.
+fn at_command_start(before: &[Word]) -> bool {
+    before.iter().enumerate().all(|(at, word)| {
+        BEFORE_RESERVED_WORD
+            .iter()
+            .any(|keyword| is_bare(word, keyword))
+            || (is_bare(word, "-p") && at > 0 && is_bare(&before[at - 1], "time"))
+    })
 }
 
 /// Whether `word` is `text`, unquoted and known before run time.

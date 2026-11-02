@@ -45,6 +45,7 @@ EOF",
   clean) rm -rf build ;;
   *) echo usage ;;
 esac"#,
+    "case a in *) shred a ;; esac",
     "if [ -f a ]; then
   mv a b
 elif [[ -d b ]]; then
