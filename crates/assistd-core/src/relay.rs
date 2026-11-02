@@ -78,8 +78,6 @@ pub struct RelayDeps {
     pub main_slot: Arc<MainSlot>,
     /// The directory each relay's quarantine is created in.
     pub dir: PathBuf,
-    /// The `assistd-quarantine-exec` executable every relay command runs under.
-    pub quarantine_exec: PathBuf,
     /// The history budget of each sub-agent's conversation, in tokens.
     pub subagent_context_tokens: u32,
 }
@@ -248,14 +246,8 @@ impl RelayTool {
             Reach::Files => (step.inputs, None),
             Reach::Web => (Vec::new(), Some(self.egress(Arc::clone(&gate)))),
         };
-        let quarantine = Quarantine::create(
-            &self.deps.dir,
-            &self.policy.sandbox,
-            self.deps.quarantine_exec.clone(),
-            inputs,
-            egress,
-        )
-        .await?;
+        let quarantine =
+            Quarantine::create(&self.deps.dir, &self.policy.sandbox, inputs, egress).await?;
         let task = match previous {
             Some(report) => format!("{}\n\n{HANDOFF_INTRO}\n{}", step.task, report.render()),
             None => step.task,
@@ -684,7 +676,6 @@ mod tests {
                     .unwrap(),
                 ),
                 dir: dir.to_path_buf(),
-                quarantine_exec: dir.join("quarantine-exec"),
                 subagent_context_tokens: 1000,
             },
             RelayPolicy {

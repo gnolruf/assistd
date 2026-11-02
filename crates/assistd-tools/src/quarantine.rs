@@ -50,8 +50,6 @@ pub enum QuarantineError {
         #[source]
         source: io::Error,
     },
-    #[error("quarantine wrapper {} is not a file", .0.display())]
-    MissingExec(PathBuf),
 }
 
 /// How a quarantine's `web` reaches the web: asking `hosts` about each host,
@@ -77,24 +75,18 @@ pub struct Quarantine {
 impl Quarantine {
     /// A new quarantine under `parent` wrapped as `sandbox` wraps, showing each of `inputs`
     /// read-only in [`Quarantine::input_dir`] under its file name, and with `egress` a `web`
-    /// command. Each command runs under `exec`, the `assistd-quarantine-exec` program, which
-    /// keeps it off every Unix socket made outside the sandbox. Fails when `sandbox` does not
-    /// wrap.
+    /// command. Fails when `sandbox` does not wrap.
     pub async fn create(
         parent: &Path,
         sandbox: &SandboxInfo,
-        exec: PathBuf,
         inputs: Vec<PathBuf>,
         egress: Option<Egress>,
     ) -> Result<Self, QuarantineError> {
         let parent = parent.to_path_buf();
-        let (dir, root, binds, exec) = on_blocking_pool(move || {
-            if !exec.is_file() {
-                return Err(QuarantineError::MissingExec(exec));
-            }
+        let (dir, root, binds) = on_blocking_pool(move || {
             let (dir, mut root) = RelayDir::create(&parent)?;
             let binds = mount_inputs(&mut root, &dir.path.join(INPUT_DIR), &inputs)?;
-            Ok((dir, root, binds, exec))
+            Ok((dir, root, binds))
         })
         .await?;
         let egress = egress.map(RelayEgress::from);
@@ -103,7 +95,6 @@ impl Quarantine {
                 dir.path.join(HOME_DIR),
                 vec![dir.path.join(INPUT_DIR), dir.path.join(OUTPUT_DIR)],
                 binds,
-                exec,
             )
             .ok_or(QuarantineError::Unsandboxed)?;
         Ok(Self {

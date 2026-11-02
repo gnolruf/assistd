@@ -54,9 +54,6 @@ mod wm_init;
 /// Log filter when `RUST_LOG` is unset.
 const DEFAULT_LOG_DIRECTIVES: &str = "info";
 
-/// Installed beside the `assistd` executable.
-const QUARANTINE_EXEC: &str = "assistd-quarantine-exec";
-
 const RELAY_DIR_MODE: u32 = 0o700;
 
 /// Command-line arguments for the `daemon` subcommand.
@@ -340,15 +337,13 @@ fn build_main_slot(
 }
 
 /// What the `relay` tool runs sub-agents with: the chat backend they share, a guard on its
-/// main slot, an emptied directory for their quarantines, and the quarantine wrapper
-/// installed beside this executable.
+/// main slot, and an emptied directory for their quarantines.
 fn build_relay_deps(
     config: &Config,
     main_slot: Arc<MainSlot>,
     chat: &Arc<dyn LlmBackend>,
     health_probe: &Arc<dyn LlmHealthProbe>,
 ) -> Result<RelayDeps> {
-    let exe = std::env::current_exe().context("cannot locate the assistd executable")?;
     Ok(RelayDeps {
         runner: SubAgentRunner::new(
             Arc::clone(chat),
@@ -357,7 +352,6 @@ fn build_relay_deps(
         ),
         main_slot,
         dir: prepare_relay_dir()?,
-        quarantine_exec: exe.with_file_name(QUARANTINE_EXEC),
         subagent_context_tokens: config
             .chat
             .max_history_tokens
