@@ -1,5 +1,6 @@
 //! Sorts a script into read-only, edit or unvetted by the programs it runs and the files its
-//! redirections write, using short lists of programs whose effects are known.
+//! redirections write, using short lists of programs whose effects are known, and lists the
+//! paths those programs read, write, delete or change the mode or owner of.
 
 use std::path::Path;
 
@@ -21,8 +22,14 @@ const WRAPPER_KEYWORDS: &[&str] = &["coproc", "time"];
 /// Words after which `find` runs a command up to a `;` or `+`.
 const FIND_COMMAND_ENDS: &[&str] = &[";", "+"];
 
+/// Characters after which the text of a word is only known at run time.
+const DYNAMIC_CHARS: &[char] = &['$', '`', '*', '?', '[', '{', '('];
+
+/// The spellings of `$HOME` a path may start with.
+const HOME_VARIABLES: &[&str] = &["${HOME}", "$HOME"];
+
 /// Programs that only read, each with the options that make it write a file or run a program.
-const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
+const READ_ONLY_PROGRAMS: &[(&str, &[Flag])] = &[
     ("b2sum", &[]),
     ("base64", &[]),
     ("basename", &[]),
@@ -32,10 +39,7 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     ("column", &[]),
     ("comm", &[]),
     ("cut", &[]),
-    (
-        "date",
-        &[Disqualifier::Short('s'), Disqualifier::Long("set")],
-    ),
+    ("date", &[Flag::Short('s'), Flag::Long("set")]),
     ("df", &[]),
     ("diff", &[]),
     ("dirname", &[]),
@@ -46,11 +50,11 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     (
         "find",
         &[
-            Disqualifier::Primary("-delete"),
-            Disqualifier::Primary("-fls"),
-            Disqualifier::Primary("-fprint"),
-            Disqualifier::Primary("-fprint0"),
-            Disqualifier::Primary("-fprintf"),
+            Flag::Primary("-delete"),
+            Flag::Primary("-fls"),
+            Flag::Primary("-fprint"),
+            Flag::Primary("-fprint0"),
+            Flag::Primary("-fprintf"),
         ],
     ),
     ("fold", &[]),
@@ -76,9 +80,9 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     (
         "sort",
         &[
-            Disqualifier::Short('o'),
-            Disqualifier::Long("output"),
-            Disqualifier::Long("compress-program"),
+            Flag::Short('o'),
+            Flag::Long("output"),
+            Flag::Long("compress-program"),
         ],
     ),
     ("stat", &[]),
@@ -93,8 +97,64 @@ const READ_ONLY_PROGRAMS: &[(&str, &[Disqualifier])] = &[
     ("whoami", &[]),
 ];
 
+/// Read-only programs whose operands are not files whose contents they read.
+const READS_NO_CONTENTS: &[&str] = &[
+    "basename", "date", "df", "dirname", "du", "id", "ls", "printenv", "readlink", "realpath",
+    "seq", "sleep", "stat", "uname", "which", "whoami",
+];
+
+/// `grep`'s options that make it read every file below a directory.
+const GREP_RECURSIVE: &[Flag] = &[
+    Flag::Short('d'),
+    Flag::Short('r'),
+    Flag::Short('R'),
+    Flag::Long("dereference-recursive"),
+    Flag::Long("directories"),
+    Flag::Long("recursive"),
+];
+
+/// Read-only programs that read every file below a directory operand given one of these options.
+const RECURSIVE_READERS: &[(&str, &[Flag])] = &[
+    ("diff", &[Flag::Short('r'), Flag::Long("recursive")]),
+    ("egrep", GREP_RECURSIVE),
+    ("fgrep", GREP_RECURSIVE),
+    ("grep", GREP_RECURSIVE),
+];
+
+/// `find` options that come before its starting points.
+const FIND_LEADING_OPTIONS: &[&str] = &["-H", "-L", "-P"];
+
 /// Programs that write or delete the literal paths they name, with the options vetted for each.
 const EDIT_PROGRAMS: &[EditProgram] = &[
+    EditProgram {
+        name: "chgrp",
+        flags: "cfhvHLPR",
+        value_flags: "",
+        long_flags: CHOWN_LONG_FLAGS,
+        targets: Targets::ChangesAllButFirst,
+    },
+    EditProgram {
+        name: "chmod",
+        flags: "cfvR",
+        value_flags: "",
+        long_flags: &[
+            "changes",
+            "no-preserve-root",
+            "preserve-root",
+            "quiet",
+            "recursive",
+            "silent",
+            "verbose",
+        ],
+        targets: Targets::ChangesAllButFirst,
+    },
+    EditProgram {
+        name: "chown",
+        flags: "cfhvHLPR",
+        value_flags: "",
+        long_flags: CHOWN_LONG_FLAGS,
+        targets: Targets::ChangesAllButFirst,
+    },
     EditProgram {
         name: "cp",
         flags: "adfHilLnPprRsTuvx",
@@ -159,6 +219,7 @@ const EDIT_PROGRAMS: &[EditProgram] = &[
             "dir",
             "force",
             "interactive",
+            "no-preserve-root",
             "one-file-system",
             "preserve-root",
             "recursive",
@@ -182,13 +243,27 @@ const EDIT_PROGRAMS: &[EditProgram] = &[
     },
 ];
 
+/// The long options vetted for `chown` and `chgrp`.
+const CHOWN_LONG_FLAGS: &[&str] = &[
+    "changes",
+    "dereference",
+    "no-dereference",
+    "no-preserve-root",
+    "preserve-root",
+    "quiet",
+    "recursive",
+    "silent",
+    "verbose",
+];
+
 /// What a script may do, as far as the read-only and edit lists can tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Class {
     /// It runs only read-only programs, and redirects only to standard streams, `/dev/null`,
     /// `/tmp` or the scratch directory.
     ReadOnly,
-    /// It also runs edit programs or redirects elsewhere; targets are as written, unresolved.
+    /// It also runs edit programs or redirects elsewhere; targets are unresolved, as written or
+    /// as where a copy or move lands.
     Edit {
         writes: Vec<String>,
         deletes: Vec<Delete>,
@@ -205,9 +280,37 @@ pub struct Delete {
     pub recursive: bool,
 }
 
-/// An option that makes a read-only program write a file or run another program.
+/// A script's class and the file operations found in it, including those of commands that
+/// left it unvetted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Analysis {
+    pub class: Class,
+    pub effects: Vec<Effect>,
+}
+
+/// A file operation a script performs on `path`: as written, with `$HOME` spelled `~`, or
+/// joined to the directory an earlier `cd` entered. `~` is left unexpanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Effect {
+    pub action: Action,
+    pub path: String,
+    /// It reaches every entry below `path`, as `rm -r` or `grep -r` do.
+    pub recursive: bool,
+}
+
+/// What an [`Effect`] does to its path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Read,
+    Write,
+    Delete,
+    /// `chmod`, `chown` or `chgrp`.
+    ChangeAttributes,
+}
+
+/// An option a program may be given.
 #[derive(Debug, Clone, Copy)]
-enum Disqualifier {
+enum Flag {
     /// A short option, alone or in a cluster.
     Short(char),
     /// A GNU long option, which may be abbreviated.
@@ -216,7 +319,7 @@ enum Disqualifier {
     Primary(&'static str),
 }
 
-impl Disqualifier {
+impl Flag {
     fn matched_by(self, option: &str) -> bool {
         match self {
             Self::Short(flag) => {
@@ -250,17 +353,19 @@ enum Targets {
     Removes,
     /// Writes every operand.
     WritesAll,
-    /// Writes its last operand.
+    /// Reads all but its last operand, which it writes.
     WritesLast,
     /// Deletes all but its last operand, which it writes.
     Moves,
     /// Writes its last operand, or the sole operand's name in the working directory.
     Links,
+    /// Changes the mode or owner of every operand after the first, which names the change.
+    ChangesAllButFirst,
 }
 
 /// An [`EditProgram`]'s arguments, once its options are vetted.
-struct EditArgs<'w> {
-    operands: Vec<&'w str>,
+struct EditArgs {
+    operands: Vec<String>,
     recursive: bool,
 }
 
@@ -289,13 +394,42 @@ struct Position<'s> {
     depth: usize,
 }
 
+/// The directory relative paths are resolved against, as far as the script shows.
+#[derive(Debug, Default)]
+enum Directory {
+    /// The one the script started in.
+    #[default]
+    Start,
+    /// One a literal `cd` entered, as written, joined to any earlier one.
+    At(String),
+    Unknown,
+}
+
+impl Directory {
+    fn entered(&self, dir: String) -> Self {
+        match self {
+            _ if dir.starts_with(['/', '~']) => Self::At(dir),
+            Self::Start => Self::At(dir),
+            Self::At(current) => Self::At(joined_path(current, &dir)),
+            Self::Unknown => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Classifier<'a> {
     scratch: Option<&'a str>,
-    writes: Vec<String>,
-    deletes: Vec<Delete>,
+    effects: Vec<Effect>,
     runs_edit_program: bool,
-    changes_directory: bool,
+    directory: Directory,
+    /// The script may change `HOME`, so `$HOME` is not `~`.
+    home_changed: bool,
+    /// The script may change `CDPATH`, so where `cd` goes is unknown.
+    cdpath_changed: bool,
+    /// The first relative target named once the directory may have changed.
+    relative_after_cd: Option<String>,
+    /// Why the first command neither list vets is unvetted.
+    unvetted: Option<String>,
 }
 
 impl Classifier<'_> {
@@ -318,32 +452,48 @@ impl Classifier<'_> {
         if let Some(why) = evaluated::in_script(&script) {
             return Err(why);
         }
+        self.home_changed |= changes(&script, "HOME");
+        self.cdpath_changed |= changes(&script, "CDPATH");
         for (index, cmd) in script.commands.iter().enumerate() {
-            self.redirects(cmd)?;
+            let redirected = self.redirects(cmd);
+            self.vet(redirected);
             let position = Position {
                 cmd,
                 script: &script,
                 index,
                 depth,
             };
-            self.command(position)?;
+            let ran = self.command(position);
+            self.vet(ran);
         }
         Ok(())
     }
 
+    /// Keep the first reason a command is unvetted, and go on collecting effects.
+    fn vet(&mut self, outcome: Result<(), String>) {
+        if let Err(why) = outcome {
+            self.unvetted.get_or_insert(why);
+        }
+    }
+
     fn redirects(&mut self, cmd: &SimpleCommand) -> Result<(), String> {
-        for redirect in cmd
-            .redirects
-            .iter()
-            .filter(|r| r.writes() && !is_harmless_target(&r.target, self.scratch))
-        {
+        for redirect in &cmd.redirects {
+            if !redirect.writes() {
+                if redirect.operator == "<" {
+                    self.read(&redirect.target, false);
+                }
+                continue;
+            }
+            if is_harmless_target(&redirect.target, self.scratch) {
+                continue;
+            }
             if redirect.target.dynamic {
                 return Err(format!(
                     "`{}` writes to `{}`, only known at run time",
                     redirect.operator, redirect.target.text
                 ));
             }
-            self.writes.push(redirect.target.text.clone());
+            self.target(Action::Write, redirect.target.text.clone(), false);
         }
         Ok(())
     }
@@ -365,7 +515,8 @@ impl Classifier<'_> {
             if word.dynamic || word.dynamic_name || invocation.fills(word) {
                 return Err(format!("command `{}` is only known at run time", word.text));
             }
-            self.program(word, args, &invocation, position)?;
+            let ran = self.program(word, args, &invocation, position);
+            self.vet(ran);
             fed_wrapper =
                 (invocation.fed && wrapper_operands(word, args.first()).is_some()).then_some(word);
             let name = program(&word.text);
@@ -417,12 +568,29 @@ impl Classifier<'_> {
                 Err("`hash -p` makes a command name run another program".into())
             }
             _ if CHANGES_DIRECTORY.contains(&name) => {
-                self.changes_directory = true;
+                self.change_directory(name, args);
                 Ok(())
             }
             _ if SAFE_BUILTINS.contains(&name) => Ok(()),
             _ => self.listed(word, args, invocation),
         }
+    }
+
+    /// Follow `cd DIR` when `DIR` is literal; any other change leaves the directory unknown.
+    fn change_directory(&mut self, name: &str, args: &[Word]) {
+        let operand = args
+            .iter()
+            .find(|arg| arg.text == "-" || !arg.text.starts_with('-'));
+        let entered = match (name, operand) {
+            ("cd", None) => Some("~".to_string()),
+            ("cd", Some(dir)) if dir.text != "-" => static_path(dir, self.home_changed)
+                .filter(|dir| !self.cdpath_changed || dir.starts_with(['/', '~', '.'])),
+            _ => None,
+        };
+        self.directory = match entered {
+            Some(dir) => self.directory.entered(dir),
+            None => Directory::Unknown,
+        };
     }
 
     /// Classify `word file`, where `word` is `source` or `.`.
@@ -464,8 +632,9 @@ impl Classifier<'_> {
         if is_wrapper(word) {
             return self.wrapper(name, args);
         }
-        if let Some(&(_, disqualifiers)) = READ_ONLY_PROGRAMS.iter().find(|(n, _)| *n == name) {
-            return read_only(name, args, disqualifiers, invocation);
+        if let Some(&(_, flags)) = READ_ONLY_PROGRAMS.iter().find(|(n, _)| *n == name) {
+            read_only(name, args, flags, invocation)?;
+            return self.reads(name, args, invocation);
         }
         match EDIT_PROGRAMS.iter().find(|edit| edit.name == name) {
             Some(edit) => self.edit(edit, args, invocation),
@@ -485,11 +654,83 @@ impl Classifier<'_> {
                 "`env {option}` may run a command the lists cannot see"
             ));
         }
-        self.changes_directory |= args
+        if args
             .iter()
             .take_while(|arg| arg.text.starts_with('-'))
-            .any(|arg| matches!(arg.text.as_str(), "-C" | "--chdir"));
+            .any(|arg| matches!(arg.text.as_str(), "-C" | "--chdir"))
+        {
+            self.directory = Directory::Unknown;
+        }
         Ok(())
+    }
+
+    /// Record the files a read-only program reads the contents of.
+    fn reads(
+        &mut self,
+        name: &str,
+        args: &[Word],
+        invocation: &Invocation<'_>,
+    ) -> Result<(), String> {
+        if READS_NO_CONTENTS.contains(&name) {
+            return Ok(());
+        }
+        if invocation.fed {
+            return Err(format!(
+                "`{name}` reads files xargs names from stdin, only known at run time"
+            ));
+        }
+        if name == "find" {
+            self.find_reads(args);
+            return Ok(());
+        }
+        let recursive = RECURSIVE_READERS
+            .iter()
+            .find(|(reader, _)| *reader == name)
+            .is_some_and(|(_, flags)| {
+                options(args).any(|arg| flags.iter().any(|flag| flag.matched_by(&arg.text)))
+            });
+        let operands: Vec<Word> = read_operands(args)
+            .filter(|word| !invocation.fills(word))
+            .collect();
+        for operand in &operands {
+            self.read(operand, recursive);
+        }
+        if recursive && operands.len() <= 1 {
+            self.target(Action::Read, ".".to_string(), true);
+        }
+        Ok(())
+    }
+
+    /// Record `find`'s starting points as read throughout when it runs a command on what it finds.
+    fn find_reads(&mut self, args: &[Word]) {
+        if !args
+            .iter()
+            .any(|arg| FIND_EXEC_FLAGS.contains(&arg.text.as_str()))
+        {
+            return;
+        }
+        let starts: Vec<&Word> = args
+            .iter()
+            .skip_while(|arg| FIND_LEADING_OPTIONS.contains(&arg.text.as_str()))
+            .take_while(|arg| !arg.text.starts_with(['-', '(', '!', ',']))
+            .collect();
+        if starts.is_empty() {
+            self.target(Action::Read, ".".to_string(), true);
+        }
+        for start in starts {
+            self.read(start, true);
+        }
+    }
+
+    /// Record a read of `word`; one only known at run time reads all of its static directory.
+    fn read(&mut self, word: &Word, recursive: bool) {
+        match static_path(word, self.home_changed) {
+            Some(path) => self.target(Action::Read, path, recursive),
+            None => {
+                let prefix = static_prefix(&spelled(word, self.home_changed));
+                self.target(Action::Read, prefix, true);
+            }
+        }
     }
 
     fn edit(
@@ -507,59 +748,87 @@ impl Classifier<'_> {
         let EditArgs {
             operands,
             recursive,
-        } = edit_args(edit, args)?;
+        } = edit_args(edit, args, self.home_changed)?;
         self.runs_edit_program = true;
-        let owned = |path: &&str| path.to_string();
         match (edit.targets, operands.split_last()) {
             (_, None) => {}
-            (Targets::Removes, Some(_)) => self.delete(&operands, recursive),
-            (Targets::WritesAll, Some(_)) => self.writes.extend(operands.iter().map(owned)),
+            (Targets::Removes, Some(_)) => self.each(Action::Delete, &operands, recursive),
+            (Targets::WritesAll, Some(_)) => self.each(Action::Write, &operands, false),
+            (Targets::ChangesAllButFirst, Some(_)) => {
+                self.each(Action::ChangeAttributes, &operands[1..], recursive);
+            }
             (Targets::WritesLast, Some((last, sources))) if !sources.is_empty() => {
-                self.writes.push(owned(last));
+                self.each(Action::Read, sources, recursive);
+                self.copied_into(last, sources, recursive);
             }
             (Targets::Moves, Some((last, sources))) if !sources.is_empty() => {
-                self.delete(sources, true);
-                self.writes.push(owned(last));
+                self.each(Action::Delete, sources, true);
+                self.copied_into(last, sources, false);
             }
-            (Targets::Links, Some((last, []))) => self.writes.push(basename(last).to_string()),
-            (Targets::Links, Some((last, _))) => self.writes.push(owned(last)),
+            (Targets::Links, Some((last, []))) => {
+                self.target(Action::Read, last.clone(), false);
+                self.target(Action::Write, basename(last).to_string(), false);
+            }
+            (Targets::Links, Some((last, sources))) => {
+                self.each(Action::Read, sources, false);
+                self.copied_into(last, sources, false);
+            }
             (Targets::WritesLast | Targets::Moves, Some(_)) => {}
         }
         Ok(())
     }
 
-    fn delete(&mut self, paths: &[&str], recursive: bool) {
-        self.deletes.extend(paths.iter().map(|path| Delete {
-            path: path.to_string(),
-            recursive,
-        }));
-    }
-
-    /// Fail when the script changes directory and names a relative target, whose directory is
-    /// then only known at run time.
-    fn relative_targets(&self) -> Result<(), String> {
-        if !self.changes_directory {
-            return Ok(());
+    fn each(&mut self, action: Action, paths: &[String], recursive: bool) {
+        for path in paths {
+            self.target(action, path.clone(), recursive);
         }
-        self.writes
-            .iter()
-            .chain(self.deletes.iter().map(|delete| &delete.path))
-            .find(|path| !path.starts_with(['/', '~']))
-            .map_or(Ok(()), |path| {
-                Err(format!(
-                    "the script changes directory, so where `{path}` is cannot be known"
-                ))
-            })
     }
 
-    fn into_class(self) -> Class {
-        if self.runs_edit_program || !self.writes.is_empty() {
-            Class::Edit {
-                writes: self.writes,
-                deletes: self.deletes,
-            }
-        } else {
-            Class::ReadOnly
+    /// Record writes of `destination` and of where each source lands if it is a directory.
+    fn copied_into(&mut self, destination: &str, sources: &[String], recursive: bool) {
+        self.target(Action::Write, destination.to_string(), recursive);
+        for name in sources
+            .iter()
+            .map(|source| basename(source))
+            .filter(|name| !matches!(*name, "" | "." | ".."))
+        {
+            self.target(Action::Write, joined_path(destination, name), recursive);
+        }
+    }
+
+    /// Record an effect on `path`, joined to the directory a `cd` entered when relative.
+    fn target(&mut self, action: Action, path: String, recursive: bool) {
+        let relative = !path.starts_with(['/', '~']);
+        let moved = !matches!(self.directory, Directory::Start);
+        let unknown = matches!(self.directory, Directory::Unknown);
+        if relative && (unknown || (moved && action != Action::Read)) {
+            self.relative_after_cd.get_or_insert_with(|| path.clone());
+        }
+        let path = match &self.directory {
+            _ if !relative => path,
+            Directory::Start => path,
+            Directory::At(dir) => joined_path(dir, &path),
+            Directory::Unknown => return,
+        };
+        self.effects.push(Effect {
+            action,
+            path,
+            recursive,
+        });
+    }
+
+    fn into_analysis(self, outcome: Result<(), String>) -> Analysis {
+        let why = self
+            .unvetted
+            .or(outcome.err())
+            .or_else(|| self.relative_after_cd.as_deref().map(changed_directory_why));
+        let class = match why {
+            Some(why) => Class::Unvetted { why },
+            None => edit_class(&self.effects, self.runs_edit_program),
+        };
+        Analysis {
+            class,
+            effects: self.effects,
         }
     }
 }
@@ -567,24 +836,49 @@ impl Classifier<'_> {
 /// Classify `script` as read-only, an edit of the paths it names, or unvetted. Redirections
 /// into `scratch`, like those into `/tmp`, are not edits.
 pub fn classify(script: &str, scratch: Option<&Path>) -> Class {
+    analyze(script, scratch).class
+}
+
+/// [`classify`] `script`, and list the file operations its commands perform.
+pub fn analyze(script: &str, scratch: Option<&Path>) -> Analysis {
     let mut classifier = Classifier {
         scratch: scratch.and_then(Path::to_str),
         ..Classifier::default()
     };
-    match classifier
-        .script(script, 0)
-        .and_then(|()| classifier.relative_targets())
-    {
-        Ok(()) => classifier.into_class(),
-        Err(why) => Class::Unvetted { why },
+    let outcome = classifier.script(script, 0);
+    classifier.into_analysis(outcome)
+}
+
+fn changed_directory_why(path: &str) -> String {
+    format!("the script changes directory, so where `{path}` is cannot be known")
+}
+
+/// The class of a vetted script with `effects`.
+fn edit_class(effects: &[Effect], runs_edit_program: bool) -> Class {
+    let writes: Vec<String> = effects
+        .iter()
+        .filter(|effect| matches!(effect.action, Action::Write | Action::ChangeAttributes))
+        .map(|effect| effect.path.clone())
+        .collect();
+    if !runs_edit_program && writes.is_empty() {
+        return Class::ReadOnly;
     }
+    let deletes = effects
+        .iter()
+        .filter(|effect| effect.action == Action::Delete)
+        .map(|effect| Delete {
+            path: effect.path.clone(),
+            recursive: effect.recursive,
+        })
+        .collect();
+    Class::Edit { writes, deletes }
 }
 
 /// Vet a read-only program's own options against its `disqualifiers`.
 fn read_only(
     name: &str,
     args: &[Word],
-    disqualifiers: &[Disqualifier],
+    disqualifiers: &[Flag],
     invocation: &Invocation<'_>,
 ) -> Result<(), String> {
     if disqualifiers.is_empty() {
@@ -633,9 +927,36 @@ fn find_own_args(args: &[Word]) -> impl Iterator<Item = &Word> {
     })
 }
 
+/// The arguments before any `--`.
+fn options(args: &[Word]) -> impl Iterator<Item = &Word> {
+    args.iter().take_while(|arg| arg.text != "--")
+}
+
+/// The words a read-only program may read as files: its operands and the values of its
+/// `--name=value` options. Values of short options are not seen.
+fn read_operands(args: &[Word]) -> impl Iterator<Item = Word> + '_ {
+    let mut after_options = false;
+    args.iter().filter_map(move |arg| {
+        if after_options {
+            return Some(arg.clone());
+        }
+        if arg.text == "--" {
+            after_options = true;
+            return None;
+        }
+        if let Some((_, value)) = arg.text.strip_prefix("--").and_then(|o| o.split_once('=')) {
+            return Some(Word {
+                text: value.to_string(),
+                ..arg.clone()
+            });
+        }
+        (arg.text == "-" || !arg.text.starts_with('-')).then(|| arg.clone())
+    })
+}
+
 /// `args` split into operands and vetted options; fails on an option not vetted for `edit` or
-/// an argument only known at run time.
-fn edit_args<'w>(edit: &EditProgram, args: &'w [Word]) -> Result<EditArgs<'w>, String> {
+/// an argument only known at run time, other than a glob for every entry of a directory.
+fn edit_args(edit: &EditProgram, args: &[Word], home_changed: bool) -> Result<EditArgs, String> {
     let mut parsed = EditArgs {
         operands: Vec::new(),
         recursive: false,
@@ -644,29 +965,42 @@ fn edit_args<'w>(edit: &EditProgram, args: &'w [Word]) -> Result<EditArgs<'w>, S
     let mut words = args.iter();
     while let Some(arg) = words.next() {
         let text = arg.text.as_str();
-        if arg.dynamic || arg.splits {
-            return Err(format!(
-                "`{} {text}` names a path only known at run time",
-                edit.name
-            ));
-        }
         if options && text == "--" {
             options = false;
-        } else if let Some(long) = text.strip_prefix("--").filter(|_| options) {
+        } else if let Some(long) = text.strip_prefix("--").filter(|_| options && !arg.dynamic) {
             if !edit.long_flags.contains(&long) {
                 return Err(format!("`{} {text}` is not a vetted option", edit.name));
             }
             parsed.recursive |= long == "recursive";
-        } else if let Some(cluster) = short_options(text).filter(|_| options) {
+        } else if let Some(cluster) = short_options(text).filter(|_| options && !arg.dynamic) {
             if edit_flags(edit, cluster)? {
                 words.next();
             }
             parsed.recursive |= cluster.contains(['r', 'R']);
         } else {
-            parsed.operands.push(text);
+            parsed.operands.push(edit_operand(edit, arg, home_changed)?);
         }
     }
     Ok(parsed)
+}
+
+/// `arg` as a path, or the directory a glob for its every entry lists.
+fn edit_operand(edit: &EditProgram, arg: &Word, home_changed: bool) -> Result<String, String> {
+    if let Some(path) = static_path(arg, home_changed) {
+        return Ok(path);
+    }
+    if arg.quoted && arg.text.starts_with('~') {
+        return Err(format!(
+            "`{} {}` may quote its `~`, so where it points cannot be known",
+            edit.name, arg.text
+        ));
+    }
+    every_entry_of(&spelled(arg, home_changed)).ok_or_else(|| {
+        format!(
+            "`{} {}` names a path only known at run time",
+            edit.name, arg.text
+        )
+    })
 }
 
 /// Vet a cluster of short flags, returning whether its value is the next word.
@@ -680,6 +1014,66 @@ fn edit_flags(edit: &EditProgram, cluster: &str) -> Result<bool, String> {
         }
     }
     Ok(false)
+}
+
+/// `word` as a path known before it runs, with a leading `$HOME` spelled `~`; `None` when it
+/// is only known at run time or starts with a `~` that may be quoted.
+fn static_path(word: &Word, home_changed: bool) -> Option<String> {
+    if word.quoted && word.text.starts_with('~') {
+        return None;
+    }
+    if !word.dynamic {
+        return Some(word.text.clone());
+    }
+    home_as_tilde(&word.text, home_changed).filter(|path| !path.contains(DYNAMIC_CHARS))
+}
+
+/// `word`'s text with a leading `$HOME` spelled `~` when it may be.
+fn spelled(word: &Word, home_changed: bool) -> String {
+    word.dynamic
+        .then(|| home_as_tilde(&word.text, home_changed))
+        .flatten()
+        .unwrap_or_else(|| word.text.clone())
+}
+
+fn home_as_tilde(text: &str, home_changed: bool) -> Option<String> {
+    if home_changed {
+        return None;
+    }
+    HOME_VARIABLES
+        .iter()
+        .find_map(|variable| text.strip_prefix(variable))
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .map(|rest| format!("~{rest}"))
+}
+
+/// The directory a path only known at run time lies in, from its text before the first part
+/// only known at run time.
+fn static_prefix(text: &str) -> String {
+    let known = text.find(DYNAMIC_CHARS).map_or(text, |end| &text[..end]);
+    match known.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(end) => known[..end].to_string(),
+        None => ".".to_string(),
+    }
+}
+
+/// The directory `text` lists every entry of, as `dir/*` or `dir/{*,.*}` do.
+fn every_entry_of(text: &str) -> Option<String> {
+    let (dir, name) = text.rsplit_once('/').unwrap_or((".", text));
+    let selects_all = |pattern: &str| !pattern.is_empty() && pattern.chars().all(|c| c == '*');
+    let all = selects_all(name)
+        || name
+            .strip_prefix('{')
+            .and_then(|list| list.strip_suffix('}'))
+            .is_some_and(|list| list.split(',').any(selects_all));
+    let dir = if dir.is_empty() { "/" } else { dir };
+    (all && !dir.contains(DYNAMIC_CHARS)).then(|| dir.to_string())
+}
+
+/// `name` inside `dir`, with one `/` between them.
+fn joined_path(dir: &str, name: &str) -> String {
+    format!("{}/{name}", dir.trim_end_matches('/'))
 }
 
 /// A wrapper run as such: a reserved-word wrapper only when unquoted.
@@ -717,6 +1111,16 @@ fn changed_git_variable(script: &Script) -> Option<&str> {
         .flat_map(|cmd| &cmd.words)
         .flat_map(|word| changed_variables(&word.text))
         .find(|name| name.starts_with("GIT_"))
+}
+
+/// Whether the script may change variable `name`.
+fn changes(script: &Script, name: &str) -> bool {
+    script
+        .commands
+        .iter()
+        .flat_map(|cmd| &cmd.words)
+        .flat_map(|word| changed_variables(&word.text))
+        .any(|changed| changed == name)
 }
 
 #[cfg(test)]

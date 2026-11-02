@@ -96,7 +96,14 @@ fn edits_record_their_targets_as_written() {
         (
             "mv a b dest/ && cp -r src /tmp/copy && ln -s /etc/hosts",
             Class::Edit {
-                writes: writes(&["dest/", "/tmp/copy", "hosts"]),
+                writes: writes(&[
+                    "dest/",
+                    "dest/a",
+                    "dest/b",
+                    "/tmp/copy",
+                    "/tmp/copy/src",
+                    "hosts",
+                ]),
                 deletes: vec![delete("a", true), delete("b", true)],
             },
         ),
