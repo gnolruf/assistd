@@ -27,13 +27,14 @@ the patched release is out.
   effects are known. Anything it cannot vet is unvetted. A program the
   user approved with "always allow" counts as vetted for the runs the
   approval covers.
-- **Path guards.** Resolve every target: destroying `$HOME`, a personal
+- **Path guards.** Resolve every `bash` and `write` target: destroying `$HOME`, a personal
   folder or a git work tree is refused; touching credentials, owner-only
   files, startup files, shell profiles or `PATH` directories always
   asks.
 - **Permission modes.** Manual asks for every edit and unvetted script;
   Accept-edits also runs edits inside `tools.write.writable_paths`; the
-  opt-in Auto puts the rest to the safety judge.
+  opt-in Auto puts the rest, plus unapproved app launches and MCP tool
+  calls, to the safety judge. A new web host always asks.
 - **Safety judge.** A one-shot model verdict in Auto mode; it asks the
   user whenever it is unsure, fails or times out.
 - **Sandbox.** Every command runs under bubblewrap, with a read-only

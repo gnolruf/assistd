@@ -344,8 +344,9 @@ evaluated string bash would run, as read-only (only programs on a
 short read-only list, redirecting only to standard streams, `/tmp` or
 the scratch directory), an edit (also programs on a short list that
 write or delete the literal paths they name, or redirections to a
-literal path), or unvetted (anything else: another program, a path or
-command only known at run time, a changed `PATH`/`LD_*`/`GIT_*`, a
+literal path), or unvetted (anything else: another program, a path
+from a variable, substitution or brace expansion, which may lie anywhere,
+a command only known at run time, a changed `PATH`/`LD_*`/`GIT_*`, a
 disqualifying option such as `sort -o` or `find -exec`). The path guards
 then resolve every target: destroying `$HOME`, a personal folder or a
 git work tree is refused in every mode, and touching credentials, an
@@ -367,10 +368,11 @@ entry, a working directory, and the files or URLs the entry's `Exec`
 field codes accept, never a command line. Entries under a visible
 `$HOME` entry, where sandboxed commands can write, are refused; the user
 confirms each launch unless they chose "always allow" for that entry,
-and one with files or URLs always asks; `write` restricts targets to a
-configured allowlist, refuses dot entries at any depth below it, and asks
-before writing outside `tools.scratch.dir`; `web fetch` asks before fetching from a host not
-yet approved and follows redirects only to the same or an approved host;
+and one with files or URLs is never approved for good; `write` restricts targets to a
+configured allowlist, refuses dot entries at any depth below it, and puts each
+target through the same path guards as `bash`, asking before writing outside
+`tools.scratch.dir`; `web fetch` asks before fetching from a host not
+yet approved, in every mode, and follows redirects only to the same or an approved host;
 `see` and `screenshot` refuse with an error when the loaded model has no
 vision projector. "Always allow" for a web host, an MCP tool or an application is saved
 beside the config in `approved_hosts.toml`, `approved_mcp_tools.toml` or
@@ -386,9 +388,11 @@ in every mode, and those touching a sensitive path always ask. Accept-edits mode
 also runs, unasked, edits whose every target lands strictly below a
 `tools.write.writable_paths` entry or the scratch directory, and `write`s there
 whose content the prompt shows in full. Auto mode, offered only when
-`tools.allow_auto_mode` is set, additionally puts the remaining edits and
-unvetted scripts to the safety judge, a one-shot model verdict that asks the
-user whenever it is unsure, fails or times out. Each unasked approval is logged
+`tools.allow_auto_mode` is set, additionally puts the remaining edits,
+unvetted scripts, unapproved `wm open` launches and unapproved MCP tool calls
+to the safety judge, a one-shot model verdict that asks the user whenever it is
+unsure, fails or times out. A new web host always asks: egress is the
+exfiltration path, so it is never left to the judge. Each unasked approval is logged
 on `assistd::policy`; nothing is added to the allowlist.
 
 ### Memory (`assistd-memory` + `assistd-embed`)

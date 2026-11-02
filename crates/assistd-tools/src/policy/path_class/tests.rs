@@ -140,3 +140,18 @@ fn credentials_and_startup_files_always_ask() {
         );
     }
 }
+
+#[test]
+fn a_path_known_only_at_run_time_reaches_only_credentials_that_exist() {
+    let script = "f=data/stars.dat; tail -5 $f";
+    let bare = TempDir::new().expect("tempdir");
+    let bare_guards = PathGuards::read(GuardRoots {
+        home: Some(bare.path().to_path_buf()),
+        cwd: Some(bare.path().to_path_buf()),
+        ..GuardRoots::default()
+    });
+    let verdict = bare_guards.verdict(analyze(script, None, None));
+    assert!(matches!(verdict, PathVerdict::Ordinary(_)), "{verdict:?}");
+    let verdict = Home::new().verdict(&format!("cd ~ && {script}"));
+    assert!(matches!(verdict, PathVerdict::Sensitive(_)), "{verdict:?}");
+}

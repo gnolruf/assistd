@@ -6,9 +6,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+use assistd_ipc::PermissionMode;
+
 use super::*;
-use crate::commands::test_support::RecordingGate;
-use crate::policy::{AlwaysAllowGate, Approval, ApprovalGate, Approvals, DenyAllGate};
+use crate::commands::test_support::{RecordingGate, router_in};
+use crate::policy::{
+    AlwaysAllowGate, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, DenyAllGate,
+    IpcConfirmationGate,
+};
 
 /// First byte of a TLS handshake record, which opens every HTTPS connection.
 const TLS_HANDSHAKE: u8 = 0x16;
@@ -122,6 +127,23 @@ async fn declined_fetch_exits_126_without_connecting() {
         "[error] web: fetch cancelled by user: https://example.com/?secret=x. \
          Try: answering without this page\n"
     );
+}
+
+#[tokio::test]
+async fn fetch_from_a_new_host_asks_even_in_auto_mode() {
+    let cmd = loopback_only(ApprovalGate::new(
+        Arc::new(IpcConfirmationGate),
+        Arc::new(Approvals::unsaved()),
+    ));
+    let (router, mut rx) = router_in(PermissionMode::Auto);
+    let out = CONFIRM_ROUTER
+        .scope(router, fetch(&cmd, "https://127.0.0.1:9/"))
+        .await;
+    assert!(
+        rx.try_recv().is_ok(),
+        "the new host was not put to the user"
+    );
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{}", stderr(&out));
 }
 
 #[tokio::test]

@@ -26,7 +26,7 @@ pub mod wm;
 pub mod write;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use crate::policy::BashPolicyCfg;
 pub use bash::BashCommand;

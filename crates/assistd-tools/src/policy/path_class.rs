@@ -254,17 +254,6 @@ impl PathGuards {
             .map(|effect| effect.path.as_str())
     }
 
-    /// Why writing the resolved `path` is sensitive, if it is.
-    pub(crate) fn sensitive_write(&self, path: &Path) -> Option<String> {
-        let effect = Effect {
-            action: Action::Write,
-            path: path.display().to_string(),
-            recursive: false,
-        };
-        self.guarded(Action::Write, path, false)
-            .map(|guard| describe(&effect, path, guard))
-    }
-
     /// The canonical path `effect` lands on, following a final symlink unless it deletes the
     /// link itself; `None` when `~` or the working directory is unknown.
     fn resolve(&self, effect: &Effect) -> Option<PathBuf> {
@@ -303,7 +292,7 @@ impl PathGuards {
         self.sensitive
             .iter()
             .filter(|(_, guarded)| action != Action::Read || *guarded == Guarded::Credentials)
-            .find(|(tree, _)| path.starts_with(tree) || (recursive && tree.starts_with(path)))
+            .find(|(tree, _)| path.starts_with(tree) || (recursive && holds(path, tree)))
             .map(|(tree, guarded)| Guard::of(tree, *guarded, path))
             .or_else(|| self.owner_only(path, recursive && action == Action::Read))
     }
@@ -346,6 +335,11 @@ impl Guard {
             holds: tree != path && tree.starts_with(path),
         }
     }
+}
+
+/// Whether a recursive operation on `path` reaches `tree`: it lies below `path` and exists.
+fn holds(path: &Path, tree: &Path) -> bool {
+    tree.starts_with(path) && tree.symlink_metadata().is_ok()
 }
 
 /// The deepest existing ancestor of `path`, or `path` itself, and the rest of `path` below it.
