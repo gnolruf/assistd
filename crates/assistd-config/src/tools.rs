@@ -208,10 +208,10 @@ impl Default for ToolsBashConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsWriteConfig {
-    /// Non-empty path prefixes `write` may create files under; symlinks and dot
-    /// entries at any depth below a prefix are refused (list one to allow it).
-    /// Writes here ask the user first; `tools.scratch.dir` is always
-    /// writable, without asking. `~` and `~/` expand to
+    /// Non-empty path prefixes `write` may create files under; anywhere else
+    /// outside `tools.scratch.dir` is refused. Symlinks and dot entries at any
+    /// depth below a prefix are refused (list one to allow it). Writes here ask
+    /// first; scratch is writable without asking. `~` and `~/` expand to
     /// `$HOME`; any other relative entry errors, missing ones are dropped.
     pub writable_paths: Vec<String>,
 }
@@ -220,7 +220,7 @@ impl DescribeSettings for ToolsWriteConfig {
     describe_fields! {
         writable_paths => (
             "writable folders",
-            "Folders write may create files under, after asking"
+            "Folders write may create files under, after asking; nowhere else outside scratch"
         ),
     }
 }
