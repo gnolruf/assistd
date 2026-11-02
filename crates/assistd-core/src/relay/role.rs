@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub(super) enum Reach {
     /// The files a step names as `inputs`, read-only; no network.
     Files,
-    /// The web through the relay's egress proxy; no files.
+    /// The web through the in-process `web` command alone; no files.
     Web,
 }
 

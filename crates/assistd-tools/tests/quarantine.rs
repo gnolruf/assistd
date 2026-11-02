@@ -2,6 +2,7 @@
 //! Returns early when `bwrap` is not on PATH or the kernel predates Landlock's
 //! Unix socket access right (Linux 7.1).
 
+use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -212,10 +213,13 @@ async fn quarantined_bash_and_cat_read_inputs_but_not_the_host_home() {
 }
 
 #[tokio::test]
-async fn relay_egress_refuses_unapproved_hosts_loopback_and_plain_http() {
+async fn a_web_relay_reaches_the_network_only_through_web() {
     let Some(sandbox) = bwrap_sandbox() else {
         return;
     };
+    let host = TcpListener::bind("127.0.0.1:0").expect("host listener");
+    host.set_nonblocking(true).expect("nonblocking listener");
+    let port = host.local_addr().expect("listener address").port();
     let relays = tempfile::tempdir().expect("relay parent");
     let egress = Egress {
         hosts: ApprovalGate::new(Arc::new(DenyAllGate), Arc::new(Approvals::unsaved())),
@@ -226,23 +230,15 @@ async fn relay_egress_refuses_unapproved_hosts_loopback_and_plain_http() {
         .expect("quarantine");
     let tool = run_tool(&quarantine);
 
-    for (target, refusal) in [
-        ("example.com:443", "did not approve example.com"),
-        ("127.0.0.1:443", "127.0.0.1 is not a public address"),
-        (
-            "example.com:80",
-            "port 80 is not one a sub-agent may connect to",
-        ),
-    ] {
-        let command = format!(
-            "bash 'exec 3<>/dev/tcp/127.0.0.1/${{HTTPS_PROXY##*:}} && \
-             printf \"CONNECT {target} HTTP/1.1\\r\\n\\r\\n\" >&3 && cat <&3'"
-        );
+    for target in ["1.1.1.1/443".to_string(), format!("127.0.0.1/{port}")] {
+        let command = format!("bash 'exec 3<>/dev/tcp/{target}'");
         let (exit_code, output) = run(&tool, &command).await;
-        assert_eq!(exit_code, 0, "{target}: {output}");
-        assert!(output.contains("403 Forbidden"), "{target}: {output}");
-        assert!(output.contains(refusal), "{target}: {output}");
+        assert_ne!(exit_code, 0, "{target}: {output}");
     }
+    assert!(
+        host.accept().is_err(),
+        "the sandbox reached the host network"
+    );
 
     let (exit_code, output) = run(&tool, "web fetch http://example.com/").await;
     assert_eq!(exit_code, 126, "{output}");

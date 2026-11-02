@@ -38,7 +38,7 @@ pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub(crate) use path_class::split_at_existing;
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
 pub use review::{Action, Analysis, Class, Confirmation, Delete, Effect, analyze, classify};
-pub(crate) use sandbox::{ConfinedSpawner, EgressRoute, InputBind, is_within_visible_home_entry};
+pub(crate) use sandbox::{ConfinedSpawner, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
     ToolSandbox, ToolsDisabled, probe_sandbox,

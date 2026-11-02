@@ -81,12 +81,6 @@ impl EgressPolicy {
     pub(crate) fn allows_plaintext(&self) -> bool {
         self.transport == Transport::PreferHttps
     }
-
-    /// The addresses `host` resolves to that this policy may reach, with
-    /// `port`. Fails with [`NonPublic::Name`] when there are none.
-    pub(crate) async fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
-        reachable_addrs(host, port, self.reachable).await
-    }
 }
 
 /// A destination was refused because it is not on the public internet.
