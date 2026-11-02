@@ -120,7 +120,7 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # bwrap_extra_args = []  # e.g. ["--share-net"] to give bash the network (Linux 6.12+)
 
 [tools.write]
-# writable_paths = ["~"]  # besides tools.scratch.dir
+# writable_paths = ["~/Documents", "~/Downloads"]  # besides tools.scratch.dir
 
 [memory]
 # enabled = true  # false: no memory tools or recalled context; chats are still saved

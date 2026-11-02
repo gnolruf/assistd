@@ -266,5 +266,5 @@ pub fn default_bash_destructive_patterns() -> Vec<String> {
 
 /// Path prefixes the `write` command may create files under.
 pub fn default_writable_paths() -> Vec<String> {
-    vec!["~".into()]
+    vec!["~/Documents".into(), "~/Downloads".into()]
 }
