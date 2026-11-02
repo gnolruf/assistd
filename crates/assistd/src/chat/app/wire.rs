@@ -7,7 +7,7 @@ use assistd_ipc::{
     Event, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role, StatusKind,
     StatusSeverity, TurnStats,
 };
-use assistd_tools::{ConfirmationRequest, Risk};
+use assistd_tools::{ConfirmationRequest, Risk, Unattended};
 use assistd_utils::time::saturating_millis;
 use serde_json::Value;
 
@@ -148,6 +148,7 @@ impl App {
                     matched_pattern,
                     always_allow,
                     risk: Risk::Elevated,
+                    unattended: Unattended::Never,
                     source,
                 },
             ),
@@ -190,9 +191,13 @@ impl App {
             Event::WakeWordDetected { .. } => self.wake_word_heard = true,
             Event::VoiceOutputState { enabled, .. } => self.voice_output_enabled = enabled,
             Event::Capabilities {
-                vision, model_name, ..
+                vision,
+                model_name,
+                auto_mode,
+                ..
             } => {
                 self.vision_enabled = vision;
+                self.offer_auto_mode(auto_mode);
                 if !model_name.is_empty() {
                     self.output.set_banner_model(&model_name);
                     self.model_name = model_name;

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use assistd_tools::{ConfirmSource, Risk};
+use assistd_tools::{ConfirmSource, Risk, Unattended};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -21,6 +21,7 @@ fn test_app_at(socket: PathBuf) -> (App, mpsc::Receiver<ChatEvent>) {
         tx,
         "test-model".into(),
         true,
+        false,
         None,
         PathBuf::from("/tmp/assistd-test-nonexistent.toml"),
     );
@@ -307,6 +308,7 @@ fn open_prompt_offering(app: &mut App, always_allow: Vec<String>) {
             matched_pattern: "rm -rf".into(),
             always_allow,
             risk: Risk::Elevated,
+            unattended: Unattended::Never,
             source: ConfirmSource::Main,
         },
     );
@@ -399,17 +401,51 @@ async fn prompt_swallows_typing_without_answering() {
 }
 
 #[tokio::test]
-async fn shift_tab_switches_the_open_turn_to_accept_commands_without_answering_its_prompt() {
+async fn shift_tab_switches_the_open_turn_to_accept_edits_without_answering_its_prompt() {
     let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
     app.on_key(key(KeyCode::BackTab));
-    assert_eq!(app.permission_mode, PermissionMode::AcceptCommands);
+    assert_eq!(app.permission_mode, PermissionMode::AcceptEdits);
     assert!(app.confirmation.is_some(), "the shown prompt stays open");
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
         Ok(Some(Request::SetPermissionMode { mode, .. })) => {
-            assert_eq!(mode, PermissionMode::AcceptCommands);
+            assert_eq!(mode, PermissionMode::AcceptEdits);
         }
         other => panic!("expected SetPermissionMode, got {other:?}"),
     }
+}
+
+#[test]
+fn shift_tab_offers_auto_only_when_the_daemon_allows_it() {
+    let (mut app, _rx) = test_app();
+    let cycle = |app: &mut App| {
+        (0..3)
+            .map(|_| {
+                app.on_key(key(KeyCode::BackTab));
+                app.permission_mode
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cycle(&mut app),
+        [
+            PermissionMode::AcceptEdits,
+            PermissionMode::Manual,
+            PermissionMode::AcceptEdits
+        ]
+    );
+    app.permission_mode = PermissionMode::Manual;
+    app.offer_auto_mode(true);
+    assert_eq!(
+        cycle(&mut app),
+        [
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+            PermissionMode::Manual
+        ]
+    );
+    app.permission_mode = PermissionMode::Auto;
+    app.offer_auto_mode(false);
+    assert_eq!(app.permission_mode, PermissionMode::Manual);
 }
 
 #[tokio::test]

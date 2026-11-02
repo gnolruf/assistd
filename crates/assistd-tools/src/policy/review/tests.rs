@@ -55,7 +55,9 @@ fn check_against(script: &str, patterns: &[DestructivePattern]) -> Option<String
     };
     match check_script(script, &rules)? {
         Confirmation::Pattern(pattern) => Some(pattern),
-        Confirmation::Unverifiable(_) | Confirmation::Sensitive(_) => Some("?".to_string()),
+        Confirmation::Unverifiable(_) | Confirmation::Sensitive(_) | Confirmation::Edit(_) => {
+            Some("?".to_string())
+        }
         Confirmation::Unlisted { .. } => None,
     }
 }
@@ -661,7 +663,6 @@ fn unlisted(programs: &[&str], approvals: &[&str]) -> Option<Confirmation> {
     Some(Confirmation::Unlisted {
         programs: programs.iter().map(ToString::to_string).collect(),
         approvals: (!approvals.is_empty()).then(|| approvals.iter().map(|a| approval(a)).collect()),
-        modifies_files: false,
     })
 }
 
@@ -859,24 +860,6 @@ fn always_allow_is_offered_only_for_unlisted_named_programs() {
         "an unverifiable command"
     );
     assert!(offered("cargo build; ./x").is_empty(), "a path");
-}
-
-#[test]
-fn unlisted_programs_that_modify_files_are_never_routine() {
-    let machine = dev_machine();
-    for (script, offered) in [
-        ("rm notes.txt", &["rm notes.txt"][..]),
-        ("cargo build && mv a b", &["cargo build", "mv a"][..]),
-    ] {
-        let confirmation = machine.review(script, &[]).expect("needs confirmation");
-        let offered: Vec<ProgramApproval> = offered.iter().map(|a| approval(a)).collect();
-        assert_eq!(confirmation.always_allow(), offered, "{script:?}");
-        assert_eq!(confirmation.risk(), Risk::Elevated, "{script:?}");
-    }
-    let cargo = machine
-        .review("cargo build", &[])
-        .expect("needs confirmation");
-    assert_eq!(cargo.risk(), Risk::Routine);
 }
 
 #[test]

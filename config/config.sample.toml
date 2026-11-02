@@ -75,6 +75,9 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # gpu_headroom_mb = 500  # free VRAM kept beside the model; less puts it to sleep or blocks a wake
 # gpu_auto_wake = false  # wake again once the model fits
 
+[tools]
+# allow_auto_mode = false  # true: shift+tab also offers Auto, where a model judge answers prompts
+
 [tools.scratch]
 # dir = "/run/user/1000/assistd/scratch"  # shared by bash and the other commands
 # retention_days = 30  # pruned at startup; 0 empties it

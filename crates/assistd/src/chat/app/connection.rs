@@ -39,10 +39,10 @@ impl App {
     /// the daemon.
     pub(super) fn spawn_query(&mut self, text: String, attachments: Vec<Attachment>) {
         let (writer_tx, writer_rx) = mpsc::channel::<Request>(QUERY_WRITER_CAPACITY);
-        if self.permission_mode == PermissionMode::AcceptCommands {
+        if self.permission_mode != PermissionMode::Manual {
             let _ = writer_tx.try_send(Request::SetPermissionMode {
                 id: Uuid::new_v4().to_string(),
-                mode: PermissionMode::AcceptCommands,
+                mode: self.permission_mode,
             });
         }
         let id = Uuid::new_v4().to_string();

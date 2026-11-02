@@ -720,10 +720,10 @@ impl assistd_llm::LlmBackend for GatedToolBackend {
     }
 }
 
-/// Tool that runs the production IPC gate on a request of the given risk
+/// Tool that runs the production IPC gate on a request the given modes may approve unasked,
 /// and reports its verdict.
 #[derive(Debug)]
-struct GatedTool(assistd_tools::Risk);
+struct GatedTool(assistd_tools::Unattended);
 
 #[async_trait::async_trait]
 impl assistd_tools::Tool for GatedTool {
@@ -750,7 +750,8 @@ impl assistd_tools::Tool for GatedTool {
                 script: "rm -rf /tmp/x".into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
-                risk: self.0,
+                risk: assistd_tools::Risk::Elevated,
+                unattended: self.0.clone(),
                 source: assistd_tools::ConfirmSource::Main,
             },
         )
@@ -764,12 +765,12 @@ impl assistd_tools::Tool for GatedTool {
 }
 
 fn gated_tool_state() -> Arc<AppState> {
-    gated_tool_state_at(assistd_tools::Risk::Elevated)
+    gated_tool_state_at(assistd_tools::Unattended::Never)
 }
 
-fn gated_tool_state_at(risk: assistd_tools::Risk) -> Arc<AppState> {
+fn gated_tool_state_at(unattended: assistd_tools::Unattended) -> Arc<AppState> {
     let mut tools = assistd_tools::ToolRegistry::new();
-    tools.register(GatedTool(risk));
+    tools.register(GatedTool(unattended));
     Arc::new(AppState::new(
         Config::default(),
         Arc::new(GatedToolBackend {
@@ -821,15 +822,15 @@ async fn dialog_client_answer_reaches_gate_in_spawned_agent_turn() {
 }
 
 #[tokio::test]
-async fn accept_commands_frame_approves_a_routine_command_without_a_prompt() {
+async fn accept_edits_frame_approves_a_scoped_edit_without_a_prompt() {
     with_server(
-        gated_tool_state_at(assistd_tools::Risk::Routine),
+        gated_tool_state_at(assistd_tools::Unattended::ScopedEdit),
         |path| async move {
             let (_write, mut reader) = open_connection(
                 &path,
                 &[
                     r#"{"type":"query","id":"q1","text":"go"}"#,
-                    r#"{"type":"set_permission_mode","id":"m","mode":"accept_commands"}"#,
+                    r#"{"type":"set_permission_mode","id":"m","mode":"accept_edits"}"#,
                 ],
                 false,
             )

@@ -35,7 +35,7 @@ pub use policy::{
     ConfirmRouter, ConfirmationGate, ConfirmationRequest, DestructivePattern, FileScope,
     IpcConfirmationGate, JUDGE_TIMEOUT, JudgeModel, JudgedCommand, NoPendingConfirm, Protected,
     Risk, SafetyJudge, SandboxError, SandboxInfo, SandboxRequest, SearchPath, SharedDirs,
-    ToolSandbox, ToolsDisabled, Verdict, inherit_confirm_router, probe_sandbox,
+    ToolSandbox, ToolsDisabled, Unattended, Verdict, inherit_confirm_router, probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};

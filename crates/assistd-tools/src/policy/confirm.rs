@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +14,8 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 use assistd_ipc::{ConfirmSource, Event, PermissionMode};
+
+use super::judge::{JudgedCommand, SafetyJudge, Verdict};
 
 /// Cap on confirmation prompts in flight on one connection.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
@@ -31,21 +34,59 @@ pub struct ConfirmationRequest {
     pub matched_pattern: String,
     /// Programs an [`Approval::Always`] answer adds to the allowlist.
     pub always_allow: Vec<String>,
-    /// Whether [`PermissionMode::AcceptCommands`] may approve it unasked.
+    /// How much it could do beyond what the prompt shows.
     pub risk: Risk,
+    /// Which permission modes may approve it without asking.
+    pub unattended: Unattended,
     /// The agent whose command it is.
     pub source: ConfirmSource,
+}
+
+/// Which permission modes may approve a [`ConfirmationRequest`] without asking the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unattended {
+    /// Every mode asks.
+    Never,
+    /// [`PermissionMode::AcceptEdits`] and [`PermissionMode::Auto`] approve it: an edit of
+    /// ordinary paths inside the edit scope.
+    ScopedEdit,
+    /// [`PermissionMode::Auto`] approves it when the safety judge allows.
+    Judged(JudgeContext),
+}
+
+/// What the safety judge is told about a command besides its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgeContext {
+    pub class: JudgedClass,
+    pub cwd: Option<PathBuf>,
+    /// Why the policy could not settle it, shown to the judge.
+    pub why: String,
+}
+
+/// The class of a command put to the safety judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgedClass {
+    /// An edit with a target outside the edit scope.
+    Edit,
+    Unvetted,
+}
+
+impl fmt::Display for JudgedClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Edit => "edit",
+            Self::Unvetted => "unvetted",
+        })
+    }
 }
 
 /// How much a [`ConfirmationRequest`] could do beyond what its tool shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Risk {
-    /// Runs or writes something that is merely not pre-approved: a program
-    /// off the allowlist, a file in the write allowlist, a launched app.
+    /// Edits files the prompt names, or launches an app.
     Routine,
-    /// A destructive pattern, a script no check can fully see, a protected
-    /// path, a file a shell could run, a new web host or an unapproved MCP
-    /// tool.
+    /// Anything else: an unvetted command, a sensitive path, a file a shell could run, a new
+    /// web host or an unapproved MCP tool.
     Elevated,
 }
 
@@ -132,39 +173,95 @@ pub struct ConfirmRouter {
     timeout: Duration,
     pending: Mutex<PendingPrompts>,
     mode: Mutex<PermissionMode>,
+    /// Answers for the user in [`PermissionMode::Auto`], which is refused without one.
+    judge: Option<SafetyJudge>,
 }
 
 impl ConfirmRouter {
-    /// A router in [`PermissionMode::Manual`] whose prompts are denied after
-    /// `timeout` without an answer.
-    pub fn new(request_id: String, wire: mpsc::Sender<Event>, timeout: Duration) -> Arc<Self> {
+    /// A router in [`PermissionMode::Manual`] whose prompts are denied after `timeout` without
+    /// an answer, and which honors [`PermissionMode::Auto`] only with a `judge`.
+    pub fn new(
+        request_id: String,
+        wire: mpsc::Sender<Event>,
+        timeout: Duration,
+        judge: Option<SafetyJudge>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             request_id,
             wire,
             timeout,
             pending: Mutex::new(PendingPrompts::default()),
             mode: Mutex::new(PermissionMode::Manual),
+            judge,
         })
     }
 
-    /// Answer later asks under `mode`; prompts already shown stay open.
+    /// Answer later asks under `mode`, or under [`PermissionMode::Manual`] when it is Auto and
+    /// there is no judge; prompts already shown stay open.
     pub fn set_mode(&self, mode: PermissionMode) {
+        let mode = if mode == PermissionMode::Auto && self.judge.is_none() {
+            warn!(
+                target: "assistd::policy",
+                "auto mode is off (tools.allow_auto_mode); using manual mode"
+            );
+            PermissionMode::Manual
+        } else {
+            mode
+        };
         *self.mode.lock() = mode;
     }
 
-    /// Approve a [`Risk::Routine`] request once in [`PermissionMode::AcceptCommands`]; otherwise
-    /// prompt the client and await the answer. Every failure is [`Approval::Deny`].
-    pub async fn ask(&self, req: ConfirmationRequest) -> Approval {
-        if req.risk == Risk::Routine && *self.mode.lock() == PermissionMode::AcceptCommands {
-            info!(
-                target: "assistd::policy",
-                tool = %req.tool,
-                pattern = %req.matched_pattern,
-                "accept-commands mode approved command"
-            );
+    /// Approve `req` once when the mode lets it run unasked; otherwise prompt the client and
+    /// await the answer. Every failure is [`Approval::Deny`].
+    pub async fn ask(&self, mut req: ConfirmationRequest) -> Approval {
+        let mode = *self.mode.lock();
+        if self.approves_unasked(mode, &mut req).await {
             return Approval::Once;
         }
         self.ask_client(req).await
+    }
+
+    /// Whether `mode` lets `req` run unasked, logging each approval. A judge's reason to ask is
+    /// added to the prompt.
+    async fn approves_unasked(&self, mode: PermissionMode, req: &mut ConfirmationRequest) -> bool {
+        match (mode, &req.unattended, &self.judge) {
+            (PermissionMode::AcceptEdits | PermissionMode::Auto, Unattended::ScopedEdit, _) => {
+                info!(
+                    target: "assistd::policy",
+                    tool = %req.tool,
+                    ?mode,
+                    class = "edit",
+                    "approved without asking"
+                );
+                true
+            }
+            (PermissionMode::Auto, Unattended::Judged(context), Some(judge)) => {
+                let judged = JudgedCommand {
+                    command: &req.script,
+                    cwd: context.cwd.as_deref(),
+                    unvetted: &context.why,
+                };
+                match judge.judge(judged).await {
+                    Verdict::Allow(reason) => {
+                        info!(
+                            target: "assistd::policy",
+                            tool = %req.tool,
+                            ?mode,
+                            class = %context.class,
+                            reason,
+                            "approved without asking"
+                        );
+                        true
+                    }
+                    Verdict::Ask(reason) => {
+                        req.matched_pattern =
+                            format!("{}; the safety judge asks: {reason}", req.matched_pattern);
+                        false
+                    }
+                }
+            }
+            _ => false,
+        }
     }
 
     async fn ask_client(&self, req: ConfirmationRequest) -> Approval {
@@ -340,7 +437,13 @@ impl ConfirmationGate for IpcConfirmationGate {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
+    use serde_json::{Map, Value};
+
     use super::*;
+    use crate::policy::JudgeModel;
+    use PermissionMode::{AcceptEdits, Auto, Manual};
 
     fn sample_request() -> ConfirmationRequest {
         ConfirmationRequest {
@@ -349,8 +452,36 @@ mod tests {
             matched_pattern: "rm -rf".into(),
             always_allow: Vec::new(),
             risk: Risk::Elevated,
+            unattended: Unattended::Never,
             source: ConfirmSource::Main,
         }
+    }
+
+    /// A judge model that always gives `decision`.
+    #[derive(Debug)]
+    struct FixedJudge(&'static str);
+
+    #[async_trait]
+    impl JudgeModel for FixedJudge {
+        async fn user_messages(&self, _limit: usize) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn reply(
+            &self,
+            _prompt: String,
+            _schema: Map<String, Value>,
+        ) -> Result<String, Box<dyn Error + Send + Sync>> {
+            Ok(format!(r#"{{"decision":"{}","reason":"stub"}}"#, self.0))
+        }
+    }
+
+    fn judged(class: JudgedClass) -> Unattended {
+        Unattended::Judged(JudgeContext {
+            class,
+            cwd: None,
+            why: "stub".into(),
+        })
     }
 
     async fn recv_confirm_id(rx: &mut mpsc::Receiver<Event>) -> String {
@@ -361,34 +492,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_commands_skips_only_routine_prompts() {
-        for (mode, risk, prompted) in [
-            (PermissionMode::Manual, Risk::Routine, true),
-            (PermissionMode::AcceptCommands, Risk::Elevated, true),
-            (PermissionMode::AcceptCommands, Risk::Routine, false),
-        ] {
-            let (tx, mut rx) = mpsc::channel(4);
-            let router = ConfirmRouter::new("r".into(), tx, Duration::from_millis(50));
-            router.set_mode(mode);
-            let approval = router.ask(ConfirmationRequest {
-                risk,
-                ..sample_request()
-            });
-            let approval = approval.await;
-            assert_eq!(rx.try_recv().is_ok(), prompted, "{mode:?} {risk:?}");
-            let expected = if prompted {
-                Approval::Deny
-            } else {
-                Approval::Once
-            };
-            assert_eq!(approval, expected, "{mode:?} {risk:?}");
+    async fn each_mode_runs_unasked_only_what_its_class_allows() {
+        let unattended = [
+            Unattended::Never,
+            Unattended::ScopedEdit,
+            judged(JudgedClass::Edit),
+            judged(JudgedClass::Unvetted),
+        ];
+        for judge in [None, Some("allow"), Some("ask")] {
+            for mode in [Manual, AcceptEdits, Auto] {
+                for class in &unattended {
+                    let effective = match (mode, judge) {
+                        (Auto, None) => Manual,
+                        _ => mode,
+                    };
+                    let prompted = match (effective, class) {
+                        (_, Unattended::Never) | (Manual, _) => true,
+                        (_, Unattended::ScopedEdit) => false,
+                        (AcceptEdits, Unattended::Judged(_)) => true,
+                        _ => judge != Some("allow"),
+                    };
+                    let (tx, mut rx) = mpsc::channel(4);
+                    let safety_judge = judge.map(|decision| {
+                        SafetyJudge::new(Arc::new(FixedJudge(decision)), Duration::from_secs(5))
+                    });
+                    let router =
+                        ConfirmRouter::new("r".into(), tx, Duration::from_millis(10), safety_judge);
+                    router.set_mode(mode);
+                    let approval = router
+                        .ask(ConfirmationRequest {
+                            unattended: class.clone(),
+                            ..sample_request()
+                        })
+                        .await;
+                    let case = format!("{mode:?} {class:?}");
+                    assert_eq!(rx.try_recv().is_ok(), prompted, "{case}");
+                    let expected = if prompted {
+                        Approval::Deny
+                    } else {
+                        Approval::Once
+                    };
+                    assert_eq!(approval, expected, "{case}");
+                }
+            }
         }
     }
 
     #[tokio::test]
     async fn router_denies_and_forgets_prompt_after_timeout() {
         let (tx, mut rx) = mpsc::channel(4);
-        let router = ConfirmRouter::new("r".into(), tx, Duration::from_millis(50));
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_millis(50), None);
         let ask = router.ask(sample_request());
         let (approval, confirm_id) = tokio::join!(ask, recv_confirm_id(&mut rx));
         assert_eq!(approval, Approval::Deny);
@@ -401,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_ask_forgets_its_prompt() {
         let (tx, mut rx) = mpsc::channel(4);
-        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60), None);
         let asker = Arc::clone(&router);
         let in_flight = tokio::spawn(async move { asker.ask(sample_request()).await });
         let confirm_id = recv_confirm_id(&mut rx).await;
@@ -417,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn router_close_denies_in_flight_prompt_and_later_asks() {
         let (tx, mut rx) = mpsc::channel(4);
-        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60), None);
         let asker = Arc::clone(&router);
         let in_flight = tokio::spawn(async move { asker.ask(sample_request()).await });
         recv_confirm_id(&mut rx).await;
@@ -434,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn router_denies_without_asking_once_pending_cap_is_reached() {
         let (tx, mut rx) = mpsc::channel(4);
-        let router = ConfirmRouter::new("r".into(), tx, CONFIRM_TIMEOUT);
+        let router = ConfirmRouter::new("r".into(), tx, CONFIRM_TIMEOUT, None);
         {
             let mut pending = router.pending.lock();
             for i in 0..MAX_PENDING_CONFIRMS {
@@ -453,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn inherit_confirm_router_carries_router_across_spawn() {
         let (tx, mut rx) = mpsc::channel(4);
-        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60), None);
         let answer = CONFIRM_ROUTER.sync_scope(Arc::clone(&router), || {
             tokio::spawn(inherit_confirm_router(async {
                 IpcConfirmationGate.confirm(sample_request()).await
@@ -469,7 +622,7 @@ mod tests {
     #[tokio::test]
     async fn bare_spawn_loses_router_and_gate_denies() {
         let (tx, mut rx) = mpsc::channel(4);
-        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60));
+        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60), None);
         let answer = CONFIRM_ROUTER.sync_scope(router, || {
             tokio::spawn(async { IpcConfirmationGate.confirm(sample_request()).await })
         });

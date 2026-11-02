@@ -555,8 +555,9 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 id: id(),
                 vision: true,
                 model_name: "Qwen3-14B-GGUF:Q4_K_M".into(),
+                auto_mode: true,
             },
-            r#"{"type":"capabilities","id":"r","vision":true,"model_name":"Qwen3-14B-GGUF:Q4_K_M"}"#,
+            r#"{"type":"capabilities","id":"r","vision":true,"model_name":"Qwen3-14B-GGUF:Q4_K_M","auto_mode":true}"#,
         ),
         (
             Event::Status {

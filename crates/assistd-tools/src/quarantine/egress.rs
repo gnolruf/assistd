@@ -16,7 +16,7 @@ use url::Host;
 
 use assistd_ipc::ConfirmSource;
 
-use crate::policy::{ConfirmationRequest, EgressPolicy, NonPublic, Risk};
+use crate::policy::{ConfirmationRequest, EgressPolicy, NonPublic, Risk, Unattended};
 
 /// Bytes of request head read before a request is refused as malformed.
 const MAX_HEAD: u64 = 8 * 1024;
@@ -223,6 +223,7 @@ async fn admit(target: &Target, policy: &EgressPolicy) -> Result<(), Refusal> {
             matched_pattern: format!("a sub-agent connects to {host}, which is not yet approved"),
             always_allow: vec![host.clone()],
             risk: Risk::Elevated,
+            unattended: Unattended::Never,
             source: ConfirmSource::Main,
         })
         .await;

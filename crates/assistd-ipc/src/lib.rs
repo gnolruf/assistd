@@ -72,9 +72,12 @@ pub enum PermissionMode {
     /// Every prompt goes to the client.
     #[default]
     Manual,
-    /// Prompts the policy rates routine are approved once without asking;
-    /// the rest still go to the client.
-    AcceptCommands,
+    /// Edits of ordinary paths inside the edit scope run without asking; the rest go to the
+    /// client.
+    AcceptEdits,
+    /// As [`PermissionMode::AcceptEdits`], and the safety judge answers the prompts it may;
+    /// offered only when the daemon allows it.
+    Auto,
 }
 
 /// A presence state the daemon can be driven to and settle in.
@@ -915,11 +918,14 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
         source: ConfirmSource,
     },
-    /// Runtime capabilities; `model_name` is the basename of the configured `model.name`.
+    /// Runtime capabilities; `model_name` is the basename of the configured `model.name`, and
+    /// `auto_mode` whether [`PermissionMode::Auto`] is honored.
     Capabilities {
         id: String,
         vision: bool,
         model_name: String,
+        #[serde(default)]
+        auto_mode: bool,
     },
     /// Progress of a relay running inside the turn's `relay` tool call.
     Relay { id: String, event: RelayEvent },

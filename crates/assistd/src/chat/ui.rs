@@ -659,7 +659,8 @@ fn render_rule(frame: &mut Frame<'_>, area: Rect) {
 fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: PermissionMode) {
     let label = match mode {
         PermissionMode::Manual => "manual mode on",
-        PermissionMode::AcceptCommands => "accept commands on",
+        PermissionMode::AcceptEdits => "accept edits on",
+        PermissionMode::Auto => "auto mode on",
     };
     let line = Span::styled(format!("{label} (shift+tab)"), Style::default().fg(BLEY));
     frame.render_widget(Paragraph::new(line), area);
@@ -859,7 +860,7 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use assistd_tools::Risk;
+    use assistd_tools::{Risk, Unattended};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -874,6 +875,7 @@ mod tests {
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
                 risk: Risk::Elevated,
+                unattended: Unattended::Never,
                 source: ConfirmSource::Main,
             },
         )

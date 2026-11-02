@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, Risk,
+    Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, Risk, Unattended,
     on_blocking_pool,
 };
 
@@ -143,6 +143,7 @@ impl WmCommand {
             } else {
                 Risk::Routine
             },
+            unattended: Unattended::Never,
             source: ConfirmSource::Main,
         };
         if has_targets {

@@ -21,6 +21,10 @@ pub struct ToolsConfig {
     pub output: ToolsOutputConfig,
     pub bash: ToolsBashConfig,
     pub write: ToolsWriteConfig,
+    /// Whether the chat's permission-mode toggle offers Auto, where the safety judge answers
+    /// for the user on commands the path guards and edit scope do not settle. `false` keeps
+    /// every connection in manual or accept-edits mode.
+    pub allow_auto_mode: bool,
 }
 
 impl DescribeSettings for ToolsConfig {
@@ -29,6 +33,10 @@ impl DescribeSettings for ToolsConfig {
         output => nested,
         bash => nested,
         write => nested,
+        allow_auto_mode => (
+            "offer auto mode",
+            "Let the chat toggle into Auto, where a model judge approves commands"
+        ),
     }
 }
 

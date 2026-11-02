@@ -86,13 +86,13 @@ async fn bash_timeout_returns_137_with_timeout_message() {
 }
 
 #[tokio::test]
-async fn destructive_pattern_is_cancelled_when_denied() {
+async fn edit_is_cancelled_when_denied() {
     let cmd = rm_rf_is_destructive(Arc::new(DenyAllGate));
     let out = run(&cmd, "rm -rf /tmp/this-directory-does-not-exist-XYZ", None).await;
     assert_eq!(out.exit_code, 126);
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "[error] bash: command cancelled by user. Matched destructive pattern: rm -rf. Try: a different approach\n"
+        "[error] bash: command cancelled by user. It edits `/tmp/this-directory-does-not-exist-XYZ`. Try: a different approach\n"
     );
 }
 

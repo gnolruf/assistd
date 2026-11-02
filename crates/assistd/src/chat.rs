@@ -80,9 +80,16 @@ struct TuiContext {
     chat_tx: mpsc::Sender<ChatEvent>,
     chat_rx: mpsc::Receiver<ChatEvent>,
     shutdown_rx: watch::Receiver<bool>,
-    model_name: String,
-    vision_enabled: bool,
+    capabilities: StartupCapabilities,
     config_path: PathBuf,
+}
+
+/// What the daemon reports about itself when the chat starts.
+#[derive(Debug, Default)]
+struct StartupCapabilities {
+    vision_enabled: bool,
+    model_name: String,
+    auto_mode: bool,
 }
 
 /// Exclusive hold on the per-user chat lock beside the daemon socket,
@@ -213,7 +220,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let (shutdown_tx, _) = watch::channel(false);
     let _signal_handler = AbortOnDropHandle::new(install_signal_handler(shutdown_tx.clone()));
 
-    let (vision_enabled, model_name) = resolve_capabilities(&ipc, &config).await;
+    let capabilities = resolve_capabilities(&ipc, &config).await;
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
 
@@ -241,8 +248,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         chat_tx,
         chat_rx,
         shutdown_rx: shutdown_tx.subscribe(),
-        model_name,
-        vision_enabled,
+        capabilities,
         config_path,
     })
     .await;
@@ -285,23 +291,21 @@ async fn wait_for_daemon(ipc: &IpcClient) -> Result<()> {
     Ok(())
 }
 
-/// Vision support and the display model name: the daemon's when it
-/// answers, else the configured model's basename.
-async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> (bool, String) {
-    let (vision_enabled, daemon_model_name) = get_capabilities(ipc).await.unwrap_or_else(|e| {
+/// The daemon's capabilities, with the configured model's basename as the display name when
+/// the daemon gives none.
+async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> StartupCapabilities {
+    let mut capabilities = get_capabilities(ipc).await.unwrap_or_else(|e| {
         info!("get_capabilities failed: {e:#}");
-        (false, String::new())
+        StartupCapabilities::default()
     });
-    let model_name = if daemon_model_name.is_empty() {
-        config
+    if capabilities.model_name.is_empty() {
+        capabilities.model_name = config
             .model
             .name
             .rsplit_once('/')
-            .map_or_else(|| config.model.name.clone(), |(_, rest)| rest.to_string())
-    } else {
-        daemon_model_name
-    };
-    (vision_enabled, model_name)
+            .map_or_else(|| config.model.name.clone(), |(_, rest)| rest.to_string());
+    }
+    capabilities
 }
 
 async fn run_tui(ctx: TuiContext) -> Result<()> {
@@ -311,8 +315,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         chat_tx,
         mut chat_rx,
         mut shutdown_rx,
-        model_name,
-        vision_enabled,
+        capabilities,
         config_path,
     } = ctx;
 
@@ -324,8 +327,9 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     let mut app = App::new(
         ipc,
         chat_tx,
-        model_name,
-        vision_enabled,
+        capabilities.model_name,
+        capabilities.vision_enabled,
+        capabilities.auto_mode,
         picker,
         config_path,
     );
@@ -459,24 +463,27 @@ fn drain_queued(app: &mut App, chat_rx: &mut mpsc::Receiver<ChatEvent>) {
     }
 }
 
-async fn get_capabilities(ipc: &IpcClient) -> Result<(bool, String)> {
+async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
     let req = Request::GetCapabilities {
         id: Uuid::new_v4().to_string(),
     };
     let mut stream = ipc.one_shot(req).await?;
-    let mut vision = false;
-    let mut model_name = String::new();
+    let mut capabilities = StartupCapabilities::default();
     loop {
         match stream.next_event().await? {
             Some(Event::Capabilities {
-                vision: v,
-                model_name: m,
+                vision,
+                model_name,
+                auto_mode,
                 ..
             }) => {
-                vision = v;
-                model_name = m;
+                capabilities = StartupCapabilities {
+                    vision_enabled: vision,
+                    model_name,
+                    auto_mode,
+                };
             }
-            Some(Event::Done { .. }) => return Ok((vision, model_name)),
+            Some(Event::Done { .. }) => return Ok(capabilities),
             Some(Event::Error { message, .. }) => anyhow::bail!("{message}"),
             Some(_) => {}
             None => anyhow::bail!("daemon closed without responding"),

@@ -15,8 +15,8 @@ use tokio::io::AsyncWriteExt;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    Approval, ConfirmationGate, ConfirmationRequest, Risk, SandboxInfo, on_blocking_pool,
-    split_at_existing,
+    Approval, ConfirmationGate, ConfirmationRequest, Risk, SandboxInfo, Unattended,
+    on_blocking_pool, split_at_existing,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.
@@ -449,7 +449,8 @@ fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> Stri
 }
 
 /// The target, size and content (head and tail only when long) for the user to confirm;
-/// [`Risk::Elevated`] when the content is cut, the file is executable or the path is sensitive.
+/// [`Risk::Elevated`], and never run unasked, when the content is cut, the file is executable
+/// or the path is sensitive.
 fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationRequest {
     let text = String::from_utf8_lossy(content);
     let mut script = format!(
@@ -467,10 +468,10 @@ fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationReq
         script.push_str(&format!("\n… {omitted} characters not shown …\n"));
         script.extend(text.chars().skip(PREVIEW_HEAD_CHARS + omitted));
     }
-    let risk = if fully_shown && !target.executable && target.sensitive.is_none() {
-        Risk::Routine
+    let (risk, unattended) = if fully_shown && !target.executable && target.sensitive.is_none() {
+        (Risk::Routine, Unattended::ScopedEdit)
     } else {
-        Risk::Elevated
+        (Risk::Elevated, Unattended::Never)
     };
     let matched_pattern = match (&target.sensitive, target.executable) {
         (Some(why), _) => why.clone(),
@@ -483,6 +484,7 @@ fn confirmation_request(target: &WriteTarget, content: &[u8]) -> ConfirmationReq
         matched_pattern,
         always_allow: Vec::new(),
         risk,
+        unattended,
         source: ConfirmSource::Main,
     }
 }

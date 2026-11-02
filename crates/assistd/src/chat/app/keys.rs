@@ -107,13 +107,28 @@ impl App {
         });
     }
 
-    /// Flip between manual and accept-commands mode, applying it to the open
-    /// turn too.
+    /// Cycle manual, accept-edits and, when offered, auto mode, applying the mode to the open turn
+    /// too.
     fn toggle_permission_mode(&mut self) {
-        self.permission_mode = match self.permission_mode {
-            PermissionMode::Manual => PermissionMode::AcceptCommands,
-            PermissionMode::AcceptCommands => PermissionMode::Manual,
+        let next = match self.permission_mode {
+            PermissionMode::Manual => PermissionMode::AcceptEdits,
+            PermissionMode::AcceptEdits if self.auto_mode_offered => PermissionMode::Auto,
+            PermissionMode::AcceptEdits | PermissionMode::Auto => PermissionMode::Manual,
         };
+        self.set_permission_mode(next);
+    }
+
+    /// Record whether the daemon honors Auto, leaving Auto for Manual when it no longer does.
+    pub(super) fn offer_auto_mode(&mut self, offered: bool) {
+        self.auto_mode_offered = offered;
+        if !offered && self.permission_mode == PermissionMode::Auto {
+            self.set_permission_mode(PermissionMode::Manual);
+        }
+    }
+
+    /// Switch to `mode`, applying it to the open turn too.
+    fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
         if let Some(writer) = self
             .active_reply
             .as_ref()
