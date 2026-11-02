@@ -1,11 +1,11 @@
-//! `grep`: filter lines of files, directories or stdin by an extended regex.
+//! `grep`: filter lines of files, directories or stdin by a GNU-style regex.
 
 use std::fs::Metadata;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use regex::{Regex, RegexBuilder};
+use fancy_regex::Regex;
 
 use crate::chain::OUTPUT_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
@@ -13,21 +13,24 @@ use crate::commands::cat::sniff_binary;
 use crate::commands::read_regular_file;
 use crate::policy::{FileScope, on_blocking_pool};
 
-/// BRE metacharacters spelled with a backslash, which the regex crate
-/// reads as the literal character.
-const BRE_ESCAPES: [&str; 7] = [r"\|", r"\(", r"\)", r"\{", r"\}", r"\+", r"\?"];
+use self::pattern::{Dialect, MatchOptions, has_bare_pipe};
+
+mod pattern;
+
 const STDIN_LABEL: &str = "(standard input)";
 /// Directory entries `-r` may visit before giving up on the walk.
 const WALK_ENTRY_MAX: usize = 50_000;
 
-/// `grep [-cilnrv] [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...`: print lines from the named files
-/// or stdin matching `PATTERN`. Exits 0 on a match, 1 on none, 2 on errors.
+/// `grep [-cilnrvwEFGP] [-e PATTERN] [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...`: print lines
+/// from the named files or stdin matching `PATTERN`. Exits 0 on a match, 1 on none, 2 on errors.
 #[derive(Debug)]
 pub struct GrepCommand;
 
 #[derive(Default)]
 struct Flags {
-    case_insensitive: bool,
+    matching: MatchOptions,
+    /// Patterns given with `-e`; when empty, the first operand is PATTERN.
+    patterns: Vec<String>,
     invert: bool,
     count_only: bool,
     line_numbers: bool,
@@ -46,13 +49,21 @@ impl Flags {
         self.before > 0 || self.after > 0
     }
 
-    fn set_context(&mut self, flag: char, lines: usize) {
+    /// Apply a flag that takes a value: `-e PATTERN` or a context count.
+    fn set_value(&mut self, flag: char, value: Option<&str>) -> Result<(), String> {
+        if flag == 'e' {
+            let pattern = value.ok_or("flag '-e' needs a pattern, as in -e 'a|b'")?;
+            self.patterns.push(pattern.to_owned());
+            return Ok(());
+        }
+        let lines = parse_context_lines(flag, value)?;
         if flag != 'A' {
             self.before = lines;
         }
         if flag != 'B' {
             self.after = lines;
         }
+        Ok(())
     }
 }
 
@@ -125,7 +136,8 @@ impl Search<'_> {
         };
         let display = target.path().to_string_lossy();
         let label = self.label_lines.then_some(display.as_ref());
-        let count = scan(self.re, self.flags, &text, label, &mut self.out);
+        let count = scan(self.re, self.flags, &text, label, &mut self.out)
+            .map_err(TargetError::MatchFailed)?;
         if self.flags.files_only {
             self.out.extend(matching_file_line(&display, count));
         } else if self.flags.count_only && self.label_lines {
@@ -179,6 +191,7 @@ impl Search<'_> {
 enum TargetError {
     Unreadable { path: String, source: io::Error },
     DirectoryWithoutRecursion { path: String },
+    MatchFailed(fancy_regex::Error),
 }
 
 impl TargetError {
@@ -191,6 +204,7 @@ impl TargetError {
                 Hint::Use,
                 format_args!("grep -r PATTERN {path}"),
             ),
+            Self::MatchFailed(source) => match_failed_line(source),
         }
     }
 }
@@ -202,20 +216,23 @@ impl Command for GrepCommand {
     }
 
     fn summary(&self) -> &'static str {
-        "filter lines matching an ERE regex (quote it: \"a|b\"); -icnrvl, -A/-B/-C N"
+        "filter lines by GNU grep regex: BRE, -E/-P extended, -F fixed; -icnrvlw -e -ABC"
     }
 
     fn help(&self) -> String {
-        "usage: grep [-cilnrv] [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...\n\
+        "usage: grep [-cilnrvwEFGP] [-e PATTERN]... [-A N] [-B N] [-C N] PATTERN [FILE|DIR]...\n\
          \n\
          Print lines matching the regex PATTERN, read from the named \
          paths or from stdin when none are given.\n\
          \n\
-         PATTERN is Rust/ERE regex, not BRE: alternation is `a|b` and \
-         groups are `(a)b`, so quote the pattern to keep `|` from \
-         starting a pipeline (`grep \"Command|Tool\" FILE`). The BRE \
-         spellings `\\|`, `\\(`, `\\+` match those characters \
-         literally here.\n\
+         PATTERN follows GNU grep. By default it is a basic regex: \
+         alternation is `a\\|b`, groups `\\(a\\)`, repeats `a\\+`, \
+         `a\\?`, `a\\{2\\}`, and the bare `|`, `(`, `+`, `?`, `{` match \
+         themselves. With -E or -P it is an extended regex: `a|b`, \
+         `(a)`, `a+`. Both dialects also accept `\\d`, `\\w`, `\\s`, \
+         `\\b`, `\\<`, `\\>` and backreferences like `\\1`; -E and -P \
+         add lookaround such as `(?=x)` and `(?<!x)`. Quote the pattern \
+         so `|` cannot start a pipeline.\n\
          \n\
          Flags:\n  \
            -i  case-insensitive\n  \
@@ -224,16 +241,20 @@ impl Command for GrepCommand {
            -n  prefix each line with its 1-based line number\n  \
            -r  descend into directory arguments\n  \
            -l  print only the names of files with a match\n  \
+           -w  match only whole words\n  \
+           -G  PATTERN is a basic regex (the default)\n  \
+           -E, -P  PATTERN is an extended regex\n  \
+           -F  PATTERN is a literal string\n  \
+           -e PATTERN  use PATTERN; repeat to match any of several\n  \
            -A N  also print N lines after each match\n  \
            -B N  also print N lines before each match\n  \
-           -C N  also print N lines before and after each match\n  \
-           -E  accepted and ignored (PATTERN is always ERE)\n\
+           -C N  also print N lines before and after each match\n\
          \n\
          Flags can be combined (e.g. `-rn`, `-nC2`) and must come \
-         before PATTERN. Context lines use `-` where a matching line has \
-         `:`, and `--` separates groups that are not adjacent. Output \
-         lines carry a `PATH:` prefix whenever more than one file is \
-         searched. Binary \
+         before PATTERN. With -e, every operand is a path. Context lines \
+         use `-` where a matching line has `:`, and `--` separates \
+         groups that are not adjacent. Output lines carry a `PATH:` \
+         prefix whenever more than one file is searched. Binary \
          files, symlinks and unreadable entries found while descending \
          are skipped; a path named on the command line that cannot be \
          read is an error.\n\
@@ -247,7 +268,7 @@ impl Command for GrepCommand {
         if input.args.is_empty() {
             return CommandOutput::usage(self.help());
         }
-        let (flags, positional) = match parse_flags(&input.args) {
+        let (flags, operands) = match parse_flags(&input.args) {
             Ok(v) => v,
             Err(msg) => {
                 return CommandOutput::usage_error(
@@ -257,42 +278,26 @@ impl Command for GrepCommand {
                 );
             }
         };
-        if positional.is_empty() {
+        let Some((patterns, paths)) = split_patterns(&flags, operands) else {
             return CommandOutput::usage(self.help());
-        }
-
-        let pattern = &positional[0];
-        let re = match RegexBuilder::new(pattern)
-            .case_insensitive(flags.case_insensitive)
-            .build()
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return CommandOutput::failed(
-                    2,
-                    error_line(
-                        "grep",
-                        format_args!("bad regex pattern: {e}"),
-                        Hint::Check,
-                        "escape regex metachars; run grep for usage",
-                    )
-                    .into_bytes(),
-                );
-            }
+        };
+        let re = match pattern::compile(patterns, &flags.matching) {
+            Ok(re) => re,
+            Err(message) => return bad_pattern(&message),
         };
 
-        let paths = &positional[1..];
-        if paths.is_empty() {
-            return match input.stdin {
-                Some(stdin) => annotate_dialect(search_stdin(&re, &flags, &stdin), pattern),
-                None => CommandOutput::usage(self.help()),
-            };
-        }
-
-        match search_paths(&input.scope, &re, &flags, paths).await {
-            Ok(out) => annotate_dialect(out, pattern),
-            Err(e) => CommandOutput::failed(2, e.error_line().into_bytes()),
-        }
+        let output = if paths.is_empty() {
+            match input.stdin {
+                Some(stdin) => search_stdin(&re, &flags, &stdin),
+                None => return CommandOutput::usage(self.help()),
+            }
+        } else {
+            match search_paths(&input.scope, &re, &flags, paths).await {
+                Ok(out) => out,
+                Err(e) => return CommandOutput::failed(2, e.error_line().into_bytes()),
+            }
+        };
+        annotate_dialect(output, flags.matching.dialect, patterns)
     }
 }
 
@@ -311,14 +316,17 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
             }
             for (offset, ch) in rest.char_indices() {
                 match ch {
-                    'i' => flags.case_insensitive = true,
+                    'i' => flags.matching.case_insensitive = true,
                     'v' => flags.invert = true,
                     'c' => flags.count_only = true,
                     'n' => flags.line_numbers = true,
                     'r' => flags.recursive = true,
                     'l' => flags.files_only = true,
-                    'E' => {}
-                    'A' | 'B' | 'C' => {
+                    'w' => flags.matching.whole_word = true,
+                    'G' => flags.matching.dialect = Dialect::Basic,
+                    'E' | 'P' => flags.matching.dialect = Dialect::Extended,
+                    'F' => flags.matching.dialect = Dialect::Fixed,
+                    'A' | 'B' | 'C' | 'e' => {
                         let attached = &rest[offset + 1..];
                         let value = if attached.is_empty() {
                             pos += 1;
@@ -326,7 +334,7 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
                         } else {
                             Some(attached)
                         };
-                        flags.set_context(ch, parse_context_lines(ch, value)?);
+                        flags.set_value(ch, value)?;
                         break;
                     }
                     other => return Err(format!("unknown flag '-{other}'")),
@@ -338,6 +346,43 @@ fn parse_flags(argv: &[String]) -> Result<(Flags, &[String]), String> {
         }
     }
     Ok((flags, &argv[pos..]))
+}
+
+/// The patterns to match and the paths to search: the `-e` patterns and
+/// every operand, or else the first operand and the rest.
+fn split_patterns<'a>(
+    flags: &'a Flags,
+    operands: &'a [String],
+) -> Option<(&'a [String], &'a [String])> {
+    if flags.patterns.is_empty() {
+        operands
+            .split_first()
+            .map(|(pattern, paths)| (std::slice::from_ref(pattern), paths))
+    } else {
+        Some((&flags.patterns, operands))
+    }
+}
+
+fn bad_pattern(message: &str) -> CommandOutput {
+    CommandOutput::failed(
+        2,
+        error_line(
+            "grep",
+            format_args!("bad regex pattern: {message}"),
+            Hint::Check,
+            "escape regex metachars, or use -F for a literal string; run grep for usage",
+        )
+        .into_bytes(),
+    )
+}
+
+fn match_failed_line(source: &fancy_regex::Error) -> String {
+    error_line(
+        "grep",
+        source,
+        Hint::Try,
+        "a pattern without nested repeats or lookaround",
+    )
 }
 
 fn parse_context_lines(flag: char, value: Option<&str>) -> Result<usize, String> {
@@ -360,7 +405,10 @@ fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
         );
     };
     let mut out = Vec::new();
-    let count = scan(re, flags, text, None, &mut out);
+    let count = match scan(re, flags, text, None, &mut out) {
+        Ok(count) => count,
+        Err(source) => return CommandOutput::failed(2, match_failed_line(&source).into_bytes()),
+    };
     let stdout = if flags.files_only {
         matching_file_line(STDIN_LABEL, count)
     } else if flags.count_only {
@@ -422,7 +470,15 @@ async fn read_text(scope: &FileScope, target: &Target) -> Result<Option<String>,
     Ok(String::from_utf8(bytes).ok())
 }
 
-fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Vec<u8>) -> usize {
+/// Write the lines of `text` that `flags` selects to `out` and return how
+/// many matched; fails when the matcher exceeds its backtracking limit.
+fn scan(
+    re: &Regex,
+    flags: &Flags,
+    text: &str,
+    label: Option<&str>,
+    out: &mut Vec<u8>,
+) -> Result<usize, fancy_regex::Error> {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let output_line = |index: usize, matched: bool| OutputLine {
         label,
@@ -434,7 +490,8 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
     let mut next_unprinted = 0;
     let mut trailing = 0;
     for (index, line) in lines.iter().enumerate() {
-        let matched = re.is_match(line) ^ flags.invert;
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let matched = re.is_match(content)? ^ flags.invert;
         count += usize::from(matched);
         if !flags.prints_lines() {
             continue;
@@ -464,7 +521,7 @@ fn scan(re: &Regex, flags: &Flags, text: &str, label: Option<&str>, out: &mut Ve
             break;
         }
     }
-    count
+    Ok(count)
 }
 
 fn matching_file_line(name: &str, count: usize) -> Vec<u8> {
@@ -477,21 +534,20 @@ fn matching_file_line(name: &str, count: usize) -> Vec<u8> {
 
 /// A zero-match result is the only moment a dialect mismatch is
 /// visible, so that is where the explanation goes.
-fn annotate_dialect(mut out: CommandOutput, pattern: &str) -> CommandOutput {
-    if out.exit_code != 1 || !out.stderr.is_empty() {
+fn annotate_dialect(
+    mut out: CommandOutput,
+    dialect: Dialect,
+    patterns: &[String],
+) -> CommandOutput {
+    let piped = patterns.iter().any(|pattern| has_bare_pipe(pattern));
+    if out.exit_code != 1 || !out.stderr.is_empty() || dialect != Dialect::Basic || !piped {
         return out;
     }
-    let Some(found) = BRE_ESCAPES.iter().find(|e| pattern.contains(**e)) else {
-        return out;
-    };
     out.stderr = error_line(
         "grep",
-        format_args!(
-            "no matches; `{found}` matches those characters literally here \
-             (PATTERN is Rust/ERE regex, not BRE)"
-        ),
+        "no matches; a bare `|` matches itself in a basic regex",
         Hint::Use,
-        "unescaped ERE metachars in a quoted pattern, e.g. grep \"a|b\" FILE",
+        "grep -E \"a|b\" FILE or grep \"a\\|b\" FILE for alternation",
     )
     .into_bytes();
     out
@@ -626,7 +682,7 @@ mod tests {
     async fn filters_stdin_per_flags() {
         let cases: [(&[&str], &[u8], i32, &str); 4] = [
             (
-                &["Command|Tool"],
+                &["-E", "Command|Tool"],
                 b"a Command here\nnothing\na Tool there\n",
                 0,
                 "a Command here\na Tool there\n",
@@ -648,15 +704,72 @@ mod tests {
         }
     }
 
+    async fn assert_matches(cases: &[(&[&str], &str, &str)]) {
+        for (args, stdin, stdout) in cases {
+            let out = run_grep(args, stdin.as_bytes()).await;
+            assert_eq!(String::from_utf8_lossy(&out.stdout), *stdout, "{args:?}");
+            assert!(out.exit_code < 2, "{args:?}: {out:?}");
+        }
+    }
+
     #[tokio::test]
-    async fn bre_escape_that_matches_nothing_explains_the_dialect() {
-        let out = run_grep(&[r"Command\|Tool"], b"a Command here\na Tool there\n").await;
+    async fn basic_regex_reads_gnu_operators_and_literals() {
+        assert_matches(&[
+            (
+                &[r"Command\|Tool"],
+                "a Command\nnone\na Tool\n",
+                "a Command\na Tool\n",
+            ),
+            (&[r"\(ab\)\+$"], "abab\nab c\n", "abab\n"),
+            (&[r"x\{2\}"], "x\nxx\n", "xx\n"),
+            (&[r"colou\?r"], "color\ncolour\n", "color\ncolour\n"),
+            (&[r"\(ab\)\1"], "abab\nab\n", "abab\n"),
+            (&[r"v\d\+"], "v12\nvx\n", "v12\n"),
+            (&[r"\<cat\>"], "cat\nconcat\n", "cat\n"),
+            (&["fn main("], "fn main() {\nmain\n", "fn main() {\n"),
+            (&["a+b"], "a+b\naab\n", "a+b\n"),
+            (&["cost $5"], "cost $5\ncost 5\n", "cost $5\n"),
+            (&["*.rs"], "src/*.rs\nmain.rs\n", "src/*.rs\n"),
+            (&["^#[^!]"], "#[test]\n#!x\n", "#[test]\n"),
+            (&[r"[\.|(]x"], "(x\n.x\nax\n", "(x\n.x\n"),
+            (&["[[:digit:]]]"], "1]\n1\n", "1]\n"),
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dialect_flags_match_as_intended() {
+        assert_matches(&[
+            (&["-E", r"(ab)+$"], "abab\nab c\n", "abab\n"),
+            (&["-E", "a+b"], "a+b\naab\n", "aab\n"),
+            (&["-P", r"foo(?=bar)"], "foobar\nfoobaz\n", "foobar\n"),
+            (
+                &["-P", r"(?<!un)safe"],
+                "unsafe\nsafe code\n",
+                "safe code\n",
+            ),
+            (&["-E", r"(\w+) \1"], "the the\nthe cat\n", "the the\n"),
+            (&["-F", "a.b(c"], "a.b(c\naxb(c\n", "a.b(c\n"),
+            (&["-w", "id"], "id = 1\nidle\nuser_id\n", "id = 1\n"),
+            (&["-wF", "a.b"], "x a.b y\nxa.b\n", "x a.b y\n"),
+            (
+                &["-e", "foo", "-e", "-bar"],
+                "foo\nbaz\n-bar\n",
+                "foo\n-bar\n",
+            ),
+            (&["-ie", r"x\|Y"], "X\ny\nz\n", "X\ny\n"),
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bare_pipe_that_matches_nothing_explains_the_dialect() {
+        let out = run_grep(&["Command|Tool"], b"a Command here\na Tool there\n").await;
         assert_eq!(out.exit_code, 1);
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            "[error] grep: no matches; `\\|` matches those characters literally here \
-             (PATTERN is Rust/ERE regex, not BRE). \
-             Use: unescaped ERE metachars in a quoted pattern, e.g. grep \"a|b\" FILE\n"
+            "[error] grep: no matches; a bare `|` matches itself in a basic regex. \
+             Use: grep -E \"a|b\" FILE or grep \"a\\|b\" FILE for alternation\n"
         );
     }
 
