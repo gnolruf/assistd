@@ -58,6 +58,7 @@ impl AppState {
                 id: id.clone(),
                 vision: probe.vision_supported,
                 model_name,
+                auto_mode: self.config.tools.allow_auto_mode,
             })
             .await;
         let _ = tx.send(Event::Done { id }).await;

@@ -226,6 +226,34 @@ impl PathGuards {
         })
     }
 
+    /// The directory relative targets resolve against.
+    pub(crate) fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
+    }
+
+    /// The first path, as written, that `effects` change outside `scope`, inside `excluded`,
+    /// on a scope directory itself, or where it cannot be resolved; `None` when every change
+    /// lands strictly below a scope directory. Blocks on the filesystem.
+    pub(crate) fn first_out_of_scope<'e>(
+        &self,
+        effects: &'e [Effect],
+        scope: &[PathBuf],
+        excluded: &[PathBuf],
+    ) -> Option<&'e str> {
+        effects
+            .iter()
+            .filter(|effect| effect.action != Action::Read)
+            .find(|effect| {
+                self.resolve(effect).is_none_or(|path| {
+                    excluded.iter().any(|dir| path.starts_with(dir))
+                        || !scope
+                            .iter()
+                            .any(|dir| path != *dir && path.starts_with(dir))
+                })
+            })
+            .map(|effect| effect.path.as_str())
+    }
+
     /// Why writing the resolved `path` is sensitive, if it is.
     pub(crate) fn sensitive_write(&self, path: &Path) -> Option<String> {
         let effect = Effect {

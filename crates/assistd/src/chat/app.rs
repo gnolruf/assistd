@@ -268,6 +268,8 @@ pub(super) struct App {
     pub verbose: bool,
     /// Shift+Tab: how this chat's turns answer confirmation prompts.
     pub permission_mode: PermissionMode,
+    /// The daemon honors [`PermissionMode::Auto`], so Shift+Tab offers it.
+    pub auto_mode_offered: bool,
 }
 
 /// The reply turn that owns the output pane. The daemon serialises turns,
@@ -413,6 +415,7 @@ impl App {
         chat_tx: mpsc::Sender<ChatEvent>,
         model_name: String,
         vision_enabled: bool,
+        auto_mode_offered: bool,
         picker: Option<Picker>,
         config_path: PathBuf,
     ) -> Self {
@@ -456,6 +459,7 @@ impl App {
             session_title: None,
             verbose: false,
             permission_mode: PermissionMode::Manual,
+            auto_mode_offered,
         }
     }
 

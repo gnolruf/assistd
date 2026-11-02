@@ -124,6 +124,7 @@ pub(crate) const SECTIONS: &[Section] = &[
         &[
             setting("tools.bash.sandbox", SettingKind::Choice(SANDBOX_MODES)),
             setting("tools.bash.timeout_secs", SettingKind::Integer),
+            setting("tools.allow_auto_mode", SettingKind::Toggle),
             setting(
                 "tools.write.writable_paths",
                 SettingKind::List(ListItem::Text),

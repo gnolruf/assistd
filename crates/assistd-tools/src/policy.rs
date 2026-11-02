@@ -1,7 +1,7 @@
 //! Command-execution policy: command review, confirmation gates, and the
 //! bwrap sandbox.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,8 +29,8 @@ pub use approvals::{
 pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
     Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, IpcConfirmationGate, MAX_PENDING_CONFIRMS, NoPendingConfirm, Risk,
-    inherit_confirm_router,
+    ConfirmationRequest, IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS,
+    NoPendingConfirm, Risk, Unattended, inherit_confirm_router,
 };
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
@@ -47,8 +47,9 @@ pub use sandbox::{
     ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 
-/// Policy for the commands that spawn subprocesses. A command runs
-/// unasked only when [`check_script`] clears it.
+/// Policy for the commands that spawn subprocesses: read-only scripts run unasked, edits ask
+/// unless the permission mode accepts them, and unvetted scripts ask unless [`check_script`]
+/// clears them.
 #[derive(Debug, Clone)]
 pub struct BashPolicyCfg {
     pub timeout: Duration,
@@ -61,6 +62,9 @@ pub struct BashPolicyCfg {
     /// The sandbox's shared scratch directory, where a redirection may
     /// write without confirmation.
     pub scratch: Option<PathBuf>,
+    /// Canonical directories below which an edit of ordinary paths runs unasked in
+    /// [`assistd_ipc::PermissionMode::AcceptEdits`] and Auto.
+    pub edit_scope: Vec<PathBuf>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -75,6 +79,7 @@ impl Default for BashPolicyCfg {
             )),
             protected: Vec::new(),
             scratch: None,
+            edit_scope: Vec::new(),
         }
     }
 }
@@ -95,7 +100,7 @@ impl BashPolicyCfg {
 #[derive(Debug)]
 pub(crate) enum Review {
     Clear,
-    Ask(Confirmation),
+    Ask(Confirmation, Unattended),
     /// It would destroy a catastrophic path; holds what and where.
     Refuse(String),
 }
@@ -109,18 +114,30 @@ pub(crate) struct SubprocessPolicy {
 }
 
 impl SubprocessPolicy {
-    /// The path guards, then [`check_script`] when they find nothing guarded, on the blocking
-    /// pool, since both read the filesystem.
+    /// The path guards, then the script's class: an edit is checked against the edit scope,
+    /// and an unvetted script against [`check_script`]. Runs on the blocking pool, since both
+    /// read the filesystem.
     pub(crate) async fn review_script(&self, script: String) -> Review {
         let cfg = Arc::clone(&self.cfg);
         let sandbox = Arc::clone(&self.sandbox);
         on_blocking_pool(move || {
+            let guards = sandbox.path_guards();
             let analysis = analyze(&script, cfg.scratch.as_deref());
-            match sandbox.path_guards().verdict(analysis) {
+            let effects = analysis.effects.clone();
+            match guards.verdict(analysis) {
                 PathVerdict::Refused(why) => Review::Refuse(why),
-                PathVerdict::Sensitive(why) => Review::Ask(Confirmation::Sensitive(why)),
-                PathVerdict::Ordinary(_) => {
-                    check_script(&script, &cfg.rules()).map_or(Review::Clear, Review::Ask)
+                PathVerdict::Sensitive(why) => {
+                    Review::Ask(Confirmation::Sensitive(why), Unattended::Never)
+                }
+                PathVerdict::Ordinary(Class::ReadOnly) => Review::Clear,
+                PathVerdict::Ordinary(Class::Edit { .. }) => edit_review(&guards, &effects, &cfg),
+                PathVerdict::Ordinary(Class::Unvetted { why }) => {
+                    match check_script(&script, &cfg.rules()) {
+                        None => Review::Clear,
+                        Some(confirmation) => {
+                            Review::Ask(confirmation, judged(JudgedClass::Unvetted, &guards, why))
+                        }
+                    }
                 }
             }
         })
@@ -139,16 +156,28 @@ impl SubprocessPolicy {
         match review {
             Review::Clear => Ok(()),
             Review::Refuse(why) => Err(refused(tool, op, &why)),
-            Review::Ask(confirmation) if self.confirmed(tool, script, &confirmation).await => {
-                Ok(())
+            Review::Ask(confirmation, unattended) => {
+                if self
+                    .confirmed(tool, script, &confirmation, unattended)
+                    .await
+                {
+                    Ok(())
+                } else {
+                    Err(cancelled(tool, op, &confirmation))
+                }
             }
-            Review::Ask(confirmation) => Err(cancelled(tool, op, &confirmation)),
         }
     }
 
     /// Ask the gate; an "always" answer also adds the offered programs to
     /// the allowlist.
-    async fn confirmed(&self, tool: &str, script: &str, confirmation: &Confirmation) -> bool {
+    async fn confirmed(
+        &self,
+        tool: &str,
+        script: &str,
+        confirmation: &Confirmation,
+        unattended: Unattended,
+    ) -> bool {
         let offered = confirmation.always_allow();
         let request = ConfirmationRequest {
             tool: tool.to_string(),
@@ -156,6 +185,7 @@ impl SubprocessPolicy {
             matched_pattern: confirmation.to_string(),
             always_allow: offered.iter().map(ToString::to_string).collect(),
             risk: confirmation.risk(),
+            unattended,
             source: ConfirmSource::Main,
         };
         approvals::confirm_remembering(
@@ -165,6 +195,35 @@ impl SubprocessPolicy {
         )
         .await
     }
+}
+
+/// An ask for an edit with `effects`: unattended in accept-edits mode when every change lands
+/// inside the edit scope, else put to the judge in auto mode.
+fn edit_review(guards: &PathGuards, effects: &[Effect], cfg: &BashPolicyCfg) -> Review {
+    let confirmation = Confirmation::Edit(
+        effects
+            .iter()
+            .filter(|effect| effect.action != Action::Read)
+            .map(|effect| effect.path.clone())
+            .collect(),
+    );
+    let unattended = match guards.first_out_of_scope(effects, &cfg.edit_scope, &cfg.protected) {
+        None => Unattended::ScopedEdit,
+        Some(path) => judged(
+            JudgedClass::Edit,
+            guards,
+            format!("it changes `{path}`, outside the edit scope"),
+        ),
+    };
+    Review::Ask(confirmation, unattended)
+}
+
+fn judged(class: JudgedClass, guards: &PathGuards, why: String) -> Unattended {
+    Unattended::Judged(JudgeContext {
+        class,
+        cwd: guards.cwd().map(Path::to_path_buf),
+        why,
+    })
 }
 
 fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput {
@@ -177,6 +236,7 @@ fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput
             format!("Not on the allowlist: {}", programs.join(", "))
         }
         Confirmation::Sensitive(why) => format!("It {why}"),
+        Confirmation::Edit(_) => format!("It {confirmation}"),
     };
     CommandOutput::failed(
         POLICY_DENIED_EXIT,

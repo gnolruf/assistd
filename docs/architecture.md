@@ -367,13 +367,17 @@ Clients that cannot answer prompts (`assistd query`, push-to-talk) deny
 them, so there only approved hosts, tools and programs run.
 
 A query connection starts in manual mode, where every prompt goes to the
-client. A client can switch it to accept-commands mode with a mid-stream
-`Request::SetPermissionMode` (the TUI's Shift+Tab). That mode approves once,
-without asking, the prompts rated `Risk::Routine`: programs off the allowlist
-that "always allow" could cover and that do not delete or overwrite files,
-`wm open` of an app with no files or URLs, and `write` outside the scratch
-directory. Destructive patterns, scripts no check can fully see, protected
-paths, new web hosts and unapproved MCP tools still ask, and nothing is added to the allowlist.
+client. A client can switch modes with a mid-stream `Request::SetPermissionMode`
+(the TUI's Shift+Tab). Read-only `bash` scripts run in every mode, scripts that
+would destroy the home directory, a personal folder or a work tree are refused
+in every mode, and those touching a sensitive path always ask. Accept-edits mode
+also runs, unasked, edits whose every target lands strictly below a
+`tools.write.writable_paths` entry or the scratch directory, and `write`s there
+whose content the prompt shows in full. Auto mode, offered only when
+`tools.allow_auto_mode` is set, additionally puts the remaining edits and
+unvetted scripts to the safety judge, a one-shot model verdict that asks the
+user whenever it is unsure, fails or times out. Each unasked approval is logged
+on `assistd::policy`; nothing is added to the allowlist.
 
 ### Memory (`assistd-memory` + `assistd-embed`)
 

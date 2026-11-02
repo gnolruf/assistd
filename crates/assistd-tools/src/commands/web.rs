@@ -21,8 +21,8 @@ use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    ApprovalGate, ConfirmationRequest, EgressPolicy, NonPublic, Risk, is_public, on_blocking_pool,
-    reachable_addrs,
+    ApprovalGate, ConfirmationRequest, EgressPolicy, NonPublic, Risk, Unattended, is_public,
+    on_blocking_pool, reachable_addrs,
 };
 
 mod page;
@@ -141,6 +141,7 @@ impl WebCommand {
                 matched_pattern: format!("fetches from {host}, which is not yet approved"),
                 always_allow: vec![host.to_string()],
                 risk: Risk::Elevated,
+                unattended: Unattended::Never,
                 source: ConfirmSource::Main,
             })
             .await
@@ -159,6 +160,7 @@ impl WebCommand {
                 ),
                 always_allow: Vec::new(),
                 risk: Risk::Elevated,
+                unattended: Unattended::Never,
                 source: ConfirmSource::Main,
             })
             .await

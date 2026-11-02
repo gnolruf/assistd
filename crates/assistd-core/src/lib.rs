@@ -354,17 +354,18 @@ fn file_policies(
         config_dir.join(APPROVALS_FILE),
     )?;
     let scratch_dir = sandbox.shared.scratch.clone();
+    let writable_paths: Vec<PathBuf> = resolve_writable_paths(&config.tools.write.writable_paths)
+        .into_iter()
+        .chain(scratch_dir.clone())
+        .collect();
     let bash_cfg = Arc::new(BashPolicyCfg {
         timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
         destructive_patterns: parse_destructive_patterns(&config.tools.bash.destructive_patterns),
         allowlist: Arc::new(allowlist),
         protected: protected_dirs.clone(),
-        scratch: scratch_dir.clone(),
+        scratch: scratch_dir,
+        edit_scope: writable_paths.clone(),
     });
-    let writable_paths = resolve_writable_paths(&config.tools.write.writable_paths)
-        .into_iter()
-        .chain(scratch_dir)
-        .collect();
     let write_cfg = Arc::new(
         WritePolicyCfg::new(writable_paths)
             .ok_or(BuildToolsError::NoWritablePaths)?

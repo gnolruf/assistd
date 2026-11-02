@@ -15,7 +15,7 @@ use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
     ConfirmationRequest, DenyAllGate, DestructivePattern, FileScope, Protected, SandboxInfo,
-    SandboxRequest, SearchPath, SharedDirs,
+    SandboxRequest, SearchPath, SharedDirs, Unattended,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
@@ -125,8 +125,8 @@ impl ConfirmationGate for RecordingGate {
 #[tokio::test]
 async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
     let gate = RecordingGate::answering(Approval::Once);
-    let cmd = bash_with(vec![vec!["true"]], gate.clone(), no_sandbox());
-    let out = cmd.run(input("true && echo ran")).await;
+    let cmd = bash_with(vec![vec!["nproc"]], gate.clone(), no_sandbox());
+    let out = cmd.run(input("nproc >/dev/null && echo ran")).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"ran\n");
     let asked = gate.asked.lock();
@@ -134,8 +134,48 @@ async fn destructive_pattern_asks_the_gate_and_runs_when_approved() {
         panic!("expected exactly one confirmation, got {asked:?}");
     };
     assert_eq!(req.tool, "bash");
-    assert_eq!(req.script, "true && echo ran");
-    assert_eq!(req.matched_pattern, "true");
+    assert_eq!(req.script, "nproc >/dev/null && echo ran");
+    assert_eq!(req.matched_pattern, "nproc");
+}
+
+#[tokio::test]
+async fn only_edits_strictly_inside_the_edit_scope_may_run_unasked() {
+    let scope = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let scope_dir = scope.path().canonicalize().unwrap();
+    let elsewhere_dir = elsewhere.path().canonicalize().unwrap();
+    let gate = RecordingGate::answering(Approval::Deny);
+    let cfg = BashPolicyCfg {
+        edit_scope: vec![scope_dir.clone()],
+        ..BashPolicyCfg::default()
+    };
+    let cmd = BashCommand::new(Arc::new(cfg), no_sandbox(), gate.clone());
+    for (script, scoped) in [
+        (format!("mkdir {}/new", scope_dir.display()), true),
+        (format!("mkdir {}/new", elsewhere_dir.display()), false),
+        (
+            format!(
+                "mkdir {}/a {}/b",
+                scope_dir.display(),
+                elsewhere_dir.display()
+            ),
+            false,
+        ),
+        (format!("chmod -R 700 {}", scope_dir.display()), false),
+    ] {
+        let out = cmd.run(input(&script)).await;
+        assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
+        let request = gate.asked.lock().pop().expect("an edit asks the gate");
+        let is_scoped = matches!(request.unattended, Unattended::ScopedEdit);
+        assert_eq!(is_scoped, scoped, "{script}: {:?}", request.unattended);
+        if !scoped {
+            assert!(
+                matches!(request.unattended, Unattended::Judged(_)),
+                "{script}: {:?}",
+                request.unattended
+            );
+        }
+    }
 }
 
 #[tokio::test]

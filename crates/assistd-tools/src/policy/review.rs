@@ -73,30 +73,6 @@ const RISKY_BUILTINS: &[&str] = &[
     "readarray",
 ];
 
-/// Programs that delete, overwrite, or change the permissions of the
-/// files they name, so running one unlisted is never routine.
-const MODIFIES_FILES: &[&str] = &[
-    "chattr",
-    "chgrp",
-    "chmod",
-    "chown",
-    "cp",
-    "dd",
-    "fallocate",
-    "install",
-    "ln",
-    "mv",
-    "rm",
-    "rmdir",
-    "rsync",
-    "setfacl",
-    "shred",
-    "tee",
-    "truncate",
-    "unlink",
-    "wipefs",
-];
-
 /// Characters that make one word a command line rather than a program
 /// name (`env -S 'rm -rf ~'`).
 const SHELL_SYNTAX: &str = ";&|()<>`$";
@@ -277,15 +253,15 @@ pub enum Confirmation {
     /// It may run something no check can see; holds why, for the prompt.
     Unverifiable(String),
     /// It runs programs not on the allowlist. `approvals` covers every run
-    /// of them when "always allow" can; `modifies_files` when one of them
-    /// deletes or overwrites the files it names.
+    /// of them when "always allow" can.
     Unlisted {
         programs: Vec<String>,
         approvals: Option<Vec<ProgramApproval>>,
-        modifies_files: bool,
     },
     /// It touches a sensitive path, so it asks every time; holds what and where.
     Sensitive(String),
+    /// It edits these paths, as written.
+    Edit(Vec<String>),
 }
 
 impl Confirmation {
@@ -300,15 +276,10 @@ impl Confirmation {
         }
     }
 
-    /// Routine when only the allowlist objects, "always allow" could cover
-    /// every program run, and none of them modifies files.
+    /// Routine for an edit, elevated for anything else.
     pub fn risk(&self) -> Risk {
         match self {
-            Self::Unlisted {
-                approvals: Some(_),
-                modifies_files: false,
-                ..
-            } => Risk::Routine,
+            Self::Edit(_) => Risk::Routine,
             Self::Pattern(_)
             | Self::Unverifiable(_)
             | Self::Unlisted { .. }
@@ -325,6 +296,8 @@ impl fmt::Display for Confirmation {
             Self::Unlisted { programs, .. } => {
                 write!(f, "not on the allowlist: {}", programs.join(", "))
             }
+            Self::Edit(paths) if paths.is_empty() => f.write_str("edits files"),
+            Self::Edit(paths) => write!(f, "edits `{}`", paths.join("`, `")),
         }
     }
 }
@@ -359,7 +332,6 @@ struct Findings<'a> {
     unlisted: Vec<String>,
     approvals: Vec<ProgramApproval>,
     unapprovable: bool,
-    modifies_files: bool,
 }
 
 impl<'a> Findings<'a> {
@@ -376,7 +348,6 @@ impl<'a> Findings<'a> {
     }
 
     fn unlisted(&mut self, name: &str, approval: Option<ProgramApproval>) {
-        self.modifies_files |= MODIFIES_FILES.contains(&program(name).as_str());
         match approval {
             Some(approval) if !self.approvals.contains(&approval) => self.approvals.push(approval),
             Some(_) => {}
@@ -402,7 +373,6 @@ impl<'a> Findings<'a> {
         (!self.unlisted.is_empty()).then_some(Confirmation::Unlisted {
             programs: self.unlisted,
             approvals: (!self.unapprovable).then_some(self.approvals),
-            modifies_files: self.modifies_files,
         })
     }
 }
