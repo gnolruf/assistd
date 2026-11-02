@@ -62,17 +62,8 @@ const QUARANTINE_ETC: [&str; 6] = [
     "/etc/ld.so.conf.d",
 ];
 
-/// Where a quarantine with egress sees the proxy's socket.
-const EGRESS_SOCKET: &str = "/run/assistd/egress.sock";
-
 /// Where a quarantine sees the program every command runs under.
 const QUARANTINE_EXEC: &str = "/run/assistd/quarantine-exec";
-
-/// The loopback port the quarantine wrapper forwards to the egress proxy.
-const EGRESS_PORT: &str = "3128";
-
-/// The proxy variables a quarantine with egress sets, all to the forwarded port.
-const PROXY_VARS: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
 
 /// The bwrap flags that mount a host path at their second argument.
 const BIND_FLAGS: &[&str] = &[
@@ -166,13 +157,12 @@ enum Profile {
 
 /// Only `/usr`, a few `/etc` entries, the shared directories and `inputs`,
 /// with `home` as `$HOME` and the working directory, every command run under
-/// the `exec` wrapper, and `egress` the only way out of the network namespace.
+/// the `exec` wrapper, and no network.
 #[derive(Debug, Clone)]
 struct QuarantineProfile {
     home: PathBuf,
     inputs: Vec<InputBind>,
     exec: PathBuf,
-    egress: Option<EgressRoute>,
 }
 
 /// A host file or directory a quarantine sees read-only at `at`, over a mount
@@ -181,13 +171,6 @@ struct QuarantineProfile {
 pub(crate) struct InputBind {
     pub(crate) fd: Arc<OwnedFd>,
     pub(crate) at: PathBuf,
-}
-
-/// A quarantine's way to the egress proxy: the proxy's Unix socket, which
-/// the quarantine wrapper forwards a loopback port to.
-#[derive(Debug, Clone)]
-pub(crate) struct EgressRoute {
-    pub(crate) socket: PathBuf,
 }
 
 /// Paths commands must not change, even inside the sandbox's writable
@@ -248,7 +231,7 @@ impl SandboxInfo {
 
     /// A bwrap sandbox that sees none of the host but its programs, `home`
     /// (writable, and shared as the scratch directory), `read_only` and
-    /// `inputs`, with no network but `egress`, running each command under the
+    /// `inputs`, with no network, running each command under the
     /// `assistd-quarantine-exec` program at `exec`. `None` when this
     /// configuration does not wrap.
     pub(crate) fn quarantined(
@@ -257,7 +240,6 @@ impl SandboxInfo {
         read_only: Vec<PathBuf>,
         inputs: Vec<InputBind>,
         exec: PathBuf,
-        egress: Option<EgressRoute>,
     ) -> Option<Self> {
         let ResolvedSandboxMode::Bwrap { .. } = self.mode else {
             return None;
@@ -273,12 +255,7 @@ impl SandboxInfo {
             host_path: self.host_path.clone(),
             unit_dirs: self.unit_dirs.clone(),
             confined: None,
-            profile: Profile::Quarantine(QuarantineProfile {
-                home,
-                inputs,
-                exec,
-                egress,
-            }),
+            profile: Profile::Quarantine(QuarantineProfile { home, inputs, exec }),
         })
     }
 
@@ -480,8 +457,7 @@ impl SandboxInfo {
     /// one of, then its inputs bound from their descriptors over their mount
     /// points in them; no
     /// `extra_args`, so the network stays unshared. `program` runs under the
-    /// quarantine wrapper, which keeps it off the host's Unix sockets and,
-    /// with egress, forwards the proxy port.
+    /// quarantine wrapper, which keeps it off the host's Unix sockets.
     fn quarantine_command<I, S>(
         &self,
         bwrap: &Path,
@@ -502,18 +478,12 @@ impl SandboxInfo {
         cmd.arg("--ro-bind")
             .arg(&quarantine.exec)
             .arg(QUARANTINE_EXEC);
-        let mut wrapper_args: Vec<OsString> = Vec::new();
-        if let Some(route) = &quarantine.egress {
-            cmd.args(egress_flags(route));
-            wrapper_args.extend(["--egress", EGRESS_SOCKET, EGRESS_PORT].map(OsString::from));
-        }
-        wrapper_args.extend(["--", program].map(OsString::from));
         let args = args.into_iter().map(|arg| arg.as_ref().to_os_string());
         run_limited(
             &mut cmd,
             prlimit,
             QUARANTINE_EXEC,
-            wrapper_args.into_iter().chain(args),
+            ["--", program].map(OsString::from).into_iter().chain(args),
         );
         Ok(cmd)
     }
@@ -972,21 +942,6 @@ fn quarantine_flags(home: &Path) -> Vec<OsString> {
     flags.push(home.into());
     flags.extend(["--setenv", "PATH", SANDBOX_PATH, "--chdir"].map(OsString::from));
     flags.push(home.into());
-    flags
-}
-
-/// The proxy's socket mounted at its fixed path, and [`PROXY_VARS`] pointing
-/// at the port the quarantine wrapper forwards to it.
-fn egress_flags(route: &EgressRoute) -> Vec<OsString> {
-    let mut flags: Vec<OsString> = vec![
-        "--ro-bind".into(),
-        route.socket.clone().into(),
-        EGRESS_SOCKET.into(),
-    ];
-    let proxy = format!("http://127.0.0.1:{EGRESS_PORT}");
-    for var in PROXY_VARS {
-        flags.extend(["--setenv".into(), var.into(), proxy.clone().into()]);
-    }
     flags
 }
 

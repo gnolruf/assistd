@@ -597,7 +597,8 @@ fn step_schema(roles: &Roles) -> Value {
 fn subagent_prompt(role: &Role, quarantine: &Quarantine) -> String {
     let world = match role.reach {
         Reach::Web => {
-            "You can search the web and fetch pages with `web`. You were handed no files."
+            "You can search the web and fetch pages with `web`, the only command that reaches \
+             the network. You were handed no files."
                 .to_string()
         }
         Reach::Files => format!(

@@ -240,7 +240,7 @@ are not mounted. Every command runs under `assistd-quarantine-exec`, bound in
 at `/run/assistd/quarantine-exec`, which restricts itself with Landlock's
 `RESOLVE_UNIX` before running the command: neither the command nor anything it
 starts can connect to a pathname Unix socket made outside the sandbox, such as
-gpg-agent's or the daemon's inside a bound input, except the egress proxy's.
+gpg-agent's or the daemon's inside a bound input.
 Network namespaces do not cover pathname sockets, and Landlock cannot be
 applied before bwrap mounts, so the restriction happens inside the sandbox. The
 wrapper fails the command when the kernel cannot enforce it.
@@ -254,24 +254,17 @@ symlinks and anything outside it. They never connect to sockets. Relative
 paths start at `home/`, and `write` may only write under `home/`.
 `Quarantine::create` fails when the sandbox does not wrap.
 
-A quarantine created with an `Egress` keeps `--unshare-net` but gets one way
-out: an HTTP `CONNECT` proxy the daemon runs on `egress.sock` in the relay
-directory, bound read-only into the sandbox at `/run/assistd/egress.sock`. Most
-clients cannot speak to a proxy over a Unix socket, so
-`assistd-quarantine-exec` is passed `--egress`: it listens on `127.0.0.1:3128`
-inside the sandbox's network namespace, forwards each connection to the
-socket, and exits with the command's status. `HTTPS_PROXY`, `HTTP_PROXY` and
-their lowercase forms point at it. Relay traffic is HTTPS only, so nothing on
-the network path can read what a sub-agent sends or alter what it downloads:
-the proxy tunnels only `CONNECT` to port 443 and refuses plain-HTTP proxy
-requests. It asks the same approved-hosts `ApprovalGate` as `web fetch`, and
-refuses loopback, private, link-local and other non-public addresses, both as
-literals and after DNS resolution, so a relay cannot reach llama-server,
-SearXNG or the LAN. The quarantine's own `web fetch` is held to the same
-`EgressPolicy`, so it refuses `http://` URLs and redirects to them; its
-`web search` goes through the daemon's SearXNG client, which only ever sees the
-query. Dropping the quarantine stops the proxy and closes every tunnel through
-it.
+A quarantine's `bash` never reaches the network, so a sub-agent cannot
+`curl`, `git clone` or `pip download`. A quarantine created with an `Egress`
+also gets the in-process `web` command, which runs in the daemon and is the
+only way a sub-agent reaches the network. It is held to a sub-agent's
+`EgressPolicy`: HTTPS to port 443 only, so nothing on the network path can read
+what a sub-agent sends or alter what it downloads, and it refuses `http://`
+URLs and redirects to them. It asks the same approved-hosts `ApprovalGate` as
+the main agent's `web fetch`, and refuses loopback, private, link-local and
+other non-public addresses, both as literals and after DNS resolution, so a
+relay cannot reach llama-server, SearXNG or the LAN. Its `web search` goes
+through the daemon's SearXNG client, which only ever sees the query.
 
 The model starts a sub-agent with the `relay` tool (`task`, `inputs`,
 `agent`, or `steps`: a plan of up to five such steps), registered in

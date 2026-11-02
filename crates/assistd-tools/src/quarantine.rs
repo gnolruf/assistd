@@ -1,6 +1,6 @@
 //! A sub-agent's disposable world: one fresh directory per relay, showing its
 //! inputs read-only in place, and the only part of the host its commands can see.
-//! Its only way to the network, if any, is the relay's egress proxy.
+//! Its only way to the network, if any, is its in-process `web` command.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -21,18 +21,13 @@ use crate::commands::{
     SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WriteCommand, WritePolicyCfg,
 };
 use crate::policy::{
-    ApprovalGate, ConfinedRoot, ConfirmationGate, EgressPolicy, EgressRoute, InputBind,
-    SandboxInfo, on_blocking_pool,
+    ApprovalGate, ConfinedRoot, ConfirmationGate, EgressPolicy, InputBind, SandboxInfo,
+    on_blocking_pool,
 };
-
-mod egress;
-
-use egress::EgressProxy;
 
 const INPUT_DIR: &str = "input";
 const HOME_DIR: &str = "home";
 const OUTPUT_DIR: &str = "output";
-const EGRESS_SOCKET: &str = "egress.sock";
 
 /// Why a quarantine could not be set up.
 #[derive(Debug, thiserror::Error)]
@@ -57,12 +52,10 @@ pub enum QuarantineError {
     },
     #[error("quarantine wrapper {} is not a file", .0.display())]
     MissingExec(PathBuf),
-    #[error("cannot start the relay's egress proxy: {0}")]
-    Proxy(#[source] io::Error),
 }
 
-/// How a quarantine reaches the web: through a proxy that asks `hosts`
-/// about each host, and through `search` for `web search` when it is enabled.
+/// How a quarantine's `web` reaches the web: asking `hosts` about each host,
+/// and through `search` for `web search` when it is enabled.
 #[derive(Debug, Clone)]
 pub struct Egress {
     pub hosts: ApprovalGate,
@@ -71,8 +64,8 @@ pub struct Egress {
 
 /// A relay's directory and the sandbox over it: its inputs read-only, a
 /// writable home, and a directory for spilled output, all at their host
-/// paths; no network but its egress proxy, if it has one. Dropping it, on
-/// cancel or panic too, closes the proxy and removes it all.
+/// paths. Its commands have no network; with egress, its in-process `web`
+/// does. Dropping it, on cancel or panic too, removes it all.
 #[derive(Debug)]
 pub struct Quarantine {
     egress: Option<RelayEgress>,
@@ -83,10 +76,10 @@ pub struct Quarantine {
 
 impl Quarantine {
     /// A new quarantine under `parent` wrapped as `sandbox` wraps, showing each of `inputs`
-    /// read-only in [`Quarantine::input_dir`] under its file name, and with `egress` its proxied
-    /// way to the web. Each command runs under `exec`, the `assistd-quarantine-exec` program,
-    /// which keeps it off every Unix socket made outside the sandbox but the proxy's. Fails
-    /// when `sandbox` does not wrap.
+    /// read-only in [`Quarantine::input_dir`] under its file name, and with `egress` a `web`
+    /// command. Each command runs under `exec`, the `assistd-quarantine-exec` program, which
+    /// keeps it off every Unix socket made outside the sandbox. Fails when `sandbox` does not
+    /// wrap.
     pub async fn create(
         parent: &Path,
         sandbox: &SandboxInfo,
@@ -104,16 +97,13 @@ impl Quarantine {
             Ok((dir, root, binds, exec))
         })
         .await?;
-        let egress = egress
-            .map(|egress| RelayEgress::start(&dir.path.join(EGRESS_SOCKET), egress))
-            .transpose()?;
+        let egress = egress.map(RelayEgress::from);
         let sandbox = sandbox
             .quarantined(
                 dir.path.join(HOME_DIR),
                 vec![dir.path.join(INPUT_DIR), dir.path.join(OUTPUT_DIR)],
                 binds,
                 exec,
-                egress.as_ref().map(|egress| egress.route.clone()),
             )
             .ok_or(QuarantineError::Unsandboxed)?;
         Ok(Self {
@@ -162,7 +152,7 @@ impl Quarantine {
 
     /// The file commands, confined to this directory, plus `echo`, `write` limited to the home,
     /// and `bash` in the quarantine sandbox under `bash`'s rules, asking `gate` as usual. With
-    /// egress, also `web`, whose fetches are held to the same rule as the proxy.
+    /// egress, also `web`, held to HTTPS on port 443 of approved public hosts.
     pub fn commands(
         &self,
         bash: &BashPolicyCfg,
@@ -203,28 +193,19 @@ impl Quarantine {
     }
 }
 
-/// A relay's running egress proxy, the rule it holds tunnels to, how the
-/// sandbox reaches it, and the relay's web search.
+/// The rule a relay's `web` fetches are held to, and its web search.
 #[derive(Debug)]
 struct RelayEgress {
-    _proxy: EgressProxy,
     policy: EgressPolicy,
-    route: EgressRoute,
     search: Option<SearxngClient>,
 }
 
-impl RelayEgress {
-    fn start(socket: &Path, egress: Egress) -> Result<Self, QuarantineError> {
-        let policy = EgressPolicy::https_only(egress.hosts);
-        let proxy = EgressProxy::bind(socket, policy.clone()).map_err(QuarantineError::Proxy)?;
-        Ok(Self {
-            _proxy: proxy,
-            policy,
-            route: EgressRoute {
-                socket: socket.to_path_buf(),
-            },
+impl From<Egress> for RelayEgress {
+    fn from(egress: Egress) -> Self {
+        Self {
+            policy: EgressPolicy::https_only(egress.hosts),
             search: egress.search,
-        })
+        }
     }
 }
 
