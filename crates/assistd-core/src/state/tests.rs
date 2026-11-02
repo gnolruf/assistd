@@ -451,10 +451,10 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
 }
 
 /// Answers the title-generation one-shot with a fixed string and records
-/// the [`assistd_llm::Thinking`] mode it was asked for.
+/// the [`assistd_llm::OneShotReply`] it was asked for.
 #[derive(Debug)]
 struct TitlingBackend {
-    thinking: StdMutex<Option<assistd_llm::Thinking>>,
+    reply: StdMutex<Option<assistd_llm::OneShotReply>>,
 }
 
 #[async_trait::async_trait]
@@ -489,9 +489,9 @@ impl LlmBackend for TitlingBackend {
     async fn complete_oneshot(
         &self,
         _prompt: String,
-        thinking: assistd_llm::Thinking,
+        reply: assistd_llm::OneShotReply,
     ) -> assistd_llm::LlmResult<String> {
-        *self.thinking.lock() = Some(thinking);
+        *self.reply.lock() = Some(reply);
         Ok("Cats And Dogs".into())
     }
 }
@@ -499,7 +499,7 @@ impl LlmBackend for TitlingBackend {
 #[tokio::test]
 async fn completed_turn_broadcasts_a_generated_session_title() {
     let backend = Arc::new(TitlingBackend {
-        thinking: StdMutex::new(None),
+        reply: StdMutex::new(None),
     });
     let state = StateParts {
         backend: backend.clone(),
@@ -524,8 +524,10 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
     assert_eq!(id, "req-title");
     assert_eq!(title, "Cats And Dogs");
     assert_eq!(
-        *backend.thinking.lock(),
-        Some(assistd_llm::Thinking::Disabled),
+        *backend.reply.lock(),
+        Some(assistd_llm::OneShotReply::Text(
+            assistd_llm::Thinking::Disabled
+        )),
         "title generation must not spend its budget on reasoning"
     );
 }

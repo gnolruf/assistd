@@ -28,7 +28,8 @@ use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
     HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
-    LlmResult, MainSlot, ReadyState, StepOutcome, Thinking, ToolCall, ToolResultPayload,
+    LlmResult, MainSlot, OneShotReply, ReadyState, StepOutcome, Thinking, ToolCall,
+    ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -678,23 +679,38 @@ impl LlmBackend for LlamaChatClient {
         Ok(conv.truncate_to_last_real_user())
     }
 
-    async fn complete_oneshot(&self, prompt: String, thinking: Thinking) -> LlmResult<String> {
+    async fn complete_oneshot(&self, prompt: String, reply: OneShotReply) -> LlmResult<String> {
         let body_bytes = {
             let mut payload = self.base_request(vec![wire::ChatMessage::plain(
                 "user",
                 wire::ContentBody::Text(prompt.as_str().into()),
             )]);
             payload.max_tokens = self.chat.max_summary_tokens();
-            payload.reasoning_budget_tokens = Some(
-                self.chat
-                    .max_reasoning_tokens
-                    .get()
-                    .min(payload.max_tokens / 2),
-            );
-            payload.chat_template_kwargs = self.template_kwargs(thinking);
+            match &reply {
+                OneShotReply::Text(thinking) => {
+                    payload.reasoning_budget_tokens = Some(
+                        self.chat
+                            .max_reasoning_tokens
+                            .get()
+                            .min(payload.max_tokens / 2),
+                    );
+                    payload.chat_template_kwargs = self.template_kwargs(*thinking);
+                }
+                OneShotReply::Json(schema) => {
+                    payload.temperature = 0.0;
+                    payload.reasoning_budget_tokens = None;
+                    payload.reasoning_budget_message = None;
+                    payload.chat_template_kwargs = self.template_kwargs(Thinking::Disabled);
+                    payload.response_format = Some(wire::ResponseFormat::json_schema(schema));
+                }
+            }
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
         self.stream_text(body_bytes, "complete_oneshot").await
+    }
+
+    async fn recent_user_messages(&self, limit: usize) -> Vec<String> {
+        self.conv.lock().await.recent_user_messages(limit)
     }
 
     async fn complete_with_schema(
