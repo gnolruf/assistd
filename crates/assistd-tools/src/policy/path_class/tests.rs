@@ -54,7 +54,7 @@ impl Home {
     }
 
     fn verdict(&self, script: &str) -> PathVerdict {
-        self.guards().verdict(analyze(script, None))
+        self.guards().verdict(analyze(script, None, None))
     }
 }
 

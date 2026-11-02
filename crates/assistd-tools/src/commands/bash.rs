@@ -1,5 +1,5 @@
 //! `bash SCRIPT`: a real `bash -c` subprocess behind the subprocess policy
-//! (allowlist, destructive-pattern confirmation, sandbox, timeout).
+//! (classifier, path guards, permission mode, sandbox, timeout).
 
 use std::io;
 use std::path::PathBuf;

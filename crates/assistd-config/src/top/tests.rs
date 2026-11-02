@@ -63,3 +63,23 @@ fn only_a_readable_file_with_mcp_env_is_exposed() {
     let without_env: Config = toml::from_str(MCP_SERVER_WITHOUT_ENV).unwrap();
     assert!(!without_env.exposes_mcp_env(0o644));
 }
+
+#[test]
+fn a_removed_key_fails_to_load() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    fs::write(&path, "[tools.bash]\nallowed_programs = [\"ls\"]\n").unwrap();
+
+    let err = Config::load_from_file(&path).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            ConfigError::Removed {
+                key: "tools.bash.allowed_programs",
+                ..
+            }
+        ),
+        "{err}"
+    );
+}

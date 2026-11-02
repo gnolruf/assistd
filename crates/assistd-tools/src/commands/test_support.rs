@@ -17,7 +17,7 @@ use super::{
 use crate::command::CommandRegistry;
 use crate::policy::{
     AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest,
-    DestructivePattern, SandboxInfo,
+    SandboxInfo,
 };
 use crate::vision::VisionGate;
 
@@ -78,17 +78,6 @@ pub(crate) fn test_wm(wm: Arc<dyn WindowManager>) -> WmCommand {
         Arc::new(AlwaysAllowGate),
         Arc::new(Approvals::unsaved()),
     )
-}
-
-/// Destructive patterns from whitespace-separated strings.
-pub(crate) fn test_patterns(patterns: &[&str]) -> Vec<DestructivePattern> {
-    patterns
-        .iter()
-        .map(|p| {
-            DestructivePattern::new(p.split_whitespace())
-                .unwrap_or_else(|| panic!("invalid pattern {p:?}"))
-        })
-        .collect()
 }
 
 /// Path of a new FIFO named `pipe` in `dir`.

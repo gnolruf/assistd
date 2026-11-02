@@ -5,7 +5,6 @@ use std::time::Duration;
 use super::*;
 use crate::chain::{execute, parse_chain};
 use crate::command::CommandRegistry;
-use crate::commands::test_patterns as patterns;
 use crate::commands::{RecordingGate, test_bash};
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
@@ -24,14 +23,8 @@ fn with_timeout(timeout: Duration) -> BashCommand {
     )
 }
 
-fn rm_rf_is_destructive(gate: Arc<dyn ConfirmationGate>) -> BashCommand {
-    bash_with_cfg(
-        BashPolicyCfg {
-            destructive_patterns: patterns(&["rm -rf"]),
-            ..Default::default()
-        },
-        gate,
-    )
+fn bash_asking(gate: Arc<dyn ConfirmationGate>) -> BashCommand {
+    bash_with_cfg(BashPolicyCfg::default(), gate)
 }
 
 async fn run(cmd: &BashCommand, script: &str, stdin: Option<Vec<u8>>) -> CommandOutput {
@@ -87,7 +80,7 @@ async fn bash_timeout_returns_137_with_timeout_message() {
 
 #[tokio::test]
 async fn edit_is_cancelled_when_denied() {
-    let cmd = rm_rf_is_destructive(Arc::new(DenyAllGate));
+    let cmd = bash_asking(Arc::new(DenyAllGate));
     let out = run(&cmd, "rm -rf /tmp/this-directory-does-not-exist-XYZ", None).await;
     assert_eq!(out.exit_code, 126);
     assert_eq!(
@@ -99,7 +92,7 @@ async fn edit_is_cancelled_when_denied() {
 #[tokio::test]
 async fn quoted_destructive_literal_does_not_prompt() {
     let gate = RecordingGate::new(false);
-    let out = run(&rm_rf_is_destructive(gate.clone()), "echo \"rm -rf\"", None).await;
+    let out = run(&bash_asking(gate.clone()), "echo \"rm -rf\"", None).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"rm -rf\n");
     assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());

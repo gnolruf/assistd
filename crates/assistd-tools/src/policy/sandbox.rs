@@ -294,11 +294,9 @@ impl SandboxInfo {
         match self.mode {
             ResolvedSandboxMode::None => SearchPath {
                 dirs: self.host_path.clone(),
-                read_only: false,
             },
             ResolvedSandboxMode::Bwrap { .. } => SearchPath {
                 dirs: std::env::split_paths(SANDBOX_PATH).collect(),
-                read_only: true,
             },
         }
     }

@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, default_bash_allowed_programs,
-    default_bash_destructive_patterns, default_tools_overflow_dir, default_tools_scratch_dir,
+    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, default_tools_overflow_dir, default_tools_scratch_dir,
     default_writable_paths,
 };
 use crate::settings::{DescribeSettings, describe_fields};
@@ -144,30 +143,13 @@ pub enum BashSandboxMode {
     None,
 }
 
-/// Policy for the scripts `bash` runs. A script runs
-/// without confirmation only when every program it can run is allowed and
-/// it matches no destructive pattern.
+/// Policy for the scripts `bash` runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsBashConfig {
     /// `bash` timeout in seconds; on expiry the process group is killed
     /// (exit 137).
     pub timeout_secs: NonZeroU64,
-    /// Programs that run without confirmation: absolute paths, or bare
-    /// names resolved on `PATH` that count only if the file is not
-    /// user-writable or is the one approved. "Always allow" approvals
-    /// persist in `allowed_programs.toml` beside the config file; shells,
-    /// interpreters and `sudo`-like wrappers can only be listed here.
-    pub allowed_programs: Vec<String>,
-    /// Commands that need confirmation, and are refused when no one can
-    /// confirm. Each is a command name (matching any path ending in it)
-    /// then arguments that must all appear, in any order; `a|b` lists
-    /// alternatives. `-rf` matches those short flags in any cluster,
-    /// `--force` also its abbreviations and `--force=…`, `of=` any argument
-    /// with that prefix; other words match exactly. Quoted text is one
-    /// word, so `"rm -r|--recursive"` matches `rm -vfr x` but not
-    /// `echo "rm -rf"`.
-    pub destructive_patterns: Vec<String>,
     /// How spawned commands are sandboxed.
     pub sandbox: BashSandboxMode,
     /// Extra bubblewrap arguments, inserted before the trailing `--`: e.g.
@@ -181,16 +163,6 @@ pub struct ToolsBashConfig {
 impl DescribeSettings for ToolsBashConfig {
     describe_fields! {
         timeout_secs => ("command timeout (s)", "Longest a bash command runs before it is killed"),
-        allowed_programs => (
-            "programs run without asking",
-            "Programs that run without asking for confirmation",
-            advanced
-        ),
-        destructive_patterns => (
-            "commands that always ask",
-            "Commands that always ask, and are refused when no one can confirm",
-            advanced
-        ),
         sandbox => ("sandbox", "auto uses bubblewrap if installed; tools are disabled unsandboxed"),
         bwrap_extra_args => (
             "extra bubblewrap arguments",
@@ -204,8 +176,6 @@ impl Default for ToolsBashConfig {
     fn default() -> Self {
         Self {
             timeout_secs: DEFAULT_BASH_TIMEOUT_SECS,
-            allowed_programs: default_bash_allowed_programs(),
-            destructive_patterns: default_bash_destructive_patterns(),
             sandbox: BashSandboxMode::default(),
             bwrap_extra_args: Vec::new(),
         }

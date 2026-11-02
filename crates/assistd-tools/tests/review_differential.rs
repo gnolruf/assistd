@@ -1,5 +1,5 @@
-//! Differential tests of the script reviewer and classifier: scripts run under real bash in
-//! bwrap, where each program is a shim logging its name. Returns early when `bwrap` cannot run.
+//! Differential tests of the script classifier: scripts run under real bash in bwrap, where each
+//! program is a shim logging its name. Returns early when `bwrap` cannot run.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -10,9 +10,9 @@ use std::thread;
 
 use tempfile::TempDir;
 
-use assistd_tools::policy::{Allowlist, Class, Rules, SearchPath, check_script, classify};
+use assistd_tools::policy::{Class, classify};
 
-/// Scripts each run in every context; every program they name is allowed except [`FORBIDDEN`].
+/// Scripts each run in every context.
 const CORPUS: &[&str] = &[
     "ls -la",
     "git status --short && git diff --stat",
@@ -127,9 +127,6 @@ g",
     "find . -name '*.txt' -exec grep -l line {} +",
 ];
 
-/// Programs off the allowlist; every other shimmed name is on it.
-const FORBIDDEN: &[&str] = &["chmod", "curl", "dd", "mv", "rm", "shred", "wget"];
-
 /// Programs the classifier may call read-only; bash builtins are never shimmed.
 const READ_ONLY: &[&str] = &[
     "b2sum",
@@ -188,7 +185,7 @@ const EDIT: &[&str] = &[
     "chgrp", "chmod", "chown", "cp", "ln", "mkdir", "mv", "rm", "tee", "touch",
 ];
 
-/// Allowed programs that run a command; their shims run the real program.
+/// Programs that run a command; their shims run the real program.
 const REAL_WRAPPERS: &[&str] = &["env", "find", "nice", "nohup", "stdbuf", "timeout", "xargs"];
 
 /// Where each corpus script is placed, at `@@`, besides on its own.
@@ -236,10 +233,9 @@ const SANDBOX_WORK: &str = "/tmp/run/work";
 
 const RUN_SECONDS: &str = "10";
 
-/// A shim directory, the allowlist over it, and per-run scratch directories.
+/// A shim directory and per-run scratch directories.
 struct Harness {
     root: TempDir,
-    allowlist: Allowlist,
 }
 
 impl Harness {
@@ -253,28 +249,7 @@ impl Harness {
         for name in names {
             fs::hard_link(&shim, bin.join(name)).expect("link shim");
         }
-        let allowed = names
-            .iter()
-            .filter(|name| !FORBIDDEN.contains(&name.as_str()))
-            .cloned();
-        let allowlist = Allowlist::unsaved(
-            allowed,
-            SearchPath {
-                dirs: vec![bin],
-                read_only: true,
-            },
-        );
-        Self { root, allowlist }
-    }
-
-    fn clears(&self, script: &str) -> bool {
-        let rules = Rules {
-            patterns: &[],
-            allowlist: &self.allowlist,
-            protected: &[],
-            scratch: None,
-        };
-        check_script(script, &rules).is_none()
+        Self { root }
     }
 
     /// The shimmed programs bash started, directly or through a wrapper, running `script`.
@@ -335,39 +310,6 @@ impl Harness {
 }
 
 #[test]
-fn cleared_scripts_run_only_allowed_programs() {
-    if !bwrap_runs() {
-        return;
-    }
-    let scripts: Vec<String> = CORPUS.iter().flat_map(|script| variants(script)).collect();
-    let harness = Harness::new(&shim_names(&scripts));
-    let cleared: Vec<&str> = scripts
-        .iter()
-        .map(String::as_str)
-        .filter(|s| harness.clears(s))
-        .collect();
-    assert!(!cleared.is_empty(), "the reviewer cleared no script");
-    let bypasses = run_all(&harness, &cleared, &is_forbidden);
-    assert!(
-        bypasses.is_empty(),
-        "cleared scripts ran forbidden programs:\n{}",
-        bypasses
-            .iter()
-            .map(|(script, ran)| format!("{ran:?} from:\n{script}\n"))
-            .collect::<String>()
-    );
-    let flagged: Vec<&str> = CORPUS
-        .iter()
-        .copied()
-        .filter(|s| !harness.clears(s))
-        .collect();
-    assert!(
-        !run_all(&harness, &flagged, &is_forbidden).is_empty(),
-        "no flagged script ran a forbidden program, so the shims log nothing"
-    );
-}
-
-#[test]
 fn classified_scripts_run_only_the_programs_their_class_allows() {
     if !bwrap_runs() {
         return;
@@ -405,10 +347,6 @@ fn classified_scripts_run_only_the_programs_their_class_allows() {
             .map(|(script, ran)| format!("{ran:?} from:\n{script}\n"))
             .collect::<String>()
     );
-}
-
-fn is_forbidden(name: &str) -> bool {
-    FORBIDDEN.contains(&name)
 }
 
 /// Run every script on a pool of threads, returning those that started a `disallowed` program,
@@ -474,7 +412,6 @@ fn shim_names(scripts: &[String]) -> BTreeSet<String> {
     scripts
         .iter()
         .flat_map(|script| script.split(|c: char| !is_name_char(c)))
-        .chain(FORBIDDEN.iter().copied())
         .chain(REAL_WRAPPERS.iter().copied())
         .filter(|name| !name.is_empty() && !name.starts_with(['.', '-', '+']))
         .filter(|name| !builtins.contains(*name))

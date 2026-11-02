@@ -90,35 +90,6 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 [tools.bash]
 # Policy for the scripts `bash` runs.
 # timeout_secs = 30
-# Programs that run without asking; "always allow" approvals go to allowed_programs.toml.
-# allowed_programs = [
-#     "[", "b2sum", "base64", "basename", "cat", "cksum", "cmp", "column", "comm", "cut",
-#     "date", "df", "diff", "dirname", "du", "echo", "egrep", "env", "expand", "false", "fgrep",
-#     "file", "find", "fold", "grep", "head", "hexdump", "hostname", "id", "join", "jq", "ls",
-#     "md5sum", "nice", "nl", "nohup", "od", "paste", "printenv", "printf", "pwd", "readlink",
-#     "realpath", "rev", "rg", "seq", "sha1sum", "sha256sum", "sha512sum", "sleep", "sort",
-#     "stat", "stdbuf", "strings", "tac", "tail", "test", "timeout", "tr", "tree", "true",
-#     "uname", "unexpand", "wc", "which", "whoami", "xargs",
-# ]
-# Commands that always need confirmation.
-# destructive_patterns = [
-#     "rm -r|--recursive",
-#     "find -delete",
-#     "find -fprint|-fprint0|-fprintf|-fls",
-#     "sort -o|--output",
-#     "tree -o",
-#     "tree -R",
-#     "file -C|--compile",
-#     "dd of=",
-#     "git push -f|--force|--force-with-lease",
-#     "git reset --hard",
-#     "git clean -f|--force",
-#     "systemctl poweroff|reboot|halt|kexec",
-#     "kill -1",
-#     "sort --compress-program",
-#     "rg --pre",
-#     "rg --hostname-bin",
-# ]
 # sandbox = "auto"  # auto | bwrap | none
 # bwrap_extra_args = []  # e.g. ["--share-net"] to give bash the network (Linux 6.12+)
 

@@ -38,6 +38,18 @@ const WAKEWORD_COMMAND_TIMEOUT_MS: RangeInclusive<u32> = 500..=15000;
 const MAX_WAKEWORD_FOLLOW_UP_MS: u32 = 30_000;
 const MAX_WAKE_PHRASE_WORDS: usize = 6;
 const MAX_WAKEWORD_SILENCE_MS: u32 = 1400;
+/// Keys a config may no longer set, each with what replaced it.
+const REMOVED_KEYS: &[(&str, &str)] = &[
+    (
+        "tools.bash.allowed_programs",
+        "the command classifier now decides which programs run unasked; \
+         answer \"always allow\" to approve others, kept in allowed_programs.toml",
+    ),
+    (
+        "tools.bash.destructive_patterns",
+        "the command classifier and path guards now decide which commands ask",
+    ),
+];
 const MIN_SENTENCE_CHARS: u32 = 50;
 const MAX_SENTENCE_CHARS: u32 = 2000;
 /// Matches the largest `limit` the `reminisce` tool accepts.
@@ -111,6 +123,7 @@ impl Config {
     /// Loads and deserializes a config from the given TOML file. Keys the
     /// schema doesn't know are skipped, with a warning logged for each; a
     /// warning is also logged if other users can read a file that sets MCP env.
+    /// Fails with [`ConfigError::Removed`] on a key assistd no longer reads.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
@@ -122,7 +135,18 @@ impl Config {
         };
         let config: Self = toml::from_str(&content).map_err(parse_error)?;
         let raw: toml::Table = toml::from_str(&content).map_err(parse_error)?;
-        for key in config.unknown_keys(&raw)? {
+        let unknown = config.unknown_keys(&raw)?;
+        if let Some(&(key, replacement)) = REMOVED_KEYS
+            .iter()
+            .find(|(removed, _)| unknown.iter().any(|key| key == removed))
+        {
+            return Err(ConfigError::Removed {
+                path: path.to_path_buf(),
+                key,
+                replacement,
+            });
+        }
+        for key in unknown {
             tracing::warn!(
                 target: "assistd::config",
                 "ignoring `{key}` in {}: assistd has no such setting \

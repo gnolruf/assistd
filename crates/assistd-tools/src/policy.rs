@@ -1,4 +1,4 @@
-//! Command-execution policy: command review, confirmation gates, and the
+//! Command-execution policy: the command classifier, path guards, confirmation gates, and the
 //! bwrap sandbox.
 
 use std::path::{Path, PathBuf};
@@ -37,10 +37,7 @@ pub use file_scope::{ConfinedRoot, FileScope};
 pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub(crate) use path_class::split_at_existing;
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
-pub use review::{
-    Action, Analysis, Class, Confirmation, Delete, DestructivePattern, Effect, Rules, analyze,
-    check_script, classify,
-};
+pub use review::{Action, Analysis, Class, Confirmation, Delete, Effect, analyze, classify};
 pub(crate) use sandbox::{ConfinedSpawner, EgressRoute, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
     Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxRequest, SharedDirs,
@@ -48,13 +45,11 @@ pub use sandbox::{
 };
 
 /// Policy for the commands that spawn subprocesses: read-only scripts run unasked, edits ask
-/// unless the permission mode accepts them, and unvetted scripts ask unless [`check_script`]
-/// clears them.
+/// unless the permission mode accepts them, and unvetted scripts ask.
 #[derive(Debug, Clone)]
 pub struct BashPolicyCfg {
     pub timeout: Duration,
-    pub destructive_patterns: Vec<DestructivePattern>,
-    /// Programs that run without confirmation, shared by every
+    /// "Always allow" approvals, which vet the programs they cover; shared by every
     /// subprocess-spawning command so an approval applies to all of them.
     pub allowlist: Arc<Allowlist>,
     /// Directories a command may not name without confirmation.
@@ -72,26 +67,10 @@ impl Default for BashPolicyCfg {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(30),
-            destructive_patterns: Vec::new(),
-            allowlist: Arc::new(Allowlist::unsaved(
-                assistd_config::defaults::default_bash_allowed_programs(),
-                SandboxInfo::none().search_path(),
-            )),
+            allowlist: Arc::new(Allowlist::unsaved(SandboxInfo::none().search_path())),
             protected: Vec::new(),
             scratch: None,
             edit_scope: Vec::new(),
-        }
-    }
-}
-
-impl BashPolicyCfg {
-    /// The rules [`check_script`] applies.
-    pub fn rules(&self) -> Rules<'_> {
-        Rules {
-            patterns: &self.destructive_patterns,
-            allowlist: &self.allowlist,
-            protected: &self.protected,
-            scratch: self.scratch.as_deref(),
         }
     }
 }
@@ -114,16 +93,17 @@ pub(crate) struct SubprocessPolicy {
 }
 
 impl SubprocessPolicy {
-    /// The path guards, then the script's class: an edit is checked against the edit scope,
-    /// and an unvetted script against [`check_script`]. Runs on the blocking pool, since both
-    /// read the filesystem.
+    /// The path guards, then the script's class, with "always allow" approvals vetting the
+    /// programs they cover: an edit is checked against the edit scope, and an unvetted script
+    /// asks. Runs on the blocking pool, since both read the filesystem.
     pub(crate) async fn review_script(&self, script: String) -> Review {
         let cfg = Arc::clone(&self.cfg);
         let sandbox = Arc::clone(&self.sandbox);
         on_blocking_pool(move || {
             let guards = sandbox.path_guards();
-            let analysis = analyze(&script, cfg.scratch.as_deref());
+            let analysis = analyze(&script, cfg.scratch.as_deref(), Some(&cfg.allowlist));
             let effects = analysis.effects.clone();
+            let always_allow = analysis.always_allow.clone();
             match guards.verdict(analysis) {
                 PathVerdict::Refused(why) => Review::Refuse(why),
                 PathVerdict::Sensitive(why) => {
@@ -131,14 +111,13 @@ impl SubprocessPolicy {
                 }
                 PathVerdict::Ordinary(Class::ReadOnly) => Review::Clear,
                 PathVerdict::Ordinary(Class::Edit { .. }) => edit_review(&guards, &effects, &cfg),
-                PathVerdict::Ordinary(Class::Unvetted { why }) => {
-                    match check_script(&script, &cfg.rules()) {
-                        None => Review::Clear,
-                        Some(confirmation) => {
-                            Review::Ask(confirmation, judged(JudgedClass::Unvetted, &guards, why))
-                        }
-                    }
-                }
+                PathVerdict::Ordinary(Class::Unvetted { why }) => Review::Ask(
+                    Confirmation::Unvetted {
+                        why: why.clone(),
+                        always_allow,
+                    },
+                    judged(JudgedClass::Unvetted, &guards, why),
+                ),
             }
         })
         .await
@@ -228,13 +207,7 @@ fn judged(class: JudgedClass, guards: &PathGuards, why: String) -> Unattended {
 
 fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput {
     let reason = match confirmation {
-        Confirmation::Pattern(pattern) => format!("Matched destructive pattern: {pattern}"),
-        Confirmation::Unverifiable(why) => {
-            format!("Could not rule out a destructive command: {why}")
-        }
-        Confirmation::Unlisted { programs, .. } => {
-            format!("Not on the allowlist: {}", programs.join(", "))
-        }
+        Confirmation::Unvetted { why, .. } => format!("It could not be vetted: {why}"),
         Confirmation::Sensitive(why) => format!("It {why}"),
         Confirmation::Edit(_) => format!("It {confirmation}"),
     };

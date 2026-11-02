@@ -18,9 +18,9 @@ use assistd_memory::{SemanticStore, SessionId};
 use assistd_search::{SearchError, SearxngClient};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
-    AllowlistError, ApprovalGate, Approvals, ConfirmationGate, DestructivePattern, MemoryOps,
-    OutputCap, PresentSpec, Protected, RememberTool, ReminisceTool, RunTool, SandboxError,
-    SandboxInfo, SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
+    AllowlistError, ApprovalGate, Approvals, ConfirmationGate, MemoryOps, OutputCap, PresentSpec,
+    Protected, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest,
+    SharedDirs, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand, TailCommand, UniqCommand,
@@ -348,11 +348,7 @@ fn file_policies(
     sandbox: &SandboxInfo,
 ) -> Result<(Arc<BashPolicyCfg>, Arc<WritePolicyCfg>), BuildToolsError> {
     let protected_dirs = vec![config_dir.to_path_buf()];
-    let allowlist = Allowlist::load(
-        config.tools.bash.allowed_programs.clone(),
-        sandbox.search_path(),
-        config_dir.join(APPROVALS_FILE),
-    )?;
+    let allowlist = Allowlist::load(sandbox.search_path(), config_dir.join(APPROVALS_FILE))?;
     let scratch_dir = sandbox.shared.scratch.clone();
     let writable_paths: Vec<PathBuf> = resolve_writable_paths(&config.tools.write.writable_paths)
         .into_iter()
@@ -360,7 +356,6 @@ fn file_policies(
         .collect();
     let bash_cfg = Arc::new(BashPolicyCfg {
         timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
-        destructive_patterns: parse_destructive_patterns(&config.tools.bash.destructive_patterns),
         allowlist: Arc::new(allowlist),
         protected: protected_dirs.clone(),
         scratch: scratch_dir,
@@ -477,23 +472,6 @@ fn sandbox_request(mode: BashSandboxMode) -> SandboxRequest {
         BashSandboxMode::Bwrap => SandboxRequest::Bwrap,
         BashSandboxMode::None => SandboxRequest::None,
     }
-}
-
-fn parse_destructive_patterns(raw_patterns: &[String]) -> Vec<DestructivePattern> {
-    raw_patterns
-        .iter()
-        .filter_map(|raw| {
-            let pattern = shlex::split(raw).and_then(DestructivePattern::new);
-            if pattern.is_none() {
-                warn!(
-                    target: "assistd::policy",
-                    pattern = %raw,
-                    "tools.bash.destructive_patterns entry is not a command; dropping it"
-                );
-            }
-            pattern
-        })
-        .collect()
 }
 
 /// Canonicalize each configured writable path, dropping (with a warning)
