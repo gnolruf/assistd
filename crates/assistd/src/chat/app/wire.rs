@@ -113,6 +113,7 @@ impl App {
             | Event::WakeWordStatus { .. }
             | Event::WakeWordTest { .. }
             | Event::WakeWordSpeech { .. }
+            | Event::Task { .. }
             | Event::LastDelta { .. } => {}
         }
     }

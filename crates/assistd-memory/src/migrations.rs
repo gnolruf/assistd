@@ -247,6 +247,42 @@ CREATE TABLE relay_entries (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// V5: saved tasks and their runs. A run's `state` codes follow `TaskRunState`'s
+/// variant order from 0 (queued); its detail columns are set only in the states that carry them.
+const V5_SQL: &str = r"
+CREATE TABLE tasks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE CHECK (name <> ''),
+    prompt     TEXT NOT NULL CHECK (prompt <> ''),
+    triggers   TEXT NOT NULL CHECK (json_valid(triggers) AND json_type(triggers) = 'array'),
+    enabled    INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    grants     TEXT NOT NULL CHECK (json_valid(grants) AND json_type(grants) = 'array'),
+    plan       TEXT CHECK (plan IS NULL OR json_valid(plan)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at)
+) STRICT;
+
+CREATE TABLE task_runs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id        INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    trigger        TEXT NOT NULL CHECK (json_valid(trigger)),
+    state          INTEGER NOT NULL CHECK (state BETWEEN 0 AND 6),
+    suspend_reason INTEGER CHECK (suspend_reason BETWEEN 0 AND 1),
+    failure        TEXT,
+    session_uuid   TEXT,
+    queued_at      INTEGER NOT NULL,
+    started_at     INTEGER CHECK (started_at >= queued_at),
+    ended_at       INTEGER CHECK (ended_at >= queued_at),
+    reply          TEXT,
+    CHECK ((state = 2) = (suspend_reason IS NOT NULL)),
+    CHECK ((state = 5) = (failure IS NOT NULL)),
+    CHECK ((state = 4) = (reply IS NOT NULL)),
+    CHECK ((state IN (4, 5, 6)) = (ended_at IS NOT NULL)),
+    CHECK (state <> 0 OR started_at IS NULL)
+) STRICT;
+CREATE INDEX idx_task_runs_task ON task_runs(task_id);
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -254,6 +290,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V2_SQL),
         M::up(V3_SQL),
         M::up(V4_SQL),
+        M::up(V5_SQL),
     ])
 }
 
@@ -280,6 +317,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 }

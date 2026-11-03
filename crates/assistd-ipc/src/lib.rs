@@ -12,9 +12,14 @@ use assistd_utils::readiness::NotReady;
 
 pub mod attachment;
 pub mod client;
+pub mod task;
 pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
+pub use task::{
+    PlanStep, SuspendReason, TaskGrant, TaskId, TaskName, TaskPlan, TaskPrompt, TaskRunId,
+    TaskRunState, TaskSpec, TaskSpecError, TaskTrigger,
+};
 pub use wakeword::WakeWordOp;
 
 /// An image on a [`Request::Query`]; `data_base64` is standard padded base64.
@@ -530,6 +535,26 @@ pub enum Request {
         #[serde(default)]
         filter: SubscribeFilter,
     },
+    /// List every saved task by name. Emits `Task`s, then `Done`.
+    TaskList { id: String },
+    /// Read one task. Emits `Task`, then `Done`.
+    TaskGet { id: String, task: TaskId },
+    /// Create a task, or replace task `task`; a changed prompt clears its plan and grants.
+    /// Errors when the name is taken. Emits the saved `Task`, then `Done`.
+    TaskSave {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<TaskId>,
+        spec: TaskSpec,
+    },
+    /// Remove a task and its run history. Emits `Done`.
+    TaskDelete { id: String, task: TaskId },
+    /// Turn a task's triggers on or off. Emits the updated `Task`, then `Done`.
+    TaskSetEnabled {
+        id: String,
+        task: TaskId,
+        enabled: bool,
+    },
 }
 
 impl Request {
@@ -593,7 +618,12 @@ impl Request {
             | Request::ChatState { id, .. }
             | Request::ChatClosed { id }
             | Request::GetChatFocus { id }
-            | Request::Subscribe { id, .. } => id,
+            | Request::Subscribe { id, .. }
+            | Request::TaskList { id }
+            | Request::TaskGet { id, .. }
+            | Request::TaskSave { id, .. }
+            | Request::TaskDelete { id, .. }
+            | Request::TaskSetEnabled { id, .. } => id,
         }
     }
 
@@ -636,6 +666,11 @@ impl Request {
             Request::GetChatFocus { .. } => "get_chat_focus",
             Request::GetReadiness { .. } => "get_readiness",
             Request::Subscribe { .. } => "subscribe",
+            Request::TaskList { .. } => "task_list",
+            Request::TaskGet { .. } => "task_get",
+            Request::TaskSave { .. } => "task_save",
+            Request::TaskDelete { .. } => "task_delete",
+            Request::TaskSetEnabled { .. } => "task_set_enabled",
         }
     }
 }
@@ -1001,6 +1036,12 @@ pub enum Event {
         removed_messages: u32,
         last_user_text: Option<String>,
     },
+    /// One saved task.
+    Task {
+        id: String,
+        task_id: TaskId,
+        spec: TaskSpec,
+    },
     /// Terminal failure.
     Error { id: String, message: String },
     /// Terminal success.
@@ -1050,6 +1091,7 @@ impl Event {
             | Event::BranchSwitched { id, .. }
             | Event::HistoryEntry { id, .. }
             | Event::UndoApplied { id, .. }
+            | Event::Task { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id }
             | Event::LastDelta { id, .. } => id,
@@ -1093,7 +1135,8 @@ impl Event {
             | Event::BranchInfo { .. }
             | Event::BranchSwitched { .. }
             | Event::HistoryEntry { .. }
-            | Event::UndoApplied { .. } => return None,
+            | Event::UndoApplied { .. }
+            | Event::Task { .. } => return None,
         })
     }
 }

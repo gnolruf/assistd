@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+assistd-ipc = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 tracing = { workspace = true }

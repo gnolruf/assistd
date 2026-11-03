@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use assistd_ipc::TaskId;
+
 use crate::{BranchId, SessionId, TurnId};
 
 /// An error from the SQLite driver, kept opaque so callers don't depend on it.
@@ -47,6 +49,16 @@ pub enum MemoryError {
 
     #[error("this session already has a branch named {0:?}")]
     BranchNameTaken(String),
+
+    #[error("no task with id {0}")]
+    TaskNotFound(TaskId),
+
+    #[error("a task named {0:?} already exists")]
+    TaskNameTaken(String),
+
+    /// The store has no database behind it this run.
+    #[error("memory.db is not open; persistence is disabled this run")]
+    Disabled,
 
     /// A SQLite statement issued by `op` failed.
     #[error("{op}: {source}")]

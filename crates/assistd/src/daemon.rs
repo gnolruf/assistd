@@ -467,6 +467,7 @@ fn build_memory_stack(
     MemoryStack::disabled(config.embedding.clone())
         .with_memory(memory.memory_store.clone())
         .with_transcripts(memory.transcript_store.clone())
+        .with_tasks(memory.task_store.clone())
         .with_embedder(embed.embedder.clone())
         .with_semantic(embed.semantic_store.clone())
         .with_embed_tx(embed.embed_tx.clone())

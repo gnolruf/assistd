@@ -323,6 +323,7 @@ dependencies = [
 name = "assistd-memory"
 version = "1.4.0"
 dependencies = [
+ "assistd-ipc",
  "async-trait",
  "chrono",
  "rusqlite",

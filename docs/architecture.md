@@ -64,7 +64,7 @@ flowchart TB
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
-| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`.                | none                                                                             |
+| `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, `find_program` (a `PATH` lookup that says why a program cannot be run), child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
@@ -400,9 +400,10 @@ on `assistd::policy`; nothing is added to the allowlist.
 ### Memory (`assistd-memory` + `assistd-embed`)
 
 One SQLite database (default: `~/.local/share/assistd/memory.db`)
-holds three schemas: a key/value `MemoryStore` for durable facts, a
+holds four schemas: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
-and undo), and a `SemanticStore` for embedding-indexed chunks. Every
+and undo), a `SemanticStore` for embedding-indexed chunks, and a
+`TaskStore` for saved tasks and their runs. Every
 write runs in order on the only read-write connection. Vector scans
 and other reads each get their own read-only connection, so a long
 scan holds up neither a write nor a history load. Shutdown closes the
