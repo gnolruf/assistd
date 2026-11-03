@@ -8,7 +8,7 @@ use tracing::warn;
 
 use assistd_embed::{BATCH_SIZE, EmbedJob, Embedder, embed_jobs};
 use assistd_ipc::{Event, ReindexKind};
-use assistd_memory::{EmbeddingTarget, MemoryError, MemoryId, SemanticStore};
+use assistd_memory::{ChunkLocator, EmbeddingTarget, MemoryError, MemoryId, SemanticStore};
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
 use super::{AppState, DispatchError, send_error, wire_role, wire_timestamp};
@@ -48,15 +48,21 @@ impl AppState {
         {
             Ok(hits) => {
                 for hit in hits {
+                    let ChunkLocator::Message {
+                        session_id,
+                        message_id,
+                        role,
+                        timestamp,
+                    } = hit.locator;
                     let _ = tx
                         .send(Event::SemanticHit {
                             id: id.clone(),
-                            message_id: hit.message_id.0,
+                            message_id: message_id.0,
                             chunk_id: hit.chunk_id.0,
-                            session_id: hit.session_id.to_string(),
-                            timestamp: wire_timestamp(hit.timestamp),
-                            role: wire_role(hit.role),
-                            content: hit.content,
+                            session_id: session_id.to_string(),
+                            timestamp: wire_timestamp(timestamp),
+                            role: wire_role(role),
+                            content: hit.text,
                             similarity: hit.similarity,
                         })
                         .await;

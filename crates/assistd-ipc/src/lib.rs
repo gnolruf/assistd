@@ -895,7 +895,7 @@ pub enum Event {
         session_id: String,
         title: String,
     },
-    /// One search hit; `content` is the full message, `similarity` is in `[0.0, 1.0]`.
+    /// One search hit; `content` is the matched chunk of message `message_id`, `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
         id: String,
         message_id: i64,

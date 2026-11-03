@@ -118,7 +118,7 @@ async fn embed_memory(
 async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
-    let long_text = "word ".repeat(150);
+    let long_text = format!("{}{}", "head ".repeat(100), "tail ".repeat(60));
     let (long_message, long_chunks) = transcript.append(&long_text).await;
     let [first, second] = &long_chunks[..] else {
         panic!("expected two chunks, got {}", long_chunks.len());
@@ -134,12 +134,20 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     assert_eq!(ids, [second.0, short]);
     assert!((hits[0].similarity - 1.0).abs() < 1e-4);
     assert!(hits[0].similarity > hits[1].similarity);
-    assert_eq!(hits[0].message_id, long_message);
-    assert_eq!(hits[0].content, long_text);
-    assert_eq!(hits[1].content, "short");
+    assert_eq!(
+        hits[0].text, second.1,
+        "a tail match must return the tail window, not the message"
+    );
+    assert!(hits[0].text.ends_with("tail ") && hits[0].text.len() < long_text.len());
+    assert_eq!(hits[1].text, "short");
+    let ChunkLocator::Message { message_id, .. } = hits[0].locator;
+    assert_eq!(message_id, long_message);
     for hit in &hits {
-        assert_eq!(hit.session_id, transcript.session);
-        assert_eq!(hit.role, PersistedRole::User);
+        let ChunkLocator::Message {
+            session_id, role, ..
+        } = hit.locator;
+        assert_eq!(session_id, transcript.session);
+        assert_eq!(role, PersistedRole::User);
     }
 }
 
@@ -189,8 +197,13 @@ async fn nearest_chunks_can_exclude_one_session() {
         .nearest_chunks(unit_vec(0.0), 5, Some(current.session))
         .await
         .unwrap();
-    let other_ids: Vec<(ChunkId, SessionId)> =
-        others.iter().map(|h| (h.chunk_id, h.session_id)).collect();
+    let other_ids: Vec<(ChunkId, SessionId)> = others
+        .iter()
+        .map(|h| {
+            let ChunkLocator::Message { session_id, .. } = h.locator;
+            (h.chunk_id, session_id)
+        })
+        .collect();
     assert_eq!(other_ids, [(past_chunk, past.session)]);
 }
 

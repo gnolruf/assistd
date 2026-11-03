@@ -3,6 +3,7 @@
 
 use tracing::debug;
 
+use assistd_memory::{ChunkLocator, EmbeddingHit};
 use assistd_wm::FocusedWindowContext;
 
 use super::query::TurnOrigin;
@@ -42,15 +43,8 @@ impl AppState {
             return Ok(None);
         }
         let mut block = String::from("Relevant past context:\n");
-        for hit in hits {
-            let snippet = truncate_for_context(&hit.content, MAX_SNIPPET_CHARS);
-            block.push_str(&format!(
-                "- [{} {} sim={:.0}%] {}\n",
-                hit.timestamp,
-                hit.role.as_wire(),
-                hit.similarity * 100.0,
-                snippet
-            ));
+        for hit in &hits {
+            block.push_str(&format_recall_line(hit));
         }
         Ok(Some(block))
     }
@@ -83,6 +77,19 @@ impl AppState {
         };
         format_window_context_block(&focused)
     }
+}
+
+/// One recalled chunk as a context-block bullet, cut to [`MAX_SNIPPET_CHARS`].
+fn format_recall_line(hit: &EmbeddingHit) -> String {
+    let ChunkLocator::Message {
+        timestamp, role, ..
+    } = &hit.locator;
+    format!(
+        "- [{timestamp} {} sim={:.0}%] {}\n",
+        role.as_wire(),
+        hit.similarity * 100.0,
+        truncate_for_context(&hit.text, MAX_SNIPPET_CHARS)
+    )
 }
 
 /// `None` when every field is empty after sanitising.
