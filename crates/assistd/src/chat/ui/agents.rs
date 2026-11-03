@@ -3,12 +3,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use super::super::app::{AgentPanel, App};
 use super::super::output::RelayStepTrace;
+use super::super::theme::Theme;
 use super::{picker_scroll_start, render_rule, render_transcript};
 
 /// Rows each listed sub-agent takes: its label and its status.
@@ -23,11 +24,12 @@ pub(super) fn render_agent_panel(
     area: Rect,
     app: &mut App,
     panel: AgentPanel,
+    theme: &Theme,
 ) {
     if panel.open {
-        render_agent_transcript(frame, area, app, panel.selected);
+        render_agent_transcript(frame, area, app, panel.selected, theme);
     } else {
-        render_agent_list(frame, area, &app.output.agents(), panel.selected);
+        render_agent_list(frame, area, &app.output.agents(), panel.selected, theme);
     }
 }
 
@@ -46,6 +48,7 @@ fn render_agent_list(
     area: Rect,
     agents: &[&RelayStepTrace],
     selected: usize,
+    theme: &Theme,
 ) {
     let [title_area, _, list_area] = Layout::vertical([
         Constraint::Length(1),
@@ -55,7 +58,7 @@ fn render_agent_list(
     .areas(area);
     let title = Line::from(vec![
         Span::styled("Sub-agents", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" ({})", agents.len()), hint_style()),
+        Span::styled(format!(" ({})", agents.len()), hint_style(theme)),
     ]);
     frame.render_widget(Paragraph::new(title), title_area);
     let visible = (usize::from(list_area.height) / AGENT_ENTRY_ROWS).max(1);
@@ -65,28 +68,34 @@ fn render_agent_list(
         .enumerate()
         .skip(start)
         .take(visible)
-        .flat_map(|(index, agent)| agent_entry_rows(agent, index == selected))
+        .flat_map(|(index, agent)| agent_entry_rows(agent, index == selected, theme))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
 }
 
-fn agent_entry_rows(agent: &RelayStepTrace, selected: bool) -> [Line<'static>; 2] {
+fn agent_entry_rows(agent: &RelayStepTrace, selected: bool, theme: &Theme) -> [Line<'static>; 2] {
     let (pointer, style) = if selected {
-        ("❯ ", agent.style().add_modifier(Modifier::BOLD))
+        ("❯ ", agent.style(theme).add_modifier(Modifier::BOLD))
     } else {
-        ("  ", agent.style())
+        ("  ", agent.style(theme))
     };
     [
         Line::from(Span::styled(format!("{pointer}{}", agent.label()), style)),
         Line::from(Span::styled(
             format!("{STATUS_INDENT}{}", agent.status()),
-            hint_style(),
+            hint_style(theme),
         )),
     ]
 }
 
 /// The agent's label and status above its transcript, scrolled like the chat's.
-fn render_agent_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App, selected: usize) {
+fn render_agent_transcript(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    selected: usize,
+    theme: &Theme,
+) {
     let verbose = app.verbose;
     let [label_area, status_area, rule_area, transcript_area] = Layout::vertical([
         Constraint::Length(1),
@@ -99,18 +108,21 @@ fn render_agent_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App, sel
     let Some(agent) = app.output.agent_mut(selected) else {
         return;
     };
-    let label = Span::styled(agent.label(), agent.style().add_modifier(Modifier::BOLD));
+    let label = Span::styled(
+        agent.label(),
+        agent.style(theme).add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(Paragraph::new(label), label_area);
-    let status = Span::styled(agent.status(), agent.style());
+    let status = Span::styled(agent.status(), agent.style(theme));
     frame.render_widget(Paragraph::new(status), status_area);
-    render_rule(frame, rule_area);
+    render_rule(frame, rule_area, theme);
     let transcript = agent.transcript_mut();
     transcript.set_verbose(verbose);
     if transcript_area.width > 0 && transcript_area.height > 0 {
-        render_transcript(frame, transcript_area, transcript);
+        render_transcript(frame, transcript_area, transcript, theme);
     }
 }
 
-fn hint_style() -> Style {
-    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+fn hint_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.status_text)
 }

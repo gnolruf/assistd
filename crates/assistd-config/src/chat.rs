@@ -1,5 +1,6 @@
-//! System prompt, history window and sampling configuration.
+//! System prompt, history window, sampling and chat TUI theme configuration.
 
+use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use crate::defaults::{
     DEFAULT_SYSTEM_PROMPT,
 };
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::theme::ThemeConfig;
 
 /// System prompt, history window and sampling. Sampler fields left `None`
 /// are omitted from requests, so llama-server applies its own default.
@@ -52,6 +54,11 @@ pub struct ChatConfig {
     /// `low`. Valid values depend on the model's template; `None` keeps the
     /// template's default. Must not be empty.
     pub reasoning_effort: Option<String>,
+    /// Colors of the chat TUI.
+    pub theme: ThemeConfig,
+    /// Themes saved from the settings panel, by name; each name is ASCII
+    /// letters, digits, `_` and `-`, and no built-in theme's.
+    pub themes: BTreeMap<String, ThemeConfig>,
 }
 
 impl DescribeSettings for ChatConfig {
@@ -100,6 +107,8 @@ impl DescribeSettings for ChatConfig {
             "Template's reasoning_effort value, e.g. low; unset keeps its default",
             advanced
         ),
+        theme => nested,
+        themes => ("themes", "Load a built-in or saved theme, or save the current colors"),
     }
 }
 
@@ -119,6 +128,8 @@ impl Default for ChatConfig {
             min_p: None,
             presence_penalty: None,
             reasoning_effort: None,
+            theme: ThemeConfig::default(),
+            themes: BTreeMap::new(),
         }
     }
 }

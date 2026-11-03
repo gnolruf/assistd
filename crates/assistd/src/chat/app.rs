@@ -19,6 +19,7 @@ use tokio::task::{JoinError, JoinSet};
 use super::input::InputLine;
 use super::output::OutputPane;
 use super::settings::SettingsPanel;
+use super::theme::Theme;
 
 mod agents;
 mod attach;
@@ -270,6 +271,8 @@ pub(super) struct App {
     pub permission_mode: PermissionMode,
     /// The daemon honors [`PermissionMode::Auto`], so Shift+Tab offers it.
     pub auto_mode_offered: bool,
+    /// Colors from the config as last loaded or saved from `/settings`.
+    theme: Theme,
 }
 
 /// The reply turn that owns the output pane. The daemon serialises turns,
@@ -460,7 +463,20 @@ impl App {
             verbose: false,
             permission_mode: PermissionMode::Manual,
             auto_mode_offered,
+            theme: Theme::default(),
         }
+    }
+
+    pub(super) fn with_theme(self, theme: Theme) -> Self {
+        Self { theme, ..self }
+    }
+
+    /// The colors to draw with: the open settings panel's, unsaved edits
+    /// included, so changes show as they are made.
+    pub(super) fn theme(&self) -> Theme {
+        self.settings_panel
+            .as_ref()
+            .map_or(self.theme, SettingsPanel::theme)
     }
 
     pub(super) fn should_quit(&self) -> bool {

@@ -58,7 +58,7 @@ fn transcription_for(id: &str, text: &str) -> Event {
 }
 
 fn rendered(app: &mut App) -> Vec<String> {
-    let (lines, _) = app.output.render_view(80, 80);
+    let (lines, _) = app.output.render_view(80, 80, &Theme::default());
     lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())

@@ -9,16 +9,16 @@ use assistd_tools::ConfirmationRequest;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
 use super::app::{App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker};
-use super::markdown::BLEY;
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use super::settings::render_settings;
+use super::theme::Theme;
 use crate::client::terminal_text::escape_controls_single_line;
 
 mod agents;
@@ -47,48 +47,57 @@ const RESUME_DETAIL_INDENT: &str = "    ";
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let [main_area, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    let theme = app.theme();
     if let Some(picker) = app.shown_resume_picker() {
-        render_resume_picker(frame, main_area, picker, &app.model_name, Utc::now());
+        render_resume_picker(
+            frame,
+            main_area,
+            picker,
+            &app.model_name,
+            Utc::now(),
+            &theme,
+        );
     } else if let Some(panel) = app.shown_wake_word_panel() {
-        wakeword::render_wake_word_panel(frame, main_area, panel);
+        wakeword::render_wake_word_panel(frame, main_area, panel, &theme);
     } else if let Some(panel) = app.shown_agent_panel() {
-        agents::render_agent_panel(frame, main_area, app, panel);
+        agents::render_agent_panel(frame, main_area, app, panel, &theme);
     } else if app.confirmation.is_none()
         && let Some(panel) = app.settings_panel.as_mut()
     {
         render_settings(frame, main_area, panel);
     } else {
-        render_chat(frame, main_area, app);
+        render_chat(frame, main_area, app, &theme);
     }
-    render_status_line(frame, status_area, app);
+    render_status_line(frame, status_area, app, &theme);
 }
 
 /// The transcript above the input line or the confirmation prompt, the
 /// slash popup over the transcript's bottom rows, then the permission-mode
 /// line.
-fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let [chat_area, mode_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let output_area = match app.confirmation.as_mut() {
-        Some(prompt) => render_confirmation_dock(frame, chat_area, prompt),
-        None => render_input_dock(frame, chat_area, app),
+        Some(prompt) => render_confirmation_dock(frame, chat_area, prompt, theme),
+        None => render_input_dock(frame, chat_area, app, theme),
     };
     app.set_output_height(output_area.height);
-    render_output(frame, output_area, app);
+    render_output(frame, output_area, app, theme);
     if app.confirmation.is_none() {
         render_slash_popup(
             frame,
             output_area,
             &app.slash_suggestions(),
             app.slash_selected(),
+            theme,
         );
     }
-    render_mode_line(frame, mode_area, app.permission_mode);
+    render_mode_line(frame, mode_area, app.permission_mode, theme);
 }
 
 /// Draw the input line and its rules at the bottom of `area`, returning
 /// the rows above them for the transcript.
-fn render_input_dock(frame: &mut Frame<'_>, area: Rect, app: &App) -> Rect {
+fn render_input_dock(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) -> Rect {
     let input_height = compute_input_height(area.width, area.height, app.input.buffer());
     let [output_area, upper_rule_area, input_area, lower_rule_area] = Layout::vertical([
         Constraint::Min(3),
@@ -97,9 +106,9 @@ fn render_input_dock(frame: &mut Frame<'_>, area: Rect, app: &App) -> Rect {
         Constraint::Length(1),
     ])
     .areas(area);
-    render_rule(frame, upper_rule_area);
+    render_rule(frame, upper_rule_area, theme);
     render_input(frame, input_area, app);
-    render_rule(frame, lower_rule_area);
+    render_rule(frame, lower_rule_area, theme);
     output_area
 }
 
@@ -111,8 +120,9 @@ fn render_resume_picker(
     picker: &ResumePicker,
     model_name: &str,
     now: DateTime<Utc>,
+    theme: &Theme,
 ) {
-    let banner = banner_lines(model_name, area.width);
+    let banner = banner_lines(model_name, area.width, theme);
     let [banner_area, search_area, _, list_area, count_area] = Layout::vertical([
         Constraint::Length(saturating_u16(banner.len())),
         Constraint::Length(3),
@@ -122,27 +132,27 @@ fn render_resume_picker(
     ])
     .areas(area);
     frame.render_widget(Paragraph::new(Text::from(banner)), banner_area);
-    render_resume_search(frame, search_area, picker.query());
+    render_resume_search(frame, search_area, picker.query(), theme);
     let matches = picker.matches();
-    render_resume_list(frame, list_area, &matches, picker.selected(), now);
+    render_resume_list(frame, list_area, &matches, picker.selected(), now, theme);
     let count = Span::styled(
         format!("{} of {}", matches.len(), picker.total()),
-        Style::default().fg(Color::DarkGray),
+        meta_style(theme),
     );
     frame.render_widget(Paragraph::new(count), count_area);
 }
 
 /// The search query in a rounded box, with the cursor after it.
-fn render_resume_search(frame: &mut Frame<'_>, area: Rect, query: &str) {
+fn render_resume_search(frame: &mut Frame<'_>, area: Rect, query: &str, theme: &Theme) {
     let query = escape_controls_single_line(query);
     let text = if query.is_empty() {
-        Span::styled("Search…", Style::default().fg(Color::DarkGray))
+        Span::styled("Search…", meta_style(theme))
     } else {
         Span::raw(query.as_ref())
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(rule_style())
+        .border_style(rule_style(theme))
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(Paragraph::new(text).block(block), area);
@@ -164,9 +174,10 @@ fn render_resume_list(
     matches: &[&BranchListEntry],
     selected: usize,
     now: DateTime<Utc>,
+    theme: &Theme,
 ) {
     if matches.is_empty() {
-        let note = Span::styled("No matches", Style::default().fg(Color::DarkGray));
+        let note = Span::styled("No matches", meta_style(theme));
         frame.render_widget(Paragraph::new(note), area);
         return;
     }
@@ -177,7 +188,7 @@ fn render_resume_list(
         .enumerate()
         .skip(start)
         .take(visible)
-        .flat_map(|(index, entry)| resume_entry_rows(entry, index == selected, now))
+        .flat_map(|(index, entry)| resume_entry_rows(entry, index == selected, now, theme))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
@@ -196,6 +207,7 @@ fn resume_entry_rows(
     entry: &BranchListEntry,
     selected: bool,
     now: DateTime<Utc>,
+    theme: &Theme,
 ) -> [Line<'static>; 2] {
     let title = entry
         .session_title
@@ -204,20 +216,17 @@ fn resume_entry_rows(
         .filter(|t| !t.is_empty())
         .map_or_else(|| "Untitled".into(), escape_controls_single_line);
     let (pointer, title_style) = if selected {
-        ("❯ ", Style::default().fg(BLEY).add_modifier(Modifier::BOLD))
+        ("❯ ", pointer_style(theme))
     } else {
         ("  ", Style::default())
     };
     let mut title_row = vec![Span::styled(format!("{pointer}{title}"), title_style)];
     if entry.is_active() {
-        title_row.push(Span::styled(
-            " (current)",
-            Style::default().fg(Color::DarkGray),
-        ));
+        title_row.push(Span::styled(" (current)", meta_style(theme)));
     }
     let detail = Span::styled(
         format!("{RESUME_DETAIL_INDENT}{}", resume_entry_details(entry, now)),
-        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+        Style::default().fg(theme.status_text),
     );
     [Line::from(title_row), Line::from(detail)]
 }
@@ -263,6 +272,7 @@ fn render_slash_popup(
     area: Rect,
     suggestions: &[&'static (&'static str, &'static str)],
     selected: usize,
+    theme: &Theme,
 ) {
     let height = saturating_u16(suggestions.len())
         .min(SLASH_POPUP_MAX_ROWS)
@@ -284,12 +294,12 @@ fn render_slash_popup(
         .take(visible_rows)
         .map(|(i, (cmd, hint))| {
             let (style, hint_style) = if i == selected {
-                (selected_style(), reversed_style())
-            } else {
                 (
-                    Style::default().fg(BLEY),
-                    Style::default().fg(Color::DarkGray),
+                    theme.selection().add_modifier(Modifier::BOLD),
+                    theme.selection(),
                 )
+            } else {
+                (Style::default().fg(theme.accent), meta_style(theme))
             };
             if hint.is_empty() {
                 Line::from(Span::styled(format!(" {cmd}"), style))
@@ -311,16 +321,17 @@ fn render_confirmation_dock(
     frame: &mut Frame<'_>,
     area: Rect,
     prompt: &mut ConfirmationPrompt,
+    theme: &Theme,
 ) -> Rect {
     let width = usize::from(area.width.saturating_sub(2));
     let max_body_rows =
         usize::from(area.height).saturating_sub(TRANSCRIPT_MIN_ROWS + CONFIRM_BORDER_ROWS);
-    let body = confirmation_body(prompt, width, max_body_rows);
+    let body = confirmation_body(prompt, width, max_body_rows, theme);
     let height = saturating_u16(body.len() + CONFIRM_BORDER_ROWS).min(area.height);
     let [output_area, prompt_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(area);
     let tool = escape_controls_single_line(&prompt.request.tool);
-    let accent = confirm_accent();
+    let accent = confirm_accent(theme);
     let title = match prompt.request.source {
         ConfirmSource::Main => format!(" Confirm {tool} "),
         ConfirmSource::Relay { .. } => format!(" Confirm {tool} for a relay sub-agent "),
@@ -339,9 +350,10 @@ fn confirmation_body(
     prompt: &mut ConfirmationPrompt,
     width: usize,
     max_rows: usize,
+    theme: &Theme,
 ) -> Vec<Line<'static>> {
     let reason_style = Style::default().add_modifier(Modifier::BOLD);
-    let mut body = relay_source_rows(&prompt.request.source, width);
+    let mut body = relay_source_rows(&prompt.request.source, width, theme);
     body.extend(indented_rows(
         "",
         &prompt.request.matched_pattern,
@@ -349,10 +361,10 @@ fn confirmation_body(
         width,
     ));
     body.push(Line::default());
-    let choices = choice_rows(prompt, width);
+    let choices = choice_rows(prompt, width, theme);
     let rows_around_script = body.len() + 2 + choices.len();
     let script_budget = max_rows.saturating_sub(rows_around_script).max(1);
-    body.extend(script_rows(prompt, width, script_budget));
+    body.extend(script_rows(prompt, width, script_budget, theme));
     body.push(Line::default());
     body.push(Line::from("Do you want to proceed?"));
     body.extend(choices);
@@ -361,7 +373,7 @@ fn confirmation_body(
 
 /// For a relay's prompt, a warning and the sub-agent's task in at most
 /// [`RELAY_TASK_ROWS`] rows; nothing for the main agent's.
-fn relay_source_rows(source: &ConfirmSource, width: usize) -> Vec<Line<'static>> {
+fn relay_source_rows(source: &ConfirmSource, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let ConfirmSource::Relay { task } = source else {
         return Vec::new();
     };
@@ -369,7 +381,7 @@ fn relay_source_rows(source: &ConfirmSource, width: usize) -> Vec<Line<'static>>
     let mut rows = indented_rows(
         "",
         warning,
-        confirm_accent().add_modifier(Modifier::BOLD),
+        confirm_accent(theme).add_modifier(Modifier::BOLD),
         width,
     );
     let task_style = Style::default().add_modifier(Modifier::ITALIC);
@@ -386,14 +398,19 @@ fn relay_source_rows(source: &ConfirmSource, width: usize) -> Vec<Line<'static>>
     rows
 }
 
-fn confirm_accent() -> Style {
-    Style::default().fg(Color::Yellow)
+fn confirm_accent(theme: &Theme) -> Style {
+    Style::default().fg(theme.warning)
 }
 
 /// The script in at most `budget` rows: the first few behind a marker
 /// while collapsed, or a window at the prompt's scroll while expanded.
 /// Clamps the scroll to the last full window.
-fn script_rows(prompt: &mut ConfirmationPrompt, width: usize, budget: usize) -> Vec<Line<'static>> {
+fn script_rows(
+    prompt: &mut ConfirmationPrompt,
+    width: usize,
+    budget: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let rows = wrapped_script(
         &prompt.request.script,
         width.saturating_sub(SCRIPT_INDENT.len()),
@@ -433,7 +450,7 @@ fn script_rows(prompt: &mut ConfirmationPrompt, width: usize, budget: usize) -> 
         .collect();
     lines.push(Line::from(Span::styled(
         format!("{SCRIPT_INDENT}{marker}"),
-        Style::default().fg(Color::Yellow),
+        confirm_accent(theme),
     )));
     lines
 }
@@ -452,7 +469,7 @@ fn script_line(row: String) -> Line<'static> {
 }
 
 /// One numbered row per choice, the selected one marked and highlighted.
-fn choice_rows(prompt: &ConfirmationPrompt, width: usize) -> Vec<Line<'static>> {
+fn choice_rows(prompt: &ConfirmationPrompt, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     prompt
         .choices()
         .iter()
@@ -464,7 +481,7 @@ fn choice_rows(prompt: &ConfirmationPrompt, width: usize) -> Vec<Line<'static>> 
                 ConfirmChoice::Deny => "No (Esc)".to_string(),
             };
             let (pointer, style) = if index == prompt.selected {
-                ("❯", Style::default().fg(BLEY).add_modifier(Modifier::BOLD))
+                ("❯", pointer_style(theme))
             } else {
                 (" ", Style::default())
             };
@@ -531,12 +548,12 @@ fn hard_wrap(text: &str, width: usize) -> Vec<String> {
 
 /// The transcript, with a blank row and the generating row below it while
 /// a reply is open.
-fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let Some(started_at) = app.reply_started_at else {
-        render_transcript(frame, area, &mut app.output);
+        render_transcript(frame, area, &mut app.output, theme);
         return;
     };
     let [transcript_area, _, status_row] = Layout::vertical([
@@ -545,13 +562,13 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(area);
-    render_generating_row(frame, status_row, app, started_at);
-    render_transcript(frame, transcript_area, &mut app.output);
+    render_generating_row(frame, status_row, app, started_at, theme);
+    render_transcript(frame, transcript_area, &mut app.output, theme);
 }
 
-fn render_transcript(frame: &mut Frame<'_>, area: Rect, output: &mut OutputPane) {
-    let slots = output.thumbnail_layout(area.width);
-    let (lines, viewport_top) = output.render_view(area.width, area.height);
+fn render_transcript(frame: &mut Frame<'_>, area: Rect, output: &mut OutputPane, theme: &Theme) {
+    let slots = output.thumbnail_layout(area.width, theme);
+    let (lines, viewport_top) = output.render_view(area.width, area.height, theme);
     for (line, row) in lines.iter().zip(area.rows()) {
         frame.render_widget(line, row);
     }
@@ -594,7 +611,13 @@ fn render_thumbnails(
 /// Spinner row for an open reply with its elapsed time, the turn's tokens,
 /// the conversation's current size and its total including compacted
 /// history, plus a warning when the daemon is about to compact history.
-fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at: Instant) {
+fn render_generating_row(
+    frame: &mut Frame<'_>,
+    row: Rect,
+    app: &App,
+    started_at: Instant,
+    theme: &Theme,
+) {
     let elapsed = compact_duration(started_at.elapsed().as_secs());
     let sizes = app.tokens.context_tokens().zip(app.tokens.total_tokens());
     let progress = match (app.tokens.tokens(), sizes) {
@@ -610,14 +633,15 @@ fn render_generating_row(frame: &mut Frame<'_>, row: Rect, app: &App, started_at
     let mut spans = vec![Span::styled(
         format!("{} Generating… ({progress})", app.spinner_char()),
         Style::default()
-            .fg(Color::Gray)
-            .add_modifier(Modifier::DIM)
+            .fg(theme.status_text)
             .add_modifier(Modifier::ITALIC),
     )];
     if app.compacting_soon {
         spans.push(Span::styled(
             " · compacting soon",
-            Style::default().fg(BLEY).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::ITALIC),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
@@ -651,29 +675,32 @@ pub(super) fn compact_count(count: u64) -> String {
     }
 }
 
-fn render_rule(frame: &mut Frame<'_>, area: Rect) {
+fn render_rule(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let rule = RULE.repeat(usize::from(area.width));
-    frame.render_widget(Paragraph::new(Span::styled(rule, rule_style())), area);
+    frame.render_widget(Paragraph::new(Span::styled(rule, rule_style(theme))), area);
 }
 
-fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: PermissionMode) {
+fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: PermissionMode, theme: &Theme) {
     let label = match mode {
         PermissionMode::Manual => "manual mode on",
         PermissionMode::AcceptEdits => "accept edits on",
         PermissionMode::Auto => "auto mode on",
     };
-    let line = Span::styled(format!("{label} (shift+tab)"), Style::default().fg(BLEY));
+    let line = Span::styled(
+        format!("{label} (shift+tab)"),
+        Style::default().fg(theme.accent),
+    );
     frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Voice capture, a model that is not active, staged attachments and then a notice, the scroll
 /// position or the interrupt hint, all gray and left-aligned.
-fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let text_style = Style::default().fg(Color::Gray).add_modifier(Modifier::DIM);
+fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let text_style = Style::default().fg(theme.status_text);
     let mut spans = Vec::new();
     for text in status_segments(app).into_iter().chain(status_hint(app)) {
         if !spans.is_empty() {
-            spans.push(Span::styled(" · ", rule_style()));
+            spans.push(Span::styled(" · ", rule_style(theme)));
         }
         spans.push(Span::styled(text, text_style));
     }
@@ -719,17 +746,17 @@ fn status_hint(app: &App) -> Option<String> {
     }
 }
 
-fn rule_style() -> Style {
-    Style::default().fg(Color::DarkGray)
+fn rule_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.border)
 }
 
-fn reversed_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+fn meta_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.status_text)
 }
 
-fn selected_style() -> Style {
+fn pointer_style(theme: &Theme) -> Style {
     Style::default()
-        .add_modifier(Modifier::REVERSED)
+        .fg(theme.accent)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -885,7 +912,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal
             .draw(|frame| {
-                render_confirmation_dock(frame, frame.area(), prompt);
+                render_confirmation_dock(frame, frame.area(), prompt, &Theme::default());
             })
             .expect("draw");
         let buffer = terminal.backend().buffer();

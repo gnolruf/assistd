@@ -13,7 +13,8 @@ use textwrap::core::display_width;
 
 use assistd_ipc::{RelayEvent, RelayStepPlan, RelayStepRecord};
 
-use super::markdown::{BLEY, render_markdown};
+use super::markdown::render_markdown;
+use super::theme::Theme;
 use super::ui::compact_duration;
 use crate::client::terminal_text::escape_bidi_controls;
 
@@ -135,12 +136,23 @@ pub(super) struct CompactionBlock {
     pub glyph_frame: u64,
 }
 
+/// What a line of transcript prose reports, which picks its style.
+#[derive(Debug, Clone, Copy)]
+enum TextRole {
+    /// A blank separator row.
+    Gap,
+    Info,
+    /// The `Worked for …` line closing a reply.
+    Summary,
+    Error,
+}
+
 enum OutputItem {
     /// Logo, version and model name; drawn unwrapped.
     Banner {
         model_name: String,
     },
-    Text(Line<'static>),
+    Text(String, TextRole),
     /// One user prompt, drawn after `> ` with every later row indented to
     /// line up beneath its first.
     Prompt(String),
@@ -208,7 +220,7 @@ impl OutputPane {
     }
 
     pub(super) fn push_info(&mut self, text: &str) {
-        self.push_separated(text.to_string(), info_style());
+        self.push_separated(text.to_string(), TextRole::Info);
     }
 
     /// Open a live compaction line.
@@ -227,7 +239,7 @@ impl OutputPane {
             timing,
             glyph_frame: 0,
         }));
-        self.items.push(OutputItem::Text(Line::from("")));
+        self.items.push(OutputItem::gap());
     }
 
     /// Stamp the live compaction line. No-op when none is live.
@@ -242,7 +254,7 @@ impl OutputPane {
 
     /// Append the dim `Worked for …` line that closes a finished reply.
     pub(super) fn push_turn_summary(&mut self, text: String) {
-        self.push_separated(text, summary_style());
+        self.push_separated(text, TextRole::Summary);
     }
 
     /// Open a streaming assistant block for [`Self::append_assistant`].
@@ -273,11 +285,11 @@ impl OutputPane {
             return;
         }
         self.open_assistant = None;
-        self.items.push(OutputItem::Text(Line::from("")));
+        self.items.push(OutputItem::gap());
     }
 
     pub(super) fn push_error(&mut self, msg: &str) {
-        self.push_separated(format!("!! {msg}"), error_style());
+        self.push_separated(format!("!! {msg}"), TextRole::Error);
     }
 
     /// Append a finished tool block. Blocks whose body exceeds
@@ -432,7 +444,7 @@ impl OutputPane {
                 OutputItem::Tool(b) => &mut b.expanded,
                 OutputItem::Thinking(t) => &mut t.expanded,
                 OutputItem::Banner { .. }
-                | OutputItem::Text(_)
+                | OutputItem::Text(..)
                 | OutputItem::Prompt(_)
                 | OutputItem::Assistant(_)
                 | OutputItem::Thumbnail(_)
@@ -621,8 +633,13 @@ impl OutputPane {
     /// The wrapped lines inside a `height`-row viewport and the index of
     /// the first of them in the whole wrapped transcript. Clamps the
     /// scroll offset to the wrapped total.
-    pub(super) fn render_view(&mut self, width: u16, height: u16) -> (&[Line<'static>], usize) {
-        self.sync_wrap(width);
+    pub(super) fn render_view(
+        &mut self,
+        width: u16,
+        height: u16,
+        theme: &Theme,
+    ) -> (&[Line<'static>], usize) {
+        self.sync_wrap(width, theme);
         let lines = &self.wrap.lines;
         let height = usize::from(height);
         let max_offset = lines.len().saturating_sub(height);
@@ -632,22 +649,21 @@ impl OutputPane {
         (&lines[start..end], start)
     }
 
-    fn sync_wrap(&mut self, width: u16) {
-        self.wrap.sync(&self.items, width, self.verbose);
+    fn sync_wrap(&mut self, width: u16, theme: &Theme) {
+        self.wrap.sync(&self.items, width, self.verbose, theme);
     }
 
     fn push_prompt(&mut self, text: String) {
         self.close_open_assistant();
         self.items.push(OutputItem::Prompt(text));
-        self.items.push(OutputItem::Text(Line::from("")));
+        self.items.push(OutputItem::gap());
     }
 
-    /// Append one styled line and the blank row that separates it from the next item.
-    fn push_separated(&mut self, text: String, style: Style) {
+    /// Append one line and the blank row that separates it from the next item.
+    fn push_separated(&mut self, text: String, role: TextRole) {
         self.close_open_assistant();
-        self.items
-            .push(OutputItem::Text(single_span_line(text, style)));
-        self.items.push(OutputItem::Text(Line::from("")));
+        self.items.push(OutputItem::Text(text, role));
+        self.items.push(OutputItem::gap());
     }
 
     fn close_open_assistant(&mut self) {
@@ -660,7 +676,7 @@ impl OutputPane {
                 self.items.pop();
                 self.wrap.truncate(idx);
             } else {
-                self.items.push(OutputItem::Text(Line::from("")));
+                self.items.push(OutputItem::gap());
             }
         }
     }
@@ -673,13 +689,13 @@ impl OutputPane {
                 name,
                 protocol,
             })));
-        self.items.push(OutputItem::Text(Line::from("")));
+        self.items.push(OutputItem::gap());
     }
 
     /// Where each thumbnail's reserved rows sit in the wrapped output that
     /// [`Self::render_view`] returns for the same `width`.
-    pub(super) fn thumbnail_layout(&mut self, width: u16) -> Vec<ThumbnailSlot> {
-        self.sync_wrap(width);
+    pub(super) fn thumbnail_layout(&mut self, width: u16, theme: &Theme) -> Vec<ThumbnailSlot> {
+        self.sync_wrap(width, theme);
         self.wrap
             .thumbnails
             .iter()
@@ -711,12 +727,12 @@ pub(super) struct ThumbnailSlot {
     pub height: usize,
 }
 
-/// Wrapped rows of the leading `starts.len()` items, valid for one `(width, verbose)` key.
+/// Wrapped rows of the leading `starts.len()` items, valid for one `(width, verbose, theme)` key.
 /// Items mutated in place must go through [`Self::invalidate`] and removals through
 /// [`Self::truncate`]; appended items are picked up by [`Self::sync`].
 #[derive(Default)]
 struct WrapCache {
-    key: Option<(u16, bool)>,
+    key: Option<(u16, bool, Theme)>,
     lines: Vec<Line<'static>>,
     /// First row of each cached item; an item ends where the next starts.
     starts: Vec<usize>,
@@ -751,16 +767,17 @@ impl WrapCache {
         self.starts[idx]..end
     }
 
-    fn sync(&mut self, items: &[OutputItem], width: u16, verbose: bool) {
-        if self.key != Some((width, verbose)) {
-            self.key = Some((width, verbose));
+    fn sync(&mut self, items: &[OutputItem], width: u16, verbose: bool, theme: &Theme) {
+        let key = Some((width, verbose, *theme));
+        if self.key != key {
+            self.key = key;
             self.truncate(0);
         }
         self.stale.sort_unstable();
         self.stale.dedup();
         let mut fresh = Vec::new();
         for idx in std::mem::take(&mut self.stale) {
-            render_item(&mut fresh, &items[idx], width, verbose);
+            render_item(&mut fresh, &items[idx], width, verbose, theme);
             let rows = self.rows(idx);
             let (old_len, new_len) = (rows.len(), fresh.len());
             self.lines.splice(rows, fresh.drain(..));
@@ -775,134 +792,145 @@ impl WrapCache {
             if matches!(item, OutputItem::Thumbnail(_)) {
                 self.thumbnails.push(idx);
             }
-            render_item(&mut self.lines, item, width, verbose);
+            render_item(&mut self.lines, item, width, verbose, theme);
         }
+    }
+}
+
+impl OutputItem {
+    fn gap() -> Self {
+        Self::Text(String::new(), TextRole::Gap)
     }
 }
 
 /// A zero width renders every item unwrapped, one line per source line.
-fn render_item(out: &mut Vec<Line<'static>>, item: &OutputItem, width: u16, verbose: bool) {
+fn render_item(
+    out: &mut Vec<Line<'static>>,
+    item: &OutputItem,
+    width: u16,
+    verbose: bool,
+    theme: &Theme,
+) {
     if width == 0 {
-        out.push(match item {
-            OutputItem::Banner { model_name } => {
-                render_banner(out, model_name, width);
-                return;
-            }
-            OutputItem::Text(l) => l.clone(),
-            OutputItem::Prompt(text) => {
-                out.extend(unwrapped_prompt_rows(text));
-                return;
-            }
-            OutputItem::Assistant(text) => {
-                out.extend(text.lines().map(|line| Line::from(line.to_string())));
-                return;
-            }
-            OutputItem::Tool(b) => single_span_line(format!("$ {}", b.command), tool_call_style()),
-            OutputItem::Thumbnail(t) => {
-                single_span_line(format!("attached: {}", t.name), info_style())
-            }
-            OutputItem::Thinking(t) => {
-                single_span_line(thinking_header_text(t), thinking_header_style())
-            }
-            OutputItem::Compaction(c) => {
-                single_span_line(compaction_text(c), thinking_header_style())
-            }
-        });
+        render_item_unwrapped(out, item, theme);
         return;
     }
     match item {
-        OutputItem::Banner { model_name } => render_banner(out, model_name, width),
-        OutputItem::Text(line) => wrap_line_into(out, line, width),
-        OutputItem::Prompt(text) => render_prompt(out, text, width),
-        OutputItem::Assistant(text) => out.extend(render_markdown(text, usize::from(width))),
-        OutputItem::Tool(b) => render_tool_block(out, b, width, verbose),
-        OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t),
-        OutputItem::Thinking(t) => render_thinking_block(out, t, width, verbose),
+        OutputItem::Banner { model_name } => render_banner(out, model_name, width, theme),
+        OutputItem::Text(text, role) => wrap_text_into(out, text, text_style(*role, theme), width),
+        OutputItem::Prompt(text) => render_prompt(out, text, width, theme),
+        OutputItem::Assistant(text) => out.extend(render_markdown(text, usize::from(width), theme)),
+        OutputItem::Tool(b) => render_tool_block(out, b, width, verbose, theme),
+        OutputItem::Thumbnail(t) => render_thumbnail_placeholder(out, t, theme),
+        OutputItem::Thinking(t) => render_thinking_block(out, t, width, verbose, theme),
         OutputItem::Compaction(c) => {
-            push_live_header(out, &compaction_text(c), !c.timing.is_live(), width);
+            push_live_header(out, &compaction_text(c), !c.timing.is_live(), width, theme);
         }
     }
 }
 
+fn render_item_unwrapped(out: &mut Vec<Line<'static>>, item: &OutputItem, theme: &Theme) {
+    out.push(match item {
+        OutputItem::Banner { model_name } => {
+            render_banner(out, model_name, 0, theme);
+            return;
+        }
+        OutputItem::Text(text, role) => single_span_line(text.clone(), text_style(*role, theme)),
+        OutputItem::Prompt(text) => {
+            out.extend(unwrapped_prompt_rows(text, theme));
+            return;
+        }
+        OutputItem::Assistant(text) => {
+            out.extend(text.lines().map(|line| Line::from(line.to_string())));
+            return;
+        }
+        OutputItem::Tool(b) => {
+            single_span_line(format!("$ {}", b.command), tool_command_style(theme))
+        }
+        OutputItem::Thumbnail(t) => {
+            single_span_line(format!("attached: {}", t.name), info_style(theme))
+        }
+        OutputItem::Thinking(t) => {
+            single_span_line(thinking_header_text(t), thinking_header_style(theme))
+        }
+        OutputItem::Compaction(c) => {
+            single_span_line(compaction_text(c), thinking_header_style(theme))
+        }
+    });
+}
+
 /// The transcript's opening banner on its own, `width` columns wide.
-pub(super) fn banner_lines(model_name: &str, width: u16) -> Vec<Line<'static>> {
+pub(super) fn banner_lines(model_name: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    render_banner(&mut lines, model_name, width);
+    render_banner(&mut lines, model_name, width, theme);
     lines
 }
 
 /// The logo with the version and model right-aligned beside it, closed by a
 /// rule spanning `width`.
-fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16) {
+fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16, theme: &Theme) {
     let version = format!("v{}", assistd_core::version());
     let beside_logo = [None, None, None, Some(version.as_str()), Some(model_name)];
     out.push(Line::from(""));
     out.extend(LOGO.into_iter().zip(beside_logo).map(|(row, value)| {
-        let mut spans = vec![Span::styled(row, logo_style())];
+        let mut spans = vec![Span::styled(row, logo_style(theme))];
         spans.extend(value.map(|value| {
             let gap = usize::from(width)
                 .saturating_sub(display_width(row) + display_width(value))
                 .max(BANNER_GAP.len());
-            Span::styled(format!("{}{value}", " ".repeat(gap)), banner_value_style())
+            Span::styled(format!("{}{value}", " ".repeat(gap)), meta_style(theme))
         }));
         Line::from(spans)
     }));
     out.push(single_span_line(
         BANNER_RULE.repeat(usize::from(width)),
-        banner_value_style(),
+        Style::default().fg(theme.border),
     ));
     out.push(Line::from(""));
 }
 
-fn render_thumbnail_placeholder(out: &mut Vec<Line<'static>>, t: &ThumbnailItem) {
+fn render_thumbnail_placeholder(out: &mut Vec<Line<'static>>, t: &ThumbnailItem, theme: &Theme) {
     out.push(single_span_line(
         format!("attached: {}", t.name),
-        info_style(),
+        info_style(theme),
     ));
     for _ in 1..THUMBNAIL_ROWS {
         out.push(Line::from(""));
     }
 }
 
-fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: u16) {
-    let style = line.spans.first().map(|s| s.style).unwrap_or_default();
-    let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-    if content.is_empty() {
-        out.push(Line::from(""));
-        return;
-    }
-    let wrapped = textwrap::wrap(&content, width as usize);
+fn wrap_text_into(out: &mut Vec<Line<'static>>, text: &str, style: Style, width: u16) {
+    let wrapped = textwrap::wrap(text, usize::from(width));
     if wrapped.is_empty() {
         out.push(Line::from(""));
         return;
     }
-    let pad_to_width = style.bg.is_some();
-    for chunk in wrapped {
-        let row = chunk.into_owned();
-        let row = if pad_to_width {
-            padded_to(row, width)
-        } else {
-            row
-        };
-        out.push(single_span_line(row, style));
-    }
+    out.extend(
+        wrapped
+            .into_iter()
+            .map(|row| single_span_line(row.into_owned(), style)),
+    );
 }
 
-fn render_prompt(out: &mut Vec<Line<'static>>, text: &str, width: u16) {
+fn render_prompt(out: &mut Vec<Line<'static>>, text: &str, width: u16, theme: &Theme) {
     let options = textwrap::Options::new(usize::from(width))
         .initial_indent(PROMPT_PREFIX)
         .subsequent_indent(PROMPT_INDENT);
     out.extend(
         textwrap::wrap(text, options)
             .into_iter()
-            .map(|row| single_span_line(padded_to(row.into_owned(), width), user_style())),
+            .map(|row| single_span_line(padded_to(row.into_owned(), width), user_style(theme))),
     );
 }
 
-fn unwrapped_prompt_rows(text: &str) -> impl Iterator<Item = Line<'static>> + '_ {
-    text.split('\n').enumerate().map(|(i, row)| {
+fn unwrapped_prompt_rows<'a>(
+    text: &'a str,
+    theme: &Theme,
+) -> impl Iterator<Item = Line<'static>> + 'a {
+    let style = user_style(theme);
+    text.split('\n').enumerate().map(move |(i, row)| {
         let lead = if i == 0 { PROMPT_PREFIX } else { PROMPT_INDENT };
-        single_span_line(format!("{lead}{row}"), user_style())
+        single_span_line(format!("{lead}{row}"), style)
     })
 }
 
@@ -920,16 +948,23 @@ fn render_thinking_block(
     t: &ThinkingBlock,
     width: u16,
     verbose: bool,
+    theme: &Theme,
 ) {
-    push_live_header(out, &thinking_header_text(t), !t.timing.is_live(), width);
+    push_live_header(
+        out,
+        &thinking_header_text(t),
+        !t.timing.is_live(),
+        width,
+        theme,
+    );
     if (t.expanded || verbose) && !t.text.is_empty() {
-        let bar = Span::styled("▎ ", thinking_bar_style());
+        let bar = Span::styled("▎ ", thinking_header_style(theme));
         let inner_w = width.saturating_sub(2).max(1);
         for line in t.text.lines() {
             if line.is_empty() {
                 out.push(Line::from(vec![bar.clone()]));
             } else {
-                push_barred(out, &bar, line, thinking_text_style(), inner_w);
+                push_barred(out, &bar, line, thinking_text_style(theme), inner_w);
             }
         }
     }
@@ -937,16 +972,22 @@ fn render_thinking_block(
 }
 
 /// A thinking or compaction header: unbarred while live, barred once done.
-fn push_live_header(out: &mut Vec<Line<'static>>, text: &str, done: bool, width: u16) {
+fn push_live_header(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    done: bool,
+    width: u16,
+    theme: &Theme,
+) {
     let (bar, bar_w) = if done {
         (
-            Span::styled("▎ ", thinking_bar_style()),
+            Span::styled("▎ ", thinking_header_style(theme)),
             width.saturating_sub(2).max(1),
         )
     } else {
         (Span::raw(""), width.max(1))
     };
-    push_barred(out, &bar, text, thinking_header_style(), bar_w);
+    push_barred(out, &bar, text, thinking_header_style(theme), bar_w);
 }
 
 fn thinking_header_text(t: &ThinkingBlock) -> String {
@@ -987,7 +1028,13 @@ fn thinking_glyph(frame: u64) -> char {
     char::from_u32(BRAILLE_BLANK + u32::try_from(dots).unwrap_or(1)).unwrap_or('⣿')
 }
 
-fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, verbose: bool) {
+fn render_tool_block(
+    out: &mut Vec<Line<'static>>,
+    b: &ToolBlock,
+    width: u16,
+    verbose: bool,
+    theme: &Theme,
+) {
     if let Some(run) = &b.relay {
         let running = matches!(b.state, ToolState::Running { .. });
         render_relay_block(
@@ -996,36 +1043,42 @@ fn render_tool_block(out: &mut Vec<Line<'static>>, b: &ToolBlock, width: u16, ve
             &b.state,
             !verbose && (running || !b.expanded),
             width,
+            theme,
         );
         return;
     }
     let inner_w = width.saturating_sub(2).max(1);
     match &b.state {
         ToolState::Running { started_at } => {
-            let bar = tool_bar(Color::Gray);
-            push_tool_header(out, &bar, &b.command, inner_w);
+            let bar = tool_bar(theme.status_text);
+            push_tool_header(out, &bar, &b.command, inner_w, theme);
             let status = format!("running… ({}s)", started_at.elapsed().as_secs());
-            push_barred(out, &bar, &status, tool_running_style(), inner_w);
+            push_barred(out, &bar, &status, tool_running_style(theme), inner_w);
         }
         ToolState::Finished {
             output,
             exit_code,
             duration_ms,
         } => {
-            let bar_color = if *exit_code == 0 {
-                Color::Green
-            } else {
-                Color::Red
-            };
+            let bar_color = exit_color(*exit_code, theme);
             let bar = tool_bar(bar_color);
-            push_tool_header(out, &bar, &b.command, inner_w);
+            push_tool_header(out, &bar, &b.command, inner_w, theme);
             let collapsible = !verbose && !b.expanded;
-            push_tool_body(out, &bar, output, collapsible, inner_w);
+            push_tool_body(out, &bar, output, collapsible, inner_w, theme);
             let footer = format!("[exit:{exit_code} | {duration_ms}ms]");
             push_tool_footer(out, &bar, footer, bar_color, inner_w);
         }
     }
     out.push(Line::from(""));
+}
+
+/// The color of a finished tool call's bar and footer.
+fn exit_color(exit_code: i32, theme: &Theme) -> Color {
+    if exit_code == 0 {
+        theme.success
+    } else {
+        theme.error
+    }
 }
 
 fn tool_bar(color: Color) -> Span<'static> {
@@ -1040,8 +1093,15 @@ fn push_tool_header(
     bar: &Span<'static>,
     command: &str,
     inner_w: u16,
+    theme: &Theme,
 ) {
-    push_barred(out, bar, &format!("$ {command}"), header_style(), inner_w);
+    push_barred(
+        out,
+        bar,
+        &format!("$ {command}"),
+        tool_command_style(theme),
+        inner_w,
+    );
 }
 
 fn push_tool_body(
@@ -1050,6 +1110,7 @@ fn push_tool_body(
     output: &str,
     collapsible: bool,
     inner_w: u16,
+    theme: &Theme,
 ) {
     let body_lines = split_body(output);
     let collapsed = collapsible && body_lines.len() > COLLAPSE_THRESHOLD;
@@ -1058,9 +1119,9 @@ fn push_tool_body(
     for i in &visible_idxs {
         let line = &body_lines[*i];
         let style = if line.starts_with("[stderr] ") {
-            stderr_style()
+            stderr_style(theme)
         } else {
-            tool_result_style()
+            tool_result_style(theme)
         };
         push_barred(out, bar, line, style, inner_w);
     }
@@ -1072,7 +1133,7 @@ fn push_tool_body(
                 bar,
                 &format!("… ({hidden} more lines, Tab to expand)"),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme.status_text)
                     .add_modifier(Modifier::ITALIC),
                 inner_w,
             );
@@ -1200,70 +1261,67 @@ fn single_span_line(text: String, style: Style) -> Line<'static> {
     Line::from(Span::styled(text, style))
 }
 
-fn logo_style() -> Style {
-    Style::default().fg(BLEY).add_modifier(Modifier::BOLD)
+fn text_style(role: TextRole, theme: &Theme) -> Style {
+    match role {
+        TextRole::Gap => Style::default(),
+        TextRole::Info => info_style(theme),
+        TextRole::Summary => Style::default().fg(theme.status_text),
+        TextRole::Error => Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD),
+    }
 }
 
-fn banner_value_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn user_style() -> Style {
-    Style::default().bg(Color::DarkGray)
-}
-
-fn error_style() -> Style {
-    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-}
-
-fn info_style() -> Style {
-    Style::default().fg(BLEY).add_modifier(Modifier::DIM)
-}
-
-fn summary_style() -> Style {
-    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
-}
-
-fn tool_call_style() -> Style {
-    Style::default().fg(BLEY).add_modifier(Modifier::BOLD)
-}
-
-fn tool_result_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn tool_running_style() -> Style {
+fn logo_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::Gray)
-        .add_modifier(Modifier::ITALIC)
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD)
 }
 
-fn header_style() -> Style {
-    Style::default().fg(BLEY).add_modifier(Modifier::BOLD)
+fn meta_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.status_text)
 }
 
-fn thinking_bar_style() -> Style {
+fn user_style(theme: &Theme) -> Style {
+    Style::default().bg(theme.user_message)
+}
+
+fn info_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::Gray)
+        .fg(theme.accent)
         .add_modifier(Modifier::DIM)
-        .add_modifier(Modifier::ITALIC)
 }
 
-fn thinking_header_style() -> Style {
+fn tool_command_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::Gray)
-        .add_modifier(Modifier::DIM)
-        .add_modifier(Modifier::ITALIC)
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD)
 }
 
-fn thinking_text_style() -> Style {
+fn tool_result_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.code)
+}
+
+fn tool_running_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::DarkGray)
+        .fg(theme.status_text)
         .add_modifier(Modifier::ITALIC)
 }
 
-fn stderr_style() -> Style {
-    Style::default().fg(Color::Red)
+fn thinking_header_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.status_text)
+        .add_modifier(Modifier::ITALIC)
+}
+
+fn thinking_text_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.status_text)
+        .add_modifier(Modifier::ITALIC)
+}
+
+fn stderr_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.error)
 }
 
 #[cfg(test)]

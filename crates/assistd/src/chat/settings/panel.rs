@@ -3,13 +3,19 @@
 
 use std::ops::ControlFlow;
 
-use assistd_config::{ConfigDocument, ConfigError};
+use assistd_config::theme::is_theme_name;
+use assistd_config::{ConfigDocument, ConfigError, ThemeColor, ThemeConfig};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::super::theme::Theme;
 use super::super::ui::{locate_cursor, wrap_input};
 use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
+use super::color_picker::{ColorPicker, PickerAction};
 use super::list_editor::{ListAction, ListEditor};
+use super::theme_list::{ThemeList, ThemeListAction};
 
+const THEME_KEY: &str = "chat.theme";
+pub(crate) const SAVED_THEMES_KEY: &str = "chat.themes";
 /// Rows PgUp/PgDn move the selection.
 const PAGE_ROWS: usize = 10;
 const SAVED_NOTE: &str = "saved; restart the daemon to apply (systemctl --user restart assistd)";
@@ -40,6 +46,17 @@ pub(crate) enum PanelMode {
     Edit(TextEditor),
     /// Editing a list setting's entries.
     List(ListEditor),
+    /// Picking a theme color, with the theme as it would look once applied.
+    Color {
+        picker: ColorPicker,
+        preview: Box<Theme>,
+    },
+    /// Choosing a theme to load, save or delete, with the highlighted one
+    /// previewed.
+    Themes {
+        list: ThemeList,
+        preview: Box<Theme>,
+    },
     /// Closing with unsaved changes; waits for save, discard or cancel.
     ConfirmClose,
 }
@@ -82,6 +99,15 @@ impl SettingsPanel {
 
     pub(crate) fn document(&self) -> &ConfigDocument {
         &self.document
+    }
+
+    /// The theme the document describes, unsaved changes included, or the
+    /// color picker's preview while it is open.
+    pub(crate) fn theme(&self) -> Theme {
+        match &self.mode {
+            PanelMode::Color { preview, .. } | PanelMode::Themes { preview, .. } => **preview,
+            _ => Theme::new(&self.document.config().chat.theme),
+        }
     }
 
     pub(crate) fn tab(&self) -> Tab {
@@ -181,6 +207,14 @@ impl SettingsPanel {
                 self.on_list_key(ev);
                 ControlFlow::Continue(())
             }
+            PanelMode::Color { .. } => {
+                self.on_color_key(ev);
+                ControlFlow::Continue(())
+            }
+            PanelMode::Themes { .. } => {
+                self.on_themes_key(ev);
+                ControlFlow::Continue(())
+            }
             PanelMode::ConfirmClose => self.on_confirm_close_key(ev),
         }
     }
@@ -231,6 +265,142 @@ impl SettingsPanel {
                 self.apply_text(&text);
             }
         }
+    }
+
+    fn on_color_key(&mut self, ev: KeyEvent) {
+        let Some(setting) = self.selected_setting() else {
+            return;
+        };
+        let PanelMode::Color { picker, .. } = &mut self.mode else {
+            return;
+        };
+        match picker.on_key(ev) {
+            PickerAction::Pending => {}
+            PickerAction::Changed => {
+                let candidate = picker.candidate();
+                let preview = self.preview_theme(setting, candidate);
+                if let PanelMode::Color { preview: shown, .. } = &mut self.mode {
+                    **shown = preview;
+                }
+            }
+            PickerAction::Cancel => {
+                self.mode = PanelMode::Browse;
+                self.feedback = None;
+            }
+            PickerAction::Apply(color) => {
+                self.apply(setting, &toml::Value::from(color.to_string()));
+            }
+        }
+    }
+
+    fn on_themes_key(&mut self, ev: KeyEvent) {
+        let PanelMode::Themes { list, preview } = &mut self.mode else {
+            return;
+        };
+        match list.on_key(ev) {
+            ThemeListAction::Pending => {}
+            ThemeListAction::Changed => {
+                let highlighted = list.highlighted().map(|entry| entry.theme);
+                **preview = Theme::new(&highlighted.unwrap_or(self.document.config().chat.theme));
+            }
+            ThemeListAction::Close => {
+                self.mode = PanelMode::Browse;
+                self.feedback = None;
+            }
+            ThemeListAction::Load { name, theme } => {
+                self.feedback = Some(match self.change(|document| load_theme(document, &theme)) {
+                    Ok(()) => {
+                        self.mode = PanelMode::Browse;
+                        Feedback::Note(format!("loaded the {name} theme"))
+                    }
+                    Err(reason) => Feedback::Error(reason),
+                });
+            }
+            ThemeListAction::Save(name) => self.save_theme(&name),
+            ThemeListAction::Delete(name) => {
+                let key = format!("{SAVED_THEMES_KEY}.{name}");
+                self.change_themes(|document| document.reset(&key), &name, "deleted");
+            }
+        }
+    }
+
+    /// Saves the current colors as theme `name`, refusing a name that is
+    /// malformed or a built-in theme's.
+    fn save_theme(&mut self, name: &str) {
+        if !is_theme_name(name) {
+            self.feedback = Some(Feedback::Error(
+                "a theme name is ASCII letters, digits, _ and -".into(),
+            ));
+        } else if ThemeConfig::built_in(name).is_some() {
+            self.feedback = Some(Feedback::Error(format!("{name} is a built-in theme")));
+        } else {
+            let theme = self.document.config().chat.theme;
+            self.change_themes(
+                |document| store_theme(document, name, &theme),
+                name,
+                "saved",
+            );
+        }
+    }
+
+    /// Makes `edit` to the saved themes and reopens the list on `name`.
+    fn change_themes(
+        &mut self,
+        edit: impl FnOnce(&mut ConfigDocument) -> Result<(), ConfigError>,
+        name: &str,
+        verb: &str,
+    ) {
+        self.feedback = Some(match self.change(edit) {
+            Ok(()) => {
+                self.mode = self.theme_list_mode(Some(name));
+                Feedback::Note(format!("{verb} the {name} theme; Ctrl+S writes it"))
+            }
+            Err(reason) => Feedback::Error(reason),
+        });
+    }
+
+    fn theme_list_mode(&self, select: Option<&str>) -> PanelMode {
+        let chat = &self.document.config().chat;
+        let list = ThemeList::new(&chat.themes, select);
+        let shown = list.highlighted().map_or(chat.theme, |entry| entry.theme);
+        PanelMode::Themes {
+            list,
+            preview: Box::new(Theme::new(&shown)),
+        }
+    }
+
+    /// The name of the built-in or saved theme the current colors match, or
+    /// `custom` when none does.
+    pub(crate) fn active_theme_name(&self) -> String {
+        let chat = &self.document.config().chat;
+        ThemeConfig::BUILT_IN
+            .iter()
+            .map(|(name, theme)| (*name, theme))
+            .chain(
+                chat.themes
+                    .iter()
+                    .map(|(name, theme)| (name.as_str(), theme)),
+            )
+            .find(|(_, theme)| **theme == chat.theme)
+            .map_or_else(|| "custom".to_string(), |(name, _)| name.to_string())
+    }
+
+    /// The theme with `setting` set to `color`; the current one when the
+    /// document refuses it.
+    fn preview_theme(&self, setting: &Setting, color: ThemeColor) -> Theme {
+        let mut candidate = self.document.clone();
+        match candidate.set(setting.key, &toml::Value::from(color.to_string())) {
+            Ok(()) => Theme::new(&candidate.config().chat.theme),
+            Err(_) => Theme::new(&self.document.config().chat.theme),
+        }
+    }
+
+    /// The color in effect for `setting`; `default` when it cannot be read.
+    pub(crate) fn current_color(&self, setting: &Setting) -> ThemeColor {
+        self.current_value(setting.key)
+            .and_then(toml::Value::as_str)
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(ThemeColor::Default)
     }
 
     fn on_list_key(&mut self, ev: KeyEvent) {
@@ -395,6 +565,18 @@ impl SettingsPanel {
                 self.mode = PanelMode::List(ListEditor::new(item));
                 self.feedback = None;
             }
+            SettingKind::Themes => {
+                let active = self.active_theme_name();
+                self.mode = self.theme_list_mode(Some(&active));
+                self.feedback = None;
+            }
+            SettingKind::Color => {
+                self.mode = PanelMode::Color {
+                    picker: ColorPicker::new(self.current_color(setting)),
+                    preview: Box::new(self.theme()),
+                };
+                self.feedback = None;
+            }
             SettingKind::Integer
             | SettingKind::Decimal
             | SettingKind::Text
@@ -414,7 +596,8 @@ impl SettingsPanel {
         }
     }
 
-    /// Flips a toggle, or moves a choice to its next or previous option.
+    /// Flips a toggle, or moves a choice or color to its next or previous
+    /// option; an RGB color moves to the first named one.
     fn cycle_selected(&mut self, forward: bool) {
         let Some(setting) = self.selected_setting() else {
             return;
@@ -432,6 +615,9 @@ impl SettingsPanel {
                 let offset = if forward { 1 } else { options.len() - 1 };
                 toml::Value::from(options[(index + offset) % options.len()])
             }
+            SettingKind::Color => toml::Value::from(
+                next_named_color(self.current_color(setting), forward).to_string(),
+            ),
             _ => return,
         };
         self.apply(setting, &next);
@@ -505,6 +691,13 @@ impl SettingsPanel {
             Err(e) => Feedback::Error(format!("not saved: {e}")),
         });
         outcome.is_ok()
+    }
+
+    /// Records the open color picker's width, so ↑/↓ move by the rows on screen.
+    pub(crate) fn set_color_picker_width(&mut self, width: u16) {
+        if let PanelMode::Color { picker, .. } = &mut self.mode {
+            picker.set_width(width);
+        }
     }
 
     /// Records the columns the open text box wraps at, so ↑/↓ move by
@@ -649,6 +842,42 @@ impl TextEditor {
     }
 }
 
+/// Sets every `chat.theme` color to `theme`'s, leaving out those that match
+/// the default so the file stays short.
+fn load_theme(document: &mut ConfigDocument, theme: &ThemeConfig) -> Result<(), ConfigError> {
+    for (field, value) in toml::Table::try_from(theme)? {
+        let key = format!("{THEME_KEY}.{field}");
+        if document.default_value(&key) == Some(&value) {
+            document.reset(&key)?;
+        } else {
+            document.set(&key, &value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes `theme`'s colors as the saved theme `name`, one key each.
+fn store_theme(
+    document: &mut ConfigDocument,
+    name: &str,
+    theme: &ThemeConfig,
+) -> Result<(), ConfigError> {
+    for (field, value) in toml::Table::try_from(theme)? {
+        document.set(&format!("{SAVED_THEMES_KEY}.{name}.{field}"), &value)?;
+    }
+    Ok(())
+}
+
+/// The named color after or before `color`, wrapping; the first for an RGB color.
+fn next_named_color(color: ThemeColor, forward: bool) -> ThemeColor {
+    let named: Vec<ThemeColor> = ThemeColor::named().collect();
+    let next = named.iter().position(|c| *c == color).map_or(0, |index| {
+        let offset = if forward { 1 } else { named.len() - 1 };
+        (index + offset) % named.len()
+    });
+    named[next]
+}
+
 /// Why `document`'s config would not validate; empty when it would.
 fn validation_issues(document: &ConfigDocument) -> Vec<String> {
     match document.config().validate() {
@@ -695,6 +924,11 @@ fn parse_input(kind: SettingKind, text: &str) -> Result<toml::Value, String> {
         | SettingKind::Text
         | SettingKind::Prose
         | SettingKind::List(_)
-        | SettingKind::External => Ok(toml::Value::String(text.to_string())),
+        | SettingKind::External
+        | SettingKind::Color
+        | SettingKind::Themes => Ok(toml::Value::String(text.to_string())),
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -89,10 +89,14 @@ impl App {
         }
     }
 
+    /// Closing the panel keeps its theme only when nothing is left unsaved.
     fn on_settings_key(&mut self, ev: KeyEvent) {
         if let Some(panel) = self.settings_panel.as_mut()
             && panel.on_key(ev).is_break()
         {
+            if !panel.document().is_modified() {
+                self.theme = panel.theme();
+            }
             self.settings_panel = None;
         }
     }

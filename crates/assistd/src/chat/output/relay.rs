@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use textwrap::core::display_width;
 
@@ -12,10 +12,10 @@ use assistd_ipc::{
 };
 
 use super::{
-    OutputPane, ToolState, elapsed_text, split_body, tool_block_label, tool_outcome, tool_output,
-    tool_result_style,
+    OutputPane, ToolState, elapsed_text, exit_color, split_body, tool_block_label, tool_outcome,
+    tool_output, tool_result_style,
 };
-use crate::chat::markdown::BLEY;
+use crate::chat::theme::Theme;
 use crate::chat::ui::compact_count;
 use crate::client::terminal_text::{escape_controls, escape_controls_single_line};
 
@@ -356,18 +356,18 @@ impl RelayStepTrace {
     }
 
     /// The style its label and status are drawn in.
-    pub(in crate::chat) fn style(&self) -> Style {
+    pub(in crate::chat) fn style(&self, theme: &Theme) -> Style {
         match &self.state {
-            StepState::Pending => pending_style(),
-            StepState::Running { .. } => Style::default().fg(Color::DarkGray),
+            StepState::Pending => pending_style(theme),
+            StepState::Running { .. } => Style::default().fg(theme.status_text),
             StepState::Finished {
                 outcome: RelayStepEnd::Answered { .. },
                 ..
-            } => Style::default().fg(Color::Green),
+            } => Style::default().fg(theme.success),
             StepState::Finished {
                 outcome: RelayStepEnd::Failed { .. },
                 ..
-            } => failed_style(),
+            } => failed_style(theme),
         }
     }
 
@@ -396,16 +396,19 @@ impl RelayStepTrace {
 
     /// Its calls, cut to the latest few while running unless `all`, then
     /// how it failed or that its report was cut.
-    fn detail_rows(&self, all: bool) -> Vec<(String, Style)> {
+    fn detail_rows(&self, all: bool, theme: &Theme) -> Vec<(String, Style)> {
         let shown = match (&self.state, all) {
             (_, true) => self.calls.len(),
             (StepState::Running { .. }, false) => TAIL_CALLS.min(self.calls.len()),
             _ => 0,
         };
         let hidden = self.calls.len().saturating_sub(shown);
-        let mut rows: Vec<(String, Style)> = self.calls[hidden..].iter().map(entry_row).collect();
+        let mut rows: Vec<(String, Style)> = self.calls[hidden..]
+            .iter()
+            .map(|entry| entry_row(entry, theme))
+            .collect();
         if hidden > 0 && shown > 0 {
-            rows.push((format!("+{hidden} more tool uses"), hint_style()));
+            rows.push((format!("+{hidden} more tool uses"), hint_style(theme)));
         }
         match &self.state {
             StepState::Finished {
@@ -413,12 +416,12 @@ impl RelayStepTrace {
                 ..
             } => rows.push((
                 format!("✗ {}", escape_controls_single_line(message)),
-                failed_style(),
+                failed_style(theme),
             )),
             StepState::Finished {
                 outcome: RelayStepEnd::Answered { truncated: true },
                 ..
-            } if all => rows.push(("report cut to fit".into(), hint_style())),
+            } if all => rows.push(("report cut to fit".into(), hint_style(theme))),
             _ => {}
         }
         rows
@@ -465,19 +468,16 @@ pub(super) fn render_relay_block(
     tool: &ToolState,
     collapsed: bool,
     width: u16,
+    theme: &Theme,
 ) {
     let (bullet, elapsed, report) = match tool {
-        ToolState::Running { started_at } => (Color::Gray, started_at.elapsed(), None),
+        ToolState::Running { started_at } => (theme.status_text, started_at.elapsed(), None),
         ToolState::Finished {
             output,
             exit_code,
             duration_ms,
         } => (
-            if *exit_code == 0 {
-                Color::Green
-            } else {
-                Color::Red
-            },
+            exit_color(*exit_code, theme),
             Duration::from_millis(*duration_ms),
             Some(output.as_str()),
         ),
@@ -489,49 +489,61 @@ pub(super) fn render_relay_block(
     let bullet_style = Style::default().fg(bullet).add_modifier(Modifier::BOLD);
     match run.steps.as_slice() {
         [only] => {
-            let lead = format!("relay · {} · ", only.agent);
+            let lead = format!("{} · ", only.agent);
             let header = fitted_row(&lead, &only.task, "", block_cols(width, HEADER_BULLET));
             push_gutter_row(
                 out,
                 header_gutter,
                 bullet_style,
                 &header,
-                header_style(),
+                header_style(theme),
                 width,
             );
-            push_rows(out, &only.detail_rows(!collapsed), result_gutter(), width);
+            push_rows(
+                out,
+                &only.detail_rows(!collapsed, theme),
+                result_gutter(),
+                width,
+                theme,
+            );
         }
         steps => {
-            let header = format!("relay · plan of {} steps", steps.len());
+            let header = format!("plan of {} steps", steps.len());
             push_gutter_row(
                 out,
                 header_gutter,
                 bullet_style,
                 &header,
-                header_style(),
+                header_style(theme),
                 width,
             );
-            push_plan_steps(out, steps, !collapsed, width);
+            push_plan_steps(out, steps, !collapsed, width, theme);
         }
     }
-    let summary = run_summary(run, report.is_some(), elapsed, collapsed);
-    push_rows(out, &[summary], result_gutter(), width);
+    let summary = run_summary(run, report.is_some(), elapsed, collapsed, theme);
+    push_rows(out, &[summary], result_gutter(), width, theme);
     if let Some(report) = report.filter(|_| !collapsed) {
         let rows: Vec<(String, Style)> = split_body(report)
             .into_iter()
-            .map(|line| (line, tool_result_style()))
+            .map(|line| (line, tool_result_style(theme)))
             .collect();
         let indent = Gutter {
             first: RESULT_REST,
             rest: RESULT_REST,
         };
-        push_rows(out, &rows, indent, width);
+        push_rows(out, &rows, indent, width, theme);
     }
     out.push(Line::from(""));
 }
 
 /// Each step on a branch of a tree, with its detail rows beneath it.
-fn push_plan_steps(out: &mut Vec<Line<'static>>, steps: &[RelayStepTrace], all: bool, width: u16) {
+fn push_plan_steps(
+    out: &mut Vec<Line<'static>>,
+    steps: &[RelayStepTrace],
+    all: bool,
+    width: u16,
+    theme: &Theme,
+) {
     for (index, step) in steps.iter().enumerate() {
         let last = index + 1 == steps.len();
         let (branch, stem) = if last {
@@ -550,14 +562,21 @@ fn push_plan_steps(out: &mut Vec<Line<'static>>, steps: &[RelayStepTrace], all: 
             first: branch,
             rest: stem,
         };
-        push_gutter_row(out, gutter, tree_style(), &row, step.style(), width);
+        push_gutter_row(
+            out,
+            gutter,
+            tree_style(theme),
+            &row,
+            step.style(theme),
+            width,
+        );
         let detail_first = format!("{stem}⎿ ");
         let detail_rest = format!("{stem}  ");
         let detail = Gutter {
             first: &detail_first,
             rest: &detail_rest,
         };
-        push_rows(out, &step.detail_rows(all), detail, width);
+        push_rows(out, &step.detail_rows(all, theme), detail, width, theme);
     }
 }
 
@@ -568,13 +587,14 @@ fn run_summary(
     finished: bool,
     elapsed: Duration,
     collapsed: bool,
+    theme: &Theme,
 ) -> (String, Style) {
     let stats = stats(run.tool_uses(), run.tokens(), elapsed);
     let hint = if collapsed { " (Tab to expand)" } else { "" };
     match (finished, run.failure()) {
-        (false, _) => (format!("Running… ({stats})"), running_style()),
-        (true, None) => (format!("Done ({stats}){hint}"), done_style()),
-        (true, Some(_)) => (format!("Failed ({stats}){hint}"), failed_style()),
+        (false, _) => (format!("Running… ({stats})"), running_style(theme)),
+        (true, None) => (format!("Done ({stats}){hint}"), done_style(theme)),
+        (true, Some(_)) => (format!("Failed ({stats}){hint}"), failed_style(theme)),
     }
 }
 
@@ -600,6 +620,7 @@ fn push_rows(
     rows: &[(String, Style)],
     gutter: Gutter<'_>,
     width: u16,
+    theme: &Theme,
 ) {
     for (index, (text, style)) in rows.iter().enumerate() {
         let row_gutter = if index == 0 {
@@ -610,7 +631,7 @@ fn push_rows(
                 rest: gutter.rest,
             }
         };
-        push_gutter_row(out, row_gutter, tree_style(), text, *style, width);
+        push_gutter_row(out, row_gutter, tree_style(theme), text, *style, width);
     }
 }
 
@@ -654,17 +675,20 @@ fn result_gutter() -> Gutter<'static> {
     }
 }
 
-fn entry_row(entry: &RelayEntry) -> (String, Style) {
+fn entry_row(entry: &RelayEntry, theme: &Theme) -> (String, Style) {
     match entry {
         RelayEntry::Call {
             command,
             result: None,
-        } => (format!("$ {command} …"), running_style()),
+        } => (format!("$ {command} …"), running_style(theme)),
         RelayEntry::Call {
             command,
             result: Some((exit_code, _)),
-        } if *exit_code != 0 => (format!("$ {command}  [exit:{exit_code}]"), failed_style()),
-        RelayEntry::Call { command, .. } => (format!("$ {command}"), tool_result_style()),
+        } if *exit_code != 0 => (
+            format!("$ {command}  [exit:{exit_code}]"),
+            failed_style(theme),
+        ),
+        RelayEntry::Call { command, .. } => (format!("$ {command}"), tool_result_style(theme)),
         RelayEntry::Compaction {
             started_at,
             took: None,
@@ -673,13 +697,13 @@ fn entry_row(entry: &RelayEntry) -> (String, Style) {
                 "compacting history… ({})",
                 elapsed_text(started_at.elapsed())
             ),
-            running_style(),
+            running_style(theme),
         ),
         RelayEntry::Compaction {
             took: Some(took), ..
         } => (
             format!("compacted history in {}", elapsed_text(*took)),
-            hint_style(),
+            hint_style(theme),
         ),
     }
 }
@@ -727,36 +751,38 @@ fn preview(task: &str) -> String {
     }
 }
 
-fn header_style() -> Style {
-    Style::default().fg(BLEY).add_modifier(Modifier::BOLD)
-}
-
-fn tree_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn running_style() -> Style {
+fn header_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::DarkGray)
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn tree_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.border)
+}
+
+fn running_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.status_text)
         .add_modifier(Modifier::ITALIC)
 }
 
-fn done_style() -> Style {
-    Style::default().fg(Color::Gray)
+fn done_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.status_text)
 }
 
-fn failed_style() -> Style {
-    Style::default().fg(Color::Red)
+fn failed_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.error)
 }
 
-fn pending_style() -> Style {
+fn pending_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::DarkGray)
+        .fg(theme.status_text)
         .add_modifier(Modifier::DIM)
 }
 
-fn hint_style() -> Style {
+fn hint_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::DarkGray)
+        .fg(theme.status_text)
         .add_modifier(Modifier::ITALIC)
 }

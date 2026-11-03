@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use assistd_config::{ThemeColor, ThemeConfig};
 use ratatui_image::picker::Picker;
 
 use super::*;
@@ -11,7 +12,7 @@ fn line_text(line: &Line<'static>) -> String {
 fn item_text(it: &OutputItem) -> String {
     match it {
         OutputItem::Banner { model_name } => format!("[banner:{model_name}]"),
-        OutputItem::Text(l) => line_text(l),
+        OutputItem::Text(text, _) => text.clone(),
         OutputItem::Prompt(text) => format!("> {text}"),
         OutputItem::Assistant(text) => text.clone(),
         OutputItem::Tool(b) => format!("[tool:{}]", b.command),
@@ -33,7 +34,7 @@ fn item_texts(p: &OutputPane) -> Vec<String> {
 }
 
 fn rendered_lines(p: &mut OutputPane, w: u16, h: u16) -> Vec<String> {
-    let (lines, _) = p.render_view(w, h);
+    let (lines, _) = p.render_view(w, h, &Theme::default());
     lines.iter().map(line_text).collect()
 }
 
@@ -174,9 +175,9 @@ fn thumbnail_protocol() -> StatefulProtocol {
 }
 
 fn assert_matches_full_rewrap(p: &mut OutputPane, width: u16) {
-    p.sync_wrap(width);
+    p.sync_wrap(width, &Theme::default());
     let mut full = WrapCache::default();
-    full.sync(&p.items, width, p.verbose);
+    full.sync(&p.items, width, p.verbose, &Theme::default());
     let incremental: Vec<String> = p.wrap.lines.iter().map(line_text).collect();
     let expected: Vec<String> = full.lines.iter().map(line_text).collect();
     assert_eq!(incremental, expected, "width {width}");
@@ -240,11 +241,11 @@ fn streaming_delta_rewraps_only_the_open_reply() {
     let mut p = OutputPane::new();
     push_seq_30(&mut p);
     p.append_assistant("hello");
-    p.sync_wrap(40);
+    p.sync_wrap(40, &Theme::default());
     let before_tail = p.wrap.starts[1];
     p.append_assistant(" world");
     assert_eq!(p.wrap.stale, [1]);
-    p.sync_wrap(40);
+    p.sync_wrap(40, &Theme::default());
     assert_eq!(p.wrap.starts, [0, before_tail]);
     assert_eq!(line_text(&p.wrap.lines[before_tail]), "hello world");
 }
@@ -258,7 +259,7 @@ fn scrolling_addresses_lines_past_u16_max() {
     }
     let rows = 2 * total;
     let first_visible = |p: &mut OutputPane| {
-        let (lines, start) = p.render_view(80, 10);
+        let (lines, start) = p.render_view(80, 10, &Theme::default());
         (start, line_text(&lines[0]), lines.len())
     };
     assert_eq!(
@@ -287,8 +288,8 @@ fn thumbnail_slots_line_up_with_rendered_rows_at_narrow_widths() {
     p.push_info("below");
     p.push_thumbnail("dog.png".into(), thumbnail_protocol());
     for width in [12, 20, 80] {
-        let slots = p.thumbnail_layout(width);
-        let (lines, top) = p.render_view(width, u16::MAX);
+        let slots = p.thumbnail_layout(width, &Theme::default());
+        let (lines, top) = p.render_view(width, u16::MAX, &Theme::default());
         assert_eq!(top, 0);
         let rendered: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(slots.len(), 2, "width {width}");
@@ -340,4 +341,28 @@ fn abandoned_tool_block_ends_as_a_failure() {
     let lines = rendered_lines(&mut p, 40, 10);
     assert_eq!(lines[1], "▎ [stderr] no result received");
     assert_eq!(lines[2], footer(38, "[exit:-1 | 0ms]"));
+}
+
+#[test]
+fn a_new_theme_restyles_rows_already_wrapped() {
+    let mut p = OutputPane::new();
+    p.push_error("boom");
+    let error_color = |p: &mut OutputPane, theme: &Theme| {
+        let (lines, _) = p.render_view(80, 10, theme);
+        lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content == "!! boom")
+            .and_then(|span| span.style.fg)
+    };
+    let default = Theme::default();
+    assert_eq!(error_color(&mut p, &default), Some(default.error));
+    let config = ThemeConfig {
+        error: ThemeColor::Magenta,
+        ..ThemeConfig::default()
+    };
+    assert_eq!(
+        error_color(&mut p, &Theme::new(&config)),
+        Some(Color::Magenta)
+    );
 }

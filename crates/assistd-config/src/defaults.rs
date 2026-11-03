@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 
+use crate::theme::{ThemeColor, ThemeConfig};
 use crate::voice::UnitInterval;
 
 /// Builds a `NonZero` from a literal; a zero fails at compile time.
@@ -142,6 +143,21 @@ pub const DEFAULT_TRAY_ICON_DISCONNECTED: &str = "network-offline";
 pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 pub const DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
 pub const DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
+
+/// The `assistd` built-in theme.
+pub const DEFAULT_THEME: ThemeConfig = ThemeConfig {
+    accent: ThemeColor::BLEY,
+    user_message: ThemeColor::DarkGray,
+    assistant_text: ThemeColor::Default,
+    status_text: ThemeColor::DarkGray,
+    code: ThemeColor::DarkGray,
+    border: ThemeColor::DarkGray,
+    success: ThemeColor::Green,
+    error: ThemeColor::Red,
+    warning: ThemeColor::Yellow,
+    link: ThemeColor::Blue,
+    selection: ThemeColor::Default,
+};
 
 /// `$XDG_RUNTIME_DIR/assistd/output`, or `$XDG_CACHE_HOME/assistd/output`, or
 /// `$HOME/.cache/assistd/output`.

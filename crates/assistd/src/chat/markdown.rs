@@ -2,9 +2,11 @@
 //! tables) into styled terminal lines wrapped to a viewport width.
 
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use textwrap::core::display_width;
+
+use super::theme::Theme;
 
 const BULLET: &str = "• ";
 const QUOTE_BAR: &str = "▎ ";
@@ -12,8 +14,6 @@ const COLUMN_SEPARATOR: &str = " │ ";
 const COLUMN_RULE_JOINT: &str = "─┼─";
 /// Narrowest a table column shrinks to before the table overflows.
 const MIN_COLUMN_WIDTH: usize = 3;
-/// Blue-gray accent shared by markdown and secondary status text.
-pub(super) const BLEY: Color = Color::Rgb(94, 116, 156);
 
 /// Leading columns every physical line inside a block carries: a list
 /// marker or quote bar on the first line, matching padding afterwards.
@@ -74,34 +74,35 @@ impl TableBuilder {
         }
     }
 
-    fn render(self, width: usize) -> Vec<Vec<Span<'static>>> {
+    /// The header, then each body row, with a rule under the header and
+    /// between body rows.
+    fn render(self, width: usize, theme: &Theme) -> Vec<Vec<Span<'static>>> {
         let columns = self.alignments.len().max(1);
         let natural = self.natural_widths(columns);
         let separators = display_width(COLUMN_SEPARATOR) * (columns - 1);
         let widths = fit_column_widths(&natural, width.saturating_sub(separators));
+        let rule = vec![Span::styled(
+            widths
+                .iter()
+                .map(|&w| "─".repeat(w))
+                .collect::<Vec<_>>()
+                .join(COLUMN_RULE_JOINT),
+            rule_style(theme),
+        )];
+        let header = (!self.header.is_empty())
+            .then_some((&self.header, Style::default().add_modifier(Modifier::BOLD)));
+        let body = self.rows.iter().map(|row| (row, Style::default()));
         let mut out = Vec::new();
-        if !self.header.is_empty() {
-            out.extend(render_table_row(
-                &self.header,
-                &widths,
-                &self.alignments,
-                strong_style(),
-            ));
-            out.push(vec![Span::styled(
-                widths
-                    .iter()
-                    .map(|&w| "─".repeat(w))
-                    .collect::<Vec<_>>()
-                    .join(COLUMN_RULE_JOINT),
-                rule_style(),
-            )]);
-        }
-        for row in &self.rows {
+        for (index, (row, cell_style)) in header.into_iter().chain(body).enumerate() {
+            if index > 0 {
+                out.push(rule.clone());
+            }
             out.extend(render_table_row(
                 row,
                 &widths,
                 &self.alignments,
-                Style::default(),
+                cell_style,
+                theme,
             ));
         }
         out
@@ -118,7 +119,8 @@ impl TableBuilder {
     }
 }
 
-struct Renderer {
+struct Renderer<'a> {
+    theme: &'a Theme,
     width: usize,
     lines: Vec<Line<'static>>,
     inline: Vec<Span<'static>>,
@@ -132,9 +134,10 @@ struct Renderer {
     in_heading: bool,
 }
 
-impl Renderer {
-    fn new(width: usize) -> Self {
+impl<'a> Renderer<'a> {
+    fn new(width: usize, theme: &'a Theme) -> Self {
         Self {
+            theme,
             width,
             lines: Vec::new(),
             inline: Vec::new(),
@@ -182,13 +185,13 @@ impl Renderer {
             Tag::Paragraph => self.flush_inline(),
             Tag::Heading { level, .. } => {
                 self.flush_inline();
-                self.push_style(heading_style(level));
+                self.push_style(heading_style(level, self.theme));
                 self.in_heading = true;
             }
             Tag::BlockQuote(_) => {
                 self.flush_inline();
                 self.prefixes
-                    .push(Prefix::bar(QUOTE_BAR, quote_bar_style()));
+                    .push(Prefix::bar(QUOTE_BAR, quote_bar_style(self.theme)));
                 self.push_style(quote_text_style());
             }
             Tag::CodeBlock(_) => {
@@ -201,12 +204,12 @@ impl Renderer {
             }
             Tag::Item => self.start_item(),
             Tag::Emphasis => self.push_modifier(Modifier::ITALIC),
-            Tag::Strong => self.push_style(strong_style()),
+            Tag::Strong => self.push_modifier(Modifier::BOLD),
             Tag::Strikethrough => self.push_modifier(Modifier::CROSSED_OUT),
             Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                 self.link_starts
                     .push((self.inline.len(), dest_url.to_string()));
-                self.push_style(link_style());
+                self.push_style(link_style(self.theme));
             }
             Tag::Table(alignments) => {
                 self.flush_inline();
@@ -307,7 +310,7 @@ impl Renderer {
             Some(None) | None => BULLET.to_string(),
         };
         self.prefixes
-            .push(Prefix::marker(marker, list_marker_style()));
+            .push(Prefix::marker(marker, list_marker_style(self.theme)));
     }
 
     fn finish_link(&mut self) {
@@ -323,7 +326,7 @@ impl Renderer {
             .map(|span| span.content.as_ref())
             .collect();
         if label != url {
-            self.push_inline(format!(" ({url})"), link_url_style());
+            self.push_inline(format!(" ({url})"), link_url_style(self.theme));
         }
     }
 
@@ -339,7 +342,7 @@ impl Renderer {
             }
             let word = Word {
                 width: display_width(line),
-                fragments: vec![Span::styled(line.to_string(), code_style())],
+                fragments: vec![Span::styled(line.to_string(), code_block_style(self.theme))],
             };
             for piece in break_long_word(word, width) {
                 self.push_line(piece.fragments);
@@ -352,7 +355,7 @@ impl Renderer {
         let Some(table) = self.table.take() else {
             return;
         };
-        for row in table.render(self.inner_width()) {
+        for row in table.render(self.inner_width(), self.theme) {
             self.push_line(row);
         }
         self.push_gap();
@@ -361,7 +364,7 @@ impl Renderer {
     fn push_rule(&mut self) {
         self.flush_inline();
         let rule = "─".repeat(self.inner_width());
-        self.push_line(vec![Span::styled(rule, rule_style())]);
+        self.push_line(vec![Span::styled(rule, rule_style(self.theme))]);
         self.push_gap();
     }
 
@@ -423,17 +426,20 @@ impl Renderer {
         self.width.saturating_sub(prefix_width).max(1)
     }
 
-    /// Code inside a heading turns white rather than fading to gray.
+    /// Code inside a heading is drawn like the heading rather than fading.
     fn inline_code_style(&self) -> Style {
         if self.in_heading {
-            code_style().fg(Color::White)
+            self.current_style()
         } else {
-            code_style()
+            Style::default().fg(self.theme.code)
         }
     }
 
     fn current_style(&self) -> Style {
-        self.styles.last().copied().unwrap_or_default()
+        self.styles
+            .last()
+            .copied()
+            .unwrap_or_else(|| Style::default().fg(self.theme.assistant_text))
     }
 
     fn push_modifier(&mut self, modifier: Modifier) {
@@ -451,8 +457,8 @@ impl Renderer {
 
 /// Styled lines for `text`, each no wider than `width` columns except
 /// where a table cannot shrink far enough to fit.
-pub(super) fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
-    let mut renderer = Renderer::new(width.max(1));
+pub(super) fn render_markdown(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut renderer = Renderer::new(width.max(1), theme);
     for event in Parser::new_ext(text, parser_options()) {
         renderer.on_event(event);
     }
@@ -491,6 +497,7 @@ fn render_table_row(
     widths: &[usize],
     alignments: &[Alignment],
     cell_style: Style,
+    theme: &Theme,
 ) -> Vec<Vec<Span<'static>>> {
     let empty = Vec::new();
     let wrapped: Vec<Vec<Vec<Span<'static>>>> = widths
@@ -511,7 +518,7 @@ fn render_table_row(
             let mut line = Vec::new();
             for (column, &width) in widths.iter().enumerate() {
                 if column > 0 {
-                    line.push(Span::styled(COLUMN_SEPARATOR, rule_style()));
+                    line.push(Span::styled(COLUMN_SEPARATOR, rule_style(theme)));
                 }
                 let content = wrapped[column].get(row).cloned().unwrap_or_default();
                 let alignment = alignments.get(column).copied().unwrap_or(Alignment::None);
@@ -641,51 +648,44 @@ fn push_fragment(piece: &mut Word, text: &mut String, style: Style) {
     }
 }
 
-fn heading_style(level: HeadingLevel) -> Style {
-    let style = Style::default().fg(BLEY).add_modifier(Modifier::BOLD);
+fn heading_style(level: HeadingLevel, theme: &Theme) -> Style {
+    let style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
     match level {
         HeadingLevel::H1 | HeadingLevel::H2 => style.add_modifier(Modifier::UNDERLINED),
         _ => style,
     }
 }
 
-/// Bold plus a brighter foreground, since many terminal fonts barely
-/// distinguish bold weight from regular.
-fn strong_style() -> Style {
-    Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD)
+fn code_block_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.code)
 }
 
-/// Matches the gray of tool output in the transcript.
-fn code_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn quote_bar_style() -> Style {
-    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+fn quote_bar_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.status_text)
 }
 
 fn quote_text_style() -> Style {
     Style::default().add_modifier(Modifier::ITALIC)
 }
 
-fn list_marker_style() -> Style {
-    Style::default().fg(BLEY)
+fn list_marker_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.accent)
 }
 
-fn link_style() -> Style {
+fn link_style(theme: &Theme) -> Style {
     Style::default()
-        .fg(Color::Blue)
+        .fg(theme.link)
         .add_modifier(Modifier::UNDERLINED)
 }
 
-fn link_url_style() -> Style {
-    Style::default().fg(Color::DarkGray)
+fn link_url_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.status_text)
 }
 
-fn rule_style() -> Style {
-    Style::default().fg(Color::DarkGray)
+fn rule_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.border)
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+use ratatui::style::Color;
+
 use super::*;
 
 fn texts(lines: &[Line<'static>]) -> Vec<String> {
@@ -8,7 +10,7 @@ fn texts(lines: &[Line<'static>]) -> Vec<String> {
 }
 
 fn rendered(text: &str, width: usize) -> Vec<String> {
-    texts(&render_markdown(text, width))
+    texts(&render_markdown(text, width, &Theme::default()))
 }
 
 fn span_style(lines: &[Line<'static>], content: &str) -> Style {
@@ -22,7 +24,7 @@ fn span_style(lines: &[Line<'static>], content: &str) -> Style {
 
 #[test]
 fn styled_word_fragments_stay_on_one_line() {
-    let lines = render_markdown("xxxx **bo**ld", 8);
+    let lines = render_markdown("xxxx **bo**ld", 8, &Theme::default());
     assert_eq!(texts(&lines), ["xxxx", "bold"]);
     assert!(
         span_style(&lines, "bo")
@@ -38,18 +40,18 @@ fn styled_word_fragments_stay_on_one_line() {
 
 #[test]
 fn bullet_list_marks_items_and_indents_wrapped_continuations() {
-    let lines = render_markdown("- short\n- a longer item that wraps", 14);
+    let lines = render_markdown("- short\n- a longer item that wraps", 14, &Theme::default());
     assert_eq!(
         texts(&lines),
         ["• short", "• a longer", "  item that", "  wraps"]
     );
-    assert_eq!(span_style(&lines, "• ").fg, Some(BLEY));
+    assert_eq!(span_style(&lines, "• ").fg, Some(Theme::default().accent));
 }
 
 #[test]
 fn fenced_code_keeps_indentation_and_breaks_long_lines_hard() {
     let text = "```rust\nfn main() {\n    let x = 1;\n\n}\n```\ntail";
-    let lines = render_markdown(text, 12);
+    let lines = render_markdown(text, 12, &Theme::default());
     assert_eq!(
         texts(&lines),
         ["fn main() {", "    let x = ", "1;", "", "}", "", "tail",]
@@ -71,10 +73,16 @@ fn unterminated_fence_renders_as_code_while_streaming() {
 #[test]
 fn table_aligns_columns_and_bolds_header() {
     let text = "| Name | Qty |\n|:-----|----:|\n| apple | 3 |\n| kiwi | 12 |";
-    let lines = render_markdown(text, 40);
+    let lines = render_markdown(text, 40, &Theme::default());
     assert_eq!(
         texts(&lines),
-        ["Name  │ Qty", "──────┼────", "apple │   3", "kiwi  │  12",]
+        [
+            "Name  │ Qty",
+            "──────┼────",
+            "apple │   3",
+            "──────┼────",
+            "kiwi  │  12",
+        ]
     );
     assert!(
         span_style(&lines, "Name")
@@ -134,8 +142,8 @@ fn wide_characters_count_two_columns() {
 #[test]
 fn width_one_never_panics() {
     let text = "# H\n\n- item\n\n> q\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\ncode\n```";
-    assert!(!render_markdown(text, 1).is_empty());
-    assert!(!render_markdown(text, 0).is_empty());
+    assert!(!render_markdown(text, 1, &Theme::default()).is_empty());
+    assert!(!render_markdown(text, 0, &Theme::default()).is_empty());
 }
 
 #[test]
