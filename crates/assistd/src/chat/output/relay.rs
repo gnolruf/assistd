@@ -489,7 +489,7 @@ pub(super) fn render_relay_block(
     let bullet_style = Style::default().fg(bullet).add_modifier(Modifier::BOLD);
     match run.steps.as_slice() {
         [only] => {
-            let lead = format!("relay · {} · ", only.agent);
+            let lead = format!("{} · ", only.agent);
             let header = fitted_row(&lead, &only.task, "", block_cols(width, HEADER_BULLET));
             push_gutter_row(
                 out,
@@ -508,7 +508,7 @@ pub(super) fn render_relay_block(
             );
         }
         steps => {
-            let header = format!("relay · plan of {} steps", steps.len());
+            let header = format!("plan of {} steps", steps.len());
             push_gutter_row(
                 out,
                 header_gutter,
