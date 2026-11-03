@@ -11,9 +11,9 @@ use ratatui::widgets::Paragraph;
 
 use super::super::output::OutputPane;
 use super::super::theme::Theme;
+use super::panel::SAVED_THEMES_KEY;
 
 const THEME_KEY_PREFIX: &str = "chat.theme.";
-const SAVED_THEMES_KEY: &str = "chat.themes";
 const THEMES_ROLE: &str = "themes";
 const TITLE: &str = "Preview ";
 const RULE: &str = "─";

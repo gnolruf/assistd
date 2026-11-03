@@ -30,7 +30,7 @@ request_timeout_secs = 120  # wait for the first token
 # summary_temperature = 0.3
 
 [chat.theme]
-# Colors of `assistd chat` (the Theme tab of `assistd settings` loads built-in themes): default, bley (#5e749c), a named ANSI color (dark_gray, light_blue, ...) or "#rrggbb".
+# Each color: default, bley, a named ANSI color (dark_gray, light_blue, ...) or "#rrggbb".
 # accent = "bley"
 # user_message = "dark_gray"  # background
 # assistant_text = "default"
@@ -42,7 +42,7 @@ request_timeout_secs = 120  # wait for the first token
 # warning = "yellow"
 # link = "blue"
 # selection = "default"  # background; default shows reverse video
-# Themes saved from the Theme tab of `assistd settings` go in their own chat.themes.<name> tables.
+# Saved themes go in [chat.themes.<name>] tables.
 
 [voice]
 enabled = false

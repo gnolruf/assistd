@@ -54,7 +54,7 @@ pub struct ChatConfig {
     /// `low`. Valid values depend on the model's template; `None` keeps the
     /// template's default. Must not be empty.
     pub reasoning_effort: Option<String>,
-    /// Colors of the chat TUI; read only by `assistd chat` and `assistd settings`.
+    /// Colors of the chat TUI.
     pub theme: ThemeConfig,
     /// Themes saved from the settings panel, by name; each name is ASCII
     /// letters, digits, `_` and `-`, and no built-in theme's.

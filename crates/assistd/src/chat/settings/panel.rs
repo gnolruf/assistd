@@ -15,7 +15,7 @@ use super::list_editor::{ListAction, ListEditor};
 use super::theme_list::{ThemeList, ThemeListAction};
 
 const THEME_KEY: &str = "chat.theme";
-const SAVED_THEMES_KEY: &str = "chat.themes";
+pub(crate) const SAVED_THEMES_KEY: &str = "chat.themes";
 /// Rows PgUp/PgDn move the selection.
 const PAGE_ROWS: usize = 10;
 const SAVED_NOTE: &str = "saved; restart the daemon to apply (systemctl --user restart assistd)";

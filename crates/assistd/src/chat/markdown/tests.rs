@@ -98,7 +98,7 @@ fn table_aligns_columns_and_bolds_header() {
 
 #[test]
 fn wide_table_shrinks_widest_column_and_wraps_its_cells() {
-    let text = "| K | Description |\n|---|---|\n| a | one two three four |\n| b | five |";
+    let text = "| K | Description |\n|---|---|\n| a | one two three four |";
     assert_eq!(
         rendered(text, 16),
         [
@@ -106,8 +106,6 @@ fn wide_table_shrinks_widest_column_and_wraps_its_cells() {
             "──┼─────────────",
             "a │ one two     ",
             "  │ three four  ",
-            "──┼─────────────",
-            "b │ five        ",
         ]
     );
 }

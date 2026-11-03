@@ -74,7 +74,7 @@ impl ThemeColor {
 impl FromStr for ThemeColor {
     type Err = ThemeColorError;
 
-    /// Accepts a name from the list above, any case, or `#rrggbb`.
+    /// Accepts a color's name in any case, or `#rrggbb`.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let refused = || ThemeColorError(text.to_string());
         if let Some(hex) = text.strip_prefix('#') {
