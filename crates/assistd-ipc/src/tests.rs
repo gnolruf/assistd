@@ -249,7 +249,7 @@ fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
                     task: "find it".into(),
                     agent: "web_research".into(),
                     run: Some(RelayStepRun {
-                        end: RelayStepEnd::Answered { truncated: false },
+                        end: RelayStepEnd::Answered,
                         duration_ms: 8000,
                         tokens: Some(4100),
                         entries: vec![
@@ -280,7 +280,7 @@ fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
                 },
             ],
         },
-        r#"{"type":"history_entry","id":"r","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered","truncated":false},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
+        r#"{"type":"history_entry","id":"r","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered"},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
     )]
 }
 

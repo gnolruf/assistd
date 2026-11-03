@@ -171,7 +171,7 @@ async fn start(
         Arc::clone(&health_probe),
         Arc::clone(&main_slot),
     )?;
-    let relay = build_relay_deps(&config, main_slot, &chat, &health_probe)?;
+    let relay = build_relay_deps(&config, main_slot, &chat, &health_probe, &session_ctx)?;
     let tools = tools_init::init(
         &config,
         config_path,
@@ -337,13 +337,15 @@ fn build_main_slot(
 }
 
 /// What the `relay` tool runs sub-agents with: the chat backend they share, a guard on its
-/// main slot, and an emptied directory for their quarantines.
+/// main slot, an emptied directory for their quarantines, and where their answers are saved.
 fn build_relay_deps(
     config: &Config,
     main_slot: Arc<MainSlot>,
     chat: &Arc<dyn LlmBackend>,
     health_probe: &Arc<dyn LlmHealthProbe>,
+    session_ctx: &SessionContext,
 ) -> Result<RelayDeps> {
+    let data_dir = dirs::data_dir().context("no user data directory for relay answers")?;
     Ok(RelayDeps {
         runner: SubAgentRunner::new(
             Arc::clone(chat),
@@ -357,6 +359,8 @@ fn build_relay_deps(
             .max_history_tokens
             .get()
             .min(config.model.context_budget()),
+        answers_dir: data_dir.join("assistd").join("relays"),
+        session: session_ctx.session_updates(),
     })
 }
 

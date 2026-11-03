@@ -455,7 +455,7 @@ fn relay_plan() -> Vec<PersistedRelayStep> {
             task: "fetch the notes".into(),
             agent: "web_research".into(),
             run: Some(PersistedRelayRun {
-                end: PersistedRelayEnd::Answered { truncated: true },
+                end: PersistedRelayEnd::Answered,
                 duration_ms: 41_000,
                 tokens: Some(9000),
                 entries,

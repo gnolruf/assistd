@@ -109,9 +109,7 @@ impl StepBuilder {
                 .entries
                 .push(PersistedRelayEntry::Compaction { duration_ms: None }),
             RelayEvent::Compacted { duration_ms } => self.finish_compaction(*duration_ms),
-            RelayEvent::Answered { truncated, .. } => self.end(PersistedRelayEnd::Answered {
-                truncated: *truncated,
-            }),
+            RelayEvent::Answered { .. } => self.end(PersistedRelayEnd::Answered),
             RelayEvent::Failed { message } => self.end(PersistedRelayEnd::Failed {
                 message: message.clone(),
             }),
@@ -235,7 +233,7 @@ pub(super) fn wire_relay_steps(steps: Vec<PersistedRelayStep>) -> Vec<RelayStepR
 fn wire_relay_run(run: PersistedRelayRun) -> RelayStepRun {
     RelayStepRun {
         end: match run.end {
-            PersistedRelayEnd::Answered { truncated } => RelayStepEnd::Answered { truncated },
+            PersistedRelayEnd::Answered => RelayStepEnd::Answered,
             PersistedRelayEnd::Failed { message } => RelayStepEnd::Failed { message },
         },
         duration_ms: run.duration_ms,

@@ -288,13 +288,9 @@ pub enum RelayEvent {
     Compacting,
     /// The compaction `Compacting` announced finished after `duration_ms`.
     Compacted { duration_ms: u64 },
-    /// The sub-agent answered in `answer_chars` characters after `tool_steps`
-    /// tool-calling steps; `truncated` when its report was cut.
-    Answered {
-        answer_chars: u32,
-        tool_steps: u32,
-        truncated: bool,
-    },
+    /// The sub-agent answered in `answer_chars` characters, as saved, after
+    /// `tool_steps` tool-calling steps.
+    Answered { answer_chars: u32, tool_steps: u32 },
     /// The step ended without a report.
     Failed { message: String },
 }
@@ -325,10 +321,8 @@ pub struct RelayStepRun {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RelayStepEnd {
-    /// It reported; `truncated` when its report was cut to fit.
-    Answered {
-        truncated: bool,
-    },
+    /// It reported.
+    Answered,
     Failed {
         message: String,
     },

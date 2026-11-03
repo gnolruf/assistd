@@ -201,9 +201,57 @@ CREATE TABLE relay_entries (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// V4: relay steps no longer record whether their report was cut. Recreates
+/// both relay tables without that column, dropping the traces stored so far.
+const V4_SQL: &str = r"
+DROP TABLE relay_entries;
+DROP TABLE relay_steps;
+
+CREATE TABLE relay_steps (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id  INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    step        INTEGER NOT NULL CHECK (step >= 1),
+    task        TEXT NOT NULL,
+    agent       TEXT NOT NULL CHECK (agent <> ''),
+    outcome     INTEGER CHECK (outcome BETWEEN 0 AND 1),
+    failure     TEXT,
+    duration_ms INTEGER CHECK (duration_ms >= 0),
+    tokens      INTEGER CHECK (tokens >= 0),
+    UNIQUE (message_id, step),
+    CHECK ((outcome IS 1) = (failure IS NOT NULL)),
+    CHECK ((outcome IS NULL) = (duration_ms IS NULL)),
+    CHECK (outcome IS NOT NULL OR tokens IS NULL)
+) STRICT;
+
+CREATE TABLE relay_entries (
+    step_id        INTEGER NOT NULL REFERENCES relay_steps(id) ON DELETE CASCADE,
+    seq            INTEGER NOT NULL CHECK (seq >= 0),
+    kind           INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),
+    content        TEXT NOT NULL,
+    tool_name      TEXT,
+    tool_args      TEXT CHECK (tool_args IS NULL OR json_valid(tool_args)),
+    tool_exit_code INTEGER,
+    duration_ms    INTEGER CHECK (duration_ms >= 0),
+    PRIMARY KEY (step_id, seq),
+    CHECK ((kind = 2) = (tool_name IS NOT NULL)),
+    CHECK ((kind = 2) = (tool_args IS NOT NULL)),
+    CHECK (kind = 2 OR tool_exit_code IS NULL),
+    CHECK (kind <> 2 OR (tool_exit_code IS NULL) = (duration_ms IS NULL)),
+    CHECK (kind <> 0 OR duration_ms IS NULL),
+    CHECK (kind <> 1 OR duration_ms IS NOT NULL),
+    CHECK (kind IN (2, 3) OR content <> ''),
+    CHECK (kind <> 3 OR content = '')
+) STRICT, WITHOUT ROWID;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1_SQL), M::up(V2_SQL), M::up(V3_SQL)])
+    Migrations::new(vec![
+        M::up(V1_SQL),
+        M::up(V2_SQL),
+        M::up(V3_SQL),
+        M::up(V4_SQL),
+    ])
 }
 
 /// Apply all pending migrations to `conn`; a no-op on an up-to-date database.
@@ -229,6 +277,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 }

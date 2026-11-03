@@ -26,10 +26,8 @@ pub struct PersistedRelayRun {
 /// How a relay step ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistedRelayEnd {
-    /// It reported; `truncated` when its report was cut to fit.
-    Answered {
-        truncated: bool,
-    },
+    /// It reported.
+    Answered,
     Failed {
         message: String,
     },

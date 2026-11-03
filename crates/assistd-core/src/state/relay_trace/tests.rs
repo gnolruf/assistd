@@ -47,7 +47,6 @@ fn trace_merges_deltas_pairs_results_and_stores_an_unfinished_step_as_stopped() 
         RelayEvent::Answered {
             answer_chars: 14,
             tool_steps: 1,
-            truncated: false,
         },
         RelayEvent::Started { step: 2 },
         RelayEvent::ToolCall {
@@ -60,7 +59,7 @@ fn trace_merges_deltas_pairs_results_and_stores_an_unfinished_step_as_stopped() 
     let steps = trace.finish();
 
     let first = steps[0].run.as_ref().expect("step 1 ran");
-    assert_eq!(first.end, PersistedRelayEnd::Answered { truncated: false });
+    assert_eq!(first.end, PersistedRelayEnd::Answered);
     assert_eq!(first.tokens, Some(4100));
     let PersistedRelayEntry::Reasoning { text, .. } = &first.entries[0] else {
         panic!("reasoning first: {:?}", first.entries);

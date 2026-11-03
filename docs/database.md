@@ -85,7 +85,6 @@ erDiagram
         text agent "the kind of sub-agent, as web_research"
         int outcome "0 answered, 1 failed, NULL never ran"
         text failure
-        int truncated
         int duration_ms
         int tokens
     }

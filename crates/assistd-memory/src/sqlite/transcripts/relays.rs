@@ -22,7 +22,6 @@ const KIND_COMPACTION: i64 = 3;
 struct StepColumns<'a> {
     outcome: Option<i64>,
     failure: Option<&'a str>,
-    truncated: Option<bool>,
     duration_ms: Option<u64>,
     tokens: Option<u32>,
 }
@@ -32,14 +31,13 @@ impl<'a> StepColumns<'a> {
         let Some(run) = run else {
             return Self::default();
         };
-        let (outcome, failure, truncated) = match &run.end {
-            PersistedRelayEnd::Answered { truncated } => (OUTCOME_ANSWERED, None, Some(*truncated)),
-            PersistedRelayEnd::Failed { message } => (OUTCOME_FAILED, Some(message.as_str()), None),
+        let (outcome, failure) = match &run.end {
+            PersistedRelayEnd::Answered => (OUTCOME_ANSWERED, None),
+            PersistedRelayEnd::Failed { message } => (OUTCOME_FAILED, Some(message.as_str())),
         };
         Self {
             outcome: Some(outcome),
             failure,
-            truncated,
             duration_ms: Some(run.duration_ms),
             tokens: run.tokens,
         }
@@ -107,8 +105,8 @@ pub(super) fn insert_relay_steps(
 ) -> rusqlite::Result<()> {
     let mut insert = tx.prepare_cached(
         "INSERT INTO relay_steps
-            (message_id, step, task, agent, outcome, failure, truncated, duration_ms, tokens)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            (message_id, step, task, agent, outcome, failure, duration_ms, tokens)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          RETURNING id",
     )?;
     for (index, step) in steps.iter().enumerate() {
@@ -121,7 +119,6 @@ pub(super) fn insert_relay_steps(
                 step.agent,
                 columns.outcome,
                 columns.failure,
-                columns.truncated,
                 columns.duration_ms,
                 columns.tokens,
             ],
@@ -169,7 +166,7 @@ pub(super) fn relay_traces(
     let mut traces: HashMap<MessageId, Vec<PersistedRelayStep>> = HashMap::new();
     let mut select = tx.prepare_cached(
         "SELECT rs.message_id, rs.id, rs.task, rs.agent, rs.outcome, rs.failure,
-                rs.truncated, rs.duration_ms, rs.tokens
+                rs.duration_ms, rs.tokens
          FROM branch_messages bm JOIN relay_steps rs ON rs.message_id = bm.message_id
          WHERE bm.branch_id = ?1
          ORDER BY rs.message_id, rs.step",
@@ -212,9 +209,7 @@ fn relay_entries(
 fn step_row(row: &Row<'_>) -> rusqlite::Result<(MessageId, i64, PersistedRelayStep)> {
     let end = match row.get::<_, Option<i64>>(4)? {
         None => None,
-        Some(OUTCOME_ANSWERED) => Some(PersistedRelayEnd::Answered {
-            truncated: row.get(6)?,
-        }),
+        Some(OUTCOME_ANSWERED) => Some(PersistedRelayEnd::Answered),
         Some(OUTCOME_FAILED) => Some(PersistedRelayEnd::Failed {
             message: row.get(5)?,
         }),
@@ -224,8 +219,8 @@ fn step_row(row: &Row<'_>) -> rusqlite::Result<(MessageId, i64, PersistedRelaySt
         .map(|end| -> rusqlite::Result<_> {
             Ok(PersistedRelayRun {
                 end,
-                duration_ms: row.get(7)?,
-                tokens: row.get(8)?,
+                duration_ms: row.get(6)?,
+                tokens: row.get(7)?,
                 entries: Vec::new(),
             })
         })
