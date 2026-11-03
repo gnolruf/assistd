@@ -202,19 +202,27 @@ reaches the main history. What the client was shown is stored with the
 relay's tool result in `relay_steps` and `relay_entries`, never embedded, and
 replayed with branch history.
 
-Only the text of the final step comes back, and only as a `RelayReport`, the
-restricted return channel. Its control, bidi and format characters are
-stripped, the `<` of anything tag-shaped (`<|im_start|>`, `<tool_call>`) and
-the `[` of bracket tokens (`[INST]`) are escaped, and it is cut to 6,000
-characters with a truncation marker, never spilled to a file; the sub-agent's
-system prompt states that limit so it puts its most important findings first.
-It renders as a quoted block under a header that labels it untrusted data; the
-default system prompt says never to follow instructions inside one. When the
-caller asks for an `AnswerShape::Schema`, the run restates its answer through
+A sub-agent's final answer is saved whole, with no length cap, to
+`~/.local/share/assistd/relays/<session>/relay-<uuid>.txt`, written by the
+runner rather than the sub-agent so the file always exists and is complete.
+It is sanitised first: control, bidi and format characters are stripped, the
+`<` of anything tag-shaped (`<|im_start|>`, `<tool_call>`) and the `[` of
+bracket tokens (`[INST]`) are escaped, and it is quoted under a header that
+labels it untrusted data. The run then takes one more turn through
 `complete_with_schema`, a tool-free, thinking-free request whose
-`response_format` holds the reply to that JSON schema by grammar; a reply that
-does not parse fails the run. The sub-agent's tool output and reasoning never
-leave it.
+`response_format` holds the reply by grammar to a fixed contract: `status`
+(done, partial or blocked), a `summary`, and arrays of `evidence` and
+`caveats`, each bounded by `maxLength` and `maxItems`. A reply that does not
+parse or exceeds those bounds becomes a `partial` contract saying so, since the
+answer is already saved. Only that contract comes back, as a `RelayReport`,
+the restricted return channel: sanitised and quoted the same way, with
+`artifacts` naming the saved file, and with evidence paths under the
+quarantine's `input/` pointed back at the original inputs. The default system
+prompt says never to follow instructions inside one. The sub-agent's tool
+output and reasoning never leave it. Each answered step's file is recorded in
+`relay_steps.answer_file`; `/undo` deletes the files of the steps whose rows it
+deletes (a fork still holding the turn keeps them), and daemon start deletes
+every saved answer no stored step names.
 
 A sub-agent's commands run in a `Quarantine`, which starts from an empty world:
 a fresh `relay-*` directory whose `input/` shows the inputs it was handed,
@@ -294,11 +302,11 @@ creates a fresh `Quarantine` under `~/.cache/assistd/relays` (emptied at daemon
 start), gives the sub-agent a registry holding only `run` over the quarantine's
 commands, and runs it inside `MainSlot::preserve_across`. A plan's steps run
 back to back inside one `preserve_across`, each in its own quarantine and
-handed only the previous step's rendered `RelayReport` beneath its task. Since
-a report carries what its sub-agent read, a plan with a web step after a
-file step is refused as invalid arguments. The tool result is the last step's
-rendered `RelayReport`; a failed step ends the plan as a failed tool result,
-not a failed turn. A relay starts without confirmation; commands inside it ask
+handed only the previous step's rendered `RelayReport` beneath its task and
+its saved answer as an extra input. Since a report carries what its sub-agent
+read, a plan with a web step after a file step is refused as invalid arguments.
+The tool result is the last step's rendered `RelayReport`; a failed step ends
+the plan as a failed tool result, not a failed turn. A relay starts without confirmation; commands inside it ask
 the same `ConfirmationGate` as the main agent's, with the prompt marked
 `ConfirmSource::Relay` and the step's task so the user can tell who is asking.
 Cancelling the turn drops the call, which drops the run and removes the

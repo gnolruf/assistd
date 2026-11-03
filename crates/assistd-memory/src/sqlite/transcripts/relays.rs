@@ -1,13 +1,16 @@
 //! A relay's sub-agent steps in `relay_steps` and their entries in `relay_entries`.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::PathBuf;
 
 use rusqlite::types::{FromSqlError, Type};
-use rusqlite::{Row, Transaction};
+use rusqlite::{Connection, Row, Transaction};
 
 use crate::{
     BranchId, MessageId, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun,
-    PersistedRelayStep, ToolOutcome,
+    PersistedRelayStep, ToolOutcome, TurnId,
 };
 
 const OUTCOME_ANSWERED: i64 = 0;
@@ -22,7 +25,7 @@ const KIND_COMPACTION: i64 = 3;
 struct StepColumns<'a> {
     outcome: Option<i64>,
     failure: Option<&'a str>,
-    truncated: Option<bool>,
+    answer_file: Option<&'a [u8]>,
     duration_ms: Option<u64>,
     tokens: Option<u32>,
 }
@@ -32,14 +35,18 @@ impl<'a> StepColumns<'a> {
         let Some(run) = run else {
             return Self::default();
         };
-        let (outcome, failure, truncated) = match &run.end {
-            PersistedRelayEnd::Answered { truncated } => (OUTCOME_ANSWERED, None, Some(*truncated)),
+        let (outcome, failure, answer_file) = match &run.end {
+            PersistedRelayEnd::Answered { answer_file } => (
+                OUTCOME_ANSWERED,
+                None,
+                Some(answer_file.as_os_str().as_bytes()),
+            ),
             PersistedRelayEnd::Failed { message } => (OUTCOME_FAILED, Some(message.as_str()), None),
         };
         Self {
             outcome: Some(outcome),
             failure,
-            truncated,
+            answer_file,
             duration_ms: Some(run.duration_ms),
             tokens: run.tokens,
         }
@@ -107,7 +114,7 @@ pub(super) fn insert_relay_steps(
 ) -> rusqlite::Result<()> {
     let mut insert = tx.prepare_cached(
         "INSERT INTO relay_steps
-            (message_id, step, task, agent, outcome, failure, truncated, duration_ms, tokens)
+            (message_id, step, task, agent, outcome, failure, duration_ms, tokens, answer_file)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          RETURNING id",
     )?;
@@ -121,9 +128,9 @@ pub(super) fn insert_relay_steps(
                 step.agent,
                 columns.outcome,
                 columns.failure,
-                columns.truncated,
                 columns.duration_ms,
                 columns.tokens,
+                columns.answer_file,
             ],
             |r| r.get(0),
         )?;
@@ -169,7 +176,7 @@ pub(super) fn relay_traces(
     let mut traces: HashMap<MessageId, Vec<PersistedRelayStep>> = HashMap::new();
     let mut select = tx.prepare_cached(
         "SELECT rs.message_id, rs.id, rs.task, rs.agent, rs.outcome, rs.failure,
-                rs.truncated, rs.duration_ms, rs.tokens
+                rs.duration_ms, rs.tokens, rs.answer_file
          FROM branch_messages bm JOIN relay_steps rs ON rs.message_id = bm.message_id
          WHERE bm.branch_id = ?1
          ORDER BY rs.message_id, rs.step",
@@ -213,7 +220,7 @@ fn step_row(row: &Row<'_>) -> rusqlite::Result<(MessageId, i64, PersistedRelaySt
     let end = match row.get::<_, Option<i64>>(4)? {
         None => None,
         Some(OUTCOME_ANSWERED) => Some(PersistedRelayEnd::Answered {
-            truncated: row.get(6)?,
+            answer_file: path_from_bytes(row.get(8)?),
         }),
         Some(OUTCOME_FAILED) => Some(PersistedRelayEnd::Failed {
             message: row.get(5)?,
@@ -224,8 +231,8 @@ fn step_row(row: &Row<'_>) -> rusqlite::Result<(MessageId, i64, PersistedRelaySt
         .map(|end| -> rusqlite::Result<_> {
             Ok(PersistedRelayRun {
                 end,
-                duration_ms: row.get(7)?,
-                tokens: row.get(8)?,
+                duration_ms: row.get(6)?,
+                tokens: row.get(7)?,
                 entries: Vec::new(),
             })
         })
@@ -236,6 +243,35 @@ fn step_row(row: &Row<'_>) -> rusqlite::Result<(MessageId, i64, PersistedRelaySt
         run,
     };
     Ok((row.get(0)?, row.get(1)?, step))
+}
+
+/// The answer files of `turn`'s relay steps whose messages no branch references.
+pub(super) fn unreferenced_answer_files(
+    tx: &Transaction<'_>,
+    turn: TurnId,
+) -> rusqlite::Result<Vec<PathBuf>> {
+    let mut select = tx.prepare_cached(
+        "SELECT rs.answer_file
+         FROM messages m JOIN relay_steps rs ON rs.message_id = m.id
+         WHERE m.turn_id = ?1 AND rs.answer_file IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM branch_messages bm WHERE bm.message_id = m.id)",
+    )?;
+    select
+        .query_map(rusqlite::params![turn], |r| r.get(0).map(path_from_bytes))?
+        .collect()
+}
+
+/// Every answer file a stored relay step names.
+pub(super) fn all_answer_files(conn: &Connection) -> rusqlite::Result<Vec<PathBuf>> {
+    let mut select =
+        conn.prepare_cached("SELECT answer_file FROM relay_steps WHERE answer_file IS NOT NULL")?;
+    select
+        .query_map([], |r| r.get(0).map(path_from_bytes))?
+        .collect()
+}
+
+fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(OsString::from_vec(bytes))
 }
 
 /// An entry from columns 1 to 6: kind, content, tool name, tool arguments,

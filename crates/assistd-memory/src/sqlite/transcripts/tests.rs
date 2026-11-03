@@ -255,6 +255,7 @@ async fn undo_removes_only_the_last_turn() {
         UndoOutcome {
             removed_messages: 2,
             last_user_text: Some("second".into()),
+            released_answer_files: Vec::new(),
         }
     );
 
@@ -455,7 +456,9 @@ fn relay_plan() -> Vec<PersistedRelayStep> {
             task: "fetch the notes".into(),
             agent: "web_research".into(),
             run: Some(PersistedRelayRun {
-                end: PersistedRelayEnd::Answered { truncated: true },
+                end: PersistedRelayEnd::Answered {
+                    answer_file: PathBuf::from("/data/relays/s/relay-1.txt"),
+                },
                 duration_ms: 41_000,
                 tokens: Some(9000),
                 entries,
@@ -506,13 +509,26 @@ async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
     let traces = store.load_relay_traces(branch).await.unwrap();
     assert_eq!(traces.get(&appended.id), Some(&relay_plan()));
     assert_eq!(traces.len(), 1);
+    assert_eq!(
+        store.relay_answer_files().await.unwrap(),
+        [PathBuf::from("/data/relays/s/relay-1.txt")]
+    );
 
     let fork = store.fork_and_switch(branch, "fork").await.unwrap();
-    store.undo_last_turn(branch).await.unwrap();
+    let undone = store.undo_last_turn(branch).await.unwrap();
     let forked = store.load_relay_traces(fork).await.unwrap();
     assert_eq!(forked.get(&appended.id), Some(&relay_plan()));
+    assert!(
+        undone.released_answer_files.is_empty(),
+        "the fork still holds it"
+    );
 
-    store.undo_last_turn(fork).await.unwrap();
+    let undone = store.undo_last_turn(fork).await.unwrap();
+    assert_eq!(
+        undone.released_answer_files,
+        [PathBuf::from("/data/relays/s/relay-1.txt")]
+    );
+    assert!(store.relay_answer_files().await.unwrap().is_empty());
     let steps: i64 = store
         .handle
         .reader()

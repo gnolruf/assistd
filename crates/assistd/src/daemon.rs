@@ -1,6 +1,7 @@
 //! Daemon entrypoint: bring up the subsystems, serve IPC while the model, voice,
 //! embedding, search and MCP servers start in the background, tear down in order.
 
+use std::collections::HashSet;
 use std::fs::DirBuilder;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -42,6 +43,7 @@ mod idle_monitor;
 mod listen_dispatcher;
 mod mcp_init;
 mod memory_init;
+mod relay_answers;
 mod search_init;
 mod shutdown;
 mod tools_init;
@@ -164,14 +166,14 @@ async fn start(
 
     let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
 
-    let main_slot = build_main_slot(&config, &api_key, slot_dir, &health_probe)?;
-    let chat = build_chat_backend(
+    let (chat, relay) = build_chat_and_relay(
         &config,
         &api_key,
-        Arc::clone(&health_probe),
-        Arc::clone(&main_slot),
+        slot_dir,
+        &health_probe,
+        &session_ctx,
+        memory.relay_answer_files.take(),
     )?;
-    let relay = build_relay_deps(&config, main_slot, &chat, &health_probe)?;
     let tools = tools_init::init(
         &config,
         config_path,
@@ -318,6 +320,34 @@ fn prepare_slot_dir() -> Result<SlotDir> {
     Ok(slot_dir)
 }
 
+/// The chat backend, and what the `relay` tool runs sub-agents with beside it on the
+/// same main slot, its saved answers swept of those not in `kept_answers`.
+fn build_chat_and_relay(
+    config: &Config,
+    api_key: &ApiKey,
+    slot_dir: SlotDir,
+    health_probe: &Arc<dyn LlmHealthProbe>,
+    session_ctx: &SessionContext,
+    kept_answers: Option<HashSet<PathBuf>>,
+) -> Result<(Arc<dyn LlmBackend>, RelayDeps)> {
+    let main_slot = build_main_slot(config, api_key, slot_dir, health_probe)?;
+    let chat = build_chat_backend(
+        config,
+        api_key,
+        Arc::clone(health_probe),
+        Arc::clone(&main_slot),
+    )?;
+    let relay = build_relay_deps(
+        config,
+        main_slot,
+        &chat,
+        health_probe,
+        session_ctx,
+        kept_answers,
+    )?;
+    Ok((chat, relay))
+}
+
 /// The guard that keeps the chat server's main slot across sub-agent runs.
 fn build_main_slot(
     config: &Config,
@@ -337,12 +367,15 @@ fn build_main_slot(
 }
 
 /// What the `relay` tool runs sub-agents with: the chat backend they share, a guard on its
-/// main slot, and an emptied directory for their quarantines.
+/// main slot, an emptied directory for their quarantines, and where their answers are saved,
+/// swept of those not in `kept_answers`.
 fn build_relay_deps(
     config: &Config,
     main_slot: Arc<MainSlot>,
     chat: &Arc<dyn LlmBackend>,
     health_probe: &Arc<dyn LlmHealthProbe>,
+    session_ctx: &SessionContext,
+    kept_answers: Option<HashSet<PathBuf>>,
 ) -> Result<RelayDeps> {
     Ok(RelayDeps {
         runner: SubAgentRunner::new(
@@ -357,6 +390,8 @@ fn build_relay_deps(
             .max_history_tokens
             .get()
             .min(config.model.context_budget()),
+        answers_dir: relay_answers::prepare(kept_answers)?,
+        session: session_ctx.session_updates(),
     })
 }
 

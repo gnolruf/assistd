@@ -1,6 +1,8 @@
 //! What a `relay` tool call's sub-agents did, stored beside the call's tool
 //! result and never part of the conversation the model sees.
 
+use std::path::PathBuf;
+
 use crate::ToolOutcome;
 
 /// One step of a relay's plan as stored, in plan order.
@@ -26,9 +28,9 @@ pub struct PersistedRelayRun {
 /// How a relay step ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistedRelayEnd {
-    /// It reported; `truncated` when its report was cut to fit.
+    /// It reported, its whole answer saved to `answer_file`.
     Answered {
-        truncated: bool,
+        answer_file: PathBuf,
     },
     Failed {
         message: String,

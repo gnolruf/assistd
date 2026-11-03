@@ -1,16 +1,23 @@
 //! Sub-agent runs: the agent loop over a throwaway conversation on the shared
-//! llama-server, returning only the model's final answer as a [`RelayReport`].
+//! llama-server, saving the model's final answer and returning its contract as a
+//! [`RelayReport`].
 
+use std::fs::{DirBuilder, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use assistd_ipc::{RelayEvent, StatusKind};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
+use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{ToolOutput, ToolRegistry};
 use assistd_utils::time::saturating_millis;
 
@@ -18,14 +25,22 @@ use crate::agent::{Agent, TOOL_CALL_EVENTS};
 
 mod report;
 
-pub(crate) use report::REPORT_MAX_CHARS;
+use report::{RelayContract, saved_answer};
+
 pub use report::RelayReport;
 
 const EVENT_BUFFER: usize = 32;
 
-/// Asks for the answer again in the requested shape once the run has answered.
-const SCHEMA_INSTRUCTION: &str = "Give your final answer again as a single JSON value \
-     matching the required schema, and nothing else.";
+const ANSWER_DIR_MODE: u32 = 0o700;
+const ANSWER_FILE_MODE: u32 = 0o600;
+
+/// Asks for the return contract once the run has answered.
+const CONTRACT_INSTRUCTION: &str = "Your answer above is saved in full and handed back. \
+     Now sum it up for the agent that gave you the task, as JSON: `status` is done when the \
+     task is finished, partial when only part of it is, and blocked when you could not make \
+     progress; `summary` states your conclusions in a few lines; `evidence` lists the \
+     file:line references or URLs they rest on; `caveats` lists what you did not verify or \
+     finish.";
 
 /// Why a sub-agent run ended without an answer.
 #[derive(Debug, Error)]
@@ -36,18 +51,13 @@ pub enum SubAgentError {
     /// The run failed.
     #[error("sub-agent failed: {0}")]
     Llm(#[from] LlmError),
-    /// The schema-constrained answer was not JSON, as when it was cut off.
-    #[error("sub-agent's structured answer is not valid JSON: {0}")]
-    MalformedAnswer(#[source] serde_json::Error),
-}
-
-/// The form a sub-agent's final answer must take.
-#[derive(Debug, Clone, PartialEq)]
-pub enum AnswerShape {
-    /// Free text.
-    Text,
-    /// A JSON value matching this JSON schema, enforced by grammar.
-    Schema(Map<String, Value>),
+    /// The answer could not be saved.
+    #[error("cannot save the sub-agent's answer to {}: {source}", path.display())]
+    Save {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 /// Where a relay reports its progress: the turn whose tool call started it,
@@ -88,15 +98,15 @@ impl SubAgentRunner {
     }
 
     /// Run `task` in an empty conversation with `system_prompt` and `tools` until the model
-    /// answers in `shape`, returning only that answer as a report. Only the report reaches the
-    /// model; `progress` is shown its tool calls, and the conversation is dropped when the
-    /// run ends or `cancel` fires.
+    /// answers, save that answer whole to the new file `answer_file`, then ask for its
+    /// contract. Only the report reaches the model; `progress` is shown its tool calls, and
+    /// the conversation is dropped when the run ends or `cancel` fires.
     pub async fn run(
         &self,
         system_prompt: String,
         task: String,
         tools: Arc<ToolRegistry>,
-        shape: AnswerShape,
+        answer_file: PathBuf,
         cancel: CancellationToken,
         progress: &RelayProgress,
     ) -> Result<RelayReport, SubAgentError> {
@@ -114,21 +124,17 @@ impl SubAgentRunner {
         );
         outcome?;
         let answer = finished.text.ok_or(SubAgentError::Cancelled)?;
-        let answer = match shape {
-            AnswerShape::Text => answer,
-            AnswerShape::Schema(schema) => {
-                answer_in_schema(backend.as_ref(), schema, &cancel).await?
-            }
-        };
-        let report = RelayReport::new(&answer);
+        let saved = saved_answer(&answer);
+        let answer_file = save_answer(saved.contents, answer_file).await?;
+        let contract = contract_of(backend.as_ref(), &cancel).await?;
         progress
             .report(RelayEvent::Answered {
-                answer_chars: u32::try_from(report.answer_chars()).unwrap_or(u32::MAX),
+                answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
                 tool_steps: finished.tool_steps,
-                truncated: report.truncated(),
+                answer_file: answer_file.clone(),
             })
             .await;
-        Ok(report)
+        Ok(RelayReport::new(contract, answer_file))
     }
 }
 
@@ -148,20 +154,49 @@ impl RelayProgress {
     }
 }
 
-/// Ask `backend` to restate its answer as JSON held to `schema`, returning
-/// the parsed value re-serialised compactly.
-async fn answer_in_schema(
+/// Write `contents` to the new owner-only file `path`, creating its directory,
+/// and return `path`.
+async fn save_answer(contents: String, path: PathBuf) -> Result<PathBuf, SubAgentError> {
+    on_blocking_pool(move || match write_new_file(&path, contents.as_bytes()) {
+        Ok(()) => Ok(path),
+        Err(source) => Err(SubAgentError::Save { path, source }),
+    })
+    .await
+}
+
+fn write_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(ANSWER_DIR_MODE)
+            .create(dir)?;
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(ANSWER_FILE_MODE)
+        .open(path)?
+        .write_all(contents)
+}
+
+/// Ask `backend` for its contract, held to the contract schema by grammar. A reply
+/// that cannot be read becomes a contract saying so, since the answer is already saved.
+async fn contract_of(
     backend: &dyn LlmBackend,
-    schema: Map<String, Value>,
     cancel: &CancellationToken,
-) -> Result<String, SubAgentError> {
+) -> Result<RelayContract, SubAgentError> {
     let reply = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(SubAgentError::Cancelled),
-        reply = backend.complete_with_schema(SCHEMA_INSTRUCTION.into(), schema) => reply?,
+        reply = backend.complete_with_schema(
+            CONTRACT_INSTRUCTION.into(),
+            RelayContract::schema(),
+        ) => reply?,
     };
-    let value: Value = serde_json::from_str(&reply).map_err(SubAgentError::MalformedAnswer)?;
-    Ok(value.to_string())
+    Ok(RelayContract::parse(&reply).unwrap_or_else(|error| {
+        warn!(target: "assistd::relay", %error, "sub-agent's contract is unreadable");
+        RelayContract::unreadable()
+    }))
 }
 
 /// Collect the run's answer while showing `progress` what the run streams.

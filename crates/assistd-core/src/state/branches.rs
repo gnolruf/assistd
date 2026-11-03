@@ -1,6 +1,8 @@
 //! Branch and session handlers, plus the session-title generator.
 
 use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -16,6 +18,7 @@ use assistd_memory::{
     BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageId, MessageKind,
     PersistedRelayStep, PersistedToolCall, Seq, SessionId, TurnStats, UndoOutcome,
 };
+use assistd_tools::policy::on_blocking_pool;
 
 use super::relay_trace::wire_relay_steps;
 use super::{AppState, send_error, wire_role, wire_timestamp};
@@ -331,6 +334,7 @@ impl AppState {
                 "truncate_to_last_real_user failed (non-fatal)"
             );
         }
+        delete_answer_files(outcome.released_answer_files).await;
         let _ = tx
             .send(Event::UndoApplied {
                 id: id.clone(),
@@ -668,4 +672,26 @@ fn is_within_recency(latest: Option<DateTime<Utc>>, recency_secs: u64) -> bool {
             age >= TimeDelta::zero() && age <= window
         }
     }
+}
+
+/// Delete saved relay answers no stored step names any more; one already gone is fine.
+async fn delete_answer_files(files: Vec<PathBuf>) {
+    if files.is_empty() {
+        return;
+    }
+    on_blocking_pool(move || {
+        for file in &files {
+            if let Err(error) = std::fs::remove_file(file)
+                && error.kind() != ErrorKind::NotFound
+            {
+                warn!(
+                    target: "assistd::state",
+                    file = %file.display(),
+                    %error,
+                    "cannot delete a saved relay answer"
+                );
+            }
+        }
+    })
+    .await;
 }

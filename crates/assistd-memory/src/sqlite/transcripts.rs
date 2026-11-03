@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -22,7 +23,7 @@ use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
 
 mod relays;
 
-use relays::{insert_relay_steps, relay_traces};
+use relays::{all_answer_files, insert_relay_steps, relay_traces, unreferenced_answer_files};
 
 /// Columns [`branch_info`] reads, over `branches b JOIN sessions s`.
 const BRANCH_INFO_SELECT: &str = "
@@ -55,6 +56,15 @@ impl SqliteTranscriptStore {
     /// Store over the shared database handle.
     pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
+    }
+
+    /// Every saved relay answer a stored relay step names.
+    pub async fn relay_answer_files(&self) -> Result<Vec<PathBuf>> {
+        self.handle
+            .reader()
+            .call(|c| all_answer_files(c))
+            .await
+            .map_err(MemoryError::sqlite("relay_answer_files"))
     }
 }
 
@@ -453,6 +463,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                        AND message_id IN (SELECT id FROM messages WHERE turn_id = ?2)",
                     rusqlite::params![branch, turn],
                 )?;
+                let released_answer_files = unreferenced_answer_files(&tx, turn)?;
                 let deleted_messages = delete_unreferenced_turn(&tx, turn)?;
                 tx.commit()?;
                 if dropped_summaries + deleted_messages > 0 {
@@ -461,6 +472,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                 Ok(UndoOutcome {
                     removed_messages: removed as u64,
                     last_user_text,
+                    released_answer_files,
                 })
             })
             .await

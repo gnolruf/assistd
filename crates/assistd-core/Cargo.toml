@@ -26,12 +26,14 @@ chrono = { workspace = true }
 futures-util = { workspace = true }
 libc = { workspace = true }
 rustix = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "net", "signal"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 assistd-tools = { workspace = true, features = ["test-support"] }

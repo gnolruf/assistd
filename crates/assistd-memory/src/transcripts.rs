@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -241,6 +242,9 @@ pub struct UndoOutcome {
     /// Number of `branch_messages` rows dropped.
     pub removed_messages: u64,
     pub last_user_text: Option<String>,
+    /// Saved relay answers whose steps were deleted, for the caller to delete;
+    /// those a fork still holds are kept.
+    pub released_answer_files: Vec<PathBuf>,
 }
 
 /// Candidate returned by [`TranscriptStore::find_resumable_session`].

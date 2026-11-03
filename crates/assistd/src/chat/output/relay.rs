@@ -263,9 +263,7 @@ impl RelayStepTrace {
                 self.finish_compaction(duration_ms);
                 self.transcript.finish_compaction();
             }
-            RelayEvent::Answered { truncated, .. } => {
-                self.finish(RelayStepEnd::Answered { truncated });
-            }
+            RelayEvent::Answered { .. } => self.finish(RelayStepEnd::Answered),
             RelayEvent::Failed { message } => self.finish(RelayStepEnd::Failed { message }),
         }
     }
@@ -345,7 +343,7 @@ impl RelayStepTrace {
             StepState::Running { started_at } => ("Running…", started_at.elapsed()),
             StepState::Finished {
                 elapsed,
-                outcome: RelayStepEnd::Answered { .. },
+                outcome: RelayStepEnd::Answered,
             } => ("Done", *elapsed),
             StepState::Finished {
                 elapsed,
@@ -361,7 +359,7 @@ impl RelayStepTrace {
             StepState::Pending => pending_style(theme),
             StepState::Running { .. } => Style::default().fg(theme.status_text),
             StepState::Finished {
-                outcome: RelayStepEnd::Answered { .. },
+                outcome: RelayStepEnd::Answered,
                 ..
             } => Style::default().fg(theme.success),
             StepState::Finished {
@@ -384,7 +382,7 @@ impl RelayStepTrace {
             StepState::Pending => '○',
             StepState::Running { .. } => '●',
             StepState::Finished {
-                outcome: RelayStepEnd::Answered { .. },
+                outcome: RelayStepEnd::Answered,
                 ..
             } => '✓',
             StepState::Finished {
@@ -395,7 +393,7 @@ impl RelayStepTrace {
     }
 
     /// Its calls, cut to the latest few while running unless `all`, then
-    /// how it failed or that its report was cut.
+    /// how it failed.
     fn detail_rows(&self, all: bool, theme: &Theme) -> Vec<(String, Style)> {
         let shown = match (&self.state, all) {
             (_, true) => self.calls.len(),
@@ -410,19 +408,15 @@ impl RelayStepTrace {
         if hidden > 0 && shown > 0 {
             rows.push((format!("+{hidden} more tool uses"), hint_style(theme)));
         }
-        match &self.state {
-            StepState::Finished {
-                outcome: RelayStepEnd::Failed { message },
-                ..
-            } => rows.push((
+        if let StepState::Finished {
+            outcome: RelayStepEnd::Failed { message },
+            ..
+        } = &self.state
+        {
+            rows.push((
                 format!("✗ {}", escape_controls_single_line(message)),
                 failed_style(theme),
-            )),
-            StepState::Finished {
-                outcome: RelayStepEnd::Answered { truncated: true },
-                ..
-            } if all => rows.push(("report cut to fit".into(), hint_style(theme))),
-            _ => {}
+            ));
         }
         rows
     }
