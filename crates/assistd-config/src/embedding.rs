@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 use crate::custom_args::{CustomArgs, EmbeddingServer};
 use crate::defaults::{
     DEFAULT_EMBEDDING_AUTO_INJECT, DEFAULT_EMBEDDING_ENABLED, DEFAULT_EMBEDDING_GPU_LAYERS,
-    DEFAULT_EMBEDDING_HOST, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_PORT,
-    DEFAULT_EMBEDDING_READY_TIMEOUT_SECS, DEFAULT_EMBEDDING_SERVER_BINARY, DEFAULT_EMBEDDING_TOP_K,
+    DEFAULT_EMBEDDING_HOST, DEFAULT_EMBEDDING_MIN_SIMILARITY, DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_PORT, DEFAULT_EMBEDDING_READY_TIMEOUT_SECS, DEFAULT_EMBEDDING_SERVER_BINARY,
+    DEFAULT_EMBEDDING_TOP_K,
 };
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::voice::UnitInterval;
 
 /// Dedicated embedding server and semantic-recall settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -46,6 +48,10 @@ pub struct EmbeddingConfig {
     /// `false`, recall happens only through `reminisce`. Off while
     /// `memory.enabled` is `false`.
     pub auto_inject: bool,
+    /// Cosine similarity, `0.0..=1.0`, an auto-injected match must reach; a
+    /// query with no match above it gets no recalled context. `0` injects
+    /// every match that is not opposed to the query.
+    pub min_similarity: UnitInterval,
 }
 
 impl DescribeSettings for EmbeddingConfig {
@@ -83,6 +89,11 @@ impl DescribeSettings for EmbeddingConfig {
             "add recalled memories to queries",
             "Prepend recalled memories to every query"
         ),
+        min_similarity => (
+            "recall similarity floor",
+            "How close a match must be to be recalled, 0 to 1",
+            advanced
+        ),
     }
 }
 
@@ -99,6 +110,7 @@ impl Default for EmbeddingConfig {
             custom_args: CustomArgs::default(),
             top_k: DEFAULT_EMBEDDING_TOP_K,
             auto_inject: DEFAULT_EMBEDDING_AUTO_INJECT,
+            min_similarity: DEFAULT_EMBEDDING_MIN_SIMILARITY,
         }
     }
 }

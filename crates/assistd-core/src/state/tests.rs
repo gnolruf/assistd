@@ -2,10 +2,11 @@ use std::borrow::Cow;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use chrono::Utc;
 use parking_lot::Mutex as StdMutex;
 use tokio::sync::{Notify, watch};
 
-use assistd_embed::EmbedderHandle;
+use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, ImageAttachment, ImageMime, ListenPhase, PresenceState,
     PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
@@ -13,8 +14,10 @@ use assistd_ipc::{
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{
-    BranchId, HistoryRow, HistoryScope, MessageKind, PersistedMessage, PersistedRole,
-    PersistedToolCall, SessionId, SqliteHandle, SqliteTranscriptStore, TranscriptStore,
+    BranchId, ChunkId, ChunkLocator, Embedding, EmbeddingHit, HistoryRow, HistoryScope, MemoryHit,
+    MemoryId, MessageId, MessageKind, NoSemanticStore, PersistedMessage, PersistedRole,
+    PersistedToolCall, SemanticStore, SessionId, SqliteHandle, SqliteTranscriptStore,
+    TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
     CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolOutput, ToolsDisabled,
@@ -1812,4 +1815,126 @@ fn tool_calls(row: &HistoryRow) -> &[PersistedToolCall] {
         MessageKind::Assistant { tool_calls, .. } => tool_calls,
         MessageKind::User | MessageKind::Tool { .. } => &[],
     }
+}
+
+#[derive(Debug)]
+struct ConstantEmbedder;
+
+#[async_trait::async_trait]
+impl assistd_embed::Embedder for ConstantEmbedder {
+    async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
+        Ok(vec![1.0])
+    }
+    fn model(&self) -> &'static str {
+        "constant"
+    }
+    fn dim(&self) -> usize {
+        1
+    }
+}
+
+/// Returns its fixed hits, minus the excluded session's.
+#[derive(Debug)]
+struct FixedHits(Vec<EmbeddingHit>);
+
+#[async_trait::async_trait]
+impl SemanticStore for FixedHits {
+    async fn nearest_chunks(
+        &self,
+        _query_vector: Vec<f32>,
+        top_k: usize,
+        exclude_session: Option<SessionId>,
+    ) -> assistd_memory::Result<Vec<EmbeddingHit>> {
+        Ok(self
+            .0
+            .iter()
+            .filter(|hit| {
+                let ChunkLocator::Message { session_id, .. } = hit.locator;
+                Some(session_id) != exclude_session
+            })
+            .take(top_k)
+            .cloned()
+            .collect())
+    }
+    async fn nearest_memories(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: usize,
+    ) -> assistd_memory::Result<Vec<MemoryHit>> {
+        NoSemanticStore.nearest_memories(query_vector, top_k).await
+    }
+    async fn drop_other_models(&self, model: &str) -> assistd_memory::Result<u64> {
+        NoSemanticStore.drop_other_models(model).await
+    }
+    async fn count_missing(&self) -> assistd_memory::Result<UnindexedRows> {
+        NoSemanticStore.count_missing().await
+    }
+    async fn memories_missing_embedding(
+        &self,
+        after: Option<MemoryId>,
+        limit: usize,
+    ) -> assistd_memory::Result<Vec<(MemoryId, String)>> {
+        NoSemanticStore
+            .memories_missing_embedding(after, limit)
+            .await
+    }
+    async fn chunks_missing_embedding(
+        &self,
+        after: Option<ChunkId>,
+        limit: usize,
+    ) -> assistd_memory::Result<Vec<(ChunkId, String)>> {
+        NoSemanticStore.chunks_missing_embedding(after, limit).await
+    }
+    async fn store_embeddings(
+        &self,
+        model: &str,
+        embeddings: Vec<Embedding>,
+    ) -> assistd_memory::Result<()> {
+        NoSemanticStore.store_embeddings(model, embeddings).await
+    }
+}
+
+fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) -> EmbeddingHit {
+    EmbeddingHit {
+        chunk_id: ChunkId(message),
+        locator: ChunkLocator::Message {
+            session_id,
+            message_id: MessageId(message),
+            role: PersistedRole::User,
+            timestamp: Utc::now(),
+        },
+        text: text.into(),
+        similarity,
+    }
+}
+
+#[tokio::test]
+async fn auto_recall_injects_each_strong_hit_from_other_sessions_once_per_session() {
+    let mut state = Arc::into_inner(default_state()).expect("sole owner");
+    let (current, _) = state.runtime.session_ctx.current().await;
+    let other = SessionId::new();
+    state.memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Ready(Arc::new(
+        ConstantEmbedder,
+    ))));
+    state.memory.semantic = Arc::new(FixedHits(vec![
+        recall_hit(current, 1, 0.9, "said in this chat"),
+        recall_hit(other, 2, 0.9, "strong past match"),
+        recall_hit(other, 3, 0.1, "weak past match"),
+    ]));
+    let recall =
+        async |state: &AppState| state.build_semantic_context("rust daemon").await.unwrap();
+
+    let first = recall(&state).await.expect("a strong hit is recalled");
+    assert!(first.contains("strong past match"), "{first}");
+    assert!(!first.contains("said in this chat"), "{first}");
+    assert!(!first.contains("weak past match"), "{first}");
+    assert_eq!(recall(&state).await, None, "already recalled this session");
+
+    state
+        .runtime
+        .session_ctx
+        .replace(SessionId::new(), None)
+        .await;
+    let after_switch = recall(&state).await.expect("a new session recalls afresh");
+    assert!(after_switch.contains("strong past match"), "{after_switch}");
 }

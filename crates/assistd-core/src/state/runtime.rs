@@ -1,5 +1,6 @@
 //! `RuntimeState`: per-process bookkeeping owned by `AppState`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use parking_lot::Mutex as StdMutex;
@@ -11,15 +12,15 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use assistd_ipc::{Event, EventKind, SubscribeFilter};
-use assistd_memory::{BranchId, SessionId};
+use assistd_memory::{BranchId, ChunkLocator, EmbeddingHit, MessageId, SessionId};
 
 use super::chat_focus::ChatFocusSlot;
 use super::wakeword_handlers::MicSession;
 
 const EVENTS_BUS_CAPACITY: usize = 256;
 
-/// The active session and, once its first message is saved, the branch
-/// it lives on; always read and replaced together.
+/// The active session, the branch it lives on once its first message is
+/// saved, and the messages recalled into it; always read and replaced together.
 #[derive(Debug)]
 pub struct SessionContext {
     inner: RwLock<SessionContextInner>,
@@ -36,6 +37,7 @@ impl SessionContext {
             inner: RwLock::new(SessionContextInner {
                 session_id,
                 branch_id,
+                recalled: HashSet::new(),
             }),
             session: watch::channel(session_id).0,
         }
@@ -53,19 +55,42 @@ impl SessionContext {
     }
 
     /// Make `branch_id` of `session_id` active and notify
-    /// [`Self::session_updates`] watchers.
+    /// [`Self::session_updates`] watchers. Switching session forgets what was recalled.
     pub async fn replace(&self, session_id: SessionId, branch_id: Option<BranchId>) {
         let mut active = self.inner.write().await;
+        if active.session_id != session_id {
+            active.recalled.clear();
+        }
         active.session_id = session_id;
         active.branch_id = branch_id;
         self.session.send_replace(session_id);
     }
+
+    /// How many messages have been recalled into the active session.
+    pub async fn recalled_count(&self) -> usize {
+        self.inner.read().await.recalled.len()
+    }
+
+    /// The first `limit` of `hits` whose message was not yet recalled into the
+    /// active session, now recorded as recalled.
+    pub async fn claim_unrecalled(
+        &self,
+        hits: Vec<EmbeddingHit>,
+        limit: usize,
+    ) -> Vec<EmbeddingHit> {
+        let mut active = self.inner.write().await;
+        hits.into_iter()
+            .filter(|hit| active.recalled.insert(hit_message_id(hit)))
+            .take(limit)
+            .collect()
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct SessionContextInner {
     session_id: SessionId,
     branch_id: Option<BranchId>,
+    recalled: HashSet<MessageId>,
 }
 
 /// What a push-to-talk press hands to its release.
@@ -214,6 +239,11 @@ impl Drop for BusSubscription {
             filters.swap_remove(idx);
         }
     }
+}
+
+fn hit_message_id(hit: &EmbeddingHit) -> MessageId {
+    let ChunkLocator::Message { message_id, .. } = hit.locator;
+    message_id
 }
 
 fn bus_copy(event: &Event) -> Event {

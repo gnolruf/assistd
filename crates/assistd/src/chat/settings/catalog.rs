@@ -149,6 +149,7 @@ pub(crate) const SECTIONS: &[Section] = &[
             setting("embedding.model", SettingKind::Text),
             setting("embedding.top_k", SettingKind::Integer),
             setting("embedding.auto_inject", SettingKind::Toggle),
+            setting("embedding.min_similarity", SettingKind::Decimal),
             setting("embedding.server_binary", SettingKind::Text),
             setting("embedding.host", SettingKind::Text),
             setting("embedding.port", SettingKind::Integer),
