@@ -120,6 +120,7 @@ pub const DEFAULT_EMBEDDING_PORT: NonZeroU16 = nz16(8386);
 pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
 pub const DEFAULT_EMBEDDING_TOP_K: NonZeroU32 = nz32(5);
 pub const DEFAULT_EMBEDDING_AUTO_INJECT: bool = true;
+pub const DEFAULT_EMBEDDING_MIN_SIMILARITY: UnitInterval = unit(0.55);
 
 pub const DEFAULT_SEARCH_ENABLED: bool = false;
 /// The console script upstream SearXNG installs.
