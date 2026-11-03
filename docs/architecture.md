@@ -304,9 +304,9 @@ commands, and runs it inside `MainSlot::preserve_across`. A plan's steps run
 back to back inside one `preserve_across`, each in its own quarantine and
 handed only the previous step's rendered `RelayReport` beneath its task and
 its saved answer as an extra input. Since a report carries what its sub-agent
-read, a plan with a web step after a file step is refused as invalid arguments. The tool result is the last step's
-rendered `RelayReport`; a failed step ends the plan as a failed tool result,
-not a failed turn. A relay starts without confirmation; commands inside it ask
+read, a plan with a web step after a file step is refused as invalid arguments.
+The tool result is the last step's rendered `RelayReport`; a failed step ends
+the plan as a failed tool result, not a failed turn. A relay starts without confirmation; commands inside it ask
 the same `ConfirmationGate` as the main agent's, with the prompt marked
 `ConfirmSource::Relay` and the step's task so the user can tell who is asking.
 Cancelling the turn drops the call, which drops the run and removes the

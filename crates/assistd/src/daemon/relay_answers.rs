@@ -20,7 +20,7 @@ pub(super) fn prepare(kept: Option<HashSet<PathBuf>>) -> Result<PathBuf> {
 }
 
 /// Delete every answer under `answers_dir` that `kept` does not name, then each
-/// session directory left empty. Runs before any relay can save an answer.
+/// session directory left empty. Must run before any relay saves an answer.
 fn sweep(answers_dir: &Path, kept: &HashSet<PathBuf>) {
     let sessions = match std::fs::read_dir(answers_dir) {
         Ok(sessions) => sessions,
