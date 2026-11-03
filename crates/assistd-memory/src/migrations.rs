@@ -201,8 +201,9 @@ CREATE TABLE relay_entries (
 ) STRICT, WITHOUT ROWID;
 ";
 
-/// V4: relay steps no longer record whether their report was cut. Recreates
-/// both relay tables without that column, dropping the traces stored so far.
+/// V4: an answered relay step records the file its whole answer was saved to in
+/// place of whether its report was cut. Recreates both relay tables, dropping
+/// the traces stored so far.
 const V4_SQL: &str = r"
 DROP TABLE relay_entries;
 DROP TABLE relay_steps;
@@ -215,10 +216,12 @@ CREATE TABLE relay_steps (
     agent       TEXT NOT NULL CHECK (agent <> ''),
     outcome     INTEGER CHECK (outcome BETWEEN 0 AND 1),
     failure     TEXT,
+    answer_file BLOB CHECK (length(answer_file) > 0),
     duration_ms INTEGER CHECK (duration_ms >= 0),
     tokens      INTEGER CHECK (tokens >= 0),
     UNIQUE (message_id, step),
     CHECK ((outcome IS 1) = (failure IS NOT NULL)),
+    CHECK ((outcome IS 0) = (answer_file IS NOT NULL)),
     CHECK ((outcome IS NULL) = (duration_ms IS NULL)),
     CHECK (outcome IS NOT NULL OR tokens IS NULL)
 ) STRICT;

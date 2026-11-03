@@ -131,6 +131,7 @@ impl SubAgentRunner {
             .report(RelayEvent::Answered {
                 answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
                 tool_steps: finished.tool_steps,
+                answer_file: answer_file.clone(),
             })
             .await;
         Ok(RelayReport::new(contract, answer_file))

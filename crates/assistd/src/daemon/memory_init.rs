@@ -1,6 +1,7 @@
 //! Memory subsystem wiring for the daemon: open SQLite, then resume a
 //! session whose daemon has died or start an unsaved one.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,6 +25,8 @@ pub(super) struct MemorySubsystem {
     /// History of the resumed branch, to replay into the LLM.
     pub resumed_history: HistoryReplay,
     pub sqlite_handle: Option<SqliteHandle>,
+    /// Every saved relay answer the database names; `None` when it cannot say.
+    pub relay_answer_files: Option<HashSet<PathBuf>>,
 }
 
 impl MemorySubsystem {
@@ -35,6 +38,7 @@ impl MemorySubsystem {
             branch_id: None,
             resumed_history: HistoryReplay::default(),
             sqlite_handle: None,
+            relay_answer_files: None,
         }
     }
 
@@ -74,6 +78,12 @@ pub(super) async fn init() -> MemorySubsystem {
     let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
     let (session_id, branch_id, resumed_history) =
         resume_or_start_unsaved_session(transcripts.as_ref(), &db_path).await;
+    let relay_answer_files = transcripts
+        .relay_answer_files()
+        .await
+        .inspect_err(|e| tracing::warn!("memory: cannot list saved relay answers ({e:#})"))
+        .ok()
+        .map(HashSet::from_iter);
 
     MemorySubsystem {
         memory_store: mem_store,
@@ -82,6 +92,7 @@ pub(super) async fn init() -> MemorySubsystem {
         branch_id,
         resumed_history,
         sqlite_handle: Some(handle),
+        relay_answer_files,
     }
 }
 

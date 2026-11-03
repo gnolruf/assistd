@@ -288,9 +288,13 @@ pub enum RelayEvent {
     Compacting,
     /// The compaction `Compacting` announced finished after `duration_ms`.
     Compacted { duration_ms: u64 },
-    /// The sub-agent answered in `answer_chars` characters, as saved, after
-    /// `tool_steps` tool-calling steps.
-    Answered { answer_chars: u32, tool_steps: u32 },
+    /// The sub-agent answered in `answer_chars` characters, saved to
+    /// `answer_file`, after `tool_steps` tool-calling steps.
+    Answered {
+        answer_chars: u32,
+        tool_steps: u32,
+        answer_file: PathBuf,
+    },
     /// The step ended without a report.
     Failed { message: String },
 }

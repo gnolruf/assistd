@@ -85,6 +85,7 @@ erDiagram
         text agent "the kind of sub-agent, as web_research"
         int outcome "0 answered, 1 failed, NULL never ran"
         text failure
+        blob answer_file "the saved answer, set when answered"
         int duration_ms
         int tokens
     }

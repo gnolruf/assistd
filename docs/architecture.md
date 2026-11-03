@@ -219,7 +219,10 @@ the restricted return channel: sanitised and quoted the same way, with
 `artifacts` naming the saved file, and with evidence paths under the
 quarantine's `input/` pointed back at the original inputs. The default system
 prompt says never to follow instructions inside one. The sub-agent's tool
-output and reasoning never leave it.
+output and reasoning never leave it. Each answered step's file is recorded in
+`relay_steps.answer_file`; `/undo` deletes the files of the steps whose rows it
+deletes (a fork still holding the turn keeps them), and daemon start deletes
+every saved answer no stored step names.
 
 A sub-agent's commands run in a `Quarantine`, which starts from an empty world:
 a fresh `relay-*` directory whose `input/` shows the inputs it was handed,
