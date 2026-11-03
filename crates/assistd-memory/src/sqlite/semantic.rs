@@ -9,8 +9,8 @@ use rusqlite::types::FromSql;
 use rusqlite::{Row, Transaction};
 
 use crate::{
-    ChunkId, Embedding, EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit, MemoryId, MessageId,
-    Result, SemanticStore, SessionId, UnindexedRows,
+    ChunkId, ChunkLocator, Embedding, EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit,
+    MemoryId, MessageId, Result, SemanticStore, SessionId, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
@@ -68,7 +68,9 @@ impl SemanticStore for SqliteSemanticStore {
                 )?;
                 hydrate_in_rank_order(
                     c,
-                    "SELECT cc.id, m.id, s.uuid, m.created_at, m.role, m.content
+                    "SELECT cc.id, m.id, s.uuid, m.created_at, m.role,
+                            CAST(substr(CAST(m.content AS BLOB), cc.byte_start + 1,
+                                        cc.byte_end - cc.byte_start) AS TEXT)
                      FROM message_chunks cc
                      JOIN messages m ON m.id = cc.message_id
                      JOIN sessions s ON s.id = m.session_id
@@ -386,11 +388,13 @@ where
 fn chunk_hit(row: &Row<'_>) -> rusqlite::Result<EmbeddingHit> {
     Ok(EmbeddingHit {
         chunk_id: row.get(0)?,
-        message_id: row.get(1)?,
-        session_id: row.get(2)?,
-        timestamp: timestamp_at(row, 3)?,
-        role: row.get(4)?,
-        content: row.get(5)?,
+        locator: ChunkLocator::Message {
+            message_id: row.get(1)?,
+            session_id: row.get(2)?,
+            timestamp: timestamp_at(row, 3)?,
+            role: row.get(4)?,
+        },
+        text: row.get(5)?,
         similarity: 0.0,
     })
 }

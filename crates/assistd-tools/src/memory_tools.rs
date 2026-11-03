@@ -6,7 +6,9 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
-use assistd_memory::{EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId};
+use assistd_memory::{
+    ChunkLocator, EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId,
+};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
@@ -16,6 +18,10 @@ use crate::memory::MemoryOps;
 use crate::{Tool, ToolError, ToolOutput};
 
 const SEARCH_LIMIT: usize = 50;
+
+/// Byte budget for all of `reminisce`'s hit lines together; lower-ranked hits that
+/// would overflow it are dropped.
+const REMINISCE_OUTPUT_BYTES: usize = 8 * 1024;
 
 /// Keys reject whitespace and uppercase so one concept keeps one spelling;
 /// hyphens allow ISO dates (`standup.2026-09-11`).
@@ -223,14 +229,15 @@ impl Tool for ReminisceTool {
 
     fn description(&self) -> Cow<'_, str> {
         "Search *earlier* conversations — every session except the one \
-         in progress, which is already in context — for messages similar \
+         in progress, which is already in context — for passages similar \
          in meaning to a query. Complement to `remember`: its search looks \
          up *saved memories* (key/value), `reminisce` searches *past \
          dialogue text*; use it when the user references something they \
          'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \
-         match a past message about \"the assistd embedding daemon in Rust\". \
-         Returns up to `limit` ranked snippets with timestamps and roles."
+         match a past passage about \"the assistd embedding daemon in Rust\". \
+         Returns up to `limit` ranked snippets, each the matching excerpt \
+         of a past message, with timestamps and roles."
             .into()
     }
 
@@ -242,7 +249,7 @@ impl Tool for ReminisceTool {
                 "query": {
                     "type": "string",
                     "description": "Natural-language query. The model embeds \
-                                    this and finds the top-`limit` past messages \
+                                    this and finds the top-`limit` past passages \
                                     by cosine similarity."
                 },
                 "limit": {
@@ -324,18 +331,33 @@ fn format_chunks(hits: &[EmbeddingHit]) -> String {
     if hits.is_empty() {
         return "(no matches)".to_string();
     }
-    hits.iter()
-        .map(|hit| {
-            format!(
-                "[{} {} sim={:.0}%] {}",
-                hit.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
-                hit.role.as_wire(),
-                hit.similarity * 100.0,
-                hit.content.replace('\n', " ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for line in hits.iter().map(format_chunk) {
+        if used + line.len() > REMINISCE_OUTPUT_BYTES {
+            break;
+        }
+        used += line.len() + 1;
+        lines.push(line);
+    }
+    let omitted = hits.len() - lines.len();
+    if omitted > 0 {
+        lines.push(format!("({omitted} lower-ranked matches omitted)"));
+    }
+    lines.join("\n")
+}
+
+fn format_chunk(hit: &EmbeddingHit) -> String {
+    let ChunkLocator::Message {
+        timestamp, role, ..
+    } = &hit.locator;
+    format!(
+        "[{} {} sim={:.0}%] {}",
+        timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
+        role.as_wire(),
+        hit.similarity * 100.0,
+        hit.text.replace('\n', " ")
+    )
 }
 
 fn valid_key(args: &Value) -> Result<String, ToolError> {

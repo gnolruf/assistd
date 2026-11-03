@@ -7,17 +7,25 @@ use chrono::{DateTime, Utc};
 
 use crate::{ChunkId, MemoryId, MessageId, PersistedRole, Result, SessionId};
 
-/// One message hit through its best-scoring chunk. `content` is the full
-/// message, not the chunk text, since chunks may cut mid-sentence.
+/// One matched chunk: its text, its cosine similarity to the query, and where it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingHit {
-    pub message_id: MessageId,
     pub chunk_id: ChunkId,
-    pub session_id: SessionId,
-    pub timestamp: DateTime<Utc>,
-    pub role: PersistedRole,
-    pub content: String,
+    pub locator: ChunkLocator,
+    pub text: String,
     pub similarity: f32,
+}
+
+/// The source a matched chunk was cut from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChunkLocator {
+    /// A stored transcript message.
+    Message {
+        session_id: SessionId,
+        message_id: MessageId,
+        role: PersistedRole,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// One saved-memory hit, ranked by cosine similarity to the query.
@@ -63,7 +71,8 @@ pub struct UnindexedRows {
 /// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
-    /// Top-K messages by their best chunk's cosine to the L2-normalised `query_vector`.
+    /// Top-K messages by their best chunk's cosine to the L2-normalised `query_vector`,
+    /// each hit carrying that chunk's text.
     /// `exclude_session`'s messages are dropped before ranking, so never count toward `top_k`.
     async fn nearest_chunks(
         &self,
