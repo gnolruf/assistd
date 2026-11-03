@@ -24,6 +24,8 @@ fn sample(kind: SettingKind) -> toml::Value {
         SettingKind::Integer => toml::Value::Integer(1),
         SettingKind::Decimal => toml::Value::Float(0.5),
         SettingKind::Text | SettingKind::Prose => toml::Value::from("x"),
+        SettingKind::Color => toml::Value::from("red"),
+        SettingKind::Themes => toml::Value::Table(toml::Table::new()),
         SettingKind::Choice(options) => toml::Value::from(options[0]),
         SettingKind::List(_) | SettingKind::External => toml::Value::Array(Vec::new()),
     }

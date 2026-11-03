@@ -35,6 +35,7 @@ use tracing_subscriber::fmt;
 use uuid::Uuid;
 
 use self::app::{App, ChatEvent, WireStream};
+use self::theme::Theme;
 
 mod app;
 mod focus;
@@ -42,6 +43,7 @@ mod input;
 mod markdown;
 mod output;
 pub(crate) mod settings;
+mod theme;
 mod ui;
 
 const CHAT_CHANNEL_CAPACITY: usize = 64;
@@ -82,6 +84,7 @@ struct TuiContext {
     shutdown_rx: watch::Receiver<bool>,
     capabilities: StartupCapabilities,
     config_path: PathBuf,
+    theme: Theme,
 }
 
 /// What the daemon reports about itself when the chat starts.
@@ -250,6 +253,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         shutdown_rx: shutdown_tx.subscribe(),
         capabilities,
         config_path,
+        theme: Theme::new(&config.chat.theme),
     })
     .await;
 
@@ -317,6 +321,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         mut shutdown_rx,
         capabilities,
         config_path,
+        theme,
     } = ctx;
 
     let _guard = TerminalGuard::enter()?;
@@ -332,7 +337,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         capabilities.auto_mode,
         picker,
         config_path,
-    );
+    )
+    .with_theme(theme);
     app.spawn_resume_or_new(RESUME_RECENCY_SECS);
 
     let mut events = EventStream::new();

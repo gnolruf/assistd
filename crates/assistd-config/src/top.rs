@@ -24,6 +24,7 @@ use crate::notifications::{NotificationsConfig, TrayIconsConfig};
 use crate::search::SearchConfig;
 use crate::settings::{DescribeSettings, describe_fields};
 use crate::sleep::SleepConfig;
+use crate::theme::{ThemeConfig, is_theme_name};
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::{ToolsConfig, ToolsOutputConfig};
 use crate::voice::{SynthesisConfig, TranscriptionConfig, VoiceConfig};
@@ -343,6 +344,17 @@ fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfi
     }
     if chat.reasoning_effort.as_deref() == Some("") {
         errors.push("chat.reasoning_effort must not be empty".into());
+    }
+    for name in chat.themes.keys() {
+        if !is_theme_name(name) {
+            errors.push(format!(
+                "chat.themes.{name}: a theme name is ASCII letters, digits, _ and -"
+            ));
+        } else if ThemeConfig::built_in(name).is_some() {
+            errors.push(format!(
+                "chat.themes.{name} has the name of a built-in theme"
+            ));
+        }
     }
 }
 

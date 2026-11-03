@@ -203,6 +203,28 @@ pub(crate) const SECTIONS: &[Section] = &[
             setting("notifications.icons.disconnected", SettingKind::Text),
         ],
     ),
+    section(
+        Tab::Theme,
+        "Themes",
+        &[setting("chat.themes", SettingKind::Themes)],
+    ),
+    section(
+        Tab::Theme,
+        "Colors",
+        &[
+            setting("chat.theme.accent", SettingKind::Color),
+            setting("chat.theme.user_message", SettingKind::Color),
+            setting("chat.theme.assistant_text", SettingKind::Color),
+            setting("chat.theme.status_text", SettingKind::Color),
+            setting("chat.theme.code", SettingKind::Color),
+            setting("chat.theme.border", SettingKind::Color),
+            setting("chat.theme.success", SettingKind::Color),
+            setting("chat.theme.error", SettingKind::Color),
+            setting("chat.theme.warning", SettingKind::Color),
+            setting("chat.theme.link", SettingKind::Color),
+            setting("chat.theme.selection", SettingKind::Color),
+        ],
+    ),
 ];
 
 /// How a setting is edited and shown.
@@ -220,6 +242,10 @@ pub(crate) enum SettingKind {
     List(ListItem),
     /// Too structured to edit in a line; shown as an entry count.
     External,
+    /// A theme color, picked in the color picker and shown in itself.
+    Color,
+    /// The saved themes; opens the list that loads, saves and deletes themes.
+    Themes,
 }
 
 /// What one entry of a [`SettingKind::List`] holds.
@@ -268,11 +294,18 @@ pub(crate) enum Tab {
     Model,
     Voice,
     Tools,
+    Theme,
 }
 
 impl Tab {
     /// Every tab, in the order the tab bar shows them.
-    pub(crate) const ALL: [Self; 4] = [Self::General, Self::Model, Self::Voice, Self::Tools];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::General,
+        Self::Model,
+        Self::Voice,
+        Self::Tools,
+        Self::Theme,
+    ];
 
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -280,6 +313,7 @@ impl Tab {
             Self::Model => "Model",
             Self::Voice => "Voice",
             Self::Tools => "Tools",
+            Self::Theme => "Theme",
         }
     }
 }

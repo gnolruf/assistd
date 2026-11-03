@@ -15,9 +15,12 @@ use ratatui::backend::CrosstermBackend;
 use super::TerminalGuard;
 
 mod catalog;
+mod color_picker;
 mod list_editor;
 mod panel;
+mod preview;
 mod render;
+mod theme_list;
 
 pub(crate) use panel::SettingsPanel;
 pub(crate) use render::render_settings;

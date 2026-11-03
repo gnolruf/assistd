@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 
@@ -14,7 +14,7 @@ use super::super::app::{
     ComputerScene, LANE_COLUMNS, Mood, RECENT_RESULTS, StatusState, TestProgress, WakeWordPanel,
     WakeWordStatus, WakeWordView,
 };
-use super::super::markdown::BLEY;
+use super::super::theme::Theme;
 use super::saturating_u16;
 use crate::client::terminal_text::escape_controls_single_line;
 
@@ -76,8 +76,13 @@ const SCENE_GAP_ROWS: usize = 1;
 const CAPTION_ROWS: usize = 2 + RECENT_RESULTS;
 
 /// Draw the panel over `area`, in place of the transcript and input line.
-pub(super) fn render_wake_word_panel(frame: &mut Frame<'_>, area: Rect, panel: &WakeWordPanel) {
-    let accent = Style::default().fg(BLEY);
+pub(super) fn render_wake_word_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    panel: &WakeWordPanel,
+    theme: &Theme,
+) {
+    let accent = Style::default().fg(theme.accent);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent)
@@ -89,13 +94,16 @@ pub(super) fn render_wake_word_panel(frame: &mut Frame<'_>, area: Rect, panel: &
     let inner = block.inner(area);
     frame.render_widget(block, area);
     match &panel.view {
-        WakeWordView::Status => frame.render_widget(wrapped(status_body(&panel.status)), inner),
+        WakeWordView::Status => {
+            frame.render_widget(wrapped(status_body(&panel.status, theme)), inner);
+        }
         WakeWordView::Session(session) => {
             render_scene(
                 frame,
                 inner,
                 &session.scene,
-                test_captions(&session.progress),
+                test_captions(&session.progress, theme),
+                theme,
             );
         }
     }
@@ -117,31 +125,34 @@ fn panel_title(view: &WakeWordView) -> &'static str {
 }
 
 /// The phrase and whether listening is on, then how to change or test it.
-fn status_body(status: &StatusState) -> Vec<Line<'static>> {
-    let mut body = status_rows(status);
+fn status_body(status: &StatusState, theme: &Theme) -> Vec<Line<'static>> {
+    let mut body = status_rows(status, theme);
     body.extend([
         Line::default(),
         Line::styled(
             "Change it as voice.wakeword.phrase in /settings, then restart the daemon.",
-            dim(),
+            dim(theme),
         ),
-        Line::styled("Press Enter to say it and see whether I'd wake.", dim()),
+        Line::styled(
+            "Press Enter to say it and see whether I'd wake.",
+            dim(theme),
+        ),
     ]);
     body
 }
 
-fn status_rows(status: &StatusState) -> Vec<Line<'static>> {
+fn status_rows(status: &StatusState, theme: &Theme) -> Vec<Line<'static>> {
     match status {
-        StatusState::Loading => vec![Line::styled("Reading the wake word…", dim())],
+        StatusState::Loading => vec![Line::styled("Reading the wake word…", dim(theme))],
         StatusState::Failed(message) => vec![Line::styled(
             format!("Couldn't read the wake word: {}", escaped(message)),
-            bad(),
+            bad(theme),
         )],
-        StatusState::Loaded(status) => loaded_status_rows(status),
+        StatusState::Loaded(status) => loaded_status_rows(status, theme),
     }
 }
 
-fn loaded_status_rows(status: &WakeWordStatus) -> Vec<Line<'static>> {
+fn loaded_status_rows(status: &WakeWordStatus, theme: &Theme) -> Vec<Line<'static>> {
     let listening = if status.listening { "on" } else { "off" };
     vec![
         labelled(
@@ -150,13 +161,14 @@ fn loaded_status_rows(status: &WakeWordStatus) -> Vec<Line<'static>> {
                 format!("\"{}\"", escaped(&status.phrase)),
                 bold(),
             )],
+            theme,
         ),
-        labelled("Listening", vec![Span::raw(listening)]),
+        labelled("Listening", vec![Span::raw(listening)], theme),
     ]
 }
 
-fn labelled(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
-    value.insert(0, Span::styled(format!("{label:<12}"), dim()));
+fn labelled(label: &str, mut value: Vec<Span<'static>>, theme: &Theme) -> Line<'static> {
+    value.insert(0, Span::styled(format!("{label:<12}"), dim(theme)));
     Line::from(value)
 }
 
@@ -167,6 +179,7 @@ fn render_scene(
     area: Rect,
     scene: &ComputerScene,
     captions: Vec<Line<'static>>,
+    theme: &Theme,
 ) {
     let scene_rows = COMPUTER.len() + SCENE_GAP_ROWS;
     let height = usize::from(area.height);
@@ -181,13 +194,13 @@ fn render_scene(
         Constraint::Min(0),
     ])
     .areas(area);
-    render_computer(frame, scene_area, scene);
+    render_computer(frame, scene_area, scene, theme);
     frame.render_widget(wrapped(captions).alignment(Alignment::Center), caption_area);
 }
 
 /// The computer centred across `area`, with as much of the inbound lane as
 /// fits to its left and the outbound lane clipped at the right edge.
-fn render_computer(frame: &mut Frame<'_>, area: Rect, scene: &ComputerScene) {
+fn render_computer(frame: &mut Frame<'_>, area: Rect, scene: &ComputerScene, theme: &Theme) {
     let width = saturating_u16(computer_width());
     let art_x = area.x + area.width.saturating_sub(width) / 2;
     let lane_cols = usize::from(art_x - area.x).min(LANE_COLUMNS);
@@ -197,7 +210,7 @@ fn render_computer(frame: &mut Frame<'_>, area: Rect, scene: &ComputerScene) {
         width: area.right() - x,
         ..area
     };
-    let lines = computer_lines(scene, scene.mood(Instant::now()), lane_cols);
+    let lines = computer_lines(scene, scene.mood(Instant::now()), lane_cols, theme);
     frame.render_widget(Paragraph::new(lines), lanes_area);
 }
 
@@ -211,7 +224,12 @@ fn computer_width() -> usize {
 
 /// Each row of the computer wearing `mood`'s face, behind the last
 /// `lane_cols` of the inbound lane, the lane row followed by the outbound one.
-fn computer_lines(scene: &ComputerScene, mood: Mood, lane_cols: usize) -> Text<'static> {
+fn computer_lines(
+    scene: &ComputerScene,
+    mood: Mood,
+    lane_cols: usize,
+    theme: &Theme,
+) -> Text<'static> {
     let face = face_rows(mood);
     let quiet_lane = " ".repeat(lane_cols);
     let inbound: String = scene
@@ -226,12 +244,12 @@ fn computer_lines(scene: &ComputerScene, mood: Mood, lane_cols: usize) -> Text<'
             .unwrap_or(art);
         if row == LANE_ROW {
             Line::from(vec![
-                Span::styled(inbound.clone(), Style::default().fg(BLEY)),
+                Span::styled(inbound.clone(), Style::default().fg(theme.accent)),
                 Span::raw(*art),
                 Span::styled(
                     scene.outbound(),
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(theme.success)
                         .add_modifier(Modifier::BOLD),
                 ),
             ])
@@ -250,7 +268,7 @@ fn face_rows(mood: Mood) -> &'static [&'static str] {
     }
 }
 
-fn test_captions(progress: &TestProgress) -> Vec<Line<'static>> {
+fn test_captions(progress: &TestProgress, theme: &Theme) -> Vec<Line<'static>> {
     let ask = progress.phrase.as_deref().map_or_else(
         || "Say the wake word and I'll tell you whether I'd wake.".to_string(),
         |phrase| {
@@ -262,13 +280,13 @@ fn test_captions(progress: &TestProgress) -> Vec<Line<'static>> {
     );
     let mut captions = vec![Line::styled(ask, bold()), Line::default()];
     if progress.results.is_empty() {
-        captions.push(Line::styled("Listening…", dim()));
+        captions.push(Line::styled("Listening…", dim(theme)));
     }
     captions.extend(progress.results.iter().map(|&matched| {
         if matched {
-            Line::styled("✓ heard the wake word: I'd wake", good())
+            Line::styled("✓ heard the wake word: I'd wake", good(theme))
         } else {
-            Line::styled("✗ heard speech without the wake word", bad())
+            Line::styled("✗ heard speech without the wake word", bad(theme))
         }
     }));
     captions
@@ -286,14 +304,14 @@ fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
 }
 
-fn dim() -> Style {
-    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+fn dim(theme: &Theme) -> Style {
+    Style::default().fg(theme.status_text)
 }
 
-fn good() -> Style {
-    Style::default().fg(Color::Green)
+fn good(theme: &Theme) -> Style {
+    Style::default().fg(theme.success)
 }
 
-fn bad() -> Style {
-    Style::default().fg(Color::Red)
+fn bad(theme: &Theme) -> Style {
+    Style::default().fg(theme.error)
 }

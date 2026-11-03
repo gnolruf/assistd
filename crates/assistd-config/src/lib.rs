@@ -17,6 +17,7 @@ pub mod notifications;
 pub mod search;
 pub mod settings;
 pub mod sleep;
+pub mod theme;
 pub mod timeouts;
 pub mod tools;
 pub mod top;
@@ -27,7 +28,9 @@ pub use compositor::{Compositor, CompositorConfig, CompositorType};
 pub use custom_args::{ChatServer, CustomArgs, EmbeddingServer, ServerKind};
 pub use document::ConfigDocument;
 pub use embedding::EmbeddingConfig;
-pub use errors::{ConfigError, CustomArgsError, SearchCommandError, UnitIntervalError};
+pub use errors::{
+    ConfigError, CustomArgsError, SearchCommandError, ThemeColorError, UnitIntervalError,
+};
 pub use mcp::{McpConfig, McpServerConfig};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
@@ -35,6 +38,7 @@ pub use notifications::{NotificationsConfig, TrayIconsConfig};
 pub use search::{SearchCommand, SearchConfig, SearchEngine};
 pub use settings::{DescribeSettings, SettingInfo, setting_info};
 pub use sleep::SleepConfig;
+pub use theme::{ThemeColor, ThemeConfig};
 pub use timeouts::TimeoutsConfig;
 pub use tools::{
     BashSandboxMode, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScratchConfig,

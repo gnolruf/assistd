@@ -392,6 +392,7 @@ fn chat_spec(port: u16) -> ClientCfg {
             min_p: None,
             presence_penalty: None,
             reasoning_effort: None,
+            ..ChatConfig::default()
         },
         model: ModelConfig {
             name: "test-model".into(),

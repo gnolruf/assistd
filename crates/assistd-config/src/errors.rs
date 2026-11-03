@@ -96,6 +96,13 @@ pub enum SearchCommandError {
 #[error("{0} is outside the range 0.0..=1.0")]
 pub struct UnitIntervalError(pub f32);
 
+/// A string refused by [`crate::theme::ThemeColor`].
+#[derive(Debug, Error)]
+#[error(
+    "`{0}` is not a color: use `default`, a named ANSI color such as `dark_gray`, or `#rrggbb`"
+)]
+pub struct ThemeColorError(pub String);
+
 fn format_validation_errors(errors: &[String]) -> String {
     let mut report = format!("configuration has {} error(s):", errors.len());
     for (i, error) in errors.iter().enumerate() {
