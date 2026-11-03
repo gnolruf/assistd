@@ -9,6 +9,7 @@ mod migrations;
 mod relay_traces;
 mod semantic;
 mod sqlite;
+mod tasks;
 mod transcripts;
 
 pub use error::{BackendError, MemoryError, Result};
@@ -21,7 +22,10 @@ pub use semantic::{
     Embedding, EmbeddingHit, EmbeddingTarget, MemoryHit, NoSemanticStore, SemanticStore,
     UnindexedRows,
 };
-pub use sqlite::{SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore};
+pub use sqlite::{
+    SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTaskStore, SqliteTranscriptStore,
+};
+pub use tasks::{NoTaskStore, TaskRecord, TaskStore};
 pub use transcripts::{
     AppendedMessage, BranchHistory, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
     MessageKind, NoTranscriptStore, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,

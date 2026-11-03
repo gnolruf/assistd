@@ -34,6 +34,7 @@ pub(crate) mod relay_trace;
 pub(crate) mod runtime;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
+pub(crate) mod task_handlers;
 pub(crate) mod voice_handlers;
 pub(crate) mod wakeword_handlers;
 pub(crate) mod wire;
@@ -227,6 +228,13 @@ impl AppState {
             Request::GetReadiness { id } => replied(self.handle_get_readiness(id, tx)).await,
             Request::Subscribe { id, filter } => {
                 replied(self.handle_subscribe(id, filter, tx)).await
+            }
+            Request::TaskList { id } => self.handle_task_list(id, tx).await,
+            Request::TaskGet { id, task } => self.handle_task_get(id, task, tx).await,
+            Request::TaskSave { id, task, spec } => self.handle_task_save(id, task, spec, tx).await,
+            Request::TaskDelete { id, task } => self.handle_task_delete(id, task, tx).await,
+            Request::TaskSetEnabled { id, task, enabled } => {
+                self.handle_task_set_enabled(id, task, enabled, tx).await
             }
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 replied(send_error(

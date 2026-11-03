@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 use assistd_config::EmbeddingConfig;
 use assistd_embed::{EmbedJob, EmbedderHandle};
 use assistd_memory::{
-    MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, SemanticStore, TranscriptStore,
+    MemoryStore, NoMemoryStore, NoSemanticStore, NoTaskStore, NoTranscriptStore, SemanticStore,
+    TaskStore, TranscriptStore,
 };
 use assistd_tools::MemoryOps;
 use assistd_utils::readiness::Readiness;
@@ -18,6 +19,7 @@ use assistd_utils::readiness::Readiness;
 pub struct MemoryStack {
     pub memory: Arc<dyn MemoryStore>,
     pub transcripts: Arc<dyn TranscriptStore>,
+    pub tasks: Arc<dyn TaskStore>,
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
@@ -37,6 +39,7 @@ impl MemoryStack {
         Self {
             memory,
             transcripts,
+            tasks: Arc::new(NoTaskStore),
             memory_ops,
             embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(
                 "embedding not configured".into(),
@@ -58,6 +61,12 @@ impl MemoryStack {
     pub fn with_transcripts(mut self, transcripts: Arc<dyn TranscriptStore>) -> Self {
         self.transcripts = transcripts.clone();
         self.memory_ops = Arc::new(MemoryOps::new(self.memory.clone(), transcripts));
+        self
+    }
+
+    /// Replace the task store.
+    pub fn with_tasks(mut self, tasks: Arc<dyn TaskStore>) -> Self {
+        self.tasks = tasks;
         self
     }
 

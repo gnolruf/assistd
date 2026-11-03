@@ -8,9 +8,9 @@ use std::sync::Arc;
 use assistd_core::branch_replay;
 use assistd_llm::HistoryReplay;
 use assistd_memory::{
-    BranchHistory, BranchId, HistoryScope, MemoryError, MemoryStore, NoMemoryStore,
-    NoTranscriptStore, SessionId, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore,
-    TranscriptStore,
+    BranchHistory, BranchId, HistoryScope, MemoryError, MemoryStore, NoMemoryStore, NoTaskStore,
+    NoTranscriptStore, SessionId, SqliteHandle, SqliteMemoryStore, SqliteTaskStore,
+    SqliteTranscriptStore, TaskStore, TranscriptStore,
 };
 use rustix::io::Errno;
 use rustix::process::Pid;
@@ -19,6 +19,7 @@ use tracing::info;
 pub(super) struct MemorySubsystem {
     pub memory_store: Arc<dyn MemoryStore>,
     pub transcript_store: Arc<dyn TranscriptStore>,
+    pub task_store: Arc<dyn TaskStore>,
     pub session_id: SessionId,
     /// `None` for an unsaved session, inserted with its first message.
     pub branch_id: Option<BranchId>,
@@ -34,6 +35,7 @@ impl MemorySubsystem {
         Self {
             memory_store: Arc::new(NoMemoryStore),
             transcript_store: Arc::new(NoTranscriptStore),
+            task_store: Arc::new(NoTaskStore),
             session_id: SessionId::new(),
             branch_id: None,
             resumed_history: HistoryReplay::default(),
@@ -88,6 +90,7 @@ pub(super) async fn init() -> MemorySubsystem {
     MemorySubsystem {
         memory_store: mem_store,
         transcript_store: transcripts,
+        task_store: Arc::new(SqliteTaskStore::new(handle.clone())),
         session_id,
         branch_id,
         resumed_history,

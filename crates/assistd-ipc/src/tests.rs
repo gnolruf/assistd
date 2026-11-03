@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::json;
 
+use crate::task::{MAX_TASK_NAME_CHARS, MAX_TASK_PROMPT_BYTES};
+
 fn id() -> String {
     "r".into()
 }
@@ -12,6 +14,7 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         memory_request_cases(),
         session_request_cases(),
         wake_word_request_cases(),
+        task_request_cases(),
     ]
     .concat()
 }
@@ -224,6 +227,7 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         session_event_cases(),
         relay_history_event_cases(),
         wake_word_event_cases(),
+        task_event_cases(),
     ]
     .concat()
 }
@@ -738,4 +742,164 @@ fn startup_readiness_keeps_the_latest_state_in_first_seen_order() {
         readiness.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
         [StartupComponent::Embedding, StartupComponent::VoiceInput]
     );
+}
+
+fn sample_task_spec() -> TaskSpec {
+    TaskSpec {
+        name: TaskName::try_from("digest".to_string()).unwrap(),
+        prompt: TaskPrompt::try_from("summarize my inbox".to_string()).unwrap(),
+        triggers: vec![TaskTrigger::Manual],
+        enabled: true,
+        grants: vec![
+            TaskGrant::Program {
+                program: "git".into(),
+                subcommand: Some("status".into()),
+            },
+            TaskGrant::WebHost {
+                host: "example.org".into(),
+            },
+            TaskGrant::McpTool {
+                name: "mcp__mail__list".into(),
+            },
+            TaskGrant::App {
+                desktop_entry: "firefox.desktop".into(),
+            },
+            TaskGrant::Write {
+                under: PathBuf::from("/home/u/notes"),
+            },
+        ],
+        plan: Some(TaskPlan {
+            summary: "read and summarize".into(),
+            steps: vec![PlanStep {
+                description: "list mail".into(),
+                actions: vec![TaskGrant::McpTool {
+                    name: "mcp__mail__list".into(),
+                }],
+            }],
+        }),
+    }
+}
+
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"summary":"read and summarize","steps":[{"description":"list mail","actions":[{"kind":"mcp_tool","name":"mcp__mail__list"}]}]}}"#;
+
+fn task_request_cases() -> Vec<(Request, &'static str)> {
+    let save_wire =
+        format!(r#"{{"type":"task_save","id":"r","task":4,"spec":{SAMPLE_TASK_SPEC_WIRE}}}"#);
+    vec![
+        (
+            Request::TaskList { id: id() },
+            r#"{"type":"task_list","id":"r"}"#,
+        ),
+        (
+            Request::TaskGet {
+                id: id(),
+                task: TaskId(4),
+            },
+            r#"{"type":"task_get","id":"r","task":4}"#,
+        ),
+        (
+            Request::TaskSave {
+                id: id(),
+                task: Some(TaskId(4)),
+                spec: sample_task_spec(),
+            },
+            save_wire.leak(),
+        ),
+        (
+            Request::TaskSave {
+                id: id(),
+                task: None,
+                spec: TaskSpec {
+                    grants: Vec::new(),
+                    plan: None,
+                    triggers: Vec::new(),
+                    ..sample_task_spec()
+                },
+            },
+            r#"{"type":"task_save","id":"r","spec":{"name":"digest","prompt":"summarize my inbox","triggers":[],"enabled":true}}"#,
+        ),
+        (
+            Request::TaskDelete {
+                id: id(),
+                task: TaskId(4),
+            },
+            r#"{"type":"task_delete","id":"r","task":4}"#,
+        ),
+        (
+            Request::TaskSetEnabled {
+                id: id(),
+                task: TaskId(4),
+                enabled: false,
+            },
+            r#"{"type":"task_set_enabled","id":"r","task":4,"enabled":false}"#,
+        ),
+    ]
+}
+
+fn task_event_cases() -> Vec<(Event, &'static str)> {
+    let wire = format!(r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE}}}"#);
+    vec![(
+        Event::Task {
+            id: id(),
+            task_id: TaskId(4),
+            spec: sample_task_spec(),
+        },
+        wire.leak(),
+    )]
+}
+
+#[test]
+fn task_run_states_match_pinned_wire_format() {
+    let cases = [
+        (TaskRunState::Queued, r#"{"state":"queued"}"#),
+        (TaskRunState::Running, r#"{"state":"running"}"#),
+        (
+            TaskRunState::Suspended {
+                reason: SuspendReason::UserConversation,
+            },
+            r#"{"state":"suspended","reason":"user_conversation"}"#,
+        ),
+        (
+            TaskRunState::Suspended {
+                reason: SuspendReason::GpuBusy,
+            },
+            r#"{"state":"suspended","reason":"gpu_busy"}"#,
+        ),
+        (TaskRunState::NeedsInput, r#"{"state":"needs_input"}"#),
+        (TaskRunState::Succeeded, r#"{"state":"succeeded"}"#),
+        (
+            TaskRunState::Failed {
+                reason: "daemon stopped".into(),
+            },
+            r#"{"state":"failed","reason":"daemon stopped"}"#,
+        ),
+        (TaskRunState::Cancelled, r#"{"state":"cancelled"}"#),
+    ];
+    for (state, wire) in cases {
+        assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+        assert_eq!(serde_json::from_str::<TaskRunState>(wire).unwrap(), state);
+    }
+}
+
+#[test]
+fn task_save_refuses_blank_names_and_oversized_prompts_at_parse() {
+    let save = |name: &str, prompt: &str| {
+        serde_json::to_string(&json!({
+            "type": "task_save",
+            "id": "r",
+            "spec": {"name": name, "prompt": prompt, "enabled": true},
+        }))
+        .unwrap()
+    };
+    let parse = |line: String| serde_json::from_str::<Request>(&line);
+
+    assert!(parse(save("   ", "hi")).is_err());
+    assert!(parse(save(&"n".repeat(MAX_TASK_NAME_CHARS + 1), "hi")).is_err());
+    assert!(parse(save("digest", " \n ")).is_err());
+    assert!(parse(save("digest", &"p".repeat(MAX_TASK_PROMPT_BYTES + 1))).is_err());
+
+    let Request::TaskSave { spec, .. } = parse(save("  digest  ", "hi")).unwrap() else {
+        panic!("not a task_save");
+    };
+    assert_eq!(spec.name.as_str(), "digest");
 }

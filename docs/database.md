@@ -24,6 +24,7 @@ erDiagram
     relay_steps ||--o{ relay_entries : "did"
     message_chunks ||--o| chunk_embeddings : "embedded as"
     memories ||--o| memory_embeddings : "embedded as"
+    tasks ||--o{ task_runs : "ran as"
 
     sessions {
         int id PK
@@ -122,6 +123,30 @@ erDiagram
         text model
         blob vector
     }
+    tasks {
+        int id PK
+        text name UK
+        text prompt
+        text triggers "JSON array"
+        int enabled
+        text grants "JSON array"
+        text plan "JSON, NULL until approved"
+        int created_at
+        int updated_at
+    }
+    task_runs {
+        int id PK
+        int task_id FK
+        text trigger "JSON, the trigger that fired"
+        int state "0 queued, 1 running, 2 suspended, 3 needs input, 4 succeeded, 5 failed, 6 cancelled"
+        int suspend_reason "0 user conversation, 1 GPU busy"
+        text failure
+        text session_uuid "the run's transcript session"
+        int queued_at
+        int started_at
+        int ended_at "set once finished"
+        text reply "the final reply, set when succeeded"
+    }
 ```
 
 Every table is `STRICT`, and every timestamp is Unix milliseconds.
@@ -180,6 +205,17 @@ cascades to the rows that hang off it.
 overwrites `value` in place and bumps `updated_at`. A trigger deletes
 the memory's embedding whenever its value changes, so a stale vector
 never outlives the text it was computed from.
+
+## Tasks
+
+**`tasks`** holds saved prompts run without the user opening a
+conversation, one row per unique `name`, with the triggers that start
+them and the plan and grants approved for the prompt. Saving a task
+whose `prompt` changed clears `plan` and `grants` in the same
+transaction, so an approval never outlives the prompt it was made for.
+**`task_runs`** records each run: the trigger that fired it, its state,
+its transcript session, and, once it succeeds, its final reply.
+Deleting a task deletes its runs; their transcript sessions stay.
 
 ## Embeddings
 
