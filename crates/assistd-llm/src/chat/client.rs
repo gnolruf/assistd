@@ -27,9 +27,9 @@ use super::sse::{SseEvent, SseLineReader};
 use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
-    HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
-    LlmResult, MainSlot, OneShotReply, ReadyState, StepOutcome, Thinking, ToolCall,
-    ToolResultPayload,
+    ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent,
+    LlmHealthProbe, LlmResult, OneShotReply, ReadyState, SlotStash, StepOutcome, Thinking,
+    ToolCall, ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -58,8 +58,9 @@ pub struct LlamaChatClient {
     /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
-    /// The guard on this conversation's slot; `None` on isolated conversations.
-    main_slot: Option<Arc<MainSlot>>,
+    /// The stash this conversation's slot state is kept in, under its key;
+    /// `None` on throwaway conversations.
+    slot: Option<SlotBinding>,
 }
 
 impl LlamaChatClient {
@@ -91,20 +92,23 @@ impl LlamaChatClient {
             timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
             health,
-            main_slot: None,
+            slot: None,
         })
     }
 
-    /// Restore `main_slot` before each request when a dropped sub-agent group
-    /// left it saved.
-    pub fn with_main_slot(mut self, main_slot: Arc<MainSlot>) -> Self {
-        self.main_slot = Some(main_slot);
+    /// Keep this, the main conversation, in `stash`, switching the slot to it
+    /// before each request.
+    pub fn with_slot_stash(mut self, stash: Arc<SlotStash>) -> Self {
+        self.slot = Some(SlotBinding {
+            stash,
+            key: ConversationKey::Main,
+        });
         self
     }
 
-    async fn restore_main_slot(&self) {
-        if let Some(main_slot) = &self.main_slot {
-            main_slot.restore_pending().await;
+    async fn claim_slot(&self) {
+        if let Some(SlotBinding { stash, key }) = &self.slot {
+            stash.switch_to(*key).await;
         }
     }
 
@@ -216,7 +220,7 @@ impl LlamaChatClient {
         compaction_headroom: Option<NonZeroU32>,
         tx: &mpsc::Sender<LlmEvent>,
     ) -> StreamOutcome {
-        self.restore_main_slot().await;
+        self.claim_slot().await;
         let Ok(pid_at_request) = self.serving_pid().await else {
             return StreamOutcome::ServerRestart {
                 accum: Box::default(),
@@ -735,7 +739,11 @@ impl LlmBackend for LlamaChatClient {
         self.stream_text(body_bytes, "complete_with_schema").await
     }
 
-    fn isolated_conversation(&self, system_prompt: String) -> LlmResult<Arc<dyn LlmBackend>> {
+    fn isolated_conversation(
+        &self,
+        system_prompt: String,
+        slot: Option<ConversationKey>,
+    ) -> LlmResult<Arc<dyn LlmBackend>> {
         let chat = ChatConfig {
             system_prompt: system_prompt.clone(),
             ..self.chat.clone()
@@ -748,9 +756,21 @@ impl LlmBackend for LlamaChatClient {
             timeouts: self.timeouts.clone(),
             conv: Mutex::new(Conversation::new(system_prompt)),
             health: self.health.clone(),
-            main_slot: None,
+            slot: slot.and_then(|key| {
+                self.slot.as_ref().map(|binding| SlotBinding {
+                    stash: Arc::clone(&binding.stash),
+                    key,
+                })
+            }),
         }))
     }
+}
+
+/// A conversation's key in the stash its slot state is kept in.
+#[derive(Debug)]
+struct SlotBinding {
+    stash: Arc<SlotStash>,
+    key: ConversationKey,
 }
 
 /// Summarizes by continuing the live conversation with the request's own
@@ -766,7 +786,7 @@ impl Summarizer for ContinuationSummarizer<'_> {
     /// Ask with the request's tools first, so the cached prompt is reused; a
     /// reply that calls a tool or is empty is asked again with no tools offered.
     async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
-        self.client.restore_main_slot().await;
+        self.client.claim_slot().await;
         self.client.serving_pid().await?;
         let SummaryRequest {
             mut messages,

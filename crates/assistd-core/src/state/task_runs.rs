@@ -10,7 +10,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
 use assistd_ipc::{ConfirmSource, Event, TaskId, TaskRunId, TaskTrigger};
-use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
+use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
@@ -152,12 +152,25 @@ impl AppState {
             return Ok(None);
         };
         let system_prompt = task_system_prompt(&self.config.chat.system_prompt);
-        let backend = self.subsystems.llm.isolated_conversation(system_prompt)?;
+        let key = ConversationKey::TaskRun(turn.run);
+        let backend = self
+            .subsystems
+            .llm
+            .isolated_conversation(system_prompt, Some(key))?;
         let persist = self.open_task_run_session(turn).await;
-        let unattended = self.unattended_turn(turn, backend, persist, cancel, tx);
-        match &self.subsystems.main_slot {
-            Some(main_slot) => main_slot.preserve_across(unattended).await,
-            None => unattended.await,
+        let outcome = self
+            .unattended_turn(turn, backend, persist, cancel, tx)
+            .await;
+        self.hand_slot_back_to_main(key).await;
+        outcome
+    }
+
+    /// Drop the ended run's slot state and restore the main conversation's
+    /// while the daemon is still idle.
+    async fn hand_slot_back_to_main(&self, run: ConversationKey) {
+        if let Some(stash) = &self.subsystems.slot_stash {
+            stash.end(run).await;
+            stash.switch_to(ConversationKey::Main).await;
         }
     }
 

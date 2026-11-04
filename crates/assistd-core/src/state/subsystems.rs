@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use assistd_llm::{LlmBackend, MainSlot};
+use assistd_llm::{LlmBackend, SlotStash};
 use assistd_tools::{ToolCatalog, ToolRegistry, ToolsDisabled};
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
@@ -55,8 +55,8 @@ pub struct Subsystems {
     /// Readiness of the SearXNG instance web search goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub tools_disabled: Option<ToolsDisabled>,
-    /// Keeps the main conversation's slot across turns on other conversations.
-    pub main_slot: Option<Arc<MainSlot>>,
+    /// Keeps each conversation's slot state while another uses the slot.
+    pub slot_stash: Option<Arc<SlotStash>>,
 }
 
 impl Subsystems {
@@ -80,7 +80,7 @@ impl Subsystems {
                 "not configured".into(),
             ))),
             tools_disabled: None,
-            main_slot: None,
+            slot_stash: None,
         }
     }
 
@@ -108,9 +108,9 @@ impl Subsystems {
         self
     }
 
-    /// Keep the main conversation's slot across task runs with `main_slot`.
-    pub fn with_main_slot(mut self, main_slot: Arc<MainSlot>) -> Self {
-        self.main_slot = Some(main_slot);
+    /// Keep each conversation's slot state in `slot_stash` while another uses the slot.
+    pub fn with_slot_stash(mut self, slot_stash: Arc<SlotStash>) -> Self {
+        self.slot_stash = Some(slot_stash);
         self
     }
 

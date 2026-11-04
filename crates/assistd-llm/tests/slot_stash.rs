@@ -1,5 +1,5 @@
-//! End-to-end tests for saving and restoring the main slot around a group of
-//! sub-agent requests, against a presence-managed `fake_llama_server`.
+//! End-to-end tests for stashing each conversation's slot state while others
+//! use the slot, against a presence-managed `fake_llama_server`.
 
 #![cfg(feature = "test-support")]
 
@@ -17,7 +17,8 @@ use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_core::PresenceManager;
 use assistd_core::presence::PresenceLlmHealthProbe;
-use assistd_llm::{LlamaChatClient, LlmBackend, LlmHealthProbe, MainSlot};
+use assistd_ipc::TaskRunId;
+use assistd_llm::{ConversationKey, LlamaChatClient, LlmBackend, LlmHealthProbe, SlotStash};
 
 use common::FakeLlama;
 
@@ -56,15 +57,15 @@ impl Harness {
         Arc::new(PresenceLlmHealthProbe::new(Arc::clone(&self.manager)))
     }
 
-    fn main_slot(&self) -> MainSlot {
-        MainSlot::new(
+    fn slot_stash(&self) -> SlotStash {
+        SlotStash::new(
             SocketAddr::new(Ipv4Addr::LOCALHOST.into(), self.port),
             Some(self.fake.api_key()),
             model_spec(&self.fake, self.port).name,
             self.fake.slot_dir(),
             Some(self.probe()),
         )
-        .expect("main slot")
+        .expect("slot stash")
     }
 
     fn chat_client(&self) -> LlamaChatClient {
@@ -78,8 +79,8 @@ impl Harness {
         .expect("chat client")
     }
 
-    /// `(save_count, restore_count)` of the child serving now.
-    async fn slot_actions(&self) -> (u64, u64) {
+    /// The files the child serving now saved and restored, in order.
+    async fn slot_actions(&self) -> (Vec<String>, Vec<String>) {
         let url = format!("http://127.0.0.1:{}/debug/counters", self.port);
         let counters: Value = reqwest::get(&url)
             .await
@@ -88,8 +89,8 @@ impl Harness {
             .await
             .expect("counters json");
         (
-            counters["save_count"].as_u64().expect("save_count"),
-            counters["restore_count"].as_u64().expect("restore_count"),
+            file_names(&counters["saved"]),
+            file_names(&counters["restored"]),
         )
     }
 
@@ -126,6 +127,18 @@ async fn grab_port() -> u16 {
     port
 }
 
+fn file_names(list: &Value) -> Vec<String> {
+    list.as_array()
+        .expect("a list of file names")
+        .iter()
+        .map(|name| name.as_str().expect("a file name").to_string())
+        .collect()
+}
+
+fn names(files: &[&str]) -> Vec<String> {
+    files.iter().map(ToString::to_string).collect()
+}
+
 fn model_spec(fake: &FakeLlama, port: u16) -> ModelConfig {
     ModelConfig {
         name: "test/fake-model-GGUF:Q4_K_M".to_string(),
@@ -139,7 +152,7 @@ fn model_spec(fake: &FakeLlama, port: u16) -> ModelConfig {
     }
 }
 
-async fn chat_request(client: &LlamaChatClient) {
+async fn chat_request(client: &dyn LlmBackend) {
     let (tx, mut rx) = mpsc::channel(64);
     client
         .generate("task".into(), tx)
@@ -151,13 +164,17 @@ async fn chat_request(client: &LlamaChatClient) {
 #[tokio::test]
 async fn a_cancelled_group_saves_once_before_and_restores_once_after() {
     let harness = Harness::start().await;
-    let slot = harness.main_slot();
+    let slot = harness.slot_stash();
     let client = harness.chat_client();
+    slot.switch_to(ConversationKey::Main).await;
 
     let sub_agents = async {
         for _ in 0..2 {
             chat_request(&client).await;
-            assert_eq!(harness.slot_actions().await, (1, 0));
+            assert_eq!(
+                harness.slot_actions().await,
+                (names(&["main.bin"]), names(&[]))
+            );
         }
         std::future::pending::<()>().await;
     };
@@ -166,7 +183,10 @@ async fn a_cancelled_group_saves_once_before_and_restores_once_after() {
         .await;
 
     assert!(outcome.is_err(), "the group should have been cut off");
-    assert_eq!(harness.slot_actions().await, (1, 1));
+    assert_eq!(
+        harness.slot_actions().await,
+        (names(&["main.bin"]), names(&["main.bin"]))
+    );
     assert!(
         !harness.has_slot_file(),
         "the saved slot outlived its group"
@@ -176,25 +196,30 @@ async fn a_cancelled_group_saves_once_before_and_restores_once_after() {
 #[tokio::test]
 async fn a_restart_inside_the_group_skips_the_restore() {
     let harness = Harness::start().await;
-    let slot = harness.main_slot();
+    let slot = harness.slot_stash();
+    slot.switch_to(ConversationKey::Main).await;
 
     let outcome = slot
         .preserve_across(async {
-            assert_eq!(harness.slot_actions().await, (1, 0));
+            assert_eq!(
+                harness.slot_actions().await,
+                (names(&["main.bin"]), names(&[]))
+            );
             harness.restart_child().await;
             "finished"
         })
         .await;
 
     assert_eq!(outcome, "finished");
-    assert_eq!(harness.slot_actions().await, (0, 0));
+    assert_eq!(harness.slot_actions().await, (names(&[]), names(&[])));
 }
 
 #[tokio::test]
 async fn a_dropped_group_is_restored_before_the_next_main_request() {
     let harness = Harness::start().await;
-    let slot = Arc::new(harness.main_slot());
-    let main = harness.chat_client().with_main_slot(Arc::clone(&slot));
+    let slot = Arc::new(harness.slot_stash());
+    let main = harness.chat_client().with_slot_stash(Arc::clone(&slot));
+    chat_request(&main).await;
 
     let dropped = tokio::time::timeout(
         Duration::from_secs(1),
@@ -202,12 +227,50 @@ async fn a_dropped_group_is_restored_before_the_next_main_request() {
     )
     .await;
     assert!(dropped.is_err(), "the group should have been dropped");
-    assert_eq!(harness.slot_actions().await, (1, 0));
+    assert_eq!(
+        harness.slot_actions().await,
+        (names(&["main.bin"]), names(&[]))
+    );
 
     chat_request(&main).await;
-    assert_eq!(harness.slot_actions().await, (1, 1));
+    assert_eq!(
+        harness.slot_actions().await,
+        (names(&["main.bin"]), names(&["main.bin"]))
+    );
     assert!(
         !harness.has_slot_file(),
         "the saved slot outlived its restore"
+    );
+}
+
+#[tokio::test]
+async fn each_conversation_gets_back_its_own_slot_until_the_child_restarts() {
+    let harness = Harness::start().await;
+    let slot = Arc::new(harness.slot_stash());
+    let main = harness.chat_client().with_slot_stash(Arc::clone(&slot));
+    let run = main
+        .isolated_conversation(
+            "task prompt".into(),
+            Some(ConversationKey::TaskRun(TaskRunId(7))),
+        )
+        .expect("task run conversation");
+
+    chat_request(&main).await;
+    chat_request(run.as_ref()).await;
+    chat_request(&main).await;
+    chat_request(run.as_ref()).await;
+    assert_eq!(
+        harness.slot_actions().await,
+        (
+            names(&["main.bin", "task-run-7.bin", "main.bin"]),
+            names(&["main.bin", "task-run-7.bin"])
+        )
+    );
+
+    harness.restart_child().await;
+    chat_request(&main).await;
+    assert_eq!(
+        harness.slot_actions().await,
+        (names(&["task-run-7.bin"]), names(&[]))
     );
 }

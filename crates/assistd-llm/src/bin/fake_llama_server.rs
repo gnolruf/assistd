@@ -51,8 +51,10 @@ struct ServerState {
     loaded_model: Option<String>,
     load_count: u32,
     unload_count: u32,
-    save_count: u32,
-    restore_count: u32,
+    /// The file each slot save wrote, in order.
+    saved: Vec<String>,
+    /// The file each slot restore read, in order.
+    restored: Vec<String>,
 }
 
 impl ServerState {
@@ -438,8 +440,8 @@ async fn counters_response(
         "pid": std::process::id(),
         "load_count": server.load_count,
         "unload_count": server.unload_count,
-        "save_count": server.save_count,
-        "restore_count": server.restore_count,
+        "saved": server.saved,
+        "restored": server.restored,
         "loaded_model": server.loaded_model,
     });
     ("HTTP/1.1 200 OK", "application/json", body.to_string())
@@ -451,11 +453,11 @@ async fn save_slot_response(
     state: &Arc<Mutex<ServerState>>,
     body: &str,
 ) -> (&'static str, &'static str, String) {
-    let Some(path) = slot_file(state, body).await else {
+    let Some((filename, path)) = slot_file(state, body).await else {
         return bad_slot_request();
     };
     std::fs::write(&path, b"slot").expect("write slot file");
-    state.lock().await.save_count += 1;
+    state.lock().await.saved.push(filename);
     (
         "HTTP/1.1 200 OK",
         "application/json",
@@ -468,10 +470,13 @@ async fn restore_slot_response(
     state: &Arc<Mutex<ServerState>>,
     body: &str,
 ) -> (&'static str, &'static str, String) {
-    let Some(path) = slot_file(state, body).await.filter(|path| path.exists()) else {
+    let Some((filename, path)) = slot_file(state, body)
+        .await
+        .filter(|(_, path)| path.exists())
+    else {
         return bad_slot_request();
     };
-    state.lock().await.restore_count += 1;
+    state.lock().await.restored.push(filename);
     let n_read = std::fs::metadata(path).map_or(0, |meta| meta.len());
     (
         "HTTP/1.1 200 OK",
@@ -480,13 +485,14 @@ async fn restore_slot_response(
     )
 }
 
-/// The slot file a request names inside `--slot-save-path`, or `None` when
-/// the request lacks a model or filename or no directory was given.
-async fn slot_file(state: &Arc<Mutex<ServerState>>, body: &str) -> Option<PathBuf> {
+/// The slot file a request names and its path inside `--slot-save-path`, or
+/// `None` when the request lacks a model or filename or no directory was given.
+async fn slot_file(state: &Arc<Mutex<ServerState>>, body: &str) -> Option<(String, PathBuf)> {
     let request: Value = serde_json::from_str(body).ok()?;
     request.get("model")?.as_str().filter(|m| !m.is_empty())?;
     let filename = request.get("filename")?.as_str()?;
-    Some(state.lock().await.slot_dir.as_ref()?.join(filename))
+    let path = state.lock().await.slot_dir.as_ref()?.join(filename);
+    Some((filename.to_string(), path))
 }
 
 fn bad_slot_request() -> (&'static str, &'static str, String) {

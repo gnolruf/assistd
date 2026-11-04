@@ -18,8 +18,8 @@ use assistd_core::{
     SubAgentRunner, Subsystems, VisionRevalidator, VoiceManager,
 };
 use assistd_llm::{
-    HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, MainSlot,
-    SlotDir,
+    HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir,
+    SlotStash,
 };
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::tracing_init::env_filter_or;
@@ -167,7 +167,7 @@ async fn start(
 
     let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
 
-    let (chat, relay, main_slot) = build_chat_and_relay(
+    let (chat, relay, slot_stash) = build_chat_and_relay(
         &config,
         &api_key,
         slot_dir,
@@ -197,7 +197,7 @@ async fn start(
         .with_mcp_servers(tools.mcp_servers)
         .with_web_search(web_search)
         .with_tools_disabled(tools.disabled)
-        .with_main_slot(main_slot);
+        .with_slot_stash(slot_stash);
 
     let state = Arc::new(AppState {
         memory: build_memory_stack(&config, &memory, &embed),
@@ -332,7 +332,7 @@ fn prepare_slot_dir() -> Result<SlotDir> {
 }
 
 /// The chat backend, what the `relay` tool runs sub-agents with beside it on the same
-/// main slot, its saved answers swept of those not in `kept_answers`, and that slot's guard.
+/// slot, its saved answers swept of those not in `kept_answers`, and that slot's stash.
 fn build_chat_and_relay(
     config: &Config,
     api_key: &ApiKey,
@@ -340,49 +340,49 @@ fn build_chat_and_relay(
     health_probe: &Arc<dyn LlmHealthProbe>,
     session_ctx: &SessionContext,
     kept_answers: Option<HashSet<PathBuf>>,
-) -> Result<(Arc<dyn LlmBackend>, RelayDeps, Arc<MainSlot>)> {
-    let main_slot = build_main_slot(config, api_key, slot_dir, health_probe)?;
+) -> Result<(Arc<dyn LlmBackend>, RelayDeps, Arc<SlotStash>)> {
+    let slot_stash = build_slot_stash(config, api_key, slot_dir, health_probe)?;
     let chat = build_chat_backend(
         config,
         api_key,
         Arc::clone(health_probe),
-        Arc::clone(&main_slot),
+        Arc::clone(&slot_stash),
     )?;
     let relay = build_relay_deps(
         config,
-        Arc::clone(&main_slot),
+        Arc::clone(&slot_stash),
         &chat,
         health_probe,
         session_ctx,
         kept_answers,
     )?;
-    Ok((chat, relay, main_slot))
+    Ok((chat, relay, slot_stash))
 }
 
-/// The guard that keeps the chat server's main slot across sub-agent runs.
-fn build_main_slot(
+/// The stash that keeps each conversation's state of the chat server's slot.
+fn build_slot_stash(
     config: &Config,
     api_key: &ApiKey,
     slot_dir: SlotDir,
     health_probe: &Arc<dyn LlmHealthProbe>,
-) -> Result<Arc<MainSlot>> {
-    let main_slot = MainSlot::new(
+) -> Result<Arc<SlotStash>> {
+    let slot_stash = SlotStash::new(
         SocketAddr::new(config.model.host, config.model.port.get()),
         Some(api_key),
         config.model.name.clone(),
         slot_dir,
         Some(Arc::clone(health_probe)),
     )
-    .context("failed to construct the main-slot client for sub-agent runs")?;
-    Ok(Arc::new(main_slot))
+    .context("failed to construct the slot stash client")?;
+    Ok(Arc::new(slot_stash))
 }
 
-/// What the `relay` tool runs sub-agents with: the chat backend they share, a guard on its
-/// main slot, an emptied directory for their quarantines, and where their answers are saved,
+/// What the `relay` tool runs sub-agents with: the chat backend they share, the stash of its
+/// slot, an emptied directory for their quarantines, and where their answers are saved,
 /// swept of those not in `kept_answers`.
 fn build_relay_deps(
     config: &Config,
-    main_slot: Arc<MainSlot>,
+    slot_stash: Arc<SlotStash>,
     chat: &Arc<dyn LlmBackend>,
     health_probe: &Arc<dyn LlmHealthProbe>,
     session_ctx: &SessionContext,
@@ -394,7 +394,7 @@ fn build_relay_deps(
             Some(Arc::clone(health_probe)),
             Duration::from_secs(config.timeouts.tool_call_secs),
         ),
-        main_slot,
+        slot_stash,
         dir: prepare_relay_dir()?,
         subagent_context_tokens: config
             .chat
@@ -457,7 +457,7 @@ fn build_chat_backend(
     config: &Config,
     api_key: &ApiKey,
     health_probe: Arc<dyn LlmHealthProbe>,
-    main_slot: Arc<MainSlot>,
+    slot_stash: Arc<SlotStash>,
 ) -> Result<Arc<dyn LlmBackend>> {
     let chat = LlamaChatClient::new(
         &config.chat,
@@ -466,7 +466,7 @@ fn build_chat_backend(
         Some(api_key),
         Some(health_probe),
     )?
-    .with_main_slot(main_slot);
+    .with_slot_stash(slot_stash);
     Ok(Arc::new(chat))
 }
 

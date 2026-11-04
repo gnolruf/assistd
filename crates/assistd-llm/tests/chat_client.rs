@@ -1364,7 +1364,9 @@ async fn isolated_conversation_never_reaches_the_main_conversation() {
     let main = build_client(&chat_spec(port));
 
     ask(&main, "main question").await;
-    let sub = main.isolated_conversation("sub prompt".into()).unwrap();
+    let sub = main
+        .isolated_conversation("sub prompt".into(), None)
+        .unwrap();
     ask(sub.as_ref(), "sub task").await;
     drop(sub);
     ask(&main, "follow up").await;
@@ -1398,7 +1400,9 @@ async fn schema_completion_constrains_the_reply_and_leaves_the_conversation_alon
     }
     let (port, _server) = spawn_fake(script.clone()).await;
     let main = build_client(&chat_spec(port));
-    let sub = main.isolated_conversation("sub prompt".into()).unwrap();
+    let sub = main
+        .isolated_conversation("sub prompt".into(), None)
+        .unwrap();
     ask(sub.as_ref(), "task").await;
     let schema = json!({"type": "object", "properties": {"found": {"type": "boolean"}}});
 

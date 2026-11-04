@@ -1,5 +1,5 @@
 //! The private directory llama-server saves and restores slot state in, and
-//! the guard that keeps the main conversation's slot across sub-agent runs.
+//! the stash that keeps each conversation's slot state while others use the slot.
 
 use std::fs::{self, DirBuilder};
 use std::future::Future;
@@ -10,21 +10,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use assistd_utils::child_server::ApiKey;
-use assistd_utils::http::{local_client_builder, read_capped};
-use assistd_utils::text::human_size;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
+
+use assistd_ipc::TaskRunId;
+use assistd_utils::child_server::ApiKey;
+use assistd_utils::http::{local_client_builder, read_capped};
+use assistd_utils::text::human_size;
 
 use super::error::LlamaServerError;
 use crate::LlmHealthProbe;
 
 const OWNER_ONLY: u32 = 0o700;
 /// The only slot with `-np 1`.
-const MAIN_SLOT_PATH: &str = "/slots/0";
-/// Fixed so at most one main-slot file exists at a time.
-const MAIN_SLOT_FILE: &str = "main.bin";
+const SLOT_PATH: &str = "/slots/0";
+/// Suspended task runs whose slot files are kept beside the main conversation's.
+const MAX_SUSPENDED_RUNS: usize = 2;
 const SLOT_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const SLOT_RESPONSE_MAX: usize = 64 * 1024;
 
@@ -60,24 +62,39 @@ impl SlotDir {
     }
 }
 
-/// Saves the chat server's main slot before a group of sub-agent requests
-/// and restores it after, so the next main turn skips re-processing its
-/// context. Every failure is logged and the group runs regardless.
+/// A conversation whose slot state the [`SlotStash`] keeps while another uses the slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConversationKey {
+    Main,
+    TaskRun(TaskRunId),
+}
+
+impl ConversationKey {
+    fn file_name(self) -> String {
+        match self {
+            Self::Main => "main.bin".to_string(),
+            Self::TaskRun(run) => format!("task-run-{run}.bin"),
+        }
+    }
+}
+
+/// Keeps each conversation's state of the chat server's only slot in a file of
+/// its own while other conversations use the slot, so switching back skips
+/// re-processing its context. Every failure is logged and costs only that.
 #[derive(Debug)]
-pub struct MainSlot {
+pub struct SlotStash {
     client: reqwest::Client,
     url: String,
     model: String,
     slot_dir: SlotDir,
     health: Option<Arc<dyn LlmHealthProbe>>,
-    /// The save whose restore has not yet run.
-    pending: Mutex<Option<SavedSlot>>,
+    state: Mutex<StashState>,
 }
 
-impl MainSlot {
-    /// A guard for `model`'s slot on the router at `addr`, whose files land
-    /// in `slot_dir`. With `health`, a restore is skipped once the serving
-    /// child has changed since the save.
+impl SlotStash {
+    /// A stash for `model`'s slot on the router at `addr`, whose files land in
+    /// `slot_dir`. With `health`, a restore is skipped once the serving child
+    /// has changed since the save.
     pub fn new(
         addr: SocketAddr,
         api_key: Option<&ApiKey>,
@@ -95,89 +112,129 @@ impl MainSlot {
             .build()?;
         Ok(Self {
             client,
-            url: format!("http://{addr}{MAIN_SLOT_PATH}"),
+            url: format!("http://{addr}{SLOT_PATH}"),
             model,
             slot_dir,
             health,
-            pending: Mutex::new(None),
+            state: Mutex::new(StashState::default()),
         })
     }
 
-    /// Run `group` between a save and a restore of the main slot. The restore
-    /// runs however `group` ends; if this future is dropped, the next
-    /// [`Self::restore_pending`] runs it. Hold the agent turn lock across the
-    /// call so no main turn lands in between.
+    /// Hand the slot to `key`: save it for the conversation holding it, then
+    /// restore `key`'s saved state, if any. Call before every request `key` makes.
+    pub async fn switch_to(&self, key: ConversationKey) {
+        let mut state = self.state.lock().await;
+        if state.occupant == Some(key) {
+            return;
+        }
+        self.set_aside(&mut state).await;
+        if let Some(saved) = state.take(key) {
+            self.restore(key, saved).await;
+            self.remove_file(key).await;
+        }
+        state.occupant = Some(key);
+    }
+
+    /// Run `group` of unkeyed requests between a save and a restore of the
+    /// conversation holding the slot. If this future is dropped, that
+    /// conversation's next [`Self::switch_to`] restores it. Hold the agent turn
+    /// lock across the call so no other conversation lands in between.
     pub async fn preserve_across<F: Future>(&self, group: F) -> F::Output {
-        *self.pending.lock().await = self.save().await;
+        let owner = {
+            let mut state = self.state.lock().await;
+            let owner = state.occupant;
+            self.set_aside(&mut state).await;
+            owner
+        };
         let output = group.await;
-        self.restore_pending().await;
+        if let Some(owner) = owner {
+            self.switch_to(owner).await;
+        }
         output
     }
 
-    /// Restore a saved main slot whose restore has not run yet. Call before
-    /// every request on the main conversation.
-    pub async fn restore_pending(&self) {
-        let mut pending = self.pending.lock().await;
-        if let Some(saved) = *pending {
-            self.restore(saved).await;
-            self.remove_file().await;
-            *pending = None;
+    /// Forget `key`'s conversation, which has ended, deleting its saved state.
+    pub async fn end(&self, key: ConversationKey) {
+        let mut state = self.state.lock().await;
+        if state.occupant == Some(key) {
+            state.occupant = None;
+        }
+        if state.take(key).is_some() {
+            self.remove_file(key).await;
         }
     }
 
-    async fn save(&self) -> Option<SavedSlot> {
+    /// Save the slot for its occupant, which then no longer holds it, evicting
+    /// the oldest suspended task run past [`MAX_SUSPENDED_RUNS`].
+    async fn set_aside(&self, state: &mut StashState) {
+        let Some(owner) = state.occupant.take() else {
+            return;
+        };
+        if let Some(saved) = self.save(owner).await {
+            state.saved.push((owner, saved));
+        }
+        if let Some(evicted) = state.evict_past_limit() {
+            debug!(target: "assistd::slots", ?evicted, "dropped the oldest suspended slot");
+            self.remove_file(evicted).await;
+        }
+    }
+
+    async fn save(&self, key: ConversationKey) -> Option<SavedSlot> {
         let Ok(pid) = self.serving_pid().await else {
-            warn!(target: "assistd::slots", "llama-server is not serving; main slot not saved");
+            warn!(target: "assistd::slots", ?key, "llama-server is not serving; slot not saved");
             return None;
         };
         let started = Instant::now();
-        match self.post_action("save").await {
+        match self.post_action("save", key).await {
             Ok(response) => {
                 debug!(
                     target: "assistd::slots",
+                    ?key,
                     tokens = response.n_saved.unwrap_or_default(),
                     size = %human_size(response.n_written.unwrap_or_default()),
                     elapsed = ?started.elapsed(),
-                    "saved main slot"
+                    "saved slot"
                 );
                 Some(SavedSlot { pid })
             }
             Err(e) => {
-                warn!(target: "assistd::slots", "saving the main slot failed: {e}");
+                warn!(target: "assistd::slots", ?key, "saving the slot failed: {e}");
                 None
             }
         }
     }
 
-    async fn restore(&self, saved: SavedSlot) {
+    async fn restore(&self, key: ConversationKey, saved: SavedSlot) {
         if self.serving_pid().await.ok() != Some(saved.pid) {
             warn!(
                 target: "assistd::slots",
-                "llama-server restarted since the main slot was saved; restore skipped"
+                ?key,
+                "llama-server restarted since the slot was saved; restore skipped"
             );
             return;
         }
         let started = Instant::now();
-        match self.post_action("restore").await {
+        match self.post_action("restore", key).await {
             Ok(response) => debug!(
                 target: "assistd::slots",
+                ?key,
                 tokens = response.n_restored.unwrap_or_default(),
                 size = %human_size(response.n_read.unwrap_or_default()),
                 elapsed = ?started.elapsed(),
-                "restored main slot"
+                "restored slot"
             ),
-            Err(e) => warn!(target: "assistd::slots", "restoring the main slot failed: {e}"),
+            Err(e) => warn!(target: "assistd::slots", ?key, "restoring the slot failed: {e}"),
         }
     }
 
-    async fn remove_file(&self) {
-        let path = self.slot_dir.path().join(MAIN_SLOT_FILE);
+    async fn remove_file(&self, key: ConversationKey) {
+        let path = self.slot_dir.path().join(key.file_name());
         if let Err(e) = tokio::fs::remove_file(&path).await
             && e.kind() != ErrorKind::NotFound
         {
             warn!(
                 target: "assistd::slots",
-                "removing the saved main slot {} failed: {e}",
+                "removing the saved slot {} failed: {e}",
                 path.display()
             );
         }
@@ -195,10 +252,15 @@ impl MainSlot {
         }
     }
 
-    async fn post_action(&self, action: &str) -> Result<SlotActionResponse, LlamaServerError> {
+    async fn post_action(
+        &self,
+        action: &str,
+        key: ConversationKey,
+    ) -> Result<SlotActionResponse, LlamaServerError> {
+        let filename = key.file_name();
         let body = SlotActionRequest {
             model: &self.model,
-            filename: MAIN_SLOT_FILE,
+            filename: &filename,
         };
         let resp = self
             .client
@@ -211,7 +273,7 @@ impl MainSlot {
         if !status.is_success() {
             return Err(LlamaServerError::ControlHttp {
                 method: "POST",
-                path: MAIN_SLOT_PATH,
+                path: SLOT_PATH,
                 status: status.as_u16(),
             });
         }
@@ -220,7 +282,32 @@ impl MainSlot {
     }
 }
 
-/// A main slot saved while the child with `pid` was serving.
+/// Which conversation holds the slot, `None` while unkeyed requests use it, and
+/// the saved state of those set aside, oldest first; a key is held or saved, never both.
+#[derive(Debug, Default)]
+struct StashState {
+    occupant: Option<ConversationKey>,
+    saved: Vec<(ConversationKey, SavedSlot)>,
+}
+
+impl StashState {
+    fn take(&mut self, key: ConversationKey) -> Option<SavedSlot> {
+        let index = self.saved.iter().position(|(saved, _)| *saved == key)?;
+        Some(self.saved.remove(index).1)
+    }
+
+    fn evict_past_limit(&mut self) -> Option<ConversationKey> {
+        let mut runs = self
+            .saved
+            .iter()
+            .enumerate()
+            .filter(|(_, (key, _))| matches!(key, ConversationKey::TaskRun(_)));
+        let (oldest, _) = runs.next()?;
+        (runs.count() >= MAX_SUSPENDED_RUNS).then(|| self.saved.remove(oldest).0)
+    }
+}
+
+/// A slot saved while the child with `pid` was serving.
 #[derive(Debug, Clone, Copy)]
 struct SavedSlot {
     pid: Option<u32>,
