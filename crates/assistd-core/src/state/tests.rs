@@ -12,7 +12,9 @@ use assistd_ipc::{
     PresenceState, PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
     TaskId, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
-use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
+use assistd_llm::{
+    ConversationKey, EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
+};
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, Embedding, EmbeddingHit, HistoryRow,
     HistoryScope, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore, PersistedMessage,
@@ -2008,6 +2010,7 @@ impl LlmBackend for MainConversation {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
+        _slot: Option<ConversationKey>,
     ) -> assistd_llm::LlmResult<Arc<dyn LlmBackend>> {
         self.task_conversation
             .lock()

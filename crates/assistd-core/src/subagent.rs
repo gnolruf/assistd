@@ -110,7 +110,7 @@ impl SubAgentRunner {
         cancel: CancellationToken,
         progress: &RelayProgress,
     ) -> Result<RelayReport, SubAgentError> {
-        let backend = self.parent.isolated_conversation(system_prompt)?;
+        let backend = self.parent.isolated_conversation(system_prompt, None)?;
         let agent = Agent::new(
             Arc::clone(&backend),
             tools,

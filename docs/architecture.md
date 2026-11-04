@@ -115,11 +115,16 @@ other local processes cannot load, unload or query models; every client
 sends it as a bearer token. The chat server's `--slot-save-path` is a
 mode-0700 `$XDG_CACHE_HOME/assistd/slots` that the daemon empties at
 startup and before every spawn, since a saved slot is only valid for the
-server that wrote it. `MainSlot` uses it to save the main conversation's
-slot before a group of sub-agent requests and restore it after (skipping
-the restore if the child changed in between), deleting the file once the
-group ends; any failure only costs re-processing the main context on the
-next turn. `assistd-utils`'s `ChildServer`
+server that wrote it. `SlotStash` keeps one file in it per conversation set
+aside, keyed by `ConversationKey` (`Main`, `TaskRun`). Before each request a
+keyed conversation calls `switch_to`, which saves the slot for whichever
+conversation holds it and restores the target's file (skipping the restore
+if the child changed since the save), deleting the file once restored.
+`preserve_across` saves the holder before a group of unkeyed sub-agent
+requests and restores it after, so a relay inside a task run keeps that run's
+slot. A file is deleted when its conversation ends (a finished run, `/new`),
+and past two suspended runs the oldest run's file is dropped. Any failure only
+costs re-processing that conversation's context. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
 `/proc` shows the listener belongs to the child's process group, so a
@@ -300,7 +305,7 @@ states the budget and asks for relays of about half of it, one per natural part
 such as a crate or module, with independent parts requested together. Each call
 creates a fresh `Quarantine` under `~/.cache/assistd/relays` (emptied at daemon
 start), gives the sub-agent a registry holding only `run` over the quarantine's
-commands, and runs it inside `MainSlot::preserve_across`. A plan's steps run
+commands, and runs it inside `SlotStash::preserve_across`. A plan's steps run
 back to back inside one `preserve_across`, each in its own quarantine and
 handed only the previous step's rendered `RelayReport` beneath its task and
 its saved answer as an extra input. Since a report carries what its sub-agent
@@ -327,7 +332,8 @@ A saved task runs through the same loop with no user present.
 The run takes the agent turn lock and the request guard, as a query does,
 then opens an `isolated_conversation`. That conversation gets the main system
 prompt plus a short preamble saying no user is present, and the main agent's
-full tool registry. The run executes inside `MainSlot::preserve_across`. It is
+full tool registry, keyed `TaskRun` in the `SlotStash`; when the run ends its
+slot file is dropped and the main conversation's slot restored. It is
 saved as a transcript session of its own, linked from its `task_runs` row, and
 its events reach subscribers wrapped in `Event::TaskRun`. The main conversation,
 its branch and the active session are never touched. Every confirmation prompt

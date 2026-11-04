@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use assistd_config::ToolsOutputConfig;
 use assistd_ipc::{RelayEvent, RelayStepPlan};
-use assistd_llm::MainSlot;
+use assistd_llm::SlotStash;
 use assistd_memory::SessionId;
 use assistd_search::SearxngClient;
 use assistd_tools::commands::BashPolicyCfg;
@@ -79,8 +79,8 @@ const TARGET_PERCENT: u64 = 50;
 #[derive(Debug)]
 pub struct RelayDeps {
     pub runner: SubAgentRunner,
-    /// Keeps the main conversation's slot across each relay.
-    pub main_slot: Arc<MainSlot>,
+    /// Keeps the calling conversation's slot state across each relay.
+    pub slot_stash: Arc<SlotStash>,
     /// The directory each relay's quarantine is created in.
     pub dir: PathBuf,
     /// The history budget of each sub-agent's conversation, in tokens.
@@ -173,14 +173,14 @@ impl RelayTool {
         }
     }
 
-    /// Runs every step inside one main-slot guard, so the swap is paid once per plan.
+    /// Runs every step inside one slot-stash guard, so the swap is paid once per plan.
     async fn relay(
         &self,
         plan: RelayPlan,
         progress: &RelayProgress,
     ) -> Result<RelayReport, StepFailed> {
         self.deps
-            .main_slot
+            .slot_stash
             .preserve_across(self.run_plan(plan, progress))
             .await
     }
@@ -648,7 +648,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use assistd_llm::{
-        LlmBackend, LlmError, LlmEvent, LlmResult, SlotDir, StepOutcome, ToolResultPayload,
+        ConversationKey, LlmBackend, LlmError, LlmEvent, LlmResult, SlotDir, StepOutcome,
+        ToolResultPayload,
     };
     use assistd_tools::{Approvals, Attachment, DenyAllGate};
 
@@ -682,7 +683,11 @@ mod tests {
             unimplemented!("parent is never driven")
         }
 
-        fn isolated_conversation(&self, _system_prompt: String) -> LlmResult<Arc<dyn LlmBackend>> {
+        fn isolated_conversation(
+            &self,
+            _system_prompt: String,
+            _slot: Option<ConversationKey>,
+        ) -> LlmResult<Arc<dyn LlmBackend>> {
             self.conversation_opened.store(true, Ordering::SeqCst);
             Err(LlmError::Unavailable("test parent".into()))
         }
@@ -697,8 +702,8 @@ mod tests {
                     None,
                     Duration::from_secs(60),
                 ),
-                main_slot: Arc::new(
-                    MainSlot::new(
+                slot_stash: Arc::new(
+                    SlotStash::new(
                         SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
                         None,
                         "model".into(),

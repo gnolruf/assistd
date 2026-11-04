@@ -12,7 +12,8 @@ use tracing::{debug, warn};
 
 use assistd_ipc::Event;
 use assistd_llm::{
-    HistoryEntry, HistoryReplay, HistoryRole, OneShotReply, Thinking, ToolCallRecord,
+    ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, OneShotReply, Thinking,
+    ToolCallRecord,
 };
 use assistd_memory::{
     BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageId, MessageKind,
@@ -384,6 +385,9 @@ impl AppState {
     pub(super) async fn handle_new_session(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
+        if let Some(stash) = &self.subsystems.slot_stash {
+            stash.end(ConversationKey::Main).await;
+        }
         self.begin_unsaved_session(id, &tx, "/new").await;
     }
 
