@@ -34,6 +34,7 @@ use memory_init::MemorySubsystem;
 use search_init::{SearchService, SearchStartup};
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 use tools_init::ToolDeps;
+use voice_init::VoiceService;
 use vram::VramLedger;
 use warmup::Warmup;
 
@@ -224,6 +225,7 @@ async fn start(
             persistence_tracker,
             presence,
             memory,
+            voice: background.voice,
             embed: background.embed,
             search: background.search,
             window,
@@ -247,13 +249,15 @@ struct BackgroundStarts {
 
 struct BackgroundServices {
     warmup: JoinHandle<()>,
+    voice: VoiceService,
     embed: EmbeddingService,
     search: SearchService,
     mcp: McpService,
 }
 
-/// Start the search and MCP servers at once, and the embedding server once
-/// the model load has settled so the two never load onto the GPU together.
+/// Start the search and MCP servers at once, and the voice worker and the
+/// embedding server once the model load has settled so none of them loads
+/// onto the GPU beside it.
 fn spawn_background_starts(
     state: &Arc<AppState>,
     starts: BackgroundStarts,
@@ -264,10 +268,15 @@ fn spawn_background_starts(
         Warmup {
             state: state.clone(),
             vision: starts.vision,
-            vram: starts.vram,
             model_settled: model_settled_tx,
         },
         stages.intake.subscribe(),
+    );
+    let voice = VoiceService::spawn(
+        state.clone(),
+        starts.vram,
+        model_settled_rx.clone(),
+        stages.voice.subscribe(),
     );
     let embed = starts
         .embed
@@ -291,6 +300,7 @@ fn spawn_background_starts(
     });
     BackgroundServices {
         warmup,
+        voice,
         embed,
         search,
         mcp,

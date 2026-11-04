@@ -18,8 +18,8 @@ const MAX_ANCESTOR_DEPTH: usize = 64;
 /// claiming the GPU; smaller drift is desktop clients resizing buffers.
 const FOREIGN_GROWTH_FLOOR_MB: u64 = 100;
 
-/// VRAM across every GPU, in MiB. The daemon's own allocations, such as
-/// transcription's, count toward neither holder.
+/// VRAM across every GPU, in MiB. The daemon's own allocations and its
+/// other children's, such as the voice worker's, count toward neither holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VramSnapshot {
     pub(super) free_mb: u64,
@@ -131,7 +131,8 @@ impl VramLedger {
         self.headroom_mb
     }
 
-    /// VRAM now, with `llama_pid` and its descendants counted as the model.
+    /// VRAM now, with `llama_pid` and its descendants counted as the model
+    /// and the daemon's other descendants not counted.
     pub(super) fn snapshot(&self, llama_pid: Option<u32>) -> Result<VramSnapshot> {
         let mut snapshot = VramSnapshot {
             free_mb: 0,
@@ -153,13 +154,10 @@ impl VramLedger {
                 *held = (*held).max(bytes);
             }
             for (pid, bytes) in per_pid {
-                if pid == self.self_pid {
-                    continue;
-                }
                 let held_mb = bytes / BYTES_PER_MB;
                 if llama_pid.is_some_and(|root| descends_from(pid, root, read_parent_pid)) {
                     snapshot.model_mb += held_mb;
-                } else {
+                } else if !descends_from(pid, self.self_pid, read_parent_pid) {
                     snapshot.foreign_mb += held_mb;
                 }
             }

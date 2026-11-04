@@ -1,25 +1,24 @@
 //! Startup work that runs while the socket already serves: load the model,
-//! then voice, then start continuous listening.
+//! then, once voice capture is up, start continuous listening.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use assistd_core::{
-    AppState, Component, ContinuousListener, PresenceManager, VisionRevalidator, spawn_supervised,
+    AppState, CaptureUnavailable, Component, ContinuousListener, PresenceManager,
+    VisionRevalidator, VoiceCapture, VoiceManager, spawn_supervised,
 };
+use assistd_utils::readiness::NotReady;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use super::vram::VramLedger;
-use super::{listen_dispatcher, voice_init};
+use super::listen_dispatcher;
 
 /// What warmup brings up behind the managers `state` already serves.
 pub(super) struct Warmup {
     pub state: Arc<AppState>,
     pub vision: Arc<VisionRevalidator>,
-    /// `None` when VRAM cannot be measured.
-    pub vram: Option<Arc<VramLedger>>,
     /// Flipped once the first model load has finished, whether or not it
     /// succeeded.
     pub model_settled: watch::Sender<bool>,
@@ -35,7 +34,6 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
     let Warmup {
         state,
         vision,
-        vram,
         model_settled,
     } = warmup;
     let presence = state.subsystems.presence.clone();
@@ -49,16 +47,21 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
         return;
     }
     model_settled.send_replace(true);
-    let voice = &state.subsystems.voice;
-    let init_voice = Box::pin(voice_init::init(voice, &state.config, &presence, vram));
-    if until_shutdown(&mut shutdown, init_voice).await.is_none() {
-        return;
-    }
-    for (component, readiness) in voice.readiness() {
-        state.publish_readiness(component, readiness);
-    }
-    if let Ok(capture) = voice.capture() {
+    let capture = until_shutdown(&mut shutdown, started_capture(&state.subsystems.voice)).await;
+    if let Some(Some(capture)) = capture {
         run_listen_dispatcher(&state, capture.listener, shutdown).await;
+    }
+}
+
+/// The capture handles once capture is up; `None` when it is unavailable.
+async fn started_capture(voice: &VoiceManager) -> Option<VoiceCapture> {
+    let mut changes = voice.subscribe_readiness();
+    loop {
+        match voice.capture() {
+            Ok(capture) => return Some(capture),
+            Err(CaptureUnavailable(NotReady::Unavailable(_))) => return None,
+            Err(CaptureUnavailable(NotReady::Starting)) => changes.changed().await.ok()?,
+        }
     }
 }
 

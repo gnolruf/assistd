@@ -29,13 +29,16 @@ required-features = ["stt", "tts"]
 [dependencies]
 dirs = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "fs", "process"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "process"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 assistd-ipc = { workspace = true }
 assistd-config = { workspace = true }
 assistd-utils = { workspace = true }
 parking_lot = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 nvml-wrapper = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
@@ -57,8 +60,6 @@ tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
 hound = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [lints]
 workspace = true

@@ -10,15 +10,15 @@ use tokio::time::Instant;
 use tracing::warn;
 
 use assistd_ipc::{Event, VoiceCaptureState, WakeWordOp};
-use assistd_voice::{CapturedUtterance, ListenError, SessionAudio, VoiceCapture, WakeWordSpotter};
+use assistd_voice::{ListenError, VoiceCapture, WakeTest};
 
 use super::{AppState, DispatchError, send_error};
 
 /// A session with no utterance for this long is cancelled.
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Mic reports queued while the previous utterance is still being
-/// spotted; each utterance comes with a start and an end of speech.
+/// Mic reports queued while the previous one is still being sent on; each
+/// utterance comes with a start and an end of speech.
 const AUDIO_BACKLOG: usize = 12;
 
 const STOP_BACKLOG: usize = 1;
@@ -56,15 +56,15 @@ struct SessionIo {
     id: String,
     tx: mpsc::Sender<Event>,
     stop: mpsc::Receiver<()>,
-    audio: mpsc::Receiver<SessionAudio>,
+    audio: mpsc::Receiver<WakeTest>,
     idle_deadline: Instant,
 }
 
 impl SessionIo {
-    /// The next utterance, after reporting each start and end of speech
-    /// before it. A stop request, disconnect, or the idle timeout ends the
-    /// session instead.
-    async fn next_utterance(&mut self) -> Result<CapturedUtterance, SessionEnd> {
+    /// Whether the next utterance held the wake phrase, after reporting each
+    /// start and end of speech before it. A stop request, disconnect, or the
+    /// idle timeout ends the session instead.
+    async fn next_utterance(&mut self) -> Result<bool, SessionEnd> {
         loop {
             let audio = tokio::select! {
                 biased;
@@ -77,8 +77,8 @@ impl SessionIo {
             }?;
             self.idle_deadline = Instant::now() + SESSION_IDLE_TIMEOUT;
             match audio {
-                SessionAudio::Speaking(speaking) => self.send_speaking(speaking).await,
-                SessionAudio::Utterance(utterance) => return Ok(utterance),
+                WakeTest::Speaking { speaking } => self.send_speaking(speaking).await,
+                WakeTest::Utterance { matched } => return Ok(matched),
             }
         }
     }
@@ -139,13 +139,7 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let capture = self.ready_capture(&id, "wake-word test", &tx).await?;
-        let Some(spotter) = capture.spotter.clone() else {
-            let message = "wake-word listening is off or failed to start; see the daemon log";
-            send_error(&tx, id, message.into()).await;
-            return Ok(());
-        };
-        self.run_mic_session(id, tx, &capture, |io| drive_test(io, spotter))
-            .await
+        self.run_mic_session(id, tx, &capture, drive_test).await
     }
 
     async fn stop_mic_session(&self, id: String, tx: mpsc::Sender<Event>) {
@@ -166,8 +160,8 @@ impl AppState {
         }
     }
 
-    /// Claim the mic, pause listening, and run `drive` against the captured
-    /// utterances until it ends; then resume listening and send the
+    /// Claim the mic, pause listening, and run `drive` against the test's
+    /// reports until it ends; then resume listening and send the
     /// terminal event.
     async fn run_mic_session<F, Fut>(
         &self,
@@ -206,8 +200,7 @@ impl AppState {
             audio,
             idle_deadline: Instant::now() + SESSION_IDLE_TIMEOUT,
         };
-        let (captured, end) =
-            tokio::join!(capture.listener.capture_utterances(audio_tx), drive(io));
+        let (captured, end) = tokio::join!(capture.listener.test_wake_word(audio_tx), drive(io));
         drop(claim);
         if resume_listening && let Err(e) = capture.listener.start().await {
             warn!(target: "assistd::wakeword", "failed to resume listening: {e}");
@@ -238,19 +231,12 @@ impl AppState {
 }
 
 /// Report, for each utterance, whether the wake phrase was spotted in it.
-async fn drive_test(mut io: SessionIo, spotter: Arc<WakeWordSpotter>) -> SessionEnd {
+async fn drive_test(mut io: SessionIo) -> SessionEnd {
     loop {
-        let utterance = match io.next_utterance().await {
-            Ok(utterance) => utterance,
+        let matched = match io.next_utterance().await {
+            Ok(matched) => matched,
             Err(end) => return end,
         };
-        let spotter = Arc::clone(&spotter);
-        let matched =
-            match tokio::task::spawn_blocking(move || spotter.find(&utterance.pcm).is_some()).await
-            {
-                Ok(matched) => matched,
-                Err(e) => return SessionEnd::Failed(format!("wake-phrase spotting failed: {e}")),
-            };
         let _ = io
             .tx
             .send(Event::WakeWordTest {
@@ -274,6 +260,9 @@ async fn send_session_end(
         SessionEnd::Failed(message) => send_error(tx, id, message).await,
         SessionEnd::CaptureStopped => {
             let message = match captured {
+                Err(ListenError::Disabled) => {
+                    "wake-word listening is off or failed to start; see the daemon log".to_string()
+                }
                 Err(e) => format!("audio capture stopped: {e}"),
                 Ok(()) => "audio capture stopped".to_string(),
             };

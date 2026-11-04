@@ -13,6 +13,7 @@ mod client;
 mod daemon;
 #[cfg(feature = "tray")]
 mod tray;
+mod voice_worker;
 mod wm_backend;
 
 /// How long exit waits on `spawn_blocking` work (e.g. a speech model
@@ -99,6 +100,11 @@ enum Commands {
     /// transcripts, save / load / list / forget / delete key-value
     /// memories.
     Memory(memory::MemoryArgs),
+
+    /// Run the daemon's voice stack over stdin and stdout; the daemon
+    /// spawns this itself.
+    #[command(hide = true)]
+    VoiceWorker,
 }
 
 fn main() -> Result<()> {
@@ -133,5 +139,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
         Commands::Memory(args) => memory::run(args).await,
+        Commands::VoiceWorker => voice_worker::run().await,
     }
 }
