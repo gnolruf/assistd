@@ -25,7 +25,32 @@ pub enum ChunkLocator {
         message_id: MessageId,
         role: PersistedRole,
         timestamp: DateTime<Utc>,
+        /// The session's title, or its first user message cut short when untitled.
+        session_label: String,
     },
+}
+
+/// A chunk shown beside a hit so the match reads in context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextChunk {
+    pub chunk_id: ChunkId,
+    pub locator: ChunkLocator,
+    pub text: String,
+}
+
+/// The chunks immediately before and after a hit in its source.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdjacentChunks {
+    pub before: Option<ContextChunk>,
+    pub after: Option<ContextChunk>,
+}
+
+/// Which sessions a chunk search ranks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScope {
+    All,
+    AllExcept(SessionId),
+    Only(SessionId),
 }
 
 /// One saved-memory hit, ranked by cosine similarity to the query.
@@ -73,13 +98,17 @@ pub struct UnindexedRows {
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Top-K messages by their best chunk's cosine to the L2-normalised `query_vector`,
     /// each hit carrying that chunk's text.
-    /// `exclude_session`'s messages are dropped before ranking, so never count toward `top_k`.
+    /// Messages outside `scope` are dropped before ranking, so never count toward `top_k`.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        exclude_session: Option<SessionId>,
+        scope: SessionScope,
     ) -> Result<Vec<EmbeddingHit>>;
+
+    /// The chunks around `locator` in its source: for a message, the last chunk of
+    /// the previous user or assistant message in its session and the first of the next.
+    async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks>;
 
     /// Top-K saved memories by cosine to the L2-normalised `query_vector`.
     async fn nearest_memories(
@@ -127,9 +156,12 @@ impl SemanticStore for NoSemanticStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _exclude_session: Option<SessionId>,
+        _scope: SessionScope,
     ) -> Result<Vec<EmbeddingHit>> {
         Ok(Vec::new())
+    }
+    async fn adjacent_chunks(&self, _locator: &ChunkLocator) -> Result<AdjacentChunks> {
+        Ok(AdjacentChunks::default())
     }
     async fn nearest_memories(
         &self,

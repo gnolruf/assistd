@@ -3,7 +3,7 @@
 
 use tracing::debug;
 
-use assistd_memory::{ChunkLocator, EmbeddingHit};
+use assistd_memory::{ChunkLocator, EmbeddingHit, SessionScope};
 use assistd_wm::FocusedWindowContext;
 
 use super::query::TurnOrigin;
@@ -41,7 +41,7 @@ impl AppState {
         let strong: Vec<_> = self
             .memory
             .semantic
-            .nearest_chunks(embedding, candidates, Some(session))
+            .nearest_chunks(embedding, candidates, SessionScope::AllExcept(session))
             .await?
             .into_iter()
             .filter(|hit| hit.similarity >= floor)

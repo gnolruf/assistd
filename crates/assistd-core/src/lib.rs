@@ -329,13 +329,19 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
     });
     tools.register(relay);
     if config.memory.enabled {
+        let transcripts = Arc::clone(&memory_ops.transcripts);
         tools.register(RememberTool::new(
             memory_ops,
             embed_tx,
             embedder.clone(),
             semantic.clone(),
         ));
-        tools.register(ReminisceTool::new(embedder, semantic, current_session));
+        tools.register(ReminisceTool::new(
+            embedder,
+            semantic,
+            transcripts,
+            current_session,
+        ));
     }
     Ok(Arc::new(tools))
 }
