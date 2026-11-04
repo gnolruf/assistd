@@ -305,6 +305,22 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(MemoryError::sqlite("resolve_branch"))
     }
 
+    async fn resolve_session(&self, prefix: &str) -> Result<Option<SessionId>> {
+        let (uuid_from, uuid_before) = uuid_prefix_bounds(prefix);
+        self.handle
+            .reader()
+            .call(move |c| {
+                c.prepare_cached(
+                    "SELECT uuid FROM sessions WHERE uuid >= ?1 AND uuid < ?2
+                     ORDER BY started_at DESC LIMIT 1",
+                )?
+                .query_row(rusqlite::params![uuid_from, uuid_before], |r| r.get(0))
+                .optional()
+            })
+            .await
+            .map_err(MemoryError::sqlite("resolve_session"))
+    }
+
     async fn fork_and_switch(&self, src: BranchId, new_name: &str) -> Result<BranchId> {
         let name = new_name.to_string();
         let created = now_millis();

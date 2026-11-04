@@ -330,6 +330,9 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
         prefer_session: Option<SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>>;
 
+    /// The newest session whose id starts with `prefix`, ignoring ASCII case.
+    async fn resolve_session(&self, prefix: &str) -> Result<Option<SessionId>>;
+
     /// Copy `src` into a new child branch `new_name` sharing its messages and make it current,
     /// in one transaction. Errors with [`BranchNotFound`](crate::MemoryError::BranchNotFound)
     /// or [`BranchNameTaken`](crate::MemoryError::BranchNameTaken).
@@ -455,6 +458,10 @@ impl TranscriptStore for NoTranscriptStore {
         _target: &str,
         _prefer_session: Option<SessionId>,
     ) -> Result<Option<(SessionId, BranchId)>> {
+        Ok(None)
+    }
+
+    async fn resolve_session(&self, _prefix: &str) -> Result<Option<SessionId>> {
         Ok(None)
     }
 

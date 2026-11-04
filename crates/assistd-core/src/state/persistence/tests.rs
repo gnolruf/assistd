@@ -121,6 +121,9 @@ impl TranscriptStore for SlowingStore {
     ) -> assistd_memory::Result<Option<(SessionId, BranchId)>> {
         Ok(None)
     }
+    async fn resolve_session(&self, _p: &str) -> assistd_memory::Result<Option<SessionId>> {
+        Ok(None)
+    }
     async fn fork_and_switch(
         &self,
         _src: BranchId,

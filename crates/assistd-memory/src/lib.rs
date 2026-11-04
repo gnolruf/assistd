@@ -19,8 +19,8 @@ pub use relay_traces::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep,
 };
 pub use semantic::{
-    ChunkLocator, Embedding, EmbeddingHit, EmbeddingTarget, MemoryHit, NoSemanticStore,
-    SemanticStore, UnindexedRows,
+    AdjacentChunks, ChunkLocator, ContextChunk, Embedding, EmbeddingHit, EmbeddingTarget,
+    MemoryHit, NoSemanticStore, SemanticStore, SessionScope, UnindexedRows,
 };
 pub use sqlite::{
     SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTaskStore, SqliteTranscriptStore,

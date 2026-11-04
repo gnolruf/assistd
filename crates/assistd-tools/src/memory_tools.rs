@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
 use assistd_memory::{
-    ChunkLocator, EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId,
+    ChunkLocator, EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId, SessionScope,
+    TranscriptStore,
 };
 use async_trait::async_trait;
 use regex::Regex;
@@ -17,11 +18,20 @@ use tokio::sync::{mpsc, watch};
 use crate::memory::MemoryOps;
 use crate::{Tool, ToolError, ToolOutput};
 
+mod exchanges;
+
+use exchanges::Exchanges;
+
 const SEARCH_LIMIT: usize = 50;
 
 /// Byte budget for all of `reminisce`'s hit lines together; lower-ranked hits that
 /// would overflow it are dropped.
 const REMINISCE_OUTPUT_BYTES: usize = 8 * 1024;
+
+/// Leading characters of a session's UUID that `reminisce` prints and accepts back.
+const SHORT_SESSION_ID_CHARS: usize = 8;
+
+const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
 /// Keys reject whitespace and uppercase so one concept keeps one spelling;
 /// hyphens allow ISO dates (`standup.2026-09-11`).
@@ -202,22 +212,130 @@ impl Tool for RememberTool {
 pub struct ReminisceTool {
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
+    transcripts: Arc<dyn TranscriptStore>,
     current_session: watch::Receiver<SessionId>,
 }
 
+/// One validated `reminisce` call.
+#[derive(Debug)]
+struct ReminisceRequest {
+    query: String,
+    limit: usize,
+    session_prefix: Option<String>,
+}
+
+impl ReminisceRequest {
+    fn parse(args: &Value) -> Result<Self, ToolError> {
+        let session_prefix = match args.get("session") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(prefix)) if !prefix.is_empty() => Some(prefix.clone()),
+            Some(other) => {
+                return Err(ToolError::InvalidArgs(format!(
+                    "`session` must be a session id from a hit, or null (got {other})"
+                )));
+            }
+        };
+        Ok(Self {
+            query: required_str(args, "query")?.to_string(),
+            limit: reminisce_limit(args)?,
+            session_prefix,
+        })
+    }
+}
+
 impl ReminisceTool {
-    /// A tool ranking past messages in `semantic` by vectors from
-    /// `embedder`, skipping the session `current_session` names at call time.
+    /// A tool ranking past messages in `semantic` by vectors from `embedder`,
+    /// resolving session ids through `transcripts`, and skipping the session
+    /// `current_session` names at call time.
     pub fn new(
         embedder: Arc<EmbedderHandle>,
         semantic: Arc<dyn SemanticStore>,
+        transcripts: Arc<dyn TranscriptStore>,
         current_session: watch::Receiver<SessionId>,
     ) -> Self {
         Self {
             embedder,
             semantic,
+            transcripts,
             current_session,
         }
+    }
+
+    /// The sessions to search: every past one, or the one `session_prefix` names.
+    /// Errors when the prefix names no session or the session in progress.
+    async fn scope(&self, session_prefix: Option<&str>) -> Result<SessionScope, ToolError> {
+        let current = *self.current_session.borrow();
+        let Some(prefix) = session_prefix else {
+            return Ok(SessionScope::AllExcept(current));
+        };
+        match self.transcripts.resolve_session(prefix).await? {
+            None => Err(ToolError::InvalidArgs(format!(
+                "no past session has id {prefix:?}"
+            ))),
+            Some(session) if session == current => Err(ToolError::InvalidArgs(format!(
+                "session {prefix:?} is the conversation in progress, already in context"
+            ))),
+            Some(session) => Ok(SessionScope::Only(session)),
+        }
+    }
+
+    async fn search(&self, request: ReminisceRequest) -> Result<String, ToolError> {
+        let scope = self.scope(request.session_prefix.as_deref()).await?;
+        let embedder = match self.embedder.get() {
+            Ok(embedder) => embedder,
+            Err(e) => return Ok(format!("(past conversations cannot be searched: {e})")),
+        };
+        let query_vec = match embedder.embed(request.query).await {
+            Ok(query_vec) => query_vec,
+            Err(e) => {
+                tracing::debug!(
+                    target: "assistd::embed",
+                    error = %e,
+                    "reminisce embed failed; returning empty"
+                );
+                return Ok("(embedding unavailable)".to_string());
+            }
+        };
+        let hits = self
+            .semantic
+            .nearest_chunks(query_vec, request.limit, scope)
+            .await?;
+        tracing::info!(
+            target: "assistd::embed",
+            returned = hits.len(),
+            "reminisce returned chunks"
+        );
+        match scope {
+            SessionScope::Only(_) => self.format_exchanges(&hits).await,
+            SessionScope::All | SessionScope::AllExcept(_) => Ok(format_chunks(&hits)),
+        }
+    }
+
+    /// `hits` from one session, each between its neighbouring chunks and merged
+    /// with hits it overlaps, under a header naming the session; hits whose
+    /// addition would overflow the output budget are dropped with the rest.
+    async fn format_exchanges(&self, hits: &[EmbeddingHit]) -> Result<String, ToolError> {
+        let Some(first) = hits.first() else {
+            return Ok("(no matches in that session)".to_string());
+        };
+        let header = session_header(&first.locator);
+        let mut exchanges = Exchanges::default();
+        let mut kept = 0;
+        for hit in hits {
+            let adjacent = self.semantic.adjacent_chunks(&hit.locator).await?;
+            let mut grown = exchanges.clone();
+            grown.add(hit, adjacent);
+            let grown_len: usize = grown.lines().iter().map(|line| line.len() + 1).sum();
+            if header.len() + grown_len > REMINISCE_OUTPUT_BYTES {
+                break;
+            }
+            exchanges = grown;
+            kept += 1;
+        }
+        let mut lines = vec![header];
+        lines.extend(exchanges.lines());
+        push_omitted_note(&mut lines, hits.len() - kept);
+        Ok(lines.join("\n"))
     }
 }
 
@@ -236,8 +354,12 @@ impl Tool for ReminisceTool {
          'discussed before' or 'worked on last month'. Robust to \
          paraphrase: a query like \"that rust project we discussed\" will \
          match a past passage about \"the assistd embedding daemon in Rust\". \
-         Returns up to `limit` ranked snippets, each the matching excerpt \
-         of a past message, with timestamps and roles."
+         Use it in two steps. First search broadly with `session` null: \
+         each of up to `limit` ranked snippets names its session's short id \
+         and title, then its timestamp, role and the matching excerpt. Then, \
+         to read a chat you found, search again with `session` set to that \
+         id: hits come only from that chat, each shown with the message \
+         before and after it so you see the exchange."
             .into()
     }
 
@@ -258,51 +380,26 @@ impl Tool for ReminisceTool {
                     "maximum": 20,
                     "description": "Maximum number of hits to return (1-20). \
                                     Smaller is sharper; larger casts a wider net."
+                },
+                "session": {
+                    "type": ["string", "null"],
+                    "description": "null searches every past chat. A session \
+                                    id copied from an earlier hit (e.g. \
+                                    3f9a1c2e) searches only that chat and shows \
+                                    the messages around each hit."
                 }
             },
-            "required": ["query", "limit"]
+            "required": ["query", "limit", "session"]
         })
     }
 
     #[tracing::instrument(skip(self, args), fields(limit = tracing::field::Empty))]
     async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
-        let query = required_str(&args, "query")?.to_string();
-        let limit = reminisce_limit(&args)?;
-        tracing::Span::current().record("limit", limit);
-
-        let embedder = match self.embedder.get() {
-            Ok(embedder) => embedder,
-            Err(e) => {
-                let note = format!("(past conversations cannot be searched: {e})");
-                return Ok(ToolOutput::text(note, start.elapsed()));
-            }
-        };
-        let query_vec = match embedder.embed(query).await {
-            Ok(query_vec) => query_vec,
-            Err(e) => {
-                tracing::debug!(
-                    target: "assistd::embed",
-                    error = %e,
-                    "reminisce embed failed; returning empty"
-                );
-                return Ok(ToolOutput::text("(embedding unavailable)", start.elapsed()));
-            }
-        };
-        let current = *self.current_session.borrow();
-        let hits = self
-            .semantic
-            .nearest_chunks(query_vec, limit, Some(current))
-            .await?;
-
-        let result = ToolOutput::text(format_chunks(&hits), start.elapsed());
-        tracing::info!(
-            target: "assistd::embed",
-            returned = hits.len(),
-            duration_ms = result.duration_ms(),
-            "reminisce returned chunks"
-        );
-        Ok(result)
+        let request = ReminisceRequest::parse(&args)?;
+        tracing::Span::current().record("limit", request.limit);
+        let output = self.search(request).await?;
+        Ok(ToolOutput::text(output, start.elapsed()))
     }
 }
 
@@ -341,23 +438,64 @@ fn format_chunks(hits: &[EmbeddingHit]) -> String {
         lines.push(line);
     }
     let omitted = hits.len() - lines.len();
+    push_omitted_note(&mut lines, omitted);
+    lines.join("\n")
+}
+
+fn push_omitted_note(lines: &mut Vec<String>, omitted: usize) {
     if omitted > 0 {
         lines.push(format!("({omitted} lower-ranked matches omitted)"));
     }
-    lines.join("\n")
 }
 
 fn format_chunk(hit: &EmbeddingHit) -> String {
     let ChunkLocator::Message {
-        timestamp, role, ..
+        session_id,
+        timestamp,
+        role,
+        session_label,
+        ..
     } = &hit.locator;
     format!(
-        "[{} {} sim={:.0}%] {}",
-        timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
+        "[session {} \"{session_label}\" {} {} sim={:.0}%] {}",
+        short_session_id(*session_id),
+        timestamp.format(TIMESTAMP_FORMAT),
         role.as_wire(),
         hit.similarity * 100.0,
-        hit.text.replace('\n', " ")
+        one_line(&hit.text)
     )
+}
+
+fn session_header(locator: &ChunkLocator) -> String {
+    let ChunkLocator::Message {
+        session_id,
+        session_label,
+        ..
+    } = locator;
+    format!(
+        "session {} \"{session_label}\":",
+        short_session_id(*session_id)
+    )
+}
+
+/// The unclosed `[timestamp role` tag that opens a line in a session-scoped result.
+fn locator_tag(locator: &ChunkLocator) -> String {
+    let ChunkLocator::Message {
+        timestamp, role, ..
+    } = locator;
+    format!("[{} {}", timestamp.format(TIMESTAMP_FORMAT), role.as_wire())
+}
+
+fn short_session_id(session: SessionId) -> String {
+    session
+        .to_string()
+        .chars()
+        .take(SHORT_SESSION_ID_CHARS)
+        .collect()
+}
+
+fn one_line(text: &str) -> String {
+    text.replace('\n', " ")
 }
 
 fn valid_key(args: &Value) -> Result<String, ToolError> {
@@ -383,9 +521,9 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 mod tests {
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        ChunkId, Embedding, MemoryError, MemoryId, MemoryStore, NoMemoryStore, NoSemanticStore,
-        NoTranscriptStore, SqliteHandle, SqliteMemoryStore, SqliteTranscriptStore, TranscriptStore,
-        UnindexedRows,
+        AdjacentChunks, BranchId, ChunkId, Embedding, MemoryError, MemoryId, MemoryStore,
+        NoMemoryStore, NoSemanticStore, NoTranscriptStore, PersistedMessage, SqliteHandle,
+        SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -433,22 +571,28 @@ mod tests {
         }
     }
 
-    /// Records the session `reminisce` asked to leave out.
+    /// Records the scope `reminisce` searched.
     #[derive(Debug, Default)]
-    struct ExclusionSpy {
-        excluded: parking_lot::Mutex<Option<SessionId>>,
+    struct ScopeSpy {
+        scope: parking_lot::Mutex<Option<SessionScope>>,
     }
 
     #[async_trait]
-    impl SemanticStore for ExclusionSpy {
+    impl SemanticStore for ScopeSpy {
         async fn nearest_chunks(
             &self,
             _q: Vec<f32>,
             _k: usize,
-            exclude_session: Option<SessionId>,
+            scope: SessionScope,
         ) -> Result<Vec<EmbeddingHit>, MemoryError> {
-            *self.excluded.lock() = exclude_session;
+            *self.scope.lock() = Some(scope);
             Ok(Vec::new())
+        }
+        async fn adjacent_chunks(
+            &self,
+            _locator: &ChunkLocator,
+        ) -> Result<AdjacentChunks, MemoryError> {
+            Ok(AdjacentChunks::default())
         }
         async fn nearest_memories(
             &self,
@@ -488,26 +632,166 @@ mod tests {
 
     #[tokio::test]
     async fn reminisce_excludes_the_session_in_progress() {
-        let spy = Arc::new(ExclusionSpy::default());
+        let spy = Arc::new(ScopeSpy::default());
         let first = SessionId::new();
         let (session_tx, session_rx) = watch::channel(first);
-        let tool = ReminisceTool::new(ready(Arc::new(FixedEmbedder)), spy.clone(), session_rx);
+        let tool = ReminisceTool::new(
+            ready(Arc::new(FixedEmbedder)),
+            spy.clone(),
+            Arc::new(NoTranscriptStore),
+            session_rx,
+        );
+        let query = json!({"query": "the rust daemon", "limit": 3, "session": null});
 
-        tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
-            .await
-            .unwrap();
-        assert_eq!(*spy.excluded.lock(), Some(first));
+        tool.invoke(query.clone()).await.unwrap();
+        assert_eq!(*spy.scope.lock(), Some(SessionScope::AllExcept(first)));
 
         let second = SessionId::new();
         session_tx.send_replace(second);
-        tool.invoke(json!({"query": "the rust daemon", "limit": 3}))
-            .await
-            .unwrap();
+        tool.invoke(query).await.unwrap();
         assert_eq!(
-            *spy.excluded.lock(),
-            Some(second),
+            *spy.scope.lock(),
+            Some(SessionScope::AllExcept(second)),
             "the tool must follow a session switch, not pin its first session"
         );
+    }
+
+    /// A saved session's main branch, for appending dialogue.
+    struct PastSession {
+        transcripts: Arc<SqliteTranscriptStore>,
+        semantic: Arc<SqliteSemanticStore>,
+        session: SessionId,
+        branch: BranchId,
+    }
+
+    impl PastSession {
+        async fn begin(handle: &SqliteHandle) -> Self {
+            let transcripts = Arc::new(SqliteTranscriptStore::new(handle.clone()));
+            let session = SessionId::new();
+            let branch = transcripts
+                .begin_session_with_main_branch(session, 0)
+                .await
+                .unwrap();
+            Self {
+                transcripts,
+                semantic: Arc::new(SqliteSemanticStore::new(handle.clone())),
+                session,
+                branch,
+            }
+        }
+
+        /// Store one user/assistant exchange, embedding the chunks of whichever
+        /// side `embed_reply` picks.
+        async fn exchange(&self, prompt: &str, reply: &str, embed_reply: bool) {
+            let opened = self
+                .transcripts
+                .begin_turn(self.branch, PersistedMessage::user(prompt))
+                .await
+                .unwrap();
+            let answered = self
+                .transcripts
+                .append_message_to_branch(
+                    self.branch,
+                    opened.turn,
+                    PersistedMessage::assistant_text(reply, None),
+                )
+                .await
+                .unwrap();
+            let embedded = if embed_reply {
+                answered.chunks
+            } else {
+                opened.message.chunks
+            };
+            let embeddings = embedded
+                .into_iter()
+                .map(|(chunk, text)| Embedding {
+                    target: EmbeddingTarget::Chunk(chunk),
+                    text,
+                    vector: vec![1.0],
+                })
+                .collect();
+            self.semantic
+                .store_embeddings("m", embeddings)
+                .await
+                .unwrap();
+        }
+
+        fn short_id(&self) -> String {
+            short_session_id(self.session)
+        }
+    }
+
+    #[tokio::test]
+    async fn reminisce_scoped_to_a_session_reads_only_that_chat_and_never_the_live_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+            .await
+            .unwrap();
+        let past = PastSession::begin(&handle).await;
+        past.transcripts
+            .set_session_title(past.session, "Daemon tuning")
+            .await
+            .unwrap();
+        past.exchange("how do I tune the daemon?", "raise the batch size", true)
+            .await;
+        past.exchange("and the voice crate?", "leave it alone", false)
+            .await;
+        let other = PastSession::begin(&handle).await;
+        other
+            .exchange("a cooking question", "use more salt", true)
+            .await;
+        let live = PastSession::begin(&handle).await;
+        live.exchange("the live question", "the live answer", true)
+            .await;
+        let tool = ReminisceTool::new(
+            ready(Arc::new(FixedEmbedder)),
+            past.semantic.clone(),
+            past.transcripts.clone(),
+            watch::channel(live.session).1,
+        );
+
+        let scoped = tool
+            .invoke(json!({"query": "tuning", "limit": 5, "session": past.short_id()}))
+            .await
+            .unwrap()
+            .output;
+        let header = format!("session {} \"Daemon tuning\":", past.short_id());
+        assert!(scoped.starts_with(&header), "{scoped}");
+        let exchange = [
+            "how do I tune",
+            "raise the batch size",
+            "and the voice crate?",
+            "leave it alone",
+        ];
+        for text in exchange {
+            assert_eq!(scoped.matches(text).count(), 1, "{text:?} in {scoped}");
+        }
+        assert_eq!(
+            scoped.matches("\n\n").count(),
+            1,
+            "overlapping hits must merge into one run: {scoped}"
+        );
+        let order: Vec<usize> = exchange
+            .iter()
+            .map(|text| {
+                scoped
+                    .find(text)
+                    .unwrap_or_else(|| panic!("{text:?} in {scoped}"))
+            })
+            .collect();
+        assert!(
+            order.is_sorted(),
+            "the exchange must read in order: {scoped}"
+        );
+        for absent in ["salt", "live"] {
+            assert!(!scoped.contains(absent), "{absent:?} leaked into {scoped}");
+        }
+
+        let err = tool
+            .invoke(json!({"query": "live", "limit": 5, "session": live.short_id()}))
+            .await
+            .unwrap_err();
+        assert!(invalid_args(err).contains("in progress"));
     }
 
     /// A SQLite-backed `MemoryOps`; hold the tempdir for the test.
@@ -625,6 +909,7 @@ mod tests {
             Box::new(ReminisceTool::new(
                 no_embedder(),
                 no_semantic(),
+                Arc::new(NoTranscriptStore),
                 watch::channel(SessionId::new()).1,
             )),
         ];

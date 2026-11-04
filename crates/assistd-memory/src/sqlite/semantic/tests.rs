@@ -129,7 +129,10 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
         .embedded_chunk(&store, "short", &unit_vec(1.5))
         .await;
 
-    let hits = store.nearest_chunks(unit_vec(0.0), 3, None).await.unwrap();
+    let hits = store
+        .nearest_chunks(unit_vec(0.0), 3, SessionScope::All)
+        .await
+        .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
     assert_eq!(ids, [second.0, short]);
     assert!((hits[0].similarity - 1.0).abs() < 1e-4);
@@ -167,7 +170,7 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 
     for (top_k, expected) in [(3, &ids[..3]), (usize::MAX, &ids[..])] {
         let hits = store
-            .nearest_chunks(unit_vec(0.0), top_k, None)
+            .nearest_chunks(unit_vec(0.0), top_k, SessionScope::All)
             .await
             .unwrap();
         let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -185,7 +188,10 @@ async fn nearest_chunks_can_exclude_one_session() {
         .embedded_chunk(&store, "current", &unit_vec(0.0))
         .await;
 
-    let all = store.nearest_chunks(unit_vec(0.0), 5, None).await.unwrap();
+    let all = store
+        .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
+        .await
+        .unwrap();
     let all_ids: Vec<ChunkId> = all.iter().map(|h| h.chunk_id).collect();
     assert_eq!(
         all_ids,
@@ -194,7 +200,7 @@ async fn nearest_chunks_can_exclude_one_session() {
     );
 
     let others = store
-        .nearest_chunks(unit_vec(0.0), 5, Some(current.session))
+        .nearest_chunks(unit_vec(0.0), 5, SessionScope::AllExcept(current.session))
         .await
         .unwrap();
     let other_ids: Vec<(ChunkId, SessionId)> = others
@@ -273,7 +279,10 @@ async fn non_finite_vectors_never_enter_top_k() {
         .embedded_chunk(&store, "near", &unit_vec(0.1))
         .await;
 
-    let hits = store.nearest_chunks(unit_vec(0.0), 2, None).await.unwrap();
+    let hits = store
+        .nearest_chunks(unit_vec(0.0), 2, SessionScope::All)
+        .await
+        .unwrap();
     let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
     assert_eq!(got, [near, far]);
     assert!(hits.iter().all(|h| h.similarity.is_finite()));
@@ -361,7 +370,10 @@ async fn dropping_other_models_keeps_only_the_current_models_vectors() {
             memories: 1
         }
     );
-    let hits = store.nearest_chunks(unit_vec(0.0), 5, None).await.unwrap();
+    let hits = store
+        .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
+        .await
+        .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
     assert_eq!(ids, [current]);
     assert!(

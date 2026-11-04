@@ -14,10 +14,10 @@ use assistd_ipc::{
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{
-    BranchId, ChunkId, ChunkLocator, Embedding, EmbeddingHit, HistoryRow, HistoryScope, MemoryHit,
-    MemoryId, MessageId, MessageKind, NoSemanticStore, PersistedMessage, PersistedRole,
-    PersistedToolCall, SemanticStore, SessionId, SqliteHandle, SqliteTranscriptStore,
-    TranscriptStore, UnindexedRows,
+    AdjacentChunks, BranchId, ChunkId, ChunkLocator, Embedding, EmbeddingHit, HistoryRow,
+    HistoryScope, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore, PersistedMessage,
+    PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope, SqliteHandle,
+    SqliteTranscriptStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
     CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolOutput, ToolsDisabled,
@@ -1843,14 +1843,14 @@ impl SemanticStore for FixedHits {
         &self,
         _query_vector: Vec<f32>,
         top_k: usize,
-        exclude_session: Option<SessionId>,
+        scope: SessionScope,
     ) -> assistd_memory::Result<Vec<EmbeddingHit>> {
         Ok(self
             .0
             .iter()
             .filter(|hit| {
                 let ChunkLocator::Message { session_id, .. } = hit.locator;
-                Some(session_id) != exclude_session
+                scope != SessionScope::AllExcept(session_id)
             })
             .take(top_k)
             .cloned()
@@ -1862,6 +1862,12 @@ impl SemanticStore for FixedHits {
         top_k: usize,
     ) -> assistd_memory::Result<Vec<MemoryHit>> {
         NoSemanticStore.nearest_memories(query_vector, top_k).await
+    }
+    async fn adjacent_chunks(
+        &self,
+        locator: &ChunkLocator,
+    ) -> assistd_memory::Result<AdjacentChunks> {
+        NoSemanticStore.adjacent_chunks(locator).await
     }
     async fn drop_other_models(&self, model: &str) -> assistd_memory::Result<u64> {
         NoSemanticStore.drop_other_models(model).await
@@ -1902,6 +1908,7 @@ fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) 
             message_id: MessageId(message),
             role: PersistedRole::User,
             timestamp: Utc::now(),
+            session_label: String::new(),
         },
         text: text.into(),
         similarity,
