@@ -6,21 +6,16 @@ use std::sync::Arc;
 use assistd_ipc::{ComponentReadiness, ListenPhase, StartupComponent};
 use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use thiserror::Error;
+use tokio::sync::watch;
 
-use crate::{
-    ContinuousListener, Transcriber, VoiceInput, VoiceOutput, VoiceOutputController,
-    WakeWordSpotter,
-};
+use crate::{ContinuousListener, VoiceInput, VoiceOutput, VoiceOutputController};
 
-/// Push-to-talk input and the continuous listener, which share one
-/// transcriber and so come up together, plus the listener's wake-phrase
-/// spotter; `None` when wake-word listening is off or failed to load.
+/// Push-to-talk input and the continuous listener, which share one mic and
+/// one transcriber and so come up together.
 #[derive(Debug, Clone)]
 pub struct VoiceCapture {
     pub input: Arc<dyn VoiceInput>,
     pub listener: Arc<dyn ContinuousListener>,
-    pub transcriber: Arc<dyn Transcriber>,
-    pub spotter: Option<Arc<WakeWordSpotter>>,
 }
 
 /// Voice capture is still starting, or unavailable this run.
@@ -34,6 +29,7 @@ pub struct CaptureUnavailable(pub NotReady);
 pub struct VoiceManager {
     capture: ReadinessCell<VoiceCapture>,
     speech: Arc<VoiceOutputController>,
+    readiness_changed: watch::Sender<()>,
 }
 
 impl VoiceManager {
@@ -43,6 +39,7 @@ impl VoiceManager {
         Arc::new(Self {
             capture: ReadinessCell::starting(),
             speech: VoiceOutputController::new(speech_enabled),
+            readiness_changed: watch::channel(()).0,
         })
     }
 
@@ -55,12 +52,25 @@ impl VoiceManager {
         Arc::new(Self {
             capture: ReadinessCell::new(Readiness::Ready(capture)),
             speech: VoiceOutputController::ready(output, speech_enabled),
+            readiness_changed: watch::channel(()).0,
         })
     }
 
     /// Record how far capture's startup has got.
     pub fn set_capture(&self, capture: Readiness<VoiceCapture>) {
         self.capture.set(capture);
+        self.readiness_changed.send_replace(());
+    }
+
+    /// Record how far speech output's startup has got.
+    pub fn set_speech(&self, output: Readiness<Arc<dyn VoiceOutput>>) {
+        self.speech.set_output(output);
+        self.readiness_changed.send_replace(());
+    }
+
+    /// Marked changed on every [`Self::set_capture`] and [`Self::set_speech`].
+    pub fn subscribe_readiness(&self) -> watch::Receiver<()> {
+        self.readiness_changed.subscribe()
     }
 
     /// The capture handles, or why there are none.

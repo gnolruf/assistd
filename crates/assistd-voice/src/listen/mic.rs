@@ -21,7 +21,7 @@ use super::silero::{FrameClassifier, SileroVad};
 use super::spotter::WakeWordSpotter;
 use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTuning};
 use super::wake_gate::{Admission, WakeGate};
-use super::{ContinuousListener, Heard, ListenError};
+use super::{ContinuousListener, Heard, ListenError, WakeTest};
 use crate::controller::VoiceOutputController;
 use crate::mic::capture::AudioCaptureError;
 use crate::transcribe::Transcriber;
@@ -38,6 +38,10 @@ const PENDING_UTTERANCE_DEPTH: usize = 4;
 /// Shortest speech after the wake phrase worth transcribing as a command:
 /// 300 ms at 16 kHz.
 const MIN_COMMAND_SAMPLES: usize = 4_800;
+
+/// Mic reports queued while the previous test utterance is still being
+/// spotted; each utterance comes with a start and an end of speech.
+const WAKE_TEST_BACKLOG: usize = 12;
 
 type CaptureJoin = JoinHandle<Result<(), AudioCaptureError>>;
 
@@ -411,10 +415,7 @@ impl ContinuousListener for MicContinuousListener {
         self.replying_tx.send_replace(replying);
     }
 
-    async fn capture_utterances(
-        &self,
-        sink: mpsc::Sender<SessionAudio>,
-    ) -> Result<(), ListenError> {
+    async fn test_wake_word(&self, sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError> {
         let _claim = {
             let listen_state = self.listen_state.lock().await;
             if listen_state.is_running() {
@@ -425,7 +426,12 @@ impl ContinuousListener for MicContinuousListener {
             }
             UtteranceCaptureClaim(Arc::clone(&self.capturing_utterances))
         };
-        self.stream_utterances(sink).await
+        let (audio_tx, audio_rx) = mpsc::channel(WAKE_TEST_BACKLOG);
+        let (captured, ()) = tokio::join!(
+            self.stream_utterances(audio_tx),
+            spot_test_utterances(Arc::clone(&self.spotter), audio_rx, sink),
+        );
+        captured
     }
 }
 
@@ -760,6 +766,32 @@ async fn spot(spotter: &Arc<WakeWordSpotter>, pcm: Vec<i16>) -> (Vec<i16>, Optio
         warn!(target: "assistd::voice::listen", "wake-phrase spotting failed: {err}");
         (Vec::new(), None)
     })
+}
+
+/// Pass a wake-word test's speech edges on to `sink` and spot the phrase in
+/// each utterance, until `sink` or the capture closes.
+async fn spot_test_utterances(
+    spotter: Arc<WakeWordSpotter>,
+    mut audio: mpsc::Receiver<SessionAudio>,
+    sink: mpsc::Sender<WakeTest>,
+) {
+    while let Some(audio) = tokio::select! {
+        () = sink.closed() => None,
+        audio = audio.recv() => audio,
+    } {
+        let report = match audio {
+            SessionAudio::Speaking(speaking) => WakeTest::Speaking { speaking },
+            SessionAudio::Utterance(utterance) => {
+                let (_, phrase_end) = spot(&spotter, utterance.pcm).await;
+                WakeTest::Utterance {
+                    matched: phrase_end.is_some(),
+                }
+            }
+        };
+        if sink.send(report).await.is_err() {
+            return;
+        }
+    }
 }
 
 async fn transcribe_pcm(transcriber: &dyn Transcriber, pcm: &[i16]) -> Option<String> {

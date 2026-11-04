@@ -58,8 +58,8 @@ pub trait BusyProbe: fmt::Debug + Send + Sync + 'static {
     /// waiting would not help.
     fn foreign_gpu_busy(&self) -> bool;
 
-    /// True when the GPU transcriber is safe to use. When false the
-    /// context may be torn down concurrently and must not be touched.
+    /// True while presence is `Active`. Otherwise the daemon is handing the
+    /// GPU back, and transcription moves to the CPU.
     fn presence_active(&self) -> bool;
 }
 

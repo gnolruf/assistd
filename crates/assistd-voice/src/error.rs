@@ -1,5 +1,5 @@
 //! Typed errors for the [`VoiceInput`](crate::VoiceInput) and
-//! [`VoiceOutput`](crate::VoiceOutput) traits.
+//! [`VoiceOutput`](crate::VoiceOutput) traits and for calls into the voice worker.
 
 use thiserror::Error;
 
@@ -24,6 +24,9 @@ pub enum VoiceInputError {
     /// The request to the daemon that owns the microphone failed.
     #[error("daemon IPC error: {0}")]
     Ipc(#[from] assistd_ipc::IpcClientError),
+
+    #[error(transparent)]
+    Worker(#[from] VoiceWorkerError),
 }
 
 /// Errors surfaced by [`VoiceOutput`](crate::VoiceOutput) implementations.
@@ -36,4 +39,21 @@ pub enum VoiceOutputError {
     #[cfg(feature = "tts")]
     #[error("speech playback enqueue failed: {0}")]
     Playback(#[source] crate::tts::SpeechError),
+
+    #[error(transparent)]
+    Worker(#[from] VoiceWorkerError),
+}
+
+/// A call into the voice worker process that did not succeed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum VoiceWorkerError {
+    /// No worker is running to take the call.
+    #[error("the voice worker is not running")]
+    NotRunning,
+    /// The worker exited before it answered.
+    #[error("the voice worker exited")]
+    Exited,
+    /// The worker answered with this failure.
+    #[error("{0}")]
+    Failed(String),
 }

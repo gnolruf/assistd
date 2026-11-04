@@ -5,6 +5,7 @@ use std::fmt;
 
 use assistd_ipc::ListenPhase;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
@@ -15,14 +16,13 @@ pub mod barge_in;
 pub mod capture;
 pub mod consumer;
 pub mod mic;
-pub mod session;
+mod session;
 pub mod silero;
 pub mod spotter;
 pub mod vad;
 pub mod wake_gate;
 
 pub use mic::MicContinuousListener;
-pub use session::{CapturedUtterance, SessionAudio};
 pub use silero::SileroVad;
 pub use spotter::{SpotterError, WakeWordSpotter};
 
@@ -42,10 +42,13 @@ pub enum ListenError {
     Capture(#[from] AudioCaptureError),
     #[error("listen worker panicked: {0}")]
     Worker(#[from] tokio::task::JoinError),
+    #[error(transparent)]
+    VoiceWorker(#[from] crate::error::VoiceWorkerError),
 }
 
 /// What the listener heard that is addressed to assistd.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "text", rename_all = "snake_case")]
 pub enum Heard {
     /// The wake phrase, alone or ahead of a command.
     WakePhrase,
@@ -56,12 +59,22 @@ pub enum Heard {
     BargeIn,
 }
 
+/// What a wake-word test reports from the mic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WakeTest {
+    /// An utterance started (`true`) or ended (`false`), kept or not.
+    Speaking { speaking: bool },
+    /// An utterance ended; whether the wake phrase was spotted in it.
+    Utterance { matched: bool },
+}
+
 /// A long-running, VAD-gated listener that emits what follows the wake
 /// phrase.
 #[async_trait]
 pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// Open the mic and start segmenting. A no-op when already active;
-    /// [`ListenError::Testing`] while [`Self::capture_utterances`] runs.
+    /// [`ListenError::Testing`] while [`Self::test_wake_word`] runs.
     async fn start(&self) -> Result<(), ListenError>;
 
     /// Close the mic and drain any in-flight utterance. Idempotent.
@@ -94,11 +107,10 @@ pub trait ContinuousListener: fmt::Debug + Send + Sync + 'static {
     /// for the wake phrase.
     fn set_replying(&self, replying: bool);
 
-    /// Send every utterance the mic hears into `sink`, cut but not transcribed, plus each start
-    /// and end of speech, until `sink` closes. Fails with [`ListenError::Listening`] while
+    /// Report into `sink` each start and end of speech the mic hears and whether each utterance
+    /// held the wake phrase, until `sink` closes. Fails with [`ListenError::Listening`] while
     /// listening is active.
-    async fn capture_utterances(&self, sink: mpsc::Sender<SessionAudio>)
-    -> Result<(), ListenError>;
+    async fn test_wake_word(&self, sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError>;
 }
 
 /// [`ContinuousListener`] for when continuous listening is off in config:
@@ -158,10 +170,7 @@ impl ContinuousListener for NoContinuousListener {
 
     fn set_replying(&self, _replying: bool) {}
 
-    async fn capture_utterances(
-        &self,
-        _sink: mpsc::Sender<SessionAudio>,
-    ) -> Result<(), ListenError> {
+    async fn test_wake_word(&self, _sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError> {
         Err(ListenError::Disabled)
     }
 }

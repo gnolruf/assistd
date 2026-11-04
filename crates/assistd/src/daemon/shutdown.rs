@@ -15,6 +15,7 @@ use super::embed_init::EmbeddingService;
 use super::mcp_init::McpService;
 use super::memory_init::MemorySubsystem;
 use super::search_init::SearchService;
+use super::voice_init::VoiceService;
 use super::wm_init::WindowSubsystem;
 
 const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
@@ -23,6 +24,7 @@ const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 /// flip in dependency order once in-flight work has drained.
 pub(super) struct ShutdownStages {
     pub(super) intake: watch::Sender<bool>,
+    pub(super) voice: watch::Sender<bool>,
     pub(super) llm: watch::Sender<bool>,
     pub(super) tools: watch::Sender<bool>,
     pub(super) search: watch::Sender<bool>,
@@ -34,6 +36,7 @@ impl ShutdownStages {
     pub(super) fn new() -> Self {
         Self {
             intake: watch::channel(false).0,
+            voice: watch::channel(false).0,
             llm: watch::channel(false).0,
             tools: watch::channel(false).0,
             search: watch::channel(false).0,
@@ -46,6 +49,7 @@ impl ShutdownStages {
     pub(super) fn cancel_all(&self) {
         for stage in [
             &self.intake,
+            &self.voice,
             &self.llm,
             &self.tools,
             &self.search,
@@ -61,6 +65,7 @@ pub(super) struct DaemonShutdown {
     pub(super) persistence_tracker: TaskTracker,
     pub(super) presence: Arc<PresenceManager>,
     pub(super) memory: MemorySubsystem,
+    pub(super) voice: VoiceService,
     pub(super) embed: EmbeddingService,
     pub(super) search: SearchService,
     pub(super) window: WindowSubsystem,
@@ -75,6 +80,9 @@ impl DaemonShutdown {
         stages.intake.send_replace(true);
         join_intake_tasks(self.intake_tasks).await;
         drain_persistence(&self.persistence_tracker).await;
+
+        stages.voice.send_replace(true);
+        self.voice.shutdown().await;
 
         stages.llm.send_replace(true);
         if let Err(e) = self.presence.shutdown().await {
@@ -99,7 +107,7 @@ impl DaemonShutdown {
 pub(super) struct IntakeTasks {
     pub(super) gpu_monitor: Option<JoinHandle<()>>,
     pub(super) idle_monitor: Option<JoinHandle<()>>,
-    /// Also runs the listen dispatcher once voice is up.
+    /// Also runs the listen dispatcher once voice capture is up.
     pub(super) warmup: JoinHandle<()>,
 }
 

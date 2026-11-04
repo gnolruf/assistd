@@ -26,9 +26,8 @@ use assistd_tools::{
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
 use assistd_voice::{
-    ContinuousListener, Heard, ListenError, SessionAudio, Transcriber, TranscriptionError,
-    VoiceCapture, VoiceInput, VoiceInputError, VoiceManager, VoiceOutputController,
-    VoiceOutputError,
+    ContinuousListener, Heard, ListenError, VoiceCapture, VoiceInput, VoiceInputError,
+    VoiceManager, VoiceOutputController, VoiceOutputError, WakeTest,
 };
 use assistd_wm::FocusedWindowContext;
 
@@ -45,7 +44,6 @@ struct StateParts {
     tools: Arc<ToolRegistry>,
     voice: Arc<dyn VoiceInput>,
     listener: Arc<dyn ContinuousListener>,
-    transcriber: Arc<dyn Transcriber>,
     speech: Arc<dyn assistd_voice::VoiceOutput>,
 }
 
@@ -58,7 +56,6 @@ impl Default for StateParts {
             tools: Arc::new(ToolRegistry::default()),
             voice: Arc::new(assistd_voice::NoVoiceInput::new()),
             listener: Arc::new(assistd_voice::NoContinuousListener::new()),
-            transcriber: Arc::new(ScriptedTranscriber(&[])),
             speech: Arc::new(assistd_voice::NoVoiceOutput),
         }
     }
@@ -75,8 +72,6 @@ impl StateParts {
                 VoiceCapture {
                     input: self.voice,
                     listener: self.listener,
-                    transcriber: self.transcriber,
-                    spotter: None,
                 },
                 self.speech,
                 true,
@@ -730,27 +725,10 @@ impl ContinuousListener for MockListener {
     }
     fn open_follow_up(&self) {}
     fn set_replying(&self, _replying: bool) {}
-    async fn capture_utterances(
-        &self,
-        sink: mpsc::Sender<SessionAudio>,
-    ) -> Result<(), ListenError> {
+    async fn test_wake_word(&self, sink: mpsc::Sender<WakeTest>) -> Result<(), ListenError> {
         assert!(!self.is_active(), "listening must pause while capturing");
         sink.closed().await;
         Ok(())
-    }
-}
-
-/// Transcribes each utterance as the script entry its first sample indexes.
-#[derive(Debug)]
-struct ScriptedTranscriber(&'static [&'static str]);
-
-#[async_trait::async_trait]
-impl Transcriber for ScriptedTranscriber {
-    async fn transcribe(&self, pcm: &[i16]) -> Result<String, TranscriptionError> {
-        let index = pcm
-            .first()
-            .map_or(0, |&sample| usize::from(sample.unsigned_abs()));
-        Ok(self.0.get(index).copied().unwrap_or_default().to_string())
     }
 }
 

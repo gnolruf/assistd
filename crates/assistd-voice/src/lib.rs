@@ -31,13 +31,15 @@ pub mod error;
 #[cfg(feature = "listen")]
 pub mod manager;
 pub mod sentence;
+#[cfg(all(feature = "listen", feature = "tts"))]
+pub mod worker;
 
 pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
-pub use error::{VoiceInputError, VoiceOutputError};
+pub use error::{VoiceInputError, VoiceOutputError, VoiceWorkerError};
 #[cfg(feature = "listen")]
 pub use listen::{
-    CapturedUtterance, ContinuousListener, Heard, ListenError, MicContinuousListener,
-    NoContinuousListener, SessionAudio, SileroVad, SpotterError, WakeWordSpotter,
+    ContinuousListener, Heard, ListenError, MicContinuousListener, NoContinuousListener, SileroVad,
+    SpotterError, WakeTest, WakeWordSpotter,
 };
 #[cfg(feature = "listen")]
 pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};

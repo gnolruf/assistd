@@ -68,7 +68,7 @@ flowchart TB
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
 | `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, `find_program` (a `PATH` lookup that says why a program cannot be run), child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
-| `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision`. | `config`, `ipc`, `utils`                                                         |
+| `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision`, run in a supervised `voice-worker` child behind daemon-side proxies. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `utils`                                                                          |
 
 `utils` sits at the bottom with no internal dependencies; `config`
@@ -442,9 +442,28 @@ unavailable) until then, and per-turn context injection skips recall.
 `VoiceManager` owns voice for the daemon's lifetime. Capture (push-to-talk
 input and the continuous listener) and speech output each start as
 `Readiness::Starting` and become `Ready` or `Unavailable(reason)` once the
-background warmup brings up the transcriber and the voice, so voice requests during
-startup or after a failed load are refused with the reason. Both appear
-in `GetReadiness`, and `GetVoiceState` reports them too.
+voice worker reports how it brought up the transcriber and the voice, so voice
+requests during startup or after a failed load are refused with the reason. Both
+appear in `GetReadiness`, and `GetVoiceState` reports them too.
+
+Everything that touches sherpa-onnx, cpal or rodio runs in the voice worker,
+the hidden `assistd voice-worker` subcommand, so a native crash costs a restart
+rather than the daemon. Once the model load settles, the daemon spawns it from
+`/proc/self/exe` (always the running build, even after an upgrade replaced the
+file) in its own process group with a parent-death signal, unless both voice
+input and speech are disabled. The two speak line-delimited JSON over the
+worker's stdin and stdout (the worker moves fd 1 to stderr so native libraries
+cannot print into the pipe); audio never crosses it, only transcripts, state
+and replies. The daemon holds proxies behind `VoiceInput`, `VoiceOutput` and
+`ContinuousListener` that forward each call and mirror the worker's capture
+state, listen phase and what it heard into the channels those traits expose,
+and it re-sends GPU availability (presence `Active`, foreign VRAM contention)
+whenever it changes, for the worker's `QueuedTranscriber`. When the worker
+dies, calls in flight fail (speech is dropped and the turn carries on as text;
+a push-to-talk recording fails), the listener reports `Off`, capture and speech
+go back to `Starting`, and the supervisor restarts it under `RestartPolicy`
+backoff, resuming listening if it was on; once the policy gives up both are
+`Unavailable`. The `VramLedger` counts the worker's VRAM as the daemon's own.
 
 Push-to-talk: the daemon receives `Request::PttStart` from a client
 or compositor binding, opens the configured microphone via cpal, and
@@ -493,7 +512,7 @@ to a lazily built CPU transcriber of the same model while presence is not
 A `Request::WakeWord` carries a `WakeWordOp` (`Status`, `TestStart`,
 `TestStop`). A test is a
 session owned by the connection that opened it: one at a time, it pauses
-the listener and takes its capture stack through `capture_utterances`,
+the listener and has it report through `test_wake_word`,
 refuses push-to-talk and `ListenStart`, and ends on stop, disconnect, or
 two minutes idle. It streams a `WakeWordTest` (whether the phrase was
 spotted) per utterance and `WakeWordSpeech` at each start and end of
