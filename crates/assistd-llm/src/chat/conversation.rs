@@ -179,7 +179,8 @@ pub struct CompactionCut {
 /// can reuse the prompt it already holds and read only the instruction.
 #[derive(Debug)]
 pub struct SummaryRequest<'a> {
-    /// The conversation exactly as the next step would render it.
+    /// The conversation as the next step would render it, except that the
+    /// turns being folded lose their context blocks.
     pub messages: Vec<wire::ChatMessage<'a>>,
     /// The closing user message, naming the stretch to summarize.
     pub instruction: String,
@@ -530,8 +531,18 @@ impl Conversation {
             instruction: self.summary_instruction(fold.end, chat.summary_target_tokens.get()),
             fold,
             revision: self.revision,
-            snapshot: self.clone(),
+            snapshot: self.without_folded_context(fold),
         })
+    }
+
+    /// A copy whose turns covered by `fold` carry no context block, so what
+    /// was injected for those moments is not summarized as conversation fact.
+    fn without_folded_context(&self, fold: Fold) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.messages[..fold.end.min(fold.turn_start)]
+            .iter_mut()
+            .for_each(|message| message.context = None);
+        snapshot
     }
 
     /// Fold `summary` in as planned at `revision`, discarding it when the
