@@ -118,6 +118,9 @@ pub struct AdjacentChunks {
 pub enum SessionScope {
     All,
     AllExcept(SessionId),
+    /// Every session, plus only those messages of this one that its current
+    /// branch's summary folded away (seq before `kept_from_seq`).
+    AllExceptInContext(SessionId),
     Only(SessionId),
 }
 

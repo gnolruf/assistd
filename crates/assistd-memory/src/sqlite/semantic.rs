@@ -271,6 +271,9 @@ impl MessageFilter {
         Ok(match scope {
             SessionScope::All => Self::Any,
             SessionScope::AllExcept(session) => Self::Skip(session_message_ids(conn, session)?),
+            SessionScope::AllExceptInContext(session) => {
+                Self::Skip(in_context_message_ids(conn, session)?)
+            }
             SessionScope::Only(session) => Self::Keep(session_message_ids(conn, session)?),
         })
     }
@@ -412,6 +415,26 @@ fn session_message_ids(
         "SELECT m.id
          FROM sessions s JOIN messages m ON m.session_id = s.id
          WHERE s.uuid = ?1",
+    )?;
+    stmt.query_map(rusqlite::params![session], |r| r.get(0))?
+        .collect()
+}
+
+/// The messages of `session` not folded into its current branch's summary.
+fn in_context_message_ids(
+    conn: &rusqlite::Connection,
+    session: SessionId,
+) -> rusqlite::Result<HashSet<MessageId>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT m.id
+         FROM sessions s JOIN messages m ON m.session_id = s.id
+         WHERE s.uuid = ?1
+           AND m.id NOT IN (
+               SELECT bm.message_id
+               FROM branch_messages bm
+               JOIN branch_summaries bs ON bs.branch_id = bm.branch_id
+               WHERE bm.branch_id = s.current_branch_id AND bm.seq < bs.kept_from_seq
+           )",
     )?;
     stmt.query_map(rusqlite::params![session], |r| r.get(0))?
         .collect()
