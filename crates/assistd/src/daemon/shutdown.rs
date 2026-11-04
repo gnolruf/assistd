@@ -158,8 +158,6 @@ async fn join_intake_tasks(tasks: IntakeTasks) {
     }
 }
 
-/// Wait for fire-and-forget persistence tasks, abandoning them after
-/// [`PERSISTENCE_DRAIN_BUDGET`].
 async fn stop_task_runs(task_runner: &TaskRunner) {
     if tokio::time::timeout(TASK_RUN_STOP_BUDGET, task_runner.stop())
         .await
@@ -172,6 +170,8 @@ async fn stop_task_runs(task_runner: &TaskRunner) {
     }
 }
 
+/// Wait for fire-and-forget persistence tasks, abandoning them after
+/// [`PERSISTENCE_DRAIN_BUDGET`].
 async fn drain_persistence(tracker: &TaskTracker) {
     tracker.close();
     if tokio::time::timeout(PERSISTENCE_DRAIN_BUDGET, tracker.wait())

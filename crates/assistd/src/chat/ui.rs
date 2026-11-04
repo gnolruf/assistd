@@ -1,7 +1,6 @@
 //! ratatui render for the chat TUI. Mutates only layout outputs: the wrap cache,
 //! the last viewport height, and the confirmation prompt's clamped scroll.
 
-use std::borrow::Cow;
 use std::time::Instant;
 
 use assistd_core::{PresenceState, VoiceCaptureState};
@@ -268,7 +267,7 @@ fn resume_entry_details(entry: &BranchListEntry, now: DateTime<Utc>) -> String {
     let mut details: Vec<String> = entry
         .task_run
         .as_ref()
-        .map(|run| run_outcome(&run.state).into_owned())
+        .map(|run| run_outcome(&run.state))
         .into_iter()
         .collect();
     if let Some(last_active_at) = entry.last_active_at {
@@ -293,7 +292,7 @@ fn resume_entry_details(entry: &BranchListEntry, now: DateTime<Utc>) -> String {
 }
 
 /// A task run's state as its `/resume` entry shows it.
-fn run_outcome(state: &TaskRunState) -> Cow<'static, str> {
+fn run_outcome(state: &TaskRunState) -> String {
     match state {
         TaskRunState::Queued => "queued".into(),
         TaskRunState::Running => "running".into(),
@@ -301,7 +300,7 @@ fn run_outcome(state: &TaskRunState) -> Cow<'static, str> {
         TaskRunState::NeedsInput => "needs input".into(),
         TaskRunState::Succeeded => "succeeded".into(),
         TaskRunState::Failed { reason } => {
-            format!("failed: {}", escape_controls_single_line(reason)).into()
+            format!("failed: {}", escape_controls_single_line(reason))
         }
         TaskRunState::Cancelled => "cancelled".into(),
     }

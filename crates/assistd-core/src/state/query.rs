@@ -161,7 +161,7 @@ pub(super) struct TurnTranslator {
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
     done_emitted: bool,
-    /// The text of the step that ended the turn, once it has.
+    /// The text of the step that ended a task run's turn, once it has.
     reply: Option<String>,
     started_at: Instant,
     tokens: TokenCounter,
@@ -187,7 +187,7 @@ impl TurnTranslator {
         }
     }
 
-    /// The final reply, once the turn emitted `Done`.
+    /// A task run's final reply, once its turn emitted `Done`.
     pub(super) fn take_reply(&mut self) -> Option<String> {
         self.reply.take()
     }
@@ -279,7 +279,9 @@ impl TurnTranslator {
             }
             LlmEvent::Done => {
                 let sentences = sentence_buf.finish().into_iter().collect();
-                self.reply = Some(self.assistant_accum.clone());
+                if let TurnScope::TaskRun(_) = self.scope {
+                    self.reply = Some(self.assistant_accum.clone());
+                }
                 self.persist_final_text(state);
                 self.done_emitted = true;
                 (Event::Done { id }, sentences)
