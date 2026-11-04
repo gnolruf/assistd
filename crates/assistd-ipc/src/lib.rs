@@ -18,7 +18,7 @@ pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
     PlanStep, SuspendReason, TaskGrant, TaskId, TaskName, TaskPlan, TaskPrompt, TaskRunId,
-    TaskRunState, TaskSpec, TaskSpecError, TaskTrigger,
+    TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -246,6 +246,8 @@ pub enum ConfirmSource {
     Main,
     /// A relay's sub-agent, working from untrusted content on `task`.
     Relay { task: String },
+    /// Run `run` of saved task `task`, with no user present.
+    Task { task: TaskId, run: TaskRunId },
 }
 
 impl ConfirmSource {
@@ -393,6 +395,7 @@ pub enum EventKind {
     Readiness,
     ContextSize,
     Relay,
+    TaskRun,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -555,6 +558,12 @@ pub enum Request {
         task: TaskId,
         enabled: bool,
     },
+    /// Queue a run of `task` in a conversation of its own, whose events are broadcast as
+    /// `TaskRun`. Emits `TaskRunQueued`, then `Done`, without waiting for the run.
+    TaskRun { id: String, task: TaskId },
+    /// Cancel run `run`, dropping its turn; errors when it is not queued or running.
+    /// Emits `Done`.
+    TaskCancel { id: String, run: TaskRunId },
 }
 
 impl Request {
@@ -623,7 +632,9 @@ impl Request {
             | Request::TaskGet { id, .. }
             | Request::TaskSave { id, .. }
             | Request::TaskDelete { id, .. }
-            | Request::TaskSetEnabled { id, .. } => id,
+            | Request::TaskSetEnabled { id, .. }
+            | Request::TaskRun { id, .. }
+            | Request::TaskCancel { id, .. } => id,
         }
     }
 
@@ -671,6 +682,8 @@ impl Request {
             Request::TaskSave { .. } => "task_save",
             Request::TaskDelete { .. } => "task_delete",
             Request::TaskSetEnabled { .. } => "task_set_enabled",
+            Request::TaskRun { .. } => "task_run",
+            Request::TaskCancel { .. } => "task_cancel",
         }
     }
 }
@@ -992,6 +1005,9 @@ pub enum Event {
         /// The later of the branch's creation and its newest message, RFC 3339.
         #[serde(default)]
         last_active_at: String,
+        /// The task run the session holds; `None` for a user's session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_run: Option<TaskRunSummary>,
     },
     /// The active branch changed; `session_id` is the now-active session.
     /// `branch_id` is `None` until the session's first message is saved.
@@ -1041,6 +1057,18 @@ pub enum Event {
         id: String,
         task_id: TaskId,
         spec: TaskSpec,
+    },
+    /// Run `run` of `task` was queued.
+    TaskRunQueued {
+        id: String,
+        task: TaskId,
+        run: TaskRunId,
+    },
+    /// One event of task run `run`'s turn, which `id` queued; never terminal itself.
+    TaskRun {
+        id: String,
+        run: TaskRunId,
+        event: Box<Event>,
     },
     /// Terminal failure.
     Error { id: String, message: String },
@@ -1092,6 +1120,8 @@ impl Event {
             | Event::HistoryEntry { id, .. }
             | Event::UndoApplied { id, .. }
             | Event::Task { id, .. }
+            | Event::TaskRunQueued { id, .. }
+            | Event::TaskRun { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id }
             | Event::LastDelta { id, .. } => id,
@@ -1119,6 +1149,7 @@ impl Event {
             Event::Readiness { .. } => EventKind::Readiness,
             Event::ContextSize { .. } => EventKind::ContextSize,
             Event::Relay { .. } => EventKind::Relay,
+            Event::TaskRun { .. } => EventKind::TaskRun,
             Event::VoiceOutputState { .. }
             | Event::WakeWordStatus { .. }
             | Event::WakeWordTest { .. }
@@ -1136,7 +1167,8 @@ impl Event {
             | Event::BranchSwitched { .. }
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. }
-            | Event::Task { .. } => return None,
+            | Event::Task { .. }
+            | Event::TaskRunQueued { .. } => return None,
         })
     }
 }

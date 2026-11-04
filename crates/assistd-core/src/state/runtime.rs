@@ -14,6 +14,7 @@ use assistd_ipc::{Event, EventKind, SubscribeFilter};
 use assistd_memory::{BranchId, SessionId};
 
 use super::chat_focus::ChatFocusSlot;
+use super::task_runner::TaskRunner;
 use super::wakeword_handlers::MicSession;
 
 const EVENTS_BUS_CAPACITY: usize = 256;
@@ -119,6 +120,8 @@ pub struct RuntimeState {
     pub(in crate::state) chat_focus: ChatFocusSlot,
     /// The open wake-word test session, which holds the mic.
     pub(in crate::state) mic_session: StdMutex<Option<MicSession>>,
+    /// Task runs in flight.
+    pub task_runner: Arc<TaskRunner>,
     events_bus: broadcast::Sender<Event>,
     /// Filters of the live [`BusSubscription`]s.
     bus_interest: Arc<StdMutex<Vec<SubscribeFilter>>>,
@@ -137,6 +140,7 @@ impl RuntimeState {
             persist_chain: StdMutex::new(None),
             chat_focus: ChatFocusSlot::default(),
             mic_session: StdMutex::new(None),
+            task_runner: Arc::default(),
             events_bus,
             bus_interest: Arc::default(),
         }
@@ -189,8 +193,8 @@ impl RuntimeState {
     }
 
     /// Publish a copy of `event` on the events bus if any subscriber
-    /// wants its kind. A `ToolResult` copy omits the result's
-    /// `attachments`, which no subscriber reads.
+    /// wants its kind. A `ToolResult` copy, wrapped in a `TaskRun` or not, omits the
+    /// result's `attachments`, which no subscriber reads.
     pub fn publish(&self, event: &Event) {
         if event.kind().is_some_and(|kind| self.bus_wants(kind)) {
             let _ = self.events_bus.send(bus_copy(event));
@@ -249,6 +253,11 @@ fn bus_copy(event: &Event) -> Event {
                 ),
                 None => result.clone(),
             },
+        },
+        Event::TaskRun { id, run, event } => Event::TaskRun {
+            id: id.clone(),
+            run: *run,
+            event: Box::new(bus_copy(event)),
         },
         other => other.clone(),
     }

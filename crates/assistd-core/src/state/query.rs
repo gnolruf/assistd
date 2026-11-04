@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, EventKind, ImageAttachment, RelayEvent, StatusKind};
+use assistd_ipc::{Event, EventKind, ImageAttachment, RelayEvent, StatusKind, TaskRunId};
 use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
@@ -115,10 +115,42 @@ impl ReasoningTrace {
     }
 }
 
+/// Whose conversation a turn belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TurnScope {
+    /// The user's conversation.
+    Main,
+    /// A task run's conversation, whose events reach subscribers wrapped in
+    /// [`Event::TaskRun`].
+    TaskRun(TaskRunId),
+}
+
+impl TurnScope {
+    /// `event` as subscribers of this scope receive it.
+    pub(super) fn wrap(self, event: Event) -> Event {
+        match self {
+            TurnScope::Main => event,
+            TurnScope::TaskRun(run) => Event::TaskRun {
+                id: event.id().to_string(),
+                run,
+                event: Box::new(event),
+            },
+        }
+    }
+
+    fn bus_kind(self, kind: EventKind) -> EventKind {
+        match self {
+            TurnScope::Main => kind,
+            TurnScope::TaskRun(_) => EventKind::TaskRun,
+        }
+    }
+}
+
 /// Translates one turn's agent events into wire events, persisting the
 /// transcript as it goes.
-struct TurnTranslator {
+pub(super) struct TurnTranslator {
     id: String,
+    scope: TurnScope,
     /// `None` when the session could not be saved, so nothing is persisted.
     persist: Option<PersistTarget>,
     assistant_accum: String,
@@ -129,14 +161,17 @@ struct TurnTranslator {
     /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
     last_emit_at: Instant,
     done_emitted: bool,
+    /// The text of the step that ended a task run's turn, once it has.
+    reply: Option<String>,
     started_at: Instant,
     tokens: TokenCounter,
 }
 
 impl TurnTranslator {
-    fn new(id: String, persist: Option<PersistTarget>) -> Self {
+    pub(super) fn new(id: String, scope: TurnScope, persist: Option<PersistTarget>) -> Self {
         Self {
             id,
+            scope,
             persist,
             assistant_accum: String::new(),
             reasoning: None,
@@ -146,14 +181,20 @@ impl TurnTranslator {
                 .checked_sub(LAST_DELTA_DEBOUNCE)
                 .unwrap_or_else(Instant::now),
             done_emitted: false,
+            reply: None,
             started_at: Instant::now(),
             tokens: TokenCounter::new(),
         }
     }
 
+    /// A task run's final reply, once its turn emitted `Done`.
+    pub(super) fn take_reply(&mut self) -> Option<String> {
+        self.reply.take()
+    }
+
     /// The wire event and sentences to speak for `event`, or `None` when
     /// it has no wire form.
-    fn translate(
+    pub(super) fn translate(
         &mut self,
         state: &AppState,
         event: LlmEvent,
@@ -238,6 +279,9 @@ impl TurnTranslator {
             }
             LlmEvent::Done => {
                 let sentences = sentence_buf.finish().into_iter().collect();
+                if let TurnScope::TaskRun(_) = self.scope {
+                    self.reply = Some(self.assistant_accum.clone());
+                }
                 self.persist_final_text(state);
                 self.done_emitted = true;
                 (Event::Done { id }, sentences)
@@ -249,15 +293,26 @@ impl TurnTranslator {
     fn accumulate_delta(&mut self, runtime: &RuntimeState, text: &str) {
         self.assistant_accum.push_str(text);
         if self.last_emit_at.elapsed() >= LAST_DELTA_DEBOUNCE {
-            publish_last_delta(runtime, &self.id, &self.assistant_accum);
+            self.publish_last_delta(runtime, &self.assistant_accum);
             self.last_emit_at = Instant::now();
+        }
+    }
+
+    /// `LastDelta` carries the whole reply so far, so building one costs a
+    /// copy of it; skip that when no subscriber would receive it.
+    fn publish_last_delta(&self, runtime: &RuntimeState, text: &str) {
+        if runtime.bus_wants(self.scope.bus_kind(EventKind::LastDelta)) {
+            let _ = runtime.events_bus().send(self.scope.wrap(Event::LastDelta {
+                id: self.id.clone(),
+                text: text.to_string(),
+            }));
         }
     }
 
     fn persist_tool_calls(&mut self, state: &AppState, calls: &[ToolCall]) {
         let narration = std::mem::take(&mut self.assistant_accum);
         if !narration.is_empty() {
-            publish_last_delta(&state.runtime, &self.id, &narration);
+            self.publish_last_delta(&state.runtime, &narration);
         }
         let reasoning = self.take_reasoning();
         self.persist_message(state, tool_calls_message(narration, calls, reasoning));
@@ -324,7 +379,7 @@ impl TurnTranslator {
             return;
         }
         let final_text = std::mem::take(&mut self.assistant_accum);
-        publish_last_delta(&state.runtime, &self.id, &final_text);
+        self.publish_last_delta(&state.runtime, &final_text);
         self.persist_message(
             state,
             PersistedMessage::assistant_text(final_text, reasoning),
@@ -332,7 +387,7 @@ impl TurnTranslator {
     }
 
     /// Record how long the turn ran and the tokens it produced.
-    fn persist_turn_stats(&self, state: &AppState) {
+    pub(super) fn persist_turn_stats(&self, state: &AppState) {
         let Some(target) = &self.persist else {
             return;
         };
@@ -642,7 +697,7 @@ impl AppState {
         persist: Option<PersistTarget>,
         cancel: &CancellationToken,
     ) -> bool {
-        let mut translator = TurnTranslator::new(id, persist);
+        let mut translator = TurnTranslator::new(id, TurnScope::Main, persist);
         let mut client_connected = true;
         loop {
             let idle_timeout = speech
@@ -850,15 +905,4 @@ fn tool_calls_message(
         })
         .collect();
     PersistedMessage::assistant_tool_calls(content, persisted, reasoning)
-}
-
-/// `LastDelta` carries the whole reply so far, so building one costs a
-/// copy of it; skip that when no subscriber would receive it.
-fn publish_last_delta(runtime: &RuntimeState, id: &str, text: &str) {
-    if runtime.bus_wants(EventKind::LastDelta) {
-        let _ = runtime.events_bus().send(Event::LastDelta {
-            id: id.to_string(),
-            text: text.to_string(),
-        });
-    }
 }

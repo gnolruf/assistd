@@ -322,6 +322,19 @@ their results land in the conversation in the order the model
 emitted them. This keeps the conversation deterministic and the
 `Event` stream readable.
 
+A saved task runs through the same loop with no user present.
+`Request::TaskRun` queues a run in the `TaskRunner` and returns at once.
+The run takes the agent turn lock and the request guard, as a query does,
+then opens an `isolated_conversation`. That conversation gets the main system
+prompt plus a short preamble saying no user is present, and the main agent's
+full tool registry. The run executes inside `MainSlot::preserve_across`. It is
+saved as a transcript session of its own, linked from its `task_runs` row, and
+its events reach subscribers wrapped in `Event::TaskRun`. The main conversation,
+its branch and the active session are never touched. Every confirmation prompt
+is denied and labelled `ConfirmSource::Task`. `Request::TaskCancel` cancels a
+run the way `InterruptTurn` cancels a turn. A run still going at shutdown is
+recorded as failed.
+
 ### Tools (`assistd-tools`)
 
 Two-tier system. The LLM sees a single `run` tool whose argument is a

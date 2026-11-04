@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use assistd_ipc::TaskRunSummary;
+
 use crate::{BranchId, ChunkId, MessageId, PersistedRelayStep, Result, Seq, SessionId, TurnId};
 
 /// Role of a persisted message, stored as the `messages.role` code.
@@ -160,6 +162,8 @@ pub struct BranchInfo {
     pub is_current_in_session: bool,
     /// The later of the branch's creation and its newest message.
     pub last_active_at: DateTime<Utc>,
+    /// The task run the session holds; `None` for a user's session.
+    pub task_run: Option<TaskRunSummary>,
 }
 
 /// One persisted message on a branch, as replayed into the in-memory conversation.
@@ -363,7 +367,8 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// no other branch references them.
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome>;
 
-    /// The newest unended session with a current branch; its `daemon_pid` is not checked.
+    /// The newest unended session with a current branch that holds no task run; its
+    /// `daemon_pid` is not checked.
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>>;
 
     /// Current `sessions.title`, or `None` when none has been set.

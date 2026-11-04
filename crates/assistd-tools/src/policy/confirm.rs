@@ -181,6 +181,8 @@ pub struct ConfirmRouter {
     mode: Mutex<PermissionMode>,
     /// Answers for the user in [`PermissionMode::Auto`], which is refused without one.
     judge: Option<SafetyJudge>,
+    /// Replaces [`ConfirmSource::Main`] on every prompt asked through this router.
+    main_source: Option<ConfirmSource>,
 }
 
 impl ConfirmRouter {
@@ -199,6 +201,25 @@ impl ConfirmRouter {
             pending: Mutex::new(PendingPrompts::default()),
             mode: Mutex::new(PermissionMode::Manual),
             judge,
+            main_source: None,
+        })
+    }
+
+    /// A router with no client behind it, which denies every prompt and labels the main
+    /// agent's with `source`.
+    pub fn unattended(request_id: String, source: ConfirmSource) -> Arc<Self> {
+        let (wire, _) = mpsc::channel(1);
+        Arc::new(Self {
+            request_id,
+            wire,
+            timeout: CONFIRM_TIMEOUT,
+            pending: Mutex::new(PendingPrompts {
+                closed: true,
+                prompts: HashMap::new(),
+            }),
+            mode: Mutex::new(PermissionMode::Manual),
+            judge: None,
+            main_source: Some(source),
         })
     }
 
@@ -220,6 +241,11 @@ impl ConfirmRouter {
     /// Approve `req` once when the mode lets it run unasked; otherwise prompt the client and
     /// await the answer. Every failure is [`Approval::Deny`].
     pub async fn ask(&self, mut req: ConfirmationRequest) -> Approval {
+        if let Some(source) = &self.main_source
+            && req.source.is_main()
+        {
+            req.source = source.clone();
+        }
         let mode = *self.mode.lock();
         if self.approves_unasked(mode, &mut req).await {
             return Approval::Once;
@@ -306,6 +332,7 @@ impl ConfirmRouter {
                 target: "assistd::policy",
                 tool = %req.tool,
                 pattern = %req.matched_pattern,
+                source = ?req.source,
                 "command denied: client cannot answer prompts"
             );
             return None;

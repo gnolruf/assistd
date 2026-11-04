@@ -197,6 +197,15 @@ pub enum TaskRunState {
     Cancelled,
 }
 
+/// The task run a transcript session holds, as listed beside the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRunSummary {
+    pub task: TaskId,
+    pub run: TaskRunId,
+    pub task_name: TaskName,
+    pub state: TaskRunState,
+}
+
 /// Why a task run is suspended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

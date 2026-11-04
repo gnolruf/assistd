@@ -10,6 +10,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
 use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 
+use assistd_ipc::{TaskId, TaskName, TaskRunId, TaskRunSummary};
+
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow,
@@ -19,13 +21,15 @@ use crate::{
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
+use super::tasks::run_state_at;
 use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
 
 mod relays;
 
 use relays::{all_answer_files, insert_relay_steps, relay_traces, unreferenced_answer_files};
 
-/// Columns [`branch_info`] reads, over `branches b JOIN sessions s`.
+/// Columns [`branch_info`] reads, over `branches b JOIN sessions s` and the task run, if any,
+/// the session holds.
 const BRANCH_INFO_SELECT: &str = "
     SELECT  b.id,
             s.uuid,
@@ -43,8 +47,16 @@ const BRANCH_INFO_SELECT: &str = "
                 (SELECT m.created_at
                  FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
                  WHERE bm.branch_id = b.id ORDER BY bm.seq DESC LIMIT 1),
-                b.created_at)) AS last_active_at
-    FROM branches b JOIN sessions s ON s.id = b.session_id";
+                b.created_at)) AS last_active_at,
+            r.task_id,
+            r.id,
+            t.name,
+            r.state,
+            r.suspend_reason,
+            r.failure
+    FROM branches b JOIN sessions s ON s.id = b.session_id
+    LEFT JOIN task_runs r ON r.session_uuid = s.uuid
+    LEFT JOIN tasks t ON t.id = r.task_id";
 
 /// SQLite-backed [`TranscriptStore`].
 #[derive(Debug, Clone)]
@@ -501,8 +513,9 @@ impl TranscriptStore for SqliteTranscriptStore {
             .call(|c| {
                 c.query_row(
                     "SELECT uuid, current_branch_id, daemon_pid, started_at
-                     FROM sessions
+                     FROM sessions s
                      WHERE ended_at IS NULL AND current_branch_id IS NOT NULL
+                       AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.session_uuid = s.uuid)
                      ORDER BY started_at DESC LIMIT 1",
                     [],
                     |r| {
@@ -956,7 +969,24 @@ fn branch_info(row: &Row<'_>) -> rusqlite::Result<BranchInfo> {
         message_count: row.get(10)?,
         is_current_in_session: row.get(11)?,
         last_active_at: timestamp_at(row, 12)?,
+        task_run: task_run_at(row, 13)?,
     })
+}
+
+/// The task run in columns `idx..idx + 6` of a [`BRANCH_INFO_SELECT`] row, if the session
+/// holds one.
+fn task_run_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<TaskRunSummary>> {
+    let Some(task) = row.get::<_, Option<i64>>(idx)? else {
+        return Ok(None);
+    };
+    let task_name = TaskName::try_from(row.get::<_, String>(idx + 2)?)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(idx + 2, Type::Text, Box::new(e)))?;
+    Ok(Some(TaskRunSummary {
+        task: TaskId(task),
+        run: TaskRunId(row.get(idx + 1)?),
+        task_name,
+        state: run_state_at(row, idx + 3)?,
+    }))
 }
 
 fn history_row(row: &Row<'_>) -> rusqlite::Result<HistoryRow> {

@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use assistd_core::{PresenceState, VoiceCaptureState};
-use assistd_ipc::{ConfirmSource, PermissionMode, TurnStats};
+use assistd_ipc::{ConfirmSource, PermissionMode, TaskRunState, TurnStats};
 use assistd_tools::ConfirmationRequest;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
@@ -15,7 +15,9 @@ use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
-use super::app::{App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker};
+use super::app::{
+    App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker, ResumeTab,
+};
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use super::settings::render_settings;
 use super::theme::Theme;
@@ -113,7 +115,7 @@ fn render_input_dock(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
 }
 
 /// The `/resume` list in place of the transcript, under the transcript's
-/// banner: the search box, the matching entries and a count.
+/// banner: the tabs, the search box, the tab's matching entries and a count.
 fn render_resume_picker(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -123,8 +125,16 @@ fn render_resume_picker(
     theme: &Theme,
 ) {
     let banner = banner_lines(model_name, area.width, theme);
-    let [banner_area, search_area, _, list_area, count_area] = Layout::vertical([
+    let [
+        banner_area,
+        tabs_area,
+        search_area,
+        _,
+        list_area,
+        count_area,
+    ] = Layout::vertical([
         Constraint::Length(saturating_u16(banner.len())),
+        Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Min(0),
@@ -132,6 +142,7 @@ fn render_resume_picker(
     ])
     .areas(area);
     frame.render_widget(Paragraph::new(Text::from(banner)), banner_area);
+    frame.render_widget(Paragraph::new(resume_tabs(picker.tab(), theme)), tabs_area);
     render_resume_search(frame, search_area, picker.query(), theme);
     let matches = picker.matches();
     render_resume_list(frame, list_area, &matches, picker.selected(), now, theme);
@@ -140,6 +151,23 @@ fn render_resume_picker(
         meta_style(theme),
     );
     frame.render_widget(Paragraph::new(count), count_area);
+}
+
+/// `Sessions  Tasks`, the tab on screen picked out.
+fn resume_tabs(shown: ResumeTab, theme: &Theme) -> Line<'static> {
+    let tab = |tab: ResumeTab, label: &'static str| {
+        let style = if tab == shown {
+            pointer_style(theme)
+        } else {
+            meta_style(theme)
+        };
+        Span::styled(label, style)
+    };
+    Line::from(vec![
+        tab(ResumeTab::Sessions, " Sessions "),
+        Span::raw(" "),
+        tab(ResumeTab::Tasks, " Tasks "),
+    ])
 }
 
 /// The search query in a rounded box, with the cursor after it.
@@ -177,7 +205,7 @@ fn render_resume_list(
     theme: &Theme,
 ) {
     if matches.is_empty() {
-        let note = Span::styled("No matches", meta_style(theme));
+        let note = Span::styled("Nothing listed", meta_style(theme));
         frame.render_widget(Paragraph::new(note), area);
         return;
     }
@@ -201,8 +229,8 @@ fn picker_scroll_start(selected: usize, total: usize, visible: usize) -> usize {
     (selected + 1).saturating_sub(visible).min(total - visible)
 }
 
-/// The session title behind a selection pointer, then when it was last
-/// active, its size and its branch.
+/// The session title, or a task run's task name, behind a selection pointer,
+/// then the run's outcome, when it was last active, its size and its branch.
 fn resume_entry_rows(
     entry: &BranchListEntry,
     selected: bool,
@@ -210,8 +238,10 @@ fn resume_entry_rows(
     theme: &Theme,
 ) -> [Line<'static>; 2] {
     let title = entry
-        .session_title
-        .as_deref()
+        .task_run
+        .as_ref()
+        .map(|run| run.task_name.as_str())
+        .or(entry.session_title.as_deref())
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map_or_else(|| "Untitled".into(), escape_controls_single_line);
@@ -231,9 +261,15 @@ fn resume_entry_rows(
     [Line::from(title_row), Line::from(detail)]
 }
 
-/// `3h ago · 12 messages · fix (forked from main@4)`.
+/// `failed: timed out · 3h ago · 12 messages · fix (forked from main@4)`, the
+/// outcome only for a task run.
 fn resume_entry_details(entry: &BranchListEntry, now: DateTime<Utc>) -> String {
-    let mut details = Vec::new();
+    let mut details: Vec<String> = entry
+        .task_run
+        .as_ref()
+        .map(|run| run_outcome(&run.state))
+        .into_iter()
+        .collect();
     if let Some(last_active_at) = entry.last_active_at {
         let secs = (now - last_active_at).num_seconds().max(0).unsigned_abs();
         details.push(compact_age(secs));
@@ -253,6 +289,21 @@ fn resume_entry_details(entry: &BranchListEntry, now: DateTime<Utc>) -> String {
         },
     );
     details.join(" · ")
+}
+
+/// A task run's state as its `/resume` entry shows it.
+fn run_outcome(state: &TaskRunState) -> String {
+    match state {
+        TaskRunState::Queued => "queued".into(),
+        TaskRunState::Running => "running".into(),
+        TaskRunState::Suspended { .. } => "suspended".into(),
+        TaskRunState::NeedsInput => "needs input".into(),
+        TaskRunState::Succeeded => "succeeded".into(),
+        TaskRunState::Failed { reason } => {
+            format!("failed: {}", escape_controls_single_line(reason))
+        }
+        TaskRunState::Cancelled => "cancelled".into(),
+    }
 }
 
 /// `just now`, `5m ago`, `3h ago`, `2d ago`.
@@ -335,6 +386,7 @@ fn render_confirmation_dock(
     let title = match prompt.request.source {
         ConfirmSource::Main => format!(" Confirm {tool} "),
         ConfirmSource::Relay { .. } => format!(" Confirm {tool} for a relay sub-agent "),
+        ConfirmSource::Task { run, .. } => format!(" Confirm {tool} for task run {run} "),
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -730,7 +782,10 @@ fn status_hint(app: &App) -> Option<String> {
     if app.confirmation.is_some() {
         Some("↑/↓ select · Enter confirm · Esc deny".to_string())
     } else if app.resume_picker.is_some() {
-        Some("type to search · ↑/↓ select · Enter resume · Esc cancel".to_string())
+        Some(
+            "type to search · Tab sessions/tasks · ↑/↓ select · Enter resume · Esc cancel"
+                .to_string(),
+        )
     } else if let Some(notice) = app.notice() {
         Some(notice.to_string())
     } else if let Some(panel) = app.shown_wake_word_panel() {

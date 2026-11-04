@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_core::PresenceState;
-use assistd_ipc::{Event, ImageMime, IpcClient, PermissionMode, Request, VoiceCaptureState};
+use assistd_ipc::{
+    Event, ImageMime, IpcClient, PermissionMode, Request, TaskRunSummary, VoiceCaptureState,
+};
 use assistd_tools::{Approval, Attachment, ConfirmationRequest};
 use assistd_utils::token_counter::TokenCounter;
 use chrono::{DateTime, Utc};
@@ -311,6 +313,8 @@ pub(super) struct BranchListEntry {
     pub session_title: Option<String>,
     /// `None` when the daemon's timestamp does not parse.
     pub last_active_at: Option<DateTime<Utc>>,
+    /// The task run the session holds; `None` for a user's session.
+    pub task_run: Option<TaskRunSummary>,
 }
 
 impl BranchListEntry {
@@ -318,11 +322,20 @@ impl BranchListEntry {
         self.is_active_session && self.is_current_in_session
     }
 
+    /// The picker tab that lists this entry.
+    fn tab(&self) -> ResumeTab {
+        match self.task_run {
+            Some(_) => ResumeTab::Tasks,
+            None => ResumeTab::Sessions,
+        }
+    }
+
     /// Whether every whitespace-separated term of the lowercased `query`
-    /// appears in the title, branch names or session id.
+    /// appears in the title, task name, branch names or session id.
     fn matches_query(&self, query: &str) -> bool {
         let haystack = [
             self.session_title.as_deref(),
+            self.task_run.as_ref().map(|run| run.task_name.as_str()),
             Some(self.name.as_str()),
             self.parent_branch_name.as_deref(),
             Some(self.session_short.as_str()),
@@ -336,27 +349,44 @@ impl BranchListEntry {
     }
 }
 
-/// Session list `/resume` draws in the chat panel, narrowed by a
-/// typed search.
+/// Which kind of session a [`ResumePicker`] lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResumeTab {
+    /// The user's own sessions.
+    Sessions,
+    /// Sessions that task runs held.
+    Tasks,
+}
+
+/// Session list `/resume` draws in the chat panel, one tab at a time,
+/// narrowed by a typed search.
 pub(super) struct ResumePicker {
     entries: Vec<BranchListEntry>,
+    tab: ResumeTab,
     query: String,
     /// Index into [`matches`](Self::matches).
     selected: usize,
 }
 
 impl ResumePicker {
-    /// Selects the active branch when it is listed.
+    /// Opens on the Sessions tab, selecting the active branch when it is listed there.
     fn new(entries: Vec<BranchListEntry>) -> Self {
-        let selected = entries
-            .iter()
-            .position(BranchListEntry::is_active)
-            .unwrap_or(0);
-        Self {
+        let mut picker = Self {
             entries,
+            tab: ResumeTab::Sessions,
             query: String::new(),
-            selected,
-        }
+            selected: 0,
+        };
+        picker.selected = picker
+            .matches()
+            .iter()
+            .position(|entry| entry.is_active())
+            .unwrap_or(0);
+        picker
+    }
+
+    pub(super) fn tab(&self) -> ResumeTab {
+        self.tab
     }
 
     pub(super) fn query(&self) -> &str {
@@ -367,17 +397,30 @@ impl ResumePicker {
         self.selected
     }
 
+    /// How many entries the tab on screen lists before the search.
     pub(super) fn total(&self) -> usize {
-        self.entries.len()
+        self.entries
+            .iter()
+            .filter(|entry| entry.tab() == self.tab)
+            .count()
     }
 
-    /// The entries the search keeps, in listing order.
+    /// The tab's entries the search keeps, in listing order.
     pub(super) fn matches(&self) -> Vec<&BranchListEntry> {
         let query = self.query.to_lowercase();
         self.entries
             .iter()
-            .filter(|entry| entry.matches_query(&query))
+            .filter(|entry| entry.tab() == self.tab && entry.matches_query(&query))
             .collect()
+    }
+
+    /// Show the other tab, keeping the search.
+    fn switch_tab(&mut self) {
+        self.tab = match self.tab {
+            ResumeTab::Sessions => ResumeTab::Tasks,
+            ResumeTab::Tasks => ResumeTab::Sessions,
+        };
+        self.selected = 0;
     }
 
     /// The selected match as a session-qualified switch target.

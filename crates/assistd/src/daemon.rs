@@ -167,7 +167,7 @@ async fn start(
 
     let session_ctx = Arc::new(SessionContext::new(memory.session_id, memory.branch_id));
 
-    let (chat, relay) = build_chat_and_relay(
+    let (chat, relay, main_slot) = build_chat_and_relay(
         &config,
         &api_key,
         slot_dir,
@@ -189,24 +189,24 @@ async fn start(
         },
     )?;
 
-    let resumed_history = std::mem::take(&mut memory.resumed_history);
-    replay_history(chat.as_ref(), resumed_history).await;
+    replay_history(chat.as_ref(), std::mem::take(&mut memory.resumed_history)).await;
 
     let subsystems = Subsystems::new(chat, presence.clone(), tools.registry, voice.clone())
         .with_window_manager(window.manager.clone())
         .with_vision_revalidator(vision_revalidator.clone())
         .with_mcp_servers(tools.mcp_servers)
         .with_web_search(web_search)
-        .with_tools_disabled(tools.disabled);
-    let memory_stack = build_memory_stack(&config, &memory, &embed);
+        .with_tools_disabled(tools.disabled)
+        .with_main_slot(main_slot);
 
     let state = Arc::new(AppState {
+        memory: build_memory_stack(&config, &memory, &embed),
         config,
         subsystems,
-        memory: memory_stack,
         runtime: RuntimeState::new().with_session_ctx(session_ctx),
     });
     let persistence_tracker = state.runtime.persistence_tracker_handle();
+    let task_runner = Arc::clone(&state.runtime.task_runner);
     let background = spawn_background_starts(
         &state,
         BackgroundStarts {
@@ -223,6 +223,7 @@ async fn start(
         state,
         DaemonShutdown {
             persistence_tracker,
+            task_runner,
             presence,
             memory,
             voice: background.voice,
@@ -330,8 +331,8 @@ fn prepare_slot_dir() -> Result<SlotDir> {
     Ok(slot_dir)
 }
 
-/// The chat backend, and what the `relay` tool runs sub-agents with beside it on the
-/// same main slot, its saved answers swept of those not in `kept_answers`.
+/// The chat backend, what the `relay` tool runs sub-agents with beside it on the same
+/// main slot, its saved answers swept of those not in `kept_answers`, and that slot's guard.
 fn build_chat_and_relay(
     config: &Config,
     api_key: &ApiKey,
@@ -339,7 +340,7 @@ fn build_chat_and_relay(
     health_probe: &Arc<dyn LlmHealthProbe>,
     session_ctx: &SessionContext,
     kept_answers: Option<HashSet<PathBuf>>,
-) -> Result<(Arc<dyn LlmBackend>, RelayDeps)> {
+) -> Result<(Arc<dyn LlmBackend>, RelayDeps, Arc<MainSlot>)> {
     let main_slot = build_main_slot(config, api_key, slot_dir, health_probe)?;
     let chat = build_chat_backend(
         config,
@@ -349,13 +350,13 @@ fn build_chat_and_relay(
     )?;
     let relay = build_relay_deps(
         config,
-        main_slot,
+        Arc::clone(&main_slot),
         &chat,
         health_probe,
         session_ctx,
         kept_answers,
     )?;
-    Ok((chat, relay))
+    Ok((chat, relay, main_slot))
 }
 
 /// The guard that keeps the chat server's main slot across sub-agent runs.

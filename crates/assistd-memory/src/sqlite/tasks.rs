@@ -1,4 +1,4 @@
-//! SQLite-backed [`TaskStore`] over the `tasks` table.
+//! SQLite-backed [`TaskStore`] over the `tasks` and `task_runs` tables.
 
 use async_trait::async_trait;
 use rusqlite::types::Type;
@@ -6,15 +6,23 @@ use rusqlite::{ErrorCode, Row, Transaction};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use assistd_ipc::{TaskId, TaskSpec};
+use assistd_ipc::{SuspendReason, TaskId, TaskRunId, TaskRunState, TaskSpec, TaskTrigger};
 
-use crate::{MemoryError, Result, TaskRecord, TaskStore};
+use crate::{MemoryError, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore};
 
 use super::connection::{SqliteHandle, truncate_wal};
 use super::timestamp::now_millis;
 
 const SELECT_TASK: &str =
     "SELECT id, name, prompt, triggers, enabled, grants, plan FROM tasks WHERE id = ?1";
+
+const RUN_QUEUED: i64 = 0;
+const RUN_RUNNING: i64 = 1;
+const RUN_SUSPENDED: i64 = 2;
+const RUN_NEEDS_INPUT: i64 = 3;
+const RUN_SUCCEEDED: i64 = 4;
+const RUN_FAILED: i64 = 5;
+const RUN_CANCELLED: i64 = 6;
 
 /// SQLite-backed [`TaskStore`].
 #[derive(Debug, Clone)]
@@ -116,6 +124,119 @@ impl TaskStore for SqliteTaskStore {
                 MemoryError::TaskNotFound(id),
             ))
     }
+
+    async fn queue_run(&self, task: TaskId, trigger: TaskTrigger) -> Result<TaskRunId> {
+        let now = now_millis();
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                c.query_row(
+                    "INSERT INTO task_runs (task_id, trigger, state, queued_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     RETURNING id",
+                    rusqlite::params![task.0, to_json(&trigger)?, RUN_QUEUED, now],
+                    |r| r.get(0).map(TaskRunId),
+                )
+            })
+            .await
+            .map_err(|error| match &error {
+                tokio_rusqlite::Error::Error(rusqlite::Error::SqliteFailure(failure, _))
+                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
+                {
+                    MemoryError::TaskNotFound(task)
+                }
+                _ => MemoryError::sqlite("task queue_run")(error),
+            })
+    }
+
+    async fn start_run(&self, run: TaskRunId, session: SessionId) -> Result<()> {
+        let now = now_millis();
+        let updated = self
+            .handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "UPDATE task_runs
+                     SET state = ?2, started_at = MAX(?3, queued_at), session_uuid = ?4
+                     WHERE id = ?1 AND state = ?5",
+                    rusqlite::params![run.0, RUN_RUNNING, now, session, RUN_QUEUED],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("task start_run"))?;
+        run_updated(updated, run)
+    }
+
+    async fn finish_run(&self, run: TaskRunId, end: TaskRunEnd) -> Result<()> {
+        let now = now_millis();
+        let (state, failure, reply) = match end {
+            TaskRunEnd::Succeeded { reply } => (RUN_SUCCEEDED, None, Some(reply)),
+            TaskRunEnd::Failed { reason } => (RUN_FAILED, Some(reason), None),
+            TaskRunEnd::Cancelled => (RUN_CANCELLED, None, None),
+        };
+        let updated = self
+            .handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "UPDATE task_runs
+                     SET state = ?2, suspend_reason = NULL, failure = ?3, reply = ?4,
+                         ended_at = MAX(?5, queued_at)
+                     WHERE id = ?1 AND state NOT IN (?6, ?7, ?8)",
+                    rusqlite::params![
+                        run.0,
+                        state,
+                        failure,
+                        reply,
+                        now,
+                        RUN_SUCCEEDED,
+                        RUN_FAILED,
+                        RUN_CANCELLED,
+                    ],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("task finish_run"))?;
+        run_updated(updated, run)
+    }
+}
+
+/// The run state stored in columns `idx` (state code), `idx + 1` (suspend reason) and
+/// `idx + 2` (failure) of `row`.
+pub(super) fn run_state_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<TaskRunState> {
+    let code: i64 = row.get(idx)?;
+    let out_of_range = || {
+        rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            Type::Integer,
+            Box::new(rusqlite::types::FromSqlError::OutOfRange(code)),
+        )
+    };
+    Ok(match code {
+        RUN_QUEUED => TaskRunState::Queued,
+        RUN_RUNNING => TaskRunState::Running,
+        RUN_SUSPENDED => TaskRunState::Suspended {
+            reason: match row.get::<_, i64>(idx + 1)? {
+                0 => SuspendReason::UserConversation,
+                1 => SuspendReason::GpuBusy,
+                _ => return Err(out_of_range()),
+            },
+        },
+        RUN_NEEDS_INPUT => TaskRunState::NeedsInput,
+        RUN_SUCCEEDED => TaskRunState::Succeeded,
+        RUN_FAILED => TaskRunState::Failed {
+            reason: row.get(idx + 2)?,
+        },
+        RUN_CANCELLED => TaskRunState::Cancelled,
+        _ => return Err(out_of_range()),
+    })
+}
+
+fn run_updated(updated: usize, run: TaskRunId) -> Result<()> {
+    if updated == 0 {
+        return Err(MemoryError::TaskRunNotFound(run));
+    }
+    Ok(())
 }
 
 fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Result<TaskRecord> {

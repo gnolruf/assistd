@@ -1,6 +1,7 @@
-use assistd_ipc::{PlanStep, TaskGrant, TaskPlan, TaskTrigger};
+use assistd_ipc::{PlanStep, TaskGrant, TaskPlan, TaskRunSummary, TaskTrigger};
 
 use super::*;
+use crate::{SqliteTranscriptStore, TranscriptStore};
 
 /// The returned temp dir must outlive the store.
 async fn fresh() -> (SqliteTaskStore, tempfile::TempDir) {
@@ -80,4 +81,59 @@ async fn save_refuses_a_taken_name_and_an_unknown_id() {
             .await,
         Err(MemoryError::TaskNotFound(TaskId(999)))
     ));
+}
+
+#[tokio::test]
+async fn a_run_session_is_listed_with_its_outcome_and_never_resumed() {
+    let temp = tempfile::tempdir().unwrap();
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let tasks = SqliteTaskStore::new(handle.clone());
+    let transcripts = SqliteTranscriptStore::new(handle);
+    let task = tasks
+        .save(None, approved_spec("digest", "a"))
+        .await
+        .unwrap();
+    let user_session = SessionId::new();
+    transcripts
+        .begin_session_with_main_branch(user_session, 1)
+        .await
+        .unwrap();
+
+    let run = tasks.queue_run(task.id, TaskTrigger::Manual).await.unwrap();
+    let run_session = SessionId::new();
+    transcripts
+        .begin_session_with_main_branch(run_session, 1)
+        .await
+        .unwrap();
+    tasks.start_run(run, run_session).await.unwrap();
+    tasks
+        .finish_run(run, TaskRunEnd::Succeeded { reply: "ok".into() })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        tasks.finish_run(run, TaskRunEnd::Cancelled).await,
+        Err(MemoryError::TaskRunNotFound(id)) if id == run
+    ));
+    let resumable = transcripts.find_resumable_session().await.unwrap().unwrap();
+    assert_eq!(resumable.session_id, user_session);
+    let tags: Vec<_> = transcripts
+        .list_branches()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|branch| (branch.session_id, branch.task_run))
+        .collect();
+    assert!(tags.contains(&(user_session, None)));
+    assert!(tags.contains(&(
+        run_session,
+        Some(TaskRunSummary {
+            task: task.id,
+            run,
+            task_name: task.spec.name.clone(),
+            state: TaskRunState::Succeeded,
+        })
+    )));
 }

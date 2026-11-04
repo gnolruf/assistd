@@ -602,8 +602,16 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 is_current_in_session: true,
                 is_active_session: false,
                 last_active_at: "2026-01-02T00:00:00Z".into(),
+                task_run: Some(TaskRunSummary {
+                    task: TaskId(4),
+                    run: TaskRunId(9),
+                    task_name: TaskName::try_from("digest".to_string()).unwrap(),
+                    state: TaskRunState::Failed {
+                        reason: "timed out".into(),
+                    },
+                }),
             },
-            r#"{"type":"branch_info","id":"r","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_ended_at":null,"session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false,"last_active_at":"2026-01-02T00:00:00Z"}"#,
+            r#"{"type":"branch_info","id":"r","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_ended_at":null,"session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false,"last_active_at":"2026-01-02T00:00:00Z","task_run":{"task":4,"run":9,"task_name":"digest","state":{"state":"failed","reason":"timed out"}}}"#,
         ),
         (
             Event::BranchSwitched {
@@ -833,19 +841,62 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"task_set_enabled","id":"r","task":4,"enabled":false}"#,
         ),
+        (
+            Request::TaskRun {
+                id: id(),
+                task: TaskId(4),
+            },
+            r#"{"type":"task_run","id":"r","task":4}"#,
+        ),
+        (
+            Request::TaskCancel {
+                id: id(),
+                run: TaskRunId(9),
+            },
+            r#"{"type":"task_cancel","id":"r","run":9}"#,
+        ),
     ]
 }
 
 fn task_event_cases() -> Vec<(Event, &'static str)> {
     let wire = format!(r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE}}}"#);
-    vec![(
-        Event::Task {
-            id: id(),
-            task_id: TaskId(4),
-            spec: sample_task_spec(),
-        },
-        wire.leak(),
-    )]
+    vec![
+        (
+            Event::Task {
+                id: id(),
+                task_id: TaskId(4),
+                spec: sample_task_spec(),
+            },
+            wire.leak(),
+        ),
+        (
+            Event::TaskRunQueued {
+                id: id(),
+                task: TaskId(4),
+                run: TaskRunId(9),
+            },
+            r#"{"type":"task_run_queued","id":"r","task":4,"run":9}"#,
+        ),
+        (
+            Event::TaskRun {
+                id: id(),
+                run: TaskRunId(9),
+                event: Box::new(Event::ConfirmRequest {
+                    id: id(),
+                    confirm_id: "c".into(),
+                    tool: "bash".into(),
+                    script: "rm x".into(),
+                    matched_pattern: "rm".into(),
+                    always_allow: Vec::new(),
+                    source: ConfirmSource::Task {
+                        task: TaskId(4),
+                        run: TaskRunId(9),
+                    },
+                }),
+            },
+            r#"{"type":"task_run","id":"r","run":9,"event":{"type":"confirm_request","id":"r","confirm_id":"c","tool":"bash","script":"rm x","matched_pattern":"rm","source":{"agent":"task","task":4,"run":9}}}"#,
+        ),
+    ]
 }
 
 #[test]
