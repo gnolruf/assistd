@@ -1,5 +1,7 @@
-//! Vision-capability probe: asks `/props` for the loaded model's
-//! `modalities`, since llama.cpp loads a projector implicitly.
+//! Capability probe: asks `/props` for the loaded model's `modalities`,
+//! since llama.cpp loads a projector implicitly, and its slot count.
+
+use std::num::NonZeroU32;
 
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -13,6 +15,8 @@ use super::error::LlamaServerError;
 pub struct VisionState {
     pub model_id: Option<String>,
     pub vision_supported: bool,
+    /// Conversations the server decodes at once; `None` when not reported.
+    pub total_slots: Option<NonZeroU32>,
 }
 
 /// Probe the loaded model's capabilities through `control`, asking a router
@@ -27,6 +31,7 @@ pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str
         return VisionState {
             model_id: parse_model_id(&body),
             vision_supported: parse_vision_supported(&body),
+            total_slots: parse_total_slots(&body),
         };
     }
 
@@ -47,6 +52,7 @@ pub async fn probe_capabilities_routed(control: &LlamaServerControl, model: &str
     VisionState {
         model_id,
         vision_supported,
+        total_slots: parse_total_slots(&child_body),
     }
 }
 
@@ -101,6 +107,13 @@ fn parse_vision_supported(body: &Value) -> bool {
         .and_then(|m| m.get("vision"))
         .and_then(Value::as_bool)
         == Some(true)
+}
+
+fn parse_total_slots(body: &Value) -> Option<NonZeroU32> {
+    body.get("total_slots")
+        .and_then(Value::as_u64)
+        .and_then(|slots| u32::try_from(slots).ok())
+        .and_then(NonZeroU32::new)
 }
 
 #[cfg(test)]

@@ -2,13 +2,15 @@
 
 use async_trait::async_trait;
 use rusqlite::types::Type;
-use rusqlite::{ErrorCode, Row, Transaction};
+use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use assistd_ipc::{SuspendReason, TaskId, TaskRunId, TaskRunState, TaskSpec, TaskTrigger};
 
-use crate::{MemoryError, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore};
+use crate::{
+    MemoryError, RecoveredQueue, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore, WaitingRun,
+};
 
 use super::connection::{SqliteHandle, truncate_wal};
 use super::timestamp::now_millis;
@@ -131,8 +133,9 @@ impl TaskStore for SqliteTaskStore {
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 c.query_row(
-                    "INSERT INTO task_runs (task_id, trigger, state, queued_at)
-                     VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO task_runs (task_id, trigger, state, queued_at, queue_pos)
+                     VALUES (?1, ?2, ?3, ?4,
+                             (SELECT COALESCE(MAX(queue_pos), -1) + 1 FROM task_runs))
                      RETURNING id",
                     rusqlite::params![task.0, to_json(&trigger)?, RUN_QUEUED, now],
                     |r| r.get(0).map(TaskRunId),
@@ -157,14 +160,96 @@ impl TaskStore for SqliteTaskStore {
             .call(move |c| {
                 c.execute(
                     "UPDATE task_runs
-                     SET state = ?2, started_at = MAX(?3, queued_at), session_uuid = ?4
-                     WHERE id = ?1 AND state = ?5",
-                    rusqlite::params![run.0, RUN_RUNNING, now, session, RUN_QUEUED],
+                     SET state = ?2, suspend_reason = NULL, started_at = MAX(?3, queued_at),
+                         session_uuid = ?4
+                     WHERE id = ?1 AND state IN (?5, ?6)",
+                    rusqlite::params![run.0, RUN_RUNNING, now, session, RUN_QUEUED, RUN_SUSPENDED],
                 )
             })
             .await
             .map_err(MemoryError::sqlite("task start_run"))?;
         run_updated(updated, run)
+    }
+
+    async fn set_run_waiting(&self, run: TaskRunId, reason: Option<SuspendReason>) -> Result<()> {
+        let (state, reason_code) = match reason {
+            Some(reason) => (RUN_SUSPENDED, Some(suspend_reason_code(reason))),
+            None => (RUN_QUEUED, None),
+        };
+        let updated = self
+            .handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "UPDATE task_runs SET state = ?2, suspend_reason = ?3
+                     WHERE id = ?1 AND state IN (?4, ?5) AND started_at IS NULL",
+                    rusqlite::params![run.0, state, reason_code, RUN_QUEUED, RUN_SUSPENDED],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("task set_run_waiting"))?;
+        run_updated(updated, run)
+    }
+
+    async fn reorder_queue(&self, order: Vec<TaskRunId>) -> Result<()> {
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "UPDATE task_runs SET queue_pos = ?2 WHERE id = ?1 AND state IN (?3, ?4)",
+                    )?;
+                    for (pos, run) in (0_i64..).zip(&order) {
+                        stmt.execute(rusqlite::params![run.0, pos, RUN_QUEUED, RUN_SUSPENDED])?;
+                    }
+                }
+                tx.commit()
+            })
+            .await
+            .map_err(MemoryError::sqlite("task reorder_queue"))
+    }
+
+    async fn set_queue_paused(&self, paused: bool) -> Result<()> {
+        self.handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "INSERT INTO task_queue (id, paused) VALUES (0, ?1)
+                     ON CONFLICT (id) DO UPDATE SET paused = excluded.paused",
+                    [paused],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("task set_queue_paused"))?;
+        Ok(())
+    }
+
+    async fn recover_queue(&self, reason: String) -> Result<RecoveredQueue> {
+        let now = now_millis();
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                fail_interrupted_runs(&tx, &reason, now)?;
+                tx.execute(
+                    "UPDATE task_runs SET state = ?1, suspend_reason = NULL WHERE state = ?2",
+                    rusqlite::params![RUN_QUEUED, RUN_SUSPENDED],
+                )?;
+                let recovered = RecoveredQueue {
+                    waiting: waiting_runs(&tx)?,
+                    paused: tx
+                        .query_row("SELECT paused FROM task_queue WHERE id = 0", [], |r| {
+                            r.get(0)
+                        })
+                        .optional()?
+                        .unwrap_or(false),
+                };
+                tx.commit()?;
+                Ok(recovered)
+            })
+            .await
+            .map_err(MemoryError::sqlite("task recover_queue"))
     }
 
     async fn finish_run(&self, run: TaskRunId, end: TaskRunEnd) -> Result<()> {
@@ -230,6 +315,44 @@ pub(super) fn run_state_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<TaskRu
         RUN_CANCELLED => TaskRunState::Cancelled,
         _ => return Err(out_of_range()),
     })
+}
+
+/// The queued runs in queue order.
+fn waiting_runs(tx: &Transaction<'_>) -> rusqlite::Result<Vec<WaitingRun>> {
+    let mut stmt =
+        tx.prepare("SELECT id, task_id FROM task_runs WHERE state = ?1 ORDER BY queue_pos, id")?;
+    stmt.query_map([RUN_QUEUED], |r| {
+        Ok(WaitingRun {
+            run: TaskRunId(r.get(0)?),
+            task: TaskId(r.get(1)?),
+        })
+    })?
+    .collect()
+}
+
+/// Fail with `reason` every run that started and has not finished.
+fn fail_interrupted_runs(tx: &Transaction<'_>, reason: &str, now: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE task_runs
+         SET state = ?1, suspend_reason = NULL, failure = ?2, ended_at = MAX(?3, queued_at)
+         WHERE state IN (?4, ?5) OR (state = ?6 AND started_at IS NOT NULL)",
+        rusqlite::params![
+            RUN_FAILED,
+            reason,
+            now,
+            RUN_RUNNING,
+            RUN_NEEDS_INPUT,
+            RUN_SUSPENDED
+        ],
+    )?;
+    Ok(())
+}
+
+fn suspend_reason_code(reason: SuspendReason) -> i64 {
+    match reason {
+        SuspendReason::UserConversation => 0,
+        SuspendReason::GpuBusy => 1,
+    }
 }
 
 fn run_updated(updated: usize, run: TaskRunId) -> Result<()> {

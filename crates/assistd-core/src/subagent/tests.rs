@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, json};
 use tokio::sync::Notify;
 
-use assistd_llm::{ConversationKey, LlmResult, StepOutcome, ToolResultPayload};
+use assistd_llm::{LlmResult, SlotAssignment, StepOutcome, ToolResultPayload};
 use assistd_tools::Attachment;
 
 use super::*;
@@ -81,7 +81,7 @@ impl LlmBackend for AnsweringParent {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
-        _slot: Option<ConversationKey>,
+        _slot: SlotAssignment,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         Ok(Arc::new(AnsweringConversation {
             answer: self.answer.clone(),
@@ -160,7 +160,7 @@ impl LlmBackend for HangingParent {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
-        _slot: Option<ConversationKey>,
+        _slot: SlotAssignment,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         Ok(Arc::new(HangingConversation {
             stepping: Arc::clone(&self.stepping),

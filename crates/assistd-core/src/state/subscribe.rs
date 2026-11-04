@@ -6,7 +6,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use assistd_ipc::{Event, SubscribeFilter};
+use assistd_ipc::{Event, EventKind, SubscribeFilter};
 
 use super::AppState;
 
@@ -23,7 +23,17 @@ impl AppState {
             kinds = ?filter.kinds,
             "subscriber attached"
         );
+        let wants_queue = filter.matches(EventKind::TaskQueue);
         let mut rx = self.runtime.subscribe_events(filter);
+        if wants_queue {
+            let snapshot = self.task_queue_snapshot();
+            let _ = tx
+                .send(Event::TaskQueue {
+                    id: id.clone(),
+                    snapshot,
+                })
+                .await;
+        }
         loop {
             tokio::select! {
                 () = tx.closed() => {

@@ -215,3 +215,53 @@ pub enum SuspendReason {
     /// Another process needs the GPU.
     GpuBusy,
 }
+
+/// A change to the task queue, sent as [`crate::Request::TaskQueue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskQueueOp {
+    /// Place waiting run `run` at index `to` among the waiting runs, 0 starting next;
+    /// an index past the end places it last.
+    Move {
+        run: TaskRunId,
+        to: u32,
+    },
+    /// Drop waiting run `run`, or stop it if it is running.
+    Cancel {
+        run: TaskRunId,
+    },
+    /// Start no more runs until [`TaskQueueOp::Resume`]; running ones carry on.
+    Pause,
+    Resume,
+}
+
+/// The task queue: its unfinished runs, what holds each model lane, and whether it is paused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskQueueSnapshot {
+    /// Running runs in the order they started, then waiting runs in the order they will start.
+    pub items: Vec<TaskQueueItem>,
+    /// One entry per lane the model can decode at once; lane 0 is the main conversation's.
+    pub lanes: Vec<LaneHolder>,
+    pub paused: bool,
+}
+
+/// One unfinished run in a [`TaskQueueSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskQueueItem {
+    pub run: TaskRunId,
+    pub task: TaskId,
+    pub task_name: TaskName,
+    pub state: TaskRunState,
+}
+
+/// What holds one model lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "holder", rename_all = "snake_case")]
+pub enum LaneHolder {
+    /// The main conversation, whether or not a turn is running in it.
+    Main,
+    Task {
+        run: TaskRunId,
+    },
+    Idle,
+}

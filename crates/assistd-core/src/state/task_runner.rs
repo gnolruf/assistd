@@ -61,6 +61,15 @@ impl TaskRunner {
         self.tracker.spawn(start(registered));
     }
 
+    /// Run the future `start` builds in the background beside the runs, handing it a
+    /// token fired once the daemon stops; [`Self::stop`] waits for it too.
+    pub(in crate::state) fn spawn_service<F>(&self, start: impl FnOnce(CancellationToken) -> F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.tracker.spawn(start(self.stopping.clone()));
+    }
+
     /// Cancel run `run`; `false` when it is not in flight.
     pub(in crate::state) fn cancel(&self, run: TaskRunId) -> bool {
         let running = self.running.lock();

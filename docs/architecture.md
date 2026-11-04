@@ -122,7 +122,8 @@ conversation holds it and restores the target's file (skipping the restore
 if the child changed since the save), deleting the file once restored.
 `preserve_across` saves the holder before a group of unkeyed sub-agent
 requests and restores it after, so a relay inside a task run keeps that run's
-slot. A file is deleted when its conversation ends (a finished run, `/new`),
+slot; with more than one slot the main conversation keeps slot 0 to itself, so
+the group runs without either. A file is deleted when its conversation ends (a finished run, `/new`),
 and past two suspended runs the oldest run's file is dropped. Any failure only
 costs re-processing that conversation's context. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
@@ -328,12 +329,28 @@ emitted them. This keeps the conversation deterministic and the
 `Event` stream readable.
 
 A saved task runs through the same loop with no user present.
-`Request::TaskRun` queues a run in the `TaskRunner` and returns at once.
-The run takes the agent turn lock and the request guard, as a query does,
-then opens an `isolated_conversation`. That conversation gets the main system
-prompt plus a short preamble saying no user is present, and the main agent's
-full tool registry, keyed `TaskRun` in the `SlotStash`; when the run ends its
-slot file is dropped and the main conversation's slot restored. It is
+`Request::TaskRun` records a queued run and appends it to the `TaskQueue`,
+returning at once. The queue is FIFO, its order kept in `task_runs.queue_pos`;
+at startup runs still queued are reloaded in that order, while any left
+running are recorded as failed, since their side effects may have happened. A
+dispatcher on the `TaskRunner` starts the head run whenever `ModelLanes` has a
+lane for it. There is one lane per slot the server reports as `total_slots` in
+`/props`, probed with vision support and re-probed after a reload. Lane 0 is
+the main conversation's and is the agent turn lock itself, so with one slot a
+run waits out the user's turn and holds the next one off. With more slots, runs
+take lanes 1..N, each pinned to its slot with `id_slot`, and the main
+conversation stays on slot 0. While the GPU monitor holds the daemon asleep for
+another process, waiting runs are `Suspended(GpuBusy)` instead of waking the
+model. `Request::TaskQueue` moves, cancels, pauses and resumes the queue (the pause is
+kept in the `task_queue` table, so it outlasts a restart), and
+`Event::TaskQueue` broadcasts the items, lane holders and pause flag after each
+change and greets every new subscriber.
+
+An admitted run takes the request guard, as a query does, then opens an
+`isolated_conversation`. That conversation gets the main system prompt plus a
+short preamble saying no user is present, and the main agent's full tool
+registry. On lane 0 it is keyed `TaskRun` in the `SlotStash`, and when the run
+ends its slot file is dropped and the main conversation's slot restored. It is
 saved as a transcript session of its own, linked from its `task_runs` row, and
 its events reach subscribers wrapped in `Event::TaskRun`. The main conversation,
 its branch and the active session are never touched. Every confirmation prompt

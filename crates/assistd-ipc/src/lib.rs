@@ -17,8 +17,9 @@ pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
-    PlanStep, SuspendReason, TaskGrant, TaskId, TaskName, TaskPlan, TaskPrompt, TaskRunId,
-    TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
+    LaneHolder, PlanStep, SuspendReason, TaskGrant, TaskId, TaskName, TaskPlan, TaskPrompt,
+    TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState, TaskRunSummary,
+    TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -396,6 +397,7 @@ pub enum EventKind {
     ContextSize,
     Relay,
     TaskRun,
+    TaskQueue,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -564,6 +566,9 @@ pub enum Request {
     /// Cancel run `run`, dropping its turn; errors when it is not queued or running.
     /// Emits `Done`.
     TaskCancel { id: String, run: TaskRunId },
+    /// Change the task queue; errors when `op` names a run that is not queued, or moves a
+    /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
+    TaskQueue { id: String, op: TaskQueueOp },
 }
 
 impl Request {
@@ -634,7 +639,8 @@ impl Request {
             | Request::TaskDelete { id, .. }
             | Request::TaskSetEnabled { id, .. }
             | Request::TaskRun { id, .. }
-            | Request::TaskCancel { id, .. } => id,
+            | Request::TaskCancel { id, .. }
+            | Request::TaskQueue { id, .. } => id,
         }
     }
 
@@ -684,6 +690,7 @@ impl Request {
             Request::TaskSetEnabled { .. } => "task_set_enabled",
             Request::TaskRun { .. } => "task_run",
             Request::TaskCancel { .. } => "task_cancel",
+            Request::TaskQueue { .. } => "task_queue",
         }
     }
 }
@@ -1070,6 +1077,12 @@ pub enum Event {
         run: TaskRunId,
         event: Box<Event>,
     },
+    /// The task queue as it now stands; broadcast on every change and sent first to every
+    /// subscriber whose filter takes it.
+    TaskQueue {
+        id: String,
+        snapshot: TaskQueueSnapshot,
+    },
     /// Terminal failure.
     Error { id: String, message: String },
     /// Terminal success.
@@ -1122,6 +1135,7 @@ impl Event {
             | Event::Task { id, .. }
             | Event::TaskRunQueued { id, .. }
             | Event::TaskRun { id, .. }
+            | Event::TaskQueue { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id }
             | Event::LastDelta { id, .. } => id,
@@ -1150,6 +1164,7 @@ impl Event {
             Event::ContextSize { .. } => EventKind::ContextSize,
             Event::Relay { .. } => EventKind::Relay,
             Event::TaskRun { .. } => EventKind::TaskRun,
+            Event::TaskQueue { .. } => EventKind::TaskQueue,
             Event::VoiceOutputState { .. }
             | Event::WakeWordStatus { .. }
             | Event::WakeWordTest { .. }

@@ -24,6 +24,7 @@ pub(crate) mod branches;
 pub(crate) mod capabilities;
 pub(crate) mod chat_focus;
 pub(crate) mod context;
+pub(crate) mod lanes;
 pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
 pub(crate) mod persistence;
@@ -34,7 +35,9 @@ pub(crate) mod relay_trace;
 pub(crate) mod runtime;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
+pub(crate) mod task_dispatch;
 pub(crate) mod task_handlers;
+pub(crate) mod task_queue;
 pub(crate) mod task_runner;
 pub(crate) mod task_runs;
 pub(crate) mod voice_handlers;
@@ -241,6 +244,7 @@ impl AppState {
             }
             Request::TaskRun { id, task } => self.handle_task_run(id, task, tx).await,
             Request::TaskCancel { id, run } => replied(self.handle_task_cancel(id, run, tx)).await,
+            Request::TaskQueue { id, op } => replied(self.handle_task_queue(id, op, tx)).await,
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 replied(send_error(
                     &tx,

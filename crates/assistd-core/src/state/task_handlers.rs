@@ -47,6 +47,9 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let deleted = self.memory.tasks.delete(task).await;
+        if deleted.is_ok() {
+            self.runtime.task_queue.forget_task(task);
+        }
         send_tasks(id, "task delete", deleted.map(|()| Vec::new()), &tx).await
     }
 

@@ -28,8 +28,8 @@ use super::think_splitter::{Segment, ThinkSplitter};
 use super::wire;
 use crate::{
     ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent,
-    LlmHealthProbe, LlmResult, OneShotReply, ReadyState, SlotStash, StepOutcome, Thinking,
-    ToolCall, ToolResultPayload,
+    LlmHealthProbe, LlmResult, OneShotReply, ReadyState, SlotAssignment, SlotStash, StepOutcome,
+    Thinking, ToolCall, ToolResultPayload,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -42,6 +42,8 @@ const REASONING_BUDGET_MESSAGE: &str =
 /// Tool-call markup the chat template emits; a summary containing it tried
 /// to act instead of summarizing.
 const TOOL_CALL_MARKUP: &str = "<tool_call>";
+/// The slot the main conversation and those sharing it with a [`SlotStash`] use.
+const SHARED_SLOT: u32 = 0;
 
 /// HTTP streaming chat client backed by a locally-managed llama-server. The conversation lock
 /// is held only while state is mutated, never across the HTTP stream or a compaction summary,
@@ -58,9 +60,7 @@ pub struct LlamaChatClient {
     /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
-    /// The stash this conversation's slot state is kept in, under its key;
-    /// `None` on throwaway conversations.
-    slot: Option<SlotBinding>,
+    slot: SlotBinding,
 }
 
 impl LlamaChatClient {
@@ -92,22 +92,22 @@ impl LlamaChatClient {
             timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
             health,
-            slot: None,
+            slot: SlotBinding::Unassigned,
         })
     }
 
-    /// Keep this, the main conversation, in `stash`, switching the slot to it
-    /// before each request.
+    /// Keep this, the main conversation, on the shared slot in `stash`,
+    /// switching the slot to it before each request.
     pub fn with_slot_stash(mut self, stash: Arc<SlotStash>) -> Self {
-        self.slot = Some(SlotBinding {
+        self.slot = SlotBinding::Shared {
             stash,
             key: ConversationKey::Main,
-        });
+        };
         self
     }
 
     async fn claim_slot(&self) {
-        if let Some(SlotBinding { stash, key }) = &self.slot {
+        if let SlotBinding::Shared { stash, key } = &self.slot {
             stash.switch_to(*key).await;
         }
     }
@@ -132,6 +132,7 @@ impl LlamaChatClient {
             reasoning_budget_message: Some(REASONING_BUDGET_MESSAGE),
             chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
             response_format: None,
+            id_slot: self.slot.index(),
         }
     }
 
@@ -742,7 +743,7 @@ impl LlmBackend for LlamaChatClient {
     fn isolated_conversation(
         &self,
         system_prompt: String,
-        slot: Option<ConversationKey>,
+        slot: SlotAssignment,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         let chat = ChatConfig {
             system_prompt: system_prompt.clone(),
@@ -756,21 +757,46 @@ impl LlmBackend for LlamaChatClient {
             timeouts: self.timeouts.clone(),
             conv: Mutex::new(Conversation::new(system_prompt)),
             health: self.health.clone(),
-            slot: slot.and_then(|key| {
-                self.slot.as_ref().map(|binding| SlotBinding {
-                    stash: Arc::clone(&binding.stash),
-                    key,
-                })
-            }),
+            slot: self.slot.assign(slot),
         }))
     }
 }
 
-/// A conversation's key in the stash its slot state is kept in.
+/// The slot a conversation's requests use.
 #[derive(Debug)]
-struct SlotBinding {
-    stash: Arc<SlotStash>,
-    key: ConversationKey,
+enum SlotBinding {
+    Unassigned,
+    /// The shared slot, its state kept in `stash` under `key` while others use it.
+    Shared {
+        stash: Arc<SlotStash>,
+        key: ConversationKey,
+    },
+    Pinned(u32),
+}
+
+impl SlotBinding {
+    /// The binding `assignment` names for a conversation on this one's server; a shared
+    /// slot without a stash is left unassigned.
+    fn assign(&self, assignment: SlotAssignment) -> Self {
+        match (assignment, self) {
+            (SlotAssignment::Shared(key), SlotBinding::Shared { stash, .. }) => {
+                SlotBinding::Shared {
+                    stash: Arc::clone(stash),
+                    key,
+                }
+            }
+            (SlotAssignment::Pinned(index), _) => SlotBinding::Pinned(index),
+            _ => SlotBinding::Unassigned,
+        }
+    }
+
+    fn index(&self) -> Option<u32> {
+        match self {
+            SlotBinding::Unassigned => None,
+            SlotBinding::Shared { .. } => Some(SHARED_SLOT),
+            SlotBinding::Pinned(index) => Some(*index),
+        }
+    }
 }
 
 /// Summarizes by continuing the live conversation with the request's own

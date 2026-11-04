@@ -30,6 +30,7 @@ fn request(messages: Vec<ChatMessage<'_>>) -> ChatRequest<'_> {
         reasoning_budget_message: None,
         chat_template_kwargs: None,
         response_format: None,
+        id_slot: None,
     }
 }
 

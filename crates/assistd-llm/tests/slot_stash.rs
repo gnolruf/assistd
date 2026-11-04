@@ -18,7 +18,9 @@ use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_core::PresenceManager;
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_ipc::TaskRunId;
-use assistd_llm::{ConversationKey, LlamaChatClient, LlmBackend, LlmHealthProbe, SlotStash};
+use assistd_llm::{
+    ConversationKey, LlamaChatClient, LlmBackend, LlmHealthProbe, SlotAssignment, SlotStash,
+};
 
 use common::FakeLlama;
 
@@ -251,7 +253,7 @@ async fn each_conversation_gets_back_its_own_slot_until_the_child_restarts() {
     let run = main
         .isolated_conversation(
             "task prompt".into(),
-            Some(ConversationKey::TaskRun(TaskRunId(7))),
+            SlotAssignment::Shared(ConversationKey::TaskRun(TaskRunId(7))),
         )
         .expect("task run conversation");
 

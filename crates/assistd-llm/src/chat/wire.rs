@@ -45,6 +45,9 @@ pub struct ChatRequest<'a> {
     /// Holds the reply to a JSON schema through llama-server's grammar sampler.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat<'a>>,
+    /// The server slot to decode in; the server picks an idle one when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_slot: Option<u32>,
 }
 
 /// OpenAI's `response_format`, in its `json_schema` form.

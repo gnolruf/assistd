@@ -283,6 +283,16 @@ CREATE TABLE task_runs (
 CREATE INDEX idx_task_runs_task ON task_runs(task_id);
 ";
 
+/// V6: a queued run's place in the task queue, where runs with equal positions start in
+/// id order, and whether the queue is paused; a missing `task_queue` row means it is not.
+const V6_SQL: &str = r"
+ALTER TABLE task_runs ADD COLUMN queue_pos INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE task_queue (
+    id     INTEGER PRIMARY KEY CHECK (id = 0),
+    paused INTEGER NOT NULL CHECK (paused IN (0, 1))
+) STRICT;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -291,6 +301,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V3_SQL),
         M::up(V4_SQL),
         M::up(V5_SQL),
+        M::up(V6_SQL),
     ])
 }
 
@@ -317,6 +328,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 }

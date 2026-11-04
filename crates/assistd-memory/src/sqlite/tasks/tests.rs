@@ -1,4 +1,4 @@
-use assistd_ipc::{PlanStep, TaskGrant, TaskPlan, TaskRunSummary, TaskTrigger};
+use assistd_ipc::{PlanStep, SuspendReason, TaskGrant, TaskPlan, TaskRunSummary, TaskTrigger};
 
 use super::*;
 use crate::{SqliteTranscriptStore, TranscriptStore};
@@ -136,4 +136,57 @@ async fn a_run_session_is_listed_with_its_outcome_and_never_resumed() {
             state: TaskRunState::Succeeded,
         })
     )));
+}
+
+#[tokio::test]
+async fn queue_order_pause_and_interrupted_runs_survive_a_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("memory.db");
+    let tasks = SqliteTaskStore::new(SqliteHandle::open(&path).await.unwrap());
+    let task = tasks
+        .save(None, approved_spec("digest", "a"))
+        .await
+        .unwrap()
+        .id;
+    let mut runs = Vec::new();
+    for _ in 0..5 {
+        runs.push(tasks.queue_run(task, TaskTrigger::Manual).await.unwrap());
+    }
+    let [running, first, second, third, cancelled] = runs[..] else {
+        unreachable!()
+    };
+    tasks.start_run(running, SessionId::new()).await.unwrap();
+    tasks
+        .set_run_waiting(first, Some(SuspendReason::GpuBusy))
+        .await
+        .unwrap();
+    tasks
+        .reorder_queue(vec![third, first, second])
+        .await
+        .unwrap();
+    tasks
+        .finish_run(cancelled, TaskRunEnd::Cancelled)
+        .await
+        .unwrap();
+    let late = tasks.queue_run(task, TaskTrigger::Manual).await.unwrap();
+    tasks.set_queue_paused(true).await.unwrap();
+    drop(tasks);
+
+    let reopened = SqliteTaskStore::new(SqliteHandle::open(&path).await.unwrap());
+    let recovered = reopened
+        .recover_queue("daemon stopped".into())
+        .await
+        .unwrap();
+    let waiting: Vec<_> = recovered
+        .waiting
+        .iter()
+        .map(|waiting| waiting.run)
+        .collect();
+    assert_eq!(waiting, [third, first, second, late]);
+    assert!(recovered.paused);
+    assert!(matches!(
+        reopened.finish_run(running, TaskRunEnd::Cancelled).await,
+        Err(MemoryError::TaskRunNotFound(_))
+    ));
+    reopened.start_run(first, SessionId::new()).await.unwrap();
 }

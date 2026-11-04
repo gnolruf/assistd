@@ -855,6 +855,23 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"task_cancel","id":"r","run":9}"#,
         ),
+        (
+            Request::TaskQueue {
+                id: id(),
+                op: TaskQueueOp::Move {
+                    run: TaskRunId(9),
+                    to: 0,
+                },
+            },
+            r#"{"type":"task_queue","id":"r","op":{"kind":"move","run":9,"to":0}}"#,
+        ),
+        (
+            Request::TaskQueue {
+                id: id(),
+                op: TaskQueueOp::Pause,
+            },
+            r#"{"type":"task_queue","id":"r","op":{"kind":"pause"}}"#,
+        ),
     ]
 }
 
@@ -895,6 +912,28 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                 }),
             },
             r#"{"type":"task_run","id":"r","run":9,"event":{"type":"confirm_request","id":"r","confirm_id":"c","tool":"bash","script":"rm x","matched_pattern":"rm","source":{"agent":"task","task":4,"run":9}}}"#,
+        ),
+        (
+            Event::TaskQueue {
+                id: id(),
+                snapshot: TaskQueueSnapshot {
+                    items: vec![TaskQueueItem {
+                        run: TaskRunId(9),
+                        task: TaskId(4),
+                        task_name: "digest".to_string().try_into().unwrap(),
+                        state: TaskRunState::Suspended {
+                            reason: SuspendReason::GpuBusy,
+                        },
+                    }],
+                    lanes: vec![
+                        LaneHolder::Main,
+                        LaneHolder::Task { run: TaskRunId(8) },
+                        LaneHolder::Idle,
+                    ],
+                    paused: false,
+                },
+            },
+            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false}}"#,
         ),
     ]
 }
