@@ -528,6 +528,7 @@ fn picker_entry(name: &str, session: &str, title: &str, active: bool) -> BranchL
         session_short: session.into(),
         session_title: Some(title.into()),
         last_active_at: None,
+        task_run: None,
     }
 }
 

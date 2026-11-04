@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use assistd_ipc::TaskId;
+use assistd_ipc::{TaskId, TaskRunId};
 
 use crate::{BranchId, SessionId, TurnId};
 
@@ -55,6 +55,9 @@ pub enum MemoryError {
 
     #[error("a task named {0:?} already exists")]
     TaskNameTaken(String),
+
+    #[error("no unfinished task run with id {0}")]
+    TaskRunNotFound(TaskRunId),
 
     /// The store has no database behind it this run.
     #[error("memory.db is not open; persistence is disabled this run")]

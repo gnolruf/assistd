@@ -150,6 +150,7 @@ impl AppState {
                     is_current_in_session: branch.is_current_in_session,
                     is_active_session,
                     last_active_at: wire_timestamp(branch.last_active_at),
+                    task_run: branch.task_run,
                 })
                 .await;
         }

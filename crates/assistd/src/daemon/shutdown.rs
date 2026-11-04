@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::{Component, PresenceManager, spawn_supervised};
+use assistd_core::{Component, PresenceManager, TaskRunner, spawn_supervised};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -19,6 +19,7 @@ use super::voice_init::VoiceService;
 use super::wm_init::WindowSubsystem;
 
 const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
+const TASK_RUN_STOP_BUDGET: Duration = Duration::from_secs(10);
 
 /// One watch per teardown stage. A signal flips only `intake`; the rest
 /// flip in dependency order once in-flight work has drained.
@@ -63,6 +64,7 @@ impl ShutdownStages {
 
 pub(super) struct DaemonShutdown {
     pub(super) persistence_tracker: TaskTracker,
+    pub(super) task_runner: Arc<TaskRunner>,
     pub(super) presence: Arc<PresenceManager>,
     pub(super) memory: MemorySubsystem,
     pub(super) voice: VoiceService,
@@ -79,6 +81,7 @@ impl DaemonShutdown {
     pub(super) async fn shutdown(self, stages: &ShutdownStages) {
         stages.intake.send_replace(true);
         join_intake_tasks(self.intake_tasks).await;
+        stop_task_runs(&self.task_runner).await;
         drain_persistence(&self.persistence_tracker).await;
 
         stages.voice.send_replace(true);
@@ -157,6 +160,18 @@ async fn join_intake_tasks(tasks: IntakeTasks) {
 
 /// Wait for fire-and-forget persistence tasks, abandoning them after
 /// [`PERSISTENCE_DRAIN_BUDGET`].
+async fn stop_task_runs(task_runner: &TaskRunner) {
+    if tokio::time::timeout(TASK_RUN_STOP_BUDGET, task_runner.stop())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            target: "assistd::tasks",
+            "task runs did not stop in time at shutdown; abandoning them"
+        );
+    }
+}
+
 async fn drain_persistence(tracker: &TaskTracker) {
     tracker.close();
     if tokio::time::timeout(PERSISTENCE_DRAIN_BUDGET, tracker.wait())

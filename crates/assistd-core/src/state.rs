@@ -35,6 +35,8 @@ pub(crate) mod runtime;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
 pub(crate) mod task_handlers;
+pub(crate) mod task_runner;
+pub(crate) mod task_runs;
 pub(crate) mod voice_handlers;
 pub(crate) mod wakeword_handlers;
 pub(crate) mod wire;
@@ -44,6 +46,7 @@ pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};
 pub use self::subsystems::{McpServerStatus, Subsystems};
+pub use self::task_runner::TaskRunner;
 pub use self::wire::AttachmentError;
 
 /// Why a request handler failed.
@@ -236,6 +239,8 @@ impl AppState {
             Request::TaskSetEnabled { id, task, enabled } => {
                 self.handle_task_set_enabled(id, task, enabled, tx).await
             }
+            Request::TaskRun { id, task } => self.handle_task_run(id, task, tx).await,
+            Request::TaskCancel { id, run } => replied(self.handle_task_cancel(id, run, tx)).await,
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 replied(send_error(
                     &tx,

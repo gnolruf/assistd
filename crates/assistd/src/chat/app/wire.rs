@@ -114,6 +114,8 @@ impl App {
             | Event::WakeWordTest { .. }
             | Event::WakeWordSpeech { .. }
             | Event::Task { .. }
+            | Event::TaskRunQueued { .. }
+            | Event::TaskRun { .. }
             | Event::LastDelta { .. } => {}
         }
     }
@@ -276,6 +278,7 @@ impl App {
                 session_id,
                 session_title,
                 last_active_at,
+                task_run,
                 ..
             } => self.branches_buffer.push(BranchListEntry {
                 name,
@@ -287,6 +290,7 @@ impl App {
                 session_short: session_id.chars().take(8).collect(),
                 session_title,
                 last_active_at: last_active_at.parse().ok(),
+                task_run,
             }),
             Event::BranchSwitched {
                 name,

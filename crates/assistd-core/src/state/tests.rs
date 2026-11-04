@@ -8,16 +8,16 @@ use tokio::sync::{Notify, watch};
 
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
-    Component, ComponentReadiness, ImageAttachment, ImageMime, ListenPhase, PresenceState,
-    PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
-    VoiceCaptureState,
+    Component, ComponentReadiness, EventKind, ImageAttachment, ImageMime, ListenPhase,
+    PresenceState, PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
+    TaskId, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload};
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, Embedding, EmbeddingHit, HistoryRow,
     HistoryScope, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore, PersistedMessage,
     PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope, SqliteHandle,
-    SqliteTranscriptStore, TranscriptStore, UnindexedRows,
+    SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
     CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolOutput, ToolsDisabled,
@@ -1956,4 +1956,228 @@ async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_point
         .await
         .expect("a new session recalls");
     assert!(fresh.contains(&pointer), "{fresh}");
+}
+
+/// The user's conversation, which records every prompt pushed to it and hands
+/// out `task_conversation` as its one isolated conversation.
+#[derive(Debug)]
+struct MainConversation {
+    pushed: StdMutex<Vec<String>>,
+    task_conversation: StdMutex<Option<Arc<dyn LlmBackend>>>,
+}
+
+impl MainConversation {
+    fn new(task_conversation: Arc<dyn LlmBackend>) -> Arc<Self> {
+        Arc::new(Self {
+            pushed: StdMutex::new(Vec::new()),
+            task_conversation: StdMutex::new(Some(task_conversation)),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for MainConversation {
+    async fn generate(
+        &self,
+        _prompt: String,
+        _tx: mpsc::Sender<LlmEvent>,
+    ) -> assistd_llm::LlmResult<()> {
+        unimplemented!("uses step path")
+    }
+    async fn push_user(
+        &self,
+        text: String,
+        _attachments: Vec<assistd_tools::Attachment>,
+    ) -> assistd_llm::LlmResult<()> {
+        self.pushed.lock().push(text);
+        Ok(())
+    }
+    async fn push_tool_results(
+        &self,
+        _results: Vec<ToolResultPayload>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+    async fn step(
+        &self,
+        _tools: Vec<serde_json::Value>,
+        _tx: mpsc::Sender<LlmEvent>,
+    ) -> assistd_llm::LlmResult<StepOutcome> {
+        Ok(StepOutcome::Final)
+    }
+    fn isolated_conversation(
+        &self,
+        _system_prompt: String,
+    ) -> assistd_llm::LlmResult<Arc<dyn LlmBackend>> {
+        self.task_conversation
+            .lock()
+            .take()
+            .ok_or_else(|| LlmError::Unavailable("one task conversation only".into()))
+    }
+}
+
+/// An `AppState` on a fresh database with one saved task, positioned on a user
+/// session whose `main` branch holds one turn.
+async fn task_state(
+    backend: Arc<MainConversation>,
+    tools: Arc<ToolRegistry>,
+) -> (Arc<AppState>, Arc<dyn TranscriptStore>, BranchId, TaskId) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("memory.db");
+    std::mem::forget(temp);
+    let handle = SqliteHandle::open(&path).await.unwrap();
+    let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
+    let tasks: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::new(handle));
+    let session = SessionId::new();
+    let branch = conv
+        .begin_session_with_main_branch(session, 123)
+        .await
+        .unwrap();
+    append_turn(&conv, branch, "hi", "hello").await;
+    let spec = TaskSpec {
+        name: "digest".to_string().try_into().unwrap(),
+        prompt: "summarize my inbox".to_string().try_into().unwrap(),
+        triggers: Vec::new(),
+        enabled: true,
+        grants: Vec::new(),
+        plan: None,
+    };
+    let task = tasks.save(None, spec).await.unwrap().id;
+    let config = Config::default();
+    let subsystems = Subsystems::new(
+        backend,
+        PresenceManager::stub(PresenceTarget::Active),
+        tools,
+        assistd_voice::VoiceManager::new(true),
+    );
+    let memory = MemoryStack::disabled(config.embedding.clone())
+        .with_transcripts(conv.clone())
+        .with_tasks(tasks);
+    let runtime =
+        RuntimeState::new().with_session_ctx(Arc::new(SessionContext::new(session, Some(branch))));
+    let state = Arc::new(AppState {
+        config,
+        subsystems,
+        memory,
+        runtime,
+    });
+    (state, conv, branch, task)
+}
+
+/// Queue a run of `task`, returning its id.
+async fn queue_task_run(state: &Arc<AppState>, task: TaskId) -> TaskRunId {
+    let (res, events) = dispatch(
+        state,
+        Request::TaskRun {
+            id: "t".into(),
+            task,
+        },
+    )
+    .await;
+    res.unwrap();
+    match events.as_slice() {
+        [Event::TaskRunQueued { run, .. }, Event::Done { .. }] => *run,
+        other => panic!("unexpected events: {other:?}"),
+    }
+}
+
+/// Wait for every run to end, then for the writes it queued to land.
+async fn settle_task_runs(state: &Arc<AppState>) {
+    tokio::time::timeout(Duration::from_secs(5), state.runtime.task_runner.stop())
+        .await
+        .expect("task run did not end");
+    state.drain_persistence_inflight().await;
+}
+
+/// The state of every task run listed beside its session's branch.
+async fn listed_run_states(conv: &Arc<dyn TranscriptStore>) -> Vec<TaskRunState> {
+    conv.list_branches()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|branch| branch.task_run.map(|run| run.state))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_finished_task_run_leaves_the_main_conversation_untouched() {
+    let backend = MainConversation::new(Arc::new(EchoBackend::new()));
+    let (state, conv, branch, task) =
+        task_state(backend.clone(), Arc::new(ToolRegistry::default())).await;
+    let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun],
+    });
+
+    let run = queue_task_run(&state, task).await;
+    let replied = loop {
+        match bus.recv().await.unwrap() {
+            Event::TaskRun {
+                run: seen, event, ..
+            } if seen == run => {
+                if let Event::Delta { text, .. } = *event {
+                    break text;
+                }
+            }
+            other => panic!("unexpected bus event: {other:?}"),
+        }
+    };
+    settle_task_runs(&state).await;
+
+    assert_eq!(replied, "summarize my inbox");
+    assert!(backend.pushed.lock().is_empty());
+    assert_eq!(
+        conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
+        before
+    );
+    assert_eq!(state.runtime.session_ctx.current().await.1, Some(branch));
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
+}
+
+#[tokio::test]
+async fn a_cancelled_task_run_leaves_the_main_conversation_untouched() {
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let task_conversation = ToolCallBackend::new(
+        "",
+        "done.",
+        vec![StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c1".into(),
+            name: "hang".into(),
+            arguments: serde_json::json!({}),
+        }])],
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(HangingTool {
+        entered: entered.clone(),
+        dropped: dropped.clone(),
+    });
+    let backend = MainConversation::new(task_conversation);
+    let (state, conv, branch, task) = task_state(backend.clone(), Arc::new(tools)).await;
+    let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
+
+    let run = queue_task_run(&state, task).await;
+    entered.notified().await;
+    let (res, events) = dispatch(
+        &state,
+        Request::TaskCancel {
+            id: "c".into(),
+            run,
+        },
+    )
+    .await;
+    res.unwrap();
+    assert_eq!(events, [done("c")]);
+    settle_task_runs(&state).await;
+
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the hung tool outlived the run"
+    );
+    assert!(backend.pushed.lock().is_empty());
+    assert_eq!(
+        conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
+        before
+    );
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Cancelled]);
 }
