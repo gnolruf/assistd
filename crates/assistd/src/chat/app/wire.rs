@@ -116,6 +116,7 @@ impl App {
             | Event::Task { .. }
             | Event::TaskRunQueued { .. }
             | Event::TaskRun { .. }
+            | Event::TaskQueue { .. }
             | Event::LastDelta { .. } => {}
         }
     }

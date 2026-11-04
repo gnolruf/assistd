@@ -141,6 +141,8 @@ pub struct PresenceManager {
     wake_started: StdMutex<Option<Instant>>,
     /// Run before every wake; unset when VRAM cannot be measured.
     wake_room: OnceLock<Arc<dyn WakeRoom>>,
+    /// Whether the daemon sleeps because another process needs the GPU.
+    gpu_hold: watch::Sender<bool>,
 }
 
 impl PresenceManager {
@@ -204,12 +206,27 @@ impl PresenceManager {
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
             wake_room: OnceLock::new(),
+            gpu_hold: watch::channel(false).0,
         }))
     }
 
     /// Check `room` before every wake from now on; a second call is ignored.
     pub fn set_wake_room(&self, room: Arc<dyn WakeRoom>) {
         let _ = self.wake_room.set(room);
+    }
+
+    /// Record whether the daemon sleeps because another process needs the GPU.
+    pub fn hold_for_gpu(&self, held: bool) {
+        self.gpu_hold.send_if_modified(|current| {
+            let changed = *current != held;
+            *current = held;
+            changed
+        });
+    }
+
+    /// Watch whether the daemon sleeps because another process needs the GPU.
+    pub fn gpu_hold(&self) -> watch::Receiver<bool> {
+        self.gpu_hold.subscribe()
     }
 
     /// The current presence state, `Waking` while a wake runs.
@@ -714,6 +731,7 @@ impl PresenceManager {
             inflight: Arc::new(RwLock::new(())),
             wake_started: StdMutex::new(None),
             wake_room: OnceLock::new(),
+            gpu_hold: watch::channel(false).0,
         })
     }
 }

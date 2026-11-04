@@ -24,8 +24,8 @@ use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
 use assistd_ipc::StatusKind;
 use assistd_llm::{
     BackendJudgeModel, ChatClientError, HealthSnapshot, HealthWaitError, LlamaChatClient,
-    LlmBackend, LlmError, LlmEvent, LlmHealthProbe, OneShotReply, ReadyState, StepOutcome,
-    Thinking, ToolCall, ToolResultPayload,
+    LlmBackend, LlmError, LlmEvent, LlmHealthProbe, OneShotReply, ReadyState, SlotAssignment,
+    StepOutcome, Thinking, ToolCall, ToolResultPayload,
 };
 use assistd_tools::{JUDGE_TIMEOUT, JudgedCommand, SafetyJudge, Verdict};
 
@@ -1365,7 +1365,7 @@ async fn isolated_conversation_never_reaches_the_main_conversation() {
 
     ask(&main, "main question").await;
     let sub = main
-        .isolated_conversation("sub prompt".into(), None)
+        .isolated_conversation("sub prompt".into(), SlotAssignment::Unassigned)
         .unwrap();
     ask(sub.as_ref(), "sub task").await;
     drop(sub);
@@ -1401,7 +1401,7 @@ async fn schema_completion_constrains_the_reply_and_leaves_the_conversation_alon
     let (port, _server) = spawn_fake(script.clone()).await;
     let main = build_client(&chat_spec(port));
     let sub = main
-        .isolated_conversation("sub prompt".into(), None)
+        .isolated_conversation("sub prompt".into(), SlotAssignment::Unassigned)
         .unwrap();
     ask(sub.as_ref(), "task").await;
     let schema = json!({"type": "object", "properties": {"found": {"type": "boolean"}}});

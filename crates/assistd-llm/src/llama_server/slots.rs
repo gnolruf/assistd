@@ -5,13 +5,14 @@ use std::fs::{self, DirBuilder};
 use std::future::Future;
 use std::io::{self, ErrorKind};
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tracing::{debug, warn};
 
 use assistd_ipc::TaskRunId;
@@ -23,7 +24,7 @@ use super::error::LlamaServerError;
 use crate::LlmHealthProbe;
 
 const OWNER_ONLY: u32 = 0o700;
-/// The only slot with `-np 1`.
+/// The main conversation's slot, the only one with `-np 1`.
 const SLOT_PATH: &str = "/slots/0";
 /// Suspended task runs whose slot files are kept beside the main conversation's.
 const MAX_SUSPENDED_RUNS: usize = 2;
@@ -78,7 +79,19 @@ impl ConversationKey {
     }
 }
 
-/// Keeps each conversation's state of the chat server's only slot in a file of
+/// Which of the chat server's slots a conversation's requests use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotAssignment {
+    /// Whichever slot the server picks; nothing is kept for the conversation.
+    Unassigned,
+    /// The main conversation's slot, the conversation's state stashed under this key
+    /// while another uses it.
+    Shared(ConversationKey),
+    /// The slot with this index, which no other conversation is given.
+    Pinned(u32),
+}
+
+/// Keeps each conversation's state of the main conversation's slot in a file of
 /// its own while other conversations use the slot, so switching back skips
 /// re-processing its context. Every failure is logged and costs only that.
 #[derive(Debug)]
@@ -88,6 +101,8 @@ pub struct SlotStash {
     model: String,
     slot_dir: SlotDir,
     health: Option<Arc<dyn LlmHealthProbe>>,
+    /// The server's slot count; one until told otherwise.
+    slots: watch::Receiver<NonZeroU32>,
     state: Mutex<StashState>,
 }
 
@@ -116,8 +131,15 @@ impl SlotStash {
             model,
             slot_dir,
             health,
+            slots: watch::channel(NonZeroU32::MIN).1,
             state: Mutex::new(StashState::default()),
         })
+    }
+
+    /// Follow `slots`, the server's slot count, instead of assuming one slot.
+    pub fn with_slot_count(mut self, slots: watch::Receiver<NonZeroU32>) -> Self {
+        self.slots = slots;
+        self
     }
 
     /// Hand the slot to `key`: save it for the conversation holding it, then
@@ -138,8 +160,12 @@ impl SlotStash {
     /// Run `group` of unkeyed requests between a save and a restore of the
     /// conversation holding the slot. If this future is dropped, that
     /// conversation's next [`Self::switch_to`] restores it. Hold the agent turn
-    /// lock across the call so no other conversation lands in between.
+    /// lock across the call so no other conversation lands in between. With more
+    /// than one slot the main conversation keeps its slot, so `group` just runs.
     pub async fn preserve_across<F: Future>(&self, group: F) -> F::Output {
+        if self.slots.borrow().get() > 1 {
+            return group.await;
+        }
         let owner = {
             let mut state = self.state.lock().await;
             let owner = state.occupant;

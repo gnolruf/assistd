@@ -3,6 +3,7 @@
 
 use std::fs::{DirBuilder, DirEntry, Permissions};
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -148,12 +149,14 @@ pub struct BuildToolsDeps<'a> {
     pub relay: RelayDeps,
 }
 
-/// Keeps a [`VisionGate`] in step with the model llama-server has loaded, re-probing only
-/// after a presence transition or a llama-server restart. A failed probe leaves the gate
-/// unchanged and is retried on the next revalidation.
+/// Keeps a [`VisionGate`] and the server's slot count in step with the model llama-server
+/// has loaded, re-probing only after a presence transition or a llama-server restart. A
+/// failed probe leaves both unchanged and is retried on the next revalidation.
 #[derive(Debug)]
 pub struct VisionRevalidator {
     gate: Arc<VisionGate>,
+    /// Starts at one until a probe reports the server's `total_slots`.
+    slots: watch::Sender<NonZeroU32>,
     control: LlamaServerControl,
     model_name: String,
     seen: Mutex<SeenLoad>,
@@ -169,6 +172,7 @@ impl VisionRevalidator {
     ) -> Arc<Self> {
         Arc::new(Self {
             gate: VisionGate::new(false),
+            slots: watch::channel(NonZeroU32::MIN).0,
             control,
             model_name,
             seen: Mutex::new(SeenLoad {
@@ -184,6 +188,11 @@ impl VisionRevalidator {
         Arc::clone(&self.gate)
     }
 
+    /// Watch how many conversations the server decodes at once.
+    pub fn slot_count(&self) -> watch::Receiver<NonZeroU32> {
+        self.slots.subscribe()
+    }
+
     /// Probe llama-server now, without touching the gate.
     pub async fn probe(&self) -> VisionState {
         probe_capabilities_routed(&self.control, &self.model_name).await
@@ -195,7 +204,15 @@ impl VisionRevalidator {
     pub async fn revalidate_if_stale(&self, presence: &PresenceManager) {
         let mut seen = self.seen.lock().await;
         if seen.take_stale(presence.llama_pid()) {
-            seen.probed = apply_probe(&self.gate, &self.probe().await);
+            let probe = self.probe().await;
+            seen.probed = apply_probe(&self.gate, &probe);
+            if let Some(slots) = probe.total_slots.filter(|_| seen.probed) {
+                self.slots.send_if_modified(|current| {
+                    let changed = *current != slots;
+                    *current = slots;
+                    changed
+                });
+            }
         }
     }
 }
@@ -533,6 +550,7 @@ mod tests {
         let probe = |id: Option<&str>, vision| VisionState {
             model_id: id.map(str::to_string),
             vision_supported: vision,
+            total_slots: None,
         };
         let cases = [
             ("failed probe", true, probe(None, false), true, false),

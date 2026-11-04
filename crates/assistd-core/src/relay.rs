@@ -648,7 +648,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use assistd_llm::{
-        ConversationKey, LlmBackend, LlmError, LlmEvent, LlmResult, SlotDir, StepOutcome,
+        LlmBackend, LlmError, LlmEvent, LlmResult, SlotAssignment, SlotDir, StepOutcome,
         ToolResultPayload,
     };
     use assistd_tools::{Approvals, Attachment, DenyAllGate};
@@ -686,7 +686,7 @@ mod tests {
         fn isolated_conversation(
             &self,
             _system_prompt: String,
-            _slot: Option<ConversationKey>,
+            _slot: SlotAssignment,
         ) -> LlmResult<Arc<dyn LlmBackend>> {
             self.conversation_opened.store(true, Ordering::SeqCst);
             Err(LlmError::Unavailable("test parent".into()))

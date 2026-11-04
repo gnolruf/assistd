@@ -1,5 +1,6 @@
 //! `RuntimeState`: per-process bookkeeping owned by `AppState`.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use parking_lot::Mutex as StdMutex;
@@ -14,6 +15,8 @@ use assistd_ipc::{Event, EventKind, SubscribeFilter};
 use assistd_memory::{BranchId, SessionId};
 
 use super::chat_focus::ChatFocusSlot;
+use super::lanes::ModelLanes;
+use super::task_queue::TaskQueue;
 use super::task_runner::TaskRunner;
 use super::wakeword_handlers::MicSession;
 
@@ -104,8 +107,10 @@ pub(in crate::state) struct PttCapture {
 #[derive(Debug)]
 pub struct RuntimeState {
     pub session_ctx: Arc<SessionContext>,
-    /// Serialises whole agent turns.
+    /// Serialises the main conversation's turns; it is also the main model lane.
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
+    pub(in crate::state) lanes: Arc<ModelLanes>,
+    pub(in crate::state) task_queue: TaskQueue,
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
     /// The push-to-talk press awaiting its release.
@@ -131,9 +136,13 @@ impl RuntimeState {
     /// Fresh state pointing at a new, unsaved session.
     pub fn new() -> Self {
         let (events_bus, _) = broadcast::channel(EVENTS_BUS_CAPACITY);
+        let agent_turn_lock = Arc::new(Mutex::new(()));
+        let one_slot = watch::channel(NonZeroU32::MIN).1;
         Self {
             session_ctx: Arc::new(SessionContext::new(SessionId::new(), None)),
-            agent_turn_lock: Arc::new(Mutex::new(())),
+            lanes: ModelLanes::new(Arc::clone(&agent_turn_lock), one_slot),
+            agent_turn_lock,
+            task_queue: TaskQueue::default(),
             persistence_tracker: TaskTracker::new(),
             ptt_capture: Arc::new(Mutex::new(None)),
             interrupt: StdMutex::new(CancellationToken::new()),
@@ -149,6 +158,12 @@ impl RuntimeState {
     /// Replace the active-session pointer.
     pub fn with_session_ctx(mut self, ctx: Arc<SessionContext>) -> Self {
         self.session_ctx = ctx;
+        self
+    }
+
+    /// Size the model lanes by `slots`, the server's slot count, instead of one lane.
+    pub fn with_slot_count(mut self, slots: watch::Receiver<NonZeroU32>) -> Self {
+        self.lanes = ModelLanes::new(Arc::clone(&self.agent_turn_lock), slots);
         self
     }
 

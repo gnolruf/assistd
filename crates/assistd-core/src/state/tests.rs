@@ -10,10 +10,10 @@ use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, ImageAttachment, ImageMime, ListenPhase,
     PresenceState, PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
-    TaskId, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
+    TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
-    ConversationKey, EchoBackend, LlmError, LlmEvent, StepOutcome, ToolCall, ToolResultPayload,
+    EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, Embedding, EmbeddingHit, HistoryRow,
@@ -2010,7 +2010,7 @@ impl LlmBackend for MainConversation {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
-        _slot: Option<ConversationKey>,
+        _slot: SlotAssignment,
     ) -> assistd_llm::LlmResult<Arc<dyn LlmBackend>> {
         self.task_conversation
             .lock()
@@ -2064,6 +2064,7 @@ async fn task_state(
         memory,
         runtime,
     });
+    state.start_task_queue().await;
     (state, conv, branch, task)
 }
 
@@ -2183,4 +2184,56 @@ async fn a_cancelled_task_run_leaves_the_main_conversation_untouched() {
         before
     );
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Cancelled]);
+}
+
+async fn change_task_queue(state: &Arc<AppState>, op: TaskQueueOp) {
+    let (res, events) = dispatch(state, Request::TaskQueue { id: "q".into(), op }).await;
+    res.unwrap();
+    assert_eq!(events, [done("q")], "{op:?}");
+}
+
+fn queued_runs(state: &AppState) -> Vec<(TaskRunId, TaskRunState)> {
+    state
+        .task_queue_snapshot()
+        .items
+        .into_iter()
+        .map(|item| (item.run, item.state))
+        .collect()
+}
+
+#[tokio::test]
+async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
+    let backend = MainConversation::new(Arc::new(EchoBackend::new()));
+    let (state, _conv, _branch, task) =
+        task_state(backend, Arc::new(ToolRegistry::default())).await;
+    change_task_queue(&state, TaskQueueOp::Pause).await;
+    let mut runs = Vec::new();
+    for _ in 0..4 {
+        runs.push(queue_task_run(&state, task).await);
+    }
+    let [first, second, third, fourth] = runs[..] else {
+        unreachable!()
+    };
+    change_task_queue(&state, TaskQueueOp::Move { run: fourth, to: 0 }).await;
+    change_task_queue(&state, TaskQueueOp::Move { run: first, to: 9 }).await;
+    change_task_queue(&state, TaskQueueOp::Cancel { run: second }).await;
+    let expected = [fourth, third, first].map(|run| (run, TaskRunState::Queued));
+    assert_eq!(queued_runs(&state), expected);
+    settle_task_runs(&state).await;
+
+    let reloaded = Arc::new(AppState {
+        memory: MemoryStack::disabled(state.config.embedding.clone())
+            .with_tasks(Arc::clone(&state.memory.tasks)),
+        ..AppState::new(
+            Config::default(),
+            Arc::new(EchoBackend::new()),
+            PresenceManager::stub(PresenceTarget::Active),
+            Arc::new(ToolRegistry::default()),
+            VoiceManager::new(true),
+        )
+    });
+    reloaded.start_task_queue().await;
+    assert_eq!(queued_runs(&reloaded), expected);
+    assert!(reloaded.task_queue_snapshot().paused);
+    settle_task_runs(&reloaded).await;
 }

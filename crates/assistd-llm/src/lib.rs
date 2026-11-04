@@ -23,8 +23,8 @@ pub use chat::conversation::{CompactionCut, ToolCallRecord};
 pub use chat::{ChatClientError, LlamaChatClient};
 pub use judge::BackendJudgeModel;
 pub use llama_server::{
-    ConversationKey, LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotDir, SlotStash,
-    VisionState, probe_capabilities_routed,
+    ConversationKey, LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotAssignment,
+    SlotDir, SlotStash, VisionState, probe_capabilities_routed,
 };
 
 /// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
@@ -312,12 +312,12 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     }
 
     /// An empty conversation with `system_prompt` on this backend's server and model, with
-    /// this backend's history budget, compacted as this backend's own conversation is. With
-    /// `slot`, its slot state is stashed under that key while other conversations use the slot.
+    /// this backend's history budget, compacted as this backend's own conversation is, whose
+    /// requests use the server slot `slot` names.
     fn isolated_conversation(
         &self,
         _system_prompt: String,
-        _slot: Option<ConversationKey>,
+        _slot: SlotAssignment,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         Err(LlmError::Unavailable(
             "isolated conversations not supported by this backend".into(),

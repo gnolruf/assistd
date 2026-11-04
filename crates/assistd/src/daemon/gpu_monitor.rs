@@ -112,6 +112,7 @@ async fn run_monitor(
                 let now = *sub.borrow_and_update();
                 if now == PresenceState::Active {
                     cause = SleepCause::None;
+                    presence.hold_for_gpu(false);
                 }
             }
             _ = shutdown.changed() => {
@@ -141,12 +142,14 @@ async fn apply(action: Action, presence: &PresenceManager, cause: &mut SleepCaus
                     *cause = SleepCause::None;
                 }
             }
+            presence.hold_for_gpu(*cause == SleepCause::Contention);
         }
         Action::Wake => {
             info!(
                 target: "assistd::gpu_monitor",
                 "the model fits in VRAM again; auto-waking"
             );
+            presence.hold_for_gpu(false);
             if let Err(e) = presence.wake().await {
                 warn!(target: "assistd::gpu_monitor", "wake transition failed: {e:#}");
             }

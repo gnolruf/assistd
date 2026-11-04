@@ -658,6 +658,10 @@ async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
     )
     .await;
     wait_for_subscribers(&state, 1).await;
+    assert!(matches!(
+        read_event(&mut reader).await,
+        Some(Event::TaskQueue { .. })
+    ));
 
     tokio::time::timeout(Duration::from_secs(2), server.stop())
         .await

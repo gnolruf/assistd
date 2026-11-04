@@ -1,10 +1,10 @@
-//! Handlers for `TaskRun` and `TaskCancel`: a saved task run as an unattended
-//! turn in a conversation and transcript session of its own.
+//! Handlers for `TaskRun` and `TaskCancel`, and a saved task run as an
+//! unattended turn in a conversation and transcript session of its own.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{OwnedMutexGuard, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
@@ -17,8 +17,10 @@ use assistd_memory::{
 use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
 use assistd_voice::SentenceBuffer;
 
+use super::lanes::LaneLease;
 use super::persistence::PersistTarget;
 use super::query::{TurnScope, TurnTranslator};
+use super::task_queue::QueuedRun;
 use super::task_runner::RegisteredRun;
 use super::{AppState, DispatchError, send_error};
 use crate::Agent;
@@ -31,7 +33,8 @@ const TASK_PREAMBLE: &str = "You are running a saved task on your own. No user i
      nobody will answer a question or confirm a command, so ask neither. Do the work with \
      your tools, then make your final reply the task's result, complete in itself.";
 
-const DAEMON_STOPPED: &str = "the daemon stopped before the run finished";
+/// Why a run the daemon stopped mid-turn failed.
+pub(super) const DAEMON_STOPPED: &str = "the daemon stopped before the run finished";
 
 /// One run of a saved task: the request that queued it, the task, and the run's id.
 struct TaskRunTurn {
@@ -54,16 +57,7 @@ impl AppState {
                 return Err(e.into());
             }
         };
-        let turn = TaskRunTurn {
-            id: id.clone(),
-            task: record,
-            run,
-        };
-        let span = info_span!("task_run", %task, %run);
-        let state = Arc::clone(&self);
-        self.runtime.task_runner.spawn(run, move |registered| {
-            state.run_task(turn, registered).instrument(span)
-        });
+        self.runtime.task_queue.push(run, record, id.clone());
         let _ = tx
             .send(Event::TaskRunQueued {
                 id: id.clone(),
@@ -81,10 +75,11 @@ impl AppState {
         run: TaskRunId,
         tx: mpsc::Sender<Event>,
     ) {
-        if self.runtime.task_runner.cancel(run) {
-            let _ = tx.send(Event::Done { id }).await;
-        } else {
-            send_error(&tx, id, format!("no task run {run} is queued or running")).await;
+        match self.cancel_task_run(run).await {
+            Ok(()) => {
+                let _ = tx.send(Event::Done { id }).await;
+            }
+            Err(e) => send_error(&tx, id, e.to_string()).await,
         }
     }
 
@@ -98,13 +93,35 @@ impl AppState {
         Ok((record, run))
     }
 
-    /// Drive the run to its end while publishing its events as `TaskRun`.
-    async fn run_task(self: Arc<Self>, turn: TaskRunTurn, registered: RegisteredRun) {
+    /// Start `queued` on the lane `lease` holds, in the background.
+    pub(super) fn spawn_task_run(self: &Arc<Self>, queued: QueuedRun, lease: LaneLease) {
+        let span = info_span!("task_run", task = %queued.task.id, run = %queued.run);
+        let run = queued.run;
+        let turn = TaskRunTurn {
+            id: queued.request_id,
+            task: queued.task,
+            run,
+        };
+        let state = Arc::clone(self);
+        self.runtime.task_runner.spawn(run, move |registered| {
+            state.run_task(turn, lease, registered).instrument(span)
+        });
+    }
+
+    /// Drive the run to its end while publishing its events as `TaskRun`, then give up
+    /// its place in the queue and its lane.
+    async fn run_task(
+        self: Arc<Self>,
+        turn: TaskRunTurn,
+        lease: LaneLease,
+        registered: RegisteredRun,
+    ) {
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
         tokio::join!(
-            self.drive_task_run(&turn, &registered, tx),
+            self.drive_task_run(&turn, &lease, &registered, tx),
             self.publish_task_run_events(TurnScope::TaskRun(turn.run), rx)
         );
+        self.runtime.task_queue.finish(turn.run);
     }
 
     async fn publish_task_run_events(&self, scope: TurnScope, mut rx: mpsc::Receiver<Event>) {
@@ -118,10 +135,13 @@ impl AppState {
     async fn drive_task_run(
         &self,
         turn: &TaskRunTurn,
+        lease: &LaneLease,
         registered: &RegisteredRun,
         tx: mpsc::Sender<Event>,
     ) {
-        let outcome = self.task_run_turn(turn, &registered.cancel, &tx).await;
+        let outcome = self
+            .task_run_turn(turn, lease, &registered.cancel, &tx)
+            .await;
         let end = run_end(outcome, registered);
         let id = turn.id.clone();
         let terminal = match &end {
@@ -145,10 +165,11 @@ impl AppState {
     async fn task_run_turn(
         &self,
         turn: &TaskRunTurn,
+        lease: &LaneLease,
         cancel: &CancellationToken,
         tx: &mpsc::Sender<Event>,
     ) -> Result<Option<String>, DispatchError> {
-        let Some(_admitted) = self.admit_task_run(&turn.id, tx, cancel).await? else {
+        let Some(_awake) = self.wake_for_task_run(&turn.id, tx, cancel).await? else {
             return Ok(None);
         };
         let system_prompt = task_system_prompt(&self.config.chat.system_prompt);
@@ -156,12 +177,14 @@ impl AppState {
         let backend = self
             .subsystems
             .llm
-            .isolated_conversation(system_prompt, Some(key))?;
+            .isolated_conversation(system_prompt, lease.slot(key))?;
         let persist = self.open_task_run_session(turn).await;
         let outcome = self
             .unattended_turn(turn, backend, persist, cancel, tx)
             .await;
-        self.hand_slot_back_to_main(key).await;
+        if lease.on_main_lane() {
+            self.hand_slot_back_to_main(key).await;
+        }
         outcome
     }
 
@@ -174,27 +197,31 @@ impl AppState {
         }
     }
 
-    /// Take the agent turn lock and wake the model as a query does; `None` when `cancel`
-    /// fired first.
-    async fn admit_task_run(
+    /// Wake the model as a query does and re-probe it if it reloaded; `None` when
+    /// `cancel` fired first.
+    async fn wake_for_task_run(
         &self,
         id: &str,
         tx: &mpsc::Sender<Event>,
         cancel: &CancellationToken,
-    ) -> Result<Option<(RequestGuard, OwnedMutexGuard<()>)>, DispatchError> {
-        let admission = async {
-            let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+    ) -> Result<Option<RequestGuard>, DispatchError> {
+        let awake = async {
             let request_guard = self
                 .subsystems
                 .presence
                 .acquire_request_guard_with_progress(id.to_string(), tx.clone())
                 .await?;
-            Ok((request_guard, agent_guard))
+            if let Some(revalidator) = &self.subsystems.vision_revalidator {
+                revalidator
+                    .revalidate_if_stale(&self.subsystems.presence)
+                    .await;
+            }
+            Ok(request_guard)
         };
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(None),
-            admitted = admission => admitted.map(Some),
+            awake = awake => awake.map(Some),
         }
     }
 

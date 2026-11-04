@@ -25,7 +25,7 @@ pub use semantic::{
 pub use sqlite::{
     SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTaskStore, SqliteTranscriptStore,
 };
-pub use tasks::{NoTaskStore, TaskRecord, TaskRunEnd, TaskStore};
+pub use tasks::{NoTaskStore, RecoveredQueue, TaskRecord, TaskRunEnd, TaskStore, WaitingRun};
 pub use transcripts::{
     AppendedMessage, BranchHistory, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
     MessageKind, NoTranscriptStore, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,

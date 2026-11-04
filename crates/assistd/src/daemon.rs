@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fs::DirBuilder;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -145,10 +146,7 @@ async fn start(
     let vision_revalidator = build_vision_revalidator(&config, &api_key, &presence, &health_probe)?;
     let voice = VoiceManager::new(config.voice.synthesis.enabled);
 
-    let vram = VramLedger::open(&config.sleep);
-    if let Some(vram) = &vram {
-        presence.set_wake_room(vram.clone());
-    }
+    let vram = open_vram_ledger(&config, &presence);
 
     let gpu_monitor_handle = gpu_monitor::spawn_monitor(
         &config.sleep,
@@ -174,6 +172,7 @@ async fn start(
         &health_probe,
         &session_ctx,
         memory.relay_answer_files.take(),
+        vision_revalidator.slot_count(),
     )?;
     let tools = tools_init::init(
         &config,
@@ -203,8 +202,9 @@ async fn start(
         memory: build_memory_stack(&config, &memory, &embed),
         config,
         subsystems,
-        runtime: RuntimeState::new().with_session_ctx(session_ctx),
+        runtime: build_runtime(session_ctx, &vision_revalidator),
     });
+    state.start_task_queue().await;
     let persistence_tracker = state.runtime.persistence_tracker_handle();
     let task_runner = Arc::clone(&state.runtime.task_runner);
     let background = spawn_background_starts(
@@ -340,8 +340,9 @@ fn build_chat_and_relay(
     health_probe: &Arc<dyn LlmHealthProbe>,
     session_ctx: &SessionContext,
     kept_answers: Option<HashSet<PathBuf>>,
+    slots: watch::Receiver<NonZeroU32>,
 ) -> Result<(Arc<dyn LlmBackend>, RelayDeps, Arc<SlotStash>)> {
-    let slot_stash = build_slot_stash(config, api_key, slot_dir, health_probe)?;
+    let slot_stash = build_slot_stash(config, api_key, slot_dir, health_probe, slots)?;
     let chat = build_chat_backend(
         config,
         api_key,
@@ -365,6 +366,7 @@ fn build_slot_stash(
     api_key: &ApiKey,
     slot_dir: SlotDir,
     health_probe: &Arc<dyn LlmHealthProbe>,
+    slots: watch::Receiver<NonZeroU32>,
 ) -> Result<Arc<SlotStash>> {
     let slot_stash = SlotStash::new(
         SocketAddr::new(config.model.host, config.model.port.get()),
@@ -374,7 +376,7 @@ fn build_slot_stash(
         Some(Arc::clone(health_probe)),
     )
     .context("failed to construct the slot stash client")?;
-    Ok(Arc::new(slot_stash))
+    Ok(Arc::new(slot_stash.with_slot_count(slots)))
 }
 
 /// What the `relay` tool runs sub-agents with: the chat backend they share, the stash of its
@@ -468,6 +470,22 @@ fn build_chat_backend(
     )?
     .with_slot_stash(slot_stash);
     Ok(Arc::new(chat))
+}
+
+/// Request bookkeeping over the resumed session, with model lanes sized by the
+/// server's slot count.
+fn build_runtime(session_ctx: Arc<SessionContext>, vision: &VisionRevalidator) -> RuntimeState {
+    RuntimeState::new()
+        .with_session_ctx(session_ctx)
+        .with_slot_count(vision.slot_count())
+}
+
+/// The VRAM ledger, checked by `presence` before every wake; `None` when the GPU
+/// monitor is off or cannot read the GPU.
+fn open_vram_ledger(config: &Config, presence: &PresenceManager) -> Option<Arc<VramLedger>> {
+    let vram = VramLedger::open(&config.sleep)?;
+    presence.set_wake_room(vram.clone());
+    Some(vram)
 }
 
 fn build_memory_stack(
