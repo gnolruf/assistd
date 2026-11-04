@@ -28,9 +28,6 @@ const SEARCH_LIMIT: usize = 50;
 /// would overflow it are dropped.
 const REMINISCE_OUTPUT_BYTES: usize = 8 * 1024;
 
-/// Leading characters of a session's UUID that `reminisce` prints and accepts back.
-const SHORT_SESSION_ID_CHARS: usize = 8;
-
 const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
 /// Keys reject whitespace and uppercase so one concept keeps one spelling;
@@ -458,7 +455,7 @@ fn format_chunk(hit: &EmbeddingHit) -> String {
     } = &hit.locator;
     format!(
         "[session {} \"{session_label}\" {} {} sim={:.0}%] {}",
-        short_session_id(*session_id),
+        session_id.short(),
         timestamp.format(TIMESTAMP_FORMAT),
         role.as_wire(),
         hit.similarity * 100.0,
@@ -472,10 +469,7 @@ fn session_header(locator: &ChunkLocator) -> String {
         session_label,
         ..
     } = locator;
-    format!(
-        "session {} \"{session_label}\":",
-        short_session_id(*session_id)
-    )
+    format!("session {} \"{session_label}\":", session_id.short())
 }
 
 /// The unclosed `[timestamp role` tag that opens a line in a session-scoped result.
@@ -484,14 +478,6 @@ fn locator_tag(locator: &ChunkLocator) -> String {
         timestamp, role, ..
     } = locator;
     format!("[{} {}", timestamp.format(TIMESTAMP_FORMAT), role.as_wire())
-}
-
-fn short_session_id(session: SessionId) -> String {
-    session
-        .to_string()
-        .chars()
-        .take(SHORT_SESSION_ID_CHARS)
-        .collect()
 }
 
 fn one_line(text: &str) -> String {
@@ -717,7 +703,7 @@ mod tests {
         }
 
         fn short_id(&self) -> String {
-            short_session_id(self.session)
+            self.session.short()
         }
     }
 
