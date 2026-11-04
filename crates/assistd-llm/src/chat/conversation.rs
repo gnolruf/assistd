@@ -34,8 +34,9 @@ const SUMMARY_INSTRUCTION_RULES: &str = "Start with where things stand now: what
     step. Then cover the earlier history, most recent first, preserving every factual claim, user \
     request, conclusion, and what each tool call found. Keep every approach that failed and why, \
     and every limit discovered in the tools or environment (commands or flags that are \
-    unsupported, hosts that are unreachable, paths that do not exist), so none is retried. Write \
-    with no preamble or commentary.";
+    unsupported, hosts that are unreachable, paths that do not exist), so none is retried. If you \
+    have the `reminisce` tool, the summarized messages stay searchable with it, so favour state \
+    and decisions over verbatim detail. Write with no preamble or commentary.";
 /// Longest quote of a message the summary instruction uses to name it.
 const SUMMARY_QUOTE_BYTES: usize = 120;
 /// Marks an image-carrying tool result sent on the user role (templates

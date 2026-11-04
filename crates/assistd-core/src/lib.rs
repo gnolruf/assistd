@@ -140,7 +140,7 @@ pub struct BuildToolsDeps<'a> {
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
     pub embed_tx: mpsc::Sender<EmbedJob>,
-    /// The active session, which `reminisce` excludes from its results.
+    /// The active session, whose messages still in context `reminisce` excludes.
     pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
     /// Readiness of the SearXNG instance `web search` goes through.

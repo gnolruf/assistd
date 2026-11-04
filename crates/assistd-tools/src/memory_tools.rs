@@ -203,8 +203,8 @@ impl Tool for RememberTool {
     }
 }
 
-/// Semantic search over past session transcripts, excluding the session in
-/// progress because its dialogue is already in the model's context.
+/// Semantic search over session transcripts, excluding the messages of the
+/// session in progress that are still in the model's context.
 #[derive(Debug)]
 pub struct ReminisceTool {
     embedder: Arc<EmbedderHandle>,
@@ -242,8 +242,8 @@ impl ReminisceRequest {
 
 impl ReminisceTool {
     /// A tool ranking past messages in `semantic` by vectors from `embedder`,
-    /// resolving session ids through `transcripts`, and skipping the session
-    /// `current_session` names at call time.
+    /// resolving session ids through `transcripts`, and skipping the
+    /// in-context messages of the session `current_session` names at call time.
     pub fn new(
         embedder: Arc<EmbedderHandle>,
         semantic: Arc<dyn SemanticStore>,
@@ -258,19 +258,21 @@ impl ReminisceTool {
         }
     }
 
-    /// The sessions to search: every past one, or the one `session_prefix` names.
+    /// The sessions to search: every one but the current one's in-context messages,
+    /// or the past one `session_prefix` names.
     /// Errors when the prefix names no session or the session in progress.
     async fn scope(&self, session_prefix: Option<&str>) -> Result<SessionScope, ToolError> {
         let current = *self.current_session.borrow();
         let Some(prefix) = session_prefix else {
-            return Ok(SessionScope::AllExcept(current));
+            return Ok(SessionScope::AllExceptInContext(current));
         };
         match self.transcripts.resolve_session(prefix).await? {
             None => Err(ToolError::InvalidArgs(format!(
                 "no past session has id {prefix:?}"
             ))),
             Some(session) if session == current => Err(ToolError::InvalidArgs(format!(
-                "session {prefix:?} is the conversation in progress, already in context"
+                "session {prefix:?} is the conversation in progress; search its summarized \
+                 part with `session` null"
             ))),
             Some(session) => Ok(SessionScope::Only(session)),
         }
@@ -304,7 +306,10 @@ impl ReminisceTool {
         );
         match scope {
             SessionScope::Only(_) => self.format_exchanges(&hits).await,
-            SessionScope::All | SessionScope::AllExcept(_) => Ok(format_chunks(&hits)),
+            SessionScope::All => Ok(format_chunks(&hits, None)),
+            SessionScope::AllExcept(current) | SessionScope::AllExceptInContext(current) => {
+                Ok(format_chunks(&hits, Some(current)))
+            }
         }
     }
 
@@ -343,9 +348,8 @@ impl Tool for ReminisceTool {
     }
 
     fn description(&self) -> Cow<'_, str> {
-        "Search *earlier* conversations — every session except the one \
-         in progress, which is already in context — for passages similar \
-         in meaning to a query. Complement to `remember`: its search looks \
+        "Search *earlier* conversations, and the part of this one replaced \
+         by its summary, for passages similar in meaning to a query. Complement to `remember`: its search looks \
          up *saved memories* (key/value), `reminisce` searches *past \
          dialogue text*; use it when the user references something they \
          'discussed before' or 'worked on last month'. Robust to \
@@ -353,7 +357,9 @@ impl Tool for ReminisceTool {
          match a past passage about \"the assistd embedding daemon in Rust\". \
          Use it in two steps. First search broadly with `session` null: \
          each of up to `limit` ranked snippets names its session's short id \
-         and title, then its timestamp, role and the matching excerpt. Then, \
+         and title, then its timestamp, role and the matching excerpt; hits \
+         marked `earlier in this chat` come from this conversation's \
+         summarized part. Then, \
          to read a chat you found, search again with `session` set to that \
          id: hits come only from that chat, each shown with the message \
          before and after it so you see the exchange."
@@ -421,13 +427,15 @@ fn reminisce_limit(args: &Value) -> Result<usize, ToolError> {
         .ok_or_else(|| ToolError::InvalidArgs(format!("`limit` must be in 1..=20 (got {limit})")))
 }
 
-fn format_chunks(hits: &[EmbeddingHit]) -> String {
+/// Ranked one-line hits within the output budget; those from `current` are
+/// marked as coming from earlier in this chat.
+fn format_chunks(hits: &[EmbeddingHit], current: Option<SessionId>) -> String {
     if hits.is_empty() {
         return "(no matches)".to_string();
     }
     let mut lines = Vec::new();
     let mut used = 0;
-    for line in hits.iter().map(format_chunk) {
+    for line in hits.iter().map(|hit| format_chunk(hit, current)) {
         if used + line.len() > REMINISCE_OUTPUT_BYTES {
             break;
         }
@@ -445,7 +453,7 @@ fn push_omitted_note(lines: &mut Vec<String>, omitted: usize) {
     }
 }
 
-fn format_chunk(hit: &EmbeddingHit) -> String {
+fn format_chunk(hit: &EmbeddingHit, current: Option<SessionId>) -> String {
     let ChunkLocator::Message {
         session_id,
         timestamp,
@@ -453,9 +461,13 @@ fn format_chunk(hit: &EmbeddingHit) -> String {
         session_label,
         ..
     } = &hit.locator;
+    let source = if Some(*session_id) == current {
+        "earlier in this chat".to_string()
+    } else {
+        format!("session {} \"{session_label}\"", session_id.short())
+    };
     format!(
-        "[session {} \"{session_label}\" {} {} sim={:.0}%] {}",
-        session_id.short(),
+        "[{source} {} {} sim={:.0}%] {}",
         timestamp.format(TIMESTAMP_FORMAT),
         role.as_wire(),
         hit.similarity * 100.0,
@@ -505,11 +517,13 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use assistd_embed::EmbedError;
     use assistd_memory::{
         AdjacentChunks, BranchId, ChunkId, Embedding, MemoryError, MemoryId, MemoryStore,
         NoMemoryStore, NoSemanticStore, NoTranscriptStore, PersistedMessage, SqliteHandle,
-        SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
+        SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, SummaryCut, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -617,7 +631,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reminisce_excludes_the_session_in_progress() {
+    async fn reminisce_excludes_the_in_context_part_of_the_session_in_progress() {
         let spy = Arc::new(ScopeSpy::default());
         let first = SessionId::new();
         let (session_tx, session_rx) = watch::channel(first);
@@ -630,14 +644,17 @@ mod tests {
         let query = json!({"query": "the rust daemon", "limit": 3, "session": null});
 
         tool.invoke(query.clone()).await.unwrap();
-        assert_eq!(*spy.scope.lock(), Some(SessionScope::AllExcept(first)));
+        assert_eq!(
+            *spy.scope.lock(),
+            Some(SessionScope::AllExceptInContext(first))
+        );
 
         let second = SessionId::new();
         session_tx.send_replace(second);
         tool.invoke(query).await.unwrap();
         assert_eq!(
             *spy.scope.lock(),
-            Some(SessionScope::AllExcept(second)),
+            Some(SessionScope::AllExceptInContext(second)),
             "the tool must follow a session switch, not pin its first session"
         );
     }
@@ -778,6 +795,41 @@ mod tests {
             .await
             .unwrap_err();
         assert!(invalid_args(err).contains("in progress"));
+    }
+
+    #[tokio::test]
+    async fn reminisce_finds_the_compacted_part_of_the_live_chat_but_not_the_kept_turns() {
+        let temp = tempfile::tempdir().unwrap();
+        let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+            .await
+            .unwrap();
+        let live = PastSession::begin(&handle).await;
+        live.exchange("which port?", "the folded port is 8431", true)
+            .await;
+        live.exchange("and now?", "the kept answer", true).await;
+        let cut = SummaryCut {
+            kept_turns: NonZeroUsize::MIN,
+            kept_steps: None,
+        };
+        live.transcripts
+            .record_branch_summary(live.branch, "summary".into(), cut, 0)
+            .await
+            .unwrap();
+        let tool = ReminisceTool::new(
+            ready(Arc::new(FixedEmbedder)),
+            live.semantic.clone(),
+            live.transcripts.clone(),
+            watch::channel(live.session).1,
+        );
+
+        let found = tool
+            .invoke(json!({"query": "port", "limit": 5, "session": null}))
+            .await
+            .unwrap()
+            .output;
+        assert!(found.starts_with("[earlier in this chat "), "{found}");
+        assert!(found.contains("the folded port is 8431"), "{found}");
+        assert!(!found.contains("the kept answer"), "{found}");
     }
 
     /// A SQLite-backed `MemoryOps`; hold the tempdir for the test.
