@@ -6,6 +6,8 @@ use std::str::FromStr;
 
 use uuid::Uuid;
 
+const SHORT_SESSION_ID_CHARS: usize = 8;
+
 macro_rules! row_id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
@@ -53,6 +55,15 @@ impl SessionId {
     /// A fresh random session id.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// The UUID's first eight hex digits, the prefix shown to the model and
+    /// accepted back when it names a session.
+    pub fn short(&self) -> String {
+        self.to_string()
+            .chars()
+            .take(SHORT_SESSION_ID_CHARS)
+            .collect()
     }
 }
 

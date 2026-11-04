@@ -1835,7 +1835,10 @@ impl assistd_embed::Embedder for ConstantEmbedder {
 
 /// Returns its fixed hits, minus the excluded session's.
 #[derive(Debug)]
-struct FixedHits(Vec<EmbeddingHit>);
+struct FixedHits {
+    chunks: Vec<EmbeddingHit>,
+    memories: Vec<MemoryHit>,
+}
 
 #[async_trait::async_trait]
 impl SemanticStore for FixedHits {
@@ -1846,7 +1849,7 @@ impl SemanticStore for FixedHits {
         scope: SessionScope,
     ) -> assistd_memory::Result<Vec<EmbeddingHit>> {
         Ok(self
-            .0
+            .chunks
             .iter()
             .filter(|hit| {
                 let ChunkLocator::Message { session_id, .. } = hit.locator;
@@ -1858,10 +1861,10 @@ impl SemanticStore for FixedHits {
     }
     async fn nearest_memories(
         &self,
-        query_vector: Vec<f32>,
+        _query_vector: Vec<f32>,
         top_k: usize,
     ) -> assistd_memory::Result<Vec<MemoryHit>> {
-        NoSemanticStore.nearest_memories(query_vector, top_k).await
+        Ok(self.memories.iter().take(top_k).cloned().collect())
     }
     async fn adjacent_chunks(
         &self,
@@ -1908,40 +1911,71 @@ fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) 
             message_id: MessageId(message),
             role: PersistedRole::User,
             timestamp: Utc::now(),
-            session_label: String::new(),
+            session_label: "Daemon tuning".into(),
         },
         text: text.into(),
         similarity,
     }
 }
 
+fn memory_hit(id: i64, key: &str, value: &str, similarity: f32) -> MemoryHit {
+    MemoryHit {
+        memory_id: MemoryId(id),
+        key: key.into(),
+        value: value.into(),
+        similarity,
+    }
+}
+
 #[tokio::test]
-async fn auto_recall_injects_each_strong_hit_from_other_sessions_once_per_session() {
+async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_pointers() {
     let mut state = Arc::into_inner(default_state()).expect("sole owner");
     let (current, _) = state.runtime.session_ctx.current().await;
     let other = SessionId::new();
     state.memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Ready(Arc::new(
         ConstantEmbedder,
     ))));
-    state.memory.semantic = Arc::new(FixedHits(vec![
-        recall_hit(current, 1, 0.9, "said in this chat"),
-        recall_hit(other, 2, 0.9, "strong past match"),
-        recall_hit(other, 3, 0.1, "weak past match"),
-    ]));
+    state.memory.semantic = Arc::new(FixedHits {
+        chunks: vec![
+            recall_hit(current, 1, 0.9, "said in this chat"),
+            recall_hit(other, 2, 0.9, "strong past match"),
+            recall_hit(other, 3, 0.8, "another past match"),
+            recall_hit(SessionId::new(), 4, 0.1, "weak past match"),
+        ],
+        memories: vec![
+            memory_hit(1, "editor", "helix", 0.9),
+            memory_hit(2, "shell", "fish", 0.1),
+        ],
+    });
     let recall =
-        async |state: &AppState| state.build_semantic_context("rust daemon").await.unwrap();
+        async |state: &AppState, query: &str| state.build_semantic_context(query).await.unwrap();
+    let session_ctx = &state.runtime.session_ctx;
 
-    let first = recall(&state).await.expect("a strong hit is recalled");
-    assert!(first.contains("strong past match"), "{first}");
+    assert_eq!(recall(&state, "hi").await, None, "too short to search");
+    session_ctx.replace(current, Some(BranchId(1))).await;
+    let first = recall(&state, "rust daemon")
+        .await
+        .expect("saving the first message leaves recall pending");
+    let pointer = format!("- chat {} \"Daemon tuning\" ", other.short());
+    assert!(first.contains("- editor: helix\n"), "{first}");
+    assert!(!first.contains("fish"), "{first}");
+    assert_eq!(first.matches(&pointer).count(), 1, "{first}");
+    assert!(first.contains("2 matching messages"), "{first}");
+    assert_eq!(first.matches("- chat ").count(), 1, "{first}");
+    assert!(!first.contains("past match"), "no message text: {first}");
     assert!(!first.contains("said in this chat"), "{first}");
-    assert!(!first.contains("weak past match"), "{first}");
-    assert_eq!(recall(&state).await, None, "already recalled this session");
+    assert_eq!(
+        recall(&state, "rust daemon").await,
+        None,
+        "once per session"
+    );
 
-    state
-        .runtime
-        .session_ctx
-        .replace(SessionId::new(), None)
-        .await;
-    let after_switch = recall(&state).await.expect("a new session recalls afresh");
-    assert!(after_switch.contains("strong past match"), "{after_switch}");
+    session_ctx.replace(other, Some(BranchId(2))).await;
+    assert_eq!(recall(&state, "rust daemon").await, None, "resumed session");
+
+    session_ctx.replace(SessionId::new(), None).await;
+    let fresh = recall(&state, "rust daemon")
+        .await
+        .expect("a new session recalls");
+    assert!(fresh.contains(&pointer), "{fresh}");
 }

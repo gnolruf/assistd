@@ -41,16 +41,16 @@ pub struct EmbeddingConfig {
     /// Extra server arguments. Flags assistd sets itself, or that expose
     /// files, tools or state through the server, fail to parse.
     pub custom_args: CustomArgs<EmbeddingServer>,
-    /// Nearest-neighbour matches per query, for auto-injection and as the
-    /// `reminisce` default. `1..=20`, the most `reminisce` returns.
+    /// Nearest-neighbour matches per search: the most saved memories and
+    /// past-chat matches auto-injected, and the `reminisce` default. `1..=20`.
     pub top_k: NonZeroU32,
-    /// Prepend the `top_k` most similar past chunks to every query; when
-    /// `false`, recall happens only through `reminisce`. Off while
-    /// `memory.enabled` is `false`.
+    /// Prepend matching saved memories, and one pointer per matching past chat, to a
+    /// new session's first query of three or more characters; resumed sessions get
+    /// none. When `false`, recall is tools-only. Off while `memory.enabled` is `false`.
     pub auto_inject: bool,
-    /// Cosine similarity, `0.0..=1.0`, an auto-injected match must reach; a
-    /// query with no match above it gets no recalled context. `0` injects
-    /// every match that is not opposed to the query.
+    /// Cosine similarity, `0.0..=1.0`, an auto-injected memory or past-chat
+    /// match must reach; a query with no match above it gets no recalled
+    /// context. `0` injects every match that is not opposed to the query.
     pub min_similarity: UnitInterval,
 }
 
@@ -87,7 +87,7 @@ impl DescribeSettings for EmbeddingConfig {
         top_k => ("memories recalled per query", "Matches recalled per query, 1 to 20"),
         auto_inject => (
             "add recalled memories to queries",
-            "Prepend recalled memories to every query"
+            "Prepend matching saved memories and pointers to past chats to a new chat's first query"
         ),
         min_similarity => (
             "recall similarity floor",

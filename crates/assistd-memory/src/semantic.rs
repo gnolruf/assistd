@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 
 use crate::{ChunkId, MemoryId, MessageId, PersistedRole, Result, SessionId};
 
+const POINTER_DATE_FORMAT: &str = "%Y-%m-%d";
+
 /// One matched chunk: its text, its cosine similarity to the query, and where it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingHit {
@@ -28,6 +30,72 @@ pub enum ChunkLocator {
         /// The session's title, or its first user message cut short when untitled.
         session_label: String,
     },
+}
+
+impl ChunkLocator {
+    /// Whether both chunks were cut from the same source.
+    pub fn same_source(&self, other: &Self) -> bool {
+        let (
+            Self::Message { session_id, .. },
+            Self::Message {
+                session_id: other, ..
+            },
+        ) = (self, other);
+        session_id == other
+    }
+}
+
+/// A source matched by one or more chunks, listed once so it can be read on
+/// demand instead of quoted. Displays as kind, short id, label, date and match count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourcePointer {
+    /// Where the source's best-ranked match sits.
+    pub locator: ChunkLocator,
+    pub matches: usize,
+}
+
+impl SourcePointer {
+    /// One pointer per source among `hits`, in order of each source's first hit.
+    pub fn group<'a>(hits: impl IntoIterator<Item = &'a EmbeddingHit>) -> Vec<Self> {
+        let mut pointers: Vec<Self> = Vec::new();
+        for hit in hits {
+            match pointers
+                .iter_mut()
+                .find(|pointer| pointer.locator.same_source(&hit.locator))
+            {
+                Some(pointer) => pointer.matches += 1,
+                None => pointers.push(Self {
+                    locator: hit.locator.clone(),
+                    matches: 1,
+                }),
+            }
+        }
+        pointers
+    }
+}
+
+impl fmt::Display for SourcePointer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ChunkLocator::Message {
+            session_id,
+            timestamp,
+            session_label,
+            ..
+        } = &self.locator;
+        let noun = if self.matches == 1 {
+            "message"
+        } else {
+            "messages"
+        };
+        write!(
+            f,
+            "chat {} \"{}\" {}, {} matching {noun}",
+            session_id.short(),
+            session_label.replace('\n', " "),
+            timestamp.format(POINTER_DATE_FORMAT),
+            self.matches,
+        )
+    }
 }
 
 /// A chunk shown beside a hit so the match reads in context.
