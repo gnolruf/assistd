@@ -346,6 +346,21 @@ kept in the `task_queue` table, so it outlasts a restart), and
 `Event::TaskQueue` broadcasts the items, lane holders and pause flag after each
 change and greets every new subscriber.
 
+Time triggers are `TaskTrigger::At` (one local datetime) and
+`TaskTrigger::Schedule` (a five-field local-time cron expression parsed by
+`croner`, so DST gaps and repeats behave). `TaskSave` refuses invalid
+expressions and `At` times already past. The `TaskScheduler`, a second service
+on the `TaskRunner`, sleeps until the nearest fire time across enabled tasks,
+waking early on any task change. Each sleep is capped at a minute and
+compared against the wall clock, since tokio's clock stands still through a
+suspend. Each task's next fire time is kept in `tasks.next_fire_at`. The
+scheduler records it in the same write that queues the fired run, so a restart
+neither double-fires nor loses a fire. A schedule whose fire times passed while
+the daemon was down or asleep runs once on return or skips them, by its
+`missed` policy. Firing only queues: a task with an unfinished run gets no
+second one. `assistd task run <name>` queues a run directly, the escape hatch for
+systemd timers, udev rules and key bindings.
+
 An admitted run takes the request guard, as a query does, then opens an
 `isolated_conversation`. That conversation gets the main system prompt plus a
 short preamble saying no user is present, and the main agent's full tool

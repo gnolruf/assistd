@@ -190,3 +190,35 @@ async fn queue_order_pause_and_interrupted_runs_survive_a_reopen() {
     ));
     reopened.start_run(first, SessionId::new()).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_fire_coalesces_into_an_unfinished_run_and_records_the_next_fire() {
+    let (store, _temp) = fresh().await;
+    let task = store
+        .save(None, approved_spec("digest", "summarize example.org"))
+        .await
+        .unwrap()
+        .id;
+    let next = DateTime::from_timestamp(1_800_000_000, 0);
+
+    let first = store.fire(task, TaskTrigger::Manual, next).await.unwrap();
+    assert!(first.is_some());
+    assert_eq!(store.get(task).await.unwrap().next_fire, next);
+    let coalesced = store.fire(task, TaskTrigger::Manual, None).await.unwrap();
+    assert_eq!(coalesced, None);
+    assert_eq!(store.get(task).await.unwrap().next_fire, None);
+
+    store
+        .finish_run(first.unwrap(), TaskRunEnd::Cancelled)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .fire(task, TaskTrigger::Manual, next)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    store.set_enabled(task, true).await.unwrap();
+    assert_eq!(store.get(task).await.unwrap().next_fire, None);
+}

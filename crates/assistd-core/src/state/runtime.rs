@@ -18,6 +18,7 @@ use super::chat_focus::ChatFocusSlot;
 use super::lanes::ModelLanes;
 use super::task_queue::TaskQueue;
 use super::task_runner::TaskRunner;
+use super::task_scheduler::TaskScheduler;
 use super::wakeword_handlers::MicSession;
 
 const EVENTS_BUS_CAPACITY: usize = 256;
@@ -111,6 +112,7 @@ pub struct RuntimeState {
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
     pub(in crate::state) lanes: Arc<ModelLanes>,
     pub(in crate::state) task_queue: TaskQueue,
+    pub(in crate::state) task_scheduler: TaskScheduler,
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
     /// The push-to-talk press awaiting its release.
@@ -143,6 +145,7 @@ impl RuntimeState {
             lanes: ModelLanes::new(Arc::clone(&agent_turn_lock), one_slot),
             agent_turn_lock,
             task_queue: TaskQueue::default(),
+            task_scheduler: TaskScheduler::default(),
             persistence_tracker: TaskTracker::new(),
             ptt_capture: Arc::new(Mutex::new(None)),
             interrupt: StdMutex::new(CancellationToken::new()),

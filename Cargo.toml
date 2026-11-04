@@ -81,6 +81,8 @@ rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 tokio-rusqlite = "0.7"
 rusqlite_migration = "2.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chrono-tz = "0.10"
+croner = "4.0.2"
 tokio-i3ipc = "0.16"
 swayipc-async = "3"
 url = { version = "2", features = ["serde"] }

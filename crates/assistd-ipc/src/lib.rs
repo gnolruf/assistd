@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use assistd_utils::readiness::NotReady;
@@ -17,9 +18,9 @@ pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
-    LaneHolder, PlanStep, SuspendReason, TaskGrant, TaskId, TaskName, TaskPlan, TaskPrompt,
-    TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState, TaskRunSummary,
-    TaskSpec, TaskSpecError, TaskTrigger,
+    LaneHolder, MissedFire, PlanStep, SuspendReason, TaskGrant, TaskId, TaskName, TaskPlan,
+    TaskPrompt, TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
+    TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -540,7 +541,7 @@ pub enum Request {
         #[serde(default)]
         filter: SubscribeFilter,
     },
-    /// List every saved task by name. Emits `Task`s, then `Done`.
+    /// List every saved task by name with its next fire time. Emits `Task`s, then `Done`.
     TaskList { id: String },
     /// Read one task. Emits `Task`, then `Done`.
     TaskGet { id: String, task: TaskId },
@@ -1064,6 +1065,9 @@ pub enum Event {
         id: String,
         task_id: TaskId,
         spec: TaskSpec,
+        /// When its triggers next fire; `None` while it is disabled or nothing is due.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_fire: Option<DateTime<Utc>>,
     },
     /// Run `run` of `task` was queued.
     TaskRunQueued {

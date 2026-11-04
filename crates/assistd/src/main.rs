@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use client::{listen, memory, presence, ptt, query, voice_ctl};
+use client::{listen, memory, presence, ptt, query, task, voice_ctl};
 
 #[cfg(feature = "chat")]
 mod chat;
@@ -101,6 +101,9 @@ enum Commands {
     /// memories.
     Memory(memory::MemoryArgs),
 
+    /// List saved tasks with their next fire times, run one now, or cancel a run.
+    Task(task::TaskArgs),
+
     /// Run the daemon's voice stack over stdin and stdout; the daemon
     /// spawns this itself.
     #[command(hide = true)]
@@ -139,6 +142,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
         Commands::Memory(args) => memory::run(args).await,
+        Commands::Task(args) => task::run(args).await,
         Commands::VoiceWorker => voice_worker::run().await,
     }
 }

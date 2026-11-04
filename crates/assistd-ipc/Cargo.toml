@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono = { workspace = true }
 dirs = { workspace = true }
 assistd-utils = { workspace = true }
 serde = { workspace = true }

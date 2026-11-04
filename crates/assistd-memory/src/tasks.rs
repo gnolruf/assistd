@@ -3,6 +3,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 use assistd_ipc::{SuspendReason, TaskId, TaskRunId, TaskSpec, TaskTrigger};
 
@@ -13,6 +14,9 @@ use crate::{MemoryError, Result, SessionId};
 pub struct TaskRecord {
     pub id: TaskId,
     pub spec: TaskSpec,
+    /// When its triggers next fire, as last recorded; `None` after every save or
+    /// enable until it is recorded again, and when nothing is due.
+    pub next_fire: Option<DateTime<Utc>>,
 }
 
 /// How a task run finished.
@@ -62,6 +66,20 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
 
     /// Set whether task `id`'s triggers fire; [`MemoryError::TaskNotFound`] when there is none.
     async fn set_enabled(&self, id: TaskId, enabled: bool) -> Result<TaskRecord>;
+
+    /// Record `next_fire` as when task `id`'s triggers next fire;
+    /// [`MemoryError::TaskNotFound`] when there is none.
+    async fn set_next_fire(&self, id: TaskId, next_fire: Option<DateTime<Utc>>) -> Result<()>;
+
+    /// In one write, record `next_fire` for task `task` and queue a run of it that
+    /// `trigger` started, unless one is already unfinished; returns the queued run.
+    /// [`MemoryError::TaskNotFound`] when there is no such task.
+    async fn fire(
+        &self,
+        task: TaskId,
+        trigger: TaskTrigger,
+        next_fire: Option<DateTime<Utc>>,
+    ) -> Result<Option<TaskRunId>>;
 
     /// Record a queued run of task `task` that `trigger` started, last in the queue;
     /// [`MemoryError::TaskNotFound`] when there is no such task.
@@ -114,6 +132,19 @@ impl TaskStore for NoTaskStore {
 
     async fn set_enabled(&self, id: TaskId, _enabled: bool) -> Result<TaskRecord> {
         Err(MemoryError::TaskNotFound(id))
+    }
+
+    async fn set_next_fire(&self, id: TaskId, _next_fire: Option<DateTime<Utc>>) -> Result<()> {
+        Err(MemoryError::TaskNotFound(id))
+    }
+
+    async fn fire(
+        &self,
+        task: TaskId,
+        _trigger: TaskTrigger,
+        _next_fire: Option<DateTime<Utc>>,
+    ) -> Result<Option<TaskRunId>> {
+        Err(MemoryError::TaskNotFound(task))
     }
 
     async fn queue_run(&self, task: TaskId, _trigger: TaskTrigger) -> Result<TaskRunId> {

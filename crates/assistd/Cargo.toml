@@ -23,7 +23,6 @@ chat = [
     "dep:shlex",
     "dep:ratatui-image",
     "dep:image",
-    "dep:chrono",
     "dep:toml",
 ]
 tray = [
@@ -47,6 +46,7 @@ assistd-utils  = { workspace = true }
 assistd-voice  = { workspace = true }
 assistd-wm     = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 nvml-wrapper = { workspace = true }
 parking_lot = { workspace = true }
@@ -59,7 +59,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
-chrono           = { workspace = true, optional = true }
 ratatui          = { workspace = true, optional = true }
 crossterm        = { workspace = true, optional = true }
 futures-util     = { workspace = true, optional = true }
