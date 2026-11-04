@@ -388,6 +388,39 @@ async fn ensure_budget_summarizes_all_but_the_preserved_turns() {
 }
 
 #[tokio::test]
+async fn ensure_budget_leaves_folded_context_blocks_out_of_the_summary_request() {
+    let mut c = Conversation::new("sys".into());
+    for i in 0..PAIRS {
+        let block = if i == 0 {
+            "Saved memories:\n- editor: helix"
+        } else {
+            "Current desktop context:\n- Focused window: kitty"
+        };
+        c.set_transient_context(block.into());
+        c.push_user(format!("user {i} message with enough length to count"));
+        c.push_assistant(format!("assistant {i} message with enough length to count"));
+    }
+    c.push_user("current question with enough length to count".into());
+
+    let fake = FakeSummarizer::new("summary");
+    let (chat, model) = spec(400, 10_000);
+    compact(c, &fake, &chat, &model).await;
+
+    let messages = &fake.captured.lock().await[0].messages;
+    assert!(!messages.contains("editor: helix"), "{messages}");
+    assert!(
+        messages.contains(
+            &serde_json::to_string(&with_context(
+                "Current desktop context:\n- Focused window: kitty",
+                &format!("user {FIRST_KEPT_PAIR} message with enough length to count"),
+            ))
+            .unwrap()
+        ),
+        "a kept turn keeps its block: {messages}"
+    );
+}
+
+#[tokio::test]
 async fn ensure_budget_releases_the_lock_while_summarizing() {
     let mut c = Conversation::new("sys".into());
     for i in 0..PAIRS {
