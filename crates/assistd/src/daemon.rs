@@ -196,6 +196,7 @@ async fn start(
         .with_mcp_servers(tools.mcp_servers)
         .with_web_search(web_search)
         .with_tools_disabled(tools.disabled)
+        .with_planning_tools(tools.planning)
         .with_slot_stash(slot_stash);
 
     let state = Arc::new(AppState {

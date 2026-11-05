@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use assistd_core::planner::PlanningTools;
 use assistd_core::{
     BuildToolsDeps, Config, McpServerStatus, RelayDeps, ToolRegistry, WindowManager,
 };
@@ -26,6 +27,7 @@ use super::memory_init::MemorySubsystem;
 /// servers whose tools join them once each has connected.
 pub(super) struct ToolsSubsystem {
     pub registry: Arc<ToolRegistry>,
+    pub planning: PlanningTools,
     pub mcp_servers: Vec<McpServerStatus>,
     pub mcp_startup: Option<McpStartup>,
     /// Set when no sandbox is available, so the registry is empty.
@@ -55,6 +57,7 @@ pub(super) fn init(
         ToolSandbox::Disabled(reason) => {
             return Ok(ToolsSubsystem {
                 registry: Arc::new(ToolRegistry::new()),
+                planning: PlanningTools::default(),
                 mcp_servers: Vec::new(),
                 mcp_startup: None,
                 disabled: Some(reason),
@@ -69,7 +72,7 @@ pub(super) fn init(
     let (mcp_servers, mcp_startup) =
         mcp_init::prepare(config, mcp_approvals, deps.vision_gate.clone());
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
-    let registry = assistd_core::build_tools(BuildToolsDeps {
+    let built = assistd_core::build_tools(BuildToolsDeps {
         config,
         config_path,
         overflow_dir: overflow_dir.clone(),
@@ -90,11 +93,12 @@ pub(super) fn init(
     })?;
     info!(
         "tools: registered {} (overflow dir {})",
-        registry.len(),
+        built.registry.len(),
         overflow_dir.display()
     );
     Ok(ToolsSubsystem {
-        registry,
+        registry: built.registry,
+        planning: built.planning,
         mcp_servers,
         mcp_startup,
         disabled: None,

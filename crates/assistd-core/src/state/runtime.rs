@@ -18,6 +18,7 @@ use super::chat_focus::ChatFocusSlot;
 use super::lanes::ModelLanes;
 use super::task_confirms::TaskConfirms;
 use super::task_events::TaskEvents;
+use super::task_plans::TaskPlans;
 use super::task_queue::TaskQueue;
 use super::task_runner::TaskRunner;
 use super::task_scheduler::TaskScheduler;
@@ -117,6 +118,7 @@ pub struct RuntimeState {
     pub(in crate::state) task_confirms: TaskConfirms,
     pub(in crate::state) task_scheduler: TaskScheduler,
     pub(in crate::state) task_events: TaskEvents,
+    pub(in crate::state) task_plans: TaskPlans,
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
     /// The push-to-talk press awaiting its release.
@@ -152,6 +154,7 @@ impl RuntimeState {
             task_confirms: TaskConfirms::default(),
             task_scheduler: TaskScheduler::default(),
             task_events: TaskEvents::default(),
+            task_plans: TaskPlans::default(),
             persistence_tracker: TaskTracker::new(),
             ptt_capture: Arc::new(Mutex::new(None)),
             interrupt: StdMutex::new(CancellationToken::new()),

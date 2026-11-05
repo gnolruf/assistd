@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 use tracing::{debug, warn};
 
-use assistd_ipc::TaskRunId;
+use assistd_ipc::{TaskId, TaskRunId};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::{local_client_builder, read_capped};
 use assistd_utils::text::human_size;
@@ -26,7 +26,7 @@ use crate::LlmHealthProbe;
 const OWNER_ONLY: u32 = 0o700;
 /// The main conversation's slot, the only one with `-np 1`.
 const SLOT_PATH: &str = "/slots/0";
-/// Suspended task runs whose slot files are kept beside the main conversation's.
+/// Task conversations whose slot files are kept beside the main conversation's.
 const MAX_SUSPENDED_RUNS: usize = 2;
 const SLOT_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const SLOT_RESPONSE_MAX: usize = 64 * 1024;
@@ -68,6 +68,8 @@ impl SlotDir {
 pub enum ConversationKey {
     Main,
     TaskRun(TaskRunId),
+    /// The planning conversation of a saved task.
+    TaskPlan(TaskId),
 }
 
 impl ConversationKey {
@@ -75,6 +77,7 @@ impl ConversationKey {
         match self {
             Self::Main => "main.bin".to_string(),
             Self::TaskRun(run) => format!("task-run-{run}.bin"),
+            Self::TaskPlan(task) => format!("task-plan-{task}.bin"),
         }
     }
 }
@@ -191,7 +194,7 @@ impl SlotStash {
     }
 
     /// Save the slot for its occupant, which then no longer holds it, evicting
-    /// the oldest suspended task run past [`MAX_SUSPENDED_RUNS`].
+    /// the oldest suspended task conversation past [`MAX_SUSPENDED_RUNS`].
     async fn set_aside(&self, state: &mut StashState) {
         let Some(owner) = state.occupant.take() else {
             return;
@@ -327,7 +330,7 @@ impl StashState {
             .saved
             .iter()
             .enumerate()
-            .filter(|(_, (key, _))| matches!(key, ConversationKey::TaskRun(_)));
+            .filter(|(_, (key, _))| *key != ConversationKey::Main);
         let (oldest, _) = runs.next()?;
         (runs.count() >= MAX_SUSPENDED_RUNS).then(|| self.saved.remove(oldest).0)
     }

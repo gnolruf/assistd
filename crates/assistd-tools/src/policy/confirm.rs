@@ -6,6 +6,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -168,6 +169,17 @@ pub trait PromptParking: fmt::Debug + Send + Sync + 'static {
     async fn park(&self, req: ConfirmationRequest) -> Approval;
 }
 
+/// Who answers a [`ConfirmRouter`]'s prompts.
+#[derive(Debug)]
+enum Answerer {
+    /// The IPC client behind the connection.
+    Client,
+    /// Nobody: the task run's grants, else its [`PromptParking`].
+    TaskRun(TaskRunAsks),
+    /// Nobody: a planning turn, whose asks are all refused and counted here.
+    Planning(AtomicUsize),
+}
+
 /// A task run's grants and where its other prompts wait.
 #[derive(Debug)]
 struct TaskRunAsks {
@@ -202,8 +214,7 @@ pub struct ConfirmRouter {
     judge: Option<SafetyJudge>,
     /// Replaces [`ConfirmSource::Main`] on every prompt asked through this router.
     main_source: Option<ConfirmSource>,
-    /// Set for a task run, whose prompts never reach a client.
-    task_run: Option<TaskRunAsks>,
+    answerer: Answerer,
     /// Raised while a prompt waits in [`PromptParking`].
     parked: watch::Sender<bool>,
 }
@@ -225,7 +236,7 @@ impl ConfirmRouter {
             mode: Mutex::new(PermissionMode::Manual),
             judge,
             main_source: None,
-            task_run: None,
+            answerer: Answerer::Client,
             parked: watch::Sender::new(false),
         })
     }
@@ -238,8 +249,35 @@ impl ConfirmRouter {
         grants: Grants,
         parking: Arc<dyn PromptParking>,
     ) -> Arc<Self> {
+        let asks = TaskRunAsks {
+            grants: Mutex::new(grants),
+            parking,
+        };
+        Arc::new(Self::unanswered(
+            request_id,
+            Some(source),
+            Answerer::TaskRun(asks),
+        ))
+    }
+
+    /// A router for a planning turn, which refuses every ask without prompting anyone, in
+    /// every mode.
+    pub fn for_planning(request_id: String) -> Arc<Self> {
+        Arc::new(Self::unanswered(
+            request_id,
+            None,
+            Answerer::Planning(AtomicUsize::new(0)),
+        ))
+    }
+
+    /// A router no client answers, so it never prompts on the wire.
+    fn unanswered(
+        request_id: String,
+        main_source: Option<ConfirmSource>,
+        answerer: Answerer,
+    ) -> Self {
         let (wire, _) = mpsc::channel(1);
-        Arc::new(Self {
+        Self {
             request_id,
             wire,
             timeout: CONFIRM_TIMEOUT,
@@ -249,13 +287,18 @@ impl ConfirmRouter {
             }),
             mode: Mutex::new(PermissionMode::Manual),
             judge: None,
-            main_source: Some(source),
-            task_run: Some(TaskRunAsks {
-                grants: Mutex::new(grants),
-                parking,
-            }),
+            main_source,
+            answerer,
             parked: watch::Sender::new(false),
-        })
+        }
+    }
+
+    /// How many asks a planning router has refused; always 0 for any other router.
+    pub fn refused_while_planning(&self) -> usize {
+        match &self.answerer {
+            Answerer::Planning(refused) => refused.load(Ordering::Acquire),
+            Answerer::Client | Answerer::TaskRun(_) => 0,
+        }
     }
 
     /// Watch whether a prompt is parked on an answer that may take any time, during which a
@@ -283,8 +326,10 @@ impl ConfirmRouter {
     /// await the answer. Every failure is [`Approval::Deny`].
     pub async fn ask(&self, mut req: ConfirmationRequest) -> Approval {
         self.label(&mut req.source);
-        if let Some(run) = &self.task_run {
-            return self.ask_for_task_run(run, req).await;
+        match &self.answerer {
+            Answerer::Client => {}
+            Answerer::TaskRun(run) => return self.ask_for_task_run(run, req).await,
+            Answerer::Planning(refused) => return refuse_while_planning(refused, &req),
         }
         let mode = *self.mode.lock();
         if self.approves_unasked(mode, &mut req).await {
@@ -528,6 +573,19 @@ impl Drop for PendingPrompt<'_> {
     fn drop(&mut self) {
         self.router.pending.lock().prompts.remove(&self.confirm_id);
     }
+}
+
+/// Count and log `req`'s refusal by a planning turn.
+fn refuse_while_planning(refused: &AtomicUsize, req: &ConfirmationRequest) -> Approval {
+    refused.fetch_add(1, Ordering::AcqRel);
+    info!(
+        target: "assistd::policy",
+        tool = %req.tool,
+        pattern = %req.matched_pattern,
+        source = ?req.source,
+        "command refused: a planning turn runs nothing that asks"
+    );
+    Approval::Deny
 }
 
 /// The run's grants covering `req`, one per need, if they cover all of it.

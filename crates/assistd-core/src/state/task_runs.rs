@@ -368,7 +368,7 @@ impl AppState {
 }
 
 /// The main system prompt followed by [`TASK_PREAMBLE`].
-fn task_system_prompt(main: &str) -> String {
+pub(super) fn task_system_prompt(main: &str) -> String {
     if main.trim().is_empty() {
         TASK_PREAMBLE.to_string()
     } else {

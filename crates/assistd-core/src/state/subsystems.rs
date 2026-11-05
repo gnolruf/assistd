@@ -10,6 +10,7 @@ use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
 use assistd_voice::VoiceManager;
 use assistd_wm::{NoWindowManager, WindowManager};
 
+use crate::planner::PlanningTools;
 use crate::{PresenceManager, VisionRevalidator};
 
 /// A configured MCP server and how far its startup has got.
@@ -48,6 +49,8 @@ pub struct Subsystems {
     pub llm: Arc<dyn LlmBackend>,
     pub presence: Arc<PresenceManager>,
     pub tools: Arc<ToolCatalog>,
+    /// What planning turns may use.
+    pub planning: PlanningTools,
     pub voice: Arc<VoiceManager>,
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
@@ -60,7 +63,7 @@ pub struct Subsystems {
 }
 
 impl Subsystems {
-    /// Bundle the required subsystems, with no window manager, no vision
+    /// Bundle the required subsystems, with no planning tools, no window manager, no vision
     /// revalidator, no MCP servers, and no web search.
     pub fn new(
         llm: Arc<dyn LlmBackend>,
@@ -72,6 +75,7 @@ impl Subsystems {
             llm,
             presence,
             tools: Arc::new(ToolCatalog::new(tools)),
+            planning: PlanningTools::default(),
             voice,
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
@@ -82,6 +86,12 @@ impl Subsystems {
             tools_disabled: None,
             slot_stash: None,
         }
+    }
+
+    /// Give planning turns `planning`.
+    pub fn with_planning_tools(mut self, planning: PlanningTools) -> Self {
+        self.planning = planning;
+        self
     }
 
     /// Replace the window manager.

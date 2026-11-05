@@ -120,7 +120,7 @@ fn reported_next_fire(record: &TaskRecord) -> Option<DateTime<Utc>> {
 }
 
 /// Send each record as an `Event::Task` then `Done`, or the failure as `Error`.
-async fn send_tasks(
+pub(super) async fn send_tasks(
     id: String,
     op: &str,
     records: Result<Vec<TaskRecord>, DispatchError>,

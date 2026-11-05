@@ -18,6 +18,7 @@ use assistd_memory::{MemoryError, PersistedRole};
 use assistd_tools::{Approval, ToolRegistry};
 use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError, VoiceManager};
 
+use crate::planner::PlanError;
 use crate::{Config, PresenceError, PresenceManager};
 
 pub(crate) mod branches;
@@ -43,6 +44,7 @@ pub(crate) mod task_confirms;
 pub(crate) mod task_dispatch;
 pub(crate) mod task_events;
 pub(crate) mod task_handlers;
+pub(crate) mod task_plans;
 pub(crate) mod task_queue;
 pub(crate) mod task_runner;
 pub(crate) mod task_runs;
@@ -57,8 +59,12 @@ pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};
 pub use self::subsystems::{McpServerStatus, Subsystems};
+pub use self::task_plans::TaskPlanError;
 pub use self::task_runner::TaskRunner;
 pub use self::wire::AttachmentError;
+
+/// Why a `SetPermissionMode` sent on its own connection is refused.
+const PERMISSION_MODE_OFF_QUERY: &str = "SetPermissionMode is honored only on a Query connection";
 
 /// Why a request handler failed.
 #[derive(Debug, Error)]
@@ -95,6 +101,12 @@ pub enum DispatchError {
 
     #[error(transparent)]
     Listen(#[from] ListenError),
+
+    #[error(transparent)]
+    TaskPlan(#[from] TaskPlanError),
+
+    #[error(transparent)]
+    Plan(#[from] PlanError),
 }
 
 /// Shared, long-lived daemon state handed to every request handler.
@@ -168,13 +180,14 @@ impl AppState {
     }
 
     /// Requests the envelope timeout leaves alone: a subscription lives as
-    /// long as its client, an agent turn is bounded per step instead, and a
-    /// wake-word session by its own idle timeout.
+    /// long as its client, an agent or planning turn is bounded per step instead,
+    /// and a wake-word session by its own idle timeout.
     fn outlives_dispatch_envelope(req: &Request) -> bool {
         matches!(
             req,
             Request::Subscribe { .. }
                 | Request::Query { .. }
+                | Request::TaskPlan { .. }
                 | Request::PttStop { .. }
                 | Request::WakeWord {
                     op: WakeWordOp::TestStart,
@@ -266,27 +279,33 @@ impl AppState {
                 let approval = Approval::from_answer(allow, add_grant);
                 replied(self.handle_task_confirm(id, run, confirm_id, approval, tx)).await
             }
+            Request::TaskPlan { id, task, feedback } => {
+                self.handle_task_plan(id, task, feedback, tx).await
+            }
+            Request::TaskPlanApprove {
+                id,
+                task,
+                plan,
+                accepted,
+            } => {
+                self.handle_task_plan_approve(id, task, plan, accepted, tx)
+                    .await
+            }
             Request::ConfirmResponse { id, confirm_id, .. } => {
-                replied(send_error(
-                    &tx,
-                    id,
-                    format!(
-                        "ConfirmResponse(confirm_id={confirm_id}) received with no matching \
-                         ConfirmRequest in flight on this connection"
-                    ),
-                ))
-                .await
+                replied(send_error(&tx, id, unmatched_confirm_response(&confirm_id))).await
             }
             Request::SetPermissionMode { id, .. } => {
-                replied(send_error(
-                    &tx,
-                    id,
-                    "SetPermissionMode is honored only on a Query connection".to_string(),
-                ))
-                .await
+                replied(send_error(&tx, id, PERMISSION_MODE_OFF_QUERY.into())).await
             }
         }
     }
+}
+
+fn unmatched_confirm_response(confirm_id: &str) -> String {
+    format!(
+        "ConfirmResponse(confirm_id={confirm_id}) received with no matching ConfirmRequest in \
+         flight on this connection"
+    )
 }
 
 async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {
