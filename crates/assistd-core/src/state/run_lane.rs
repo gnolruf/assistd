@@ -148,10 +148,8 @@ impl RunLane {
     }
 
     fn must_yield(&self) -> bool {
-        let state = &self.state;
-        state.config.tasks.interruption == TaskInterruption::Interrupt
-            && state.runtime.lanes.is_single()
-            && state.runtime.conversation.is_open()
+        self.state.config.tasks.interruption == TaskInterruption::Interrupt
+            && self.state.conversation_holds_queue()
             && self.on_main_lane()
     }
 }

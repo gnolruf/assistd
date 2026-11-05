@@ -74,9 +74,9 @@ impl ModelLanes {
         self.slots.borrow().get() == 1
     }
 
-    /// The task run holding the main lane.
-    pub(in crate::state) fn main_holder(&self) -> Option<TaskRunId> {
-        self.held.borrow().get(&MAIN_LANE).copied()
+    /// Whether a task run holds the main lane.
+    pub(in crate::state) fn main_held_by_run(&self) -> bool {
+        self.held.borrow().contains_key(&MAIN_LANE)
     }
 
     /// What holds each lane now.

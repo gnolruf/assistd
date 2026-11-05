@@ -56,17 +56,14 @@ impl AppState {
         tx: &mpsc::Sender<Event>,
     ) -> Option<MainLaneTurn> {
         let lanes = &self.runtime.lanes;
-        if !lanes.is_single() {
-            return Some(self.join_conversation().await);
-        }
         match self.config.tasks.interruption {
-            TaskInterruption::Interrupt => Some(self.join_conversation().await),
+            _ if !lanes.is_single() => Some(self.join_conversation().await),
             TaskInterruption::AfterTask => {
                 let turn = self
                     .runtime
                     .conversation
                     .begin_turn(self.conversation_quiet_time());
-                if lanes.main_holder().is_some() {
+                if lanes.main_held_by_run() {
                     let _ = tx
                         .send(Event::Queued {
                             id: id.to_string(),
@@ -80,7 +77,9 @@ impl AppState {
             TaskInterruption::AfterQueue if self.turn_waits_for_queue() => {
                 self.queue_behind_tasks(id, text, tx).await
             }
-            TaskInterruption::AfterQueue => Some(self.join_conversation().await),
+            TaskInterruption::Interrupt | TaskInterruption::AfterQueue => {
+                Some(self.join_conversation().await)
+            }
         }
     }
 
@@ -99,7 +98,7 @@ impl AppState {
     /// run holds the lane or user turns already wait.
     fn turn_waits_for_queue(&self) -> bool {
         !self.runtime.conversation.is_open()
-            && (self.runtime.lanes.main_holder().is_some()
+            && (self.runtime.lanes.main_held_by_run()
                 || self.runtime.task_queue.has_waiting_turns())
     }
 

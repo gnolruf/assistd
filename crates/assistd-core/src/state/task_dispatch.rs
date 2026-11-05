@@ -171,7 +171,7 @@ impl AppState {
         let mut published = None;
         loop {
             let gpu_held = *gpu_hold.borrow_and_update();
-            let talking = *conversation.borrow_and_update();
+            let conversation_now = *conversation.borrow_and_update();
             self.suspend_waiting_runs(gpu_held).await;
             queue_changes.mark_unchanged();
             self.publish_task_queue(&mut published);
@@ -183,7 +183,7 @@ impl AppState {
                 () = lane_changes.changed() => {}
                 () = changed_or_pending(&mut gpu_hold) => {}
                 () = changed_or_pending(&mut conversation) => {}
-                () = quiet_ends(talking) => {
+                () = quiet_ends(conversation_now) => {
                     self.runtime.conversation.end_if_quiet_by(Instant::now());
                 }
                 admitted = admit(&self.runtime.lanes, next) => self.start_admitted(admitted),

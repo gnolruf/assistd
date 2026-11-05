@@ -84,7 +84,6 @@ impl TaskQueue {
         behind
     }
 
-    /// Whether any user turn waits in the queue.
     pub(in crate::state) fn has_waiting_turns(&self) -> bool {
         self.state
             .borrow()
