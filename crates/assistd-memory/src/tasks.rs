@@ -81,6 +81,15 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
         next_fire: Option<DateTime<Utc>>,
     ) -> Result<Option<TaskRunId>>;
 
+    /// Queue a run of task `task` that `trigger` started, last in the queue, unless one is
+    /// already unfinished; returns the queued run. [`MemoryError::TaskNotFound`] when there
+    /// is no such task.
+    async fn queue_unless_unfinished(
+        &self,
+        task: TaskId,
+        trigger: TaskTrigger,
+    ) -> Result<Option<TaskRunId>>;
+
     /// Record a queued run of task `task` that `trigger` started, last in the queue;
     /// [`MemoryError::TaskNotFound`] when there is no such task.
     async fn queue_run(&self, task: TaskId, trigger: TaskTrigger) -> Result<TaskRunId>;
@@ -143,6 +152,14 @@ impl TaskStore for NoTaskStore {
         task: TaskId,
         _trigger: TaskTrigger,
         _next_fire: Option<DateTime<Utc>>,
+    ) -> Result<Option<TaskRunId>> {
+        Err(MemoryError::TaskNotFound(task))
+    }
+
+    async fn queue_unless_unfinished(
+        &self,
+        task: TaskId,
+        _trigger: TaskTrigger,
     ) -> Result<Option<TaskRunId>> {
         Err(MemoryError::TaskNotFound(task))
     }

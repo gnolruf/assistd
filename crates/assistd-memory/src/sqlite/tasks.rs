@@ -159,11 +159,7 @@ impl TaskStore for SqliteTaskStore {
                 if update_next_fire(&tx, task, next_fire)? == 0 {
                     return Err(rusqlite::Error::QueryReturnedNoRows);
                 }
-                let queued = if has_unfinished_run(&tx, task)? {
-                    None
-                } else {
-                    Some(insert_queued_run(&tx, task, &trigger, now)?)
-                };
+                let queued = queue_coalesced(&tx, task, &trigger, now)?;
                 tx.commit()?;
                 Ok(queued)
             })
@@ -174,20 +170,31 @@ impl TaskStore for SqliteTaskStore {
             ))
     }
 
+    async fn queue_unless_unfinished(
+        &self,
+        task: TaskId,
+        trigger: TaskTrigger,
+    ) -> Result<Option<TaskRunId>> {
+        let now = now_millis();
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let queued = queue_coalesced(&tx, task, &trigger, now)?;
+                tx.commit()?;
+                Ok(queued)
+            })
+            .await
+            .map_err(missing_task_or("task queue_unless_unfinished", task))
+    }
+
     async fn queue_run(&self, task: TaskId, trigger: TaskTrigger) -> Result<TaskRunId> {
         let now = now_millis();
         self.handle
             .writer()
             .call(move |c| insert_queued_run(c, task, &trigger, now))
             .await
-            .map_err(|error| match &error {
-                tokio_rusqlite::Error::Error(rusqlite::Error::SqliteFailure(failure, _))
-                    if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
-                {
-                    MemoryError::TaskNotFound(task)
-                }
-                _ => MemoryError::sqlite("task queue_run")(error),
-            })
+            .map_err(missing_task_or("task queue_run", task))
     }
 
     async fn start_run(&self, run: TaskRunId, session: SessionId) -> Result<()> {
@@ -365,6 +372,35 @@ fn update_next_fire(
         "UPDATE tasks SET next_fire_at = ?2 WHERE id = ?1",
         rusqlite::params![task.0, next_fire.map(|at| at.timestamp_millis())],
     )
+}
+
+/// Map a failed insert of a run of `task` to [`MemoryError::TaskNotFound`] when no such
+/// task exists, else to the SQLite error of `op`.
+fn missing_task_or(
+    op: &'static str,
+    task: TaskId,
+) -> impl FnOnce(tokio_rusqlite::Error) -> MemoryError {
+    move |error| match &error {
+        tokio_rusqlite::Error::Error(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
+        {
+            MemoryError::TaskNotFound(task)
+        }
+        _ => MemoryError::sqlite(op)(error),
+    }
+}
+
+/// Queue a run of `task` that `trigger` started unless one is unfinished.
+fn queue_coalesced(
+    tx: &Transaction<'_>,
+    task: TaskId,
+    trigger: &TaskTrigger,
+    now: i64,
+) -> rusqlite::Result<Option<TaskRunId>> {
+    if has_unfinished_run(tx, task)? {
+        return Ok(None);
+    }
+    insert_queued_run(tx, task, trigger, now).map(Some)
 }
 
 /// Queue a run of `task` that `trigger` started, last in the queue.

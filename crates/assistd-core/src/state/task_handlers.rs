@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use assistd_ipc::{Event, TaskId, TaskSpec};
 use assistd_memory::TaskRecord;
 
+use super::event_triggers::{check_chain, resolve_watched_paths};
 use super::fire_times::{check_triggers, next_fire};
 use super::{AppState, DispatchError, send_error};
 
@@ -49,6 +50,7 @@ impl AppState {
             self.save_task(task, spec).await
         };
         self.runtime.task_scheduler.reschedule();
+        self.runtime.task_events.rewatch();
         send_tasks(id, "task save", record.map(|r| vec![r]), &tx).await
     }
 
@@ -64,6 +66,7 @@ impl AppState {
         };
         if deleted.is_ok() {
             self.runtime.task_queue.forget_task(task);
+            self.runtime.task_events.rewatch();
         }
         let deleted = deleted.map(|()| Vec::new()).map_err(Into::into);
         send_tasks(id, "task delete", deleted, &tx).await
@@ -81,22 +84,26 @@ impl AppState {
             self.memory.tasks.set_enabled(task, enabled).await
         };
         self.runtime.task_scheduler.reschedule();
+        self.runtime.task_events.rewatch();
         let record = record.map(|r| vec![r]).map_err(Into::into);
         send_tasks(id, "task set_enabled", record, &tx).await
     }
 
     /// Save `spec` as task `task`, or as a new task, once its triggers pass
-    /// [`check_triggers`] against those it replaces.
+    /// [`check_triggers`] against those it replaces and [`check_chain`], with its
+    /// watched paths tilde-expanded.
     async fn save_task(
         &self,
         task: Option<TaskId>,
-        spec: TaskSpec,
+        mut spec: TaskSpec,
     ) -> Result<TaskRecord, DispatchError> {
         let stored = match task {
             Some(task) => self.memory.tasks.get(task).await?.spec.triggers,
             None => Vec::new(),
         };
         check_triggers(&spec.triggers, &stored, &Local::now())?;
+        resolve_watched_paths(&mut spec.triggers).await?;
+        check_chain(task, &spec.triggers, &self.memory.tasks.list().await?)?;
         Ok(self.memory.tasks.save(task, spec).await?)
     }
 }

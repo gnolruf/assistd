@@ -768,6 +768,24 @@ fn sample_task_spec() -> TaskSpec {
                 cron: "0 9 * * 1-5".into(),
                 missed: MissedFire::Skip,
             },
+            TaskTrigger::Event {
+                event: TaskEvent::DaemonStarted,
+                cooldown_secs: 0,
+            },
+            TaskTrigger::Event {
+                event: TaskEvent::PathChanged {
+                    path: PathBuf::from("/home/u/inbox"),
+                    debounce_secs: 5,
+                },
+                cooldown_secs: 300,
+            },
+            TaskTrigger::Event {
+                event: TaskEvent::TaskFinished {
+                    task: TaskId(3),
+                    outcome: FinishOutcome::Failed,
+                },
+                cooldown_secs: 60,
+            },
         ],
         enabled: true,
         grants: vec![
@@ -800,7 +818,7 @@ fn sample_task_spec() -> TaskSpec {
     }
 }
 
-const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"summary":"read and summarize","steps":[{"description":"list mail","actions":[{"kind":"mcp_tool","name":"mcp__mail__list"}]}]}}"#;
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"summary":"read and summarize","steps":[{"description":"list mail","actions":[{"kind":"mcp_tool","name":"mcp__mail__list"}]}]}}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
     let save_wire =

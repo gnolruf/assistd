@@ -14,6 +14,12 @@ pub const MAX_TASK_NAME_CHARS: usize = 80;
 /// Largest task prompt accepted, in bytes.
 pub const MAX_TASK_PROMPT_BYTES: usize = 16 * 1024;
 
+/// Least time between two fires of one task's event triggers when none is given, in seconds.
+pub const DEFAULT_EVENT_COOLDOWN_SECS: u32 = 60;
+
+/// How long a burst of path changes is gathered into one fire when not given, in seconds.
+pub const DEFAULT_PATH_DEBOUNCE_SECS: u32 = 2;
+
 /// A saved task's row id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -138,7 +144,7 @@ pub struct TaskSpec {
 }
 
 /// A condition that starts a run of its task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskTrigger {
     /// Started on request.
@@ -152,11 +158,51 @@ pub enum TaskTrigger {
         #[serde(default)]
         missed: MissedFire,
     },
+    /// Fires when `event` happens, at most once per `cooldown_secs` seconds for its task.
+    Event {
+        event: TaskEvent,
+        #[serde(default = "default_cooldown_secs")]
+        cooldown_secs: u32,
+    },
+}
+
+/// Something that happened which an [`TaskTrigger::Event`] fires on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskEvent {
+    /// The daemon started and its model first became ready.
+    DaemonStarted,
+    /// logind's `LockedHint` on the user's graphical session turned false.
+    SessionUnlocked,
+    /// A file was created, modified or moved in at or under `path`, which must exist and
+    /// is tilde-expanded at save; a burst within `debounce_secs` seconds fires once.
+    PathChanged {
+        path: PathBuf,
+        #[serde(default = "default_debounce_secs")]
+        debounce_secs: u32,
+    },
+    /// A run of task `task` finished with `outcome`; a chain that loops is refused at save.
+    TaskFinished {
+        task: TaskId,
+        #[serde(default)]
+        outcome: FinishOutcome,
+    },
+}
+
+/// Which endings of the upstream run fire a [`TaskEvent::TaskFinished`]; a cancelled run
+/// fires none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishOutcome {
+    Succeeded,
+    Failed,
+    #[default]
+    Either,
 }
 
 /// What a schedule does about fire times that passed while the daemon was down
 /// or the machine was suspended.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MissedFire {
     /// Fire once on return, however many fire times passed.
@@ -285,4 +331,12 @@ pub enum LaneHolder {
         run: TaskRunId,
     },
     Idle,
+}
+
+fn default_cooldown_secs() -> u32 {
+    DEFAULT_EVENT_COOLDOWN_SECS
+}
+
+fn default_debounce_secs() -> u32 {
+    DEFAULT_PATH_DEBOUNCE_SECS
 }
