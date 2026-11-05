@@ -1,6 +1,7 @@
 //! SQLite-backed [`TaskStore`] over the `tasks` and `task_runs` tables.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
 use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 use serde::Serialize;
@@ -13,10 +14,9 @@ use crate::{
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
-use super::timestamp::now_millis;
+use super::timestamp::{now_millis, optional_timestamp_at};
 
-const SELECT_TASK: &str =
-    "SELECT id, name, prompt, triggers, enabled, grants, plan FROM tasks WHERE id = ?1";
+const TASK_COLUMNS: &str = "id, name, prompt, triggers, enabled, grants, plan, next_fire_at";
 
 const RUN_QUEUED: i64 = 0;
 const RUN_RUNNING: i64 = 1;
@@ -45,10 +45,8 @@ impl TaskStore for SqliteTaskStore {
         self.handle
             .reader()
             .call(|c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare_cached(
-                    "SELECT id, name, prompt, triggers, enabled, grants, plan FROM tasks \
-                     ORDER BY name",
-                )?;
+                let mut stmt =
+                    c.prepare_cached(&format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY name"))?;
                 let rows = stmt
                     .query_map([], task_record)?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -61,7 +59,13 @@ impl TaskStore for SqliteTaskStore {
     async fn get(&self, id: TaskId) -> Result<TaskRecord> {
         self.handle
             .reader()
-            .call(move |c| c.query_row(SELECT_TASK, [id.0], task_record))
+            .call(move |c| {
+                c.query_row(
+                    &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+                    [id.0],
+                    task_record,
+                )
+            })
             .await
             .map_err(MemoryError::sqlite_or_missing(
                 "task get",
@@ -113,9 +117,10 @@ impl TaskStore for SqliteTaskStore {
             .writer()
             .call(move |c| {
                 c.query_row(
-                    "UPDATE tasks SET enabled = ?2, updated_at = MAX(?3, created_at) \
-                     WHERE id = ?1 \
-                     RETURNING id, name, prompt, triggers, enabled, grants, plan",
+                    &format!(
+                        "UPDATE tasks SET enabled = ?2, next_fire_at = NULL, \
+                         updated_at = MAX(?3, created_at) WHERE id = ?1 RETURNING {TASK_COLUMNS}"
+                    ),
                     rusqlite::params![id.0, enabled, now],
                     task_record,
                 )
@@ -127,20 +132,53 @@ impl TaskStore for SqliteTaskStore {
             ))
     }
 
-    async fn queue_run(&self, task: TaskId, trigger: TaskTrigger) -> Result<TaskRunId> {
+    async fn set_next_fire(&self, id: TaskId, next_fire: Option<DateTime<Utc>>) -> Result<()> {
+        let updated = self
+            .handle
+            .writer()
+            .call(move |c| update_next_fire(c, id, next_fire))
+            .await
+            .map_err(MemoryError::sqlite("task set_next_fire"))?;
+        if updated == 0 {
+            return Err(MemoryError::TaskNotFound(id));
+        }
+        Ok(())
+    }
+
+    async fn fire(
+        &self,
+        task: TaskId,
+        trigger: TaskTrigger,
+        next_fire: Option<DateTime<Utc>>,
+    ) -> Result<Option<TaskRunId>> {
         let now = now_millis();
         self.handle
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
-                c.query_row(
-                    "INSERT INTO task_runs (task_id, trigger, state, queued_at, queue_pos)
-                     VALUES (?1, ?2, ?3, ?4,
-                             (SELECT COALESCE(MAX(queue_pos), -1) + 1 FROM task_runs))
-                     RETURNING id",
-                    rusqlite::params![task.0, to_json(&trigger)?, RUN_QUEUED, now],
-                    |r| r.get(0).map(TaskRunId),
-                )
+                let tx = c.transaction()?;
+                if update_next_fire(&tx, task, next_fire)? == 0 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+                let queued = if has_unfinished_run(&tx, task)? {
+                    None
+                } else {
+                    Some(insert_queued_run(&tx, task, &trigger, now)?)
+                };
+                tx.commit()?;
+                Ok(queued)
             })
+            .await
+            .map_err(MemoryError::sqlite_or_missing(
+                "task fire",
+                MemoryError::TaskNotFound(task),
+            ))
+    }
+
+    async fn queue_run(&self, task: TaskId, trigger: TaskTrigger) -> Result<TaskRunId> {
+        let now = now_millis();
+        self.handle
+            .writer()
+            .call(move |c| insert_queued_run(c, task, &trigger, now))
             .await
             .map_err(|error| match &error {
                 tokio_rusqlite::Error::Error(rusqlite::Error::SqliteFailure(failure, _))
@@ -317,6 +355,49 @@ pub(super) fn run_state_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<TaskRu
     })
 }
 
+/// Record `next_fire` on task `task`; returns how many rows changed.
+fn update_next_fire(
+    c: &rusqlite::Connection,
+    task: TaskId,
+    next_fire: Option<DateTime<Utc>>,
+) -> rusqlite::Result<usize> {
+    c.execute(
+        "UPDATE tasks SET next_fire_at = ?2 WHERE id = ?1",
+        rusqlite::params![task.0, next_fire.map(|at| at.timestamp_millis())],
+    )
+}
+
+/// Queue a run of `task` that `trigger` started, last in the queue.
+fn insert_queued_run(
+    c: &rusqlite::Connection,
+    task: TaskId,
+    trigger: &TaskTrigger,
+    now: i64,
+) -> rusqlite::Result<TaskRunId> {
+    c.query_row(
+        "INSERT INTO task_runs (task_id, trigger, state, queued_at, queue_pos)
+         VALUES (?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(queue_pos), -1) + 1 FROM task_runs))
+         RETURNING id",
+        rusqlite::params![task.0, to_json(trigger)?, RUN_QUEUED, now],
+        |r| r.get(0).map(TaskRunId),
+    )
+}
+
+/// Whether a run of `task` is queued, running, suspended or awaiting input.
+fn has_unfinished_run(tx: &Transaction<'_>, task: TaskId) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM task_runs WHERE task_id = ?1 AND state IN (?2, ?3, ?4, ?5))",
+        rusqlite::params![
+            task.0,
+            RUN_QUEUED,
+            RUN_RUNNING,
+            RUN_SUSPENDED,
+            RUN_NEEDS_INPUT
+        ],
+        |r| r.get(0),
+    )
+}
+
 /// The queued runs in queue order.
 fn waiting_runs(tx: &Transaction<'_>) -> rusqlite::Result<Vec<WaitingRun>> {
     let mut stmt =
@@ -381,6 +462,7 @@ fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Resu
     Ok(TaskRecord {
         id: TaskId(id),
         spec,
+        next_fire: None,
     })
 }
 
@@ -402,7 +484,7 @@ fn replace_task(
     }
     tx.execute(
         "UPDATE tasks SET name = ?2, prompt = ?3, triggers = ?4, enabled = ?5, grants = ?6,
-                          plan = ?7, updated_at = MAX(?8, created_at)
+                          plan = ?7, next_fire_at = NULL, updated_at = MAX(?8, created_at)
          WHERE id = ?1",
         rusqlite::params![
             id.0,
@@ -415,7 +497,11 @@ fn replace_task(
             now,
         ],
     )?;
-    Ok(TaskRecord { id, spec })
+    Ok(TaskRecord {
+        id,
+        spec,
+        next_fire: None,
+    })
 }
 
 /// Map a failed save of the task named `name` to its typed error.
@@ -448,6 +534,7 @@ fn task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
                 .map(|plan| from_json(6, &plan))
                 .transpose()?,
         },
+        next_fire: optional_timestamp_at(row, 7)?,
     })
 }
 

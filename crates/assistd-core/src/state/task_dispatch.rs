@@ -21,13 +21,18 @@ const TASK_QUEUE_EVENT_ID: &str = "task_queue";
 
 impl AppState {
     /// Reload the runs left waiting when the daemon last stopped, failing those it
-    /// stopped mid-run, then start queued runs as lanes free up until the task runner stops.
+    /// stopped mid-run, then start queued runs as lanes free up and queue runs as time
+    /// triggers fire, until the task runner stops.
     pub async fn start_task_queue(self: &Arc<Self>) {
         self.reload_task_queue().await;
-        let state = Arc::clone(self);
+        let dispatcher = Arc::clone(self);
         self.runtime
             .task_runner
-            .spawn_service(move |stopping| state.dispatch_queued_runs(stopping));
+            .spawn_service(move |stopping| dispatcher.dispatch_queued_runs(stopping));
+        let scheduler = Arc::clone(self);
+        self.runtime
+            .task_runner
+            .spawn_service(move |stopping| scheduler.schedule_task_fires(stopping));
     }
 
     /// The task queue and the model lanes as they stand.
@@ -103,7 +108,7 @@ impl AppState {
                 Ok(record) => self
                     .runtime
                     .task_queue
-                    .push(run, record, format!("task-run-{run}")),
+                    .push(run, record, unrequested_run_id(run)),
                 Err(e) => warn!(
                     target: "assistd::tasks",
                     %run,
@@ -177,6 +182,11 @@ impl AppState {
         });
         *published = Some(snapshot);
     }
+}
+
+/// The request id tagging the events of run `run`, which no client request queued.
+pub(super) fn unrequested_run_id(run: TaskRunId) -> String {
+    format!("task-run-{run}")
 }
 
 /// A lane for `next`; never returns without a run to admit.

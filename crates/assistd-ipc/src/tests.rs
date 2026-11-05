@@ -1,4 +1,5 @@
 use super::*;
+use chrono::NaiveDate;
 use serde_json::json;
 
 use crate::task::{MAX_TASK_NAME_CHARS, MAX_TASK_PROMPT_BYTES};
@@ -756,7 +757,18 @@ fn sample_task_spec() -> TaskSpec {
     TaskSpec {
         name: TaskName::try_from("digest".to_string()).unwrap(),
         prompt: TaskPrompt::try_from("summarize my inbox".to_string()).unwrap(),
-        triggers: vec![TaskTrigger::Manual],
+        triggers: vec![
+            TaskTrigger::Manual,
+            TaskTrigger::At {
+                at: NaiveDate::from_ymd_opt(2026, 11, 4)
+                    .and_then(|day| day.and_hms_opt(23, 0, 0))
+                    .unwrap(),
+            },
+            TaskTrigger::Schedule {
+                cron: "0 9 * * 1-5".into(),
+                missed: MissedFire::Skip,
+            },
+        ],
         enabled: true,
         grants: vec![
             TaskGrant::Program {
@@ -788,7 +800,7 @@ fn sample_task_spec() -> TaskSpec {
     }
 }
 
-const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"summary":"read and summarize","steps":[{"description":"list mail","actions":[{"kind":"mcp_tool","name":"mcp__mail__list"}]}]}}"#;
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"summary":"read and summarize","steps":[{"description":"list mail","actions":[{"kind":"mcp_tool","name":"mcp__mail__list"}]}]}}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
     let save_wire =
@@ -876,13 +888,16 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
 }
 
 fn task_event_cases() -> Vec<(Event, &'static str)> {
-    let wire = format!(r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE}}}"#);
+    let wire = format!(
+        r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z"}}"#
+    );
     vec![
         (
             Event::Task {
                 id: id(),
                 task_id: TaskId(4),
                 spec: sample_task_spec(),
+                next_fire: DateTime::from_timestamp(1_793_887_200, 0),
             },
             wire.leak(),
         ),

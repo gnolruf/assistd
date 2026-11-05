@@ -293,6 +293,12 @@ CREATE TABLE task_queue (
 ) STRICT;
 ";
 
+/// V7: when a task's triggers next fire, in Unix milliseconds; `NULL` until the
+/// scheduler computes it after a save, or when nothing is due.
+const V7_SQL: &str = r"
+ALTER TABLE tasks ADD COLUMN next_fire_at INTEGER;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -302,6 +308,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V4_SQL),
         M::up(V5_SQL),
         M::up(V6_SQL),
+        M::up(V7_SQL),
     ])
 }
 
@@ -328,6 +335,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
     }
 }

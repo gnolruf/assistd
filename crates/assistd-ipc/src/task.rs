@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -142,6 +143,26 @@ pub struct TaskSpec {
 pub enum TaskTrigger {
     /// Started on request.
     Manual,
+    /// Fires once at local wall-clock time `at`; a time a DST gap skips is read at the
+    /// offset in force before the gap.
+    At { at: NaiveDateTime },
+    /// Recurs at every local time matching the five-field cron expression `cron`.
+    Schedule {
+        cron: String,
+        #[serde(default)]
+        missed: MissedFire,
+    },
+}
+
+/// What a schedule does about fire times that passed while the daemon was down
+/// or the machine was suspended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissedFire {
+    /// Fire once on return, however many fire times passed.
+    #[default]
+    RunOnce,
+    Skip,
 }
 
 /// One approval a task run may use in place of asking.

@@ -24,6 +24,7 @@ pub(crate) mod branches;
 pub(crate) mod capabilities;
 pub(crate) mod chat_focus;
 pub(crate) mod context;
+pub(crate) mod fire_times;
 pub(crate) mod lanes;
 pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
@@ -40,11 +41,13 @@ pub(crate) mod task_handlers;
 pub(crate) mod task_queue;
 pub(crate) mod task_runner;
 pub(crate) mod task_runs;
+pub(crate) mod task_scheduler;
 pub(crate) mod voice_handlers;
 pub(crate) mod wakeword_handlers;
 pub(crate) mod wire;
 
 pub use self::branches::branch_replay;
+pub use self::fire_times::TriggerError;
 pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};
@@ -60,6 +63,9 @@ pub enum DispatchError {
 
     #[error("invalid attachment: {0}")]
     InvalidAttachment(#[from] AttachmentError),
+
+    #[error(transparent)]
+    InvalidTrigger(#[from] TriggerError),
 
     #[error("vision not available: model does not support images")]
     VisionUnsupported,
