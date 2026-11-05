@@ -4,7 +4,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -307,41 +307,58 @@ pub enum SuspendReason {
 }
 
 /// A change to the task queue, sent as [`crate::Request::TaskQueue`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskQueueOp {
     /// Place waiting run `run` at index `to` among the waiting runs, 0 starting next;
     /// an index past the end places it last.
-    Move {
-        run: TaskRunId,
-        to: u32,
-    },
+    Move { run: TaskRunId, to: u32 },
     /// Drop waiting run `run`, or stop it if it is running.
-    Cancel {
-        run: TaskRunId,
-    },
+    Cancel { run: TaskRunId },
+    /// Drop the user turn queued by the query with request id `id`, which then ends
+    /// with `Done`.
+    CancelTurn { id: String },
     /// Start no more runs until [`TaskQueueOp::Resume`]; running ones carry on.
     Pause,
+    /// Start runs again, ending the user's conversation if it holds the queue.
     Resume,
 }
 
-/// The task queue: its unfinished runs, what holds each model lane, and whether it is paused.
+/// The task queue: its unfinished runs and waiting user turns, what holds each model
+/// lane, and whether it is paused or held for the user's conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskQueueSnapshot {
-    /// Running runs in the order they started, then waiting runs in the order they will start.
-    pub items: Vec<TaskQueueItem>,
+    /// Running runs in the order they started, then waiting items in the order they start.
+    pub items: Vec<QueueItem>,
     /// One entry per lane the model can decode at once; lane 0 is the main conversation's.
     pub lanes: Vec<LaneHolder>,
     pub paused: bool,
+    /// Set while the user's conversation keeps runs from the only lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<ConversationHold>,
 }
 
-/// One unfinished run in a [`TaskQueueSnapshot`].
+/// One unfinished item in a [`TaskQueueSnapshot`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskQueueItem {
-    pub run: TaskRunId,
-    pub task: TaskId,
-    pub task_name: TaskName,
-    pub state: TaskRunState,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QueueItem {
+    Run {
+        run: TaskRunId,
+        task: TaskId,
+        task_name: TaskName,
+        state: TaskRunState,
+    },
+    /// A user message waiting its turn behind the queue, by its query's request id.
+    UserTurn { id: String, preview: String },
+}
+
+/// The user's conversation holding the task queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationHold {
+    /// When the queue resumes unless another user turn arrives; `None` while a turn is
+    /// in flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumes_at: Option<DateTime<Utc>>,
 }
 
 /// What holds one model lane.

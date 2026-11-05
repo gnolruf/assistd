@@ -110,6 +110,7 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) {
         self.runtime.chat_focus.close(peer_pid);
+        self.runtime.conversation.end();
         self.refresh_chat_focus(&id);
         let _ = tx.send(Event::Done { id }).await;
     }

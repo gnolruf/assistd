@@ -9,17 +9,14 @@ use async_trait::async_trait;
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use assistd_ipc::{Event, TaskGrant, TaskId, TaskPrompt, TaskRunId};
-use assistd_llm::{ConversationKey, LlmBackend};
 use assistd_memory::MemoryError;
 use assistd_tools::{Approval, ConfirmationRequest, PromptParking};
 
-use super::lanes::LaneLease;
+use super::run_lane::RunLane;
 use super::{AppState, send_error};
-use crate::presence::RequestGuard;
 
 /// Why a `TaskConfirm` was refused.
 #[derive(Debug, Error)]
@@ -111,64 +108,13 @@ impl Drop for RegisteredConfirm<'_> {
     }
 }
 
-/// What a task run holds while its turn may decode: a model lane, and the daemon kept
-/// awake. Both are given up while the run waits on the user.
-#[derive(Debug)]
-pub(in crate::state) struct RunHold {
-    held: StdMutex<Option<Held>>,
-}
-
-#[derive(Debug)]
-struct Held {
-    lease: LaneLease,
-    /// `None` when waking the model failed, which the run's next request reports.
-    _awake: Option<RequestGuard>,
-}
-
-impl RunHold {
-    pub(in crate::state) fn new(lease: LaneLease, awake: RequestGuard) -> Self {
-        Self {
-            held: StdMutex::new(Some(Held {
-                lease,
-                _awake: Some(awake),
-            })),
-        }
-    }
-
-    /// Whether the run holds the main lane now.
-    pub(in crate::state) fn on_main_lane(&self) -> bool {
-        self.held
-            .lock()
-            .as_ref()
-            .is_some_and(|held| held.lease.on_main_lane())
-    }
-
-    fn release(&self) {
-        self.held.lock().take();
-    }
-
-    fn take(&self, lease: LaneLease, awake: Option<RequestGuard>) {
-        *self.held.lock() = Some(Held {
-            lease,
-            _awake: awake,
-        });
-    }
-}
-
 /// Parks a task run's ungranted prompts: the run shows as needing input and gives up its
 /// hold until `TaskConfirm` answers, then waits first in the queue for a lane.
 #[derive(Debug)]
 pub(in crate::state) struct TaskRunParking {
-    pub(in crate::state) state: Arc<AppState>,
     pub(in crate::state) task: TaskId,
     pub(in crate::state) prompt: TaskPrompt,
-    pub(in crate::state) run: TaskRunId,
-    /// Tags the run's events.
-    pub(in crate::state) request_id: String,
-    pub(in crate::state) hold: Arc<RunHold>,
-    pub(in crate::state) backend: Arc<dyn LlmBackend>,
-    pub(in crate::state) events: mpsc::Sender<Event>,
-    pub(in crate::state) cancel: CancellationToken,
+    pub(in crate::state) lane: Arc<RunLane>,
 }
 
 #[async_trait]
@@ -177,8 +123,9 @@ impl PromptParking for TaskRunParking {
         let (answer, answered) = oneshot::channel();
         let confirm_id = uuid::Uuid::new_v4().to_string();
         let grants = req.grantable.grants();
-        let _registered = self.state.runtime.task_confirms.register(
-            self.run,
+        let lane = &self.lane;
+        let _registered = lane.state.runtime.task_confirms.register(
+            lane.run,
             PendingConfirm {
                 confirm_id: confirm_id.clone(),
                 task: self.task,
@@ -191,7 +138,7 @@ impl PromptParking for TaskRunParking {
         self.announce(req, confirm_id, grants).await;
         let approval = tokio::select! {
             biased;
-            () = self.cancel.cancelled() => return Approval::Deny,
+            () = lane.cancel.cancelled() => return Approval::Deny,
             answer = answered => answer.unwrap_or(Approval::Deny),
         };
         if self.resume().await {
@@ -211,7 +158,7 @@ impl TaskRunParking {
             "task run paused for input"
         );
         let event = Event::ConfirmRequest {
-            id: self.request_id.clone(),
+            id: self.lane.request_id.clone(),
             confirm_id,
             tool: req.tool,
             script: req.script,
@@ -220,57 +167,36 @@ impl TaskRunParking {
             grants,
             source: req.source,
         };
-        let _ = self.events.send(event).await;
+        let _ = self.lane.events.send(event).await;
     }
 
     async fn pause(&self) {
-        self.state.runtime.task_queue.mark_needs_input(self.run);
-        self.hold.release();
-        if let Err(e) = self
+        let lane = &self.lane;
+        lane.state.runtime.task_queue.mark_needs_input(lane.run);
+        lane.release();
+        if let Err(e) = lane
             .state
             .memory
             .tasks
-            .set_run_needs_input(self.run, true)
+            .set_run_needs_input(lane.run, true)
             .await
         {
             warn!(target: "assistd::tasks", error = %e, "recording that the run needs input failed");
         }
     }
 
-    /// Wait first in the queue for a lane, move the conversation to its slot, and wake the
-    /// model; `false` when the run was cancelled first.
+    /// Wait first in the queue for a lane and take it again; `false` when the run was
+    /// cancelled first.
     async fn resume(&self) -> bool {
-        let Some(lane) = self.state.runtime.task_queue.resume_first(self.run) else {
+        let lane = &self.lane;
+        if !lane.regain().await {
             return false;
-        };
-        let lease = tokio::select! {
-            biased;
-            () = self.cancel.cancelled() => return false,
-            lease = lane => match lease {
-                Ok(lease) => lease,
-                Err(_) => return false,
-            },
-        };
-        self.backend
-            .move_to_slot(lease.slot(ConversationKey::TaskRun(self.run)));
-        let awake = match self
-            .state
-            .wake_for_task_run(&self.request_id, &self.events, &self.cancel)
-            .await
-        {
-            Ok(Some(awake)) => Some(awake),
-            Ok(None) => return false,
-            Err(e) => {
-                warn!(target: "assistd::tasks", error = %e, "waking the model to resume the run failed");
-                None
-            }
-        };
-        self.hold.take(lease, awake);
-        if let Err(e) = self
+        }
+        if let Err(e) = lane
             .state
             .memory
             .tasks
-            .set_run_needs_input(self.run, false)
+            .set_run_needs_input(lane.run, false)
             .await
         {
             warn!(target: "assistd::tasks", error = %e, "recording that the run resumed failed");

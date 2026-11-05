@@ -383,6 +383,7 @@ impl AppState {
     /// `/new`: begin a fresh session, saved with its first message.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_new_session(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
+        self.runtime.conversation.end();
         let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
         if let Some(stash) = &self.subsystems.slot_stash {

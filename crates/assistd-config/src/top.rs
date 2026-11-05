@@ -24,6 +24,7 @@ use crate::notifications::{NotificationsConfig, TrayIconsConfig};
 use crate::search::SearchConfig;
 use crate::settings::{DescribeSettings, describe_fields};
 use crate::sleep::SleepConfig;
+use crate::tasks::TasksConfig;
 use crate::theme::{ThemeConfig, is_theme_name};
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::{ToolsConfig, ToolsOutputConfig};
@@ -37,6 +38,7 @@ const STT_ENCODER_PREFIX: &str = "encoder";
 const MAX_UTTERANCE_SECS: u32 = 300;
 const WAKEWORD_COMMAND_TIMEOUT_MS: RangeInclusive<u32> = 500..=15000;
 const MAX_WAKEWORD_FOLLOW_UP_MS: u32 = 30_000;
+const MAX_RESUME_AFTER_IDLE_SECS: u32 = 3600;
 const MAX_WAKE_PHRASE_WORDS: usize = 6;
 const MAX_WAKEWORD_SILENCE_MS: u32 = 1400;
 /// Keys a config may no longer set, each with what replaced it.
@@ -73,6 +75,7 @@ pub struct Config {
     #[serde(skip)]
     pub timeouts: TimeoutsConfig,
     pub notifications: NotificationsConfig,
+    pub tasks: TasksConfig,
 }
 
 impl DescribeSettings for Config {
@@ -89,6 +92,7 @@ impl DescribeSettings for Config {
         mcp => nested,
         timeouts => skip,
         notifications => nested,
+        tasks => nested,
     }
 }
 
@@ -107,6 +111,7 @@ impl Config {
         validate_search(&mut errors, &self.search, &self.embedding, &self.model);
         validate_mcp(&mut errors, &self.mcp);
         validate_notifications(&mut errors, &self.notifications);
+        validate_tasks(&mut errors, &self.tasks);
         if errors.is_empty() {
             Ok(())
         } else {
@@ -616,6 +621,15 @@ fn validate_tray_icons(errors: &mut Vec<String>, icons: &TrayIconsConfig) {
         if name.trim().is_empty() {
             errors.push(format!("notifications.icons.{key} must not be empty"));
         }
+    }
+}
+
+fn validate_tasks(errors: &mut Vec<String>, tasks: &TasksConfig) {
+    if tasks.resume_after_idle_secs > MAX_RESUME_AFTER_IDLE_SECS {
+        errors.push(format!(
+            "tasks.resume_after_idle_secs must be at most {MAX_RESUME_AFTER_IDLE_SECS}, got {}",
+            tasks.resume_after_idle_secs
+        ));
     }
 }
 

@@ -407,6 +407,23 @@ is parked. `Request::TaskConfirm` answers it, with `add_grant` saving those
 grants on the task when its prompt is unchanged, and the run waits first in the
 queue for a lane, moving its conversation to that lane's slot.
 
+With one lane, a user message that finds a run on it follows
+`[tasks] interruption`. Under `interrupt` the run's turn sees the conversation
+open through its `RunLane` and yields at its next model step. A step in flight is
+cancelled and announced as `StatusKind::YieldedToUser`, so its partial output is
+dropped. A tool call in flight finishes first. A relay in flight is cancelled and
+rerun from its arguments, since its effects stay in its quarantine. The yielded run
+waits first in the queue as `Suspended(UserConversation)`, its slot state stashed.
+Under `after_task` the turn is told `Event::Queued` and takes the lane once the run
+ends, ahead of the queue. Under `after_queue` it joins the queue as a user-turn item,
+behind any turns already waiting, which the dispatcher hands the main lane in its
+turn; `TaskQueueOp::CancelTurn` drops it. Every user turn opens the
+`UserConversation`, which holds waiting runs as `Suspended(UserConversation)`. The
+conversation ends once no turn has arrived for `resume_after_idle_secs` after the
+last reply and its speech finished, or the wake word's follow-up window if longer.
+`/new`, `ChatClosed` and `TaskQueueOp::Resume` end it at once. Its hold, and when
+it lifts, rides on the `TaskQueue` snapshot.
+
 ### Plan mode (`assistd-core::Planner`)
 
 A planning turn shows how the agent means to do a piece of work, and which

@@ -162,3 +162,7 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # listening = "audio-input-microphone"  # wake phrase heard, or push-to-talk
 # generating = "system-run"
 # disconnected = "network-offline"
+
+# [tasks]
+# interruption = "interrupt"  # or "after_task", "after_queue"; only with one model lane
+# resume_after_idle_secs = 120  # quiet time after a reply before held tasks resume

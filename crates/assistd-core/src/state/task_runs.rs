@@ -22,7 +22,8 @@ use super::event_triggers::Occurrence;
 use super::lanes::LaneLease;
 use super::persistence::PersistTarget;
 use super::query::{TurnScope, TurnTranslator};
-use super::task_confirms::{RunHold, TaskRunParking};
+use super::run_lane::{LaneHold, RUN_LANE, RunLane, YieldingBackend};
+use super::task_confirms::TaskRunParking;
 use super::task_queue::QueuedRun;
 use super::task_runner::RegisteredRun;
 use super::{AppState, DispatchError, send_error};
@@ -195,27 +196,24 @@ impl AppState {
         };
         let system_prompt = task_system_prompt(&self.config.chat.system_prompt);
         let key = ConversationKey::TaskRun(turn.run);
-        let backend = self
+        let conversation = self
             .subsystems
             .llm
             .isolated_conversation(system_prompt, lease.slot(key))?;
-        let hold = Arc::new(RunHold::new(lease, awake));
-        let persist = self.open_task_run_session(turn).await;
-        let parking = TaskRunParking {
+        let lane = Arc::new(RunLane {
             state: Arc::clone(self),
-            task: turn.task.id,
-            prompt: turn.task.spec.prompt.clone(),
             run: turn.run,
             request_id: turn.id.clone(),
-            hold: Arc::clone(&hold),
-            backend: Arc::clone(&backend),
+            held: LaneHold::new(lease, awake),
+            backend: Arc::clone(&conversation),
             events: tx.clone(),
             cancel: cancel.clone(),
-        };
+        });
+        let persist = self.open_task_run_session(turn).await;
         let outcome = self
-            .unattended_turn(turn, backend, parking, persist, cancel, tx)
+            .unattended_turn(turn, conversation, Arc::clone(&lane), persist, cancel, tx)
             .await;
-        self.end_run_conversation(key, hold.on_main_lane()).await;
+        self.end_run_conversation(key, lane.on_main_lane()).await;
         outcome
     }
 
@@ -288,19 +286,19 @@ impl AppState {
         }
     }
 
-    /// Run the task's prompt on `backend`, persisting to `persist` and sending its wire
-    /// events to `tx`; returns the final reply once the turn emitted `Done`.
+    /// Run the task's prompt in `conversation` on `lane`, persisting to `persist` and sending
+    /// its wire events to `tx`; returns the final reply once the turn emitted `Done`.
     async fn unattended_turn(
         &self,
         turn: &TaskRunTurn,
-        backend: Arc<dyn LlmBackend>,
-        parking: TaskRunParking,
+        conversation: Arc<dyn LlmBackend>,
+        lane: Arc<RunLane>,
         persist: Option<PersistTarget>,
         cancel: &CancellationToken,
         tx: &mpsc::Sender<Event>,
     ) -> Result<Option<String>, DispatchError> {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
-        let agent_task = self.spawn_task_agent(turn, backend, parking, llm_tx, cancel.clone());
+        let agent_task = self.spawn_task_agent(turn, conversation, lane, llm_tx, cancel.clone());
         let mut translator =
             TurnTranslator::new(turn.id.clone(), TurnScope::TaskRun(turn.run), persist);
         self.forward_task_run_events(&mut translator, llm_rx, tx)
@@ -312,19 +310,24 @@ impl AppState {
         }
     }
 
-    /// The main agent's tools over `backend`, with every confirmation labelled as the run's
-    /// and approved by the task's grants or parked in `parking`.
+    /// The main agent's tools over `conversation`, each model step giving way to the user's
+    /// conversation on `lane`, with every confirmation labelled as the run's and approved by
+    /// the task's grants or parked until answered.
     fn spawn_task_agent(
         &self,
         turn: &TaskRunTurn,
-        backend: Arc<dyn LlmBackend>,
-        parking: TaskRunParking,
+        conversation: Arc<dyn LlmBackend>,
+        lane: Arc<RunLane>,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
         let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
             self.subsystems.presence.clone(),
         )));
+        let backend = Arc::new(YieldingBackend {
+            inner: conversation,
+            lane: Arc::clone(&lane),
+        });
         let agent = Agent::new(
             backend,
             self.subsystems.tools.snapshot(),
@@ -336,14 +339,18 @@ impl AppState {
             run: turn.run,
         };
         let grants = Grants::new(turn.task.spec.grants.clone());
+        let parking = TaskRunParking {
+            task: turn.task.id,
+            prompt: turn.task.spec.prompt.clone(),
+            lane: Arc::clone(&lane),
+        };
         let router =
             ConfirmRouter::for_task_run(turn.id.clone(), source, grants, Arc::new(parking));
         let prompt = turn.task.spec.prompt.as_str().to_string();
+        let agent_turn = async move { agent.run_turn(prompt, Vec::new(), llm_tx, cancel).await };
         AbortOnDropHandle::new(tokio::spawn(
-            CONFIRM_ROUTER
-                .scope(router, async move {
-                    agent.run_turn(prompt, Vec::new(), llm_tx, cancel).await
-                })
+            RUN_LANE
+                .scope(lane, CONFIRM_ROUTER.scope(router, agent_turn))
                 .in_current_span(),
         ))
     }

@@ -15,6 +15,7 @@ use assistd_ipc::{Event, EventKind, SubscribeFilter};
 use assistd_memory::{BranchId, SessionId};
 
 use super::chat_focus::ChatFocusSlot;
+use super::conversation::UserConversation;
 use super::lanes::ModelLanes;
 use super::task_confirms::TaskConfirms;
 use super::task_events::TaskEvents;
@@ -114,6 +115,8 @@ pub struct RuntimeState {
     /// Serialises the main conversation's turns; it is also the main model lane.
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
     pub(in crate::state) lanes: Arc<ModelLanes>,
+    /// The user's conversation, which holds the task queue off a lone lane.
+    pub(in crate::state) conversation: Arc<UserConversation>,
     pub(in crate::state) task_queue: TaskQueue,
     pub(in crate::state) task_confirms: TaskConfirms,
     pub(in crate::state) task_scheduler: TaskScheduler,
@@ -150,6 +153,7 @@ impl RuntimeState {
             session_ctx: Arc::new(SessionContext::new(SessionId::new(), None)),
             lanes: ModelLanes::new(Arc::clone(&agent_turn_lock), one_slot),
             agent_turn_lock,
+            conversation: Arc::default(),
             task_queue: TaskQueue::default(),
             task_confirms: TaskConfirms::default(),
             task_scheduler: TaskScheduler::default(),

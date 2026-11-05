@@ -230,6 +230,7 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         relay_history_event_cases(),
         wake_word_event_cases(),
         task_event_cases(),
+        task_queue_event_cases(),
     ]
     .concat()
 }
@@ -936,6 +937,13 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
             r#"{"type":"task_queue","id":"r","op":{"kind":"pause"}}"#,
         ),
         (
+            Request::TaskQueue {
+                id: id(),
+                op: TaskQueueOp::CancelTurn { id: "q".into() },
+            },
+            r#"{"type":"task_queue","id":"r","op":{"kind":"cancel_turn","id":"q"}}"#,
+        ),
+        (
             Request::TaskConfirm {
                 id: id(),
                 run: TaskRunId(9),
@@ -976,6 +984,55 @@ fn task_plan_request_cases() -> Vec<(Request, &'static str)> {
                 }],
             },
             r#"{"type":"task_plan_approve","id":"r","task":4,"plan":"p1","accepted":[{"kind":"web_host","host":"example.org"}]}"#,
+        ),
+    ]
+}
+
+fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
+    vec![
+        (
+            Event::TaskQueue {
+                id: id(),
+                snapshot: TaskQueueSnapshot {
+                    items: vec![
+                        QueueItem::Run {
+                            run: TaskRunId(9),
+                            task: TaskId(4),
+                            task_name: "digest".to_string().try_into().unwrap(),
+                            state: TaskRunState::Suspended {
+                                reason: SuspendReason::GpuBusy,
+                            },
+                        },
+                        QueueItem::UserTurn {
+                            id: "q".into(),
+                            preview: "hi".into(),
+                        },
+                    ],
+                    lanes: vec![
+                        LaneHolder::Main,
+                        LaneHolder::Task { run: TaskRunId(8) },
+                        LaneHolder::Idle,
+                    ],
+                    paused: false,
+                    held: Some(ConversationHold {
+                        resumes_at: Some(
+                            NaiveDate::from_ymd_opt(2026, 11, 5)
+                                .unwrap()
+                                .and_hms_opt(9, 30, 0)
+                                .unwrap()
+                                .and_utc(),
+                        ),
+                    }),
+                },
+            },
+            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
+        ),
+        (
+            Event::Queued {
+                id: id(),
+                behind: 2,
+            },
+            r#"{"type":"queued","id":"r","behind":2}"#,
         ),
     ]
 }
@@ -1021,28 +1078,6 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                 }),
             },
             r#"{"type":"task_run","id":"r","run":9,"event":{"type":"confirm_request","id":"r","confirm_id":"c","tool":"bash","script":"rm x","matched_pattern":"rm","source":{"agent":"task","task":4,"run":9}}}"#,
-        ),
-        (
-            Event::TaskQueue {
-                id: id(),
-                snapshot: TaskQueueSnapshot {
-                    items: vec![TaskQueueItem {
-                        run: TaskRunId(9),
-                        task: TaskId(4),
-                        task_name: "digest".to_string().try_into().unwrap(),
-                        state: TaskRunState::Suspended {
-                            reason: SuspendReason::GpuBusy,
-                        },
-                    }],
-                    lanes: vec![
-                        LaneHolder::Main,
-                        LaneHolder::Task { run: TaskRunId(8) },
-                        LaneHolder::Idle,
-                    ],
-                    paused: false,
-                },
-            },
-            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false}}"#,
         ),
         (
             Event::Plan {

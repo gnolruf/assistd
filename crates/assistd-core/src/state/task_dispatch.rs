@@ -1,23 +1,34 @@
-//! The task queue's dispatcher, which starts queued runs as model lanes free
-//! up, and the `TaskQueue` handler.
+//! The task queue's dispatcher, which starts queued runs and user turns as model
+//! lanes free up and holds runs for the user's conversation, and the `TaskQueue` handler.
 
 use std::future::pending;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedMutexGuard, mpsc};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use assistd_ipc::{Event, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId};
+use assistd_ipc::{
+    ConversationHold, Event, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId,
+};
 use assistd_memory::{TaskRunEnd, WaitingRun};
 
+use super::conversation::ConversationState;
 use super::lanes::{LaneLease, ModelLanes, changed_or_pending};
-use super::task_queue::{Cancelled, QueueOpError};
+use super::task_queue::{Cancelled, NextStart, QueueOpError, TurnStart};
 use super::task_runs::DAEMON_STOPPED;
 use super::{AppState, send_error};
 
 /// The `id` broadcast `TaskQueue` events carry.
 const TASK_QUEUE_EVENT_ID: &str = "task_queue";
+
+/// A waiting item [`admit`] found a lane for.
+enum Admitted {
+    Run(TaskRunId, LaneLease),
+    /// The user turn of the query with this request id, and the main lane.
+    Turn(String, OwnedMutexGuard<()>),
+}
 
 impl AppState {
     /// Reload the runs left waiting when the daemon last stopped, failing those it
@@ -47,7 +58,25 @@ impl AppState {
     pub(super) fn task_queue_snapshot(&self) -> TaskQueueSnapshot {
         self.runtime
             .task_queue
-            .snapshot(self.runtime.lanes.holders())
+            .snapshot(self.runtime.lanes.holders(), self.conversation_hold())
+    }
+
+    /// Whether the user's conversation keeps task runs off the model's only lane.
+    pub(super) fn conversation_holds_queue(&self) -> bool {
+        self.runtime.lanes.is_single() && self.runtime.conversation.is_open()
+    }
+
+    fn conversation_hold(&self) -> Option<ConversationHold> {
+        if !self.runtime.lanes.is_single() {
+            return None;
+        }
+        match self.runtime.conversation.state() {
+            ConversationState::Idle => None,
+            ConversationState::Talking { .. } => Some(ConversationHold { resumes_at: None }),
+            ConversationState::Quiet { resumes_at, .. } => Some(ConversationHold {
+                resumes_at: Some(resumes_at),
+            }),
+        }
     }
 
     pub(super) async fn handle_task_queue(
@@ -89,8 +118,12 @@ impl AppState {
                 self.memory.tasks.reorder_queue(order).await?;
             }
             TaskQueueOp::Cancel { run } => self.cancel_task_run(run).await?,
+            TaskQueueOp::CancelTurn { id } => queue.cancel_turn(&id)?,
             TaskQueueOp::Pause => self.set_task_queue_paused(true).await?,
-            TaskQueueOp::Resume => self.set_task_queue_paused(false).await?,
+            TaskQueueOp::Resume => {
+                self.set_task_queue_paused(false).await?;
+                self.runtime.conversation.end();
+            }
         }
         Ok(())
     }
@@ -127,16 +160,19 @@ impl AppState {
         }
     }
 
-    /// Start the next queued run whenever a lane can take it, and broadcast the queue
-    /// after every change, until `stopping` fires.
+    /// Start the next queued item whenever a lane can take it, hold waiting runs while the
+    /// GPU monitor or the user's conversation does, end the conversation once it has been
+    /// quiet long enough, and broadcast the queue after every change, until `stopping` fires.
     async fn dispatch_queued_runs(self: Arc<Self>, stopping: CancellationToken) {
         let mut queue_changes = self.runtime.task_queue.subscribe();
         let mut lane_changes = self.runtime.lanes.watch();
         let mut gpu_hold = self.subsystems.presence.gpu_hold();
+        let mut conversation = self.runtime.conversation.subscribe();
         let mut published = None;
         loop {
-            let held = *gpu_hold.borrow_and_update();
-            self.suspend_for_gpu(held).await;
+            let gpu_held = *gpu_hold.borrow_and_update();
+            let conversation_now = *conversation.borrow_and_update();
+            self.suspend_waiting_runs(gpu_held).await;
             queue_changes.mark_unchanged();
             self.publish_task_queue(&mut published);
             let next = self.runtime.task_queue.next_to_start();
@@ -146,25 +182,54 @@ impl AppState {
                 _ = queue_changes.changed() => {}
                 () = lane_changes.changed() => {}
                 () = changed_or_pending(&mut gpu_hold) => {}
-                (run, lease) = admit(&self.runtime.lanes, next) => self.start_admitted(run, lease),
+                () = changed_or_pending(&mut conversation) => {}
+                () = quiet_ends(conversation_now) => {
+                    self.runtime.conversation.end_if_quiet_by(Instant::now());
+                }
+                admitted = admit(&self.runtime.lanes, next) => self.start_admitted(admitted),
             }
         }
     }
 
-    /// Start waiting run `run` on `lease`'s lane, unless it stopped waiting meanwhile.
-    fn start_admitted(self: &Arc<Self>, run: TaskRunId, lease: LaneLease) {
-        let started = self.runtime.task_queue.start(run, lease, |queued, lease| {
-            self.spawn_task_run(queued, lease);
-        });
-        if !started {
-            debug!(target: "assistd::tasks", %run, "admitted run left the queue first");
+    /// Start the waiting item a lane was found for, unless it stopped waiting meanwhile or
+    /// the user's conversation took the main lane first.
+    fn start_admitted(self: &Arc<Self>, admitted: Admitted) {
+        match admitted {
+            Admitted::Run(_, lease) if lease.on_main_lane() && self.conversation_holds_queue() => {
+                debug!(target: "assistd::tasks", "the user's conversation took the lane first");
+            }
+            Admitted::Run(run, lease) => {
+                let started = self.runtime.task_queue.start(run, lease, |queued, lease| {
+                    self.spawn_task_run(queued, lease);
+                });
+                if !started {
+                    debug!(target: "assistd::tasks", %run, "admitted run left the queue first");
+                }
+            }
+            Admitted::Turn(id, lane) => {
+                let turn = self
+                    .runtime
+                    .conversation
+                    .begin_turn(self.conversation_quiet_time());
+                let start = TurnStart { lane, turn };
+                if let Err(unstarted) = self.runtime.task_queue.start_turn(&id, start) {
+                    debug!(target: "assistd::tasks", %id, "admitted user turn left the queue first");
+                    unstarted.turn.abandon();
+                }
+            }
         }
     }
 
-    /// Suspend every waiting run while the GPU monitor holds the daemon asleep, and
-    /// queue them again once it lets go, recording each change.
-    async fn suspend_for_gpu(&self, held: bool) {
-        let reason = held.then_some(SuspendReason::GpuBusy);
+    /// Suspend every waiting run while the GPU monitor holds the daemon asleep or the
+    /// user's conversation holds the only lane, and queue them again once both let go,
+    /// recording each change.
+    async fn suspend_waiting_runs(&self, gpu_held: bool) {
+        let reason = if gpu_held {
+            Some(SuspendReason::GpuBusy)
+        } else {
+            self.conversation_holds_queue()
+                .then_some(SuspendReason::UserConversation)
+        };
         for run in self.runtime.task_queue.suspend_waiting(reason) {
             if let Err(e) = self.memory.tasks.set_run_waiting(run, reason).await {
                 warn!(
@@ -196,10 +261,19 @@ pub(super) fn unrequested_run_id(run: TaskRunId) -> String {
     format!("task-run-{run}")
 }
 
-/// A lane for `next`; never returns without a run to admit.
-async fn admit(lanes: &Arc<ModelLanes>, next: Option<TaskRunId>) -> (TaskRunId, LaneLease) {
-    let Some(run) = next else {
-        return pending().await;
-    };
-    (run, lanes.admit(run).await)
+/// A lane for `next`; never returns without an item to admit.
+async fn admit(lanes: &Arc<ModelLanes>, next: Option<NextStart>) -> Admitted {
+    match next {
+        None => pending().await,
+        Some(NextStart::Run(run)) => Admitted::Run(run, lanes.admit(run).await),
+        Some(NextStart::Turn(id)) => Admitted::Turn(id, lanes.admit_user_turn().await),
+    }
+}
+
+/// When a quiet conversation's quiet time runs out; never for any other.
+async fn quiet_ends(conversation: ConversationState) {
+    match conversation {
+        ConversationState::Quiet { until, .. } => tokio::time::sleep_until(until).await,
+        ConversationState::Idle | ConversationState::Talking { .. } => pending().await,
+    }
 }
