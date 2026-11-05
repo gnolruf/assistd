@@ -12,13 +12,13 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use assistd_ipc::Plan;
+use assistd_ipc::{HostName, PermissionMode, Plan};
 use assistd_llm::{
     LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, StepOutcome, ToolResultPayload,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
-    Attachment, CONFIRM_ROUTER, ConfirmRouter, GrantCheck, SearchPath, Tool, ToolCatalog,
+    ActionCheck, Attachment, CONFIRM_ROUTER, ConfirmRouter, SearchPath, Tool, ToolCatalog,
     ToolError, ToolOutput, ToolRegistry,
 };
 
@@ -75,17 +75,25 @@ pub enum PlanError {
 #[derive(Debug, Clone)]
 pub struct PlanningTools {
     pub registry: Arc<ToolRegistry>,
-    pub checks: GrantCheck,
+    pub checks: ActionCheck,
 }
 
 impl Default for PlanningTools {
-    /// No tools, and checks that find no program.
+    /// No tools, and checks that find no program and no approval.
     fn default() -> Self {
         Self {
             registry: Arc::new(ToolRegistry::new()),
-            checks: GrantCheck::new(SearchPath { dirs: Vec::new() }),
+            checks: ActionCheck::new(SearchPath { dirs: Vec::new() }, None),
         }
     }
+}
+
+/// What the planned work will run under, which decides the actions it will ask about.
+#[derive(Debug, Clone, Default)]
+pub struct WorkPermissions {
+    pub mode: PermissionMode,
+    /// Hosts it fetches from unasked, on top of the approved hosts.
+    pub allowed_hosts: Vec<HostName>,
 }
 
 /// Runs planning turns. Every ask for confirmation in one is refused without prompting, so it
@@ -116,12 +124,13 @@ impl Planner {
     }
 
     /// Run a planning turn on `ask` in `conversation`, streaming it on `tx`, then ask for the
-    /// plan, each action checked against the machine. The plan-mode preamble rides at the
-    /// conversation's tail, so its system prompt is unchanged; `request_id` labels refusals.
+    /// plan, each action checked against the machine and `permissions`. The plan-mode preamble
+    /// rides at the conversation's tail, so its system prompt is unchanged; `request_id` labels
+    /// refusals.
     pub async fn plan(
         &self,
         conversation: Arc<dyn LlmBackend>,
-        ask: PlanAsk,
+        (ask, permissions): (PlanAsk, WorkPermissions),
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
@@ -142,7 +151,7 @@ impl Planner {
         let draft = draft_of(conversation.as_ref(), &cancel).await?;
         let checks = self.tools.checks.clone();
         let tools = self.catalog.snapshot();
-        Ok(on_blocking_pool(move || draft.into_plan(&checks, &tools)).await)
+        Ok(on_blocking_pool(move || draft.into_plan(&checks, &tools, &permissions)).await)
     }
 }
 

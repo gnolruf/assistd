@@ -18,10 +18,11 @@ pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
-    AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS,
-    FinishOutcome, LaneHolder, MissedFire, Plan, PlanId, PlanStep, QueueItem, SuspendReason,
-    TaskEvent, TaskGrant, TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot, TaskRunId,
-    TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
+    ActionOutlook, AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS,
+    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MissedFire, Plan, PlanId,
+    PlanStep, PlannedAction, QueueItem, SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt,
+    TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState, TaskRunSummary, TaskSpec,
+    TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -551,7 +552,8 @@ pub enum Request {
     TaskList { id: String },
     /// Read one task. Emits `Task`, then `Done`.
     TaskGet { id: String, task: TaskId },
-    /// Create a task, or replace task `task`; a changed prompt clears its plan and grants.
+    /// Create a task, or replace task `task`; a changed prompt clears its plan. Errors when
+    /// `spec.mode` is Auto and the daemon does not allow it.
     /// Errors when the name is taken. Emits the saved `Task`, then `Done`.
     TaskSave {
         id: String,
@@ -576,16 +578,13 @@ pub enum Request {
     /// Change the task queue; errors when `op` names a run that is not queued, or moves a
     /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
     TaskQueue { id: String, op: TaskQueueOp },
-    /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on; `add_grant` with
-    /// `allow` also saves its `grants` on the task. Errors when the run is not waiting on it, or
-    /// `add_grant` names one without grants. Emits `Done`.
+    /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on, for this once.
+    /// Errors when the run is not waiting on it. Emits `Done`.
     TaskConfirm {
         id: String,
         run: TaskRunId,
         confirm_id: String,
         allow: bool,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        add_grant: bool,
     },
     /// Plan `task`'s prompt in a conversation of its own, or with `feedback` revise its last
     /// plan; streams the turn wrapped in `TaskPlan`, then emits `Plan` and `Done`. Errors when
@@ -596,15 +595,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feedback: Option<String>,
     },
-    /// Save `task`'s latest plan `plan` on it, its `accepted` actions replacing the task's
-    /// grants, then emit the updated `Task` and `Done`. Errors when `plan` is not the latest,
-    /// the prompt changed since, or an accepted grant is not in it.
+    /// Save `task`'s latest plan `plan` on it for its runs to follow, then emit the updated
+    /// `Task` and `Done`. Errors when `plan` is not the latest or the prompt changed since.
     TaskPlanApprove {
         id: String,
         task: TaskId,
         plan: PlanId,
-        #[serde(default)]
-        accepted: Vec<TaskGrant>,
     },
     /// Check `trigger` as `TaskSave` would for task `task`, or for a new task when `None`.
     /// Emits `TriggerFires`, then `Done`; errors with why a save would refuse it.
@@ -1022,10 +1018,6 @@ pub enum Event {
         /// Programs an "always allow" answer adds to the allowlist; empty when not offered.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         always_allow: Vec<String>,
-        /// What an `add_grant` answer saves on a paused task run's task; empty when no grant
-        /// can cover the request.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        grants: Vec<TaskGrant>,
         /// Which agent asked.
         #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
         source: ConfirmSource,

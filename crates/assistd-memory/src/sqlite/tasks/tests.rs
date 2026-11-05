@@ -1,4 +1,6 @@
-use assistd_ipc::{Plan, PlanId, PlanStep, SuspendReason, TaskGrant, TaskRunSummary, TaskTrigger};
+use assistd_ipc::{
+    PermissionMode, Plan, PlanId, PlanStep, SuspendReason, TaskRunSummary, TaskTrigger,
+};
 
 use super::*;
 use crate::{SqliteTranscriptStore, TranscriptStore};
@@ -18,9 +20,8 @@ fn approved_spec(name: &str, prompt: &str) -> TaskSpec {
         prompt: prompt.to_string().try_into().unwrap(),
         triggers: Vec::new(),
         enabled: true,
-        grants: vec![TaskGrant::WebHost {
-            host: "example.org".into(),
-        }],
+        mode: PermissionMode::AcceptEdits,
+        allowed_hosts: vec!["example.org".to_string().try_into().unwrap()],
         plan: Some(Plan {
             id: PlanId("p1".into()),
             summary: "fetch it".into(),
@@ -33,7 +34,7 @@ fn approved_spec(name: &str, prompt: &str) -> TaskSpec {
 }
 
 #[tokio::test]
-async fn only_a_changed_prompt_drops_the_plan_and_grants() {
+async fn only_a_changed_prompt_drops_the_plan() {
     let (store, _temp) = fresh().await;
     let saved = store
         .save(None, approved_spec("digest", "summarize example.org"))
@@ -52,8 +53,9 @@ async fn only_a_changed_prompt_drops_the_plan_and_grants() {
     let cleared = store.save(Some(saved.id), reworded).await.unwrap();
     let stored = store.get(saved.id).await.unwrap();
     assert_eq!(stored, cleared);
-    assert!(stored.spec.grants.is_empty());
     assert_eq!(stored.spec.plan, None);
+    assert_eq!(stored.spec.mode, PermissionMode::AcceptEdits);
+    assert_eq!(stored.spec.allowed_hosts.len(), 1);
     assert_eq!(stored.spec.prompt.as_str(), "summarize example.com");
 }
 
@@ -66,30 +68,21 @@ async fn a_plan_approved_for_an_old_prompt_is_not_saved() {
     };
     let saved = store.save(None, spec).await.unwrap();
     let plan = approved_spec("digest", "x").plan.unwrap();
-    let grants = vec![TaskGrant::McpTool {
-        name: "mcp__mail__list".into(),
-    }];
     let stale = "summarize example.com".to_string().try_into().unwrap();
 
     let refused = store
-        .approve_plan(saved.id, stale, plan.clone(), grants.clone())
+        .approve_plan(saved.id, stale, plan.clone())
         .await
         .unwrap();
     assert_eq!(refused, None);
     assert_eq!(store.get(saved.id).await.unwrap(), saved);
 
     let approved = store
-        .approve_plan(
-            saved.id,
-            saved.spec.prompt.clone(),
-            plan.clone(),
-            grants.clone(),
-        )
+        .approve_plan(saved.id, saved.spec.prompt.clone(), plan.clone())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(approved.spec.plan, Some(plan));
-    assert_eq!(approved.spec.grants, grants);
     assert_eq!(store.get(saved.id).await.unwrap(), approved);
 }
 

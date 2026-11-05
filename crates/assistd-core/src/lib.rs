@@ -18,10 +18,10 @@ use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_search::{SearchError, SearxngClient};
 use assistd_tools::{
-    APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
-    AllowlistError, ApprovalGate, Approvals, ConfirmationGate, GrantCheck, MemoryOps, OutputCap,
+    APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ActionCheck,
+    Allowlist, AllowlistError, ApprovalGate, Approvals, ConfirmationGate, MemoryOps, OutputCap,
     PresentSpec, Protected, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo,
-    SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
+    SandboxRequest, SharedDirs, StandingApprovals, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand, TailCommand, UniqCommand,
@@ -149,6 +149,8 @@ pub struct BuildToolsDeps<'a> {
     /// Readiness of the SearXNG instance `web search` goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub relay: RelayDeps,
+    /// The MCP tools approved with "always allow", which a plan's actions are checked against.
+    pub mcp_approvals: ApprovalGate,
 }
 
 /// The registries [`build_tools`] assembles.
@@ -298,6 +300,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         window_manager,
         web_search,
         relay,
+        mcp_approvals,
     } = deps;
 
     clear_overflow_dir(&overflow_dir)?;
@@ -306,6 +309,13 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     let (bash_cfg, write_cfg) = file_policies(config, &config_dir, &sandbox)?;
 
     let (search, approved_hosts) = web_access(config, &config_dir, &confirmation_gate, web_search)?;
+    let (approved_apps, checks) = action_checks(
+        &config_dir,
+        &sandbox,
+        &bash_cfg,
+        &approved_hosts,
+        mcp_approvals,
+    )?;
     let output_cap = Arc::new(OutputCap::new(PresentSpec::from_config(
         &config.tools.output,
         overflow_dir,
@@ -329,7 +339,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         output_cap: Arc::clone(&output_cap),
         scratch_dir: scratch_dir.as_deref(),
         reminisce,
-        checks: GrantCheck::new(sandbox.search_path()),
+        checks,
     });
     let relay = RelayTool::new(
         relay,
@@ -346,7 +356,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         bash_cfg,
         write_cfg,
         approved_hosts,
-        approved_apps: Arc::new(Approvals::load(config_dir.join(APPROVED_APPS_FILE))?),
+        approved_apps,
         screenshot_cfg: Arc::new(ScreenshotPolicyCfg {
             compositor: config.compositor.resolve(),
             ..ScreenshotPolicyCfg::default()
@@ -366,24 +376,60 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     });
     tools.register(relay);
     if config.memory.enabled {
-        let transcripts = Arc::clone(&memory_ops.transcripts);
-        tools.register(RememberTool::new(
-            memory_ops,
-            embed_tx,
-            embedder.clone(),
-            semantic.clone(),
-        ));
-        tools.register(ReminisceTool::new(
-            embedder,
-            semantic,
-            transcripts,
-            current_session,
-        ));
+        let memory = (memory_ops, embed_tx);
+        register_memory_tools(&mut tools, memory, embedder, semantic, current_session);
     }
     Ok(BuiltTools {
         registry: Arc::new(tools),
         planning,
     })
+}
+
+/// Register `remember` over `memory`'s store and embedding queue, and `reminisce`.
+fn register_memory_tools(
+    tools: &mut ToolRegistry,
+    (memory_ops, embed_tx): (Arc<MemoryOps>, mpsc::Sender<EmbedJob>),
+    embedder: Arc<EmbedderHandle>,
+    semantic: Arc<dyn SemanticStore>,
+    current_session: watch::Receiver<SessionId>,
+) {
+    let transcripts = Arc::clone(&memory_ops.transcripts);
+    tools.register(RememberTool::new(
+        memory_ops,
+        embed_tx,
+        embedder.clone(),
+        semantic.clone(),
+    ));
+    tools.register(ReminisceTool::new(
+        embedder,
+        semantic,
+        transcripts,
+        current_session,
+    ));
+}
+
+/// The apps approved for good, and the checks a plan's actions face: against the sandbox's
+/// programs, and against the approvals that let an action run unasked whatever the mode
+/// besides the edit scope the edit modes approve within.
+fn action_checks(
+    config_dir: &Path,
+    sandbox: &SandboxInfo,
+    bash_cfg: &BashPolicyCfg,
+    hosts: &ApprovalGate,
+    mcp_tools: ApprovalGate,
+) -> Result<(Arc<Approvals>, ActionCheck), BuildToolsError> {
+    let apps = Arc::new(Approvals::load(config_dir.join(APPROVED_APPS_FILE))?);
+    let standing = StandingApprovals {
+        programs: Arc::clone(&bash_cfg.allowlist),
+        hosts: hosts.clone(),
+        apps: Arc::clone(&apps),
+        mcp_tools,
+        edit_scope: bash_cfg.edit_scope.clone(),
+    };
+    Ok((
+        apps,
+        ActionCheck::new(sandbox.search_path(), Some(standing)),
+    ))
 }
 
 /// The `bash` and `write` policies: `config_dir` protected, and the
@@ -442,7 +488,7 @@ struct PlanningToolDeps<'a> {
     output_cap: Arc<OutputCap>,
     scratch_dir: Option<&'a Path>,
     reminisce: Option<ReminisceTool>,
-    checks: GrantCheck,
+    checks: ActionCheck,
 }
 
 /// `run` over `commands` and, with memory on, `reminisce`, each reporting refusals as

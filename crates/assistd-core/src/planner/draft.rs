@@ -1,12 +1,14 @@
 //! The plan as the model writes it, held to a schema by grammar, and the [`Plan`] it becomes
-//! once its actions are read as grants and checked.
+//! once its actions are read and checked.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use assistd_ipc::{AnticipatedAction, Plan, PlanId, PlanStep, TaskGrant};
-use assistd_tools::{GrantCheck, ToolRegistry};
+use assistd_ipc::{AnticipatedAction, Plan, PlanId, PlanStep, PlannedAction};
+use assistd_tools::{ActionCheck, ToolRegistry};
 use assistd_utils::path::expand_tilde_from_env;
+
+use super::WorkPermissions;
 
 const SUMMARY_MAX_CHARS: usize = 800;
 const STEPS_MAX_ITEMS: usize = 16;
@@ -90,14 +92,19 @@ impl PlanDraft {
     }
 
     /// The plan under a fresh id, each step's repeated actions merged and every action checked
-    /// by `checks` against `tools`. Blocks on the filesystem.
-    pub(super) fn into_plan(self, checks: &GrantCheck, tools: &ToolRegistry) -> Plan {
+    /// by `checks` against `tools` and the work's `permissions`. Blocks on the filesystem.
+    pub(super) fn into_plan(
+        self,
+        checks: &ActionCheck,
+        tools: &ToolRegistry,
+        permissions: &WorkPermissions,
+    ) -> Plan {
         let steps = self
             .steps
             .into_iter()
             .map(|step| PlanStep {
                 description: step.description.trim().to_string(),
-                actions: anticipated(step.actions, checks, tools),
+                actions: anticipated(step.actions, checks, tools, permissions),
             })
             .collect();
         Plan {
@@ -109,47 +116,50 @@ impl PlanDraft {
 }
 
 impl DraftAction {
-    fn into_grant(self) -> TaskGrant {
+    fn into_action(self) -> PlannedAction {
         let target = self.target.trim().to_string();
         match self.kind {
-            DraftKind::Program => TaskGrant::Program {
+            DraftKind::Program => PlannedAction::Program {
                 program: target,
                 subcommand: self
                     .subcommand
                     .map(|subcommand| subcommand.trim().to_string())
                     .filter(|subcommand| !subcommand.is_empty()),
             },
-            DraftKind::WebHost => TaskGrant::WebHost {
+            DraftKind::WebHost => PlannedAction::WebHost {
                 host: target.to_ascii_lowercase(),
             },
-            DraftKind::McpTool => TaskGrant::McpTool { name: target },
-            DraftKind::App => TaskGrant::App {
+            DraftKind::McpTool => PlannedAction::McpTool { name: target },
+            DraftKind::App => PlannedAction::App {
                 desktop_entry: target,
             },
-            DraftKind::Write => TaskGrant::Write {
+            DraftKind::Write => PlannedAction::Write {
                 under: expand_tilde_from_env(&target),
             },
         }
     }
 }
 
-/// `actions` as grants, each once, with what `checks` finds wrong with it.
+/// `actions`, each once, with what `checks` finds wrong with it and whether the work's
+/// `permissions` let it run unasked.
 fn anticipated(
     actions: Vec<DraftAction>,
-    checks: &GrantCheck,
+    checks: &ActionCheck,
     tools: &ToolRegistry,
+    permissions: &WorkPermissions,
 ) -> Vec<AnticipatedAction> {
-    let mut grants: Vec<TaskGrant> = Vec::new();
-    for grant in actions.into_iter().map(DraftAction::into_grant) {
-        if !grants.contains(&grant) {
-            grants.push(grant);
+    let mut distinct: Vec<PlannedAction> = Vec::new();
+    for action in actions.into_iter().map(DraftAction::into_action) {
+        if !distinct.contains(&action) {
+            distinct.push(action);
         }
     }
-    grants
+    distinct
         .into_iter()
-        .map(|grant| AnticipatedAction {
-            problem: checks.problem(&grant, tools),
-            grant,
+        .map(|action| AnticipatedAction {
+            problem: checks.problem(&action, tools),
+            outlook: checks.outlook(&action, permissions.mode, &permissions.allowed_hosts),
+            action,
         })
         .collect()
 }

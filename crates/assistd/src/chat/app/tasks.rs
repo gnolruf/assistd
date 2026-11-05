@@ -9,7 +9,7 @@ use crate::chat::tasks::TasksPanel;
 
 impl App {
     pub(super) fn open_tasks_panel(&mut self) {
-        self.tasks_panel = Some(TasksPanel::new());
+        self.tasks_panel = Some(TasksPanel::new(self.auto_mode_offered));
         self.send_tasks_requests();
     }
 

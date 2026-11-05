@@ -299,6 +299,17 @@ const V7_SQL: &str = r"
 ALTER TABLE tasks ADD COLUMN next_fire_at INTEGER;
 ";
 
+/// V8: a task's permission mode, coded 0 manual, 1 accept edits, 2 auto, and the hosts its
+/// runs fetch from unasked, in place of its grants. Plans saved before are dropped, since
+/// they held grants.
+const V8_SQL: &str = r"
+ALTER TABLE tasks DROP COLUMN grants;
+ALTER TABLE tasks ADD COLUMN mode INTEGER NOT NULL DEFAULT 0 CHECK (mode BETWEEN 0 AND 2);
+ALTER TABLE tasks ADD COLUMN allowed_hosts TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(allowed_hosts) AND json_type(allowed_hosts) = 'array');
+UPDATE tasks SET plan = NULL;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -309,6 +320,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V5_SQL),
         M::up(V6_SQL),
         M::up(V7_SQL),
+        M::up(V8_SQL),
     ])
 }
 
@@ -335,6 +347,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
     }
 }

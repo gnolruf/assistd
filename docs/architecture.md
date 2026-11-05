@@ -394,21 +394,20 @@ cancels a run the way `InterruptTurn` cancels a turn. A run still going at
 shutdown is recorded as failed.
 
 A run's prompts are labelled `ConfirmSource::Task` (a relayed sub-agent's
-prompts name the run too) and go through a `ConfirmRouter` built with the task's `Grants`.
-Each `ConfirmationRequest` carries a `Grantable`: the program approvals, web
-host, MCP tool, desktop entry and canonical write targets a grant must cover,
-or `Never` for what always asks (sensitive paths, writes too long to show,
-plaintext fetches, launches with targets). A grant covers no more than the
-matching "always allow" would: the same subcommand, the exact host, a write
-strictly below the granted directory once both are resolved. A covered request
-runs once, logged on `assistd::policy`; grants never reach the allowlist or the
+prompts name the run too) and go through `ConfirmRouter::for_task_run`, set to
+the task's `mode` as a chat connection would be, with the safety judge in Auto
+when `tools.allow_auto_mode` allows it (`TaskSave` refuses Auto otherwise). A
+`web` fetch from a host not yet approved asks as `Unattended::WebHost`, which no
+mode approves but a run does once when the host is one of the task's
+`allowed_hosts`, matched exactly. What the mode and hosts approve runs once,
+logged on `assistd::policy`, and never reaches the allowlist or the
 `approved_*.toml` files. Anything else is parked: the run turns `NeedsInput`,
 gives up its lane and request guard (on lane 0 its slot state stays in the
-stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`
-listing the grants that would cover it. The tool deadline stops while a prompt
-is parked. `Request::TaskConfirm` answers it, with `add_grant` saving those
-grants on the task when its prompt is unchanged, and the run waits first in the
-queue for a lane, moving its conversation to that lane's slot.
+stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`. The
+tool deadline stops while a prompt is parked. `Request::TaskConfirm` answers it
+for that prompt alone, and the run waits first in the queue for a lane, moving
+its conversation to that lane's slot. A task's approved plan is appended to the
+run's system prompt for it to follow.
 
 With one lane, a user message that finds a run on it follows
 `[tasks] interruption`. Under `interrupt` the run's turn sees the conversation
@@ -444,11 +443,14 @@ as the transient note on every step, so it renders at the conversation's
 tail and the system prompt, and its cache, are unchanged. When the turn
 answers, `complete_with_schema` holds the reply to a draft of a summary and
 steps, each with actions named by a kind (`program`, `web_host`, `mcp_tool`,
-`app`, `write`) and a target. Each action becomes a `TaskGrant`, and
-`GrantCheck` flags any that would cover nothing: a program missing from the
+`app`, `write`) and a target. Each action becomes a `PlannedAction`, and
+`ActionCheck` flags any that would fail: a program missing from the
 sandbox's `PATH`, a malformed host, an MCP tool no connected server offers,
 an app with no launchable desktop entry, a write directory that is relative
-or not a directory. The result is a `Plan` with a fresh `PlanId`, sent as
+or not a directory. It also gives each an `ActionOutlook` under the work's
+`WorkPermissions`: `Unasked` when a standing approval, an allowed host or the
+mode with the edit scope covers it, `JudgeDecides` for programs and MCP tools
+in Auto, else `Asks`. The result is a `Plan` with a fresh `PlanId`, sent as
 `Event::Plan`.
 
 `Request::TaskPlan` plans a saved task's prompt in an isolated conversation
@@ -456,22 +458,21 @@ with the task-run system prompt, keyed `TaskPlan` in the `SlotStash`. It takes
 the main lane and request guard as a query does, and `InterruptTurn`
 cancels it; its turn reaches the client wrapped in `Event::TaskPlan`. With
 `feedback` it continues the same conversation, so a revision keeps what the
-model already found; it is refused once the task's prompt has changed.
-`Request::TaskPlanApprove` names the latest plan and the actions the user
-accepted, each of which must be in it. The plan, holding only those actions,
-and the actions as the task's grants, replacing any it held, are saved in one
-write that is skipped if the prompt changed since the plan was made. The
-planning conversation is then dropped.
+model already found; it is refused once the task's prompt has changed. The
+outlooks follow the task's mode and allowed hosts at planning time.
+`Request::TaskPlanApprove` names the latest plan, which is saved on the task
+unless the prompt changed since it was made. The planning conversation is then
+dropped.
 
 In the TUI, `/tasks` opens a panel over these requests alone, since tasks
 live in the daemon's store rather than `config.toml`. It lists each task
 with its triggers, next fire, last outcome and whether it is enabled without
-an approved plan; its editor saves the name, prompt, triggers and enabled
-flag, leaving grants and plan to the daemon. "Plan" streams the planning turn
-like a chat turn, then shows the plan as a `PlanReview`: each anticipated
-action a checkbox, ticked unless flagged. Feedback revises the plan, and
-approving sends the ticked actions. A grants view removes grants one at a
-time with a `TaskSave` of the stored task.
+an approved plan; its editor saves the name, prompt, mode (Auto only when the
+daemon offers it), allowed hosts, triggers and enabled flag, leaving the plan
+to the daemon. "Plan" streams the planning turn like a chat turn, then shows
+the plan as a `PlanReview`: each step's anticipated actions with whether the
+run will ask about them and any problem found. Feedback revises the plan, and
+approving accepts it.
 
 ### Tools (`assistd-tools`)
 

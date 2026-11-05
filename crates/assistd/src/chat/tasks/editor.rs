@@ -1,7 +1,9 @@
-//! The task editor: a task's name, prompt, triggers and enabled flag, saved through
-//! the daemon, which checks each trigger as it is written.
+//! The task editor: a task's name, prompt, permission mode, allowed hosts, triggers and
+//! enabled flag, saved through the daemon, which checks each trigger as it is written.
 
-use assistd_ipc::{Request, TaskId, TaskName, TaskPrompt, TaskSpec, TaskTrigger};
+use assistd_ipc::{
+    HostName, PermissionMode, Request, TaskId, TaskName, TaskPrompt, TaskSpec, TaskTrigger,
+};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -14,11 +16,13 @@ use crate::chat::settings::{EditAction, EditorShape, TextEditor};
 pub(in crate::chat) enum EditorRow {
     Name,
     Prompt,
+    Mode,
+    Host(usize),
+    AddHost,
     Enabled,
     Trigger(usize),
     AddTrigger,
     Plan,
-    Grants,
 }
 
 /// What the daemon said of one trigger.
@@ -41,6 +45,11 @@ pub(in crate::chat) enum EditorMode {
     Browse,
     Name(TextEditor),
     Prompt(TextEditor),
+    /// A host being written, in place of row `replaces` or after the others.
+    Host {
+        replaces: Option<usize>,
+        editor: TextEditor,
+    },
     Trigger(Box<TriggerForm>),
     /// Asking whether to drop unsaved changes.
     Discard,
@@ -51,16 +60,19 @@ pub(super) enum EditorAction {
     Stay,
     Close,
     OpenPlan(TaskId),
-    OpenGrants,
 }
 
-/// A task as edited; its grants and plan are only ever the daemon's.
+/// A task as edited; its plan is only ever the daemon's.
 pub(in crate::chat) struct TaskEditor {
     task: Option<TaskId>,
     /// The task as last saved; `None` until a new task is first saved.
     stored: Option<TaskSpec>,
     name: String,
     prompt: String,
+    permission: PermissionMode,
+    hosts: Vec<HostName>,
+    /// The daemon allows Auto mode, so the mode row offers it.
+    auto_offered: bool,
     enabled: bool,
     triggers: Vec<TriggerRow>,
     /// Index into [`rows`](Self::rows).
@@ -71,13 +83,16 @@ pub(in crate::chat) struct TaskEditor {
 }
 
 impl TaskEditor {
-    /// An empty, disabled task.
-    pub(super) fn new_task() -> Self {
+    /// An empty, disabled task in Manual mode; Auto is offered when `auto_offered`.
+    pub(super) fn new_task(auto_offered: bool) -> Self {
         Self {
             task: None,
             stored: None,
             name: String::new(),
             prompt: String::new(),
+            permission: PermissionMode::Manual,
+            hosts: Vec::new(),
+            auto_offered,
             enabled: false,
             triggers: Vec::new(),
             selected: 0,
@@ -87,10 +102,15 @@ impl TaskEditor {
     }
 
     /// Saved task `task`, with each of its triggers sent to be checked.
-    pub(super) fn existing(task: TaskId, spec: TaskSpec, outbox: &mut Outbox) -> Self {
+    pub(super) fn existing(
+        task: TaskId,
+        spec: TaskSpec,
+        auto_offered: bool,
+        outbox: &mut Outbox,
+    ) -> Self {
         let mut editor = Self {
             task: Some(task),
-            ..Self::new_task()
+            ..Self::new_task(auto_offered)
         };
         editor.load(spec, outbox);
         editor
@@ -110,6 +130,14 @@ impl TaskEditor {
 
     pub(in crate::chat) fn prompt(&self) -> &str {
         &self.prompt
+    }
+
+    pub(in crate::chat) fn permission(&self) -> PermissionMode {
+        self.permission
+    }
+
+    pub(in crate::chat) fn hosts(&self) -> &[HostName] {
+        &self.hosts
     }
 
     pub(in crate::chat) fn enabled(&self) -> bool {
@@ -137,24 +165,34 @@ impl TaskEditor {
 
     /// Every row in display order.
     pub(in crate::chat) fn rows(&self) -> Vec<EditorRow> {
-        [EditorRow::Name, EditorRow::Prompt, EditorRow::Enabled]
+        [EditorRow::Name, EditorRow::Prompt, EditorRow::Mode]
             .into_iter()
+            .chain((0..self.hosts.len()).map(EditorRow::Host))
+            .chain([EditorRow::AddHost, EditorRow::Enabled])
             .chain((0..self.triggers.len()).map(EditorRow::Trigger))
-            .chain([EditorRow::AddTrigger, EditorRow::Plan, EditorRow::Grants])
+            .chain([EditorRow::AddTrigger, EditorRow::Plan])
             .collect()
     }
 
-    /// Whether the name, prompt, enabled flag or triggers differ from the saved task.
+    /// Whether any edited field differs from the saved task.
     pub(in crate::chat) fn is_modified(&self) -> bool {
         let triggers = self.triggers.iter().map(|row| &row.trigger);
         match &self.stored {
             Some(spec) => {
                 self.name != spec.name.as_str()
                     || self.prompt != spec.prompt.as_str()
+                    || self.permission != spec.mode
+                    || self.hosts != spec.allowed_hosts
                     || self.enabled != spec.enabled
                     || !triggers.eq(&spec.triggers)
             }
-            None => !self.name.is_empty() || !self.prompt.is_empty() || !self.triggers.is_empty(),
+            None => {
+                !self.name.is_empty()
+                    || !self.prompt.is_empty()
+                    || self.permission != PermissionMode::Manual
+                    || !self.hosts.is_empty()
+                    || !self.triggers.is_empty()
+            }
         }
     }
 
@@ -165,7 +203,8 @@ impl TaskEditor {
         self.load(spec, outbox);
     }
 
-    /// Take the daemon's copy after a change to its grants or plan, keeping unsaved edits.
+    /// Take the daemon's copy after a change to its plan or enabled flag, keeping unsaved
+    /// edits.
     pub(super) fn refresh_stored(&mut self, spec: TaskSpec) {
         self.stored = Some(spec);
     }
@@ -193,6 +232,8 @@ impl TaskEditor {
     fn load(&mut self, spec: TaskSpec, outbox: &mut Outbox) {
         self.name = spec.name.as_str().to_string();
         self.prompt = spec.prompt.as_str().to_string();
+        self.permission = spec.mode;
+        self.hosts.clone_from(&spec.allowed_hosts);
         self.enabled = spec.enabled;
         let task = self.task;
         self.triggers = spec
@@ -229,6 +270,14 @@ impl TaskEditor {
                 EditAction::Cancel => self.mode = EditorMode::Browse,
                 EditAction::Pending => {}
             },
+            EditorMode::Host { replaces, editor } => match editor.on_key(ev) {
+                EditAction::Apply => {
+                    let (replaces, text) = (*replaces, editor.text().to_string());
+                    self.place_host(replaces, text);
+                }
+                EditAction::Cancel => self.mode = EditorMode::Browse,
+                EditAction::Pending => {}
+            },
             EditorMode::Trigger(form) => match form.on_key(ev, upstreams) {
                 FormAction::Apply(trigger) => {
                     let replaces = form.replaces;
@@ -248,8 +297,8 @@ impl TaskEditor {
         EditorAction::Stay
     }
 
-    /// ↑/↓ move, Enter or Space opens the row, Delete drops a trigger, Ctrl+S saves and
-    /// Esc leaves, asking first when something is unsaved.
+    /// ↑/↓ move, Enter or Space opens the row, ←/→ change the mode, Delete drops a host or
+    /// trigger, Ctrl+S saves and Esc leaves, asking first when something is unsaved.
     fn on_browse_key(&mut self, ev: KeyEvent, outbox: &mut Outbox) -> EditorAction {
         let control = ev.modifiers.contains(KeyModifiers::CONTROL);
         match ev.code {
@@ -258,12 +307,11 @@ impl TaskEditor {
             KeyCode::Down => self.selected = (self.selected + 1).min(self.rows().len() - 1),
             KeyCode::Esc if self.is_modified() => self.mode = EditorMode::Discard,
             KeyCode::Esc => return EditorAction::Close,
-            KeyCode::Enter | KeyCode::Char(' ') => return self.open_row(),
-            KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d') => {
-                if let EditorRow::Trigger(index) = self.selected_row() {
-                    self.triggers.remove(index);
-                }
+            KeyCode::Left | KeyCode::Right if self.selected_row() == EditorRow::Mode => {
+                self.cycle_permission(ev.code == KeyCode::Right);
             }
+            KeyCode::Enter | KeyCode::Char(' ') => return self.open_row(),
+            KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d') => self.remove_selected(),
             _ => {}
         }
         EditorAction::Stay
@@ -278,6 +326,20 @@ impl TaskEditor {
                 let shape = EditorShape::Box { wrap_width: 0 };
                 self.mode = EditorMode::Prompt(TextEditor::new(self.prompt.clone(), shape));
             }
+            EditorRow::Mode => self.cycle_permission(true),
+            EditorRow::Host(index) => {
+                let text = self.hosts[index].as_str().to_string();
+                self.mode = EditorMode::Host {
+                    replaces: Some(index),
+                    editor: TextEditor::new(text, EditorShape::Line),
+                };
+            }
+            EditorRow::AddHost => {
+                self.mode = EditorMode::Host {
+                    replaces: None,
+                    editor: TextEditor::new(String::new(), EditorShape::Line),
+                };
+            }
             EditorRow::Enabled => self.enabled = !self.enabled,
             EditorRow::Trigger(index) => {
                 let form = TriggerForm::editing(index, &self.triggers[index].trigger);
@@ -288,12 +350,59 @@ impl TaskEditor {
                 Some(task) => return EditorAction::OpenPlan(task),
                 None => self.error = Some("save the task (ctrl+s) before planning it".into()),
             },
-            EditorRow::Grants => match self.saved_task() {
-                Some(_) => return EditorAction::OpenGrants,
-                None => self.error = Some("save the task (ctrl+s) first".into()),
-            },
         }
         EditorAction::Stay
+    }
+
+    /// Step to the next or previous mode the daemon allows.
+    fn cycle_permission(&mut self, forward: bool) {
+        let mut modes = vec![PermissionMode::Manual, PermissionMode::AcceptEdits];
+        if self.auto_offered {
+            modes.push(PermissionMode::Auto);
+        }
+        let index = modes
+            .iter()
+            .position(|mode| *mode == self.permission)
+            .unwrap_or(0);
+        let next = if forward {
+            (index + 1) % modes.len()
+        } else {
+            (index + modes.len() - 1) % modes.len()
+        };
+        self.permission = modes[next];
+    }
+
+    fn remove_selected(&mut self) {
+        match self.selected_row() {
+            EditorRow::Host(index) => {
+                self.hosts.remove(index);
+            }
+            EditorRow::Trigger(index) => {
+                self.triggers.remove(index);
+            }
+            _ => {}
+        }
+    }
+
+    /// Put the host `text` names in row `replaces`, or after the others, unless it is already
+    /// listed, closing the editor; a text that names no host leaves it open with the reason.
+    fn place_host(&mut self, replaces: Option<usize>, text: String) {
+        let host = match HostName::try_from(text) {
+            Ok(host) => host,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                return;
+            }
+        };
+        self.error = None;
+        self.mode = EditorMode::Browse;
+        if let Some(index) = replaces.filter(|index| *index < self.hosts.len()) {
+            self.hosts.remove(index);
+        }
+        if !self.hosts.contains(&host) {
+            let at = replaces.unwrap_or(self.hosts.len()).min(self.hosts.len());
+            self.hosts.insert(at, host);
+        }
     }
 
     /// The task's id when it is saved with nothing left unsaved.
@@ -326,15 +435,11 @@ impl TaskEditor {
         }
     }
 
-    /// The task to save: the edited fields with the saved grants and plan.
+    /// The task to save: the edited fields with the saved plan.
     fn draft_spec(&self) -> Result<TaskSpec, String> {
         let name = TaskName::try_from(self.name.clone()).map_err(|e| e.to_string())?;
         let prompt = TaskPrompt::try_from(self.prompt.clone()).map_err(|e| e.to_string())?;
-        let (grants, plan) = self
-            .stored
-            .as_ref()
-            .map(|spec| (spec.grants.clone(), spec.plan.clone()))
-            .unwrap_or_default();
+        let plan = self.stored.as_ref().and_then(|spec| spec.plan.clone());
         Ok(TaskSpec {
             name,
             prompt,
@@ -344,7 +449,8 @@ impl TaskEditor {
                 .map(|row| row.trigger.clone())
                 .collect(),
             enabled: self.enabled,
-            grants,
+            mode: self.permission,
+            allowed_hosts: self.hosts.clone(),
             plan,
         })
     }

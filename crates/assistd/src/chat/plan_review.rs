@@ -1,83 +1,48 @@
-//! A plan under review: its steps, with each anticipated action a checkbox the
-//! user ticks to approve it.
+//! A plan under review: its steps and the actions each expects to need approved, scrolled
+//! through before the plan is accepted.
 
 use std::fmt::Write as _;
 
-use assistd_ipc::{AnticipatedAction, Plan, TaskGrant};
+use assistd_ipc::{ActionOutlook, Plan, PlannedAction};
 
-/// A plan and which of its actions are checked; actions that failed the daemon's
-/// checks start unchecked.
+/// A plan and how far down it is scrolled.
 pub(super) struct PlanReview {
     plan: Plan,
-    /// One per action, in step order.
-    checked: Vec<bool>,
-    /// Index into the actions in step order.
-    selected: usize,
+    /// First line shown; each frame clamps it.
+    scroll: usize,
 }
 
 impl PlanReview {
     pub(super) fn new(plan: Plan) -> Self {
-        let checked = plan
-            .steps
-            .iter()
-            .flat_map(|step| &step.actions)
-            .map(|action| action.problem.is_none())
-            .collect();
-        Self {
-            plan,
-            checked,
-            selected: 0,
-        }
+        Self { plan, scroll: 0 }
     }
 
     pub(super) fn plan(&self) -> &Plan {
         &self.plan
     }
 
-    pub(super) fn selected(&self) -> usize {
-        self.selected
+    pub(super) fn scroll(&self) -> usize {
+        self.scroll
     }
 
-    pub(super) fn is_checked(&self, action: usize) -> bool {
-        self.checked.get(action).copied().unwrap_or(false)
+    pub(super) fn scroll_up(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_sub(lines);
     }
 
-    pub(super) fn action_count(&self) -> usize {
-        self.checked.len()
+    pub(super) fn scroll_down(&mut self, lines: usize) {
+        self.scroll = self.scroll.saturating_add(lines);
     }
 
-    pub(super) fn select_previous(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub(super) fn select_next(&mut self) {
-        self.selected = (self.selected + 1).min(self.checked.len().saturating_sub(1));
-    }
-
-    pub(super) fn toggle_selected(&mut self) {
-        if let Some(checked) = self.checked.get_mut(self.selected) {
-            *checked = !*checked;
-        }
-    }
-
-    /// The grants of the checked actions, in step order.
-    pub(super) fn accepted(&self) -> Vec<TaskGrant> {
-        self.actions()
-            .zip(&self.checked)
-            .filter(|(_, checked)| **checked)
-            .map(|(action, _)| action.grant.clone())
-            .collect()
-    }
-
-    fn actions(&self) -> impl Iterator<Item = &AnticipatedAction> {
-        self.plan.steps.iter().flat_map(|step| &step.actions)
+    /// Hold the scroll within `last`, the last line that can start the view.
+    pub(super) fn clamp_scroll(&mut self, last: usize) {
+        self.scroll = self.scroll.min(last);
     }
 }
 
-/// What `grant` lets a run do, in a few words.
-pub(super) fn grant_label(grant: &TaskGrant) -> String {
-    match grant {
-        TaskGrant::Program {
+/// What `action` does, in a few words.
+pub(super) fn action_label(action: &PlannedAction) -> String {
+    match action {
+        PlannedAction::Program {
             program,
             subcommand,
         } => {
@@ -87,12 +52,18 @@ pub(super) fn grant_label(grant: &TaskGrant) -> String {
             }
             label
         }
-        TaskGrant::WebHost { host } => format!("reach {host}"),
-        TaskGrant::McpTool { name } => format!("call {name}"),
-        TaskGrant::App { desktop_entry } => format!("launch {desktop_entry}"),
-        TaskGrant::Write { under } => format!("write under {}", under.display()),
+        PlannedAction::WebHost { host } => format!("reach {host}"),
+        PlannedAction::McpTool { name } => format!("call {name}"),
+        PlannedAction::App { desktop_entry } => format!("launch {desktop_entry}"),
+        PlannedAction::Write { under } => format!("write under {}", under.display()),
     }
 }
 
-#[cfg(test)]
-mod tests;
+/// Whether the work will stop to ask about an action, in a few words.
+pub(super) fn outlook_label(outlook: ActionOutlook) -> &'static str {
+    match outlook {
+        ActionOutlook::Unasked => "runs unasked",
+        ActionOutlook::JudgeDecides => "the safety judge decides",
+        ActionOutlook::Asks => "asks you",
+    }
+}

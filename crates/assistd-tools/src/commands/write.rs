@@ -15,7 +15,7 @@ use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Action, Analysis, Approval, Class, Confirmation, ConfirmationGate, ConfirmationRequest, Effect,
-    Grantable, PathGuards, Review, Risk, SandboxInfo, Unattended, guarded_review, on_blocking_pool,
+    PathGuards, Review, Risk, SandboxInfo, Unattended, guarded_review, on_blocking_pool,
     split_at_existing,
 };
 
@@ -129,14 +129,9 @@ impl WriteCommand {
         match target.review {
             Review::Clear => Ok(target.path),
             Review::Refuse(why) => Err(write_refused(raw_path, &why)),
-            Review::Ask(confirmation, unattended, grantable) => {
-                let request = confirmation_request(
-                    &target.path,
-                    content,
-                    &confirmation,
-                    unattended,
-                    grantable,
-                );
+            Review::Ask(confirmation, unattended) => {
+                let request =
+                    confirmation_request(&target.path, content, &confirmation, unattended);
                 if self.gate.confirm(request).await == Approval::Deny {
                     Err(self.write_cancelled(raw_path))
                 } else {
@@ -477,13 +472,12 @@ fn review_write(guards: &PathGuards, path: &Path, cfg: &WritePolicyCfg) -> Revie
 }
 
 /// The target, size and content (head and tail only when long) for the user to confirm. Content
-/// too long to show in full is [`Risk::Elevated`] and never runs unasked or granted.
+/// too long to show in full is [`Risk::Elevated`] and never runs unasked.
 fn confirmation_request(
     path: &Path,
     content: &[u8],
     confirmation: &Confirmation,
     unattended: Unattended,
-    grantable: Grantable,
 ) -> ConfirmationRequest {
     let text = String::from_utf8_lossy(content);
     let mut script = format!(
@@ -492,14 +486,9 @@ fn confirmation_request(
     );
     let total = text.chars().count();
     let fully_shown = total <= PREVIEW_HEAD_CHARS + PREVIEW_TAIL_CHARS;
-    let (risk, unattended, grantable, matched_pattern) = if fully_shown {
+    let (risk, unattended, matched_pattern) = if fully_shown {
         script.push_str(&text);
-        (
-            confirmation.risk(),
-            unattended,
-            grantable,
-            confirmation.to_string(),
-        )
+        (confirmation.risk(), unattended, confirmation.to_string())
     } else {
         let omitted = total - PREVIEW_HEAD_CHARS - PREVIEW_TAIL_CHARS;
         script.extend(text.chars().take(PREVIEW_HEAD_CHARS));
@@ -508,7 +497,6 @@ fn confirmation_request(
         (
             Risk::Elevated,
             Unattended::Never,
-            Grantable::Never,
             format!("{confirmation}, with content too long to show in full"),
         )
     };
@@ -519,7 +507,6 @@ fn confirmation_request(
         always_allow: Vec::new(),
         risk,
         unattended,
-        grantable,
         source: ConfirmSource::Main,
     }
 }

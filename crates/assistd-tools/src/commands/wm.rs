@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, GrantNeed, Grantable,
-    JudgeContext, JudgedClass, Risk, Unattended, on_blocking_pool,
+    Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, JudgeContext,
+    JudgedClass, Risk, Unattended, on_blocking_pool,
 };
 
 mod desktop_entry;
@@ -153,11 +153,6 @@ impl WmCommand {
                     entry.name
                 ),
             }),
-            grantable: if has_targets {
-                Grantable::Never
-            } else {
-                Grantable::needs(vec![GrantNeed::App(key.clone())])
-            },
             source: ConfirmSource::Main,
         };
         if has_targets {

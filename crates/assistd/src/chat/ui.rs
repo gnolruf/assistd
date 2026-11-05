@@ -953,7 +953,7 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use assistd_tools::{Grantable, Risk, Unattended};
+    use assistd_tools::{Risk, Unattended};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -969,7 +969,6 @@ mod tests {
                 always_allow: Vec::new(),
                 risk: Risk::Elevated,
                 unattended: Unattended::Never,
-                grantable: Grantable::Never,
                 source: ConfirmSource::Main,
             },
         )

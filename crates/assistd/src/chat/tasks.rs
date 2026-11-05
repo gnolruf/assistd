@@ -4,9 +4,7 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 
-use assistd_ipc::{
-    Event, Plan, PlanId, RelayEvent, Request, TaskGrant, TaskId, TaskRunState, TaskSpec,
-};
+use assistd_ipc::{Event, Plan, PlanId, RelayEvent, Request, TaskId, TaskRunState, TaskSpec};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
@@ -22,6 +20,9 @@ use editor::EditorAction;
 pub(super) use editor::{EditorMode, EditorRow, TaskEditor, TriggerCheck, TriggerRow};
 pub(super) use trigger_form::{AT_FORMAT, TriggerForm, UpstreamChoice};
 
+/// Lines PgUp/PgDn scroll a plan under review.
+const REVIEW_PAGE_LINES: usize = 10;
+
 /// A task as the daemon last listed it.
 pub(super) struct ListedTask {
     pub id: TaskId,
@@ -36,7 +37,7 @@ enum PendingOp {
     List,
     /// A save from the editor, whose result the editor adopts.
     Save,
-    /// A change to a task's enabled flag, grants or plan outside the editor's fields.
+    /// A change to a task's enabled flag from the list.
     Update,
     Delete(TaskId),
     CheckTrigger,
@@ -62,13 +63,7 @@ impl Outbox {
     }
 }
 
-/// The view drawn over the editor.
-pub(super) enum Overlay {
-    Plan(PlanSession),
-    Grants { selected: usize },
-}
-
-/// Planning a task, and the plan once made.
+/// Planning a task, and the plan once made, drawn over the editor.
 pub(super) struct PlanSession {
     task: TaskId,
     /// The `TaskPlan` request whose events this shows.
@@ -93,8 +88,8 @@ pub(super) enum Message {
     Error(String),
 }
 
-/// The tasks panel: the list, the editor on top of it, and a plan or grants view on top
-/// of the editor.
+/// The tasks panel: the list, the editor on top of it, and the plan view on top of the
+/// editor.
 pub(super) struct TasksPanel {
     tasks: Vec<ListedTask>,
     /// Rows of the `TaskList` in flight.
@@ -105,14 +100,17 @@ pub(super) struct TasksPanel {
     /// The selected task is about to be deleted unless the next key says no.
     confirm_delete: bool,
     editor: Option<TaskEditor>,
-    overlay: Option<Overlay>,
+    plan_view: Option<PlanSession>,
     outbox: Outbox,
     message: Option<Message>,
+    /// The daemon allows Auto mode, so the editor offers it.
+    auto_offered: bool,
 }
 
 impl TasksPanel {
-    /// An empty panel with its task list requested.
-    pub(super) fn new() -> Self {
+    /// An empty panel with its task list requested; its editor offers Auto mode when
+    /// `auto_offered`.
+    pub(super) fn new(auto_offered: bool) -> Self {
         let mut panel = Self {
             tasks: Vec::new(),
             listing: Vec::new(),
@@ -120,9 +118,10 @@ impl TasksPanel {
             selected: 0,
             confirm_delete: false,
             editor: None,
-            overlay: None,
+            plan_view: None,
             outbox: Outbox::default(),
             message: None,
+            auto_offered,
         };
         panel
             .outbox
@@ -154,8 +153,12 @@ impl TasksPanel {
         self.editor.as_mut()
     }
 
-    pub(super) fn overlay(&self) -> Option<&Overlay> {
-        self.overlay.as_ref()
+    pub(super) fn plan_view(&self) -> Option<&PlanSession> {
+        self.plan_view.as_ref()
+    }
+
+    pub(super) fn plan_view_mut(&mut self) -> Option<&mut PlanSession> {
+        self.plan_view.as_mut()
     }
 
     pub(super) fn message(&self) -> Option<&Message> {
@@ -164,21 +167,21 @@ impl TasksPanel {
 
     /// The planning turn on screen.
     pub(super) fn planning_pane(&self) -> Option<&OutputPane> {
-        match &self.overlay {
-            Some(Overlay::Plan(PlanSession {
+        match &self.plan_view {
+            Some(PlanSession {
                 state: PlanState::Planning(pane),
                 ..
-            })) => Some(pane),
+            }) => Some(pane),
             _ => None,
         }
     }
 
     pub(super) fn planning_pane_mut(&mut self) -> Option<&mut OutputPane> {
-        match &mut self.overlay {
-            Some(Overlay::Plan(PlanSession {
+        match &mut self.plan_view {
+            Some(PlanSession {
                 state: PlanState::Planning(pane),
                 ..
-            })) => Some(pane),
+            }) => Some(pane),
             _ => None,
         }
     }
@@ -211,8 +214,8 @@ impl TasksPanel {
             return ControlFlow::Break(());
         }
         self.message = None;
-        if self.overlay.is_some() {
-            self.on_overlay_key(ev);
+        if self.plan_view.is_some() {
+            self.on_plan_key(ev);
         } else if self.editor.is_some() {
             self.on_editor_key(ev);
         } else {
@@ -236,7 +239,7 @@ impl TasksPanel {
             KeyCode::Down => {
                 self.selected = (self.selected + 1).min(self.tasks.len().saturating_sub(1));
             }
-            KeyCode::Char('n') => self.editor = Some(TaskEditor::new_task()),
+            KeyCode::Char('n') => self.editor = Some(TaskEditor::new_task(self.auto_offered)),
             KeyCode::Enter => self.edit_selected(),
             KeyCode::Char(' ') => self.toggle_selected(),
             KeyCode::Char('d') | KeyCode::Delete if !self.tasks.is_empty() => {
@@ -249,7 +252,8 @@ impl TasksPanel {
 
     fn edit_selected(&mut self) {
         if let Some(task) = self.tasks.get(self.selected) {
-            let editor = TaskEditor::existing(task.id, task.spec.clone(), &mut self.outbox);
+            let spec = task.spec.clone();
+            let editor = TaskEditor::existing(task.id, spec, self.auto_offered, &mut self.outbox);
             self.editor = Some(editor);
         }
     }
@@ -285,7 +289,6 @@ impl TasksPanel {
             EditorAction::Stay => {}
             EditorAction::Close => self.editor = None,
             EditorAction::OpenPlan(task) => self.start_plan(task, None),
-            EditorAction::OpenGrants => self.overlay = Some(Overlay::Grants { selected: 0 }),
         }
     }
 
@@ -304,55 +307,43 @@ impl TasksPanel {
             task,
             feedback,
         });
-        self.overlay = Some(Overlay::Plan(PlanSession {
+        self.plan_view = Some(PlanSession {
             task,
             request,
             state: PlanState::Planning(Box::new(pane)),
-        }));
+        });
     }
 
     /// Stop the planning turn on screen, whose failure then goes unreported.
     fn interrupt_planning(&mut self) {
-        if let Some(Overlay::Plan(session)) = &self.overlay {
+        if let Some(session) = &self.plan_view {
             self.outbox.pending.remove(&session.request);
         }
         self.outbox
             .send(PendingOp::Interrupt, |id| Request::InterruptTurn { id });
     }
 
-    fn on_overlay_key(&mut self, ev: KeyEvent) {
-        match self.overlay.as_mut() {
-            Some(Overlay::Plan(_)) => self.on_plan_key(ev),
-            Some(Overlay::Grants { selected }) => {
-                let selected = *selected;
-                self.on_grants_key(ev, selected);
-            }
-            None => {}
-        }
-    }
-
-    /// Esc stops a planning turn or leaves the plan. In review, ↑/↓ select an action,
-    /// Space ticks it, `f` writes feedback to revise the plan and `a` approves it.
+    /// Esc stops a planning turn or leaves the plan. In review, ↑/↓ and PgUp/PgDn scroll,
+    /// `f` writes feedback to revise the plan and `a` approves it.
     fn on_plan_key(&mut self, ev: KeyEvent) {
-        let Some(Overlay::Plan(session)) = self.overlay.as_mut() else {
+        let Some(session) = self.plan_view.as_mut() else {
             return;
         };
         let task = session.task;
         match plan_key_outcome(&mut session.state, ev) {
             PlanKeyOutcome::Stay => {}
-            PlanKeyOutcome::Leave => self.overlay = None,
+            PlanKeyOutcome::Leave => self.plan_view = None,
             PlanKeyOutcome::Interrupt => {
                 self.interrupt_planning();
-                self.overlay = None;
+                self.plan_view = None;
             }
             PlanKeyOutcome::Replan(feedback) => self.start_plan(task, feedback),
-            PlanKeyOutcome::Approve(plan, accepted) => {
+            PlanKeyOutcome::Approve(plan) => {
                 self.outbox
                     .send(PendingOp::Approve, |id| Request::TaskPlanApprove {
                         id,
                         task,
                         plan,
-                        accepted,
                     });
             }
         }
@@ -360,52 +351,17 @@ impl TasksPanel {
 
     /// Record the columns the feedback box wraps at.
     pub(super) fn set_feedback_width(&mut self, width: u16) {
-        if let Some(Overlay::Plan(PlanSession {
+        if let Some(PlanSession {
             state:
                 PlanState::Review {
                     feedback: Some(editor),
                     ..
                 },
             ..
-        })) = self.overlay.as_mut()
+        }) = self.plan_view.as_mut()
         {
             editor.set_wrap_width(width);
         }
-    }
-
-    /// ↑/↓ select a grant, `d` removes it, Esc goes back to the editor.
-    fn on_grants_key(&mut self, ev: KeyEvent, selected: usize) {
-        let Some((task, spec)) = self
-            .editor
-            .as_ref()
-            .and_then(|editor| editor.task().zip(editor.stored().cloned()))
-        else {
-            self.overlay = None;
-            return;
-        };
-        let last = spec.grants.len().saturating_sub(1);
-        let selected = match ev.code {
-            KeyCode::Esc => {
-                self.overlay = None;
-                return;
-            }
-            KeyCode::Up => selected.saturating_sub(1),
-            KeyCode::Down => (selected + 1).min(last),
-            KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace
-                if selected < spec.grants.len() =>
-            {
-                let mut spec = spec;
-                spec.grants.remove(selected);
-                self.outbox.send(PendingOp::Update, |id| Request::TaskSave {
-                    id,
-                    task: Some(task),
-                    spec,
-                });
-                selected.min(last.saturating_sub(1))
-            }
-            _ => selected,
-        };
-        self.overlay = Some(Overlay::Grants { selected });
     }
 
     /// Apply an event answering one of the panel's requests; others are ignored.
@@ -445,7 +401,7 @@ impl TasksPanel {
     /// The connection of a request failed without a terminal event.
     pub(super) fn on_connection_lost(&mut self, message: &str) {
         if self.planning_pane().is_some()
-            && let Some(Overlay::Plan(session)) = self.overlay.as_mut()
+            && let Some(session) = self.plan_view.as_mut()
         {
             session.state = PlanState::Failed(message.to_string());
         }
@@ -484,8 +440,8 @@ impl TasksPanel {
 
     /// The plan session for `request`, when it is the one on screen.
     fn plan_session_mut(&mut self, request: &str) -> Option<&mut PlanSession> {
-        match &mut self.overlay {
-            Some(Overlay::Plan(session)) if session.request == request => Some(session),
+        match &mut self.plan_view {
+            Some(session) if session.request == request => Some(session),
             _ => None,
         }
     }
@@ -523,7 +479,7 @@ impl TasksPanel {
                 self.message = Some(Message::Info("deleted".into()));
             }
             PendingOp::Approve => {
-                self.overlay = None;
+                self.plan_view = None;
                 self.message = Some(Message::Info("plan approved".into()));
             }
             PendingOp::Update
@@ -566,7 +522,7 @@ enum PlanKeyOutcome {
     Interrupt,
     /// Plan afresh, or with feedback revise the plan.
     Replan(Option<String>),
-    Approve(PlanId, Vec<TaskGrant>),
+    Approve(PlanId),
 }
 
 /// Apply `ev` to the plan view's `state`, saying what else it asks for.
@@ -608,9 +564,10 @@ fn review_key_outcome(
 ) -> PlanKeyOutcome {
     match ev.code {
         KeyCode::Esc => return PlanKeyOutcome::Leave,
-        KeyCode::Up => review.select_previous(),
-        KeyCode::Down => review.select_next(),
-        KeyCode::Char(' ') => review.toggle_selected(),
+        KeyCode::Up => review.scroll_up(1),
+        KeyCode::Down => review.scroll_down(1),
+        KeyCode::PageUp => review.scroll_up(REVIEW_PAGE_LINES),
+        KeyCode::PageDown => review.scroll_down(REVIEW_PAGE_LINES),
         KeyCode::Char('f') => {
             *feedback = Some(TextEditor::new(
                 String::new(),
@@ -618,7 +575,7 @@ fn review_key_outcome(
             ));
         }
         KeyCode::Char('a') | KeyCode::Enter => {
-            return PlanKeyOutcome::Approve(review.plan().id.clone(), review.accepted());
+            return PlanKeyOutcome::Approve(review.plan().id.clone());
         }
         _ => {}
     }

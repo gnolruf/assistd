@@ -11,8 +11,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use assistd_ipc::{Event, TaskGrant, TaskId, TaskPrompt, TaskRunId};
-use assistd_memory::MemoryError;
+use assistd_ipc::{Event, TaskRunId};
 use assistd_tools::{Approval, ConfirmationRequest, PromptParking};
 
 use super::run_lane::RunLane;
@@ -23,12 +22,6 @@ use super::{AppState, send_error};
 pub(in crate::state) enum TaskConfirmError {
     #[error("task run {0} is not waiting on confirmation {1}")]
     NotWaiting(TaskRunId, String),
-
-    #[error("no grant can cover this confirmation, so none can be added to the task")]
-    NotGrantable,
-
-    #[error(transparent)]
-    Memory(#[from] MemoryError),
 }
 
 /// The confirmation each paused task run waits on.
@@ -47,20 +40,6 @@ impl TaskConfirms {
             run,
             confirm_id,
         }
-    }
-
-    /// The task, prompt and grants of confirmation `confirm_id`, which `run` must wait on.
-    fn waiting(
-        &self,
-        run: TaskRunId,
-        confirm_id: &str,
-    ) -> Result<(TaskId, TaskPrompt, Vec<TaskGrant>), TaskConfirmError> {
-        let pending = self.pending.lock();
-        let waiting = pending
-            .get(&run)
-            .filter(|pending| pending.confirm_id == confirm_id)
-            .ok_or_else(|| TaskConfirmError::NotWaiting(run, confirm_id.to_string()))?;
-        Ok((waiting.task, waiting.prompt.clone(), waiting.grants.clone()))
     }
 
     /// Answer confirmation `confirm_id`, which `run` must wait on, with `approval`.
@@ -84,10 +63,6 @@ impl TaskConfirms {
 #[derive(Debug)]
 struct PendingConfirm {
     confirm_id: String,
-    task: TaskId,
-    /// The prompt the run was started with, which a grant added for it must still match.
-    prompt: TaskPrompt,
-    grants: Vec<TaskGrant>,
     answer: oneshot::Sender<Approval>,
 }
 
@@ -108,12 +83,10 @@ impl Drop for RegisteredConfirm<'_> {
     }
 }
 
-/// Parks a task run's ungranted prompts: the run shows as needing input and gives up its
-/// hold until `TaskConfirm` answers, then waits first in the queue for a lane.
+/// Parks the task run prompts its mode and hosts leave open: the run shows as needing input
+/// and gives up its hold until `TaskConfirm` answers, then waits first in the queue for a lane.
 #[derive(Debug)]
 pub(in crate::state) struct TaskRunParking {
-    pub(in crate::state) task: TaskId,
-    pub(in crate::state) prompt: TaskPrompt,
     pub(in crate::state) lane: Arc<RunLane>,
 }
 
@@ -122,20 +95,16 @@ impl PromptParking for TaskRunParking {
     async fn park(&self, req: ConfirmationRequest) -> Approval {
         let (answer, answered) = oneshot::channel();
         let confirm_id = uuid::Uuid::new_v4().to_string();
-        let grants = req.grantable.grants();
         let lane = &self.lane;
         let _registered = lane.state.runtime.task_confirms.register(
             lane.run,
             PendingConfirm {
                 confirm_id: confirm_id.clone(),
-                task: self.task,
-                prompt: self.prompt.clone(),
-                grants: grants.clone(),
                 answer,
             },
         );
         self.pause().await;
-        self.announce(req, confirm_id, grants).await;
+        self.announce(req, confirm_id).await;
         let approval = tokio::select! {
             biased;
             () = lane.cancel.cancelled() => return Approval::Deny,
@@ -150,7 +119,7 @@ impl PromptParking for TaskRunParking {
 }
 
 impl TaskRunParking {
-    async fn announce(&self, req: ConfirmationRequest, confirm_id: String, grants: Vec<TaskGrant>) {
+    async fn announce(&self, req: ConfirmationRequest, confirm_id: String) {
         info!(
             target: "assistd::tasks",
             tool = %req.tool,
@@ -164,7 +133,6 @@ impl TaskRunParking {
             script: req.script,
             matched_pattern: req.matched_pattern,
             always_allow: Vec::new(),
-            grants,
             source: req.source,
         };
         let _ = self.lane.events.send(event).await;
@@ -212,39 +180,23 @@ impl AppState {
         id: String,
         run: TaskRunId,
         confirm_id: String,
-        approval: Approval,
+        allow: bool,
         tx: mpsc::Sender<Event>,
     ) {
-        match self.answer_task_confirm(run, &confirm_id, approval).await {
+        let approval = if allow {
+            Approval::Once
+        } else {
+            Approval::Deny
+        };
+        match self
+            .runtime
+            .task_confirms
+            .answer(run, &confirm_id, approval)
+        {
             Ok(()) => {
                 let _ = tx.send(Event::Done { id }).await;
             }
             Err(e) => send_error(&tx, id, e.to_string()).await,
         }
-    }
-
-    /// Answer `run`'s confirmation with `approval`, first saving its grants on the task when
-    /// it is [`Approval::Always`] and the task's prompt is still the run's.
-    async fn answer_task_confirm(
-        &self,
-        run: TaskRunId,
-        confirm_id: &str,
-        approval: Approval,
-    ) -> Result<(), TaskConfirmError> {
-        let confirms = &self.runtime.task_confirms;
-        if approval == Approval::Always {
-            let (task, prompt, grants) = confirms.waiting(run, confirm_id)?;
-            if grants.is_empty() {
-                return Err(TaskConfirmError::NotGrantable);
-            }
-            if !self.memory.tasks.add_grants(task, prompt, grants).await? {
-                info!(
-                    target: "assistd::tasks",
-                    %run,
-                    "the task's prompt changed since the run started; the grant holds for this run only"
-                );
-            }
-        }
-        confirms.answer(run, confirm_id, approval)
     }
 }

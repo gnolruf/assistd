@@ -25,7 +25,6 @@ fn scoped_edit(path: &str) -> WriteTarget {
         review: Review::Ask(
             Confirmation::Edit(vec![path.into()]),
             Unattended::ScopedEdit,
-            Grantable::Never,
         ),
     }
 }
@@ -440,13 +439,11 @@ async fn credentials_and_startup_files_ask_even_in_auto_mode() {
         let path = cfg
             .resolve(&raw.to_string_lossy(), None)
             .expect("allowlisted");
-        let Review::Ask(confirmation, unattended, grantable) = review_write(&guards, &path, &cfg)
-        else {
+        let Review::Ask(confirmation, unattended) = review_write(&guards, &path, &cfg) else {
             panic!("{raw:?} must ask");
         };
-        assert_eq!(grantable, Grantable::Never, "{raw:?} must not be grantable");
         let (router, mut rx) = router_in(PermissionMode::Auto);
-        let request = confirmation_request(&path, b"x", &confirmation, unattended, grantable);
+        let request = confirmation_request(&path, b"x", &confirmation, unattended);
         assert_eq!(router.ask(request).await, Approval::Deny, "{raw:?}");
         assert!(rx.try_recv().is_ok(), "{raw:?} was not put to the user");
     }

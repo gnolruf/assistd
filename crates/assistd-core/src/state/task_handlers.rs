@@ -7,7 +7,7 @@ use chrono::{DateTime, Local, Utc};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use assistd_ipc::{Event, TaskId, TaskSpec, TaskTrigger};
+use assistd_ipc::{Event, PermissionMode, TaskId, TaskSpec, TaskTrigger};
 use assistd_memory::TaskRecord;
 
 use super::event_triggers::{check_chain, resolve_watched_paths};
@@ -180,7 +180,8 @@ impl AppState {
         Ok(())
     }
 
-    /// Save `spec` as task `task`, or as a new task, once its triggers pass
+    /// Save `spec` as task `task`, or as a new task, once its mode is one the daemon allows and
+    /// its triggers pass
     /// [`check_triggers`] against those it replaces and [`check_chain`], with its
     /// watched paths tilde-expanded.
     async fn save_task(
@@ -188,6 +189,9 @@ impl AppState {
         task: Option<TaskId>,
         mut spec: TaskSpec,
     ) -> Result<TaskRecord, DispatchError> {
+        if spec.mode == PermissionMode::Auto && !self.config.tools.allow_auto_mode {
+            return Err(DispatchError::AutoModeOff);
+        }
         let stored = match task {
             Some(task) => self.memory.tasks.get(task).await?.spec.triggers,
             None => Vec::new(),

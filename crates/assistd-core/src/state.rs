@@ -13,9 +13,9 @@ use tracing::warn;
 
 use assistd_embed::EmbedError;
 use assistd_ipc::{Event, Request, Role, WakeWordOp};
-use assistd_llm::{LlmBackend, LlmError};
+use assistd_llm::{BackendJudgeModel, LlmBackend, LlmError};
 use assistd_memory::{MemoryError, PersistedRole};
-use assistd_tools::{Approval, ToolRegistry};
+use assistd_tools::{JUDGE_TIMEOUT, SafetyJudge, ToolRegistry};
 use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError, VoiceManager};
 
 use crate::planner::PlanError;
@@ -84,6 +84,9 @@ pub enum DispatchError {
     #[error("vision not available: model does not support images")]
     VisionUnsupported,
 
+    #[error("auto mode is off (tools.allow_auto_mode), so a task cannot run in it")]
+    AutoModeOff,
+
     #[error(transparent)]
     Llm(#[from] LlmError),
 
@@ -139,6 +142,14 @@ impl AppState {
             memory,
             runtime,
         }
+    }
+
+    /// The judge that answers for the user in Auto mode, when `tools.allow_auto_mode` allows it.
+    pub fn safety_judge(&self) -> Option<SafetyJudge> {
+        self.config.tools.allow_auto_mode.then(|| {
+            let model = BackendJudgeModel::new(Arc::clone(&self.subsystems.llm));
+            SafetyJudge::new(Arc::new(model), JUDGE_TIMEOUT)
+        })
     }
 
     /// Route one request from the client running as `peer_pid` to its handler, streaming
@@ -276,20 +287,13 @@ impl AppState {
                 run,
                 confirm_id,
                 allow,
-                add_grant,
-            } => {
-                let approval = Approval::from_answer(allow, add_grant);
-                replied(self.handle_task_confirm(id, run, confirm_id, approval, tx)).await
-            }
+            } => replied(self.handle_task_confirm(id, run, confirm_id, allow, tx)).await,
             Request::TaskPlan { id, task, feedback } => {
                 self.handle_task_plan(id, task, feedback, tx).await
             }
-            Request::TaskPlanApprove {
-                id,
-                task,
-                plan,
-                accepted,
-            } => self.handle_plan_approve(id, task, plan, accepted, tx).await,
+            Request::TaskPlanApprove { id, task, plan } => {
+                self.handle_plan_approve(id, task, plan, tx).await
+            }
             Request::TaskCheckTrigger { id, task, trigger } => {
                 self.handle_task_check_trigger(id, task, trigger, tx).await
             }

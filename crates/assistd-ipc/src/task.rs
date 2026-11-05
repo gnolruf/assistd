@@ -8,6 +8,8 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::PermissionMode;
+
 /// Longest task name accepted, in characters.
 pub const MAX_TASK_NAME_CHARS: usize = 80;
 
@@ -19,6 +21,9 @@ pub const DEFAULT_EVENT_COOLDOWN_SECS: u32 = 60;
 
 /// How long a burst of path changes is gathered into one fire when not given, in seconds.
 pub const DEFAULT_PATH_DEBOUNCE_SECS: u32 = 2;
+
+/// Longest host name accepted, in bytes.
+pub const MAX_HOST_NAME_BYTES: usize = 253;
 
 /// A saved task's row id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -56,6 +61,9 @@ pub enum TaskSpecError {
 
     #[error("task prompt is {0} bytes; the limit is {MAX_TASK_PROMPT_BYTES}")]
     PromptTooLarge(usize),
+
+    #[error("{0:?} is not a host name")]
+    NotAHost(String),
 }
 
 /// A task's display name: trimmed, non-empty, at most [`MAX_TASK_NAME_CHARS`] characters.
@@ -127,7 +135,53 @@ impl From<TaskPrompt> for String {
     }
 }
 
-/// A saved task: its prompt, what starts it, and the approvals made for that prompt.
+/// A web host named exactly: lowercase ASCII letters, digits, `-` and `.`, in labels of 1
+/// to 63 bytes that neither start nor end with `-`, at most [`MAX_HOST_NAME_BYTES`] in all.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HostName(String);
+
+impl HostName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for HostName {
+    type Error = TaskSpecError;
+
+    /// Trims and lowercases `host` before checking it.
+    fn try_from(host: String) -> Result<Self, Self::Error> {
+        let lowered = host.trim().to_ascii_lowercase();
+        let label_ok = |label: &str| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        };
+        if lowered.len() > MAX_HOST_NAME_BYTES || !lowered.split('.').all(label_ok) {
+            return Err(TaskSpecError::NotAHost(host));
+        }
+        Ok(Self(lowered))
+    }
+}
+
+impl From<HostName> for String {
+    fn from(host: HostName) -> Self {
+        host.0
+    }
+}
+
+impl fmt::Display for HostName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// A saved task: its prompt, what starts it, how its runs' prompts are answered, and the plan
+/// its runs follow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSpec {
     pub name: TaskName,
@@ -135,11 +189,13 @@ pub struct TaskSpec {
     #[serde(default)]
     pub triggers: Vec<TaskTrigger>,
     pub enabled: bool,
-    /// Approvals runs of this task may use; cleared whenever the prompt changes.
+    /// Which of a run's prompts are approved without asking, as in the chat.
+    #[serde(default)]
+    pub mode: PermissionMode,
+    /// Hosts a run's `web` fetches from without asking, on top of the approved hosts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grants: Vec<TaskGrant>,
-    /// The approved plan, holding only its accepted actions; cleared whenever the prompt
-    /// changes.
+    pub allowed_hosts: Vec<HostName>,
+    /// The approved plan each run is given to follow; cleared whenever the prompt changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Plan>,
 }
@@ -212,10 +268,10 @@ pub enum MissedFire {
     Skip,
 }
 
-/// One approval a task run may use in place of asking.
+/// Something a plan step expects to do that may need the user's approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TaskGrant {
+pub enum PlannedAction {
     /// Run `program`, limited to `subcommand` when set.
     Program {
         program: String,
@@ -243,7 +299,7 @@ impl fmt::Display for PlanId {
     }
 }
 
-/// How the agent means to do a piece of work, and the approvals it expects to need.
+/// How the agent means to do a piece of work, and what it expects to need approved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: PlanId,
@@ -251,7 +307,7 @@ pub struct Plan {
     pub steps: Vec<PlanStep>,
 }
 
-/// One step of a [`Plan`] and the approvals it expects to need.
+/// One step of a [`Plan`] and what it expects to need approved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub description: String,
@@ -259,14 +315,29 @@ pub struct PlanStep {
     pub actions: Vec<AnticipatedAction>,
 }
 
-/// An approval a plan expects to need; approving it makes `grant` a grant.
+/// An action a plan expects to need approved, and whether it will be asked about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnticipatedAction {
-    pub grant: TaskGrant,
-    /// Why the daemon expects the grant to cover nothing, such as a program missing from
-    /// `PATH`; `None` when it passed every check.
+    pub action: PlannedAction,
+    /// Why the daemon expects the action to fail, such as a program missing from `PATH`;
+    /// `None` when it passed every check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    #[serde(default)]
+    pub outlook: ActionOutlook,
+}
+
+/// Whether the work's permission mode and approvals let an [`AnticipatedAction`] run without
+/// asking, as far as the daemon can tell before it runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionOutlook {
+    /// An approval or the mode covers it.
+    Unasked,
+    /// Auto mode's safety judge decides when it runs.
+    JudgeDecides,
+    #[default]
+    Asks,
 }
 
 /// Where a task run has got; only a finished run carries an outcome.

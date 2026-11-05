@@ -70,7 +70,7 @@ pub(super) fn init(
         Arc::new(assistd_core::mcp_tool_approvals(config_path)?),
     );
     let (mcp_servers, mcp_startup) =
-        mcp_init::prepare(config, mcp_approvals, deps.vision_gate.clone());
+        mcp_init::prepare(config, mcp_approvals.clone(), deps.vision_gate.clone());
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let built = assistd_core::build_tools(BuildToolsDeps {
         config,
@@ -90,6 +90,7 @@ pub(super) fn init(
         window_manager: deps.window_manager,
         web_search: deps.web_search,
         relay: deps.relay,
+        mcp_approvals,
     })?;
     info!(
         "tools: registered {} (overflow dir {})",

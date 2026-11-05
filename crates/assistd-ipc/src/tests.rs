@@ -515,7 +515,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "rm -rf /tmp/foo".into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
-                grants: Vec::new(),
                 source: ConfirmSource::Main,
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
@@ -528,7 +527,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "cargo build".into(),
                 matched_pattern: "not on the allowlist: cargo".into(),
                 always_allow: vec!["cargo".into()],
-                grants: Vec::new(),
                 source: ConfirmSource::Main,
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"cargo build","matched_pattern":"not on the allowlist: cargo","always_allow":["cargo"]}"#,
@@ -541,7 +539,6 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "curl example.com".into(),
                 matched_pattern: "not on the allowlist: curl".into(),
                 always_allow: Vec::new(),
-                grants: Vec::new(),
                 source: ConfirmSource::Relay {
                     task: "summarise the page".into(),
                     run: None,
@@ -557,15 +554,12 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "web fetch https://example.com".into(),
                 matched_pattern: "fetches from example.com".into(),
                 always_allow: vec!["example.com".into()],
-                grants: vec![TaskGrant::WebHost {
-                    host: "example.com".into(),
-                }],
                 source: ConfirmSource::Relay {
                     task: "summarise the page".into(),
                     run: Some(TaskRunId(9)),
                 },
             },
-            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"web","script":"web fetch https://example.com","matched_pattern":"fetches from example.com","always_allow":["example.com"],"grants":[{"kind":"web_host","host":"example.com"}],"source":{"agent":"relay","task":"summarise the page","run":9}}"#,
+            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"web","script":"web fetch https://example.com","matched_pattern":"fetches from example.com","always_allow":["example.com"],"source":{"agent":"relay","task":"summarise the page","run":9}}"#,
         ),
         (
             Event::Relay {
@@ -812,24 +806,8 @@ fn sample_task_spec() -> TaskSpec {
             },
         ],
         enabled: true,
-        grants: vec![
-            TaskGrant::Program {
-                program: "git".into(),
-                subcommand: Some("status".into()),
-            },
-            TaskGrant::WebHost {
-                host: "example.org".into(),
-            },
-            TaskGrant::McpTool {
-                name: "mcp__mail__list".into(),
-            },
-            TaskGrant::App {
-                desktop_entry: "firefox.desktop".into(),
-            },
-            TaskGrant::Write {
-                under: PathBuf::from("/home/u/notes"),
-            },
-        ],
+        mode: PermissionMode::AcceptEdits,
+        allowed_hosts: vec!["Example.org".to_string().try_into().unwrap()],
         plan: Some(sample_plan()),
     }
 }
@@ -840,19 +818,51 @@ fn sample_plan() -> Plan {
         summary: "read and summarize".into(),
         steps: vec![PlanStep {
             description: "list mail".into(),
-            actions: vec![AnticipatedAction {
-                grant: TaskGrant::McpTool {
-                    name: "mcp__mail__list".into(),
+            actions: vec![
+                AnticipatedAction {
+                    action: PlannedAction::Program {
+                        program: "git".into(),
+                        subcommand: Some("status".into()),
+                    },
+                    problem: None,
+                    outlook: ActionOutlook::JudgeDecides,
                 },
-                problem: Some("no such tool".into()),
-            }],
+                AnticipatedAction {
+                    action: PlannedAction::WebHost {
+                        host: "example.org".into(),
+                    },
+                    problem: None,
+                    outlook: ActionOutlook::Unasked,
+                },
+                AnticipatedAction {
+                    action: PlannedAction::McpTool {
+                        name: "mcp__mail__list".into(),
+                    },
+                    problem: Some("no such tool".into()),
+                    outlook: ActionOutlook::Asks,
+                },
+                AnticipatedAction {
+                    action: PlannedAction::App {
+                        desktop_entry: "firefox.desktop".into(),
+                    },
+                    problem: None,
+                    outlook: ActionOutlook::Asks,
+                },
+                AnticipatedAction {
+                    action: PlannedAction::Write {
+                        under: PathBuf::from("/home/u/notes"),
+                    },
+                    problem: None,
+                    outlook: ActionOutlook::Unasked,
+                },
+            ],
         }],
     }
 }
 
-const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"grant":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool"}]}]}"#;
+const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}"#;
 
-const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"grant":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool"}]}]}}"#;
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"],"plan":{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
     let save_wire =
@@ -882,13 +892,14 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
                 id: id(),
                 task: None,
                 spec: TaskSpec {
-                    grants: Vec::new(),
+                    mode: PermissionMode::Manual,
+                    allowed_hosts: Vec::new(),
                     plan: None,
                     triggers: Vec::new(),
                     ..sample_task_spec()
                 },
             },
-            r#"{"type":"task_save","id":"r","spec":{"name":"digest","prompt":"summarize my inbox","triggers":[],"enabled":true}}"#,
+            r#"{"type":"task_save","id":"r","spec":{"name":"digest","prompt":"summarize my inbox","triggers":[],"enabled":true,"mode":"manual"}}"#,
         ),
         (
             Request::TaskDelete {
@@ -949,9 +960,8 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
                 run: TaskRunId(9),
                 confirm_id: "c".into(),
                 allow: true,
-                add_grant: true,
             },
-            r#"{"type":"task_confirm","id":"r","run":9,"confirm_id":"c","allow":true,"add_grant":true}"#,
+            r#"{"type":"task_confirm","id":"r","run":9,"confirm_id":"c","allow":true}"#,
         ),
     ]
 }
@@ -979,11 +989,8 @@ fn task_plan_request_cases() -> Vec<(Request, &'static str)> {
                 id: id(),
                 task: TaskId(4),
                 plan: PlanId("p1".into()),
-                accepted: vec![TaskGrant::WebHost {
-                    host: "example.org".into(),
-                }],
             },
-            r#"{"type":"task_plan_approve","id":"r","task":4,"plan":"p1","accepted":[{"kind":"web_host","host":"example.org"}]}"#,
+            r#"{"type":"task_plan_approve","id":"r","task":4,"plan":"p1"}"#,
         ),
         (
             Request::TaskCheckTrigger {
@@ -1090,7 +1097,6 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                     script: "rm x".into(),
                     matched_pattern: "rm".into(),
                     always_allow: Vec::new(),
-                    grants: Vec::new(),
                     source: ConfirmSource::Task {
                         task: TaskId(4),
                         run: TaskRunId(9),
@@ -1174,4 +1180,34 @@ fn task_save_refuses_blank_names_and_oversized_prompts_at_parse() {
         panic!("not a task_save");
     };
     assert_eq!(spec.name.as_str(), "digest");
+}
+
+#[test]
+fn task_save_takes_only_exact_host_names_as_allowed_hosts() {
+    let save = |host: &str| {
+        serde_json::to_string(&json!({
+            "type": "task_save",
+            "id": "r",
+            "spec": {"name": "n", "prompt": "p", "enabled": true, "allowed_hosts": [host]},
+        }))
+        .unwrap()
+    };
+    let parse = |line: String| serde_json::from_str::<Request>(&line);
+
+    for refused in [
+        "",
+        "*.example.org",
+        "https://example.org",
+        "example.org/path",
+        "example..org",
+        "-example.org",
+        "example.org.",
+        "exa mple.org",
+    ] {
+        assert!(parse(save(refused)).is_err(), "{refused:?} was taken");
+    }
+    let Request::TaskSave { spec, .. } = parse(save(" API.Example.org ")).unwrap() else {
+        panic!("not a task_save");
+    };
+    assert_eq!(spec.allowed_hosts[0].as_str(), "api.example.org");
 }

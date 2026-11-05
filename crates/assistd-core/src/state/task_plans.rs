@@ -1,6 +1,6 @@
 //! Handlers for `TaskPlan` and `TaskPlanApprove`: a task's prompt planned in a conversation of
-//! its own and revised there on feedback, and an approved plan saved on the task with its
-//! accepted actions as the task's grants.
+//! its own and revised there on feedback, and an approved plan saved on the task for its runs
+//! to follow.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,13 +12,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use assistd_ipc::{Event, Plan, PlanId, TaskGrant, TaskId, TaskPrompt};
+use assistd_ipc::{Event, Plan, PlanId, TaskId, TaskPrompt};
 use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, LlmHealthProbe, SlotAssignment};
 use assistd_memory::TaskRecord;
 
 use super::task_runs::task_system_prompt;
 use super::{AppState, DispatchError, send_error};
-use crate::planner::{PlanAsk, PlanError, Planner};
+use crate::planner::{PlanAsk, PlanError, Planner, WorkPermissions};
 use crate::presence::PresenceLlmHealthProbe;
 
 const EVENT_BUFFER: usize = 32;
@@ -30,8 +30,6 @@ pub enum TaskPlanError {
     NoPlanToRevise(TaskId),
     #[error("plan {plan} is not the latest plan made for task {task}")]
     NotLatest { task: TaskId, plan: PlanId },
-    #[error("an accepted grant is not one of the plan's actions: {0:?}")]
-    NotInPlan(TaskGrant),
     #[error("task {0}'s prompt changed after it was planned; plan it again")]
     PromptChanged(TaskId),
 }
@@ -97,11 +95,10 @@ impl AppState {
         id: String,
         task: TaskId,
         plan: PlanId,
-        accepted: Vec<TaskGrant>,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let record = self
-            .approve_task_plan(task, plan, accepted)
+            .approve_task_plan(task, plan)
             .await
             .map(|record| vec![record]);
         self.send_tasks(id, "task plan approve", record, &tx).await
@@ -127,11 +124,15 @@ impl AppState {
             return Err(PlanError::Cancelled.into());
         };
         let (session, ask) = self.planning_session(&record, feedback).await?;
+        let permissions = WorkPermissions {
+            mode: record.spec.mode,
+            allowed_hosts: record.spec.allowed_hosts.clone(),
+        };
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
         let planner = self.planner();
         let planning = planner.plan(
             Arc::clone(&session.conversation),
-            ask,
+            (ask, permissions),
             id.to_string(),
             llm_tx,
             cancel.clone(),
@@ -178,13 +179,11 @@ impl AppState {
         Ok((session, ask))
     }
 
-    /// Save plan `plan` on task `task` with `accepted` as its grants, then drop the task's
-    /// planning conversation.
+    /// Save plan `plan` on task `task`, then drop the task's planning conversation.
     async fn approve_task_plan(
         &self,
         task: TaskId,
         plan: PlanId,
-        accepted: Vec<TaskGrant>,
     ) -> Result<TaskRecord, DispatchError> {
         let not_latest = || TaskPlanError::NotLatest {
             task,
@@ -195,12 +194,10 @@ impl AppState {
             .latest
             .filter(|latest| latest.id == plan)
             .ok_or_else(not_latest)?;
-        let approved = approved_plan(latest, &accepted)?;
-        let grants = distinct(accepted);
         let record = self
             .memory
             .tasks
-            .approve_plan(task, session.prompt, approved, grants)
+            .approve_plan(task, session.prompt, latest)
             .await?
             .ok_or(TaskPlanError::PromptChanged(task))?;
         info!(target: "assistd::tasks", %task, %plan, "task plan approved");
@@ -228,39 +225,6 @@ impl AppState {
             Duration::from_secs(self.config.timeouts.tool_call_secs),
         )
     }
-}
-
-/// `plan` holding only the actions in `accepted`, each of which must be one of its actions.
-fn approved_plan(plan: Plan, accepted: &[TaskGrant]) -> Result<Plan, TaskPlanError> {
-    let offered = |grant: &TaskGrant| {
-        plan.steps
-            .iter()
-            .flat_map(|step| &step.actions)
-            .any(|action| action.grant == *grant)
-    };
-    if let Some(stray) = accepted.iter().find(|grant| !offered(grant)) {
-        return Err(TaskPlanError::NotInPlan(stray.clone()));
-    }
-    let steps = plan
-        .steps
-        .into_iter()
-        .map(|mut step| {
-            step.actions
-                .retain(|action| accepted.contains(&action.grant));
-            step
-        })
-        .collect();
-    Ok(Plan { steps, ..plan })
-}
-
-fn distinct(grants: Vec<TaskGrant>) -> Vec<TaskGrant> {
-    let mut kept = Vec::with_capacity(grants.len());
-    for grant in grants {
-        if !kept.contains(&grant) {
-            kept.push(grant);
-        }
-    }
-    kept
 }
 
 /// Send the planning turn's events to `tx`, each wrapped as task `task`'s.

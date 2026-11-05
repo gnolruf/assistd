@@ -7,7 +7,7 @@ use assistd_ipc::{
     Event, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role, StatusKind,
     StatusSeverity, TurnStats,
 };
-use assistd_tools::{ConfirmationRequest, Grantable, Risk, Unattended};
+use assistd_tools::{ConfirmationRequest, Risk, Unattended};
 use assistd_utils::time::saturating_millis;
 use serde_json::Value;
 
@@ -168,7 +168,6 @@ impl App {
                     always_allow,
                     risk: Risk::Elevated,
                     unattended: Unattended::Never,
-                    grantable: Grantable::Never,
                     source,
                 },
             ),

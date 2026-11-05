@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use assistd_ipc::Event;
 use assistd_tools::commands::BashPolicyCfg;
 use assistd_tools::{
-    ApprovalGate, Approvals, CONFIRM_ROUTER, ConfirmRouter, ConfirmationGate, GrantCheck,
+    ActionCheck, ApprovalGate, Approvals, CONFIRM_ROUTER, ConfirmRouter, ConfirmationGate,
     IpcConfirmationGate, OutputCap, PresentSpec, SandboxInfo, ToolOutput, ToolRegistry,
 };
 
@@ -29,7 +29,7 @@ fn planning_registry() -> Arc<ToolRegistry> {
         output_cap: Arc::new(OutputCap::new(PresentSpec::default())),
         scratch_dir: None,
         reminisce: None,
-        checks: GrantCheck::new(sandbox.search_path()),
+        checks: ActionCheck::new(sandbox.search_path(), None),
     })
     .registry
 }
