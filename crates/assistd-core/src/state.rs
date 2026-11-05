@@ -234,8 +234,7 @@ impl AppState {
                 self.handle_memory_forget(id, memory_id, tx).await
             }
             Request::MemorySemanticSearch { id, query, limit } => {
-                self.handle_memory_semantic_search(id, query, limit, tx)
-                    .await
+                self.handle_semantic_search(id, query, limit, tx).await
             }
             Request::MemoryReindex { id } => self.handle_memory_reindex(id, tx).await,
             Request::GetPresence { id } => replied(self.handle_get_presence(id, tx)).await,
@@ -290,9 +289,9 @@ impl AppState {
                 task,
                 plan,
                 accepted,
-            } => {
-                self.handle_task_plan_approve(id, task, plan, accepted, tx)
-                    .await
+            } => self.handle_plan_approve(id, task, plan, accepted, tx).await,
+            Request::TaskCheckTrigger { id, task, trigger } => {
+                self.handle_task_check_trigger(id, task, trigger, tx).await
             }
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 replied(send_error(&tx, id, unmatched_confirm_response(&confirm_id))).await

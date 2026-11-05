@@ -985,6 +985,14 @@ fn task_plan_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"task_plan_approve","id":"r","task":4,"plan":"p1","accepted":[{"kind":"web_host","host":"example.org"}]}"#,
         ),
+        (
+            Request::TaskCheckTrigger {
+                id: id(),
+                task: None,
+                trigger: TaskTrigger::Manual,
+            },
+            r#"{"type":"task_check_trigger","id":"r","trigger":{"kind":"manual"}}"#,
+        ),
     ]
 }
 
@@ -1039,7 +1047,7 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
 
 fn task_event_cases() -> Vec<(Event, &'static str)> {
     let wire = format!(
-        r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z"}}"#
+        r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z","last_run":{{"state":"failed","reason":"timed out"}}}}"#
     );
     vec![
         (
@@ -1048,8 +1056,20 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                 task_id: TaskId(4),
                 spec: sample_task_spec(),
                 next_fire: DateTime::from_timestamp(1_793_887_200, 0),
+                last_run: Some(TaskRunState::Failed {
+                    reason: "timed out".into(),
+                }),
             },
             wire.leak(),
+        ),
+        (
+            Event::TriggerFires {
+                id: id(),
+                fires: DateTime::from_timestamp(1_793_887_200, 0)
+                    .into_iter()
+                    .collect(),
+            },
+            r#"{"type":"trigger_fires","id":"r","fires":["2026-11-05T14:00:00Z"]}"#,
         ),
         (
             Event::TaskRunQueued {

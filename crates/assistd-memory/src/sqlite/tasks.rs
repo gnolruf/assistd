@@ -1,5 +1,7 @@
 //! SQLite-backed [`TaskStore`] over the `tasks` and `task_runs` tables.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
@@ -396,6 +398,26 @@ impl TaskStore for SqliteTaskStore {
             .await
             .map_err(MemoryError::sqlite("task finish_run"))?;
         run_updated(updated, run)
+    }
+
+    async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>> {
+        self.handle
+            .reader()
+            .call(|c| -> rusqlite::Result<_> {
+                let mut stmt = c.prepare_cached(
+                    "SELECT task_id, state, suspend_reason, failure FROM task_runs
+                     WHERE id IN (SELECT MAX(id) FROM task_runs
+                                  WHERE state IN (?1, ?2, ?3) GROUP BY task_id)",
+                )?;
+                let rows = stmt
+                    .query_map([RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELLED], |row| {
+                        Ok((TaskId(row.get(0)?), run_state_at(row, 1)?))
+                    })?
+                    .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .map_err(MemoryError::sqlite("task last_finished_runs"))
     }
 }
 

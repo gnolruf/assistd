@@ -349,7 +349,10 @@ change and greets every new subscriber.
 Time triggers are `TaskTrigger::At` (one local datetime) and
 `TaskTrigger::Schedule` (a five-field local-time cron expression parsed by
 `croner`, so DST gaps and repeats behave). `TaskSave` refuses invalid
-expressions and `At` times already past. The `TaskScheduler`, a second service
+expressions and `At` times already past. `TaskCheckTrigger` runs the same
+checks on one trigger without saving and returns its next three fire times,
+so a client can show them, or the refusal, as the trigger is written.
+`Event::Task` carries how the task's latest finished run ended. The `TaskScheduler`, a second service
 on the `TaskRunner`, sleeps until the nearest fire time across enabled tasks,
 waking early on any task change. Each sleep is capped at a minute and
 compared against the wall clock, since tokio's clock stands still through a
@@ -459,6 +462,16 @@ accepted, each of which must be in it. The plan, holding only those actions,
 and the actions as the task's grants, replacing any it held, are saved in one
 write that is skipped if the prompt changed since the plan was made. The
 planning conversation is then dropped.
+
+In the TUI, `/tasks` opens a panel over these requests alone, since tasks
+live in the daemon's store rather than `config.toml`. It lists each task
+with its triggers, next fire, last outcome and whether it is enabled without
+an approved plan; its editor saves the name, prompt, triggers and enabled
+flag, leaving grants and plan to the daemon. "Plan" streams the planning turn
+like a chat turn, then shows the plan as a `PlanReview`: each anticipated
+action a checkbox, ticked unless flagged. Feedback revises the plan, and
+approving sends the ticked actions. A grants view removes grants one at a
+time with a `TaskSave` of the stored task.
 
 ### Tools (`assistd-tools`)
 

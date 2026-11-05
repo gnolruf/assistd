@@ -22,6 +22,10 @@ impl App {
     pub(crate) fn on_chat_event(&mut self, ev: ChatEvent) {
         match ev {
             ChatEvent::Wire { stream, event } => self.on_wire_event(stream, event),
+            ChatEvent::WireError {
+                stream: WireStream::Tasks,
+                message,
+            } => self.fail_tasks_stream(&message),
             ChatEvent::WireError { stream, message } => {
                 self.output.push_error(&format!("[wire error] {message}"));
                 self.fail_stream(stream);
@@ -67,9 +71,16 @@ impl App {
     }
 
     fn on_wire_event(&mut self, stream: WireStream, ev: Event) {
-        if let WireStream::WakeWord(wake_word_stream) = stream {
-            self.on_wake_word_event(wake_word_stream, ev);
-            return;
+        match stream {
+            WireStream::WakeWord(wake_word_stream) => {
+                self.on_wake_word_event(wake_word_stream, ev);
+                return;
+            }
+            WireStream::Tasks => {
+                self.on_tasks_event(ev);
+                return;
+            }
+            WireStream::Reply | WireStream::Branch | WireStream::Status => {}
         }
         if matches!(stream, WireStream::Reply) && !self.accept_reply_event(&ev) {
             return;
@@ -120,6 +131,7 @@ impl App {
             | Event::Queued { .. }
             | Event::Plan { .. }
             | Event::TaskPlan { .. }
+            | Event::TriggerFires { .. }
             | Event::LastDelta { .. } => {}
         }
     }
@@ -531,7 +543,7 @@ impl App {
                     self.open_resume_picker();
                 }
             }
-            WireStream::Status | WireStream::WakeWord(_) => {}
+            WireStream::Status | WireStream::WakeWord(_) | WireStream::Tasks => {}
         }
     }
 
@@ -543,7 +555,7 @@ impl App {
                 self.branches_buffer.clear();
             }
             WireStream::WakeWord(WakeWordStream::Session) => self.fail_wake_word_session(),
-            WireStream::Status | WireStream::WakeWord(_) => {}
+            WireStream::Status | WireStream::WakeWord(_) | WireStream::Tasks => {}
         }
     }
 }

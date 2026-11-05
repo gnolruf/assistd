@@ -16,7 +16,7 @@ use assistd_tools::DEFAULT_SEARCH_LIMIT;
 use super::{AppState, DispatchError, send_error, wire_role, wire_timestamp};
 
 impl AppState {
-    pub(super) async fn handle_memory_semantic_search(
+    pub(super) async fn handle_semantic_search(
         self: Arc<Self>,
         id: String,
         query: String,

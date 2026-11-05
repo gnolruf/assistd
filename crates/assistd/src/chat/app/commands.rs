@@ -17,6 +17,7 @@ enum SlashCommand {
     New,
     Resume,
     Settings,
+    Tasks,
     WakeWord,
 }
 
@@ -38,6 +39,7 @@ impl SlashCommand {
             "/new" => Some(Self::New),
             "/resume" => Some(Self::Resume),
             "/settings" => Some(Self::Settings),
+            "/tasks" => Some(Self::Tasks),
             "/wakeword" => Some(Self::WakeWord),
             _ => None,
         }
@@ -83,6 +85,7 @@ impl App {
                 self.spawn_branch_command(BranchOp::ResumePicker, Request::Branches { id });
             }
             SlashCommand::Settings => self.open_settings_panel(),
+            SlashCommand::Tasks => self.open_tasks_panel(),
             SlashCommand::WakeWord => self.open_wake_word_panel(),
         }
     }

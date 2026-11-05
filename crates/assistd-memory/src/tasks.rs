@@ -1,12 +1,14 @@
 //! The [`TaskStore`] of saved tasks and its no-op fallback.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use assistd_ipc::{
-    Plan, SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskSpec, TaskTrigger,
+    Plan, SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskRunState, TaskSpec,
+    TaskTrigger,
 };
 
 use crate::{MemoryError, Result, SessionId};
@@ -142,6 +144,9 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
     /// Record how unfinished run `run` ended; [`MemoryError::TaskRunNotFound`] when it has
     /// already finished or does not exist.
     async fn finish_run(&self, run: TaskRunId, end: TaskRunEnd) -> Result<()>;
+
+    /// How each task's latest finished run ended, for every task with one.
+    async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>>;
 }
 
 /// Store with no database: lists nothing and refuses every write.
@@ -240,5 +245,9 @@ impl TaskStore for NoTaskStore {
 
     async fn finish_run(&self, run: TaskRunId, _end: TaskRunEnd) -> Result<()> {
         Err(MemoryError::TaskRunNotFound(run))
+    }
+
+    async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>> {
+        Ok(HashMap::new())
     }
 }

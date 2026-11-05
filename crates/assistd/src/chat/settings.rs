@@ -22,7 +22,7 @@ mod preview;
 mod render;
 mod theme_list;
 
-pub(crate) use panel::SettingsPanel;
+pub(crate) use panel::{EditAction, EditorShape, SettingsPanel, TextEditor};
 pub(crate) use render::render_settings;
 
 #[derive(Args)]

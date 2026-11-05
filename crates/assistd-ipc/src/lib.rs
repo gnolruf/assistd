@@ -606,6 +606,14 @@ pub enum Request {
         #[serde(default)]
         accepted: Vec<TaskGrant>,
     },
+    /// Check `trigger` as `TaskSave` would for task `task`, or for a new task when `None`.
+    /// Emits `TriggerFires`, then `Done`; errors with why a save would refuse it.
+    TaskCheckTrigger {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<TaskId>,
+        trigger: TaskTrigger,
+    },
 }
 
 impl Request {
@@ -680,7 +688,8 @@ impl Request {
             | Request::TaskQueue { id, .. }
             | Request::TaskConfirm { id, .. }
             | Request::TaskPlan { id, .. }
-            | Request::TaskPlanApprove { id, .. } => id,
+            | Request::TaskPlanApprove { id, .. }
+            | Request::TaskCheckTrigger { id, .. } => id,
         }
     }
 
@@ -734,6 +743,7 @@ impl Request {
             Request::TaskConfirm { .. } => "task_confirm",
             Request::TaskPlan { .. } => "task_plan",
             Request::TaskPlanApprove { .. } => "task_plan_approve",
+            Request::TaskCheckTrigger { .. } => "task_check_trigger",
         }
     }
 }
@@ -1116,6 +1126,15 @@ pub enum Event {
         /// When its triggers next fire; `None` while it is disabled or nothing is due.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_fire: Option<DateTime<Utc>>,
+        /// How its latest finished run ended; `None` before any has finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_run: Option<TaskRunState>,
+    },
+    /// The next fire times of the trigger a `TaskCheckTrigger` checked, soonest first, at
+    /// most three; empty for a trigger that fires on request or on an event.
+    TriggerFires {
+        id: String,
+        fires: Vec<DateTime<Utc>>,
     },
     /// Run `run` of `task` was queued.
     TaskRunQueued {
@@ -1202,6 +1221,7 @@ impl Event {
             | Event::Queued { id, .. }
             | Event::Plan { id, .. }
             | Event::TaskPlan { id, .. }
+            | Event::TriggerFires { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id }
             | Event::LastDelta { id, .. } => id,
@@ -1252,7 +1272,8 @@ impl Event {
             | Event::TaskRunQueued { .. }
             | Event::Queued { .. }
             | Event::Plan { .. }
-            | Event::TaskPlan { .. } => return None,
+            | Event::TaskPlan { .. }
+            | Event::TriggerFires { .. } => return None,
         })
     }
 }

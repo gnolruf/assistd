@@ -16,7 +16,6 @@ use assistd_ipc::{Event, Plan, PlanId, TaskGrant, TaskId, TaskPrompt};
 use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, LlmHealthProbe, SlotAssignment};
 use assistd_memory::TaskRecord;
 
-use super::task_handlers::send_tasks;
 use super::task_runs::task_system_prompt;
 use super::{AppState, DispatchError, send_error};
 use crate::planner::{PlanAsk, PlanError, Planner};
@@ -93,7 +92,7 @@ impl AppState {
         }
     }
 
-    pub(super) async fn handle_task_plan_approve(
+    pub(super) async fn handle_plan_approve(
         self: Arc<Self>,
         id: String,
         task: TaskId,
@@ -105,7 +104,7 @@ impl AppState {
             .approve_task_plan(task, plan, accepted)
             .await
             .map(|record| vec![record]);
-        send_tasks(id, "task plan approve", record, &tx).await
+        self.send_tasks(id, "task plan approve", record, &tx).await
     }
 
     /// Plan or revise task `task` on the main lane, as a user turn takes it, streaming the

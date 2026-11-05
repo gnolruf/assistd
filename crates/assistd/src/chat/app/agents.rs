@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::App;
 use crate::chat::output::{OutputPane, RelayStepTrace};
+use crate::chat::tasks::TasksPanel;
 
 /// The `/agents` panel, drawn in place of the transcript.
 #[derive(Debug, Clone, Copy)]
@@ -52,12 +53,24 @@ impl App {
             || self
                 .viewed_agent()
                 .is_some_and(|agent| agent.transcript().glyph_live())
+            || self
+                .tasks_panel
+                .as_ref()
+                .and_then(TasksPanel::planning_pane)
+                .is_some_and(OutputPane::glyph_live)
     }
 
     pub(in crate::chat) fn advance_live_glyphs(&mut self) {
         self.output.advance_live_glyphs();
         if let Some(agent) = self.viewed_agent_mut() {
             agent.transcript_mut().advance_live_glyphs();
+        }
+        if let Some(pane) = self
+            .tasks_panel
+            .as_mut()
+            .and_then(TasksPanel::planning_pane_mut)
+        {
+            pane.advance_live_glyphs();
         }
     }
 
