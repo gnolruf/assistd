@@ -16,6 +16,7 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         session_request_cases(),
         wake_word_request_cases(),
         task_request_cases(),
+        task_plan_request_cases(),
     ]
     .concat()
 }
@@ -828,19 +829,29 @@ fn sample_task_spec() -> TaskSpec {
                 under: PathBuf::from("/home/u/notes"),
             },
         ],
-        plan: Some(TaskPlan {
-            summary: "read and summarize".into(),
-            steps: vec![PlanStep {
-                description: "list mail".into(),
-                actions: vec![TaskGrant::McpTool {
-                    name: "mcp__mail__list".into(),
-                }],
-            }],
-        }),
+        plan: Some(sample_plan()),
     }
 }
 
-const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"summary":"read and summarize","steps":[{"description":"list mail","actions":[{"kind":"mcp_tool","name":"mcp__mail__list"}]}]}}"#;
+fn sample_plan() -> Plan {
+    Plan {
+        id: PlanId("p1".into()),
+        summary: "read and summarize".into(),
+        steps: vec![PlanStep {
+            description: "list mail".into(),
+            actions: vec![AnticipatedAction {
+                grant: TaskGrant::McpTool {
+                    name: "mcp__mail__list".into(),
+                },
+                problem: Some("no such tool".into()),
+            }],
+        }],
+    }
+}
+
+const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"grant":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool"}]}]}"#;
+
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"grants":[{"kind":"program","program":"git","subcommand":"status"},{"kind":"web_host","host":"example.org"},{"kind":"mcp_tool","name":"mcp__mail__list"},{"kind":"app","desktop_entry":"firefox.desktop"},{"kind":"write","under":"/home/u/notes"}],"plan":{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"grant":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool"}]}]}}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
     let save_wire =
@@ -937,6 +948,38 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
     ]
 }
 
+fn task_plan_request_cases() -> Vec<(Request, &'static str)> {
+    vec![
+        (
+            Request::TaskPlan {
+                id: id(),
+                task: TaskId(4),
+                feedback: None,
+            },
+            r#"{"type":"task_plan","id":"r","task":4}"#,
+        ),
+        (
+            Request::TaskPlan {
+                id: id(),
+                task: TaskId(4),
+                feedback: Some("skip the mail".into()),
+            },
+            r#"{"type":"task_plan","id":"r","task":4,"feedback":"skip the mail"}"#,
+        ),
+        (
+            Request::TaskPlanApprove {
+                id: id(),
+                task: TaskId(4),
+                plan: PlanId("p1".into()),
+                accepted: vec![TaskGrant::WebHost {
+                    host: "example.org".into(),
+                }],
+            },
+            r#"{"type":"task_plan_approve","id":"r","task":4,"plan":"p1","accepted":[{"kind":"web_host","host":"example.org"}]}"#,
+        ),
+    ]
+}
+
 fn task_event_cases() -> Vec<(Event, &'static str)> {
     let wire = format!(
         r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z"}}"#
@@ -1000,6 +1043,24 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                 },
             },
             r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false}}"#,
+        ),
+        (
+            Event::Plan {
+                id: id(),
+                plan: sample_plan(),
+            },
+            format!(r#"{{"type":"plan","id":"r","plan":{SAMPLE_PLAN_WIRE}}}"#).leak(),
+        ),
+        (
+            Event::TaskPlan {
+                id: id(),
+                task: TaskId(4),
+                event: Box::new(Event::Delta {
+                    id: id(),
+                    text: "hi".into(),
+                }),
+            },
+            r#"{"type":"task_plan","id":"r","task":4,"event":{"type":"delta","id":"r","text":"hi"}}"#,
         ),
     ]
 }

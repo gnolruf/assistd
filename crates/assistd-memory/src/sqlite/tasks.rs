@@ -8,7 +8,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use assistd_ipc::{
-    SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskRunState, TaskSpec, TaskTrigger,
+    Plan, SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskRunState, TaskSpec,
+    TaskTrigger,
 };
 
 use crate::{
@@ -152,6 +153,29 @@ impl TaskStore for SqliteTaskStore {
             .await
             .map_err(MemoryError::sqlite_or_missing(
                 "task add_grants",
+                MemoryError::TaskNotFound(id),
+            ))
+    }
+
+    async fn approve_plan(
+        &self,
+        id: TaskId,
+        prompt: TaskPrompt,
+        plan: Plan,
+        grants: Vec<TaskGrant>,
+    ) -> Result<Option<TaskRecord>> {
+        let now = now_millis();
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let approved = approve_plan_if_prompt(&tx, id, &prompt, &plan, &grants, now)?;
+                tx.commit()?;
+                Ok(approved)
+            })
+            .await
+            .map_err(MemoryError::sqlite_or_missing(
+                "task approve_plan",
                 MemoryError::TaskNotFound(id),
             ))
     }
@@ -612,6 +636,34 @@ fn add_grants_if_prompt(
         rusqlite::params![id.0, to_json(&held)?, now],
     )?;
     Ok(true)
+}
+
+/// Set task `id`'s plan and grants when its prompt is still `prompt`, returning it as updated.
+fn approve_plan_if_prompt(
+    tx: &Transaction<'_>,
+    id: TaskId,
+    prompt: &TaskPrompt,
+    plan: &Plan,
+    grants: &[TaskGrant],
+    now: i64,
+) -> rusqlite::Result<Option<TaskRecord>> {
+    let updated = tx.execute(
+        "UPDATE tasks SET plan = ?3, grants = ?4, updated_at = MAX(?5, created_at)
+         WHERE id = ?1 AND prompt = ?2",
+        rusqlite::params![
+            id.0,
+            prompt.as_str(),
+            to_json(plan)?,
+            to_json(&grants)?,
+            now
+        ],
+    )?;
+    if updated == 0 {
+        tx.query_row("SELECT 1 FROM tasks WHERE id = ?1", [id.0], |_| Ok(()))?;
+        return Ok(None);
+    }
+    let select = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1");
+    tx.query_row(&select, [id.0], task_record).map(Some)
 }
 
 /// Map a failed save of the task named `name` to its typed error.

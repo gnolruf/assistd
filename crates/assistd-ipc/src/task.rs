@@ -138,9 +138,10 @@ pub struct TaskSpec {
     /// Approvals runs of this task may use; cleared whenever the prompt changes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<TaskGrant>,
-    /// The approved plan; cleared whenever the prompt changes.
+    /// The approved plan, holding only its accepted actions; cleared whenever the prompt
+    /// changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<TaskPlan>,
+    pub plan: Option<Plan>,
 }
 
 /// A condition that starts a run of its task.
@@ -231,19 +232,41 @@ pub enum TaskGrant {
     Write { under: PathBuf },
 }
 
-/// An approved plan for a task's prompt.
+/// A plan's id, fresh for every plan the planner makes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlanId(pub String);
+
+impl fmt::Display for PlanId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// How the agent means to do a piece of work, and the approvals it expects to need.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskPlan {
+pub struct Plan {
+    pub id: PlanId,
     pub summary: String,
     pub steps: Vec<PlanStep>,
 }
 
-/// One step of a [`TaskPlan`] and the approvals it expects to need.
+/// One step of a [`Plan`] and the approvals it expects to need.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub actions: Vec<TaskGrant>,
+    pub actions: Vec<AnticipatedAction>,
+}
+
+/// An approval a plan expects to need; approving it makes `grant` a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnticipatedAction {
+    pub grant: TaskGrant,
+    /// Why the daemon expects the grant to cover nothing, such as a program missing from
+    /// `PATH`; `None` when it passed every check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
 }
 
 /// Where a task run has got; only a finished run carries an outcome.

@@ -1,4 +1,4 @@
-use assistd_ipc::{PlanStep, SuspendReason, TaskGrant, TaskPlan, TaskRunSummary, TaskTrigger};
+use assistd_ipc::{Plan, PlanId, PlanStep, SuspendReason, TaskGrant, TaskRunSummary, TaskTrigger};
 
 use super::*;
 use crate::{SqliteTranscriptStore, TranscriptStore};
@@ -21,7 +21,8 @@ fn approved_spec(name: &str, prompt: &str) -> TaskSpec {
         grants: vec![TaskGrant::WebHost {
             host: "example.org".into(),
         }],
-        plan: Some(TaskPlan {
+        plan: Some(Plan {
+            id: PlanId("p1".into()),
             summary: "fetch it".into(),
             steps: vec![PlanStep {
                 description: "fetch the page".into(),
@@ -54,6 +55,42 @@ async fn only_a_changed_prompt_drops_the_plan_and_grants() {
     assert!(stored.spec.grants.is_empty());
     assert_eq!(stored.spec.plan, None);
     assert_eq!(stored.spec.prompt.as_str(), "summarize example.com");
+}
+
+#[tokio::test]
+async fn a_plan_approved_for_an_old_prompt_is_not_saved() {
+    let (store, _temp) = fresh().await;
+    let spec = TaskSpec {
+        plan: None,
+        ..approved_spec("digest", "summarize example.org")
+    };
+    let saved = store.save(None, spec).await.unwrap();
+    let plan = approved_spec("digest", "x").plan.unwrap();
+    let grants = vec![TaskGrant::McpTool {
+        name: "mcp__mail__list".into(),
+    }];
+    let stale = "summarize example.com".to_string().try_into().unwrap();
+
+    let refused = store
+        .approve_plan(saved.id, stale, plan.clone(), grants.clone())
+        .await
+        .unwrap();
+    assert_eq!(refused, None);
+    assert_eq!(store.get(saved.id).await.unwrap(), saved);
+
+    let approved = store
+        .approve_plan(
+            saved.id,
+            saved.spec.prompt.clone(),
+            plan.clone(),
+            grants.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approved.spec.plan, Some(plan));
+    assert_eq!(approved.spec.grants, grants);
+    assert_eq!(store.get(saved.id).await.unwrap(), approved);
 }
 
 #[tokio::test]

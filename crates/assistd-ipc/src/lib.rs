@@ -18,10 +18,10 @@ pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
-    DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, LaneHolder, MissedFire,
-    PlanStep, SuspendReason, TaskEvent, TaskGrant, TaskId, TaskName, TaskPlan, TaskPrompt,
-    TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState, TaskRunSummary,
-    TaskSpec, TaskSpecError, TaskTrigger,
+    AnticipatedAction, DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome,
+    LaneHolder, MissedFire, Plan, PlanId, PlanStep, SuspendReason, TaskEvent, TaskGrant, TaskId,
+    TaskName, TaskPrompt, TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
+    TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -587,6 +587,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         add_grant: bool,
     },
+    /// Plan `task`'s prompt in a conversation of its own, or with `feedback` revise its last
+    /// plan; streams the turn wrapped in `TaskPlan`, then emits `Plan` and `Done`. Errors when
+    /// `feedback` is given and the task has no plan to revise.
+    TaskPlan {
+        id: String,
+        task: TaskId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+    },
+    /// Save `task`'s latest plan `plan` on it, its `accepted` actions replacing the task's
+    /// grants, then emit the updated `Task` and `Done`. Errors when `plan` is not the latest,
+    /// the prompt changed since, or an accepted grant is not in it.
+    TaskPlanApprove {
+        id: String,
+        task: TaskId,
+        plan: PlanId,
+        #[serde(default)]
+        accepted: Vec<TaskGrant>,
+    },
 }
 
 impl Request {
@@ -659,7 +678,9 @@ impl Request {
             | Request::TaskRun { id, .. }
             | Request::TaskCancel { id, .. }
             | Request::TaskQueue { id, .. }
-            | Request::TaskConfirm { id, .. } => id,
+            | Request::TaskConfirm { id, .. }
+            | Request::TaskPlan { id, .. }
+            | Request::TaskPlanApprove { id, .. } => id,
         }
     }
 
@@ -711,6 +732,8 @@ impl Request {
             Request::TaskCancel { .. } => "task_cancel",
             Request::TaskQueue { .. } => "task_queue",
             Request::TaskConfirm { .. } => "task_confirm",
+            Request::TaskPlan { .. } => "task_plan",
+            Request::TaskPlanApprove { .. } => "task_plan_approve",
         }
     }
 }
@@ -1109,6 +1132,14 @@ pub enum Event {
         id: String,
         snapshot: TaskQueueSnapshot,
     },
+    /// A plan for the work asked for, each anticipated action checked against the machine.
+    Plan { id: String, plan: Plan },
+    /// One event of the planning turn for `task`, which `id` asked for; never terminal itself.
+    TaskPlan {
+        id: String,
+        task: TaskId,
+        event: Box<Event>,
+    },
     /// Terminal failure.
     Error { id: String, message: String },
     /// Terminal success.
@@ -1162,6 +1193,8 @@ impl Event {
             | Event::TaskRunQueued { id, .. }
             | Event::TaskRun { id, .. }
             | Event::TaskQueue { id, .. }
+            | Event::Plan { id, .. }
+            | Event::TaskPlan { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id }
             | Event::LastDelta { id, .. } => id,
@@ -1209,7 +1242,9 @@ impl Event {
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. }
             | Event::Task { .. }
-            | Event::TaskRunQueued { .. } => return None,
+            | Event::TaskRunQueued { .. }
+            | Event::Plan { .. }
+            | Event::TaskPlan { .. } => return None,
         })
     }
 }

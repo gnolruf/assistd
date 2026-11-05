@@ -19,9 +19,9 @@ use assistd_memory::{SemanticStore, SessionId};
 use assistd_search::{SearchError, SearxngClient};
 use assistd_tools::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
-    AllowlistError, ApprovalGate, Approvals, ConfirmationGate, MemoryOps, OutputCap, PresentSpec,
-    Protected, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo, SandboxRequest,
-    SharedDirs, ToolSandbox, VisionGate,
+    AllowlistError, ApprovalGate, Approvals, ConfirmationGate, GrantCheck, MemoryOps, OutputCap,
+    PresentSpec, Protected, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo,
+    SandboxRequest, SharedDirs, ToolSandbox, VisionGate,
     commands::{
         BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
         ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand, TailCommand, UniqCommand,
@@ -34,9 +34,11 @@ use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::path::expand_tilde_from_env;
 use assistd_utils::readiness::ReadinessCell;
 
+use planner::{PlanModeTool, PlanningTools};
 use relay::{RelayPolicy, RelayTool};
 
 pub mod agent;
+pub mod planner;
 pub mod presence;
 pub mod recovery;
 mod relay;
@@ -147,6 +149,14 @@ pub struct BuildToolsDeps<'a> {
     /// Readiness of the SearXNG instance `web search` goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub relay: RelayDeps,
+}
+
+/// The registries [`build_tools`] assembles.
+#[derive(Debug)]
+pub struct BuiltTools {
+    /// What ordinary turns are offered.
+    pub registry: Arc<ToolRegistry>,
+    pub planning: PlanningTools,
 }
 
 /// Keeps a [`VisionGate`] and the server's slot count in step with the model llama-server
@@ -269,10 +279,10 @@ pub fn mcp_tool_approvals(config_path: &Path) -> Result<Approvals, BuildToolsErr
     Ok(Approvals::load(config_dir.join(APPROVED_MCP_TOOLS_FILE))?)
 }
 
-/// Assemble the tool registry: the built-in commands behind `run`, `relay`
-/// and, with `memory.enabled`, the memory tools. Removes earlier spill files from
-/// [`BuildToolsDeps::overflow_dir`].
-pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildToolsError> {
+/// Assemble the tool registry: the built-in commands behind `run`, `relay` and, with
+/// `memory.enabled`, the memory tools; and beside it the planning registry. Removes earlier
+/// spill files from [`BuildToolsDeps::overflow_dir`].
+pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsError> {
     let BuildToolsDeps {
         config,
         config_path,
@@ -295,18 +305,32 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
     let scratch_dir = sandbox.shared.scratch.clone();
     let (bash_cfg, write_cfg) = file_policies(config, &config_dir, &sandbox)?;
 
-    let search = config
-        .search
-        .enabled
-        .then(|| {
-            let addr = SocketAddr::new(config.search.host, config.search.port.get());
-            SearxngClient::new(addr, web_search)
-        })
-        .transpose()?;
-    let approved_hosts = ApprovalGate::new(
-        Arc::clone(&confirmation_gate),
-        Arc::new(Approvals::load(config_dir.join(APPROVED_HOSTS_FILE))?),
-    );
+    let (search, approved_hosts) = web_access(config, &config_dir, &confirmation_gate, web_search)?;
+    let output_cap = Arc::new(OutputCap::new(PresentSpec::from_config(
+        &config.tools.output,
+        overflow_dir,
+    )));
+    let reminisce = config.memory.enabled.then(|| {
+        ReminisceTool::new(
+            embedder.clone(),
+            semantic.clone(),
+            Arc::clone(&memory_ops.transcripts),
+            current_session.clone(),
+        )
+    });
+    let planning = planning_tools(PlanningToolDeps {
+        commands: planning_commands(PlanningCommandDeps {
+            bash_cfg: Arc::clone(&bash_cfg),
+            approved_hosts: approved_hosts.clone(),
+            sandbox: Arc::clone(&sandbox),
+            confirmation_gate: Arc::clone(&confirmation_gate),
+            search: search.clone(),
+        }),
+        output_cap: Arc::clone(&output_cap),
+        scratch_dir: scratch_dir.as_deref(),
+        reminisce,
+        checks: GrantCheck::new(sandbox.search_path()),
+    });
     let relay = RelayTool::new(
         relay,
         RelayPolicy {
@@ -334,10 +358,6 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
         search,
     });
 
-    let output_cap = Arc::new(OutputCap::new(PresentSpec::from_config(
-        &config.tools.output,
-        overflow_dir,
-    )));
     let run = RunTool::new(Arc::new(commands), Arc::clone(&output_cap));
     let mut tools = ToolRegistry::with_output_cap(output_cap);
     tools.register(match &scratch_dir {
@@ -360,7 +380,10 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<Arc<ToolRegistry>, BuildT
             current_session,
         ));
     }
-    Ok(Arc::new(tools))
+    Ok(BuiltTools {
+        registry: Arc::new(tools),
+        planning,
+    })
 }
 
 /// The `bash` and `write` policies: `config_dir` protected, and the
@@ -392,6 +415,106 @@ fn file_policies(
     Ok((bash_cfg, write_cfg))
 }
 
+/// The SearXNG client `web search` uses, if search is on, and the gate for web hosts.
+fn web_access(
+    config: &Config,
+    config_dir: &Path,
+    gate: &Arc<dyn ConfirmationGate>,
+    web_search: Arc<ReadinessCell<ChildServerStatus>>,
+) -> Result<(Option<SearxngClient>, ApprovalGate), BuildToolsError> {
+    let search = config
+        .search
+        .enabled
+        .then(|| {
+            let addr = SocketAddr::new(config.search.host, config.search.port.get());
+            SearxngClient::new(addr, web_search)
+        })
+        .transpose()?;
+    let approved_hosts = ApprovalGate::new(
+        Arc::clone(gate),
+        Arc::new(Approvals::load(config_dir.join(APPROVED_HOSTS_FILE))?),
+    );
+    Ok((search, approved_hosts))
+}
+
+struct PlanningToolDeps<'a> {
+    commands: CommandRegistry,
+    output_cap: Arc<OutputCap>,
+    scratch_dir: Option<&'a Path>,
+    reminisce: Option<ReminisceTool>,
+    checks: GrantCheck,
+}
+
+/// `run` over `commands` and, with memory on, `reminisce`, each reporting refusals as
+/// [`PlanModeTool`] does.
+fn planning_tools(deps: PlanningToolDeps<'_>) -> PlanningTools {
+    let PlanningToolDeps {
+        commands,
+        output_cap,
+        scratch_dir,
+        reminisce,
+        checks,
+    } = deps;
+    let run = RunTool::new(Arc::new(commands), Arc::clone(&output_cap));
+    let mut registry = ToolRegistry::with_output_cap(output_cap);
+    registry.register(PlanModeTool::new(match scratch_dir {
+        Some(scratch_dir) => run.with_scratch_dir(scratch_dir),
+        None => run,
+    }));
+    if let Some(reminisce) = reminisce {
+        registry.register(PlanModeTool::new(reminisce));
+    }
+    PlanningTools {
+        registry: Arc::new(registry),
+        checks,
+    }
+}
+
+struct PlanningCommandDeps {
+    bash_cfg: Arc<BashPolicyCfg>,
+    approved_hosts: ApprovalGate,
+    sandbox: Arc<SandboxInfo>,
+    confirmation_gate: Arc<dyn ConfirmationGate>,
+    search: Option<SearxngClient>,
+}
+
+/// The commands of a planning turn: the in-process readers, `web`, and `bash` with no
+/// "always allow" approvals, so a script it runs unasked is read-only by its own class.
+fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
+    let PlanningCommandDeps {
+        bash_cfg,
+        approved_hosts,
+        sandbox,
+        confirmation_gate,
+        search,
+    } = deps;
+    let unapproved = BashPolicyCfg {
+        allowlist: Arc::new(Allowlist::unsaved(sandbox.search_path())),
+        ..BashPolicyCfg::clone(&bash_cfg)
+    };
+    let mut commands = CommandRegistry::new();
+    register_readers(&mut commands);
+    commands.register(WebCommand::new(approved_hosts, search));
+    commands.register(BashCommand::new(
+        Arc::new(unapproved),
+        sandbox,
+        confirmation_gate,
+    ));
+    commands
+}
+
+fn register_readers(commands: &mut CommandRegistry) {
+    commands.register(CatCommand);
+    commands.register(LsCommand);
+    commands.register(GrepCommand);
+    commands.register(WcCommand);
+    commands.register(HeadCommand);
+    commands.register(TailCommand);
+    commands.register(SortCommand);
+    commands.register(UniqCommand);
+    commands.register(EchoCommand);
+}
+
 struct BuiltinCommandDeps {
     bash_cfg: Arc<BashPolicyCfg>,
     write_cfg: Arc<WritePolicyCfg>,
@@ -420,15 +543,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     } = deps;
 
     let mut commands = CommandRegistry::new();
-    commands.register(CatCommand);
-    commands.register(LsCommand);
-    commands.register(GrepCommand);
-    commands.register(WcCommand);
-    commands.register(HeadCommand);
-    commands.register(TailCommand);
-    commands.register(SortCommand);
-    commands.register(UniqCommand);
-    commands.register(EchoCommand);
+    register_readers(&mut commands);
     commands.register(WriteCommand::new(
         write_cfg,
         confirmation_gate.clone(),

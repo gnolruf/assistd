@@ -5,7 +5,9 @@ use std::fmt;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use assistd_ipc::{SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskSpec, TaskTrigger};
+use assistd_ipc::{
+    Plan, SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskSpec, TaskTrigger,
+};
 
 use crate::{MemoryError, Result, SessionId};
 
@@ -76,6 +78,17 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
         prompt: TaskPrompt,
         grants: Vec<TaskGrant>,
     ) -> Result<bool>;
+
+    /// Save `plan` on task `id` with `grants` in place of those it holds, unless its prompt is
+    /// no longer `prompt`; returns the updated task, or `None` when the prompt changed.
+    /// [`MemoryError::TaskNotFound`] when there is no such task.
+    async fn approve_plan(
+        &self,
+        id: TaskId,
+        prompt: TaskPrompt,
+        plan: Plan,
+        grants: Vec<TaskGrant>,
+    ) -> Result<Option<TaskRecord>>;
 
     /// Record `next_fire` as when task `id`'s triggers next fire;
     /// [`MemoryError::TaskNotFound`] when there is none.
@@ -167,6 +180,16 @@ impl TaskStore for NoTaskStore {
         _prompt: TaskPrompt,
         _grants: Vec<TaskGrant>,
     ) -> Result<bool> {
+        Err(MemoryError::TaskNotFound(id))
+    }
+
+    async fn approve_plan(
+        &self,
+        id: TaskId,
+        _prompt: TaskPrompt,
+        _plan: Plan,
+        _grants: Vec<TaskGrant>,
+    ) -> Result<Option<TaskRecord>> {
         Err(MemoryError::TaskNotFound(id))
     }
 

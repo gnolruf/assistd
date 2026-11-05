@@ -59,7 +59,7 @@ flowchart TB
 |------------------|------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
-| `assistd-core`   | Daemon glue. `AppState`, agent loop, presence machine, socket server, `build_tools()` factory.       | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
+| `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine, socket server, `build_tools()` factory. | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
@@ -406,6 +406,42 @@ listing the grants that would cover it. The tool deadline stops while a prompt
 is parked. `Request::TaskConfirm` answers it, with `add_grant` saving those
 grants on the task when its prompt is unchanged, and the run waits first in the
 queue for a lane, moving its conversation to that lane's slot.
+
+### Plan mode (`assistd-core::Planner`)
+
+A planning turn shows how the agent means to do a piece of work, and which
+approvals it expects to need, before anything runs. The `Planner` drives the
+agent loop over a given conversation with the planning registry, which
+`build_tools()` assembles beside the main one: `run` over the in-process
+readers, `web` and a `bash` whose policy holds no "always allow" approvals,
+plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
+`relay`, `remember` or MCP tools. The turn runs under
+`ConfirmRouter::for_planning`, which refuses every ask without prompting
+anyone in any mode, so the planning turn runs only what needs no
+confirmation; each refusal is counted and the tool result gains a note
+telling the model to describe that step instead. A plan-mode preamble is set
+as the transient note on every step, so it renders at the conversation's
+tail and the system prompt, and its cache, are unchanged. When the turn
+answers, `complete_with_schema` holds the reply to a draft of a summary and
+steps, each with actions named by a kind (`program`, `web_host`, `mcp_tool`,
+`app`, `write`) and a target. Each action becomes a `TaskGrant`, and
+`GrantCheck` flags any that would cover nothing: a program missing from the
+sandbox's `PATH`, a malformed host, an MCP tool no connected server offers,
+an app with no launchable desktop entry, a write directory that is relative
+or not a directory. The result is a `Plan` with a fresh `PlanId`, sent as
+`Event::Plan`.
+
+`Request::TaskPlan` plans a saved task's prompt in an isolated conversation
+with the task-run system prompt, keyed `TaskPlan` in the `SlotStash`. It takes
+the main lane and request guard as a query does, and `InterruptTurn`
+cancels it; its turn reaches the client wrapped in `Event::TaskPlan`. With
+`feedback` it continues the same conversation, so a revision keeps what the
+model already found; it is refused once the task's prompt has changed.
+`Request::TaskPlanApprove` names the latest plan and the actions the user
+accepted, each of which must be in it. The plan, holding only those actions,
+and the actions as the task's grants, replacing any it held, are saved in one
+write that is skipped if the prompt changed since the plan was made. The
+planning conversation is then dropped.
 
 ### Tools (`assistd-tools`)
 

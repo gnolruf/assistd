@@ -18,6 +18,7 @@ use crate::policy::{
 mod desktop_entry;
 mod open;
 
+use desktop_entry::DesktopEntry;
 use open::{OpenArgs, OpenError, PreparedLaunch};
 
 const NAME: &str = "wm";
@@ -267,6 +268,12 @@ async fn focus(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
         Ok(()) => CommandOutput::ok(Vec::new()),
         Err(e) => wm_error(format_args!("focus {id_arg}"), &e),
     }
+}
+
+/// Why `wm open` could not launch the app with desktop entry `id`, if it could not. Blocks on
+/// the filesystem.
+pub(crate) fn unlaunchable_app(id: &str) -> Option<String> {
+    DesktopEntry::find(id).err().map(|e| e.to_string())
 }
 
 fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
