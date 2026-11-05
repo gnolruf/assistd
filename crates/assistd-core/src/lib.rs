@@ -437,7 +437,6 @@ fn web_access(
     Ok((search, approved_hosts))
 }
 
-/// What [`planning_tools`] registers.
 struct PlanningToolDeps<'a> {
     commands: CommandRegistry,
     output_cap: Arc<OutputCap>,
@@ -471,7 +470,6 @@ fn planning_tools(deps: PlanningToolDeps<'_>) -> PlanningTools {
     }
 }
 
-/// The subsystems [`planning_commands`] reaches.
 struct PlanningCommandDeps {
     bash_cfg: Arc<BashPolicyCfg>,
     approved_hosts: ApprovalGate,
@@ -505,7 +503,6 @@ fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
     commands
 }
 
-/// Register the in-process commands that only read.
 fn register_readers(commands: &mut CommandRegistry) {
     commands.register(CatCommand);
     commands.register(LsCommand);

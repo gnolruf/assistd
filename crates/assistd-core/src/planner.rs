@@ -167,7 +167,7 @@ async fn draft_of(
             reply?
         }
     };
-    PlanDraft::parse(&reply).map_err(PlanError::Unreadable)
+    serde_json::from_str(&reply).map_err(PlanError::Unreadable)
 }
 
 /// A conversation whose every step ends with [`PLAN_PREAMBLE`], ahead of any one-shot note

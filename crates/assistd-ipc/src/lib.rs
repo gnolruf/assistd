@@ -587,9 +587,8 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         add_grant: bool,
     },
-    /// Plan `task`'s prompt in a planning conversation of its own, or with `feedback`, revise
-    /// the plan that conversation last made. Takes the main lane as a query does, streams the
-    /// planning turn wrapped in `TaskPlan`, then emits `Plan` and `Done`. Errors when
+    /// Plan `task`'s prompt in a conversation of its own, or with `feedback` revise its last
+    /// plan; streams the turn wrapped in `TaskPlan`, then emits `Plan` and `Done`. Errors when
     /// `feedback` is given and the task has no plan to revise.
     TaskPlan {
         id: String,
@@ -597,10 +596,9 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feedback: Option<String>,
     },
-    /// Save plan `plan`, the latest made for `task`, on the task with its `accepted` actions as
-    /// the task's grants, replacing those it held. Errors when the plan is not the task's
-    /// latest, the prompt changed since, or an accepted grant is not in it. Emits the updated
-    /// `Task`, then `Done`.
+    /// Save `task`'s latest plan `plan` on it, its `accepted` actions replacing the task's
+    /// grants, then emit the updated `Task` and `Done`. Errors when `plan` is not the latest,
+    /// the prompt changed since, or an accepted grant is not in it.
     TaskPlanApprove {
         id: String,
         task: TaskId,

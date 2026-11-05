@@ -36,11 +36,10 @@ struct DraftStep {
 struct DraftAction {
     kind: DraftKind,
     target: String,
-    #[serde(default)]
     subcommand: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum DraftKind {
     Program,
@@ -88,10 +87,6 @@ impl PlanDraft {
             ),
             ("required".into(), json!(["summary", "steps"])),
         ])
-    }
-
-    pub(super) fn parse(reply: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(reply)
     }
 
     /// The plan under a fresh id, each step's repeated actions merged and every action checked
