@@ -7,7 +7,9 @@ use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use assistd_ipc::{SuspendReason, TaskId, TaskRunId, TaskRunState, TaskSpec, TaskTrigger};
+use assistd_ipc::{
+    SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskRunState, TaskSpec, TaskTrigger,
+};
 
 use crate::{
     MemoryError, RecoveredQueue, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore, WaitingRun,
@@ -132,6 +134,28 @@ impl TaskStore for SqliteTaskStore {
             ))
     }
 
+    async fn add_grants(
+        &self,
+        id: TaskId,
+        prompt: TaskPrompt,
+        grants: Vec<TaskGrant>,
+    ) -> Result<bool> {
+        let now = now_millis();
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let added = add_grants_if_prompt(&tx, id, &prompt, grants, now)?;
+                tx.commit()?;
+                Ok(added)
+            })
+            .await
+            .map_err(MemoryError::sqlite_or_missing(
+                "task add_grants",
+                MemoryError::TaskNotFound(id),
+            ))
+    }
+
     async fn set_next_fire(&self, id: TaskId, next_fire: Option<DateTime<Utc>>) -> Result<()> {
         let updated = self
             .handle
@@ -213,6 +237,26 @@ impl TaskStore for SqliteTaskStore {
             })
             .await
             .map_err(MemoryError::sqlite("task start_run"))?;
+        run_updated(updated, run)
+    }
+
+    async fn set_run_needs_input(&self, run: TaskRunId, needs_input: bool) -> Result<()> {
+        let (from, to) = if needs_input {
+            (RUN_RUNNING, RUN_NEEDS_INPUT)
+        } else {
+            (RUN_NEEDS_INPUT, RUN_RUNNING)
+        };
+        let updated = self
+            .handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "UPDATE task_runs SET state = ?3 WHERE id = ?1 AND state = ?2",
+                    rusqlite::params![run.0, from, to],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("task set_run_needs_input"))?;
         run_updated(updated, run)
     }
 
@@ -538,6 +582,36 @@ fn replace_task(
         spec,
         next_fire: None,
     })
+}
+
+/// Add each of `grants` task `id` lacks, unless its stored prompt differs from `prompt`;
+/// returns whether they were added.
+fn add_grants_if_prompt(
+    tx: &Transaction<'_>,
+    id: TaskId,
+    prompt: &TaskPrompt,
+    grants: Vec<TaskGrant>,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    let (stored_prompt, stored_grants): (String, String) = tx.query_row(
+        "SELECT prompt, grants FROM tasks WHERE id = ?1",
+        [id.0],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if stored_prompt != prompt.as_str() {
+        return Ok(false);
+    }
+    let mut held: Vec<TaskGrant> = from_json(1, &stored_grants)?;
+    for grant in grants {
+        if !held.contains(&grant) {
+            held.push(grant);
+        }
+    }
+    tx.execute(
+        "UPDATE tasks SET grants = ?2, updated_at = MAX(?3, created_at) WHERE id = ?1",
+        rusqlite::params![id.0, to_json(&held)?, now],
+    )?;
+    Ok(true)
 }
 
 /// Map a failed save of the task named `name` to its typed error.

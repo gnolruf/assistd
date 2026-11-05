@@ -16,6 +16,7 @@ use assistd_memory::{BranchId, SessionId};
 
 use super::chat_focus::ChatFocusSlot;
 use super::lanes::ModelLanes;
+use super::task_confirms::TaskConfirms;
 use super::task_events::TaskEvents;
 use super::task_queue::TaskQueue;
 use super::task_runner::TaskRunner;
@@ -113,6 +114,7 @@ pub struct RuntimeState {
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
     pub(in crate::state) lanes: Arc<ModelLanes>,
     pub(in crate::state) task_queue: TaskQueue,
+    pub(in crate::state) task_confirms: TaskConfirms,
     pub(in crate::state) task_scheduler: TaskScheduler,
     pub(in crate::state) task_events: TaskEvents,
     /// Fire-and-forget persistence tasks, drained at daemon shutdown.
@@ -147,6 +149,7 @@ impl RuntimeState {
             lanes: ModelLanes::new(Arc::clone(&agent_turn_lock), one_slot),
             agent_turn_lock,
             task_queue: TaskQueue::default(),
+            task_confirms: TaskConfirms::default(),
             task_scheduler: TaskScheduler::default(),
             task_events: TaskEvents::default(),
             persistence_tracker: TaskTracker::new(),

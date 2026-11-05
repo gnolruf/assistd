@@ -323,6 +323,10 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
             "isolated conversations not supported by this backend".into(),
         ))
     }
+
+    /// Send this conversation's later requests to the server slot `slot` names; call only
+    /// between requests. A backend without slots ignores it.
+    fn move_to_slot(&self, _slot: SlotAssignment) {}
 }
 
 /// Trivial backend that echoes the user's most recent push as a single

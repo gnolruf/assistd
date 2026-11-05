@@ -437,6 +437,7 @@ impl ConfirmationGate for RelayStepGate {
     async fn confirm(&self, mut request: ConfirmationRequest) -> Approval {
         request.source = ConfirmSource::Relay {
             task: self.task.clone(),
+            run: None,
         };
         self.inner.confirm(request).await
     }

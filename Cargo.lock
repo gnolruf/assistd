@@ -295,6 +295,7 @@ dependencies = [
  "assistd-utils",
  "async-trait",
  "base64 0.23.1",
+ "parking_lot 0.13.0",
  "reqwest",
  "rustix 1.1.6",
  "serde",

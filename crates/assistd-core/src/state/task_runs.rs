@@ -1,5 +1,6 @@
 //! Handlers for `TaskRun` and `TaskCancel`, and a saved task run as an
-//! unattended turn in a conversation and transcript session of its own.
+//! unattended turn in a conversation and transcript session of its own, its
+//! prompts approved by the task's grants or paused for the user.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,13 +15,14 @@ use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProb
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
-use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
+use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter, Grants};
 use assistd_voice::SentenceBuffer;
 
 use super::event_triggers::Occurrence;
 use super::lanes::LaneLease;
 use super::persistence::PersistTarget;
 use super::query::{TurnScope, TurnTranslator};
+use super::task_confirms::{RunHold, TaskRunParking};
 use super::task_queue::QueuedRun;
 use super::task_runner::RegisteredRun;
 use super::{AppState, DispatchError, send_error};
@@ -31,8 +33,9 @@ const EVENT_BUFFER: usize = 32;
 
 /// Follows the main system prompt in every task run's conversation.
 const TASK_PREAMBLE: &str = "You are running a saved task on your own. No user is present: \
-     nobody will answer a question or confirm a command, so ask neither. Do the work with \
-     your tools, then make your final reply the task's result, complete in itself.";
+     nobody will answer a question, so ask none. A command needing confirmation waits until \
+     the user answers it later. Do the work with your tools, then make your final reply the \
+     task's result, complete in itself.";
 
 /// Why a run the daemon stopped mid-turn failed.
 pub(super) const DAEMON_STOPPED: &str = "the daemon stopped before the run finished";
@@ -119,7 +122,7 @@ impl AppState {
     ) {
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
         tokio::join!(
-            self.drive_task_run(&turn, &lease, &registered, tx),
+            self.drive_task_run(&turn, lease, &registered, tx),
             self.publish_task_run_events(TurnScope::TaskRun(turn.run), rx)
         );
         self.runtime.task_queue.finish(turn.run);
@@ -134,9 +137,9 @@ impl AppState {
     /// Run the turn, record how it ended, then end its event stream with `Error` for a
     /// failed run and `Done` for a cancelled one, whose turn sent none.
     async fn drive_task_run(
-        &self,
+        self: &Arc<Self>,
         turn: &TaskRunTurn,
-        lease: &LaneLease,
+        lease: LaneLease,
         registered: &RegisteredRun,
         tx: mpsc::Sender<Event>,
     ) {
@@ -181,13 +184,13 @@ impl AppState {
 
     /// The run's final reply, `None` when it was cancelled or ended without one.
     async fn task_run_turn(
-        &self,
+        self: &Arc<Self>,
         turn: &TaskRunTurn,
-        lease: &LaneLease,
+        lease: LaneLease,
         cancel: &CancellationToken,
         tx: &mpsc::Sender<Event>,
     ) -> Result<Option<String>, DispatchError> {
-        let Some(_awake) = self.wake_for_task_run(&turn.id, tx, cancel).await? else {
+        let Some(awake) = self.wake_for_task_run(&turn.id, tx, cancel).await? else {
             return Ok(None);
         };
         let system_prompt = task_system_prompt(&self.config.chat.system_prompt);
@@ -196,28 +199,40 @@ impl AppState {
             .subsystems
             .llm
             .isolated_conversation(system_prompt, lease.slot(key))?;
+        let hold = Arc::new(RunHold::new(lease, awake));
         let persist = self.open_task_run_session(turn).await;
+        let parking = TaskRunParking {
+            state: Arc::clone(self),
+            task: turn.task.id,
+            prompt: turn.task.spec.prompt.clone(),
+            run: turn.run,
+            request_id: turn.id.clone(),
+            hold: Arc::clone(&hold),
+            backend: Arc::clone(&backend),
+            events: tx.clone(),
+            cancel: cancel.clone(),
+        };
         let outcome = self
-            .unattended_turn(turn, backend, persist, cancel, tx)
+            .unattended_turn(turn, backend, parking, persist, cancel, tx)
             .await;
-        if lease.on_main_lane() {
-            self.hand_slot_back_to_main(key).await;
-        }
+        self.end_run_conversation(key, hold.on_main_lane()).await;
         outcome
     }
 
-    /// Drop the ended run's slot state and restore the main conversation's
-    /// while the daemon is still idle.
-    async fn hand_slot_back_to_main(&self, run: ConversationKey) {
+    /// Drop the ended run's slot state and, when it held the main lane, restore the main
+    /// conversation's while the daemon is still idle.
+    async fn end_run_conversation(&self, run: ConversationKey, on_main_lane: bool) {
         if let Some(stash) = &self.subsystems.slot_stash {
             stash.end(run).await;
-            stash.switch_to(ConversationKey::Main).await;
+            if on_main_lane {
+                stash.switch_to(ConversationKey::Main).await;
+            }
         }
     }
 
     /// Wake the model as a query does and re-probe it if it reloaded; `None` when
     /// `cancel` fired first.
-    async fn wake_for_task_run(
+    pub(super) async fn wake_for_task_run(
         &self,
         id: &str,
         tx: &mpsc::Sender<Event>,
@@ -279,12 +294,13 @@ impl AppState {
         &self,
         turn: &TaskRunTurn,
         backend: Arc<dyn LlmBackend>,
+        parking: TaskRunParking,
         persist: Option<PersistTarget>,
         cancel: &CancellationToken,
         tx: &mpsc::Sender<Event>,
     ) -> Result<Option<String>, DispatchError> {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
-        let agent_task = self.spawn_task_agent(turn, backend, llm_tx, cancel.clone());
+        let agent_task = self.spawn_task_agent(turn, backend, parking, llm_tx, cancel.clone());
         let mut translator =
             TurnTranslator::new(turn.id.clone(), TurnScope::TaskRun(turn.run), persist);
         self.forward_task_run_events(&mut translator, llm_rx, tx)
@@ -296,12 +312,13 @@ impl AppState {
         }
     }
 
-    /// The main agent's tools over `backend`, with every confirmation denied and labelled
-    /// as the run's.
+    /// The main agent's tools over `backend`, with every confirmation labelled as the run's
+    /// and approved by the task's grants or parked in `parking`.
     fn spawn_task_agent(
         &self,
         turn: &TaskRunTurn,
         backend: Arc<dyn LlmBackend>,
+        parking: TaskRunParking,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
@@ -318,7 +335,9 @@ impl AppState {
             task: turn.task.id,
             run: turn.run,
         };
-        let router = ConfirmRouter::unattended(turn.id.clone(), source);
+        let grants = Grants::new(turn.task.spec.grants.clone());
+        let router =
+            ConfirmRouter::for_task_run(turn.id.clone(), source, grants, Arc::new(parking));
         let prompt = turn.task.spec.prompt.as_str().to_string();
         AbortOnDropHandle::new(tokio::spawn(
             CONFIRM_ROUTER

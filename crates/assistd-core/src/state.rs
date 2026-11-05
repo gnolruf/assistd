@@ -15,7 +15,7 @@ use assistd_embed::EmbedError;
 use assistd_ipc::{Event, Request, Role, WakeWordOp};
 use assistd_llm::{LlmBackend, LlmError};
 use assistd_memory::{MemoryError, PersistedRole};
-use assistd_tools::ToolRegistry;
+use assistd_tools::{Approval, ToolRegistry};
 use assistd_voice::{CaptureUnavailable, ListenError, VoiceInputError, VoiceManager};
 
 use crate::{Config, PresenceError, PresenceManager};
@@ -39,6 +39,7 @@ pub(crate) mod runtime;
 pub(crate) mod session_unlock;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
+pub(crate) mod task_confirms;
 pub(crate) mod task_dispatch;
 pub(crate) mod task_events;
 pub(crate) mod task_handlers;
@@ -255,6 +256,16 @@ impl AppState {
             Request::TaskRun { id, task } => self.handle_task_run(id, task, tx).await,
             Request::TaskCancel { id, run } => replied(self.handle_task_cancel(id, run, tx)).await,
             Request::TaskQueue { id, op } => replied(self.handle_task_queue(id, op, tx)).await,
+            Request::TaskConfirm {
+                id,
+                run,
+                confirm_id,
+                allow,
+                add_grant,
+            } => {
+                let approval = Approval::from_answer(allow, add_grant);
+                replied(self.handle_task_confirm(id, run, confirm_id, approval, tx)).await
+            }
             Request::ConfirmResponse { id, confirm_id, .. } => {
                 replied(send_error(
                     &tx,

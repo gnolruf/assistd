@@ -5,7 +5,7 @@ use std::fmt;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use assistd_ipc::{SuspendReason, TaskId, TaskRunId, TaskSpec, TaskTrigger};
+use assistd_ipc::{SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskSpec, TaskTrigger};
 
 use crate::{MemoryError, Result, SessionId};
 
@@ -67,6 +67,16 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
     /// Set whether task `id`'s triggers fire; [`MemoryError::TaskNotFound`] when there is none.
     async fn set_enabled(&self, id: TaskId, enabled: bool) -> Result<TaskRecord>;
 
+    /// Add each of `grants` task `id` does not hold yet, unless its prompt is no longer
+    /// `prompt`; returns whether they were added. [`MemoryError::TaskNotFound`] when there is
+    /// no such task.
+    async fn add_grants(
+        &self,
+        id: TaskId,
+        prompt: TaskPrompt,
+        grants: Vec<TaskGrant>,
+    ) -> Result<bool>;
+
     /// Record `next_fire` as when task `id`'s triggers next fire;
     /// [`MemoryError::TaskNotFound`] when there is none.
     async fn set_next_fire(&self, id: TaskId, next_fire: Option<DateTime<Utc>>) -> Result<()>;
@@ -97,6 +107,10 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
     /// Mark waiting run `run` as running in transcript session `session`;
     /// [`MemoryError::TaskRunNotFound`] unless it is queued or suspended.
     async fn start_run(&self, run: TaskRunId, session: SessionId) -> Result<()>;
+
+    /// Mark running run `run` as awaiting input, or awaiting run `run` as running again when
+    /// `needs_input` is false; [`MemoryError::TaskRunNotFound`] unless it was in the other state.
+    async fn set_run_needs_input(&self, run: TaskRunId, needs_input: bool) -> Result<()>;
 
     /// Mark waiting run `run` as suspended for `reason`, or as queued again when `None`;
     /// [`MemoryError::TaskRunNotFound`] unless it is queued or suspended.
@@ -147,6 +161,15 @@ impl TaskStore for NoTaskStore {
         Err(MemoryError::TaskNotFound(id))
     }
 
+    async fn add_grants(
+        &self,
+        id: TaskId,
+        _prompt: TaskPrompt,
+        _grants: Vec<TaskGrant>,
+    ) -> Result<bool> {
+        Err(MemoryError::TaskNotFound(id))
+    }
+
     async fn fire(
         &self,
         task: TaskId,
@@ -169,6 +192,10 @@ impl TaskStore for NoTaskStore {
     }
 
     async fn start_run(&self, run: TaskRunId, _session: SessionId) -> Result<()> {
+        Err(MemoryError::TaskRunNotFound(run))
+    }
+
+    async fn set_run_needs_input(&self, run: TaskRunId, _needs_input: bool) -> Result<()> {
         Err(MemoryError::TaskRunNotFound(run))
     }
 

@@ -60,7 +60,8 @@ pub struct LlamaChatClient {
     /// child, and a failure coinciding with a supervisor restart becomes
     /// [`LlmError::ServerRestarting`] instead of a transport fault.
     health: Option<Arc<dyn LlmHealthProbe>>,
-    slot: SlotBinding,
+    /// Changes only between requests, when the conversation moves to another slot.
+    slot: parking_lot::Mutex<SlotBinding>,
 }
 
 impl LlamaChatClient {
@@ -92,14 +93,14 @@ impl LlamaChatClient {
             timeouts: timeouts.clone(),
             conv: Mutex::new(conv),
             health,
-            slot: SlotBinding::Unassigned,
+            slot: parking_lot::Mutex::new(SlotBinding::Unassigned),
         })
     }
 
     /// Keep this, the main conversation, on the shared slot in `stash`,
     /// switching the slot to it before each request.
     pub fn with_slot_stash(mut self, stash: Arc<SlotStash>) -> Self {
-        self.slot = SlotBinding::Shared {
+        *self.slot.get_mut() = SlotBinding::Shared {
             stash,
             key: ConversationKey::Main,
         };
@@ -107,8 +108,12 @@ impl LlamaChatClient {
     }
 
     async fn claim_slot(&self) {
-        if let SlotBinding::Shared { stash, key } = &self.slot {
-            stash.switch_to(*key).await;
+        let shared = match &*self.slot.lock() {
+            SlotBinding::Shared { stash, key } => Some((Arc::clone(stash), *key)),
+            SlotBinding::Unassigned | SlotBinding::Pinned(_) => None,
+        };
+        if let Some((stash, key)) = shared {
+            stash.switch_to(key).await;
         }
     }
 
@@ -132,7 +137,7 @@ impl LlamaChatClient {
             reasoning_budget_message: Some(REASONING_BUDGET_MESSAGE),
             chat_template_kwargs: self.template_kwargs(Thinking::Enabled),
             response_format: None,
-            id_slot: self.slot.index(),
+            id_slot: self.slot.lock().index(),
         }
     }
 
@@ -757,8 +762,13 @@ impl LlmBackend for LlamaChatClient {
             timeouts: self.timeouts.clone(),
             conv: Mutex::new(Conversation::new(system_prompt)),
             health: self.health.clone(),
-            slot: self.slot.assign(slot),
+            slot: parking_lot::Mutex::new(self.slot.lock().assign(slot)),
         }))
+    }
+
+    fn move_to_slot(&self, slot: SlotAssignment) {
+        let mut binding = self.slot.lock();
+        *binding = binding.assign(slot);
     }
 }
 

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use assistd_tools::{ConfirmSource, Risk, Unattended};
+use assistd_tools::{ConfirmSource, Grantable, Risk, Unattended};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -309,6 +309,7 @@ fn open_prompt_offering(app: &mut App, always_allow: Vec<String>) {
             always_allow,
             risk: Risk::Elevated,
             unattended: Unattended::Never,
+            grantable: Grantable::Never,
             source: ConfirmSource::Main,
         },
     );

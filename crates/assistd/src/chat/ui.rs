@@ -385,7 +385,10 @@ fn render_confirmation_dock(
     let accent = confirm_accent(theme);
     let title = match prompt.request.source {
         ConfirmSource::Main => format!(" Confirm {tool} "),
-        ConfirmSource::Relay { .. } => format!(" Confirm {tool} for a relay sub-agent "),
+        ConfirmSource::Relay { run: None, .. } => format!(" Confirm {tool} for a relay sub-agent "),
+        ConfirmSource::Relay { run: Some(run), .. } => {
+            format!(" Confirm {tool} for a relay sub-agent of task run {run} ")
+        }
         ConfirmSource::Task { run, .. } => format!(" Confirm {tool} for task run {run} "),
     };
     let block = Block::bordered()
@@ -426,7 +429,7 @@ fn confirmation_body(
 /// For a relay's prompt, a warning and the sub-agent's task in at most
 /// [`RELAY_TASK_ROWS`] rows; nothing for the main agent's.
 fn relay_source_rows(source: &ConfirmSource, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let ConfirmSource::Relay { task } = source else {
+    let ConfirmSource::Relay { task, .. } = source else {
         return Vec::new();
     };
     let warning = "Asked by a relay sub-agent working from untrusted content. Its task:";
@@ -942,7 +945,7 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use assistd_tools::{Risk, Unattended};
+    use assistd_tools::{Grantable, Risk, Unattended};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -958,6 +961,7 @@ mod tests {
                 always_allow: Vec::new(),
                 risk: Risk::Elevated,
                 unattended: Unattended::Never,
+                grantable: Grantable::Never,
                 source: ConfirmSource::Main,
             },
         )

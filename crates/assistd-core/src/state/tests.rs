@@ -10,7 +10,7 @@ use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, ImageAttachment, ImageMime, ListenPhase,
     PresenceState, PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
-    TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
+    TaskGrant, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
@@ -22,8 +22,9 @@ use assistd_memory::{
     SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
-    CommandRegistry, OutputCap, PresentSpec, RunTool, ToolError, ToolOutput, ToolsDisabled,
-    commands::EchoCommand,
+    Approval, CommandRegistry, ConfirmationGate, ConfirmationRequest, GrantNeed, Grantable,
+    IpcConfirmationGate, OutputCap, PresentSpec, Risk, RunTool, ToolError, ToolOutput,
+    ToolsDisabled, Unattended, commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
@@ -2025,6 +2026,15 @@ async fn task_state(
     backend: Arc<MainConversation>,
     tools: Arc<ToolRegistry>,
 ) -> (Arc<AppState>, Arc<dyn TranscriptStore>, BranchId, TaskId) {
+    task_state_with(Config::default(), backend, tools).await
+}
+
+/// [`task_state`] under `config`.
+async fn task_state_with(
+    config: Config,
+    backend: Arc<MainConversation>,
+    tools: Arc<ToolRegistry>,
+) -> (Arc<AppState>, Arc<dyn TranscriptStore>, BranchId, TaskId) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("memory.db");
     std::mem::forget(temp);
@@ -2046,7 +2056,6 @@ async fn task_state(
         plan: None,
     };
     let task = tasks.save(None, spec).await.unwrap().id;
-    let config = Config::default();
     let subsystems = Subsystems::new(
         backend,
         PresenceManager::stub(PresenceTarget::Active),
@@ -2236,4 +2245,120 @@ async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
     assert_eq!(queued_runs(&reloaded), expected);
     assert!(reloaded.task_queue_snapshot().paused);
     settle_task_runs(&reloaded).await;
+}
+
+/// Asks to fetch from `example.com`, which a web-host grant covers.
+#[derive(Debug)]
+struct FetchTool;
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for FetchTool {
+    fn name(&self) -> &'static str {
+        "fetch"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "fetches a page".into()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+        let request = ConfirmationRequest {
+            tool: "web".into(),
+            script: "web fetch https://example.com".into(),
+            matched_pattern: "fetches from example.com, which is not yet approved".into(),
+            always_allow: vec!["example.com".into()],
+            risk: Risk::Elevated,
+            unattended: Unattended::Never,
+            grantable: Grantable::needs(vec![GrantNeed::WebHost("example.com".into())]),
+            source: assistd_tools::ConfirmSource::Main,
+        };
+        let approved = IpcConfirmationGate.confirm(request).await != Approval::Deny;
+        Ok(ToolOutput::text(
+            if approved { "fetched" } else { "denied" },
+            Duration::ZERO,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn an_ungranted_prompt_pauses_the_run_until_answered_and_add_grant_saves_it() {
+    let fetch = || {
+        StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c".into(),
+            name: "fetch".into(),
+            arguments: serde_json::json!({}),
+        }])
+    };
+    let task_conversation = ToolCallBackend::new("", "done.", vec![fetch(), fetch()]);
+    let mut tools = ToolRegistry::new();
+    tools.register(FetchTool);
+    let mut config = Config::default();
+    config.timeouts.tool_call_secs = 1;
+    let backend = MainConversation::new(task_conversation);
+    let (state, conv, _branch, task) = task_state_with(config, backend, Arc::new(tools)).await;
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun],
+    });
+
+    let run = queue_task_run(&state, task).await;
+    let (confirm_id, grants) = loop {
+        if let Event::TaskRun { event, .. } = bus.recv().await.unwrap()
+            && let Event::ConfirmRequest {
+                confirm_id, grants, ..
+            } = *event
+        {
+            break (confirm_id, grants);
+        }
+    };
+    let granted = vec![TaskGrant::WebHost {
+        host: "example.com".into(),
+    }];
+    assert_eq!(grants, granted);
+    assert_eq!(queued_runs(&state), [(run, TaskRunState::NeedsInput)]);
+    assert!(
+        state.runtime.agent_turn_lock.try_lock().is_ok(),
+        "a paused run holds no lane"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let (res, events) = dispatch(
+        &state,
+        Request::TaskConfirm {
+            id: "a".into(),
+            run,
+            confirm_id,
+            allow: true,
+            add_grant: true,
+        },
+    )
+    .await;
+    res.unwrap();
+    assert_eq!(events, [done("a")]);
+    let mut prompts = 1;
+    let mut results = Vec::new();
+    while results.len() < 2 {
+        let Event::TaskRun { event, .. } = bus.recv().await.unwrap() else {
+            continue;
+        };
+        match *event {
+            Event::ConfirmRequest { .. } => prompts += 1,
+            Event::ToolResult { result, .. } => results.push(result),
+            _ => {}
+        }
+    }
+    settle_task_runs(&state).await;
+
+    assert_eq!(prompts, 1, "the added grant covers the run's second fetch");
+    assert!(
+        results
+            .iter()
+            .all(|result| result.to_string().contains("fetched")),
+        "the parked fetch outlived the tool deadline: {results:?}"
+    );
+    assert_eq!(
+        state.memory.tasks.get(task).await.unwrap().spec.grants,
+        granted
+    );
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
 }

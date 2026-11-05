@@ -513,6 +513,7 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "rm -rf /tmp/foo".into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
+                grants: Vec::new(),
                 source: ConfirmSource::Main,
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
@@ -525,6 +526,7 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "cargo build".into(),
                 matched_pattern: "not on the allowlist: cargo".into(),
                 always_allow: vec!["cargo".into()],
+                grants: Vec::new(),
                 source: ConfirmSource::Main,
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"cargo build","matched_pattern":"not on the allowlist: cargo","always_allow":["cargo"]}"#,
@@ -537,11 +539,31 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                 script: "curl example.com".into(),
                 matched_pattern: "not on the allowlist: curl".into(),
                 always_allow: Vec::new(),
+                grants: Vec::new(),
                 source: ConfirmSource::Relay {
                     task: "summarise the page".into(),
+                    run: None,
                 },
             },
             r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"curl example.com","matched_pattern":"not on the allowlist: curl","source":{"agent":"relay","task":"summarise the page"}}"#,
+        ),
+        (
+            Event::ConfirmRequest {
+                id: id(),
+                confirm_id: "c-abc".into(),
+                tool: "web".into(),
+                script: "web fetch https://example.com".into(),
+                matched_pattern: "fetches from example.com".into(),
+                always_allow: vec!["example.com".into()],
+                grants: vec![TaskGrant::WebHost {
+                    host: "example.com".into(),
+                }],
+                source: ConfirmSource::Relay {
+                    task: "summarise the page".into(),
+                    run: Some(TaskRunId(9)),
+                },
+            },
+            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"web","script":"web fetch https://example.com","matched_pattern":"fetches from example.com","always_allow":["example.com"],"grants":[{"kind":"web_host","host":"example.com"}],"source":{"agent":"relay","task":"summarise the page","run":9}}"#,
         ),
         (
             Event::Relay {
@@ -902,6 +924,16 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"task_queue","id":"r","op":{"kind":"pause"}}"#,
         ),
+        (
+            Request::TaskConfirm {
+                id: id(),
+                run: TaskRunId(9),
+                confirm_id: "c".into(),
+                allow: true,
+                add_grant: true,
+            },
+            r#"{"type":"task_confirm","id":"r","run":9,"confirm_id":"c","allow":true,"add_grant":true}"#,
+        ),
     ]
 }
 
@@ -938,6 +970,7 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                     script: "rm x".into(),
                     matched_pattern: "rm".into(),
                     always_allow: Vec::new(),
+                    grants: Vec::new(),
                     source: ConfirmSource::Task {
                         task: TaskId(4),
                         run: TaskRunId(9),

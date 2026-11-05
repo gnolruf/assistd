@@ -254,6 +254,16 @@ impl PathGuards {
             .map(|effect| effect.path.as_str())
     }
 
+    /// The canonical paths `effects` change, in order; `None` when one cannot be resolved.
+    /// Blocks on the filesystem.
+    pub(crate) fn changed_targets(&self, effects: &[Effect]) -> Option<Vec<PathBuf>> {
+        effects
+            .iter()
+            .filter(|effect| effect.action != Action::Read)
+            .map(|effect| self.resolve(effect))
+            .collect()
+    }
+
     /// The canonical path `effect` lands on, following a final symlink unless it deletes the
     /// link itself; `None` when `~` or the working directory is unknown.
     fn resolve(&self, effect: &Effect) -> Option<PathBuf> {
@@ -366,7 +376,7 @@ pub(crate) fn split_at_existing(path: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// `path` with its deepest existing ancestor canonicalized and the rest cleaned lexically.
-fn canonical_existing(path: &Path) -> Option<PathBuf> {
+pub(crate) fn canonical_existing(path: &Path) -> Option<PathBuf> {
     let (anchor, tail) = split_at_existing(path);
     let anchor = std::fs::canonicalize(anchor).ok()?;
     Some(lexical_clean(&anchor.join(tail)))
