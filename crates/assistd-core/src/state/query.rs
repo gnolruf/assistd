@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::{OwnedMutexGuard, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -25,6 +25,7 @@ use assistd_voice::{
 use super::context::combine_context_blocks;
 use super::persistence::PersistTarget;
 use super::relay_trace::RelayTraceBuilder;
+use super::turn_admission::MainLaneTurn;
 use super::wire::decode_wire_attachments;
 use super::{AppState, DispatchError, RuntimeState, send_error};
 use crate::Agent;
@@ -255,7 +256,12 @@ impl TurnTranslator {
                 event,
                 message,
             } => {
-                if matches!(event, StatusKind::Restarting | StatusKind::OutputTruncated) {
+                if matches!(
+                    event,
+                    StatusKind::Restarting
+                        | StatusKind::OutputTruncated
+                        | StatusKind::YieldedToUser
+                ) {
                     self.discard_partial_response(sentence_buf);
                 }
                 (
@@ -445,9 +451,14 @@ impl AppState {
     ) -> Result<(), DispatchError> {
         let _cancel_on_return = cancel.clone().drop_guard();
         let attachments = self.prepare_attachments(&id, wire_attachments, &tx).await?;
-        let Some((_request_guard, agent_guard)) = self.admit_turn(&id, &tx, &cancel).await? else {
+        let Some((_request_guard, main_lane)) = self.admit_turn(&id, &text, &tx, &cancel).await?
+        else {
             return finish_interrupted_before_start(&tx, id).await;
         };
+        let MainLaneTurn {
+            lane: agent_guard,
+            turn: _conversation_turn,
+        } = main_lane;
         if !self.revalidate_vision(&cancel).await {
             return finish_interrupted_before_start(&tx, id).await;
         }
@@ -519,21 +530,26 @@ impl AppState {
         Err(error)
     }
 
+    /// The main lane and the daemon awake for query `id`'s turn; `None` when `cancel`
+    /// fired or the turn was dropped from the queue first.
     async fn admit_turn(
         &self,
         id: &str,
+        text: &str,
         tx: &mpsc::Sender<Event>,
         cancel: &CancellationToken,
-    ) -> Result<Option<(RequestGuard, OwnedMutexGuard<()>)>, DispatchError> {
+    ) -> Result<Option<(RequestGuard, MainLaneTurn)>, DispatchError> {
         let admission = async {
-            let agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+            let Some(main_lane) = self.take_main_lane(id, text, tx).await else {
+                return Ok(None);
+            };
             let request_guard = self.acquire_request_guard(id, tx).await?;
-            Ok((request_guard, agent_guard))
+            Ok(Some((request_guard, main_lane)))
         };
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(None),
-            admitted = admission => admitted.map(Some),
+            admitted = admission => admitted,
         }
     }
 

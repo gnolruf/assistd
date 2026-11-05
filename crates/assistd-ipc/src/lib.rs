@@ -18,10 +18,10 @@ pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
-    AnticipatedAction, DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome,
-    LaneHolder, MissedFire, Plan, PlanId, PlanStep, SuspendReason, TaskEvent, TaskGrant, TaskId,
-    TaskName, TaskPrompt, TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
-    TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
+    AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS,
+    FinishOutcome, LaneHolder, MissedFire, Plan, PlanId, PlanStep, QueueItem, SuspendReason,
+    TaskEvent, TaskGrant, TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot, TaskRunId,
+    TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -832,6 +832,9 @@ pub enum StatusKind {
     CompactingHistory,
     /// The compaction announced by [`StatusKind::CompactingHistory`] finished.
     HistoryCompacted,
+    /// A task run gave the model to the user's conversation; the step it was streaming
+    /// was discarded and runs again when the task resumes.
+    YieldedToUser,
 }
 
 /// Author of a persisted transcript message.
@@ -1126,6 +1129,9 @@ pub enum Event {
         run: TaskRunId,
         event: Box<Event>,
     },
+    /// The query `id` waits for the model behind `behind` queue items: a running task, or
+    /// the runs and turns ahead of it in the queue.
+    Queued { id: String, behind: u32 },
     /// The task queue as it now stands; broadcast on every change and sent first to every
     /// subscriber whose filter takes it.
     TaskQueue {
@@ -1193,6 +1199,7 @@ impl Event {
             | Event::TaskRunQueued { id, .. }
             | Event::TaskRun { id, .. }
             | Event::TaskQueue { id, .. }
+            | Event::Queued { id, .. }
             | Event::Plan { id, .. }
             | Event::TaskPlan { id, .. }
             | Event::Error { id, .. }
@@ -1243,6 +1250,7 @@ impl Event {
             | Event::UndoApplied { .. }
             | Event::Task { .. }
             | Event::TaskRunQueued { .. }
+            | Event::Queued { .. }
             | Event::Plan { .. }
             | Event::TaskPlan { .. } => return None,
         })

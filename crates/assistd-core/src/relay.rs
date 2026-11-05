@@ -28,6 +28,7 @@ use assistd_tools::{
 };
 use assistd_utils::path::expand_tilde_from_env;
 
+use crate::state::run_lane::{RUN_LANE, RunLane};
 use crate::subagent::{RelayProgress, RelayReport, SubAgentError, SubAgentRunner};
 
 use role::{Reach, Role, Roles};
@@ -35,6 +36,12 @@ use role::{Reach, Role, Roles};
 mod role;
 mod sizing;
 
+/// Ends a relay step cancelled because its task run gave the model to the user.
+const RELAY_YIELDED: &str =
+    "paused for the user's conversation; the relay reruns when the task resumes";
+/// The result of a relay whose task run was cancelled while it waited to rerun it.
+const RELAY_CANCELLED_WHILE_YIELDED: &str =
+    "[error] relay: the task run was cancelled before the relay could rerun";
 const DESCRIPTION_INTRO: &str = "Hand a self-contained task to a sub-agent that works in a \
      disposable sandbox and reports back. Use it to keep large or untrusted content out \
      of this conversation. Pick one `agent`:";
@@ -170,6 +177,32 @@ impl RelayTool {
             deps,
             policy,
             roles: Roles::built_in(),
+        }
+    }
+
+    /// Relay `plan` within a task run on `lane`, cancelling it whenever the run yields to the
+    /// user's conversation and rerunning it from `args` once the run has the lane again,
+    /// since its effects stay inside its quarantine. `None` when the run was cancelled first.
+    async fn relay_giving_way(
+        &self,
+        mut plan: RelayPlan,
+        args: &Value,
+        progress: &RelayProgress,
+        lane: &RunLane,
+    ) -> Result<Option<Result<RelayReport, StepFailed>>, ToolError> {
+        loop {
+            tokio::select! {
+                biased;
+                outcome = self.relay(plan, progress) => return Ok(Some(outcome)),
+                () = lane.yield_requested() => {}
+            }
+            info!(target: "assistd::relay", "relay cancelled for the user's conversation");
+            let message = RELAY_YIELDED.to_string();
+            progress.report(RelayEvent::Failed { message }).await;
+            if !lane.give_way().await {
+                return Ok(None);
+            }
+            plan = RelayPlan::parse(args, &self.roles)?;
         }
     }
 
@@ -422,12 +455,17 @@ impl Tool for RelayTool {
         tracing::Span::current().record("agents", plan.agents());
         info!(target: "assistd::relay", "relay started");
         let progress = RelayProgress::of_current_tool_call();
-        Ok(match self.relay(plan, &progress).await {
-            Ok(report) => ToolOutput::text(report.render(), start.elapsed()),
-            Err(error) => {
+        let outcome = match RUN_LANE.try_with(Arc::clone) {
+            Ok(lane) => self.relay_giving_way(plan, &args, &progress, &lane).await?,
+            Err(_) => Some(self.relay(plan, &progress).await),
+        };
+        Ok(match outcome {
+            Some(Ok(report)) => ToolOutput::text(report.render(), start.elapsed()),
+            Some(Err(error)) => {
                 info!(target: "assistd::relay", %error, "relay ended without a report");
                 ToolOutput::failed(format!("[error] relay: {error}"), start.elapsed())
             }
+            None => ToolOutput::failed(RELAY_CANCELLED_WHILE_YIELDED, start.elapsed()),
         })
     }
 }

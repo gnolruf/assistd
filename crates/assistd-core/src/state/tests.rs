@@ -9,8 +9,9 @@ use tokio::sync::{Notify, watch};
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, ImageAttachment, ImageMime, ListenPhase,
-    PresenceState, PresenceTarget, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
-    TaskGrant, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
+    PresenceState, PresenceTarget, QueueItem, StartupComponent, StatusKind, StatusSeverity,
+    SubscribeFilter, TaskGrant, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec,
+    VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
@@ -37,6 +38,8 @@ use assistd_wm::FocusedWindowContext;
 use super::*;
 use crate::Config;
 use crate::state::context::format_window_context_block;
+
+mod interruption;
 
 /// Inputs for an [`AppState`] with no-op memory; every field defaults to
 /// the stub the daemon uses when the subsystem is disabled.
@@ -2032,7 +2035,7 @@ async fn task_state(
 /// [`task_state`] under `config`.
 async fn task_state_with(
     config: Config,
-    backend: Arc<MainConversation>,
+    backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
 ) -> (Arc<AppState>, Arc<dyn TranscriptStore>, BranchId, TaskId) {
     let temp = tempfile::tempdir().unwrap();
@@ -2196,9 +2199,10 @@ async fn a_cancelled_task_run_leaves_the_main_conversation_untouched() {
 }
 
 async fn change_task_queue(state: &Arc<AppState>, op: TaskQueueOp) {
+    let label = format!("{op:?}");
     let (res, events) = dispatch(state, Request::TaskQueue { id: "q".into(), op }).await;
     res.unwrap();
-    assert_eq!(events, [done("q")], "{op:?}");
+    assert_eq!(events, [done("q")], "{label}");
 }
 
 fn queued_runs(state: &AppState) -> Vec<(TaskRunId, TaskRunState)> {
@@ -2206,7 +2210,10 @@ fn queued_runs(state: &AppState) -> Vec<(TaskRunId, TaskRunState)> {
         .task_queue_snapshot()
         .items
         .into_iter()
-        .map(|item| (item.run, item.state))
+        .filter_map(|item| match item {
+            QueueItem::Run { run, state, .. } => Some((run, state)),
+            QueueItem::UserTurn { .. } => None,
+        })
         .collect()
 }
 

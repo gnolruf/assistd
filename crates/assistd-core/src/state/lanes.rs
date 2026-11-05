@@ -64,6 +64,21 @@ impl ModelLanes {
         }
     }
 
+    /// Wait for the main lane for a queued user turn. Cancel-safe.
+    pub(in crate::state) async fn admit_user_turn(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.main).lock_owned().await
+    }
+
+    /// Whether user turns and task runs share the model's only lane.
+    pub(in crate::state) fn is_single(&self) -> bool {
+        self.slots.borrow().get() == 1
+    }
+
+    /// The task run holding the main lane.
+    pub(in crate::state) fn main_holder(&self) -> Option<TaskRunId> {
+        self.held.borrow().get(&MAIN_LANE).copied()
+    }
+
     /// What holds each lane now.
     pub(in crate::state) fn holders(&self) -> Vec<LaneHolder> {
         let total = self.slots.borrow().get();

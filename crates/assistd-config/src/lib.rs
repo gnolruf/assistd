@@ -17,6 +17,7 @@ pub mod notifications;
 pub mod search;
 pub mod settings;
 pub mod sleep;
+pub mod tasks;
 pub mod theme;
 pub mod timeouts;
 pub mod tools;
@@ -38,6 +39,7 @@ pub use notifications::{NotificationsConfig, TrayIconsConfig};
 pub use search::{SearchCommand, SearchConfig, SearchEngine};
 pub use settings::{DescribeSettings, SettingInfo, setting_info};
 pub use sleep::SleepConfig;
+pub use tasks::{TaskInterruption, TasksConfig};
 pub use theme::{ThemeColor, ThemeConfig};
 pub use timeouts::TimeoutsConfig;
 pub use tools::{

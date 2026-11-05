@@ -145,6 +145,8 @@ pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
 pub const DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
 pub const DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
 
+pub const DEFAULT_TASKS_RESUME_AFTER_IDLE_SECS: u32 = 120;
+
 /// The `assistd` built-in theme.
 pub const DEFAULT_THEME: ThemeConfig = ThemeConfig {
     accent: ThemeColor::BLEY,

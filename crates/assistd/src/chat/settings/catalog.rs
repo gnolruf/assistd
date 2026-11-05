@@ -6,6 +6,7 @@ use assistd_config::{SettingInfo, setting_info};
 const COMPOSITOR_TYPES: &[&str] = &["auto", "i3", "sway", "hyprland"];
 const SANDBOX_MODES: &[&str] = &["auto", "bwrap", "none"];
 const VOICE_FAMILIES: &[&str] = &["vits", "kokoro"];
+const TASK_INTERRUPTIONS: &[&str] = &["interrupt", "after_task", "after_queue"];
 
 pub(crate) const SECTIONS: &[Section] = &[
     section(
@@ -191,6 +192,17 @@ pub(crate) const SECTIONS: &[Section] = &[
         &[
             setting("notifications.auto_hide_ms", SettingKind::Integer),
             setting("notifications.brief_when_away", SettingKind::Toggle),
+        ],
+    ),
+    section(
+        Tab::General,
+        "Tasks",
+        &[
+            setting(
+                "tasks.interruption",
+                SettingKind::Choice(TASK_INTERRUPTIONS),
+            ),
+            setting("tasks.resume_after_idle_secs", SettingKind::Integer),
         ],
     ),
     section(
