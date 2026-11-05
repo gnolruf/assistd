@@ -57,6 +57,12 @@ allow = [
 name = "option-ext"
 allow = ["MPL-2.0"]
 
+[[licenses.exceptions]]
+# notify (inotify watches for path-changed task triggers) is CC0-1.0, a
+# public-domain dedication with no conditions on downstream use.
+name = "notify"
+allow = ["CC0-1.0"]
+
 # The next three only run inside sherpa-onnx-sys's build script, which
 # downloads and unpacks its prebuilt library archive; none of them is
 # linked into assistd. All three licences are permissive.
