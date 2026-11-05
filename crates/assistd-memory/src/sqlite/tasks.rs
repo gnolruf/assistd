@@ -136,12 +136,7 @@ impl TaskStore for SqliteTaskStore {
         let updated = self
             .handle
             .writer()
-            .call(move |c| {
-                c.execute(
-                    "UPDATE tasks SET next_fire_at = ?2 WHERE id = ?1",
-                    rusqlite::params![id.0, next_fire.map(|at| at.timestamp_millis())],
-                )
-            })
+            .call(move |c| update_next_fire(c, id, next_fire))
             .await
             .map_err(MemoryError::sqlite("task set_next_fire"))?;
         if updated == 0 {
@@ -161,11 +156,7 @@ impl TaskStore for SqliteTaskStore {
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
-                let updated = tx.execute(
-                    "UPDATE tasks SET next_fire_at = ?2 WHERE id = ?1",
-                    rusqlite::params![task.0, next_fire.map(|at| at.timestamp_millis())],
-                )?;
-                if updated == 0 {
+                if update_next_fire(&tx, task, next_fire)? == 0 {
                     return Err(rusqlite::Error::QueryReturnedNoRows);
                 }
                 let queued = if has_unfinished_run(&tx, task)? {
@@ -362,6 +353,18 @@ pub(super) fn run_state_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<TaskRu
         RUN_CANCELLED => TaskRunState::Cancelled,
         _ => return Err(out_of_range()),
     })
+}
+
+/// Record `next_fire` on task `task`; returns how many rows changed.
+fn update_next_fire(
+    c: &rusqlite::Connection,
+    task: TaskId,
+    next_fire: Option<DateTime<Utc>>,
+) -> rusqlite::Result<usize> {
+    c.execute(
+        "UPDATE tasks SET next_fire_at = ?2 WHERE id = ?1",
+        rusqlite::params![task.0, next_fire.map(|at| at.timestamp_millis())],
+    )
 }
 
 /// Queue a run of `task` that `trigger` started, last in the queue.

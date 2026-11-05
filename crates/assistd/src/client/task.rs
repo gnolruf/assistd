@@ -30,7 +30,6 @@ pub(crate) enum TaskAction {
     Cancel { run: i64 },
 }
 
-/// A task as `TaskList` reports it.
 struct ListedTask {
     id: TaskId,
     spec: TaskSpec,

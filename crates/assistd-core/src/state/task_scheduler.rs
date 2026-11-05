@@ -50,7 +50,8 @@ impl AppState {
             let sleep = next.map_or(MAX_SLEEP, |at| {
                 (at - now.to_utc())
                     .to_std()
-                    .map_or(MAX_SLEEP, |until| until.min(MAX_SLEEP))
+                    .unwrap_or_default()
+                    .min(MAX_SLEEP)
             });
             tokio::select! {
                 biased;
