@@ -1,5 +1,8 @@
-//! When a task's time triggers next fire, and which of them fires once a
-//! recorded fire time has passed.
+//! When a task's time triggers next fire, which of them fires once a recorded
+//! fire time has passed, and why `TaskSave` refuses a trigger.
+
+use std::io;
+use std::path::PathBuf;
 
 use chrono::{DateTime, LocalResult, NaiveDateTime, TimeDelta, TimeZone, Utc};
 use croner::Cron;
@@ -7,7 +10,7 @@ use croner::errors::CronError;
 use croner::parser::{CronParser, Seconds, Year};
 use thiserror::Error;
 
-use assistd_ipc::{MissedFire, TaskTrigger};
+use assistd_ipc::{MissedFire, TaskId, TaskTrigger};
 
 /// How long after a fire time it may be noticed and still count as on time, not missed.
 const ON_TIME_GRACE: TimeDelta = TimeDelta::minutes(2);
@@ -24,6 +27,22 @@ pub enum TriggerError {
 
     #[error("trigger time {0} has already passed")]
     PastAt(NaiveDateTime),
+
+    #[error("watched path {} is not absolute", .0.display())]
+    RelativePath(PathBuf),
+
+    #[error("watched path {} cannot be read: {source}", path.display())]
+    MissingPath {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("trigger waits on task {0}, which does not exist")]
+    UnknownUpstream(TaskId),
+
+    #[error("waiting on task {0} would make this task wait on itself")]
+    ChainCycle(TaskId),
 }
 
 /// Refuse a trigger in `triggers` with an invalid cron expression, or an `At` time not
@@ -35,7 +54,7 @@ pub(in crate::state) fn check_triggers<Tz: TimeZone>(
 ) -> Result<(), TriggerError> {
     for trigger in triggers {
         match trigger {
-            TaskTrigger::Manual => {}
+            TaskTrigger::Manual | TaskTrigger::Event { .. } => {}
             TaskTrigger::At { at } => {
                 if !stored.contains(trigger) && at_instant(at, &now.timezone()) <= *now {
                     return Err(TriggerError::PastAt(*at));
@@ -102,7 +121,7 @@ fn occurrence<Tz: TimeZone>(
     inclusive: bool,
 ) -> Option<DateTime<Tz>> {
     match trigger {
-        TaskTrigger::Manual => None,
+        TaskTrigger::Manual | TaskTrigger::Event { .. } => None,
         TaskTrigger::At { at } => {
             let at = at_instant(at, &from.timezone());
             (at > *from || (inclusive && at == *from)).then_some(at)
@@ -117,7 +136,9 @@ fn occurrence<Tz: TimeZone>(
 fn missed_fire_policy(trigger: &TaskTrigger) -> MissedFire {
     match trigger {
         TaskTrigger::Schedule { missed, .. } => *missed,
-        TaskTrigger::Manual | TaskTrigger::At { .. } => MissedFire::RunOnce,
+        TaskTrigger::Manual | TaskTrigger::At { .. } | TaskTrigger::Event { .. } => {
+            MissedFire::RunOnce
+        }
     }
 }
 

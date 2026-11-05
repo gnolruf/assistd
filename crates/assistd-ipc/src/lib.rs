@@ -18,9 +18,10 @@ pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
-    LaneHolder, MissedFire, PlanStep, SuspendReason, TaskGrant, TaskId, TaskName, TaskPlan,
-    TaskPrompt, TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
-    TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
+    DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, LaneHolder, MissedFire,
+    PlanStep, SuspendReason, TaskEvent, TaskGrant, TaskId, TaskName, TaskPlan, TaskPrompt,
+    TaskQueueItem, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState, TaskRunSummary,
+    TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 

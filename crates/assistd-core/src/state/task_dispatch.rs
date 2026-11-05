@@ -22,7 +22,7 @@ const TASK_QUEUE_EVENT_ID: &str = "task_queue";
 impl AppState {
     /// Reload the runs left waiting when the daemon last stopped, failing those it
     /// stopped mid-run, then start queued runs as lanes free up and queue runs as time
-    /// triggers fire, until the task runner stops.
+    /// and event triggers fire, until the task runner stops.
     pub async fn start_task_queue(self: &Arc<Self>) {
         self.reload_task_queue().await;
         let dispatcher = Arc::clone(self);
@@ -33,6 +33,14 @@ impl AppState {
         self.runtime
             .task_runner
             .spawn_service(move |stopping| scheduler.schedule_task_fires(stopping));
+        let watcher = Arc::clone(self);
+        self.runtime
+            .task_runner
+            .spawn_service(move |stopping| watcher.watch_task_events(stopping));
+        let startup = Arc::clone(self);
+        self.runtime
+            .task_runner
+            .spawn_service(move |stopping| startup.fire_on_daemon_started(stopping));
     }
 
     /// The task queue and the model lanes as they stand.

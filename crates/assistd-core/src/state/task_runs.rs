@@ -17,6 +17,7 @@ use assistd_memory::{
 use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
 use assistd_voice::SentenceBuffer;
 
+use super::event_triggers::Occurrence;
 use super::lanes::LaneLease;
 use super::persistence::PersistTarget;
 use super::query::{TurnScope, TurnTranslator};
@@ -152,12 +153,29 @@ impl AppState {
             }),
             TaskRunEnd::Cancelled => Some(Event::Done { id }),
         };
-        info!(target: "assistd::tasks", end = ?end, "task run ended");
-        if let Err(e) = self.memory.tasks.finish_run(turn.run, end).await {
-            warn!(target: "assistd::tasks", error = %e, "recording how the task run ended failed");
-        }
+        self.record_run_end(turn, end).await;
         if let Some(terminal) = terminal {
             let _ = tx.send(terminal).await;
+        }
+    }
+
+    /// Record how the run ended, then fire the triggers waiting on its task finishing
+    /// unless it was cancelled.
+    async fn record_run_end(&self, turn: &TaskRunTurn, end: TaskRunEnd) {
+        info!(target: "assistd::tasks", end = ?end, "task run ended");
+        let succeeded = match &end {
+            TaskRunEnd::Succeeded { .. } => Some(true),
+            TaskRunEnd::Failed { .. } => Some(false),
+            TaskRunEnd::Cancelled => None,
+        };
+        if let Err(e) = self.memory.tasks.finish_run(turn.run, end).await {
+            warn!(target: "assistd::tasks", error = %e, "recording how the task run ended failed");
+            return;
+        }
+        if let Some(succeeded) = succeeded {
+            let task = turn.task.id;
+            self.fire_event_triggers(Occurrence::TaskFinished { task, succeeded })
+                .await;
         }
     }
 

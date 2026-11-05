@@ -361,6 +361,24 @@ the daemon was down or asleep runs once on return or skips them, by its
 second one. `assistd task run <name>` queues a run directly, the escape hatch for
 systemd timers, udev rules and key bindings.
 
+Event triggers are `TaskTrigger::Event`, carrying a `TaskEvent` and a cool-down
+(default one minute) that keeps a task's event triggers from firing it more
+often than that. `DaemonStarted` fires once, when presence first reaches
+`Active`. `SessionUnlocked` fires when logind's `LockedHint` on the user's
+graphical session (`User.Display`) turns false, watched over `zbus`; screen
+lockers set the hint, while logind's `Unlock` signal only follows
+`loginctl unlock-session`. `PathChanged` watches a path
+recursively with `notify` (inotify) and fires once per burst of creates,
+writes and moves-in, gathered over `debounce_secs`; `TaskSave` tilde-expands
+the path and refuses one that is relative or missing. `TaskFinished` fires
+when a run of the named task succeeds, fails, or either (a cancelled run fires
+nothing), queued as each run's end is recorded; `TaskSave` refuses a chain
+that names a missing task or leads back to the task being saved. A third
+service on the `TaskRunner` keeps one watch per enabled trigger that needs one
+(a path watch each, one shared logind subscription), matching them to the
+saved tasks after every save, enable, disable or delete. Event fires queue
+through the same coalescing as time triggers.
+
 An admitted run takes the request guard, as a query does, then opens an
 `isolated_conversation`. That conversation gets the main system prompt plus a
 short preamble saying no user is present, and the main agent's full tool
