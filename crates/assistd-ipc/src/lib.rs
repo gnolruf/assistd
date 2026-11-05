@@ -247,8 +247,13 @@ pub enum ConfirmSource {
     /// The main conversation's agent.
     #[default]
     Main,
-    /// A relay's sub-agent, working from untrusted content on `task`.
-    Relay { task: String },
+    /// A relay's sub-agent, working from untrusted content on `task`, inside task run `run`
+    /// when one relayed it.
+    Relay {
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run: Option<TaskRunId>,
+    },
     /// Run `run` of saved task `task`, with no user present.
     Task { task: TaskId, run: TaskRunId },
 }
@@ -571,6 +576,18 @@ pub enum Request {
     /// Change the task queue; errors when `op` names a run that is not queued, or moves a
     /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
     TaskQueue { id: String, op: TaskQueueOp },
+    /// Answer the confirmation task run `run` is paused on, sent as a `TaskRun`-wrapped
+    /// `ConfirmRequest` with this `confirm_id`. With `allow` and `add_grant`, also save the
+    /// prompt's `grants` on the task for its later runs. Errors when the run is not waiting on
+    /// that prompt, or `add_grant` names a prompt without grants. Emits `Done`.
+    TaskConfirm {
+        id: String,
+        run: TaskRunId,
+        confirm_id: String,
+        allow: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        add_grant: bool,
+    },
 }
 
 impl Request {
@@ -642,7 +659,8 @@ impl Request {
             | Request::TaskSetEnabled { id, .. }
             | Request::TaskRun { id, .. }
             | Request::TaskCancel { id, .. }
-            | Request::TaskQueue { id, .. } => id,
+            | Request::TaskQueue { id, .. }
+            | Request::TaskConfirm { id, .. } => id,
         }
     }
 
@@ -693,6 +711,7 @@ impl Request {
             Request::TaskRun { .. } => "task_run",
             Request::TaskCancel { .. } => "task_cancel",
             Request::TaskQueue { .. } => "task_queue",
+            Request::TaskConfirm { .. } => "task_confirm",
         }
     }
 }
@@ -968,7 +987,10 @@ pub enum Event {
         /// Programs an "always allow" answer adds to the allowlist; empty when not offered.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         always_allow: Vec<String>,
-
+        /// What an `add_grant` answer saves on a paused task run's task; empty when no grant
+        /// can cover the request.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grants: Vec<TaskGrant>,
         /// Which agent asked.
         #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
         source: ConfirmSource,

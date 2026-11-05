@@ -153,10 +153,9 @@ impl AppState {
 
     /// Start waiting run `run` on `lease`'s lane, unless it stopped waiting meanwhile.
     fn start_admitted(self: &Arc<Self>, run: TaskRunId, lease: LaneLease) {
-        let started = self
-            .runtime
-            .task_queue
-            .start(run, |queued| self.spawn_task_run(queued, lease));
+        let started = self.runtime.task_queue.start(run, lease, |queued, lease| {
+            self.spawn_task_run(queued, lease);
+        });
         if !started {
             debug!(target: "assistd::tasks", %run, "admitted run left the queue first");
         }

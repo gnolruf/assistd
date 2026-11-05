@@ -2,7 +2,9 @@
 //! requests, feed the results back, repeat until it answers.
 
 use std::any::Any;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +19,7 @@ use assistd_llm::{
     HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
     ToolResultPayload,
 };
-use assistd_tools::{Attachment, ToolOutput, ToolRegistry};
+use assistd_tools::{Attachment, CONFIRM_ROUTER, ToolOutput, ToolRegistry};
 
 use crate::recovery::{Component, StatusSeverity, panic_message};
 use crate::recovery_event;
@@ -643,6 +645,38 @@ fn panicked_tool_result(
     )
 }
 
+/// `fut`'s output, or `None` once it has run `deadline` without one; the clock stops while the
+/// confirm router in scope has a prompt parked.
+async fn within_deadline<F: Future>(deadline: Duration, fut: F) -> Option<F::Output> {
+    let Ok(mut parked) = CONFIRM_ROUTER.try_with(|router| router.parked()) else {
+        return tokio::time::timeout(deadline, fut).await.ok();
+    };
+    let mut fut = pin!(fut);
+    let mut left = deadline;
+    loop {
+        if *parked.borrow_and_update() {
+            tokio::select! {
+                output = &mut fut => return Some(output),
+                changed = parked.changed() => if changed.is_err() {
+                    return tokio::time::timeout(left, fut).await.ok();
+                },
+            }
+        } else {
+            let started = Instant::now();
+            tokio::select! {
+                output = &mut fut => return Some(output),
+                () = tokio::time::sleep(left) => return None,
+                changed = parked.changed() => {
+                    left = left.saturating_sub(started.elapsed());
+                    if changed.is_err() {
+                        return tokio::time::timeout(left, fut).await.ok();
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn dispatch_tool_call(
     tools: &ToolRegistry,
     call: &ToolCall,
@@ -657,7 +691,7 @@ async fn dispatch_tool_call(
 
     let invocation = AssertUnwindSafe(tool.invoke(call.arguments.clone())).catch_unwind();
     let finished = if tool.bounded_by_tool_deadline() {
-        tokio::time::timeout(deadline, invocation).await.ok()
+        within_deadline(deadline, invocation).await
     } else {
         Some(invocation.await)
     };

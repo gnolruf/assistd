@@ -386,10 +386,26 @@ registry. On lane 0 it is keyed `TaskRun` in the `SlotStash`, and when the run
 ends its slot file is dropped and the main conversation's slot restored. It is
 saved as a transcript session of its own, linked from its `task_runs` row, and
 its events reach subscribers wrapped in `Event::TaskRun`. The main conversation,
-its branch and the active session are never touched. Every confirmation prompt
-is denied and labelled `ConfirmSource::Task`. `Request::TaskCancel` cancels a
-run the way `InterruptTurn` cancels a turn. A run still going at shutdown is
-recorded as failed.
+its branch and the active session are never touched. `Request::TaskCancel`
+cancels a run the way `InterruptTurn` cancels a turn. A run still going at
+shutdown is recorded as failed.
+
+A run's prompts are labelled `ConfirmSource::Task` (a relayed sub-agent's name
+the run too) and go through a `ConfirmRouter` built with the task's `Grants`.
+Each `ConfirmationRequest` carries a `Grantable`: the program approvals, web
+host, MCP tool, desktop entry and canonical write targets a grant must cover,
+or `Never` for what always asks (sensitive paths, writes too long to show,
+plaintext fetches, launches with targets). A grant covers no more than the
+matching "always allow" would: the same subcommand, the exact host, a write
+strictly below the granted directory once both are resolved. A covered request
+runs once, logged on `assistd::policy`; grants never reach the allowlist or the
+`approved_*.toml` files. Anything else is parked: the run turns `NeedsInput`,
+gives up its lane and request guard (on lane 0 its slot state stays in the
+stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`
+listing the grants that would cover it. The tool deadline stops while a prompt
+is parked. `Request::TaskConfirm` answers it, with `add_grant` saving those
+grants on the task when its prompt is unchanged, and the run waits first in the
+queue for a lane, moving its conversation to that lane's slot.
 
 ### Tools (`assistd-tools`)
 

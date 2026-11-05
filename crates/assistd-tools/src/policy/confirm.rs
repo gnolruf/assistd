@@ -10,12 +10,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-use assistd_ipc::{ConfirmSource, Event, PermissionMode};
+use assistd_ipc::{ConfirmSource, Event, PermissionMode, TaskGrant};
 
+use super::grants::{Grantable, Grants};
 use super::judge::{JudgedCommand, SafetyJudge, Verdict};
+use super::on_blocking_pool;
 
 /// Cap on confirmation prompts in flight on one connection.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
@@ -38,6 +40,8 @@ pub struct ConfirmationRequest {
     pub risk: Risk,
     /// Which permission modes may approve it without asking.
     pub unattended: Unattended,
+    /// What grants must cover for a task run to run it without asking.
+    pub grantable: Grantable,
     /// The agent whose command it is.
     pub source: ConfirmSource,
 }
@@ -156,6 +160,21 @@ impl ConfirmationGate for AlwaysAllowGate {
     }
 }
 
+/// Holds a task run's prompts, which nobody is present to answer, until the user answers.
+#[async_trait]
+pub trait PromptParking: fmt::Debug + Send + Sync + 'static {
+    /// Pause the run on `req` and resume it once answered; [`Approval::Always`] means the user
+    /// also granted `req`'s grants to the task. Every failure is [`Approval::Deny`].
+    async fn park(&self, req: ConfirmationRequest) -> Approval;
+}
+
+/// A task run's grants and where its other prompts wait.
+#[derive(Debug)]
+struct TaskRunAsks {
+    grants: Mutex<Grants>,
+    parking: Arc<dyn PromptParking>,
+}
+
 #[derive(Debug, Default)]
 struct PendingPrompts {
     /// The client can no longer answer; every later ask is denied.
@@ -183,6 +202,10 @@ pub struct ConfirmRouter {
     judge: Option<SafetyJudge>,
     /// Replaces [`ConfirmSource::Main`] on every prompt asked through this router.
     main_source: Option<ConfirmSource>,
+    /// Set for a task run, whose prompts never reach a client.
+    task_run: Option<TaskRunAsks>,
+    /// Raised while a prompt waits in [`PromptParking`].
+    parked: watch::Sender<bool>,
 }
 
 impl ConfirmRouter {
@@ -202,12 +225,19 @@ impl ConfirmRouter {
             mode: Mutex::new(PermissionMode::Manual),
             judge,
             main_source: None,
+            task_run: None,
+            parked: watch::Sender::new(false),
         })
     }
 
-    /// A router with no client behind it, which denies every prompt and labels the main
-    /// agent's with `source`.
-    pub fn unattended(request_id: String, source: ConfirmSource) -> Arc<Self> {
+    /// A router for a task run with no client behind it, labelling its prompts with `source`:
+    /// a prompt `grants` cover is approved once, and any other waits in `parking`.
+    pub fn for_task_run(
+        request_id: String,
+        source: ConfirmSource,
+        grants: Grants,
+        parking: Arc<dyn PromptParking>,
+    ) -> Arc<Self> {
         let (wire, _) = mpsc::channel(1);
         Arc::new(Self {
             request_id,
@@ -220,7 +250,18 @@ impl ConfirmRouter {
             mode: Mutex::new(PermissionMode::Manual),
             judge: None,
             main_source: Some(source),
+            task_run: Some(TaskRunAsks {
+                grants: Mutex::new(grants),
+                parking,
+            }),
+            parked: watch::Sender::new(false),
         })
+    }
+
+    /// Watch whether a prompt is parked on an answer that may take any time, during which a
+    /// tool's deadline should not run.
+    pub fn parked(&self) -> watch::Receiver<bool> {
+        self.parked.subscribe()
     }
 
     /// Answer later asks under `mode`, or under [`PermissionMode::Manual`] when it is Auto and
@@ -241,16 +282,61 @@ impl ConfirmRouter {
     /// Approve `req` once when the mode lets it run unasked; otherwise prompt the client and
     /// await the answer. Every failure is [`Approval::Deny`].
     pub async fn ask(&self, mut req: ConfirmationRequest) -> Approval {
-        if let Some(source) = &self.main_source
-            && req.source.is_main()
-        {
-            req.source = source.clone();
+        self.label(&mut req.source);
+        if let Some(run) = &self.task_run {
+            return self.ask_for_task_run(run, req).await;
         }
         let mode = *self.mode.lock();
         if self.approves_unasked(mode, &mut req).await {
             return Approval::Once;
         }
         self.ask_client(req).await
+    }
+
+    /// Put this router's own source on a main agent's prompt, and name the task run on a
+    /// relay's.
+    fn label(&self, source: &mut ConfirmSource) {
+        let Some(main) = &self.main_source else {
+            return;
+        };
+        match (main, source) {
+            (_, asker @ ConfirmSource::Main) => *asker = main.clone(),
+            (
+                ConfirmSource::Task { run, .. },
+                ConfirmSource::Relay {
+                    run: relayed_in, ..
+                },
+            ) => {
+                *relayed_in = Some(*run);
+            }
+            _ => {}
+        }
+    }
+
+    /// Approve `req` once when the run's grants cover it, logging the grants that did;
+    /// otherwise park it. A grant the user adds while answering holds for the rest of the run
+    /// and never reaches the allowlist.
+    async fn ask_for_task_run(&self, run: &TaskRunAsks, req: ConfirmationRequest) -> Approval {
+        if let Some(grants) = granted(run, &req).await {
+            info!(
+                target: "assistd::policy",
+                tool = %req.tool,
+                source = ?req.source,
+                ?grants,
+                "approved by the task's grants"
+            );
+            return Approval::Once;
+        }
+        let offered = req.grantable.grants();
+        let approval = {
+            let _parked = ParkedFlag::raise(&self.parked);
+            run.parking.park(req).await
+        };
+        if approval == Approval::Always {
+            run.grants.lock().extend(offered);
+            return Approval::Once;
+        }
+        approval
     }
 
     /// Whether `mode` lets `req` run unasked, logging each approval. A judge's reason to ask is
@@ -307,6 +393,7 @@ impl ConfirmRouter {
             script: req.script.clone(),
             matched_pattern: req.matched_pattern.clone(),
             always_allow: req.always_allow.clone(),
+            grants: Vec::new(),
             source: req.source.clone(),
         };
         if self.wire.send(event).await.is_err() {
@@ -414,6 +501,22 @@ impl ConfirmRouter {
     }
 }
 
+/// A router's parked flag, raised until dropped.
+struct ParkedFlag<'router>(&'router watch::Sender<bool>);
+
+impl<'router> ParkedFlag<'router> {
+    fn raise(flag: &'router watch::Sender<bool>) -> Self {
+        flag.send_replace(true);
+        Self(flag)
+    }
+}
+
+impl Drop for ParkedFlag<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
+}
+
 /// A prompt registered with a [`ConfirmRouter`], removed from its
 /// routing table when dropped.
 struct PendingPrompt<'router> {
@@ -425,6 +528,13 @@ impl Drop for PendingPrompt<'_> {
     fn drop(&mut self) {
         self.router.pending.lock().prompts.remove(&self.confirm_id);
     }
+}
+
+/// The run's grants covering `req`, one per need, if they cover all of it.
+async fn granted(run: &TaskRunAsks, req: &ConfirmationRequest) -> Option<Vec<TaskGrant>> {
+    let grants = run.grants.lock().clone();
+    let grantable = req.grantable.clone();
+    on_blocking_pool(move || grants.covering(&grantable)).await
 }
 
 tokio::task_local! {
@@ -470,9 +580,27 @@ impl ConfirmationGate for IpcConfirmationGate {
 
 #[cfg(test)]
 mod tests {
+    use assistd_ipc::{TaskId, TaskRunId};
+
     use super::*;
     use crate::commands::test_support::FixedJudge;
+    use crate::policy::GrantNeed;
     use PermissionMode::{AcceptEdits, Auto, Manual};
+
+    /// Answers every parked prompt with `approval`, counting them.
+    #[derive(Debug)]
+    struct AnsweringParking {
+        approval: Approval,
+        parked: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl PromptParking for AnsweringParking {
+        async fn park(&self, _req: ConfirmationRequest) -> Approval {
+            *self.parked.lock() += 1;
+            self.approval
+        }
+    }
 
     fn sample_request() -> ConfirmationRequest {
         ConfirmationRequest {
@@ -482,6 +610,7 @@ mod tests {
             always_allow: Vec::new(),
             risk: Risk::Elevated,
             unattended: Unattended::Never,
+            grantable: Grantable::Never,
             source: ConfirmSource::Main,
         }
     }
@@ -546,6 +675,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn task_run_router_runs_granted_asks_and_parks_the_rest() {
+        let parking = Arc::new(AnsweringParking {
+            approval: Approval::Always,
+            parked: Mutex::new(0),
+        });
+        let source = ConfirmSource::Task {
+            task: TaskId(1),
+            run: TaskRunId(2),
+        };
+        let grants = Grants::new(vec![TaskGrant::WebHost {
+            host: "example.com".into(),
+        }]);
+        let router = ConfirmRouter::for_task_run("r".into(), source, grants, parking.clone());
+        let fetch = |host: &str| ConfirmationRequest {
+            grantable: Grantable::needs(vec![GrantNeed::WebHost(host.into())]),
+            ..sample_request()
+        };
+        let parked = || *parking.parked.lock();
+
+        assert_eq!(router.ask(fetch("example.com")).await, Approval::Once);
+        assert_eq!(parked(), 0, "a granted ask is not parked");
+        assert_eq!(router.ask(fetch("other.org")).await, Approval::Once);
+        assert_eq!(parked(), 1, "an ungranted ask is parked");
+        assert_eq!(router.ask(fetch("other.org")).await, Approval::Once);
+        assert_eq!(
+            parked(),
+            1,
+            "a grant added while answering holds for the rest of the run"
+        );
     }
 
     #[tokio::test]
