@@ -2,6 +2,7 @@
 //! parking that pauses a run, gives up its lane, and resumes it first in the queue.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -72,17 +73,13 @@ impl TaskConfirms {
         confirm_id: &str,
         approval: Approval,
     ) -> Result<(), TaskConfirmError> {
-        let mut pending = self.pending.lock();
-        if pending
-            .get(&run)
-            .is_none_or(|pending| pending.confirm_id != confirm_id)
-        {
-            return Err(TaskConfirmError::NotWaiting(run, confirm_id.to_string()));
+        match self.pending.lock().entry(run) {
+            Entry::Occupied(waiting) if waiting.get().confirm_id == confirm_id => {
+                let _ = waiting.remove().answer.send(approval);
+                Ok(())
+            }
+            _ => Err(TaskConfirmError::NotWaiting(run, confirm_id.to_string())),
         }
-        if let Some(answered) = pending.remove(&run) {
-            let _ = answered.answer.send(approval);
-        }
-        Ok(())
     }
 }
 
@@ -106,12 +103,10 @@ struct RegisteredConfirm<'confirms> {
 
 impl Drop for RegisteredConfirm<'_> {
     fn drop(&mut self) {
-        let mut pending = self.confirms.pending.lock();
-        if pending
-            .get(&self.run)
-            .is_some_and(|pending| pending.confirm_id == self.confirm_id)
+        if let Entry::Occupied(waiting) = self.confirms.pending.lock().entry(self.run)
+            && waiting.get().confirm_id == self.confirm_id
         {
-            pending.remove(&self.run);
+            waiting.remove();
         }
     }
 }

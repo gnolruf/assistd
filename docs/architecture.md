@@ -390,8 +390,8 @@ its branch and the active session are never touched. `Request::TaskCancel`
 cancels a run the way `InterruptTurn` cancels a turn. A run still going at
 shutdown is recorded as failed.
 
-A run's prompts are labelled `ConfirmSource::Task` (a relayed sub-agent's name
-the run too) and go through a `ConfirmRouter` built with the task's `Grants`.
+A run's prompts are labelled `ConfirmSource::Task` (a relayed sub-agent's
+prompts name the run too) and go through a `ConfirmRouter` built with the task's `Grants`.
 Each `ConfirmationRequest` carries a `Grantable`: the program approvals, web
 host, MCP tool, desktop entry and canonical write targets a grant must cover,
 or `Never` for what always asks (sensitive paths, writes too long to show,

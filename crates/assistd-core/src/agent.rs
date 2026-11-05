@@ -654,23 +654,24 @@ async fn within_deadline<F: Future>(deadline: Duration, fut: F) -> Option<F::Out
     let mut fut = pin!(fut);
     let mut left = deadline;
     loop {
-        if *parked.borrow_and_update() {
-            tokio::select! {
-                output = &mut fut => return Some(output),
-                changed = parked.changed() => if changed.is_err() {
-                    return tokio::time::timeout(left, fut).await.ok();
-                },
+        let paused = *parked.borrow_and_update();
+        let started = Instant::now();
+        let clock = async {
+            if paused {
+                std::future::pending::<()>().await;
+            } else {
+                tokio::time::sleep(left).await;
             }
-        } else {
-            let started = Instant::now();
-            tokio::select! {
-                output = &mut fut => return Some(output),
-                () = tokio::time::sleep(left) => return None,
-                changed = parked.changed() => {
+        };
+        tokio::select! {
+            output = &mut fut => return Some(output),
+            () = clock => return None,
+            changed = parked.changed() => {
+                if !paused {
                     left = left.saturating_sub(started.elapsed());
-                    if changed.is_err() {
-                        return tokio::time::timeout(left, fut).await.ok();
-                    }
+                }
+                if changed.is_err() {
+                    return tokio::time::timeout(left, fut).await.ok();
                 }
             }
         }

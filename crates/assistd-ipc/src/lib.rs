@@ -576,10 +576,9 @@ pub enum Request {
     /// Change the task queue; errors when `op` names a run that is not queued, or moves a
     /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
     TaskQueue { id: String, op: TaskQueueOp },
-    /// Answer the confirmation task run `run` is paused on, sent as a `TaskRun`-wrapped
-    /// `ConfirmRequest` with this `confirm_id`. With `allow` and `add_grant`, also save the
-    /// prompt's `grants` on the task for its later runs. Errors when the run is not waiting on
-    /// that prompt, or `add_grant` names a prompt without grants. Emits `Done`.
+    /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on; `add_grant` with
+    /// `allow` also saves its `grants` on the task. Errors when the run is not waiting on it, or
+    /// `add_grant` names one without grants. Emits `Done`.
     TaskConfirm {
         id: String,
         run: TaskRunId,

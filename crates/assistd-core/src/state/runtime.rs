@@ -114,7 +114,6 @@ pub struct RuntimeState {
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
     pub(in crate::state) lanes: Arc<ModelLanes>,
     pub(in crate::state) task_queue: TaskQueue,
-    /// The confirmations paused task runs wait on.
     pub(in crate::state) task_confirms: TaskConfirms,
     pub(in crate::state) task_scheduler: TaskScheduler,
     pub(in crate::state) task_events: TaskEvents,

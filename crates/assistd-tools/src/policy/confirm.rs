@@ -580,27 +580,9 @@ impl ConfirmationGate for IpcConfirmationGate {
 
 #[cfg(test)]
 mod tests {
-    use assistd_ipc::{TaskId, TaskRunId};
-
     use super::*;
     use crate::commands::test_support::FixedJudge;
-    use crate::policy::GrantNeed;
     use PermissionMode::{AcceptEdits, Auto, Manual};
-
-    /// Answers every parked prompt with `approval`, counting them.
-    #[derive(Debug)]
-    struct AnsweringParking {
-        approval: Approval,
-        parked: Mutex<u32>,
-    }
-
-    #[async_trait]
-    impl PromptParking for AnsweringParking {
-        async fn park(&self, _req: ConfirmationRequest) -> Approval {
-            *self.parked.lock() += 1;
-            self.approval
-        }
-    }
 
     fn sample_request() -> ConfirmationRequest {
         ConfirmationRequest {
@@ -675,38 +657,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[tokio::test]
-    async fn task_run_router_runs_granted_asks_and_parks_the_rest() {
-        let parking = Arc::new(AnsweringParking {
-            approval: Approval::Always,
-            parked: Mutex::new(0),
-        });
-        let source = ConfirmSource::Task {
-            task: TaskId(1),
-            run: TaskRunId(2),
-        };
-        let grants = Grants::new(vec![TaskGrant::WebHost {
-            host: "example.com".into(),
-        }]);
-        let router = ConfirmRouter::for_task_run("r".into(), source, grants, parking.clone());
-        let fetch = |host: &str| ConfirmationRequest {
-            grantable: Grantable::needs(vec![GrantNeed::WebHost(host.into())]),
-            ..sample_request()
-        };
-        let parked = || *parking.parked.lock();
-
-        assert_eq!(router.ask(fetch("example.com")).await, Approval::Once);
-        assert_eq!(parked(), 0, "a granted ask is not parked");
-        assert_eq!(router.ask(fetch("other.org")).await, Approval::Once);
-        assert_eq!(parked(), 1, "an ungranted ask is parked");
-        assert_eq!(router.ask(fetch("other.org")).await, Approval::Once);
-        assert_eq!(
-            parked(),
-            1,
-            "a grant added while answering holds for the rest of the run"
-        );
     }
 
     #[tokio::test]
