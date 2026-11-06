@@ -1,29 +1,46 @@
 //! The inline command-confirmation prompt.
 
-use assistd_ipc::Request;
+use assistd_ipc::{PausedPrompt, Request, TaskRunId};
 use assistd_tools::{Approval, ConfirmationRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use super::{App, ConfirmChoice, ConfirmationPrompt};
+use super::{AnswerTo, App, ConfirmChoice, ConfirmationPrompt};
 
 /// Script rows one PgUp/PgDn moves an expanded prompt.
 const PROMPT_SCROLL_STEP: usize = 10;
 
 impl App {
-    /// Show a command-confirmation prompt. A second prompt arriving while
-    /// one is open is denied immediately.
+    /// Show a reply's command-confirmation prompt in place of an open task run's, which
+    /// stays paused; one arriving while another reply prompt is open is denied immediately.
     pub(super) fn open_confirmation(&mut self, confirm_id: String, request: ConfirmationRequest) {
-        if self.confirmation.is_some() {
+        if self
+            .confirmation
+            .as_ref()
+            .is_some_and(|prompt| prompt.answer_to == AnswerTo::Reply)
+        {
             self.send_confirm_response(&confirm_id, Approval::Deny);
             return;
         }
         self.confirmation = Some(ConfirmationPrompt::new(confirm_id, request));
     }
 
+    /// Show the prompt paused run `run` waits on, unless another prompt is open.
+    pub(super) fn open_task_run_confirmation(&mut self, run: TaskRunId, prompt: PausedPrompt) {
+        if self.confirmation.is_some() {
+            self.set_notice("answer the open prompt first");
+            return;
+        }
+        self.confirmation = Some(ConfirmationPrompt::for_task_run(run, prompt));
+    }
+
     pub(super) fn resolve_confirmation(&mut self, approval: Approval) {
-        if let Some(prompt) = self.confirmation.take() {
-            self.send_confirm_response(&prompt.confirm_id, approval);
+        let Some(prompt) = self.confirmation.take() else {
+            return;
+        };
+        match prompt.answer_to {
+            AnswerTo::Reply => self.send_confirm_response(&prompt.confirm_id, approval),
+            AnswerTo::TaskRun(run) => self.answer_task_run(run, prompt.confirm_id, approval),
         }
     }
 

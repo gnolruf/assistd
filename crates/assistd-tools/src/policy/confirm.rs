@@ -163,8 +163,8 @@ impl ConfirmationGate for AlwaysAllowGate {
 /// Holds a task run's prompts, which nobody is present to answer, until the user answers.
 #[async_trait]
 pub trait PromptParking: fmt::Debug + Send + Sync + 'static {
-    /// Pause the run on `req` and resume it once answered for this once. Every failure is
-    /// [`Approval::Deny`].
+    /// Pause the run on `req` and resume it once answered; [`Approval::Always`] on a web
+    /// fetch also allows its host for the rest of the run. Every failure is [`Approval::Deny`].
     async fn park(&self, req: ConfirmationRequest) -> Approval;
 }
 
@@ -182,7 +182,7 @@ enum Answerer {
 /// The hosts a task run fetches from unasked, and where its other prompts wait.
 #[derive(Debug)]
 struct TaskRunAsks {
-    allowed_hosts: Vec<HostName>,
+    allowed_hosts: Mutex<Vec<HostName>>,
     parking: Arc<dyn PromptParking>,
 }
 
@@ -253,7 +253,7 @@ impl ConfirmRouter {
         parking: Arc<dyn PromptParking>,
     ) -> Arc<Self> {
         let asks = TaskRunAsks {
-            allowed_hosts,
+            allowed_hosts: Mutex::new(allowed_hosts),
             parking,
         };
         let router = Self {
@@ -367,19 +367,21 @@ impl ConfirmRouter {
     }
 
     /// Approve `req` once when it fetches from a host the task allows; otherwise park it. An
-    /// answer holds for this prompt alone.
+    /// answer holds for this prompt alone, except that "always" allows its host for the rest
+    /// of the run.
     async fn ask_for_task_run(&self, run: &TaskRunAsks, req: ConfirmationRequest) -> Approval {
-        if let Unattended::WebHost(host) = &req.unattended
-            && run
-                .allowed_hosts
-                .iter()
-                .any(|allowed| allowed.as_str().eq_ignore_ascii_case(host))
+        let host = match &req.unattended {
+            Unattended::WebHost(host) => HostName::try_from(host.clone()).ok(),
+            _ => None,
+        };
+        if let Some(host) = &host
+            && run.allowed_hosts.lock().contains(host)
         {
             info!(
                 target: "assistd::policy",
                 tool = %req.tool,
                 source = ?req.source,
-                host,
+                host = %host,
                 "approved: the task allows this host"
             );
             return Approval::Once;
@@ -388,6 +390,11 @@ impl ConfirmRouter {
             let _parked = ParkedFlag::raise(&self.parked);
             run.parking.park(req).await
         };
+        if approval == Approval::Always
+            && let Some(host) = host
+        {
+            run.allowed_hosts.lock().push(host);
+        }
         match approval {
             Approval::Deny => Approval::Deny,
             Approval::Once | Approval::Always => Approval::Once,

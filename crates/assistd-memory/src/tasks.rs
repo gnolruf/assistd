@@ -6,7 +6,9 @@ use std::fmt;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use assistd_ipc::{SuspendReason, TaskId, TaskRunId, TaskRunState, TaskSpec, TaskTrigger};
+use assistd_ipc::{
+    SuspendReason, TaskId, TaskRunId, TaskRunRecord, TaskRunState, TaskSpec, TaskTrigger,
+};
 
 use crate::{MemoryError, Result, SessionId};
 
@@ -122,6 +124,10 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
 
     /// How each task's latest finished run ended, for every task with one.
     async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>>;
+
+    /// Task `task`'s latest `limit` runs, newest first; [`MemoryError::TaskNotFound`] when
+    /// there is no such task.
+    async fn runs(&self, task: TaskId, limit: u32) -> Result<Vec<TaskRunRecord>>;
 }
 
 /// Store with no database: lists nothing and refuses every write.
@@ -205,5 +211,9 @@ impl TaskStore for NoTaskStore {
 
     async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>> {
         Ok(HashMap::new())
+    }
+
+    async fn runs(&self, task: TaskId, _limit: u32) -> Result<Vec<TaskRunRecord>> {
+        Err(MemoryError::TaskNotFound(task))
     }
 }

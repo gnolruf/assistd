@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use assistd_core::{PresenceState, VoiceCaptureState};
 use assistd_ipc::{ConfirmSource, PermissionMode, TaskRunState, TurnStats};
-use assistd_tools::ConfirmationRequest;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -16,7 +15,7 @@ use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
 use super::app::{
-    App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker, ResumeTab,
+    AnswerTo, App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker, ResumeTab,
 };
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use super::settings::render_settings;
@@ -537,7 +536,7 @@ fn choice_rows(prompt: &ConfirmationPrompt, width: usize, theme: &Theme) -> Vec<
         .flat_map(|(index, choice)| {
             let label = match choice {
                 ConfirmChoice::Once => "Yes".to_string(),
-                ConfirmChoice::Always => always_label(&prompt.request),
+                ConfirmChoice::Always => always_label(prompt),
                 ConfirmChoice::Deny => "No (Esc)".to_string(),
             };
             let (pointer, style) = if index == prompt.selected {
@@ -552,14 +551,18 @@ fn choice_rows(prompt: &ConfirmationPrompt, width: usize, theme: &Theme) -> Vec<
 }
 
 /// What the "always" choice stops asking about, in the terms of the tool
-/// that asked.
-fn always_label(request: &ConfirmationRequest) -> String {
+/// that asked; for a paused task run, only its task stops asking.
+fn always_label(prompt: &ConfirmationPrompt) -> String {
+    let request = &prompt.request;
     let names = request
         .always_allow
         .iter()
         .map(|name| escape_controls_single_line(name))
         .collect::<Vec<_>>()
         .join(", ");
+    if matches!(prompt.answer_to, AnswerTo::TaskRun(_)) {
+        return format!("Yes, and allow fetches from {names} for this task");
+    }
     match request.tool.as_str() {
         "web" => format!("Yes, allow all fetches from {names}"),
         tool if tool.starts_with("mcp__") => format!("Yes, always allow {names}"),
@@ -952,7 +955,7 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use assistd_tools::{Risk, Unattended};
+    use assistd_tools::{ConfirmationRequest, Risk, Unattended};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

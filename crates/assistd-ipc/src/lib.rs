@@ -19,10 +19,10 @@ pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
     ActionOutlook, AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS,
-    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MissedFire,
-    ModeRecommendation, Plan, PlanId, PlanStep, PlannedAction, QueueItem, SuspendReason, TaskEvent,
-    TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
-    TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
+    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MAX_LISTED_RUNS, MissedFire,
+    ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep, PlannedAction, QueueItem,
+    SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot,
+    TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -577,6 +577,9 @@ pub enum Request {
     /// Change the task queue; errors when `op` names a run that is not queued, or moves a
     /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
     TaskQueue { id: String, op: TaskQueueOp },
+    /// List task `task`'s runs, newest first, at most [`MAX_LISTED_RUNS`]. Emits
+    /// `TaskRunRecord`s, then `Done`; errors when there is no such task.
+    TaskRuns { id: String, task: TaskId },
     /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on, for this once.
     /// Errors when the run is not waiting on it. Emits `Done`.
     TaskConfirm {
@@ -584,6 +587,10 @@ pub enum Request {
         run: TaskRunId,
         confirm_id: String,
         allow: bool,
+        /// With `allow`, also add the prompt's [`PausedPrompt::host`] to the task's allowed
+        /// hosts, emitting the updated `Task` before `Done`; errors when it has none.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        always: bool,
     },
     /// Explore task prompt `prompt` in a conversation of its own and rewrite it as a brief for
     /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last
@@ -680,6 +687,7 @@ impl Request {
             | Request::TaskSetEnabled { id, .. }
             | Request::TaskRun { id, .. }
             | Request::TaskCancel { id, .. }
+            | Request::TaskRuns { id, .. }
             | Request::TaskQueue { id, .. }
             | Request::TaskConfirm { id, .. }
             | Request::TaskRefine { id, .. }
@@ -733,6 +741,7 @@ impl Request {
             Request::TaskSetEnabled { .. } => "task_set_enabled",
             Request::TaskRun { .. } => "task_run",
             Request::TaskCancel { .. } => "task_cancel",
+            Request::TaskRuns { .. } => "task_runs",
             Request::TaskQueue { .. } => "task_queue",
             Request::TaskConfirm { .. } => "task_confirm",
             Request::TaskRefine { .. } => "task_refine",
@@ -1125,6 +1134,8 @@ pub enum Event {
         id: String,
         fires: Vec<DateTime<Utc>>,
     },
+    /// One run listed by `TaskRuns`.
+    TaskRunRecord { id: String, record: TaskRunRecord },
     /// Run `run` of `task` was queued.
     TaskRunQueued {
         id: String,
@@ -1207,6 +1218,7 @@ impl Event {
             | Event::HistoryEntry { id, .. }
             | Event::UndoApplied { id, .. }
             | Event::Task { id, .. }
+            | Event::TaskRunRecord { id, .. }
             | Event::TaskRunQueued { id, .. }
             | Event::TaskRun { id, .. }
             | Event::TaskQueue { id, .. }
@@ -1261,6 +1273,7 @@ impl Event {
             | Event::HistoryEntry { .. }
             | Event::UndoApplied { .. }
             | Event::Task { .. }
+            | Event::TaskRunRecord { .. }
             | Event::TaskRunQueued { .. }
             | Event::Queued { .. }
             | Event::TaskRefined { .. }

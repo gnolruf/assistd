@@ -1,5 +1,6 @@
-//! Confirmations paused task runs wait on: the registry `TaskConfirm` answers, and the
-//! parking that pauses a run, gives up its lane, and resumes it first in the queue.
+//! Confirmations paused task runs wait on: the registry `TaskConfirm` answers, the
+//! parking that pauses a run, gives up its lane, and resumes it first in the queue, and the
+//! "always" answer that adds a web host to the task's allowed hosts.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -11,17 +12,21 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use assistd_ipc::{Event, TaskRunId};
-use assistd_tools::{Approval, ConfirmationRequest, PromptParking};
+use assistd_ipc::{Event, HostName, PausedPrompt, TaskId, TaskRunId};
+use assistd_memory::TaskRecord;
+use assistd_tools::{Approval, ConfirmationRequest, PromptParking, Unattended};
 
 use super::run_lane::RunLane;
-use super::{AppState, send_error};
+use super::{AppState, DispatchError, send_error};
 
 /// Why a `TaskConfirm` was refused.
 #[derive(Debug, Error)]
 pub(in crate::state) enum TaskConfirmError {
     #[error("task run {0} is not waiting on confirmation {1}")]
     NotWaiting(TaskRunId, String),
+
+    #[error("confirmation {0} offers no host to allow for the task")]
+    NoHost(String),
 }
 
 /// The confirmation each paused task run waits on.
@@ -42,28 +47,52 @@ impl TaskConfirms {
         }
     }
 
-    /// Answer confirmation `confirm_id`, which `run` must wait on, with `approval`.
+    /// Answer confirmation `confirm_id`, which `run` must wait on, with `approval`; an
+    /// [`Approval::Always`] returns the host it allows, and is refused when none is offered.
     fn answer(
         &self,
         run: TaskRunId,
         confirm_id: &str,
         approval: Approval,
-    ) -> Result<(), TaskConfirmError> {
-        match self.pending.lock().entry(run) {
-            Entry::Occupied(waiting) if waiting.get().confirm_id == confirm_id => {
-                let _ = waiting.remove().answer.send(approval);
-                Ok(())
-            }
-            _ => Err(TaskConfirmError::NotWaiting(run, confirm_id.to_string())),
+    ) -> Result<Option<AllowedHost>, TaskConfirmError> {
+        let mut pending = self.pending.lock();
+        let Entry::Occupied(waiting) = pending.entry(run) else {
+            return Err(TaskConfirmError::NotWaiting(run, confirm_id.to_string()));
+        };
+        let confirm = waiting.get();
+        if confirm.confirm_id != confirm_id {
+            return Err(TaskConfirmError::NotWaiting(run, confirm_id.to_string()));
         }
+        let allowed = match (approval, &confirm.host) {
+            (Approval::Always, Some(host)) => Some(AllowedHost {
+                task: confirm.task,
+                host: host.clone(),
+            }),
+            (Approval::Always, None) => {
+                return Err(TaskConfirmError::NoHost(confirm_id.to_string()));
+            }
+            (Approval::Once | Approval::Deny, _) => None,
+        };
+        let _ = waiting.remove().answer.send(approval);
+        Ok(allowed)
     }
 }
 
-/// A confirmation a paused run waits on, and where its answer goes.
+/// A confirmation a paused run of `task` waits on, and where its answer goes.
 #[derive(Debug)]
 struct PendingConfirm {
     confirm_id: String,
+    task: TaskId,
+    /// The web host an "always" answer allows for the task.
+    host: Option<HostName>,
     answer: oneshot::Sender<Approval>,
+}
+
+/// A web host an "always" answer allows for the runs of `task`.
+#[derive(Debug)]
+struct AllowedHost {
+    task: TaskId,
+    host: HostName,
 }
 
 /// A confirmation registered in [`TaskConfirms`], forgotten when dropped.
@@ -95,15 +124,29 @@ impl PromptParking for TaskRunParking {
     async fn park(&self, req: ConfirmationRequest) -> Approval {
         let (answer, answered) = oneshot::channel();
         let confirm_id = uuid::Uuid::new_v4().to_string();
+        let host = match &req.unattended {
+            Unattended::WebHost(host) => HostName::try_from(host.clone()).ok(),
+            _ => None,
+        };
         let lane = &self.lane;
         let _registered = lane.state.runtime.task_confirms.register(
             lane.run,
             PendingConfirm {
                 confirm_id: confirm_id.clone(),
+                task: lane.task,
+                host: host.clone(),
                 answer,
             },
         );
-        self.pause().await;
+        self.pause(PausedPrompt {
+            confirm_id: confirm_id.clone(),
+            tool: req.tool.clone(),
+            script: req.script.clone(),
+            matched_pattern: req.matched_pattern.clone(),
+            host,
+            source: req.source.clone(),
+        })
+        .await;
         self.announce(req, confirm_id).await;
         let approval = tokio::select! {
             biased;
@@ -138,9 +181,12 @@ impl TaskRunParking {
         let _ = self.lane.events.send(event).await;
     }
 
-    async fn pause(&self) {
+    async fn pause(&self, prompt: PausedPrompt) {
         let lane = &self.lane;
-        lane.state.runtime.task_queue.mark_needs_input(lane.run);
+        lane.state
+            .runtime
+            .task_queue
+            .mark_needs_input(lane.run, prompt);
         lane.release();
         if let Err(e) = lane
             .state
@@ -180,23 +226,48 @@ impl AppState {
         id: String,
         run: TaskRunId,
         confirm_id: String,
-        allow: bool,
+        approval: Approval,
         tx: mpsc::Sender<Event>,
-    ) {
-        let approval = if allow {
-            Approval::Once
-        } else {
-            Approval::Deny
-        };
+    ) -> Result<(), DispatchError> {
         match self
             .runtime
             .task_confirms
             .answer(run, &confirm_id, approval)
         {
-            Ok(()) => {
+            Ok(None) => {
                 let _ = tx.send(Event::Done { id }).await;
+                Ok(())
             }
-            Err(e) => send_error(&tx, id, e.to_string()).await,
+            Ok(Some(allowed)) => {
+                let record = self.allow_task_host(allowed).await.map(|r| vec![r]);
+                self.runtime.task_scheduler.reschedule();
+                self.send_tasks(id, "allowing the host for the task", record, &tx)
+                    .await
+            }
+            Err(e) => {
+                send_error(&tx, id, e.to_string()).await;
+                Ok(())
+            }
         }
+    }
+
+    /// Add `allowed.host` to its task's allowed hosts, unless already there.
+    async fn allow_task_host(&self, allowed: AllowedHost) -> Result<TaskRecord, DispatchError> {
+        let _pass = self.runtime.task_scheduler.hold().await;
+        let mut record = self.memory.tasks.get(allowed.task).await?;
+        if record.spec.allowed_hosts.contains(&allowed.host) {
+            return Ok(record);
+        }
+        record.spec.allowed_hosts.push(allowed.host);
+        Ok(self.memory.tasks.save(Some(record.id), record.spec).await?)
+    }
+}
+
+/// The approval a `TaskConfirm`'s `allow` and `always` give; `always` alone denies.
+pub(super) fn approval(allow: bool, always: bool) -> Approval {
+    match (allow, always) {
+        (false, _) => Approval::Deny,
+        (true, false) => Approval::Once,
+        (true, true) => Approval::Always,
     }
 }

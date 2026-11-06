@@ -16,6 +16,7 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         session_request_cases(),
         wake_word_request_cases(),
         task_request_cases(),
+        task_confirm_request_cases(),
         task_refine_request_cases(),
     ]
     .concat()
@@ -952,14 +953,37 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
             },
             r#"{"type":"task_queue","id":"r","op":{"kind":"cancel_turn","id":"q"}}"#,
         ),
+    ]
+}
+
+fn task_confirm_request_cases() -> Vec<(Request, &'static str)> {
+    vec![
         (
             Request::TaskConfirm {
                 id: id(),
                 run: TaskRunId(9),
                 confirm_id: "c".into(),
                 allow: true,
+                always: false,
             },
             r#"{"type":"task_confirm","id":"r","run":9,"confirm_id":"c","allow":true}"#,
+        ),
+        (
+            Request::TaskConfirm {
+                id: id(),
+                run: TaskRunId(9),
+                confirm_id: "c".into(),
+                allow: true,
+                always: true,
+            },
+            r#"{"type":"task_confirm","id":"r","run":9,"confirm_id":"c","allow":true,"always":true}"#,
+        ),
+        (
+            Request::TaskRuns {
+                id: id(),
+                task: TaskId(4),
+            },
+            r#"{"type":"task_runs","id":"r","task":4}"#,
         ),
     ]
 }
@@ -1011,6 +1035,24 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
                             state: TaskRunState::Suspended {
                                 reason: SuspendReason::GpuBusy,
                             },
+                            prompt: None,
+                        },
+                        QueueItem::Run {
+                            run: TaskRunId(8),
+                            task: TaskId(5),
+                            task_name: "fetch".to_string().try_into().unwrap(),
+                            state: TaskRunState::NeedsInput,
+                            prompt: Some(PausedPrompt {
+                                confirm_id: "c".into(),
+                                tool: "web".into(),
+                                script: "web fetch https://example.org/".into(),
+                                matched_pattern: "fetches from example.org".into(),
+                                host: Some("example.org".to_string().try_into().unwrap()),
+                                source: ConfirmSource::Task {
+                                    task: TaskId(5),
+                                    run: TaskRunId(8),
+                                },
+                            }),
                         },
                         QueueItem::UserTurn {
                             id: "q".into(),
@@ -1034,7 +1076,7 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
                     }),
                 },
             },
-            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
+            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"run","run":8,"task":5,"task_name":"fetch","state":{"state":"needs_input"},"prompt":{"confirm_id":"c","tool":"web","script":"web fetch https://example.org/","matched_pattern":"fetches from example.org","host":"example.org","source":{"agent":"task","task":5,"run":8}}},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
         ),
         (
             Event::Queued {
@@ -1071,6 +1113,22 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                     .collect(),
             },
             r#"{"type":"trigger_fires","id":"r","fires":["2026-11-05T14:00:00Z"]}"#,
+        ),
+        (
+            Event::TaskRunRecord {
+                id: id(),
+                record: TaskRunRecord {
+                    run: TaskRunId(9),
+                    trigger: TaskTrigger::Manual,
+                    state: TaskRunState::Succeeded,
+                    queued_at: DateTime::from_timestamp(1_793_887_200, 0).unwrap(),
+                    started_at: DateTime::from_timestamp(1_793_887_201, 0),
+                    ended_at: DateTime::from_timestamp(1_793_887_260, 0),
+                    reply: Some("done".into()),
+                    session_id: Some("s".into()),
+                },
+            },
+            r#"{"type":"task_run_record","id":"r","record":{"run":9,"trigger":{"kind":"manual"},"state":{"state":"succeeded"},"queued_at":"2026-11-05T14:00:00Z","started_at":"2026-11-05T14:00:01Z","ended_at":"2026-11-05T14:01:00Z","reply":"done","session_id":"s"}}"#,
         ),
         (
             Event::TaskRunQueued {
