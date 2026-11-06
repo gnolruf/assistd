@@ -2,14 +2,18 @@
 //! enabled flag, saved through the daemon, which checks each trigger as it is written.
 
 use assistd_ipc::{
-    HostName, PermissionMode, Request, TaskId, TaskName, TaskPrompt, TaskSpec, TaskTrigger,
+    HostName, ModeRecommendation, PermissionMode, Plan, Request, TaskId, TaskName, TaskPrompt,
+    TaskSpec, TaskTrigger,
 };
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::prompt_box::{PromptBox, RunPermissions};
 use super::trigger_form::{FormAction, TriggerForm, UpstreamChoice};
 use super::{Outbox, PendingOp};
-use crate::chat::settings::{EditAction, EditorShape, TextEditor};
+use crate::chat::settings::{
+    EditAction, EditorShape, ListAction, ListEditor, ListItem, TextEditor,
+};
 
 /// One row of the editor, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,12 +21,10 @@ pub(in crate::chat) enum EditorRow {
     Name,
     Prompt,
     Mode,
-    Host(usize),
-    AddHost,
+    Hosts,
     Enabled,
     Trigger(usize),
     AddTrigger,
-    Plan,
 }
 
 /// What the daemon said of one trigger.
@@ -44,12 +46,8 @@ pub(in crate::chat) struct TriggerRow {
 pub(in crate::chat) enum EditorMode {
     Browse,
     Name(TextEditor),
-    Prompt(TextEditor),
-    /// A host being written, in place of row `replaces` or after the others.
-    Host {
-        replaces: Option<usize>,
-        editor: TextEditor,
-    },
+    Prompt(PromptBox),
+    Hosts(ListEditor),
     Trigger(Box<TriggerForm>),
     /// Asking whether to drop unsaved changes.
     Discard,
@@ -59,10 +57,9 @@ pub(in crate::chat) enum EditorMode {
 pub(super) enum EditorAction {
     Stay,
     Close,
-    OpenPlan(TaskId),
 }
 
-/// A task as edited; its plan is only ever the daemon's.
+/// A task as edited.
 pub(in crate::chat) struct TaskEditor {
     task: Option<TaskId>,
     /// The task as last saved; `None` until a new task is first saved.
@@ -120,10 +117,6 @@ impl TaskEditor {
         self.task
     }
 
-    pub(in crate::chat) fn stored(&self) -> Option<&TaskSpec> {
-        self.stored.as_ref()
-    }
-
     pub(in crate::chat) fn name(&self) -> &str {
         &self.name
     }
@@ -165,13 +158,17 @@ impl TaskEditor {
 
     /// Every row in display order.
     pub(in crate::chat) fn rows(&self) -> Vec<EditorRow> {
-        [EditorRow::Name, EditorRow::Prompt, EditorRow::Mode]
-            .into_iter()
-            .chain((0..self.hosts.len()).map(EditorRow::Host))
-            .chain([EditorRow::AddHost, EditorRow::Enabled])
-            .chain((0..self.triggers.len()).map(EditorRow::Trigger))
-            .chain([EditorRow::AddTrigger, EditorRow::Plan])
-            .collect()
+        [
+            EditorRow::Name,
+            EditorRow::Prompt,
+            EditorRow::Mode,
+            EditorRow::Hosts,
+            EditorRow::Enabled,
+        ]
+        .into_iter()
+        .chain((0..self.triggers.len()).map(EditorRow::Trigger))
+        .chain([EditorRow::AddTrigger])
+        .collect()
     }
 
     /// Whether any edited field differs from the saved task.
@@ -203,8 +200,7 @@ impl TaskEditor {
         self.load(spec, outbox);
     }
 
-    /// Take the daemon's copy after a change to its plan or enabled flag, keeping unsaved
-    /// edits.
+    /// Take the daemon's copy after a change to its enabled flag, keeping unsaved edits.
     pub(super) fn refresh_stored(&mut self, spec: TaskSpec) {
         self.stored = Some(spec);
     }
@@ -219,6 +215,61 @@ impl TaskEditor {
             matches!(&row.check, TriggerCheck::Checking { request: pending } if pending == request)
         }) {
             row.check = check;
+        }
+    }
+
+    /// The open prompt box.
+    fn prompt_box(&mut self) -> Option<&mut PromptBox> {
+        match &mut self.mode {
+            EditorMode::Prompt(prompt) => Some(prompt),
+            _ => None,
+        }
+    }
+
+    /// Whether the open prompt box waits on a refine.
+    pub(super) fn refining(&self) -> bool {
+        matches!(&self.mode, EditorMode::Prompt(prompt) if prompt.refining())
+    }
+
+    pub(super) fn advance_refine_dots(&mut self) {
+        if let Some(prompt) = self.prompt_box() {
+            prompt.advance_refine_dots();
+        }
+    }
+
+    /// Stop the prompt box's refine in flight.
+    pub(super) fn cancel_refine(&mut self, outbox: &mut Outbox) {
+        if let Some(prompt) = self.prompt_box() {
+            prompt.cancel_refine(outbox);
+        }
+    }
+
+    /// Put the rewrite answering `request` in the prompt box, if it still waits on it.
+    pub(super) fn on_refined(
+        &mut self,
+        request: &str,
+        prompt: TaskPrompt,
+        answer: (&Plan, &ModeRecommendation),
+    ) {
+        if let Some(prompt_box) = self.prompt_box() {
+            prompt_box.on_refined(request, prompt, answer);
+        }
+    }
+
+    /// Show why refine `request` failed, if the prompt box still waits on it.
+    pub(super) fn on_refine_failed(&mut self, request: &str, message: &str) {
+        if self
+            .prompt_box()
+            .is_some_and(|prompt| prompt.on_refine_ended(request))
+        {
+            self.error = Some(format!("refine failed: {message}"));
+        }
+    }
+
+    /// Stop waiting on a refine whose answer was lost with the connection.
+    pub(super) fn abandon_refine(&mut self) {
+        if let Some(prompt) = self.prompt_box() {
+            prompt.abandon_refine();
         }
     }
 
@@ -262,22 +313,26 @@ impl TaskEditor {
                 EditAction::Cancel => self.mode = EditorMode::Browse,
                 EditAction::Pending => {}
             },
-            EditorMode::Prompt(editor) => match editor.on_key(ev) {
-                EditAction::Apply => {
-                    self.prompt = editor.text().to_string();
-                    self.mode = EditorMode::Browse;
+            EditorMode::Prompt(prompt) => {
+                let permissions = RunPermissions {
+                    mode: self.permission,
+                    allowed_hosts: &self.hosts,
+                };
+                match prompt.on_key(ev, permissions, outbox) {
+                    Ok(EditAction::Apply) => {
+                        self.prompt = prompt.text().text().to_string();
+                        self.mode = EditorMode::Browse;
+                    }
+                    Ok(EditAction::Cancel) => self.mode = EditorMode::Browse,
+                    Ok(EditAction::Pending) => self.error = None,
+                    Err(reason) => self.error = Some(reason),
                 }
-                EditAction::Cancel => self.mode = EditorMode::Browse,
-                EditAction::Pending => {}
-            },
-            EditorMode::Host { replaces, editor } => match editor.on_key(ev) {
-                EditAction::Apply => {
-                    let (replaces, text) = (*replaces, editor.text().to_string());
-                    self.place_host(replaces, text);
-                }
-                EditAction::Cancel => self.mode = EditorMode::Browse,
-                EditAction::Pending => {}
-            },
+            }
+            EditorMode::Hosts(list) => {
+                let entries = host_values(&self.hosts);
+                let action = list.on_key(ev, &entries);
+                self.apply_host_action(action);
+            }
             EditorMode::Trigger(form) => match form.on_key(ev, upstreams) {
                 FormAction::Apply(trigger) => {
                     let replaces = form.replaces;
@@ -297,8 +352,7 @@ impl TaskEditor {
         EditorAction::Stay
     }
 
-    /// ↑/↓ move, Enter or Space opens the row, ←/→ change the mode, Delete drops a host or
-    /// trigger, Ctrl+S saves and Esc leaves, asking first when something is unsaved.
+    /// ↑/↓ move, Enter or Space opens the row, ←/→ change the mode, Delete drops a trigger, Ctrl+S saves and Esc leaves, asking first when something is unsaved.
     fn on_browse_key(&mut self, ev: KeyEvent, outbox: &mut Outbox) -> EditorAction {
         let control = ev.modifiers.contains(KeyModifiers::CONTROL);
         match ev.code {
@@ -323,33 +377,16 @@ impl TaskEditor {
                 self.mode = EditorMode::Name(TextEditor::new(self.name.clone(), EditorShape::Line));
             }
             EditorRow::Prompt => {
-                let shape = EditorShape::Box { wrap_width: 0 };
-                self.mode = EditorMode::Prompt(TextEditor::new(self.prompt.clone(), shape));
+                self.mode = EditorMode::Prompt(PromptBox::new(self.prompt.clone()));
             }
             EditorRow::Mode => self.cycle_permission(true),
-            EditorRow::Host(index) => {
-                let text = self.hosts[index].as_str().to_string();
-                self.mode = EditorMode::Host {
-                    replaces: Some(index),
-                    editor: TextEditor::new(text, EditorShape::Line),
-                };
-            }
-            EditorRow::AddHost => {
-                self.mode = EditorMode::Host {
-                    replaces: None,
-                    editor: TextEditor::new(String::new(), EditorShape::Line),
-                };
-            }
+            EditorRow::Hosts => self.mode = EditorMode::Hosts(ListEditor::new(ListItem::Text)),
             EditorRow::Enabled => self.enabled = !self.enabled,
             EditorRow::Trigger(index) => {
                 let form = TriggerForm::editing(index, &self.triggers[index].trigger);
                 self.mode = EditorMode::Trigger(Box::new(form));
             }
             EditorRow::AddTrigger => self.mode = EditorMode::Trigger(Box::new(TriggerForm::new())),
-            EditorRow::Plan => match self.saved_task() {
-                Some(task) => return EditorAction::OpenPlan(task),
-                None => self.error = Some("save the task (ctrl+s) before planning it".into()),
-            },
         }
         EditorAction::Stay
     }
@@ -373,41 +410,57 @@ impl TaskEditor {
     }
 
     fn remove_selected(&mut self) {
-        match self.selected_row() {
-            EditorRow::Host(index) => {
+        if let EditorRow::Trigger(index) = self.selected_row() {
+            self.triggers.remove(index);
+        }
+    }
+
+    /// The allowed hosts as the list box's entries.
+    pub(in crate::chat) fn host_entries(&self) -> Vec<toml::Value> {
+        host_values(&self.hosts)
+    }
+
+    fn apply_host_action(&mut self, action: ListAction) {
+        match action {
+            ListAction::Pending => {}
+            ListAction::Close => {
+                self.mode = EditorMode::Browse;
+                self.error = None;
+            }
+            ListAction::Store { index, value } => match self.place_host(index, &value) {
+                Ok(()) => {
+                    self.error = None;
+                    if let EditorMode::Hosts(list) = &mut self.mode {
+                        list.close_entry();
+                    }
+                }
+                Err(reason) => self.error = Some(reason),
+            },
+            ListAction::Delete(index) => {
                 self.hosts.remove(index);
             }
-            EditorRow::Trigger(index) => {
-                self.triggers.remove(index);
-            }
-            _ => {}
+            ListAction::Refused(reason) => self.error = Some(reason),
         }
     }
 
-    /// Put the host `text` names in row `replaces`, or after the others, unless it is already
-    /// listed, closing the editor; a text that names no host leaves it open with the reason.
-    fn place_host(&mut self, replaces: Option<usize>, text: String) {
-        let host = match HostName::try_from(text) {
-            Ok(host) => host,
-            Err(e) => {
-                self.error = Some(e.to_string());
-                return;
-            }
-        };
-        self.error = None;
-        self.mode = EditorMode::Browse;
-        if let Some(index) = replaces.filter(|index| *index < self.hosts.len()) {
-            self.hosts.remove(index);
+    /// Put the host `value` names at `index`, appending when `index` is the host count;
+    /// refuses a value that names no host or one listed elsewhere.
+    fn place_host(&mut self, index: usize, value: &toml::Value) -> Result<(), String> {
+        let text = value.as_str().unwrap_or_default().to_string();
+        let host = HostName::try_from(text).map_err(|e| e.to_string())?;
+        let listed_elsewhere = self
+            .hosts
+            .iter()
+            .enumerate()
+            .any(|(at, listed)| at != index && *listed == host);
+        if listed_elsewhere {
+            return Err(format!("{} is already allowed", host.as_str()));
         }
-        if !self.hosts.contains(&host) {
-            let at = replaces.unwrap_or(self.hosts.len()).min(self.hosts.len());
-            self.hosts.insert(at, host);
+        match self.hosts.get_mut(index) {
+            Some(slot) => *slot = host,
+            None => self.hosts.push(host),
         }
-    }
-
-    /// The task's id when it is saved with nothing left unsaved.
-    fn saved_task(&self) -> Option<TaskId> {
-        self.task.filter(|_| !self.is_modified())
+        Ok(())
     }
 
     /// Put `trigger` in row `replaces`, or after the others, and send it to be checked.
@@ -435,11 +488,10 @@ impl TaskEditor {
         }
     }
 
-    /// The task to save: the edited fields with the saved plan.
+    /// The task to save: the edited fields.
     fn draft_spec(&self) -> Result<TaskSpec, String> {
         let name = TaskName::try_from(self.name.clone()).map_err(|e| e.to_string())?;
         let prompt = TaskPrompt::try_from(self.prompt.clone()).map_err(|e| e.to_string())?;
-        let plan = self.stored.as_ref().and_then(|spec| spec.plan.clone());
         Ok(TaskSpec {
             name,
             prompt,
@@ -451,9 +503,15 @@ impl TaskEditor {
             enabled: self.enabled,
             mode: self.permission,
             allowed_hosts: self.hosts.clone(),
-            plan,
         })
     }
+}
+
+fn host_values(hosts: &[HostName]) -> Vec<toml::Value> {
+    hosts
+        .iter()
+        .map(|host| toml::Value::from(host.as_str()))
+        .collect()
 }
 
 /// A row for `trigger` of task `task`, its check sent through `outbox`.

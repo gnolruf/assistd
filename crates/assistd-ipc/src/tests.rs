@@ -16,7 +16,7 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         session_request_cases(),
         wake_word_request_cases(),
         task_request_cases(),
-        task_plan_request_cases(),
+        task_refine_request_cases(),
     ]
     .concat()
 }
@@ -808,7 +808,6 @@ fn sample_task_spec() -> TaskSpec {
         enabled: true,
         mode: PermissionMode::AcceptEdits,
         allowed_hosts: vec!["Example.org".to_string().try_into().unwrap()],
-        plan: Some(sample_plan()),
     }
 }
 
@@ -862,7 +861,7 @@ fn sample_plan() -> Plan {
 
 const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}"#;
 
-const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"],"plan":{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}}"#;
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"]}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
     let save_wire =
@@ -894,7 +893,6 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
                 spec: TaskSpec {
                     mode: PermissionMode::Manual,
                     allowed_hosts: Vec::new(),
-                    plan: None,
                     triggers: Vec::new(),
                     ..sample_task_spec()
                 },
@@ -966,31 +964,27 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
     ]
 }
 
-fn task_plan_request_cases() -> Vec<(Request, &'static str)> {
+fn task_refine_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::TaskPlan {
+            Request::TaskRefine {
                 id: id(),
-                task: TaskId(4),
+                prompt: "summarize my inbox".to_string().try_into().unwrap(),
+                mode: PermissionMode::Manual,
+                allowed_hosts: Vec::new(),
                 feedback: None,
             },
-            r#"{"type":"task_plan","id":"r","task":4}"#,
+            r#"{"type":"task_refine","id":"r","prompt":"summarize my inbox","mode":"manual"}"#,
         ),
         (
-            Request::TaskPlan {
+            Request::TaskRefine {
                 id: id(),
-                task: TaskId(4),
+                prompt: "summarize my inbox".to_string().try_into().unwrap(),
+                mode: PermissionMode::AcceptEdits,
+                allowed_hosts: vec!["example.org".to_string().try_into().unwrap()],
                 feedback: Some("skip the mail".into()),
             },
-            r#"{"type":"task_plan","id":"r","task":4,"feedback":"skip the mail"}"#,
-        ),
-        (
-            Request::TaskPlanApprove {
-                id: id(),
-                task: TaskId(4),
-                plan: PlanId("p1".into()),
-            },
-            r#"{"type":"task_plan_approve","id":"r","task":4,"plan":"p1"}"#,
+            r#"{"type":"task_refine","id":"r","prompt":"summarize my inbox","mode":"accept_edits","allowed_hosts":["example.org"],"feedback":"skip the mail"}"#,
         ),
         (
             Request::TaskCheckTrigger {
@@ -1106,22 +1100,31 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
             r#"{"type":"task_run","id":"r","run":9,"event":{"type":"confirm_request","id":"r","confirm_id":"c","tool":"bash","script":"rm x","matched_pattern":"rm","source":{"agent":"task","task":4,"run":9}}}"#,
         ),
         (
-            Event::Plan {
+            Event::TaskRefined {
                 id: id(),
+                prompt: "summarize my inbox".to_string().try_into().unwrap(),
                 plan: sample_plan(),
+                recommended: ModeRecommendation {
+                    mode: PermissionMode::AcceptEdits,
+                    covers: vec![PlannedAction::Write {
+                        under: "/home/u/notes".into(),
+                    }],
+                    still_asks: vec![PlannedAction::WebHost {
+                        host: "example.org".into(),
+                    }],
+                },
             },
-            format!(r#"{{"type":"plan","id":"r","plan":{SAMPLE_PLAN_WIRE}}}"#).leak(),
+            format!(r#"{{"type":"task_refined","id":"r","prompt":"summarize my inbox","plan":{SAMPLE_PLAN_WIRE},"recommended":{{"mode":"accept_edits","covers":[{{"kind":"write","under":"/home/u/notes"}}],"still_asks":[{{"kind":"web_host","host":"example.org"}}]}}}}"#).leak(),
         ),
         (
             Event::TaskPlan {
                 id: id(),
-                task: TaskId(4),
                 event: Box::new(Event::Delta {
                     id: id(),
                     text: "hi".into(),
                 }),
             },
-            r#"{"type":"task_plan","id":"r","task":4,"event":{"type":"delta","id":"r","text":"hi"}}"#,
+            r#"{"type":"task_plan","id":"r","event":{"type":"delta","id":"r","text":"hi"}}"#,
         ),
     ]
 }

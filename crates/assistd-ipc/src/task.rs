@@ -180,8 +180,7 @@ impl fmt::Display for HostName {
     }
 }
 
-/// A saved task: its prompt, what starts it, how its runs' prompts are answered, and the plan
-/// its runs follow.
+/// A saved task: its prompt, what starts it, and how its runs' prompts are answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSpec {
     pub name: TaskName,
@@ -195,9 +194,6 @@ pub struct TaskSpec {
     /// Hosts a run's `web` fetches from without asking, on top of the approved hosts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<HostName>,
-    /// The approved plan each run is given to follow; cleared whenever the prompt changes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan: Option<Plan>,
 }
 
 /// A condition that starts a run of its task.
@@ -338,6 +334,19 @@ pub enum ActionOutlook {
     JudgeDecides,
     #[default]
     Asks,
+}
+
+/// The least permissive mode under which a plan's runs stop to ask the fewest times, and the
+/// actions that decide it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeRecommendation {
+    pub mode: PermissionMode,
+    /// Actions Manual would ask about that `mode` runs unasked or leaves to the safety judge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<PlannedAction>,
+    /// Actions that would still stop a run to ask under `mode`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub still_asks: Vec<PlannedAction>,
 }
 
 /// Where a task run has got; only a finished run carries an outcome.

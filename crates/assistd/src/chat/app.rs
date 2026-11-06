@@ -585,13 +585,6 @@ impl App {
         if let Some(agent) = self.viewed_agent_mut() {
             agent.transcript_mut().refresh_live_block();
         }
-        if let Some(pane) = self
-            .tasks_panel
-            .as_mut()
-            .and_then(TasksPanel::planning_pane_mut)
-        {
-            pane.refresh_live_block();
-        }
         let live_secs = self.output.live_block_seconds();
         if live_secs != self.last_live_seconds {
             self.last_live_seconds = live_secs;

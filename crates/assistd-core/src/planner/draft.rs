@@ -1,9 +1,10 @@
-//! The plan as the model writes it, held to a schema by grammar, and the [`Plan`] it becomes
-//! once its actions are read and checked.
+//! The plan, or the rewritten task prompt with its plan, as the model writes it, held to a
+//! schema by grammar, and the [`Plan`] it becomes once its actions are read and checked.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use assistd_ipc::task::MAX_TASK_PROMPT_BYTES;
 use assistd_ipc::{AnticipatedAction, Plan, PlanId, PlanStep, PlannedAction};
 use assistd_tools::{ActionCheck, ToolRegistry};
 use assistd_utils::path::expand_tilde_from_env;
@@ -11,6 +12,8 @@ use assistd_utils::path::expand_tilde_from_env;
 use super::WorkPermissions;
 
 const SUMMARY_MAX_CHARS: usize = 800;
+/// A character is at most four bytes, so a prompt of this many always fits a task prompt.
+const PROMPT_MAX_CHARS: usize = MAX_TASK_PROMPT_BYTES / 4;
 const STEPS_MAX_ITEMS: usize = 16;
 const DESCRIPTION_MAX_CHARS: usize = 400;
 const ACTIONS_MAX_ITEMS: usize = 8;
@@ -21,6 +24,15 @@ const SUBCOMMAND_MAX_CHARS: usize = 64;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PlanDraft {
+    summary: String,
+    steps: Vec<DraftStep>,
+}
+
+/// The model's rewritten task prompt and the plan of it, before its actions are checked.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RefinementDraft {
+    prompt: String,
     summary: String,
     steps: Vec<DraftStep>,
 }
@@ -112,6 +124,31 @@ impl PlanDraft {
             summary: self.summary.trim().to_string(),
             steps,
         }
+    }
+}
+
+impl RefinementDraft {
+    /// The JSON schema the refinement request is held to by grammar: the plan's, with the
+    /// prompt ahead of it.
+    pub(super) fn schema() -> Map<String, Value> {
+        let mut schema = PlanDraft::schema();
+        let prompt = json!({"type": "string", "minLength": 1, "maxLength": PROMPT_MAX_CHARS});
+        let mut properties = Map::from_iter([("prompt".into(), prompt)]);
+        if let Some(Value::Object(plan)) = schema.remove("properties") {
+            properties.extend(plan);
+        }
+        schema.insert("properties".into(), Value::Object(properties));
+        schema.insert("required".into(), json!(["prompt", "summary", "steps"]));
+        schema
+    }
+
+    /// The rewritten prompt, trimmed, and the plan draft.
+    pub(super) fn into_parts(self) -> (String, PlanDraft) {
+        let plan = PlanDraft {
+            summary: self.summary,
+            steps: self.steps,
+        };
+        (self.prompt.trim().to_string(), plan)
     }
 }
 

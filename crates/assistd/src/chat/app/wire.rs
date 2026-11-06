@@ -129,7 +129,7 @@ impl App {
             | Event::TaskRun { .. }
             | Event::TaskQueue { .. }
             | Event::Queued { .. }
-            | Event::Plan { .. }
+            | Event::TaskRefined { .. }
             | Event::TaskPlan { .. }
             | Event::TriggerFires { .. }
             | Event::LastDelta { .. } => {}

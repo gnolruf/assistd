@@ -406,8 +406,8 @@ gives up its lane and request guard (on lane 0 its slot state stays in the
 stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`. The
 tool deadline stops while a prompt is parked. `Request::TaskConfirm` answers it
 for that prompt alone, and the run waits first in the queue for a lane, moving
-its conversation to that lane's slot. A task's approved plan is appended to the
-run's system prompt for it to follow.
+its conversation to that lane's slot. The task's prompt is the only instruction a
+run gets; no plan is stored on the task.
 
 With one lane, a user message that finds a run on it follows
 `[tasks] interruption`. Under `interrupt` the run's turn sees the conversation
@@ -440,8 +440,9 @@ anyone in any mode, so the planning turn runs only what needs no
 confirmation; each refusal is counted and the tool result gains a note
 telling the model to describe that step instead. A plan-mode preamble is set
 as the transient note on every step, so it renders at the conversation's
-tail and the system prompt, and its cache, are unchanged. When the turn
-answers, `complete_with_schema` holds the reply to a draft of a summary and
+tail and the system prompt, and its cache, are unchanged. It asks the turn to
+end with only a short list of what it found, since the plan itself is asked
+for next. When the turn answers, `complete_with_schema` holds the reply to a draft of a summary and
 steps, each with actions named by a kind (`program`, `web_host`, `mcp_tool`,
 `app`, `write`) and a target. Each action becomes a `PlannedAction`, and
 `ActionCheck` flags any that would fail: a program missing from the
@@ -450,29 +451,35 @@ an app with no launchable desktop entry, a write directory that is relative
 or not a directory. It also gives each an `ActionOutlook` under the work's
 `WorkPermissions`: `Unasked` when a standing approval, an allowed host or the
 mode with the edit scope covers it, `JudgeDecides` for programs and MCP tools
-in Auto, else `Asks`. The result is a `Plan` with a fresh `PlanId`, sent as
-`Event::Plan`.
+in Auto, else `Asks`. The result is a `Plan` with a fresh `PlanId`.
+`Planner::refine` runs the same turn but asks for a `prompt` beside the plan:
+the work rewritten as a self-contained brief for an unattended run, with the
+plan being that brief's.
 
-`Request::TaskPlan` plans a saved task's prompt in an isolated conversation
-with the task-run system prompt, keyed `TaskPlan` in the `SlotStash`. It takes
-the main lane and request guard as a query does, and `InterruptTurn`
-cancels it; its turn reaches the client wrapped in `Event::TaskPlan`. With
+`Request::TaskRefine` refines a task prompt, saved or not, under the permission
+mode and allowed hosts the request gives, in an isolated conversation with the
+task-run system prompt, keyed `TaskRefine` in the `SlotStash`. Only the latest
+refine's conversation is kept; a new one ends it. It takes the main lane and
+request guard as a query does, and `InterruptTurn` cancels it; its turn reaches
+the client wrapped in `Event::TaskPlan`, and its result as `Event::TaskRefined`
+with the rewritten `TaskPrompt` and its `Plan`. It saves nothing. With
 `feedback` it continues the same conversation, so a revision keeps what the
-model already found; it is refused once the task's prompt has changed. The
-outlooks follow the task's mode and allowed hosts at planning time.
-`Request::TaskPlanApprove` names the latest plan, which is saved on the task
-unless the prompt changed since it was made. The planning conversation is then
-dropped.
+model already found, quoting back the rewrite the client was shown, which the
+grammar-held request left out of the conversation; it is refused unless the
+last refine was of the same prompt.
 
 In the TUI, `/tasks` opens a panel over these requests alone, since tasks
 live in the daemon's store rather than `config.toml`. It lists each task
-with its triggers, next fire, last outcome and whether it is enabled without
-an approved plan; its editor saves the name, prompt, mode (Auto only when the
-daemon offers it), allowed hosts, triggers and enabled flag, leaving the plan
-to the daemon. "Plan" streams the planning turn like a chat turn, then shows
-the plan as a `PlanReview`: each step's anticipated actions with whether the
-run will ask about them and any problem found. Feedback revises the plan, and
-approving accepts it.
+with its triggers, next fire, last outcome and whether it is enabled; its
+editor saves the name, prompt, mode (Auto only when the daemon offers it),
+allowed hosts, triggers and enabled flag. Ctrl+R in the prompt box refines the
+text in it under the editor's mode and hosts, out of view: the status bar shows
+an animated "refining" and the box takes no keys but Esc, which cancels it; the
+planning turn's events are not drawn. The rewrite then replaces the box's text, to edit or apply,
+with a line under the box giving the recommended mode and a brief reason. The
+daemon picks it as the least permissive mode, Auto only when allowed, under which
+the fewest of the plan's actions would ask, and sends it as a `ModeRecommendation`
+with the actions it covers and those that would still ask.
 
 ### Tools (`assistd-tools`)
 

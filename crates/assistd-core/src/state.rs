@@ -201,7 +201,7 @@ impl AppState {
             req,
             Request::Subscribe { .. }
                 | Request::Query { .. }
-                | Request::TaskPlan { .. }
+                | Request::TaskRefine { .. }
                 | Request::PttStop { .. }
                 | Request::WakeWord {
                     op: WakeWordOp::TestStart,
@@ -288,11 +288,20 @@ impl AppState {
                 confirm_id,
                 allow,
             } => replied(self.handle_task_confirm(id, run, confirm_id, allow, tx)).await,
-            Request::TaskPlan { id, task, feedback } => {
-                self.handle_task_plan(id, task, feedback, tx).await
-            }
-            Request::TaskPlanApprove { id, task, plan } => {
-                self.handle_plan_approve(id, task, plan, tx).await
+            Request::TaskRefine {
+                id,
+                prompt,
+                mode,
+                allowed_hosts,
+                feedback,
+            } => {
+                let ask = task_plans::RefineAsk {
+                    prompt,
+                    mode,
+                    allowed_hosts,
+                    feedback,
+                };
+                self.handle_task_refine(id, ask, tx).await
             }
             Request::TaskCheckTrigger { id, task, trigger } => {
                 self.handle_task_check_trigger(id, task, trigger, tx).await

@@ -42,7 +42,6 @@ mod focus;
 mod input;
 mod markdown;
 mod output;
-mod plan_review;
 pub(crate) mod settings;
 mod tasks;
 mod theme;

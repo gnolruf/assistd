@@ -1,7 +1,8 @@
-//! The `/tasks` panel: the task list, the editor with its trigger form and prompt box,
-//! and the plan view over the editor.
+//! The `/tasks` panel: the task list, and the editor with its trigger form and prompt box.
 
-use assistd_ipc::{FinishOutcome, MissedFire, PermissionMode, TaskEvent, TaskId, TaskTrigger};
+use assistd_ipc::{
+    FinishOutcome, HostName, MissedFire, PermissionMode, TaskEvent, TaskId, TaskTrigger,
+};
 use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -9,16 +10,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 
-use super::super::settings::TextEditor;
+use super::super::settings::{TextEditor, list_hint, render_list_editor};
 use super::super::tasks::{
-    AT_FORMAT, EditorMode, EditorRow, ListedTask, Message, PlanSession, PlanState, TaskEditor,
-    TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
+    AT_FORMAT, EditorMode, EditorRow, ListedTask, Message, RefineNote, TaskEditor, TasksPanel,
+    TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
 };
 use super::super::theme::Theme;
-use super::plan_review::render_plan_review;
-use super::{
-    locate_cursor, picker_scroll_start, render_rule, render_transcript, run_outcome, wrap_input,
-};
+use super::{locate_cursor, picker_scroll_start, render_rule, run_outcome, wrap_input};
 use crate::client::terminal_text::escape_controls_single_line;
 
 /// Rows each listed task takes: its name and its details.
@@ -28,22 +26,25 @@ const POINTER: &str = "❯ ";
 const NO_POINTER: &str = "  ";
 /// Columns the editor's and form's labels are padded to.
 const LABEL_WIDTH: usize = 14;
-/// Rows the prompt box, trigger form or feedback box takes while open.
+/// Rows the prompt box or trigger form takes while open.
 const BOX_ROWS: u16 = 10;
 const FIRE_FORMAT: &str = "%a %m-%d %H:%M";
 const NEXT_FIRE_FORMAT: &str = "%Y-%m-%d %H:%M";
 const LIST_HINT: &str = "↑/↓ select · Enter edit · n new · Space on/off · d delete · Esc close";
 const DELETE_HINT: &str = "y delete · any other key keeps it";
 const EDITOR_HINT: &str =
-    "↑/↓ move · Enter open · ←/→ mode · d remove host or trigger · ctrl+s save · Esc back";
+    "↑/↓ move · Enter open · ←/→ mode · d remove trigger · ctrl+s save · Esc back";
 const FIELD_HINT: &str = "Enter apply · Esc cancel";
-const PROMPT_HINT: &str = "Enter apply · shift+Enter new line · Esc cancel";
+const PROMPT_HINT: &str = "Enter apply · shift+Enter new line · ctrl+r refine · Esc cancel";
 const FORM_HINT: &str = "↑/↓ field · ←/→ choose · Enter apply · Esc cancel";
 const DISCARD_HINT: &str = "y discard changes · any other key keeps editing";
-const PLANNING_HINT: &str = "planning… · Esc stop";
-const REVIEW_HINT: &str = "↑/↓ PgUp/PgDn scroll · f feedback · a approve · Esc back";
-const FEEDBACK_HINT: &str = "Enter re-plan · shift+Enter new line · Esc cancel";
-const FAILED_HINT: &str = "Enter plan again · Esc back";
+/// The refining status at each count of dots, padded so the hint does not shift.
+const REFINING_HINTS: [&str; 4] = [
+    "refining    · Esc cancel",
+    "refining.   · Esc cancel",
+    "refining..  · Esc cancel",
+    "refining... · Esc cancel",
+];
 
 /// A title, the view on top, then the panel's last message.
 pub(super) fn render_tasks_panel(
@@ -63,9 +64,7 @@ pub(super) fn render_tasks_panel(
     render_rule(frame, rule_area, theme);
     render_message(frame, message_area, panel, theme);
     let upstreams = panel.upstream_choices();
-    if panel.plan_view().is_some() {
-        render_plan_view(frame, body_area, panel, theme);
-    } else if let Some(editor) = panel.editor_mut() {
+    if let Some(editor) = panel.editor_mut() {
         render_editor(frame, body_area, editor, &upstreams, theme);
     } else {
         render_task_list(frame, body_area, panel, theme);
@@ -74,24 +73,19 @@ pub(super) fn render_tasks_panel(
 
 /// The keys that work in the view on top, for the status line.
 pub(super) fn tasks_panel_hint(panel: &TasksPanel) -> &'static str {
-    match (panel.plan_view(), panel.editor()) {
-        (Some(session), _) => match &session.state {
-            PlanState::Planning(_) => PLANNING_HINT,
-            PlanState::Review {
-                feedback: Some(_), ..
-            } => FEEDBACK_HINT,
-            PlanState::Review { .. } => REVIEW_HINT,
-            PlanState::Failed(_) => FAILED_HINT,
-        },
-        (None, Some(editor)) => match editor.mode() {
+    match panel.editor() {
+        Some(editor) => match editor.mode() {
             EditorMode::Browse => EDITOR_HINT,
-            EditorMode::Name(_) | EditorMode::Host { .. } => FIELD_HINT,
-            EditorMode::Prompt(_) => PROMPT_HINT,
+            EditorMode::Name(_) => FIELD_HINT,
+            EditorMode::Hosts(list) => list_hint(list.state()),
+            EditorMode::Prompt(prompt) => prompt
+                .refine_dots()
+                .map_or(PROMPT_HINT, |dots| REFINING_HINTS[dots]),
             EditorMode::Trigger(_) => FORM_HINT,
             EditorMode::Discard => DISCARD_HINT,
         },
-        (None, None) if panel.confirm_delete() => DELETE_HINT,
-        (None, None) => LIST_HINT,
+        None if panel.confirm_delete() => DELETE_HINT,
+        None => LIST_HINT,
     }
 }
 
@@ -109,9 +103,6 @@ fn title(panel: &TasksPanel) -> Line<'static> {
         if editor.is_modified() {
             spans.push(Span::raw(" •"));
         }
-    }
-    if panel.plan_view().is_some() {
-        spans.push(Span::raw(" › Plan"));
     }
     Line::from(spans)
 }
@@ -176,7 +167,7 @@ fn task_entry_rows(
         (NO_POINTER, Style::default())
     };
     let spec = &task.spec;
-    let mut title = vec![
+    let title = vec![
         Span::styled(
             format!(
                 "{pointer}{}",
@@ -193,12 +184,6 @@ fn task_entry_rows(
             meta(theme),
         ),
     ];
-    if spec.enabled && spec.plan.is_none() {
-        title.push(Span::styled(
-            "  ⚠ no approved plan",
-            Style::default().fg(theme.warning),
-        ));
-    }
     let mut details = vec![triggers_summary(&spec.triggers, tasks)];
     if let Some(at) = task.next_fire {
         details.push(format!("next {}", local(at, NEXT_FIRE_FORMAT)));
@@ -277,7 +262,8 @@ fn event_summary(event: &TaskEvent, name_of: &dyn Fn(TaskId) -> Option<String>) 
     }
 }
 
-/// The rows, then the open prompt box or trigger form below them, then the editor's error.
+/// The rows, then the open prompt box or trigger form below them, then the note on the
+/// last refine, then the editor's error.
 fn render_editor(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -286,16 +272,15 @@ fn render_editor(
     theme: &Theme,
 ) {
     let box_rows = match editor.mode() {
-        EditorMode::Prompt(_) | EditorMode::Trigger(_) => BOX_ROWS,
-        EditorMode::Browse
-        | EditorMode::Name(_)
-        | EditorMode::Host { .. }
-        | EditorMode::Discard => 0,
+        EditorMode::Prompt(_) | EditorMode::Trigger(_) | EditorMode::Hosts(_) => BOX_ROWS,
+        EditorMode::Browse | EditorMode::Name(_) | EditorMode::Discard => 0,
     };
+    let note_rows = u16::from(refine_note(editor).is_some());
     let error_rows = u16::from(editor.error().is_some());
-    let [rows_area, box_area, error_area] = Layout::vertical([
+    let [rows_area, box_area, note_area, error_area] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(box_rows),
+        Constraint::Length(note_rows),
         Constraint::Length(error_rows),
     ])
     .areas(area);
@@ -312,15 +297,52 @@ fn render_editor(
         EditorMode::Prompt(_) => {
             let inner = render_box(frame, box_area, "Prompt", theme);
             editor.set_prompt_width(inner.width);
-            if let EditorMode::Prompt(text) = editor.mode() {
-                render_text_box(frame, inner, text);
+            if let EditorMode::Prompt(prompt) = editor.mode() {
+                render_text_box(frame, inner, prompt.text(), !prompt.refining());
+            }
+            if let Some(note) = refine_note(editor) {
+                render_refine_note(frame, note_area, (note, editor.permission()), theme);
             }
         }
-        EditorMode::Browse
-        | EditorMode::Name(_)
-        | EditorMode::Host { .. }
-        | EditorMode::Discard => {}
+        EditorMode::Hosts(list) => {
+            let entries = editor.host_entries();
+            render_list_editor(frame, box_area, (list, &entries), "Allowed hosts", theme);
+        }
+        EditorMode::Browse | EditorMode::Name(_) | EditorMode::Discard => {}
     }
+}
+
+/// The open prompt box's note on its last refine.
+fn refine_note(editor: &TaskEditor) -> Option<&RefineNote> {
+    match editor.mode() {
+        EditorMode::Prompt(prompt) => prompt.note(),
+        _ => None,
+    }
+}
+
+/// The recommended mode and why, in amber when it is not the task's `current` mode or runs
+/// would still pause.
+fn render_refine_note(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    (note, current): (&RefineNote, PermissionMode),
+    theme: &Theme,
+) {
+    let color = if note.warns || note.mode != current {
+        theme.warning
+    } else {
+        theme.status_text
+    };
+    let text = format!(
+        "recommended mode: {} ({})",
+        mode_name(note.mode),
+        note.reason
+    );
+    let line = Line::styled(
+        escape_controls_single_line(&text).into_owned(),
+        Style::default().fg(color),
+    );
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Each row with the selected one picked out, scrolled to keep it in view.
@@ -367,27 +389,8 @@ fn render_editor_rows(
 fn inline_editor(editor: &TaskEditor, row: EditorRow) -> Option<(&'static str, &TextEditor)> {
     match (row, editor.mode()) {
         (EditorRow::Name, EditorMode::Name(text)) => Some(("Name", text)),
-        (
-            EditorRow::Host(index),
-            EditorMode::Host {
-                replaces: Some(replaces),
-                editor: text,
-            },
-        ) if index == *replaces => Some((host_label(index), text)),
-        (
-            EditorRow::AddHost,
-            EditorMode::Host {
-                replaces: None,
-                editor: text,
-            },
-        ) => Some((host_label(editor.hosts().len()), text)),
         _ => None,
     }
-}
-
-/// The label of host row `index`: only the first is labelled.
-fn host_label(index: usize) -> &'static str {
-    if index == 0 { "Allowed hosts" } else { "" }
 }
 
 fn editor_row_lines(
@@ -416,18 +419,12 @@ fn editor_row_lines(
             mode_span(editor.permission(), selected, theme),
             theme,
         )],
-        EditorRow::Host(index) => vec![labelled(
+        EditorRow::Hosts => vec![labelled(
             selected,
-            host_label(index),
-            Span::raw(editor.hosts()[index].as_str().to_string()),
+            "Allowed hosts",
+            hosts_summary(editor, theme),
             theme,
         )],
-        EditorRow::AddHost => add_row_lines(
-            editor.hosts().is_empty().then_some("Allowed hosts"),
-            "+ add host",
-            selected,
-            theme,
-        ),
         EditorRow::Enabled => vec![labelled(
             selected,
             "Enabled",
@@ -443,12 +440,6 @@ fn editor_row_lines(
             selected,
             theme,
         ),
-        EditorRow::Plan => vec![labelled(
-            selected,
-            "Plan",
-            plan_summary(editor, theme),
-            theme,
-        )],
     }
 }
 
@@ -470,21 +461,31 @@ fn add_row_lines(
     none.into_iter().chain([add]).collect()
 }
 
-/// The permission mode and what it runs unasked, with choice arrows while selected.
-fn mode_span(mode: PermissionMode, selected: bool, theme: &Theme) -> Span<'static> {
-    let (name, effect) = match mode {
-        PermissionMode::Manual => ("manual", "asks about everything"),
-        PermissionMode::AcceptEdits => ("accept edits", "edits in the edit scope run unasked"),
-        PermissionMode::Auto => ("auto", "the safety judge answers what it may"),
-    };
-    if selected {
-        Span::styled(
-            format!("◂ {name} ▸  {effect}"),
-            Style::default().fg(theme.accent),
-        )
-    } else {
-        Span::raw(format!("{name}  {effect}"))
+fn mode_name(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Manual => "manual",
+        PermissionMode::AcceptEdits => "accept edits",
+        PermissionMode::Auto => "auto",
     }
+}
+
+/// The permission mode, with choice arrows while selected.
+fn mode_span(mode: PermissionMode, selected: bool, theme: &Theme) -> Span<'static> {
+    let name = mode_name(mode);
+    if selected {
+        Span::styled(format!("◂ {name} ▸"), Style::default().fg(theme.accent))
+    } else {
+        Span::raw(name)
+    }
+}
+
+/// The allowed hosts on one line, or `none`.
+fn hosts_summary(editor: &TaskEditor, theme: &Theme) -> Span<'static> {
+    if editor.hosts().is_empty() {
+        return Span::styled("none", meta(theme));
+    }
+    let hosts: Vec<&str> = editor.hosts().iter().map(HostName::as_str).collect();
+    Span::raw(hosts.join(", "))
 }
 
 fn trigger_row_lines(
@@ -521,23 +522,6 @@ fn trigger_row_lines(
     };
     lines.extend(detail.map(|span| Line::from(vec![Span::raw(indent), span])));
     lines
-}
-
-fn plan_summary(editor: &TaskEditor, theme: &Theme) -> Span<'static> {
-    match editor.stored().and_then(|spec| spec.plan.as_ref()) {
-        Some(plan) => Span::styled(
-            format!(
-                "approved · {} steps · Enter to plan again",
-                plan.steps.len()
-            ),
-            Style::default().fg(theme.success),
-        ),
-        None if editor.enabled() => Span::styled(
-            "⚠ none approved · Enter to plan",
-            Style::default().fg(theme.warning),
-        ),
-        None => Span::styled("none · Enter to plan", meta(theme)),
-    }
 }
 
 /// The prompt's first line, and how many more there are.
@@ -628,52 +612,6 @@ fn choice_span(text: &str, focused: bool, theme: &Theme) -> Span<'static> {
     }
 }
 
-/// The planning turn while it runs, then the plan under review with any feedback box below.
-fn render_plan_view(frame: &mut Frame<'_>, area: Rect, panel: &mut TasksPanel, theme: &Theme) {
-    if let Some(pane) = panel.planning_pane_mut() {
-        render_transcript(frame, area, pane, theme);
-        return;
-    }
-    let feedback_open = matches!(
-        panel.plan_view(),
-        Some(PlanSession {
-            state: PlanState::Review {
-                feedback: Some(_),
-                ..
-            },
-            ..
-        })
-    );
-    let [plan_area, feedback_area] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(if feedback_open { BOX_ROWS } else { 0 }),
-    ])
-    .areas(area);
-    let feedback_inner = feedback_open.then(|| render_box(frame, feedback_area, "Feedback", theme));
-    if let Some(inner) = feedback_inner {
-        panel.set_feedback_width(inner.width);
-    }
-    let Some(session) = panel.plan_view_mut() else {
-        return;
-    };
-    match &mut session.state {
-        PlanState::Review { review, feedback } => {
-            render_plan_review(frame, plan_area, review, theme);
-            if let (Some(text), Some(inner)) = (feedback, feedback_inner) {
-                render_text_box(frame, inner, text);
-            }
-        }
-        PlanState::Failed(message) => {
-            let line = Line::styled(
-                format!("Planning failed: {}", escape_controls_single_line(message)),
-                Style::default().fg(theme.error),
-            );
-            frame.render_widget(Paragraph::new(line), plan_area);
-        }
-        PlanState::Planning(_) => {}
-    }
-}
-
 /// A rounded box titled `title` over `area`, returning its inside.
 fn render_box(frame: &mut Frame<'_>, area: Rect, title: &str, theme: &Theme) -> Rect {
     let accent = Style::default().fg(theme.accent);
@@ -687,7 +625,7 @@ fn render_box(frame: &mut Frame<'_>, area: Rect, title: &str, theme: &Theme) -> 
 }
 
 /// `editor`'s text wrapped into `area`, scrolled to keep the cursor in view.
-fn render_text_box(frame: &mut Frame<'_>, area: Rect, editor: &TextEditor) {
+fn render_text_box(frame: &mut Frame<'_>, area: Rect, editor: &TextEditor, cursor: bool) {
     let chars: Vec<char> = editor.text().chars().collect();
     let rows = wrap_input(&chars, 0, area.width);
     let (cursor_row, cursor_column) = locate_cursor(&rows, editor.cursor_chars());
@@ -703,7 +641,9 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, editor: &TextEditor) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
-    place_cursor(frame, area, cursor_row - start, cursor_column);
+    if cursor {
+        place_cursor(frame, area, cursor_row - start, cursor_column);
+    }
 }
 
 /// The slice of a one-line editor's text that fits `width` columns with the cursor in

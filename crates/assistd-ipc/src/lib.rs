@@ -19,10 +19,10 @@ pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
     ActionOutlook, AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS,
-    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MissedFire, Plan, PlanId,
-    PlanStep, PlannedAction, QueueItem, SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt,
-    TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState, TaskRunSummary, TaskSpec,
-    TaskSpecError, TaskTrigger,
+    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MissedFire,
+    ModeRecommendation, Plan, PlanId, PlanStep, PlannedAction, QueueItem, SuspendReason, TaskEvent,
+    TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
+    TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -552,8 +552,7 @@ pub enum Request {
     TaskList { id: String },
     /// Read one task. Emits `Task`, then `Done`.
     TaskGet { id: String, task: TaskId },
-    /// Create a task, or replace task `task`; a changed prompt clears its plan. Errors when
-    /// `spec.mode` is Auto and the daemon does not allow it.
+    /// Create a task, or replace task `task`. Errors when `spec.mode` is Auto and the daemon does not allow it.
     /// Errors when the name is taken. Emits the saved `Task`, then `Done`.
     TaskSave {
         id: String,
@@ -586,21 +585,21 @@ pub enum Request {
         confirm_id: String,
         allow: bool,
     },
-    /// Plan `task`'s prompt in a conversation of its own, or with `feedback` revise its last
-    /// plan; streams the turn wrapped in `TaskPlan`, then emits `Plan` and `Done`. Errors when
-    /// `feedback` is given and the task has no plan to revise.
-    TaskPlan {
+    /// Explore task prompt `prompt` in a conversation of its own and rewrite it as a brief for
+    /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last
+    /// rewrite of it; a new refine ends the previous one. Streams the turn wrapped in
+    /// `TaskPlan`, then emits `TaskRefined` and `Done`. Saves nothing. Errors when `mode` is
+    /// Auto and the daemon does not allow it, or `feedback` is given and the last refine was
+    /// not of `prompt`.
+    TaskRefine {
         id: String,
-        task: TaskId,
+        prompt: TaskPrompt,
+        #[serde(default)]
+        mode: PermissionMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_hosts: Vec<HostName>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feedback: Option<String>,
-    },
-    /// Save `task`'s latest plan `plan` on it for its runs to follow, then emit the updated
-    /// `Task` and `Done`. Errors when `plan` is not the latest or the prompt changed since.
-    TaskPlanApprove {
-        id: String,
-        task: TaskId,
-        plan: PlanId,
     },
     /// Check `trigger` as `TaskSave` would for task `task`, or for a new task when `None`.
     /// Emits `TriggerFires`, then `Done`; errors with why a save would refuse it.
@@ -683,8 +682,7 @@ impl Request {
             | Request::TaskCancel { id, .. }
             | Request::TaskQueue { id, .. }
             | Request::TaskConfirm { id, .. }
-            | Request::TaskPlan { id, .. }
-            | Request::TaskPlanApprove { id, .. }
+            | Request::TaskRefine { id, .. }
             | Request::TaskCheckTrigger { id, .. } => id,
         }
     }
@@ -737,8 +735,7 @@ impl Request {
             Request::TaskCancel { .. } => "task_cancel",
             Request::TaskQueue { .. } => "task_queue",
             Request::TaskConfirm { .. } => "task_confirm",
-            Request::TaskPlan { .. } => "task_plan",
-            Request::TaskPlanApprove { .. } => "task_plan_approve",
+            Request::TaskRefine { .. } => "task_refine",
             Request::TaskCheckTrigger { .. } => "task_check_trigger",
         }
     }
@@ -1149,14 +1146,17 @@ pub enum Event {
         id: String,
         snapshot: TaskQueueSnapshot,
     },
-    /// A plan for the work asked for, each anticipated action checked against the machine.
-    Plan { id: String, plan: Plan },
-    /// One event of the planning turn for `task`, which `id` asked for; never terminal itself.
-    TaskPlan {
+    /// The asked prompt rewritten as a brief for an unattended run, the plan of that brief,
+    /// each anticipated action checked against the machine and the asked permissions, and the
+    /// mode its runs are best given among those the daemon allows.
+    TaskRefined {
         id: String,
-        task: TaskId,
-        event: Box<Event>,
+        prompt: TaskPrompt,
+        plan: Plan,
+        recommended: ModeRecommendation,
     },
+    /// One event of the planning turn `id` asked for; never terminal itself.
+    TaskPlan { id: String, event: Box<Event> },
     /// Terminal failure.
     Error { id: String, message: String },
     /// Terminal success.
@@ -1211,7 +1211,7 @@ impl Event {
             | Event::TaskRun { id, .. }
             | Event::TaskQueue { id, .. }
             | Event::Queued { id, .. }
-            | Event::Plan { id, .. }
+            | Event::TaskRefined { id, .. }
             | Event::TaskPlan { id, .. }
             | Event::TriggerFires { id, .. }
             | Event::Error { id, .. }
@@ -1263,7 +1263,7 @@ impl Event {
             | Event::Task { .. }
             | Event::TaskRunQueued { .. }
             | Event::Queued { .. }
-            | Event::Plan { .. }
+            | Event::TaskRefined { .. }
             | Event::TaskPlan { .. }
             | Event::TriggerFires { .. } => return None,
         })

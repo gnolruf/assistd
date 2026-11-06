@@ -1,6 +1,4 @@
-use assistd_ipc::{
-    PermissionMode, Plan, PlanId, PlanStep, SuspendReason, TaskRunSummary, TaskTrigger,
-};
+use assistd_ipc::{PermissionMode, SuspendReason, TaskRunSummary, TaskTrigger};
 
 use super::*;
 use crate::{SqliteTranscriptStore, TranscriptStore};
@@ -14,7 +12,7 @@ async fn fresh() -> (SqliteTaskStore, tempfile::TempDir) {
     (SqliteTaskStore::new(handle), temp)
 }
 
-fn approved_spec(name: &str, prompt: &str) -> TaskSpec {
+fn sample_spec(name: &str, prompt: &str) -> TaskSpec {
     TaskSpec {
         name: name.to_string().try_into().unwrap(),
         prompt: prompt.to_string().try_into().unwrap(),
@@ -22,93 +20,25 @@ fn approved_spec(name: &str, prompt: &str) -> TaskSpec {
         enabled: true,
         mode: PermissionMode::AcceptEdits,
         allowed_hosts: vec!["example.org".to_string().try_into().unwrap()],
-        plan: Some(Plan {
-            id: PlanId("p1".into()),
-            summary: "fetch it".into(),
-            steps: vec![PlanStep {
-                description: "fetch the page".into(),
-                actions: Vec::new(),
-            }],
-        }),
     }
-}
-
-#[tokio::test]
-async fn only_a_changed_prompt_drops_the_plan() {
-    let (store, _temp) = fresh().await;
-    let saved = store
-        .save(None, approved_spec("digest", "summarize example.org"))
-        .await
-        .unwrap();
-
-    let renamed = TaskSpec {
-        triggers: vec![TaskTrigger::Manual],
-        ..approved_spec("morning digest", "summarize example.org")
-    };
-    let kept = store.save(Some(saved.id), renamed.clone()).await.unwrap();
-    assert_eq!(kept.spec, renamed);
-    assert_eq!(store.get(saved.id).await.unwrap().spec, renamed);
-
-    let reworded = approved_spec("morning digest", "summarize example.com");
-    let cleared = store.save(Some(saved.id), reworded).await.unwrap();
-    let stored = store.get(saved.id).await.unwrap();
-    assert_eq!(stored, cleared);
-    assert_eq!(stored.spec.plan, None);
-    assert_eq!(stored.spec.mode, PermissionMode::AcceptEdits);
-    assert_eq!(stored.spec.allowed_hosts.len(), 1);
-    assert_eq!(stored.spec.prompt.as_str(), "summarize example.com");
-}
-
-#[tokio::test]
-async fn a_plan_approved_for_an_old_prompt_is_not_saved() {
-    let (store, _temp) = fresh().await;
-    let spec = TaskSpec {
-        plan: None,
-        ..approved_spec("digest", "summarize example.org")
-    };
-    let saved = store.save(None, spec).await.unwrap();
-    let plan = approved_spec("digest", "x").plan.unwrap();
-    let stale = "summarize example.com".to_string().try_into().unwrap();
-
-    let refused = store
-        .approve_plan(saved.id, stale, plan.clone())
-        .await
-        .unwrap();
-    assert_eq!(refused, None);
-    assert_eq!(store.get(saved.id).await.unwrap(), saved);
-
-    let approved = store
-        .approve_plan(saved.id, saved.spec.prompt.clone(), plan.clone())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(approved.spec.plan, Some(plan));
-    assert_eq!(store.get(saved.id).await.unwrap(), approved);
 }
 
 #[tokio::test]
 async fn save_refuses_a_taken_name_and_an_unknown_id() {
     let (store, _temp) = fresh().await;
-    store
-        .save(None, approved_spec("digest", "a"))
-        .await
-        .unwrap();
-    let other = store.save(None, approved_spec("other", "b")).await.unwrap();
+    store.save(None, sample_spec("digest", "a")).await.unwrap();
+    let other = store.save(None, sample_spec("other", "b")).await.unwrap();
 
     assert!(matches!(
-        store.save(None, approved_spec("digest", "c")).await,
+        store.save(None, sample_spec("digest", "c")).await,
         Err(MemoryError::TaskNameTaken(name)) if name == "digest"
     ));
     assert!(matches!(
-        store
-            .save(Some(other.id), approved_spec("digest", "b"))
-            .await,
+        store.save(Some(other.id), sample_spec("digest", "b")).await,
         Err(MemoryError::TaskNameTaken(_))
     ));
     assert!(matches!(
-        store
-            .save(Some(TaskId(999)), approved_spec("new", "d"))
-            .await,
+        store.save(Some(TaskId(999)), sample_spec("new", "d")).await,
         Err(MemoryError::TaskNotFound(TaskId(999)))
     ));
 }
@@ -121,10 +51,7 @@ async fn a_run_session_is_listed_with_its_outcome_and_never_resumed() {
         .unwrap();
     let tasks = SqliteTaskStore::new(handle.clone());
     let transcripts = SqliteTranscriptStore::new(handle);
-    let task = tasks
-        .save(None, approved_spec("digest", "a"))
-        .await
-        .unwrap();
+    let task = tasks.save(None, sample_spec("digest", "a")).await.unwrap();
     let user_session = SessionId::new();
     transcripts
         .begin_session_with_main_branch(user_session, 1)
@@ -174,7 +101,7 @@ async fn queue_order_pause_and_interrupted_runs_survive_a_reopen() {
     let path = temp.path().join("memory.db");
     let tasks = SqliteTaskStore::new(SqliteHandle::open(&path).await.unwrap());
     let task = tasks
-        .save(None, approved_spec("digest", "a"))
+        .save(None, sample_spec("digest", "a"))
         .await
         .unwrap()
         .id;
@@ -225,7 +152,7 @@ async fn queue_order_pause_and_interrupted_runs_survive_a_reopen() {
 async fn a_fire_coalesces_into_an_unfinished_run_and_records_the_next_fire() {
     let (store, _temp) = fresh().await;
     let task = store
-        .save(None, approved_spec("digest", "summarize example.org"))
+        .save(None, sample_spec("digest", "summarize example.org"))
         .await
         .unwrap()
         .id;

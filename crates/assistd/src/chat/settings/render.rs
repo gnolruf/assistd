@@ -11,7 +11,7 @@ use super::super::theme::{Theme, color};
 use super::super::ui::{locate_cursor, wrap_input};
 use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
 use super::color_picker::{ColorPicker, PALETTE_CELL_WIDTH, PickerFocus};
-use super::list_editor::{EntryEditor, ListState, entry_summary};
+use super::list_editor::{EntryEditor, ListEditor, ListState, entry_summary};
 use super::panel::{Feedback, PanelMode, Row, SettingsPanel, TextEditor, short_decimal};
 use super::preview::render_theme_preview;
 use super::theme_list::{ThemeEntry, ThemeListState};
@@ -363,14 +363,7 @@ fn hint(mode: &PanelMode) -> &'static str {
             "Enter apply · Shift+Enter new line · Esc cancel · Ctrl+U clear"
         }
         PanelMode::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
-        PanelMode::List(editor) => match editor.state() {
-            ListState::Browse => "↑/↓ move · Enter edit · a add · d delete · Esc done",
-            ListState::Edit(entry) if entry.key_file_field().is_some() => {
-                "Enter apply · Tab switch field · Esc cancel · Ctrl+U clear"
-            }
-            ListState::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
-            ListState::ConfirmDelete => "y delete · n keep",
-        },
+        PanelMode::List(editor) => list_hint(editor.state()),
         PanelMode::Color { picker, .. } => match (picker.hex_input(), picker.focus()) {
             (Some(_), _) => "type 6 hex digits · Backspace erase · Esc stop typing",
             (None, PickerFocus::Palette(_)) => {
@@ -406,10 +399,14 @@ fn box_block(panel: &SettingsPanel, theme: &Theme) -> Block<'static> {
     let label = panel
         .selected_setting()
         .map_or("", |setting| setting.label());
+    titled_box(label, theme)
+}
+
+fn titled_box(title: &str, theme: &Theme) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent(theme))
-        .title(Span::styled(format!(" {label} "), accent(theme)))
+        .title(Span::styled(format!(" {title} "), accent(theme)))
 }
 
 /// The edited text wrapped in a bordered box, scrolled to keep the cursor
@@ -437,17 +434,28 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel,
     place_cursor(frame, inner, cursor_row - start, cursor_column);
 }
 
-/// The list setting's entries then an add row, scrolled to keep the
-/// selection in view, with the open entry's fields in its place.
+/// The list setting's entries in the box titled with its label.
 fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
     let (PanelMode::List(editor), Some(setting)) = (panel.mode(), panel.selected_setting()) else {
         return;
     };
-    let block = box_block(panel, theme);
+    let entries = panel.list_entries(setting.key);
+    render_list_editor(frame, area, (editor, entries), setting.label(), theme);
+}
+
+/// `entries` then an add row in a box titled `title`, scrolled to keep the selection in
+/// view, with the open entry's fields in its place.
+pub(crate) fn render_list_editor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    (editor, entries): (&ListEditor, &[toml::Value]),
+    title: &str,
+    theme: &Theme,
+) {
+    let block = titled_box(title, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = usize::from(inner.width).saturating_sub(NO_POINTER.len());
-    let entries = panel.list_entries(setting.key);
     let mut lines = Vec::new();
     let mut cursor = None;
     let mut selected_line = 0;
@@ -473,6 +481,18 @@ fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, the
     frame.render_widget(Paragraph::new(lines), inner);
     if let Some((row, column)) = cursor {
         place_cursor(frame, inner, row.saturating_sub(start), column);
+    }
+}
+
+/// The keys the list box takes in `state`.
+pub(crate) fn list_hint(state: &ListState) -> &'static str {
+    match state {
+        ListState::Browse => "↑/↓ move · Enter edit · a add · d delete · Esc done",
+        ListState::Edit(entry) if entry.key_file_field().is_some() => {
+            "Enter apply · Tab switch field · Esc cancel · Ctrl+U clear"
+        }
+        ListState::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
+        ListState::ConfirmDelete => "y delete · n keep",
     }
 }
 

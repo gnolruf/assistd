@@ -2056,7 +2056,6 @@ async fn task_state_with(
         enabled: true,
         mode: assistd_ipc::PermissionMode::Manual,
         allowed_hosts: Vec::new(),
-        plan: None,
     };
     let task = tasks.save(None, spec).await.unwrap().id;
     let subsystems = Subsystems::new(

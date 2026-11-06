@@ -1,6 +1,6 @@
 //! Handlers for `TaskRun` and `TaskCancel`, and a saved task run as an
-//! unattended turn in a conversation and transcript session of its own, following the
-//! task's plan, its prompts approved by the task's mode and hosts or paused for the user.
+//! unattended turn in a conversation and transcript session of its own, its prompts approved
+//! by the task's mode and hosts or paused for the user.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
-use assistd_ipc::{ConfirmSource, Event, Plan, TaskId, TaskRunId, TaskTrigger};
+use assistd_ipc::{ConfirmSource, Event, TaskId, TaskRunId, TaskTrigger};
 use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
@@ -194,10 +194,7 @@ impl AppState {
         let Some(awake) = self.wake_for_task_run(&turn.id, tx, cancel).await? else {
             return Ok(None);
         };
-        let system_prompt = run_system_prompt(
-            &self.config.chat.system_prompt,
-            turn.task.spec.plan.as_ref(),
-        );
+        let system_prompt = task_system_prompt(&self.config.chat.system_prompt);
         let key = ConversationKey::TaskRun(turn.run);
         let conversation = self
             .subsystems
@@ -387,26 +384,6 @@ pub(super) fn task_system_prompt(main: &str) -> String {
     } else {
         format!("{main}\n\n{TASK_PREAMBLE}")
     }
-}
-
-/// [`task_system_prompt`], then the task's approved `plan` for the run to follow.
-fn run_system_prompt(main: &str, plan: Option<&Plan>) -> String {
-    let prompt = task_system_prompt(main);
-    let Some(plan) = plan else {
-        return prompt;
-    };
-    let steps: Vec<String> = plan
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(index, step)| format!("{}. {}", index + 1, step.description))
-        .collect();
-    format!(
-        "{prompt}\n\nThe user approved this plan for the task. Follow it, departing from it \
-         only where a step turns out impossible, and say so in your reply.\n{}\n{}",
-        plan.summary,
-        steps.join("\n")
-    )
 }
 
 /// How a run whose turn ended with `outcome` finished. A run cut short by shutdown

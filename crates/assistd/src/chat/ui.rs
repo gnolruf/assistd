@@ -24,7 +24,6 @@ use super::theme::Theme;
 use crate::client::terminal_text::escape_controls_single_line;
 
 mod agents;
-mod plan_review;
 mod tasks;
 mod wakeword;
 
