@@ -313,6 +313,10 @@ const V9_SQL: &str = r"
 ALTER TABLE tasks DROP COLUMN plan;
 ";
 
+const V10_SQL: &str = r"
+ALTER TABLE tasks ADD COLUMN announce INTEGER NOT NULL DEFAULT 0;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -325,6 +329,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V7_SQL),
         M::up(V8_SQL),
         M::up(V9_SQL),
+        M::up(V10_SQL),
     ])
 }
 
@@ -351,6 +356,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 }

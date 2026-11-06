@@ -147,7 +147,7 @@ impl Driver {
                 self.set_chat_focus(*focused);
                 return;
             }
-            Event::TaskQueue { .. } | Event::TaskRunEnded { .. } => {
+            Event::TaskQueue { .. } | Event::TaskReply { .. } => {
                 self.announce_task_notices(ev);
                 return;
             }
@@ -167,8 +167,8 @@ impl Driver {
         self.was_speaking = is_speaking;
     }
 
-    /// Task notices wait on the chat being known to be unfocused, as turns do, except a run
-    /// needing input.
+    /// A run needing input shows whether or not the chat has focus; a reply waits on the
+    /// chat being known to be unfocused, as a turn does.
     fn announce_task_notices(&mut self, ev: &Event) {
         for notice in self.task_notices.notices_for(ev) {
             if notice.ignores_focus() || self.chat_focused == Some(false) {

@@ -89,7 +89,7 @@ fn subscribe_filter() -> SubscribeFilter {
             EventKind::SessionTitle,
             EventKind::Readiness,
             EventKind::TaskQueue,
-            EventKind::TaskRunEnded,
+            EventKind::TaskReply,
         ],
     }
 }

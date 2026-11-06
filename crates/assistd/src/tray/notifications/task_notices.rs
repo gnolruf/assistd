@@ -1,44 +1,37 @@
-//! One-off notices about task runs: a run that finished or failed, and a run newly paused on
-//! a prompt nobody has answered.
+//! One-off notices about task runs: a run newly paused on a prompt nobody has answered, and
+//! the final reply of a task that announces its replies.
 
 use std::collections::HashSet;
 
-use assistd_ipc::{Event, PausedPrompt, QueueItem, TaskRunId, TaskRunState};
+use assistd_ipc::{Event, QueueItem, TaskQueueSnapshot, TaskRunId};
 
-use super::activity::{flatten_whitespace, truncate_chars_from_start};
+use super::activity::truncate_chars_from_start;
 
-/// Characters of a finished run's reply a notice shows, from its start.
-const REPLY_START_CHARS: usize = 200;
+/// Characters of an announced reply a notice shows, from its start.
+const REPLY_CHARS: usize = 300;
 
 /// A notice about one task run, shown beside the turn notification rather than replacing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TaskNotice {
     pub run: TaskRunId,
     pub task_name: String,
-    pub outcome: NoticeOutcome,
+    pub kind: NoticeKind,
 }
 
 impl TaskNotice {
     /// Shown even while the chat has focus.
     pub(super) fn ignores_focus(&self) -> bool {
-        matches!(self.outcome, NoticeOutcome::NeedsInput { .. })
+        matches!(self.kind, NoticeKind::NeedsInput { .. })
     }
 }
 
 /// What a [`TaskNotice`] reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum NoticeOutcome {
-    /// The start of the run's final reply.
-    Finished {
-        reply_start: String,
-    },
-    Failed {
-        reason: String,
-    },
+pub(super) enum NoticeKind {
     /// Why the prompt the run waits on needs confirming.
-    NeedsInput {
-        reason: String,
-    },
+    NeedsInput { reason: String },
+    /// The start of the run's final reply.
+    Reply { text: String },
 }
 
 /// Turns task events into [`TaskNotice`]s, each paused prompt noticed once.
@@ -49,75 +42,52 @@ pub(super) struct TaskNoticeTracker {
 }
 
 impl TaskNoticeTracker {
-    /// The notices `ev` raises; a cancelled run raises none.
+    /// The notices `ev` raises.
     pub(super) fn notices_for(&mut self, ev: &Event) -> Vec<TaskNotice> {
         match ev {
-            Event::TaskRunEnded {
+            Event::TaskQueue { snapshot, .. } => self.newly_paused(snapshot),
+            Event::TaskReply {
                 run,
                 task_name,
-                state,
                 reply,
                 ..
-            } => ended_outcome(state, reply.as_deref())
-                .map(|outcome| TaskNotice {
-                    run: *run,
-                    task_name: task_name.to_string(),
-                    outcome,
-                })
-                .into_iter()
-                .collect(),
-            Event::TaskQueue { snapshot, .. } => self.newly_paused(&snapshot.items),
+            } => vec![TaskNotice {
+                run: *run,
+                task_name: task_name.to_string(),
+                kind: NoticeKind::Reply {
+                    text: truncate_chars_from_start(reply.trim(), REPLY_CHARS),
+                },
+            }],
             _ => Vec::new(),
         }
     }
 
-    fn newly_paused(&mut self, items: &[QueueItem]) -> Vec<TaskNotice> {
-        let paused: Vec<(TaskRunId, &str, &PausedPrompt)> = items
-            .iter()
-            .filter_map(|item| match item {
-                QueueItem::Run {
-                    run,
-                    task_name,
-                    prompt: Some(prompt),
-                    ..
-                } => Some((*run, task_name.as_str(), prompt)),
-                _ => None,
-            })
-            .collect();
-        let notices = paused
-            .iter()
-            .filter(|(_, _, prompt)| !self.paused.contains(&prompt.confirm_id))
-            .map(|(run, task_name, prompt)| TaskNotice {
-                run: *run,
-                task_name: (*task_name).to_string(),
-                outcome: NoticeOutcome::NeedsInput {
-                    reason: prompt.matched_pattern.clone(),
-                },
-            })
-            .collect();
-        self.paused = paused
-            .into_iter()
-            .map(|(_, _, prompt)| prompt.confirm_id.clone())
-            .collect();
+    /// A notice for every prompt in `snapshot` not in the previous one.
+    fn newly_paused(&mut self, snapshot: &TaskQueueSnapshot) -> Vec<TaskNotice> {
+        let mut paused = HashSet::new();
+        let mut notices = Vec::new();
+        for item in &snapshot.items {
+            let QueueItem::Run {
+                run,
+                task_name,
+                prompt: Some(prompt),
+                ..
+            } = item
+            else {
+                continue;
+            };
+            if !self.paused.contains(&prompt.confirm_id) {
+                notices.push(TaskNotice {
+                    run: *run,
+                    task_name: task_name.to_string(),
+                    kind: NoticeKind::NeedsInput {
+                        reason: prompt.matched_pattern.clone(),
+                    },
+                });
+            }
+            paused.insert(prompt.confirm_id.clone());
+        }
+        self.paused = paused;
         notices
-    }
-}
-
-fn ended_outcome(state: &TaskRunState, reply: Option<&str>) -> Option<NoticeOutcome> {
-    match state {
-        TaskRunState::Succeeded => Some(NoticeOutcome::Finished {
-            reply_start: truncate_chars_from_start(
-                &flatten_whitespace(reply.unwrap_or_default()),
-                REPLY_START_CHARS,
-            ),
-        }),
-        TaskRunState::Failed { reason } => Some(NoticeOutcome::Failed {
-            reason: reason.clone(),
-        }),
-        TaskRunState::Queued
-        | TaskRunState::Running
-        | TaskRunState::Suspended { .. }
-        | TaskRunState::NeedsInput
-        | TaskRunState::Cancelled => None,
     }
 }

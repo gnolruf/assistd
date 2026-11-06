@@ -2,7 +2,7 @@
 //! freedesktop notification.
 
 use super::activity::{Activity, ActivityView};
-use super::task_notices::{NoticeOutcome, TaskNotice};
+use super::task_notices::{NoticeKind, TaskNotice};
 
 /// The action key notification daemons run on a click of the body.
 pub(super) const HIDE_ACTION: &str = "default";
@@ -61,14 +61,12 @@ pub(super) fn render(notification: &Notification, caps: Capabilities) -> Rendere
 
 /// A task notice under its task's name, left for the service to expire.
 pub(super) fn render_task_notice(notice: &TaskNotice, caps: Capabilities) -> Rendered {
-    let (icon, body, urgency) = match &notice.outcome {
-        NoticeOutcome::Finished { reply_start } => ("dialog-information", reply_start.clone(), 1),
-        NoticeOutcome::Failed { reason } => ("dialog-error", format!("Failed: {reason}"), 2),
-        NoticeOutcome::NeedsInput { reason } => (
+    let (icon, body) = match &notice.kind {
+        NoticeKind::NeedsInput { reason } => (
             "dialog-question",
             format!("Needs input: {reason} · answer it in /tasks"),
-            1,
         ),
+        NoticeKind::Reply { text } => ("dialog-information", text.clone()),
     };
     Rendered {
         icon,
@@ -79,7 +77,7 @@ pub(super) fn render_task_notice(notice: &TaskNotice, caps: Capabilities) -> Ren
             body
         },
         actions: Vec::new(),
-        urgency,
+        urgency: 1,
         expire_timeout: -1,
     }
 }

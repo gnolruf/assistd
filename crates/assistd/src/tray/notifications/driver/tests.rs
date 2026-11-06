@@ -2,7 +2,7 @@ use assistd_ipc::{PausedPrompt, QueueItem, TaskId, TaskQueueSnapshot, TaskRunId,
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::super::task_notices::NoticeOutcome;
+use super::super::task_notices::NoticeKind;
 use super::*;
 
 struct Harness {
@@ -104,46 +104,44 @@ fn queue_with_paused_run(confirm_id: &str) -> Event {
     }
 }
 
-fn run_ended(state: TaskRunState, reply: Option<&str>) -> Event {
-    Event::TaskRunEnded {
+fn task_reply(reply: &str) -> Event {
+    Event::TaskReply {
         id: "t".into(),
-        task: TaskId(1),
         run: TaskRunId(3),
         task_name: "digest".to_string().try_into().unwrap(),
-        state,
-        reply: reply.map(str::to_string),
+        reply: reply.into(),
     }
 }
 
-fn expect_announce(h: &mut Harness) -> NoticeOutcome {
+fn expect_announce(h: &mut Harness) -> NoticeKind {
     match h.next_command() {
-        Some(NotifierCommand::Announce(notice)) => notice.outcome,
+        Some(NotifierCommand::Announce(notice)) => notice.kind,
         other => panic!("expected Announce, got {other:?}"),
     }
 }
 
 #[test]
-fn task_notices_hold_back_for_focus_except_a_run_needing_input() {
+fn task_notices_wait_for_focus_to_be_lost_except_a_run_needing_input() {
+    let needs_input = NoticeKind::NeedsInput {
+        reason: "rm".into(),
+    };
     let mut h = Harness::new();
     h.event(chat_focus(true));
     h.event(queue_with_paused_run("c1"));
-    assert!(matches!(
-        expect_announce(&mut h),
-        NoticeOutcome::NeedsInput { .. }
-    ));
+    assert_eq!(expect_announce(&mut h), needs_input);
     h.event(queue_with_paused_run("c1"));
     h.expect_nothing();
-    h.event(run_ended(TaskRunState::Succeeded, Some("all done")));
+    h.event(queue_with_paused_run("c2"));
+    assert_eq!(expect_announce(&mut h), needs_input);
+    h.event(task_reply("3 new messages"));
     h.expect_nothing();
 
     h.event(chat_focus(false));
-    h.event(run_ended(TaskRunState::Cancelled, None));
-    h.expect_nothing();
-    h.event(run_ended(TaskRunState::Succeeded, Some("all\ndone")));
+    h.event(task_reply("3 new messages"));
     assert_eq!(
         expect_announce(&mut h),
-        NoticeOutcome::Finished {
-            reply_start: "all done".into()
+        NoticeKind::Reply {
+            text: "3 new messages".into()
         }
     );
 }

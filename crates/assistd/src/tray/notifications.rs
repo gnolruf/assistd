@@ -1,5 +1,5 @@
-//! Desktop notifications showing each turn's activity and task runs that finished or need
-//! input, spawned alongside the tray icon.
+//! Desktop notifications showing each turn's activity, task runs that need input and the
+//! replies of tasks that announce them, spawned alongside the tray icon.
 
 use assistd_config::Config;
 use assistd_ipc::{Event, IpcClient};

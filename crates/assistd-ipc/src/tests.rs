@@ -809,6 +809,7 @@ fn sample_task_spec() -> TaskSpec {
         enabled: true,
         mode: PermissionMode::AcceptEdits,
         allowed_hosts: vec!["Example.org".to_string().try_into().unwrap()],
+        announce: true,
     }
 }
 
@@ -862,7 +863,7 @@ fn sample_plan() -> Plan {
 
 const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}"#;
 
-const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"]}"#;
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"],"announce":true}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
     let save_wire =
@@ -894,6 +895,7 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
                 spec: TaskSpec {
                     mode: PermissionMode::Manual,
                     allowed_hosts: Vec::new(),
+                    announce: false,
                     triggers: Vec::new(),
                     ..sample_task_spec()
                 },
@@ -1081,15 +1083,13 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
             r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"run","run":8,"task":5,"task_name":"fetch","state":{"state":"needs_input"},"prompt":{"confirm_id":"c","tool":"web","script":"web fetch https://example.org/","matched_pattern":"fetches from example.org","host":"example.org","source":{"agent":"task","task":5,"run":8}},"started_at":"2026-11-05T14:00:00Z"},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
         ),
         (
-            Event::TaskRunEnded {
+            Event::TaskReply {
                 id: id(),
-                task: TaskId(4),
                 run: TaskRunId(9),
                 task_name: "inbox".to_string().try_into().unwrap(),
-                state: TaskRunState::Succeeded,
-                reply: Some("done".into()),
+                reply: "3 new messages".into(),
             },
-            r#"{"type":"task_run_ended","id":"r","task":4,"run":9,"task_name":"inbox","state":{"state":"succeeded"},"reply":"done"}"#,
+            r#"{"type":"task_reply","id":"r","run":9,"task_name":"inbox","reply":"3 new messages"}"#,
         ),
         (
             Event::Queued {

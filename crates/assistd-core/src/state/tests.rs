@@ -2056,6 +2056,7 @@ async fn task_state_with(
         enabled: true,
         mode: assistd_ipc::PermissionMode::Manual,
         allowed_hosts: Vec::new(),
+        announce: false,
     };
     let task = tasks.save(None, spec).await.unwrap().id;
     let subsystems = Subsystems::new(
@@ -2147,6 +2148,44 @@ async fn a_finished_task_run_leaves_the_main_conversation_untouched() {
     );
     assert_eq!(state.runtime.session_ctx.current().await.1, Some(branch));
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
+}
+
+#[tokio::test]
+async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
+    let backend = MainConversation::new(Arc::new(EchoBackend::new()));
+    let (state, _conv, _branch, task) =
+        task_state(backend, Arc::new(ToolRegistry::default())).await;
+    let recorder = MockSpeechRecorder::new();
+    state
+        .subsystems
+        .voice
+        .set_speech(Readiness::Ready(recorder.clone()));
+    let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
+    spec.announce = true;
+    state.memory.tasks.save(Some(task), spec).await.unwrap();
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+        kinds: vec![EventKind::TaskReply],
+    });
+
+    queue_task_run(&state, task).await;
+    let announced = tokio::time::timeout(Duration::from_secs(5), bus.recv())
+        .await
+        .expect("no TaskReply")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while recorder.calls().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reply was not spoken");
+    settle_task_runs(&state).await;
+
+    assert!(matches!(
+        announced,
+        Event::TaskReply { reply, .. } if reply == "summarize my inbox"
+    ));
+    assert_eq!(recorder.calls(), ["summarize my inbox"]);
 }
 
 #[tokio::test]

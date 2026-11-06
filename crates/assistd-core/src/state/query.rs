@@ -833,7 +833,7 @@ async fn next_llm_event(
     received.map_or(NextLlmEvent::Closed, NextLlmEvent::Event)
 }
 
-async fn run_speech_worker(
+pub(super) async fn run_speech_worker(
     voice_output: Arc<VoiceOutputController>,
     events_bus: broadcast::Sender<Event>,
     id: String,

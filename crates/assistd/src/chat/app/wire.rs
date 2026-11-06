@@ -132,8 +132,8 @@ impl App {
             | Event::TaskRunRecord { .. }
             | Event::TaskRunQueued { .. }
             | Event::TaskRun { .. }
-            | Event::TaskRunEnded { .. }
             | Event::TaskQueue { .. }
+            | Event::TaskReply { .. }
             | Event::Queued { .. }
             | Event::TaskRefined { .. }
             | Event::TaskPlan { .. }

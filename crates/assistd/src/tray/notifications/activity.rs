@@ -271,7 +271,7 @@ fn value_inline(v: &Value) -> String {
     }
 }
 
-pub(super) fn flatten_whitespace(s: &str) -> String {
+fn flatten_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
     for ch in s.chars() {

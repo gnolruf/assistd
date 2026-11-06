@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
-use assistd_ipc::{ConfirmSource, Event, TaskId, TaskRunId, TaskRunState, TaskTrigger};
+use assistd_ipc::{ConfirmSource, Event, TaskId, TaskRunId, TaskTrigger};
 use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
@@ -23,6 +23,7 @@ use super::lanes::LaneLease;
 use super::persistence::PersistTarget;
 use super::query::{TurnScope, TurnTranslator};
 use super::run_lane::{LaneHold, RUN_LANE, RunLane, YieldingBackend};
+use super::task_announce::TaskReply;
 use super::task_confirms::TaskRunParking;
 use super::task_queue::QueuedRun;
 use super::task_runner::RegisteredRun;
@@ -122,11 +123,23 @@ impl AppState {
         registered: RegisteredRun,
     ) {
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
-        tokio::join!(
+        let (reply, ()) = tokio::join!(
             self.drive_task_run(&turn, lease, &registered, tx),
             self.publish_task_run_events(TurnScope::TaskRun(turn.run), rx)
         );
         self.runtime.task_queue.finish(turn.run);
+        if let Some(reply) = reply.filter(|_| turn.task.spec.announce) {
+            let announce = self.announce_task_reply(TaskReply {
+                id: turn.id,
+                run: turn.run,
+                task_name: turn.task.spec.name,
+                reply,
+            });
+            tokio::select! {
+                () = registered.cancel.cancelled() => {}
+                () = announce => {}
+            }
+        }
     }
 
     async fn publish_task_run_events(&self, scope: TurnScope, mut rx: mpsc::Receiver<Event>) {
@@ -136,19 +149,24 @@ impl AppState {
     }
 
     /// Run the turn, record how it ended, then end its event stream with `Error` for a
-    /// failed run and `Done` for a cancelled one, whose turn sent none.
+    /// failed run and `Done` for a cancelled one, whose turn sent none. Returns the final
+    /// reply of a run that succeeded.
     async fn drive_task_run(
         self: &Arc<Self>,
         turn: &TaskRunTurn,
         lease: LaneLease,
         registered: &RegisteredRun,
         tx: mpsc::Sender<Event>,
-    ) {
+    ) -> Option<String> {
         let outcome = self
             .task_run_turn(turn, lease, &registered.cancel, &tx)
             .await;
         let end = run_end(outcome, registered);
         let id = turn.id.clone();
+        let reply = match &end {
+            TaskRunEnd::Succeeded { reply } => Some(reply.clone()),
+            TaskRunEnd::Failed { .. } | TaskRunEnd::Cancelled => None,
+        };
         let terminal = match &end {
             TaskRunEnd::Succeeded { .. } => None,
             TaskRunEnd::Failed { reason } => Some(Event::Error {
@@ -161,13 +179,13 @@ impl AppState {
         if let Some(terminal) = terminal {
             let _ = tx.send(terminal).await;
         }
+        reply
     }
 
     /// Record how the run ended, then fire the triggers waiting on its task finishing
     /// unless it was cancelled.
     async fn record_run_end(&self, turn: &TaskRunTurn, end: TaskRunEnd) {
         info!(target: "assistd::tasks", end = ?end, "task run ended");
-        self.publish_run_ended(turn, &end);
         let succeeded = match &end {
             TaskRunEnd::Succeeded { .. } => Some(true),
             TaskRunEnd::Failed { .. } => Some(false),
@@ -182,27 +200,6 @@ impl AppState {
             self.fire_event_triggers(Occurrence::TaskFinished { task, succeeded })
                 .await;
         }
-    }
-
-    fn publish_run_ended(&self, turn: &TaskRunTurn, end: &TaskRunEnd) {
-        let (state, reply) = match end {
-            TaskRunEnd::Succeeded { reply } => (TaskRunState::Succeeded, Some(reply.clone())),
-            TaskRunEnd::Failed { reason } => (
-                TaskRunState::Failed {
-                    reason: reason.clone(),
-                },
-                None,
-            ),
-            TaskRunEnd::Cancelled => (TaskRunState::Cancelled, None),
-        };
-        self.runtime.publish(&Event::TaskRunEnded {
-            id: turn.id.clone(),
-            task: turn.task.id,
-            run: turn.run,
-            task_name: turn.task.spec.name.clone(),
-            state,
-            reply,
-        });
     }
 
     /// The run's final reply, `None` when it was cancelled or ended without one.

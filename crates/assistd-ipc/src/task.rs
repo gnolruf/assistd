@@ -197,6 +197,9 @@ pub struct TaskSpec {
     /// Hosts a run's `web` fetches from without asking, on top of the approved hosts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<HostName>,
+    /// Speak a successful run's final reply and show it as a notification, as a chat reply is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub announce: bool,
 }
 
 /// A condition that starts a run of its task.

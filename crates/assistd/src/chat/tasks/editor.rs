@@ -1,5 +1,5 @@
-//! The task editor: a task's name, prompt, permission mode, allowed hosts, triggers and
-//! enabled flag, saved through the daemon, which checks each trigger as it is written.
+//! The task editor: a task's name, prompt, permission mode, allowed hosts, whether it
+//! announces its replies, triggers and enabled flag, saved through the daemon, which checks each trigger as it is written.
 
 use assistd_ipc::{
     HostName, ModeRecommendation, PermissionMode, Plan, Request, TaskId, TaskName, TaskPrompt,
@@ -22,6 +22,7 @@ pub(in crate::chat) enum EditorRow {
     Prompt,
     Mode,
     Hosts,
+    Announce,
     Enabled,
     Trigger(usize),
     AddTrigger,
@@ -79,6 +80,7 @@ pub(in crate::chat) struct TaskEditor {
     hosts: Vec<HostName>,
     /// The daemon allows Auto mode, so the mode row offers it.
     auto_offered: bool,
+    announce: bool,
     enabled: bool,
     triggers: Vec<TriggerRow>,
     /// Index into [`rows`](Self::rows).
@@ -99,6 +101,7 @@ impl TaskEditor {
             permission: PermissionMode::Manual,
             hosts: Vec::new(),
             auto_offered,
+            announce: false,
             enabled: false,
             triggers: Vec::new(),
             selected: 0,
@@ -142,6 +145,10 @@ impl TaskEditor {
         &self.hosts
     }
 
+    pub(in crate::chat) fn announce(&self) -> bool {
+        self.announce
+    }
+
     pub(in crate::chat) fn enabled(&self) -> bool {
         self.enabled
     }
@@ -172,6 +179,7 @@ impl TaskEditor {
             EditorRow::Prompt,
             EditorRow::Mode,
             EditorRow::Hosts,
+            EditorRow::Announce,
             EditorRow::Enabled,
         ]
         .into_iter()
@@ -189,6 +197,7 @@ impl TaskEditor {
                     || self.prompt != spec.prompt.as_str()
                     || self.permission != spec.mode
                     || self.hosts != spec.allowed_hosts
+                    || self.announce != spec.announce
                     || self.enabled != spec.enabled
                     || !triggers.eq(&spec.triggers)
             }
@@ -197,6 +206,7 @@ impl TaskEditor {
                     || !self.prompt.is_empty()
                     || self.permission != PermissionMode::Manual
                     || !self.hosts.is_empty()
+                    || self.announce
                     || !self.triggers.is_empty()
             }
         }
@@ -308,6 +318,7 @@ impl TaskEditor {
         self.prompt = spec.prompt.as_str().to_string();
         self.permission = spec.mode;
         self.hosts.clone_from(&spec.allowed_hosts);
+        self.announce = spec.announce;
         self.enabled = spec.enabled;
         let task = self.task;
         self.triggers = spec
@@ -448,6 +459,7 @@ impl TaskEditor {
             }
             EditorRow::Mode => {}
             EditorRow::Hosts => self.mode = EditorMode::Hosts(ListEditor::new(ListItem::Text)),
+            EditorRow::Announce => self.announce = !self.announce,
             EditorRow::Enabled => self.enabled = !self.enabled,
             EditorRow::Trigger(index) => {
                 let form = TriggerForm::editing(index, &self.triggers[index].trigger);
@@ -561,6 +573,7 @@ impl TaskEditor {
             enabled: self.enabled,
             mode: self.permission,
             allowed_hosts: self.hosts.clone(),
+            announce: self.announce,
         })
     }
 }
