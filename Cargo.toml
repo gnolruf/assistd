@@ -93,7 +93,7 @@ notify = { version = "8.2", default-features = false }
 sherpa-onnx = { version = "2.0.0", default-features = false, features = ["shared"] }
 sentencepiece-rust = "0.1.1"
 cpal = "0.18.1"
-ringbuf = "0.5"
+ringbuf = "0.6"
 rubato = "5.0"
 hound = "3.5"
 landlock = "0.4.7"
