@@ -1,6 +1,6 @@
 pkgbase = assistd-git
 	pkgdesc = A local-model agent daemon for Linux (LLM + voice + tools + WM integration) - git HEAD
-	pkgver = 1.0.0.r246.g9199320
+	pkgver = 0.5.0.r101.gbf06c24
 	pkgrel = 1
 	url = https://github.com/gnolruf/assistd
 	install = assistd.install
@@ -26,7 +26,7 @@ pkgbase = assistd-git
 	optdepends = bubblewrap: sandboxed bash command tool
 	optdepends = pipewire-alsa: route audio through PipeWire (otherwise raw ALSA)
 	optdepends = notification-daemon: desktop notifications from the tray
-	provides = assistd=1.0.0.r246.g9199320
+	provides = assistd=0.5.0.r101.gbf06c24
 	conflicts = assistd
 	options = !lto
 	backup = etc/assistd/config.toml
