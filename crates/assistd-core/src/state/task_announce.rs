@@ -20,16 +20,22 @@ pub(super) struct TaskReply {
 
 impl AppState {
     pub(super) async fn announce_task_reply(&self, reply: TaskReply) {
+        let TaskReply {
+            id,
+            run,
+            task_name,
+            reply,
+        } = reply;
+        let sentences = self.reply_sentences(&reply);
         self.runtime.publish(&Event::TaskReply {
-            id: reply.id.clone(),
-            run: reply.run,
-            task_name: reply.task_name,
-            reply: reply.reply.clone(),
+            id: id.clone(),
+            run,
+            task_name,
+            reply,
         });
         self.wait_for_quiet_chat().await;
         let voice_output = self.subsystems.voice.speech().clone();
         let start_epoch = voice_output.current_epoch();
-        let sentences = self.reply_sentences(&reply.reply);
         let (speech_tx, speech_rx) = mpsc::channel(sentences.len().max(1));
         for sentence in sentences {
             let _ = speech_tx.try_send(sentence);
@@ -38,7 +44,7 @@ impl AppState {
         run_speech_worker(
             voice_output,
             self.runtime.events_bus().clone(),
-            reply.id,
+            id,
             start_epoch,
             speech_rx,
         )

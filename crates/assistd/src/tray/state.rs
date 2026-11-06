@@ -109,7 +109,6 @@ impl TrayTracker {
         (!lines.is_empty()).then(|| lines.join("\n"))
     }
 
-    /// The task queue as last broadcast; `None` until the daemon sends it.
     pub(super) fn task_queue(&self) -> Option<&TaskQueueSnapshot> {
         self.task_queue.as_ref()
     }

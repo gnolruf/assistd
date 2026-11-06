@@ -128,7 +128,7 @@ impl AppState {
             self.publish_task_run_events(TurnScope::TaskRun(turn.run), rx)
         );
         self.runtime.task_queue.finish(turn.run);
-        if let Some(reply) = reply.filter(|_| turn.task.spec.announce) {
+        if let Some(reply) = reply {
             let announce = self.announce_task_reply(TaskReply {
                 id: turn.id,
                 run: turn.run,
@@ -150,7 +150,7 @@ impl AppState {
 
     /// Run the turn, record how it ended, then end its event stream with `Error` for a
     /// failed run and `Done` for a cancelled one, whose turn sent none. Returns the final
-    /// reply of a run that succeeded.
+    /// reply of a successful run whose task announces it.
     async fn drive_task_run(
         self: &Arc<Self>,
         turn: &TaskRunTurn,
@@ -163,17 +163,18 @@ impl AppState {
             .await;
         let end = run_end(outcome, registered);
         let id = turn.id.clone();
-        let reply = match &end {
-            TaskRunEnd::Succeeded { reply } => Some(reply.clone()),
-            TaskRunEnd::Failed { .. } | TaskRunEnd::Cancelled => None,
-        };
-        let terminal = match &end {
-            TaskRunEnd::Succeeded { .. } => None,
-            TaskRunEnd::Failed { reason } => Some(Event::Error {
-                id,
-                message: reason.clone(),
-            }),
-            TaskRunEnd::Cancelled => Some(Event::Done { id }),
+        let (terminal, reply) = match &end {
+            TaskRunEnd::Succeeded { reply } => {
+                (None, turn.task.spec.announce.then(|| reply.clone()))
+            }
+            TaskRunEnd::Failed { reason } => (
+                Some(Event::Error {
+                    id,
+                    message: reason.clone(),
+                }),
+                None,
+            ),
+            TaskRunEnd::Cancelled => (Some(Event::Done { id }), None),
         };
         self.record_run_end(turn, end).await;
         if let Some(terminal) = terminal {

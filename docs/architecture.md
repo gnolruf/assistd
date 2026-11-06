@@ -488,13 +488,13 @@ and pauses it through `Request::TaskQueue`; Enter on a run needing input opens
 its prompt in the chat's confirmation dialog, answered with `TaskConfirm`. The
 Runs tab lists the selected task's runs, and Enter switches to a run's session
 as `/resume` does. Outside the panel, the status line counts runs needing input
-(highlighted; Ctrl+T opens the panel) and names the runs running. The tray's tooltip lists
-running runs with their elapsed time, runs needing input and the queued count; its
-menu pauses and resumes the queue, and it notifies on every run newly needing input,
-whether or not the chat has focus. A task with `announce` set broadcasts a successful
-run's final reply as `Event::TaskReply`, which the tray shows as a notification while the
-chat is unfocused, then speaks it once no user turn is in flight and nothing is playing;
-a chat turn starting meanwhile cuts it off, and other runs are never spoken.
+(Ctrl+T opens the panel) and names the running ones. The tray's tooltip lists
+running runs with elapsed time, runs needing input and the queued count; its menu
+pauses and resumes the queue, and it notifies on every run newly needing input,
+focused or not. A task with `announce` set broadcasts a successful run's final
+reply as `Event::TaskReply`, which the tray notifies while the chat is unfocused;
+the daemon speaks it once no user turn is in flight and nothing is playing, and a
+chat turn starting meanwhile cuts it off.
 
 ### Tools (`assistd-tools`)
 

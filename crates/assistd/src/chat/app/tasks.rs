@@ -25,7 +25,6 @@ impl App {
             .filter(|_| self.confirmation.is_none())
     }
 
-    /// The task queue as last broadcast; `None` until the bus delivers it.
     pub(in crate::chat) fn task_queue(&self) -> Option<&TaskQueueSnapshot> {
         self.task_queue.as_ref()
     }

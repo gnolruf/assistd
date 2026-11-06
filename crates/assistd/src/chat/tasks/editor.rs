@@ -1,5 +1,5 @@
-//! The task editor: a task's name, prompt, permission mode, allowed hosts, whether it
-//! announces its replies, triggers and enabled flag, saved through the daemon, which checks each trigger as it is written.
+//! The task editor: a task's name, prompt, permission mode, allowed hosts, announce flag,
+//! triggers and enabled flag, saved through the daemon, which checks each trigger as written.
 
 use assistd_ipc::{
     HostName, ModeRecommendation, PermissionMode, Plan, Request, TaskId, TaskName, TaskPrompt,
