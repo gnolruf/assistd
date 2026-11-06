@@ -83,6 +83,20 @@ pub(in crate::state) fn next_fire<Tz: TimeZone>(
         .map(|at| at.with_timezone(&Utc))
 }
 
+/// The first `count` times `trigger` fires after `after`, soonest first.
+pub(in crate::state) fn upcoming_fires<Tz: TimeZone>(
+    trigger: &TaskTrigger,
+    after: &DateTime<Tz>,
+    count: usize,
+) -> Vec<DateTime<Utc>> {
+    std::iter::successors(occurrence(trigger, after, false), |previous| {
+        occurrence(trigger, previous, false)
+    })
+    .take(count)
+    .map(|at| at.with_timezone(&Utc))
+    .collect()
+}
+
 /// The trigger that fires now that `due`, the recorded next fire time, has passed at
 /// `now`: one whose fire time is no more than [`ON_TIME_GRACE`] old, else one that
 /// missed a fire time since `due` and runs missed fires once. `None` skips them all.

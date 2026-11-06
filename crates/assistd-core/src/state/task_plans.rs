@@ -1,8 +1,6 @@
-//! Handlers for `TaskPlan` and `TaskPlanApprove`: a task's prompt planned in a conversation of
-//! its own and revised there on feedback, and an approved plan saved on the task with its
-//! accepted actions as the task's grants.
+//! The handler for `TaskRefine`: a task prompt explored in a conversation of its own,
+//! rewritten as a brief for an unattended run, and revised there on feedback.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,113 +10,104 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use assistd_ipc::{Event, Plan, PlanId, TaskGrant, TaskId, TaskPrompt};
+use assistd_ipc::{Event, HostName, PermissionMode, TaskPrompt};
 use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, LlmHealthProbe, SlotAssignment};
-use assistd_memory::TaskRecord;
 
-use super::task_handlers::send_tasks;
 use super::task_runs::task_system_prompt;
 use super::{AppState, DispatchError, send_error};
-use crate::planner::{PlanAsk, PlanError, Planner};
+use crate::planner::{PlanAsk, PlanError, Planner, Refinement, WorkPermissions};
 use crate::presence::PresenceLlmHealthProbe;
 
 const EVENT_BUFFER: usize = 32;
 
-/// Why a task could not be planned, or its plan approved.
+/// Why a task prompt could not be refined.
 #[derive(Debug, Error)]
 pub enum TaskPlanError {
-    #[error("task {0} has no plan to revise; plan it without feedback first")]
-    NoPlanToRevise(TaskId),
-    #[error("plan {plan} is not the latest plan made for task {task}")]
-    NotLatest { task: TaskId, plan: PlanId },
-    #[error("an accepted grant is not one of the plan's actions: {0:?}")]
-    NotInPlan(TaskGrant),
-    #[error("task {0}'s prompt changed after it was planned; plan it again")]
-    PromptChanged(TaskId),
+    #[error("this prompt has no rewrite to revise; refine it without feedback first")]
+    NothingToRevise,
 }
 
-/// The planning conversation of each task planned since the daemon started.
+/// What a `TaskRefine` asks for: the prompt, the permissions its runs would have, and any
+/// feedback on the last rewrite.
+pub(super) struct RefineAsk {
+    pub prompt: TaskPrompt,
+    pub mode: PermissionMode,
+    pub allowed_hosts: Vec<HostName>,
+    pub feedback: Option<String>,
+}
+
+/// The planning conversation of the latest refine since the daemon started.
 #[derive(Debug, Default)]
 pub(in crate::state) struct TaskPlans {
-    sessions: StdMutex<HashMap<TaskId, PlanningSession>>,
+    latest: StdMutex<Option<PlanningSession>>,
 }
 
-/// One task's planning conversation, the prompt it planned, and the last plan it made.
+/// A planning conversation, the prompt it explored, and its last rewrite of that prompt.
 #[derive(Debug, Clone)]
 struct PlanningSession {
     conversation: Arc<dyn LlmBackend>,
     prompt: TaskPrompt,
-    latest: Option<Plan>,
+    rewrite: Option<TaskPrompt>,
 }
 
 impl TaskPlans {
-    fn get(&self, task: TaskId) -> Option<PlanningSession> {
-        self.sessions.lock().get(&task).cloned()
+    fn latest(&self) -> Option<PlanningSession> {
+        self.latest.lock().clone()
     }
 
-    fn record(&self, task: TaskId, session: PlanningSession) {
-        self.sessions.lock().insert(task, session);
+    fn record(&self, session: PlanningSession) {
+        *self.latest.lock() = Some(session);
     }
 
-    /// Drop task `task`'s planning conversation; `false` when it had none.
-    fn forget(&self, task: TaskId) -> bool {
-        self.sessions.lock().remove(&task).is_some()
+    /// Drop the latest planning conversation; `false` when there was none.
+    fn forget(&self) -> bool {
+        self.latest.lock().take().is_some()
     }
 }
 
 impl AppState {
-    pub(super) async fn handle_task_plan(
+    pub(super) async fn handle_task_refine(
         self: Arc<Self>,
         id: String,
-        task: TaskId,
-        feedback: Option<String>,
+        ask: RefineAsk,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let cancel = self.runtime.turn_cancellation();
-        match self.plan_task(&id, task, feedback, &tx, &cancel).await {
-            Ok(plan) => {
-                let _ = tx
-                    .send(Event::Plan {
-                        id: id.clone(),
-                        plan,
-                    })
-                    .await;
+        match self.refine_prompt(&id, ask, &tx, &cancel).await {
+            Ok(Refinement {
+                prompt,
+                plan,
+                recommended,
+            }) => {
+                let refined = Event::TaskRefined {
+                    id: id.clone(),
+                    prompt,
+                    plan,
+                    recommended,
+                };
+                let _ = tx.send(refined).await;
                 let _ = tx.send(Event::Done { id }).await;
                 Ok(())
             }
             Err(e) => {
-                send_error(&tx, id, format!("task plan failed: {e}")).await;
+                send_error(&tx, id, format!("task refine failed: {e}")).await;
                 Err(e)
             }
         }
     }
 
-    pub(super) async fn handle_task_plan_approve(
-        self: Arc<Self>,
-        id: String,
-        task: TaskId,
-        plan: PlanId,
-        accepted: Vec<TaskGrant>,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<(), DispatchError> {
-        let record = self
-            .approve_task_plan(task, plan, accepted)
-            .await
-            .map(|record| vec![record]);
-        send_tasks(id, "task plan approve", record, &tx).await
-    }
-
-    /// Plan or revise task `task` on the main lane, as a user turn takes it, streaming the
-    /// planning turn to `tx` as `TaskPlan` events.
-    async fn plan_task(
+    /// Refine the asked prompt, or revise its last rewrite, on the main lane, as a user
+    /// turn takes it, streaming the planning turn to `tx` as `TaskPlan` events.
+    async fn refine_prompt(
         &self,
         id: &str,
-        task: TaskId,
-        feedback: Option<String>,
+        ask: RefineAsk,
         tx: &mpsc::Sender<Event>,
         cancel: &CancellationToken,
-    ) -> Result<Plan, DispatchError> {
-        let record = self.memory.tasks.get(task).await?;
+    ) -> Result<Refinement, DispatchError> {
+        if ask.mode == PermissionMode::Auto && !self.config.tools.allow_auto_mode {
+            return Err(DispatchError::AutoModeOff);
+        }
         let lane = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(PlanError::Cancelled.into()),
@@ -127,94 +116,72 @@ impl AppState {
         let Some(_awake) = self.wake_for_task_run(id, tx, cancel).await? else {
             return Err(PlanError::Cancelled.into());
         };
-        let (session, ask) = self.planning_session(&record, feedback).await?;
+        let (session, plan_ask) = self.planning_session(ask.prompt, ask.feedback).await?;
+        let permissions = WorkPermissions {
+            mode: ask.mode,
+            allowed_hosts: ask.allowed_hosts,
+        };
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
         let planner = self.planner();
-        let planning = planner.plan(
+        let planning = planner.refine(
             Arc::clone(&session.conversation),
-            ask,
+            plan_ask,
+            permissions,
             id.to_string(),
             llm_tx,
             cancel.clone(),
         );
-        let (plan, ()) = tokio::join!(planning, forward_planning_events(id, task, llm_rx, tx));
+        let (refinement, ()) = tokio::join!(planning, forward_planning_events(id, llm_rx, tx));
         drop(lane);
-        let plan = plan?;
-        info!(target: "assistd::tasks", %task, plan = %plan.id, "task planned");
-        let latest = Some(plan.clone());
-        self.runtime
-            .task_plans
-            .record(task, PlanningSession { latest, ..session });
-        Ok(plan)
+        let refinement = refinement?;
+        info!(target: "assistd::tasks", plan = %refinement.plan.id, "task prompt refined");
+        self.runtime.task_plans.record(PlanningSession {
+            rewrite: Some(refinement.prompt.clone()),
+            ..session
+        });
+        Ok(refinement)
     }
 
-    /// The conversation to plan `record` in and what to ask it: with `feedback`, the one
-    /// that made the task's last plan for its current prompt; without, a new one.
+    /// The conversation to refine `prompt` in and what to ask it: with `feedback`, the one
+    /// that last rewrote `prompt`; without, a new one in place of the last.
     async fn planning_session(
         &self,
-        record: &TaskRecord,
+        prompt: TaskPrompt,
         feedback: Option<String>,
     ) -> Result<(PlanningSession, PlanAsk), DispatchError> {
-        let task = record.id;
         if let Some(feedback) = feedback {
-            let session = self
+            let (session, shown) = self
                 .runtime
                 .task_plans
-                .get(task)
-                .filter(|session| session.prompt == record.spec.prompt && session.latest.is_some())
-                .ok_or(TaskPlanError::NoPlanToRevise(task))?;
-            return Ok((session, PlanAsk::Revise(feedback)));
+                .latest()
+                .filter(|session| session.prompt == prompt)
+                .and_then(|session| {
+                    let shown = session.rewrite.as_ref()?.as_str().to_string();
+                    Some((session, shown))
+                })
+                .ok_or(TaskPlanError::NothingToRevise)?;
+            return Ok((session, PlanAsk::Revise { shown, feedback }));
         }
-        self.end_planning_conversation(task).await;
+        self.end_planning_conversation().await;
         let conversation = self.subsystems.llm.isolated_conversation(
             task_system_prompt(&self.config.chat.system_prompt),
-            SlotAssignment::Shared(ConversationKey::TaskPlan(task)),
+            SlotAssignment::Shared(ConversationKey::TaskRefine),
         )?;
+        let ask = PlanAsk::Work(prompt.as_str().to_string());
         let session = PlanningSession {
             conversation,
-            prompt: record.spec.prompt.clone(),
-            latest: None,
+            prompt,
+            rewrite: None,
         };
-        let ask = PlanAsk::Work(record.spec.prompt.as_str().to_string());
         Ok((session, ask))
     }
 
-    /// Save plan `plan` on task `task` with `accepted` as its grants, then drop the task's
-    /// planning conversation.
-    async fn approve_task_plan(
-        &self,
-        task: TaskId,
-        plan: PlanId,
-        accepted: Vec<TaskGrant>,
-    ) -> Result<TaskRecord, DispatchError> {
-        let not_latest = || TaskPlanError::NotLatest {
-            task,
-            plan: plan.clone(),
-        };
-        let session = self.runtime.task_plans.get(task).ok_or_else(not_latest)?;
-        let latest = session
-            .latest
-            .filter(|latest| latest.id == plan)
-            .ok_or_else(not_latest)?;
-        let approved = approved_plan(latest, &accepted)?;
-        let grants = distinct(accepted);
-        let record = self
-            .memory
-            .tasks
-            .approve_plan(task, session.prompt, approved, grants)
-            .await?
-            .ok_or(TaskPlanError::PromptChanged(task))?;
-        info!(target: "assistd::tasks", %task, %plan, "task plan approved");
-        self.end_planning_conversation(task).await;
-        Ok(record)
-    }
-
-    /// Forget task `task`'s planning conversation and its saved slot state.
-    async fn end_planning_conversation(&self, task: TaskId) {
-        if self.runtime.task_plans.forget(task)
+    /// Forget the latest planning conversation and its saved slot state.
+    async fn end_planning_conversation(&self) {
+        if self.runtime.task_plans.forget()
             && let Some(stash) = &self.subsystems.slot_stash
         {
-            stash.end(ConversationKey::TaskPlan(task)).await;
+            stash.end(ConversationKey::TaskRefine).await;
         }
     }
 
@@ -227,47 +194,14 @@ impl AppState {
             Arc::clone(&self.subsystems.tools),
             Some(health),
             Duration::from_secs(self.config.timeouts.tool_call_secs),
+            self.config.tools.allow_auto_mode,
         )
     }
 }
 
-/// `plan` holding only the actions in `accepted`, each of which must be one of its actions.
-fn approved_plan(plan: Plan, accepted: &[TaskGrant]) -> Result<Plan, TaskPlanError> {
-    let offered = |grant: &TaskGrant| {
-        plan.steps
-            .iter()
-            .flat_map(|step| &step.actions)
-            .any(|action| action.grant == *grant)
-    };
-    if let Some(stray) = accepted.iter().find(|grant| !offered(grant)) {
-        return Err(TaskPlanError::NotInPlan(stray.clone()));
-    }
-    let steps = plan
-        .steps
-        .into_iter()
-        .map(|mut step| {
-            step.actions
-                .retain(|action| accepted.contains(&action.grant));
-            step
-        })
-        .collect();
-    Ok(Plan { steps, ..plan })
-}
-
-fn distinct(grants: Vec<TaskGrant>) -> Vec<TaskGrant> {
-    let mut kept = Vec::with_capacity(grants.len());
-    for grant in grants {
-        if !kept.contains(&grant) {
-            kept.push(grant);
-        }
-    }
-    kept
-}
-
-/// Send the planning turn's events to `tx`, each wrapped as task `task`'s.
+/// Send the planning turn's events to `tx`, each wrapped as `TaskPlan`.
 async fn forward_planning_events(
     id: &str,
-    task: TaskId,
     mut llm_rx: mpsc::Receiver<LlmEvent>,
     tx: &mpsc::Sender<Event>,
 ) {
@@ -275,7 +209,6 @@ async fn forward_planning_events(
         if let Some(event) = planning_wire_event(id, event) {
             let wrapped = Event::TaskPlan {
                 id: id.to_string(),
-                task,
                 event: Box::new(event),
             };
             let _ = tx.send(wrapped).await;

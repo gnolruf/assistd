@@ -43,6 +43,7 @@ mod input;
 mod markdown;
 mod output;
 pub(crate) mod settings;
+mod tasks;
 mod theme;
 mod ui;
 

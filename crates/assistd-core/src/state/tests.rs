@@ -10,8 +10,7 @@ use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, ImageAttachment, ImageMime, ListenPhase,
     PresenceState, PresenceTarget, QueueItem, StartupComponent, StatusKind, StatusSeverity,
-    SubscribeFilter, TaskGrant, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec,
-    VoiceCaptureState,
+    SubscribeFilter, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
@@ -23,9 +22,9 @@ use assistd_memory::{
     SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
-    Approval, CommandRegistry, ConfirmationGate, ConfirmationRequest, GrantNeed, Grantable,
-    IpcConfirmationGate, OutputCap, PresentSpec, Risk, RunTool, ToolError, ToolOutput,
-    ToolsDisabled, Unattended, commands::EchoCommand,
+    Approval, CommandRegistry, ConfirmationGate, ConfirmationRequest, IpcConfirmationGate,
+    OutputCap, PresentSpec, Risk, RunTool, ToolError, ToolOutput, ToolsDisabled, Unattended,
+    commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
@@ -2055,8 +2054,8 @@ async fn task_state_with(
         prompt: "summarize my inbox".to_string().try_into().unwrap(),
         triggers: Vec::new(),
         enabled: true,
-        grants: Vec::new(),
-        plan: None,
+        mode: assistd_ipc::PermissionMode::Manual,
+        allowed_hosts: Vec::new(),
     };
     let task = tasks.save(None, spec).await.unwrap().id;
     let subsystems = Subsystems::new(
@@ -2254,7 +2253,8 @@ async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
     settle_task_runs(&reloaded).await;
 }
 
-/// Asks to fetch from `example.com`, which a web-host grant covers.
+/// Asks to fetch from the `host` in its arguments, as `web` asks about a host not yet
+/// approved.
 #[derive(Debug)]
 struct FetchTool;
 
@@ -2269,15 +2269,15 @@ impl assistd_tools::Tool for FetchTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+        let host = args["host"].as_str().unwrap_or_default().to_string();
         let request = ConfirmationRequest {
             tool: "web".into(),
-            script: "web fetch https://example.com".into(),
-            matched_pattern: "fetches from example.com, which is not yet approved".into(),
-            always_allow: vec!["example.com".into()],
+            script: format!("web fetch https://{host}"),
+            matched_pattern: format!("fetches from {host}, which is not yet approved"),
+            always_allow: vec![host.clone()],
             risk: Risk::Elevated,
-            unattended: Unattended::Never,
-            grantable: Grantable::needs(vec![GrantNeed::WebHost("example.com".into())]),
+            unattended: Unattended::WebHost(host),
             source: assistd_tools::ConfirmSource::Main,
         };
         let approved = IpcConfirmationGate.confirm(request).await != Approval::Deny;
@@ -2289,39 +2289,45 @@ impl assistd_tools::Tool for FetchTool {
 }
 
 #[tokio::test]
-async fn an_ungranted_prompt_pauses_the_run_until_answered_and_add_grant_saves_it() {
-    let fetch = || {
+async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others() {
+    let fetch = |host: &str| {
         StepOutcome::ToolCalls(vec![ToolCall {
             id: "c".into(),
             name: "fetch".into(),
-            arguments: serde_json::json!({}),
+            arguments: serde_json::json!({ "host": host }),
         }])
     };
-    let task_conversation = ToolCallBackend::new("", "done.", vec![fetch(), fetch()]);
+    let steps = vec![fetch("allowed.example"), fetch("other.example")];
+    let task_conversation = ToolCallBackend::new("", "done.", steps);
     let mut tools = ToolRegistry::new();
     tools.register(FetchTool);
     let mut config = Config::default();
     config.timeouts.tool_call_secs = 1;
     let backend = MainConversation::new(task_conversation);
     let (state, conv, _branch, task) = task_state_with(config, backend, Arc::new(tools)).await;
+    let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
+    spec.allowed_hosts = vec!["allowed.example".to_string().try_into().unwrap()];
+    state.memory.tasks.save(Some(task), spec).await.unwrap();
     let mut bus = state.runtime.subscribe_events(SubscribeFilter {
         kinds: vec![EventKind::TaskRun],
     });
 
     let run = queue_task_run(&state, task).await;
-    let (confirm_id, grants) = loop {
-        if let Event::TaskRun { event, .. } = bus.recv().await.unwrap()
-            && let Event::ConfirmRequest {
-                confirm_id, grants, ..
-            } = *event
-        {
-            break (confirm_id, grants);
+    let mut results = Vec::new();
+    let (confirm_id, script) = loop {
+        let Event::TaskRun { event, .. } = bus.recv().await.unwrap() else {
+            continue;
+        };
+        match *event {
+            Event::ConfirmRequest {
+                confirm_id, script, ..
+            } => break (confirm_id, script),
+            Event::ToolResult { result, .. } => results.push(result),
+            _ => {}
         }
     };
-    let granted = vec![TaskGrant::WebHost {
-        host: "example.com".into(),
-    }];
-    assert_eq!(grants, granted);
+    assert_eq!(script, "web fetch https://other.example");
+    assert_eq!(results.len(), 1, "the allowed host was fetched unasked");
     assert_eq!(queued_runs(&state), [(run, TaskRunState::NeedsInput)]);
     assert!(
         state.runtime.agent_turn_lock.try_lock().is_ok(),
@@ -2336,36 +2342,28 @@ async fn an_ungranted_prompt_pauses_the_run_until_answered_and_add_grant_saves_i
             run,
             confirm_id,
             allow: true,
-            add_grant: true,
         },
     )
     .await;
     res.unwrap();
     assert_eq!(events, [done("a")]);
-    let mut prompts = 1;
-    let mut results = Vec::new();
     while results.len() < 2 {
         let Event::TaskRun { event, .. } = bus.recv().await.unwrap() else {
             continue;
         };
         match *event {
-            Event::ConfirmRequest { .. } => prompts += 1,
+            Event::ConfirmRequest { script, .. } => panic!("asked again: {script}"),
             Event::ToolResult { result, .. } => results.push(result),
             _ => {}
         }
     }
     settle_task_runs(&state).await;
 
-    assert_eq!(prompts, 1, "the added grant covers the run's second fetch");
     assert!(
         results
             .iter()
             .all(|result| result.to_string().contains("fetched")),
         "the parked fetch outlived the tool deadline: {results:?}"
-    );
-    assert_eq!(
-        state.memory.tasks.get(task).await.unwrap().spec.grants,
-        granted
     );
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
 }

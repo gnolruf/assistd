@@ -30,13 +30,13 @@ pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegis
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RememberTool, ReminisceTool};
 pub use policy::{
-    APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, Allowlist,
-    AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT,
-    ConfirmRouter, ConfirmationGate, ConfirmationRequest, FileScope, GrantCheck, GrantNeed,
-    Grantable, Grants, IpcConfirmationGate, JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass,
-    JudgedCommand, NoPendingConfirm, PromptParking, Protected, Risk, SafetyJudge, SandboxError,
-    SandboxInfo, SandboxRequest, SearchPath, SharedDirs, ToolSandbox, ToolsDisabled, Unattended,
-    Verdict, inherit_confirm_router, probe_sandbox,
+    APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ActionCheck,
+    Allowlist, AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT,
+    ConfirmRouter, ConfirmationGate, ConfirmationRequest, FileScope, IpcConfirmationGate,
+    JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm,
+    PromptParking, Protected, Risk, SafetyJudge, SandboxError, SandboxInfo, SandboxRequest,
+    SearchPath, SharedDirs, StandingApprovals, ToolSandbox, ToolsDisabled, Unattended, Verdict,
+    inherit_confirm_router, probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};

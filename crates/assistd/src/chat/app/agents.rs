@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::App;
 use crate::chat::output::{OutputPane, RelayStepTrace};
+use crate::chat::tasks::TasksPanel;
 
 /// The `/agents` panel, drawn in place of the transcript.
 #[derive(Debug, Clone, Copy)]
@@ -46,18 +47,22 @@ impl App {
         self.output.agents().get(panel.selected).copied()
     }
 
-    /// Whether a thinking block or compaction line on screen is animating.
+    /// Whether a thinking block, compaction line or refining status on screen is animating.
     pub(in crate::chat) fn glyph_live(&self) -> bool {
         self.output.glyph_live()
             || self
                 .viewed_agent()
                 .is_some_and(|agent| agent.transcript().glyph_live())
+            || self.tasks_panel.as_ref().is_some_and(TasksPanel::refining)
     }
 
     pub(in crate::chat) fn advance_live_glyphs(&mut self) {
         self.output.advance_live_glyphs();
         if let Some(agent) = self.viewed_agent_mut() {
             agent.transcript_mut().advance_live_glyphs();
+        }
+        if let Some(panel) = self.tasks_panel.as_mut() {
+            panel.advance_refine_dots();
         }
     }
 

@@ -756,7 +756,6 @@ impl assistd_tools::Tool for GatedTool {
                 always_allow: Vec::new(),
                 risk: assistd_tools::Risk::Elevated,
                 unattended: self.0.clone(),
-                grantable: assistd_tools::Grantable::Never,
                 source: assistd_tools::ConfirmSource::Main,
             },
         )

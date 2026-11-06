@@ -10,18 +10,19 @@ use assistd_ipc::ConfirmSource;
 use crate::command::{CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 
+mod actions;
 mod allowlist;
 mod approvals;
 mod confirm;
 mod egress;
 mod file_scope;
-mod grants;
 mod judge;
 mod path_class;
 mod review;
 mod sandbox;
 mod shell;
 
+pub use actions::{ActionCheck, StandingApprovals};
 pub use allowlist::{APPROVALS_FILE, Allowlist, AllowlistError, SearchPath};
 pub use approvals::{
     APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ApprovalGate, Approvals,
@@ -35,7 +36,6 @@ pub use confirm::{
 };
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
-pub use grants::{GrantCheck, GrantNeed, Grantable, Grants};
 pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub(crate) use path_class::split_at_existing;
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
@@ -81,7 +81,7 @@ impl Default for BashPolicyCfg {
 #[derive(Debug)]
 pub(crate) enum Review {
     Clear,
-    Ask(Confirmation, Unattended, Grantable),
+    Ask(Confirmation, Unattended),
     /// It would destroy a catastrophic path; holds what and where.
     Refuse(String),
 }
@@ -121,9 +121,9 @@ impl SubprocessPolicy {
         match review {
             Review::Clear => Ok(()),
             Review::Refuse(why) => Err(refused(tool, op, &why)),
-            Review::Ask(confirmation, unattended, grantable) => {
+            Review::Ask(confirmation, unattended) => {
                 if self
-                    .confirmed(tool, script, &confirmation, unattended, grantable)
+                    .confirmed(tool, script, &confirmation, unattended)
                     .await
                 {
                     Ok(())
@@ -142,7 +142,6 @@ impl SubprocessPolicy {
         script: &str,
         confirmation: &Confirmation,
         unattended: Unattended,
-        grantable: Grantable,
     ) -> bool {
         let offered = confirmation.always_allow();
         let request = ConfirmationRequest {
@@ -152,7 +151,6 @@ impl SubprocessPolicy {
             always_allow: offered.iter().map(ToString::to_string).collect(),
             risk: confirmation.risk(),
             unattended,
-            grantable,
             source: ConfirmSource::Main,
         };
         approvals::confirm_remembering(
@@ -176,43 +174,19 @@ pub(crate) fn guarded_review(
     let always_allow = analysis.always_allow.clone();
     match guards.verdict(analysis) {
         PathVerdict::Refused(why) => Review::Refuse(why),
-        PathVerdict::Sensitive(why) => Review::Ask(
-            Confirmation::Sensitive(why),
-            Unattended::Never,
-            Grantable::Never,
-        ),
+        PathVerdict::Sensitive(why) => Review::Ask(Confirmation::Sensitive(why), Unattended::Never),
         PathVerdict::Ordinary(Class::ReadOnly) => Review::Clear,
         PathVerdict::Ordinary(Class::Edit { .. }) => {
-            let grantable = change_grants(guards, &effects, Vec::new());
-            edit_review(guards, &effects, edit_scope, excluded, grantable)
+            edit_review(guards, &effects, edit_scope, excluded)
         }
-        PathVerdict::Ordinary(Class::Unvetted { why }) => {
-            let grantable = if always_allow.is_empty() {
-                Grantable::Never
-            } else {
-                let programs = always_allow.iter().cloned().map(GrantNeed::Program);
-                change_grants(guards, &effects, programs.collect())
-            };
-            Review::Ask(
-                Confirmation::Unvetted {
-                    why: why.clone(),
-                    always_allow,
-                },
-                judged(JudgedClass::Unvetted, guards, why),
-                grantable,
-            )
-        }
+        PathVerdict::Ordinary(Class::Unvetted { why }) => Review::Ask(
+            Confirmation::Unvetted {
+                why: why.clone(),
+                always_allow,
+            },
+            judged(JudgedClass::Unvetted, guards, why),
+        ),
     }
-}
-
-/// `needs` plus a write grant for every path `effects` change; never grantable when one of
-/// those paths cannot be resolved. Blocks on the filesystem.
-fn change_grants(guards: &PathGuards, effects: &[Effect], mut needs: Vec<GrantNeed>) -> Grantable {
-    let Some(targets) = guards.changed_targets(effects) else {
-        return Grantable::Never;
-    };
-    needs.extend(targets.into_iter().map(GrantNeed::Write));
-    Grantable::needs(needs)
 }
 
 /// An ask for an edit with `effects`: unattended in accept-edits mode when every change lands
@@ -222,7 +196,6 @@ fn edit_review(
     effects: &[Effect],
     edit_scope: &[PathBuf],
     excluded: &[PathBuf],
-    grantable: Grantable,
 ) -> Review {
     let confirmation = Confirmation::Edit(
         effects
@@ -239,7 +212,7 @@ fn edit_review(
             format!("it changes `{path}`, outside the edit scope"),
         ),
     };
-    Review::Ask(confirmation, unattended, grantable)
+    Review::Ask(confirmation, unattended)
 }
 
 fn judged(class: JudgedClass, guards: &PathGuards, why: String) -> Unattended {

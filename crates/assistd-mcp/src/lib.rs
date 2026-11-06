@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use assistd_tools::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::{
-    ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, GrantNeed, Grantable, ImageMime,
-    JudgeContext, JudgedClass, Risk, Tool, ToolError, ToolOutput, Unattended, VisionGate,
+    ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext,
+    JudgedClass, Risk, Tool, ToolError, ToolOutput, Unattended, VisionGate,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -68,7 +68,6 @@ impl McpToolAdapter {
                          JSON arguments"
                     ),
                 }),
-                grantable: Grantable::needs(vec![GrantNeed::McpTool(name.to_string())]),
                 source: ConfirmSource::Main,
             })
             .await

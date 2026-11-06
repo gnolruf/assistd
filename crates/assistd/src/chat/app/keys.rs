@@ -19,6 +19,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/new", ""),
     ("/resume", ""),
     ("/settings", ""),
+    ("/tasks", ""),
     ("/undo", ""),
     ("/wakeword", ""),
 ];
@@ -45,6 +46,8 @@ impl App {
             self.on_settings_key(ev);
         } else if self.shown_agent_panel().is_some() {
             self.on_agent_panel_key(ev);
+        } else if self.shown_tasks_panel().is_some() {
+            self.on_tasks_key(ev);
         } else if ev.code == KeyCode::BackTab {
             self.toggle_permission_mode();
         } else if self.confirmation.is_some() {

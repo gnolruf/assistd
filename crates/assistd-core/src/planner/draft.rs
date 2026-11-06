@@ -1,14 +1,19 @@
-//! The plan as the model writes it, held to a schema by grammar, and the [`Plan`] it becomes
-//! once its actions are read as grants and checked.
+//! The plan, or the rewritten task prompt with its plan, as the model writes it, held to a
+//! schema by grammar, and the [`Plan`] it becomes once its actions are read and checked.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use assistd_ipc::{AnticipatedAction, Plan, PlanId, PlanStep, TaskGrant};
-use assistd_tools::{GrantCheck, ToolRegistry};
+use assistd_ipc::task::MAX_TASK_PROMPT_BYTES;
+use assistd_ipc::{AnticipatedAction, Plan, PlanId, PlanStep, PlannedAction};
+use assistd_tools::{ActionCheck, ToolRegistry};
 use assistd_utils::path::expand_tilde_from_env;
 
+use super::WorkPermissions;
+
 const SUMMARY_MAX_CHARS: usize = 800;
+/// A character is at most four bytes, so a prompt of this many always fits a task prompt.
+const PROMPT_MAX_CHARS: usize = MAX_TASK_PROMPT_BYTES / 4;
 const STEPS_MAX_ITEMS: usize = 16;
 const DESCRIPTION_MAX_CHARS: usize = 400;
 const ACTIONS_MAX_ITEMS: usize = 8;
@@ -19,6 +24,15 @@ const SUBCOMMAND_MAX_CHARS: usize = 64;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PlanDraft {
+    summary: String,
+    steps: Vec<DraftStep>,
+}
+
+/// The model's rewritten task prompt and the plan of it, before its actions are checked.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RefinementDraft {
+    prompt: String,
     summary: String,
     steps: Vec<DraftStep>,
 }
@@ -90,14 +104,19 @@ impl PlanDraft {
     }
 
     /// The plan under a fresh id, each step's repeated actions merged and every action checked
-    /// by `checks` against `tools`. Blocks on the filesystem.
-    pub(super) fn into_plan(self, checks: &GrantCheck, tools: &ToolRegistry) -> Plan {
+    /// by `checks` against `tools` and the work's `permissions`. Blocks on the filesystem.
+    pub(super) fn into_plan(
+        self,
+        checks: &ActionCheck,
+        tools: &ToolRegistry,
+        permissions: &WorkPermissions,
+    ) -> Plan {
         let steps = self
             .steps
             .into_iter()
             .map(|step| PlanStep {
                 description: step.description.trim().to_string(),
-                actions: anticipated(step.actions, checks, tools),
+                actions: anticipated(step.actions, checks, tools, permissions),
             })
             .collect();
         Plan {
@@ -108,48 +127,76 @@ impl PlanDraft {
     }
 }
 
+impl RefinementDraft {
+    /// The JSON schema the refinement request is held to by grammar: the plan's, with the
+    /// prompt ahead of it.
+    pub(super) fn schema() -> Map<String, Value> {
+        let mut schema = PlanDraft::schema();
+        let prompt = json!({"type": "string", "minLength": 1, "maxLength": PROMPT_MAX_CHARS});
+        let mut properties = Map::from_iter([("prompt".into(), prompt)]);
+        if let Some(Value::Object(plan)) = schema.remove("properties") {
+            properties.extend(plan);
+        }
+        schema.insert("properties".into(), Value::Object(properties));
+        schema.insert("required".into(), json!(["prompt", "summary", "steps"]));
+        schema
+    }
+
+    /// The rewritten prompt, trimmed, and the plan draft.
+    pub(super) fn into_parts(self) -> (String, PlanDraft) {
+        let plan = PlanDraft {
+            summary: self.summary,
+            steps: self.steps,
+        };
+        (self.prompt.trim().to_string(), plan)
+    }
+}
+
 impl DraftAction {
-    fn into_grant(self) -> TaskGrant {
+    fn into_action(self) -> PlannedAction {
         let target = self.target.trim().to_string();
         match self.kind {
-            DraftKind::Program => TaskGrant::Program {
+            DraftKind::Program => PlannedAction::Program {
                 program: target,
                 subcommand: self
                     .subcommand
                     .map(|subcommand| subcommand.trim().to_string())
                     .filter(|subcommand| !subcommand.is_empty()),
             },
-            DraftKind::WebHost => TaskGrant::WebHost {
+            DraftKind::WebHost => PlannedAction::WebHost {
                 host: target.to_ascii_lowercase(),
             },
-            DraftKind::McpTool => TaskGrant::McpTool { name: target },
-            DraftKind::App => TaskGrant::App {
+            DraftKind::McpTool => PlannedAction::McpTool { name: target },
+            DraftKind::App => PlannedAction::App {
                 desktop_entry: target,
             },
-            DraftKind::Write => TaskGrant::Write {
+            DraftKind::Write => PlannedAction::Write {
                 under: expand_tilde_from_env(&target),
             },
         }
     }
 }
 
-/// `actions` as grants, each once, with what `checks` finds wrong with it.
+/// `actions`, each once, with what `checks` finds wrong with it and whether the work's
+/// `permissions` let it run unasked.
 fn anticipated(
     actions: Vec<DraftAction>,
-    checks: &GrantCheck,
+    checks: &ActionCheck,
     tools: &ToolRegistry,
+    permissions: &WorkPermissions,
 ) -> Vec<AnticipatedAction> {
-    let mut grants: Vec<TaskGrant> = Vec::new();
-    for grant in actions.into_iter().map(DraftAction::into_grant) {
-        if !grants.contains(&grant) {
-            grants.push(grant);
+    let mut distinct: Vec<PlannedAction> = Vec::new();
+    for action in actions.into_iter().map(DraftAction::into_action) {
+        if !distinct.contains(&action) {
+            distinct.push(action);
         }
     }
-    grants
+    distinct
         .into_iter()
-        .map(|grant| AnticipatedAction {
-            problem: checks.problem(&grant, tools),
-            grant,
+        .map(|action| AnticipatedAction {
+            problem: checks.problem(&action, tools),
+            outlook: checks.outlook(&action, permissions.mode, &permissions.allowed_hosts),
+            action,
         })
         .collect()
 }

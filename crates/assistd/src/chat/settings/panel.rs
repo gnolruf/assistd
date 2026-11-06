@@ -703,12 +703,8 @@ impl SettingsPanel {
     /// Records the columns the open text box wraps at, so ↑/↓ move by
     /// the rows on screen.
     pub(crate) fn set_text_box_width(&mut self, width: u16) {
-        if let PanelMode::Edit(TextEditor {
-            shape: EditorShape::Box { wrap_width },
-            ..
-        }) = &mut self.mode
-        {
-            *wrap_width = width;
+        if let PanelMode::Edit(editor) = &mut self.mode {
+            editor.set_wrap_width(width);
         }
     }
 }
@@ -757,6 +753,14 @@ impl TextEditor {
 
     pub(crate) fn is_box(&self) -> bool {
         matches!(self.shape, EditorShape::Box { .. })
+    }
+
+    /// Records the columns a box wraps at, so ↑/↓ move by the rows on screen; a line
+    /// ignores it.
+    pub(crate) fn set_wrap_width(&mut self, width: u16) {
+        if let EditorShape::Box { wrap_width } = &mut self.shape {
+            *wrap_width = width;
+        }
     }
 
     /// Characters before the cursor.

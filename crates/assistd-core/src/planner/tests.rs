@@ -4,14 +4,17 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use assistd_ipc::Event;
+use assistd_ipc::{
+    AnticipatedAction, Event, PermissionMode, Plan, PlanId, PlanStep, PlannedAction,
+};
 use assistd_tools::commands::BashPolicyCfg;
 use assistd_tools::{
-    ApprovalGate, Approvals, CONFIRM_ROUTER, ConfirmRouter, ConfirmationGate, GrantCheck,
-    IpcConfirmationGate, OutputCap, PresentSpec, SandboxInfo, ToolOutput, ToolRegistry,
+    ActionCheck, ApprovalGate, Approvals, CONFIRM_ROUTER, ConfirmRouter, ConfirmationGate,
+    IpcConfirmationGate, OutputCap, PresentSpec, SandboxInfo, SearchPath, ToolOutput, ToolRegistry,
 };
 
 use super::REFUSED_NOTE;
+use super::recommend::recommended_mode;
 use crate::{PlanningCommandDeps, PlanningToolDeps, planning_commands, planning_tools};
 
 fn planning_registry() -> Arc<ToolRegistry> {
@@ -29,7 +32,7 @@ fn planning_registry() -> Arc<ToolRegistry> {
         output_cap: Arc::new(OutputCap::new(PresentSpec::default())),
         scratch_dir: None,
         reminisce: None,
-        checks: GrantCheck::new(sandbox.search_path()),
+        checks: ActionCheck::new(sandbox.search_path(), None),
     })
     .registry
 }
@@ -89,4 +92,42 @@ async fn planning_refuses_everything_the_gate_would_prompt_for() {
     assert!(prompted_lines >= 3, "only {prompted_lines} lines asked");
     assert!(kept.exists());
     assert!(!made.exists());
+}
+
+#[test]
+fn recommends_auto_only_when_offered_and_the_least_permissive_mode_on_ties() {
+    let action = |action| AnticipatedAction {
+        action,
+        problem: None,
+        outlook: Default::default(),
+    };
+    let push = PlannedAction::Program {
+        program: "git".into(),
+        subcommand: Some("push".into()),
+    };
+    let plan = Plan {
+        id: PlanId("p".into()),
+        summary: String::new(),
+        steps: vec![PlanStep {
+            description: String::new(),
+            actions: vec![
+                action(push.clone()),
+                action(PlannedAction::WebHost {
+                    host: "example.org".into(),
+                }),
+            ],
+        }],
+    };
+    let checks = ActionCheck::new(SearchPath { dirs: Vec::new() }, None);
+    let hosts = vec!["example.org".to_string().try_into().unwrap()];
+
+    let offered = recommended_mode(&plan, &checks, &hosts, true);
+    assert_eq!(offered.mode, PermissionMode::Auto);
+    assert_eq!(offered.covers, vec![push.clone()]);
+    assert!(offered.still_asks.is_empty());
+
+    let withheld = recommended_mode(&plan, &checks, &hosts, false);
+    assert_eq!(withheld.mode, PermissionMode::Manual);
+    assert!(withheld.covers.is_empty());
+    assert_eq!(withheld.still_asks, vec![push]);
 }

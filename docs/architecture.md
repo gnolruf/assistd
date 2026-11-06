@@ -349,10 +349,13 @@ change and greets every new subscriber.
 Time triggers are `TaskTrigger::At` (one local datetime) and
 `TaskTrigger::Schedule` (a five-field local-time cron expression parsed by
 `croner`, so DST gaps and repeats behave). `TaskSave` refuses invalid
-expressions and `At` times already past. The `TaskScheduler`, a second service
-on the `TaskRunner`, sleeps until the nearest fire time across enabled tasks,
-waking early on any task change. Each sleep is capped at a minute and
-compared against the wall clock, since tokio's clock stands still through a
+expressions and `At` times already past. `TaskCheckTrigger` runs the same
+checks on one trigger without saving and returns its next three fire times,
+so a client can show them, or the refusal, as the trigger is written.
+`Event::Task` carries how the task's latest finished run ended. The
+`TaskScheduler`, a second service on the `TaskRunner`, sleeps until the
+nearest fire time across enabled tasks, waking early on any task change. Each
+sleep is capped at a minute and compared against the wall clock, since tokio's clock stands still through a
 suspend. Each task's next fire time is kept in `tasks.next_fire_at`. The
 scheduler records it in the same write that queues the fired run, so a restart
 neither double-fires nor loses a fire. A schedule whose fire times passed while
@@ -391,21 +394,20 @@ cancels a run the way `InterruptTurn` cancels a turn. A run still going at
 shutdown is recorded as failed.
 
 A run's prompts are labelled `ConfirmSource::Task` (a relayed sub-agent's
-prompts name the run too) and go through a `ConfirmRouter` built with the task's `Grants`.
-Each `ConfirmationRequest` carries a `Grantable`: the program approvals, web
-host, MCP tool, desktop entry and canonical write targets a grant must cover,
-or `Never` for what always asks (sensitive paths, writes too long to show,
-plaintext fetches, launches with targets). A grant covers no more than the
-matching "always allow" would: the same subcommand, the exact host, a write
-strictly below the granted directory once both are resolved. A covered request
-runs once, logged on `assistd::policy`; grants never reach the allowlist or the
+prompts name the run too) and go through `ConfirmRouter::for_task_run`, set to
+the task's `mode` as a chat connection would be, with the safety judge in Auto
+when `tools.allow_auto_mode` allows it (`TaskSave` refuses Auto otherwise). A
+`web` fetch from a host not yet approved asks as `Unattended::WebHost`, which no
+mode approves but a run does once when the host is one of the task's
+`allowed_hosts`, matched exactly. What the mode and hosts approve runs once,
+logged on `assistd::policy`, and never reaches the allowlist or the
 `approved_*.toml` files. Anything else is parked: the run turns `NeedsInput`,
 gives up its lane and request guard (on lane 0 its slot state stays in the
-stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`
-listing the grants that would cover it. The tool deadline stops while a prompt
-is parked. `Request::TaskConfirm` answers it, with `add_grant` saving those
-grants on the task when its prompt is unchanged, and the run waits first in the
-queue for a lane, moving its conversation to that lane's slot.
+stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`. The
+tool deadline stops while a prompt is parked. `Request::TaskConfirm` answers it
+for that prompt alone, and the run waits first in the queue for a lane, moving
+its conversation to that lane's slot. The task's prompt is the only instruction a
+run gets; no plan is stored on the task.
 
 With one lane, a user message that finds a run on it follows
 `[tasks] interruption`. Under `interrupt` the run's turn sees the conversation
@@ -438,27 +440,45 @@ anyone in any mode, so the planning turn runs only what needs no
 confirmation; each refusal is counted and the tool result gains a note
 telling the model to describe that step instead. A plan-mode preamble is set
 as the transient note on every step, so it renders at the conversation's
-tail and the system prompt, and its cache, are unchanged. When the turn
-answers, `complete_with_schema` holds the reply to a draft of a summary and
-steps, each with actions named by a kind (`program`, `web_host`, `mcp_tool`,
-`app`, `write`) and a target. Each action becomes a `TaskGrant`, and
-`GrantCheck` flags any that would cover nothing: a program missing from the
+tail and the system prompt, and its cache, are unchanged. It asks the turn to
+end with only a short list of what it found, since the plan itself is asked
+for next. When the turn answers, `complete_with_schema` holds the reply to a
+draft of a summary and steps, each with actions named by a kind (`program`,
+`web_host`, `mcp_tool`, `app`, `write`) and a target. Each action becomes a `PlannedAction`, and
+`ActionCheck` flags any that would fail: a program missing from the
 sandbox's `PATH`, a malformed host, an MCP tool no connected server offers,
 an app with no launchable desktop entry, a write directory that is relative
-or not a directory. The result is a `Plan` with a fresh `PlanId`, sent as
-`Event::Plan`.
+or not a directory. It also gives each an `ActionOutlook` under the work's
+`WorkPermissions`: `Unasked` when a standing approval, an allowed host or the
+mode with the edit scope covers it, `JudgeDecides` for programs and MCP tools
+in Auto, else `Asks`. The result is a `Plan` with a fresh `PlanId`.
+`Planner::refine` runs the same turn but asks for a `prompt` beside the plan:
+the work rewritten as a self-contained brief for an unattended run, with the
+plan being that brief's.
 
-`Request::TaskPlan` plans a saved task's prompt in an isolated conversation
-with the task-run system prompt, keyed `TaskPlan` in the `SlotStash`. It takes
-the main lane and request guard as a query does, and `InterruptTurn`
-cancels it; its turn reaches the client wrapped in `Event::TaskPlan`. With
+`Request::TaskRefine` refines a task prompt, saved or not, under the permission
+mode and allowed hosts the request gives, in an isolated conversation with the
+task-run system prompt, keyed `TaskRefine` in the `SlotStash`. Only the latest
+refine's conversation is kept; a new one ends it. It takes the main lane and
+request guard as a query does, and `InterruptTurn` cancels it; its turn reaches
+the client wrapped in `Event::TaskPlan`, and its result as `Event::TaskRefined`
+with the rewritten `TaskPrompt`, its `Plan` and a `ModeRecommendation`: the
+least permissive mode, Auto only when allowed, under which the fewest of the
+plan's actions would ask, with the actions it covers and those that would still
+ask. It saves nothing. With
 `feedback` it continues the same conversation, so a revision keeps what the
-model already found; it is refused once the task's prompt has changed.
-`Request::TaskPlanApprove` names the latest plan and the actions the user
-accepted, each of which must be in it. The plan, holding only those actions,
-and the actions as the task's grants, replacing any it held, are saved in one
-write that is skipped if the prompt changed since the plan was made. The
-planning conversation is then dropped.
+model already found, quoting back the rewrite the client was shown, which the
+grammar-held request left out of the conversation; it is refused unless the
+last refine was of the same prompt.
+
+In the TUI, `/tasks` opens a panel over these requests alone, since tasks
+live in the daemon's store rather than `config.toml`. It lists each task
+with its triggers, next fire, last outcome and whether it is enabled; its
+editor saves the name, prompt, mode (Auto only when the daemon offers it),
+allowed hosts, triggers and enabled flag. Ctrl+R in the prompt box refines its
+text under the editor's mode and hosts without drawing the planning turn; Esc
+cancels it. The rewrite replaces the box's text, unapplied, with the
+recommended mode and a brief reason on a line below.
 
 ### Tools (`assistd-tools`)
 

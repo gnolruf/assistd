@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 use tracing::{debug, warn};
 
-use assistd_ipc::{TaskId, TaskRunId};
+use assistd_ipc::TaskRunId;
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::{local_client_builder, read_capped};
 use assistd_utils::text::human_size;
@@ -68,8 +68,8 @@ impl SlotDir {
 pub enum ConversationKey {
     Main,
     TaskRun(TaskRunId),
-    /// The planning conversation of a saved task.
-    TaskPlan(TaskId),
+    /// The planning conversation refining a task prompt.
+    TaskRefine,
 }
 
 impl ConversationKey {
@@ -77,7 +77,7 @@ impl ConversationKey {
         match self {
             Self::Main => "main.bin".to_string(),
             Self::TaskRun(run) => format!("task-run-{run}.bin"),
-            Self::TaskPlan(task) => format!("task-plan-{task}.bin"),
+            Self::TaskRefine => "task-refine.bin".to_string(),
         }
     }
 }

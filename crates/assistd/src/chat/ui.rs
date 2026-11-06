@@ -24,6 +24,7 @@ use super::theme::Theme;
 use crate::client::terminal_text::escape_controls_single_line;
 
 mod agents;
+mod tasks;
 mod wakeword;
 
 const INPUT_PROMPT: &str = "> ";
@@ -63,6 +64,10 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
         wakeword::render_wake_word_panel(frame, main_area, panel, &theme);
     } else if let Some(panel) = app.shown_agent_panel() {
         agents::render_agent_panel(frame, main_area, app, panel, &theme);
+    } else if app.confirmation.is_none()
+        && let Some(panel) = app.tasks_panel.as_mut()
+    {
+        tasks::render_tasks_panel(frame, main_area, panel, &theme);
     } else if app.confirmation.is_none()
         && let Some(panel) = app.settings_panel.as_mut()
     {
@@ -795,6 +800,8 @@ fn status_hint(app: &App) -> Option<String> {
         Some(wakeword::wake_word_hint(&panel.view).to_string())
     } else if let Some(panel) = app.shown_agent_panel() {
         Some(agents::agent_panel_hint(panel).to_string())
+    } else if let Some(panel) = app.shown_tasks_panel() {
+        Some(tasks::tasks_panel_hint(panel).to_string())
     } else if app.output.scroll_offset() > 0 {
         Some(format!("↑{} · PgDn to follow", app.output.scroll_offset()))
     } else if app.generating() {
@@ -945,7 +952,7 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use assistd_tools::{Grantable, Risk, Unattended};
+    use assistd_tools::{Risk, Unattended};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -961,7 +968,6 @@ mod tests {
                 always_allow: Vec::new(),
                 risk: Risk::Elevated,
                 unattended: Unattended::Never,
-                grantable: Grantable::Never,
                 source: ConfirmSource::Main,
             },
         )

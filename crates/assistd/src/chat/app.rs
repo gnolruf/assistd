@@ -21,6 +21,7 @@ use tokio::task::{JoinError, JoinSet};
 use super::input::InputLine;
 use super::output::OutputPane;
 use super::settings::SettingsPanel;
+use super::tasks::TasksPanel;
 use super::theme::Theme;
 
 mod agents;
@@ -30,6 +31,7 @@ mod connection;
 mod keys;
 mod modal;
 mod resume;
+mod tasks;
 mod wakeword;
 mod wire;
 
@@ -93,6 +95,8 @@ pub(super) enum WireStream {
     Status,
     /// A `/wakeword` request; owns the wake-word dock.
     WakeWord(WakeWordStream),
+    /// A `/tasks` request, routed to the panel by its id.
+    Tasks,
 }
 
 pub(super) enum ChatEvent {
@@ -261,6 +265,9 @@ pub(super) struct App {
     /// `/agents` panel, drawn in place of the transcript; `confirmation`
     /// takes precedence while both are open.
     agent_panel: Option<AgentPanel>,
+    /// `/tasks` panel, drawn in place of the transcript; `confirmation`
+    /// takes precedence while both are open.
+    pub tasks_panel: Option<TasksPanel>,
     /// The config file `/settings` edits.
     config_path: PathBuf,
     /// Throttles rewraps for a live block's timer to 1 Hz.
@@ -500,6 +507,7 @@ impl App {
             agent_panel: None,
             wake_word_panel: None,
             settings_panel: None,
+            tasks_panel: None,
             config_path,
             last_live_seconds: None,
             session_title: None,

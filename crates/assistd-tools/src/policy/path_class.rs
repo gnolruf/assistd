@@ -254,16 +254,6 @@ impl PathGuards {
             .map(|effect| effect.path.as_str())
     }
 
-    /// The canonical paths `effects` change, in order; `None` when one cannot be resolved.
-    /// Blocks on the filesystem.
-    pub(crate) fn changed_targets(&self, effects: &[Effect]) -> Option<Vec<PathBuf>> {
-        effects
-            .iter()
-            .filter(|effect| effect.action != Action::Read)
-            .map(|effect| self.resolve(effect))
-            .collect()
-    }
-
     /// The canonical path `effect` lands on, following a final symlink unless it deletes the
     /// link itself; `None` when `~` or the working directory is unknown.
     fn resolve(&self, effect: &Effect) -> Option<PathBuf> {

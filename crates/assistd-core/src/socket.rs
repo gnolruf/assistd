@@ -20,10 +20,7 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
 use assistd_ipc::{Event, Request};
-use assistd_llm::BackendJudgeModel;
-use assistd_tools::{
-    Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, JUDGE_TIMEOUT, SafetyJudge,
-};
+use assistd_tools::{Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
 use assistd_utils::time::saturating_millis;
 
 use crate::AppState;
@@ -452,14 +449,6 @@ async fn back_off_from_fd_exhaustion(err: &io::Error, fd_exhausted: &mut bool) {
     tokio::time::sleep(FD_EXHAUSTION_BACKOFF).await;
 }
 
-/// The judge that answers for the user in Auto mode, when `tools.allow_auto_mode` allows it.
-fn safety_judge(state: &AppState) -> Option<SafetyJudge> {
-    state.config.tools.allow_auto_mode.then(|| {
-        let model = BackendJudgeModel::new(Arc::clone(&state.subsystems.llm));
-        SafetyJudge::new(Arc::new(model), JUDGE_TIMEOUT)
-    })
-}
-
 /// Matches the raw errno because EMFILE maps to the unstable
 /// `io::ErrorKind::Uncategorized`.
 fn is_fd_exhaustion(err: &io::Error) -> bool {
@@ -487,7 +476,7 @@ async fn handle_connection(
         req.id().to_string(),
         tx.clone(),
         CONFIRM_TIMEOUT,
-        safety_judge(&state),
+        state.safety_judge(),
     );
     let is_subscribe = matches!(req, Request::Subscribe { .. });
 

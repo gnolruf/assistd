@@ -18,10 +18,11 @@ pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use task::{
-    AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS, DEFAULT_PATH_DEBOUNCE_SECS,
-    FinishOutcome, LaneHolder, MissedFire, Plan, PlanId, PlanStep, QueueItem, SuspendReason,
-    TaskEvent, TaskGrant, TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot, TaskRunId,
-    TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
+    ActionOutlook, AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS,
+    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MissedFire,
+    ModeRecommendation, Plan, PlanId, PlanStep, PlannedAction, QueueItem, SuspendReason, TaskEvent,
+    TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
+    TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 
@@ -551,8 +552,8 @@ pub enum Request {
     TaskList { id: String },
     /// Read one task. Emits `Task`, then `Done`.
     TaskGet { id: String, task: TaskId },
-    /// Create a task, or replace task `task`; a changed prompt clears its plan and grants.
-    /// Errors when the name is taken. Emits the saved `Task`, then `Done`.
+    /// Create a task, or replace task `task`. Errors when the name is taken, or `spec.mode` is
+    /// Auto and the daemon does not allow it. Emits the saved `Task`, then `Done`.
     TaskSave {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,35 +577,37 @@ pub enum Request {
     /// Change the task queue; errors when `op` names a run that is not queued, or moves a
     /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
     TaskQueue { id: String, op: TaskQueueOp },
-    /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on; `add_grant` with
-    /// `allow` also saves its `grants` on the task. Errors when the run is not waiting on it, or
-    /// `add_grant` names one without grants. Emits `Done`.
+    /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on, for this once.
+    /// Errors when the run is not waiting on it. Emits `Done`.
     TaskConfirm {
         id: String,
         run: TaskRunId,
         confirm_id: String,
         allow: bool,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        add_grant: bool,
     },
-    /// Plan `task`'s prompt in a conversation of its own, or with `feedback` revise its last
-    /// plan; streams the turn wrapped in `TaskPlan`, then emits `Plan` and `Done`. Errors when
-    /// `feedback` is given and the task has no plan to revise.
-    TaskPlan {
+    /// Explore task prompt `prompt` in a conversation of its own and rewrite it as a brief for
+    /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last
+    /// rewrite of it; a new refine ends the previous one. Streams the turn wrapped in
+    /// `TaskPlan`, then emits `TaskRefined` and `Done`. Saves nothing. Errors when `mode` is
+    /// Auto and the daemon does not allow it, or `feedback` is given and the last refine was
+    /// not of `prompt`.
+    TaskRefine {
         id: String,
-        task: TaskId,
+        prompt: TaskPrompt,
+        #[serde(default)]
+        mode: PermissionMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_hosts: Vec<HostName>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feedback: Option<String>,
     },
-    /// Save `task`'s latest plan `plan` on it, its `accepted` actions replacing the task's
-    /// grants, then emit the updated `Task` and `Done`. Errors when `plan` is not the latest,
-    /// the prompt changed since, or an accepted grant is not in it.
-    TaskPlanApprove {
+    /// Check `trigger` as `TaskSave` would for task `task`, or for a new task when `None`.
+    /// Emits `TriggerFires`, then `Done`; errors with why a save would refuse it.
+    TaskCheckTrigger {
         id: String,
-        task: TaskId,
-        plan: PlanId,
-        #[serde(default)]
-        accepted: Vec<TaskGrant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<TaskId>,
+        trigger: TaskTrigger,
     },
 }
 
@@ -679,8 +682,8 @@ impl Request {
             | Request::TaskCancel { id, .. }
             | Request::TaskQueue { id, .. }
             | Request::TaskConfirm { id, .. }
-            | Request::TaskPlan { id, .. }
-            | Request::TaskPlanApprove { id, .. } => id,
+            | Request::TaskRefine { id, .. }
+            | Request::TaskCheckTrigger { id, .. } => id,
         }
     }
 
@@ -732,8 +735,8 @@ impl Request {
             Request::TaskCancel { .. } => "task_cancel",
             Request::TaskQueue { .. } => "task_queue",
             Request::TaskConfirm { .. } => "task_confirm",
-            Request::TaskPlan { .. } => "task_plan",
-            Request::TaskPlanApprove { .. } => "task_plan_approve",
+            Request::TaskRefine { .. } => "task_refine",
+            Request::TaskCheckTrigger { .. } => "task_check_trigger",
         }
     }
 }
@@ -1012,10 +1015,6 @@ pub enum Event {
         /// Programs an "always allow" answer adds to the allowlist; empty when not offered.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         always_allow: Vec<String>,
-        /// What an `add_grant` answer saves on a paused task run's task; empty when no grant
-        /// can cover the request.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        grants: Vec<TaskGrant>,
         /// Which agent asked.
         #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
         source: ConfirmSource,
@@ -1116,6 +1115,15 @@ pub enum Event {
         /// When its triggers next fire; `None` while it is disabled or nothing is due.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_fire: Option<DateTime<Utc>>,
+        /// How its latest finished run ended; `None` before any has finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_run: Option<TaskRunState>,
+    },
+    /// The next fire times of the trigger a `TaskCheckTrigger` checked, soonest first, at
+    /// most three; empty for a trigger that fires on request or on an event.
+    TriggerFires {
+        id: String,
+        fires: Vec<DateTime<Utc>>,
     },
     /// Run `run` of `task` was queued.
     TaskRunQueued {
@@ -1138,14 +1146,17 @@ pub enum Event {
         id: String,
         snapshot: TaskQueueSnapshot,
     },
-    /// A plan for the work asked for, each anticipated action checked against the machine.
-    Plan { id: String, plan: Plan },
-    /// One event of the planning turn for `task`, which `id` asked for; never terminal itself.
-    TaskPlan {
+    /// The asked prompt rewritten as a brief for an unattended run, the plan of that brief,
+    /// each anticipated action checked against the machine and the asked permissions, and the
+    /// mode its runs are best given among those the daemon allows.
+    TaskRefined {
         id: String,
-        task: TaskId,
-        event: Box<Event>,
+        prompt: TaskPrompt,
+        plan: Plan,
+        recommended: ModeRecommendation,
     },
+    /// One event of the planning turn `id` asked for; never terminal itself.
+    TaskPlan { id: String, event: Box<Event> },
     /// Terminal failure.
     Error { id: String, message: String },
     /// Terminal success.
@@ -1200,8 +1211,9 @@ impl Event {
             | Event::TaskRun { id, .. }
             | Event::TaskQueue { id, .. }
             | Event::Queued { id, .. }
-            | Event::Plan { id, .. }
+            | Event::TaskRefined { id, .. }
             | Event::TaskPlan { id, .. }
+            | Event::TriggerFires { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id }
             | Event::LastDelta { id, .. } => id,
@@ -1251,8 +1263,9 @@ impl Event {
             | Event::Task { .. }
             | Event::TaskRunQueued { .. }
             | Event::Queued { .. }
-            | Event::Plan { .. }
-            | Event::TaskPlan { .. } => return None,
+            | Event::TaskRefined { .. }
+            | Event::TaskPlan { .. }
+            | Event::TriggerFires { .. } => return None,
         })
     }
 }

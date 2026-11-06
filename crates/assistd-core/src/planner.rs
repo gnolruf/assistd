@@ -1,5 +1,6 @@
 //! Plan mode: a turn over a conversation that may run only what asks for nothing, ending in a
-//! [`Plan`] of steps and the approvals each expects to need.
+//! [`Plan`] of steps and the approvals each expects to need, or in a task prompt rewritten
+//! with its plan.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -7,40 +8,56 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use assistd_ipc::Plan;
+use assistd_ipc::{HostName, ModeRecommendation, PermissionMode, Plan, TaskPrompt, TaskSpecError};
 use assistd_llm::{
     LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, StepOutcome, ToolResultPayload,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
-    Attachment, CONFIRM_ROUTER, ConfirmRouter, GrantCheck, SearchPath, Tool, ToolCatalog,
+    ActionCheck, Attachment, CONFIRM_ROUTER, ConfirmRouter, SearchPath, Tool, ToolCatalog,
     ToolError, ToolOutput, ToolRegistry,
 };
 
 use crate::agent::Agent;
 
 mod draft;
+mod recommend;
 
-use draft::PlanDraft;
+use draft::{PlanDraft, RefinementDraft};
+use recommend::recommended_mode;
 
 /// Rendered at the tail of the conversation on every step of a planning turn.
 const PLAN_PREAMBLE: &str = "Plan mode: do not do the work yet. Find out what it needs \
-     using only commands that change nothing, then reply with a plan: the steps you would \
-     take and what each would need approved. Anything that would ask for confirmation is \
-     refused while planning; when a command is refused, describe that step in the plan \
-     instead of looking for another way to run it.";
+     using only commands that change nothing. Anything that would ask for confirmation is \
+     refused while planning; when a command is refused, note that the step needs approval \
+     instead of looking for another way to run it. Once you know enough, reply with only a \
+     short list of what you found: the paths, commands and hosts the work would use, and \
+     anything missing or refused. Do not write the plan or the steps yet; you will be asked \
+     for them next, in a fixed format.";
 
 /// Appended to a planning tool's result when something in it was refused for asking.
 const REFUSED_NOTE: &str = "\n[plan mode: this needed approval, so it was refused and did not \
-     run. Describe the step, and the approval it needs, in your plan instead.]";
+     run. Note the step, and the approval it needs, for your plan instead.]";
 
 /// Asks for the plan once the planning turn has answered.
-const PLAN_INSTRUCTION: &str = "Now give your plan as JSON. `summary` says in a few lines \
+const PLAN_INSTRUCTION: &str = "Now give your plan as JSON.";
+
+/// Asks for the task prompt rewritten, and its plan, once the planning turn has answered.
+const REFINE_INSTRUCTION: &str = "This work will run unattended, with nobody to answer \
+     questions. Now give, as JSON, `prompt`: the work rewritten as a self-contained brief for \
+     that run. Say what it is for; list the steps, naming the exact paths, commands and hosts \
+     you found; say what done looks like and where the result goes; and say what to do when \
+     something fails or there is nothing to do. Keep everything the user asked for and add \
+     no work they did not ask for. Then give the plan for that brief.";
+
+/// How the plan is laid out, after either instruction.
+const PLAN_LAYOUT: &str = "`summary` says in a few lines \
      what the work will do. `steps` lists the steps in order, each with a `description` and \
      the `actions` it needs approved to run without asking. An action's `kind` is `program` \
      to run a program that is not read-only (`target` is its name, and `subcommand` its \
@@ -55,8 +72,18 @@ const PLAN_INSTRUCTION: &str = "Now give your plan as JSON. `summary` says in a 
 pub enum PlanAsk {
     /// Plan this piece of work.
     Work(String),
-    /// Revise the conversation's last plan with this feedback.
-    Revise(String),
+    /// Revise `shown`, what the user was given from the conversation's last answer, with
+    /// `feedback`.
+    Revise { shown: String, feedback: String },
+}
+
+/// A task prompt rewritten for unattended runs, the plan of the rewrite, and the mode its
+/// runs are best given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refinement {
+    pub prompt: TaskPrompt,
+    pub plan: Plan,
+    pub recommended: ModeRecommendation,
 }
 
 /// Why a planning turn ended without a plan.
@@ -68,6 +95,8 @@ pub enum PlanError {
     Llm(#[from] LlmError),
     #[error("the model's plan could not be read: {0}")]
     Unreadable(#[source] serde_json::Error),
+    #[error("the model's prompt was refused: {0}")]
+    Prompt(#[from] TaskSpecError),
 }
 
 /// What a planning turn may use: tools that ask for nothing, and the checks its anticipated
@@ -75,17 +104,25 @@ pub enum PlanError {
 #[derive(Debug, Clone)]
 pub struct PlanningTools {
     pub registry: Arc<ToolRegistry>,
-    pub checks: GrantCheck,
+    pub checks: ActionCheck,
 }
 
 impl Default for PlanningTools {
-    /// No tools, and checks that find no program.
+    /// No tools, and checks that find no program and no approval.
     fn default() -> Self {
         Self {
             registry: Arc::new(ToolRegistry::new()),
-            checks: GrantCheck::new(SearchPath { dirs: Vec::new() }),
+            checks: ActionCheck::new(SearchPath { dirs: Vec::new() }, None),
         }
     }
+}
+
+/// What the planned work will run under, which decides the actions it will ask about.
+#[derive(Debug, Clone, Default)]
+pub struct WorkPermissions {
+    pub mode: PermissionMode,
+    /// Hosts it fetches from unasked, on top of the approved hosts.
+    pub allowed_hosts: Vec<HostName>,
 }
 
 /// Runs planning turns. Every ask for confirmation in one is refused without prompting, so it
@@ -97,35 +134,106 @@ pub struct Planner {
     catalog: Arc<ToolCatalog>,
     health: Option<Arc<dyn LlmHealthProbe>>,
     tool_deadline: Duration,
+    /// Auto mode may be recommended.
+    auto_offered: bool,
 }
 
 impl Planner {
-    /// A planner over `tools`; `health` and `tool_deadline` act as they do for [`Agent`].
+    /// A planner over `tools`; `health` and `tool_deadline` act as they do for [`Agent`], and
+    /// a refine recommends Auto only when `auto_offered`.
     pub fn new(
         tools: PlanningTools,
         catalog: Arc<ToolCatalog>,
         health: Option<Arc<dyn LlmHealthProbe>>,
         tool_deadline: Duration,
+        auto_offered: bool,
     ) -> Self {
         Self {
             tools,
             catalog,
             health,
             tool_deadline,
+            auto_offered,
         }
     }
 
     /// Run a planning turn on `ask` in `conversation`, streaming it on `tx`, then ask for the
-    /// plan, each action checked against the machine. The plan-mode preamble rides at the
-    /// conversation's tail, so its system prompt is unchanged; `request_id` labels refusals.
+    /// plan, each action checked against the machine and `permissions`. The plan-mode preamble
+    /// rides at the conversation's tail, so its system prompt is unchanged; `request_id` labels
+    /// refusals.
     pub async fn plan(
+        &self,
+        conversation: Arc<dyn LlmBackend>,
+        ask: PlanAsk,
+        permissions: WorkPermissions,
+        request_id: String,
+        tx: mpsc::Sender<LlmEvent>,
+        cancel: CancellationToken,
+    ) -> Result<Plan, PlanError> {
+        let conversation = self
+            .explore(conversation, ask, request_id, tx, &cancel)
+            .await?;
+        let instruction = format!("{PLAN_INSTRUCTION} {PLAN_LAYOUT}");
+        let draft: PlanDraft = draft_of(
+            conversation.as_ref(),
+            instruction,
+            PlanDraft::schema(),
+            &cancel,
+        )
+        .await?;
+        Ok(self.checked(draft, permissions).await)
+    }
+
+    /// As [`Planner::plan`] for a task's prompt, but ending in the prompt rewritten as a brief
+    /// for an unattended run, with the plan of that brief and the mode its runs are best given.
+    pub async fn refine(
+        &self,
+        conversation: Arc<dyn LlmBackend>,
+        ask: PlanAsk,
+        permissions: WorkPermissions,
+        request_id: String,
+        tx: mpsc::Sender<LlmEvent>,
+        cancel: CancellationToken,
+    ) -> Result<Refinement, PlanError> {
+        let conversation = self
+            .explore(conversation, ask, request_id, tx, &cancel)
+            .await?;
+        let instruction = format!("{REFINE_INSTRUCTION} {PLAN_LAYOUT}");
+        let draft: RefinementDraft = draft_of(
+            conversation.as_ref(),
+            instruction,
+            RefinementDraft::schema(),
+            &cancel,
+        )
+        .await?;
+        let (prompt, draft) = draft.into_parts();
+        let prompt = TaskPrompt::try_from(prompt)?;
+        let checks = self.tools.checks.clone();
+        let tools = self.catalog.snapshot();
+        let auto_offered = self.auto_offered;
+        let (plan, recommended) = on_blocking_pool(move || {
+            let plan = draft.into_plan(&checks, &tools, &permissions);
+            let hosts = &permissions.allowed_hosts;
+            let recommended = recommended_mode(&plan, &checks, hosts, auto_offered);
+            (plan, recommended)
+        })
+        .await;
+        Ok(Refinement {
+            prompt,
+            plan,
+            recommended,
+        })
+    }
+
+    /// Run the planning turn on `ask`, returning the conversation in plan mode.
+    async fn explore(
         &self,
         conversation: Arc<dyn LlmBackend>,
         ask: PlanAsk,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
-        cancel: CancellationToken,
-    ) -> Result<Plan, PlanError> {
+        cancel: &CancellationToken,
+    ) -> Result<Arc<dyn LlmBackend>, PlanError> {
         let conversation: Arc<dyn LlmBackend> = Arc::new(PlanModeConversation::new(conversation));
         let agent = Agent::new(
             Arc::clone(&conversation),
@@ -139,10 +247,14 @@ impl Planner {
         if cancel.is_cancelled() {
             return Err(PlanError::Cancelled);
         }
-        let draft = draft_of(conversation.as_ref(), &cancel).await?;
+        Ok(conversation)
+    }
+
+    /// `draft` as a plan, each action checked against the machine and `permissions`.
+    async fn checked(&self, draft: PlanDraft, permissions: WorkPermissions) -> Plan {
         let checks = self.tools.checks.clone();
         let tools = self.catalog.snapshot();
-        Ok(on_blocking_pool(move || draft.into_plan(&checks, &tools)).await)
+        on_blocking_pool(move || draft.into_plan(&checks, &tools, &permissions)).await
     }
 }
 
@@ -150,22 +262,24 @@ impl PlanAsk {
     fn into_text(self) -> String {
         match self {
             Self::Work(text) => text,
-            Self::Revise(feedback) => format!("Revise your plan with this feedback: {feedback}"),
+            Self::Revise { shown, feedback } => {
+                format!("You gave me this:\n\n{shown}\n\nRevise it with this feedback: {feedback}")
+            }
         }
     }
 }
 
-/// Ask `conversation` for its plan, held to the draft schema by grammar.
-async fn draft_of(
+/// Ask `conversation` for its answer to `instruction`, held to `schema` by grammar.
+async fn draft_of<T: DeserializeOwned>(
     conversation: &dyn LlmBackend,
+    instruction: String,
+    schema: Map<String, Value>,
     cancel: &CancellationToken,
-) -> Result<PlanDraft, PlanError> {
+) -> Result<T, PlanError> {
     let reply = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(PlanError::Cancelled),
-        reply = conversation.complete_with_schema(PLAN_INSTRUCTION.into(), PlanDraft::schema()) => {
-            reply?
-        }
+        reply = conversation.complete_with_schema(instruction, schema) => reply?,
     };
     serde_json::from_str(&reply).map_err(PlanError::Unreadable)
 }

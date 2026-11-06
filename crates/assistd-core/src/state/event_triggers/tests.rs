@@ -20,8 +20,8 @@ fn task(id: i64, triggers: Vec<TaskTrigger>) -> TaskRecord {
             prompt: TaskPrompt::try_from("work".to_string()).unwrap(),
             triggers,
             enabled: true,
-            grants: Vec::new(),
-            plan: None,
+            mode: assistd_ipc::PermissionMode::Manual,
+            allowed_hosts: Vec::new(),
         },
         next_fire: None,
     }

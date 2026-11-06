@@ -11,7 +11,7 @@ use super::super::theme::{Theme, color};
 use super::super::ui::{locate_cursor, wrap_input};
 use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
 use super::color_picker::{ColorPicker, PALETTE_CELL_WIDTH, PickerFocus};
-use super::list_editor::{EntryEditor, ListState, entry_summary};
+use super::list_editor::{EntryEditor, ListEditor, ListState, entry_summary};
 use super::panel::{Feedback, PanelMode, Row, SettingsPanel, TextEditor, short_decimal};
 use super::preview::render_theme_preview;
 use super::theme_list::{ThemeEntry, ThemeListState};
@@ -363,14 +363,7 @@ fn hint(mode: &PanelMode) -> &'static str {
             "Enter apply · Shift+Enter new line · Esc cancel · Ctrl+U clear"
         }
         PanelMode::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
-        PanelMode::List(editor) => match editor.state() {
-            ListState::Browse => "↑/↓ move · Enter edit · a add · d delete · Esc done",
-            ListState::Edit(entry) if entry.key_file_field().is_some() => {
-                "Enter apply · Tab switch field · Esc cancel · Ctrl+U clear"
-            }
-            ListState::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
-            ListState::ConfirmDelete => "y delete · n keep",
-        },
+        PanelMode::List(editor) => list_hint(editor.state()),
         PanelMode::Color { picker, .. } => match (picker.hex_input(), picker.focus()) {
             (Some(_), _) => "type 6 hex digits · Backspace erase · Esc stop typing",
             (None, PickerFocus::Palette(_)) => {
@@ -406,10 +399,15 @@ fn box_block(panel: &SettingsPanel, theme: &Theme) -> Block<'static> {
     let label = panel
         .selected_setting()
         .map_or("", |setting| setting.label());
+    titled_box(label, theme)
+}
+
+/// A rounded, accent-bordered box titled `title`.
+pub(crate) fn titled_box(title: &str, theme: &Theme) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent(theme))
-        .title(Span::styled(format!(" {label} "), accent(theme)))
+        .title(Span::styled(format!(" {title} "), accent(theme)))
 }
 
 /// The edited text wrapped in a bordered box, scrolled to keep the cursor
@@ -419,13 +417,23 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel,
     let inner = block.inner(area);
     frame.render_widget(block, area);
     panel.set_text_box_width(inner.width);
-    let PanelMode::Edit(editor) = panel.mode() else {
-        return;
-    };
+    if let PanelMode::Edit(editor) = panel.mode() {
+        render_wrapped_editor(frame, inner, editor, true);
+    }
+}
+
+/// `editor`'s text wrapped into `area`, scrolled to keep the cursor in view, with the
+/// terminal cursor placed when `show_cursor`.
+pub(crate) fn render_wrapped_editor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &TextEditor,
+    show_cursor: bool,
+) {
     let chars: Vec<char> = editor.text().chars().collect();
-    let rows = wrap_input(&chars, 0, inner.width);
+    let rows = wrap_input(&chars, 0, area.width);
     let (cursor_row, cursor_column) = locate_cursor(&rows, editor.cursor_chars());
-    let visible = usize::from(inner.height).max(1);
+    let visible = usize::from(area.height).max(1);
     let start = (cursor_row + 1).saturating_sub(visible);
     let lines: Vec<Line<'static>> = rows
         .iter()
@@ -433,21 +441,35 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel,
         .take(visible)
         .map(|&(row_start, row_end)| Line::raw(visible_chars(&chars[row_start..row_end])))
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
-    place_cursor(frame, inner, cursor_row - start, cursor_column);
+    frame.render_widget(Paragraph::new(lines), area);
+    if show_cursor {
+        place_cursor(frame, area, cursor_row - start, cursor_column);
+    }
 }
 
-/// The list setting's entries then an add row, scrolled to keep the
-/// selection in view, with the open entry's fields in its place.
+/// The list setting's entries in the box titled with its label.
 fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
     let (PanelMode::List(editor), Some(setting)) = (panel.mode(), panel.selected_setting()) else {
         return;
     };
-    let block = box_block(panel, theme);
+    let entries = panel.list_entries(setting.key);
+    render_list_editor(frame, area, editor, entries, setting.label(), theme);
+}
+
+/// `entries` then an add row in a box titled `title`, scrolled to keep the selection in
+/// view, with the open entry's fields in its place.
+pub(crate) fn render_list_editor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &ListEditor,
+    entries: &[toml::Value],
+    title: &str,
+    theme: &Theme,
+) {
+    let block = titled_box(title, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = usize::from(inner.width).saturating_sub(NO_POINTER.len());
-    let entries = panel.list_entries(setting.key);
     let mut lines = Vec::new();
     let mut cursor = None;
     let mut selected_line = 0;
@@ -473,6 +495,18 @@ fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, the
     frame.render_widget(Paragraph::new(lines), inner);
     if let Some((row, column)) = cursor {
         place_cursor(frame, inner, row.saturating_sub(start), column);
+    }
+}
+
+/// The keys the list box takes in `state`.
+pub(crate) fn list_hint(state: &ListState) -> &'static str {
+    match state {
+        ListState::Browse => "↑/↓ move · Enter edit · a add · d delete · Esc done",
+        ListState::Edit(entry) if entry.key_file_field().is_some() => {
+            "Enter apply · Tab switch field · Esc cancel · Ctrl+U clear"
+        }
+        ListState::Edit(_) => "Enter apply · Esc cancel · Ctrl+U clear",
+        ListState::ConfirmDelete => "y delete · n keep",
     }
 }
 
@@ -753,7 +787,7 @@ fn checkbox(on: bool) -> &'static str {
 
 /// The slice of the editor's text that fits `width` columns with the cursor
 /// in view, and the cursor's column within it.
-fn editor_window(editor: &TextEditor, width: usize) -> (String, usize) {
+pub(crate) fn editor_window(editor: &TextEditor, width: usize) -> (String, usize) {
     let cursor = editor.cursor_chars();
     let start = cursor.saturating_sub(width.saturating_sub(1));
     let chars: Vec<char> = editor.text().chars().skip(start).take(width).collect();
@@ -771,14 +805,19 @@ fn longest_label() -> usize {
 }
 
 /// Puts the terminal cursor `row` lines and `column` columns into `area`,
-/// clamped to its right edge.
-fn place_cursor(frame: &mut Frame<'_>, area: Rect, row: usize, column: usize) {
+/// clamped to it.
+pub(crate) fn place_cursor(frame: &mut Frame<'_>, area: Rect, row: usize, column: usize) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let offset = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
     frame.set_cursor_position(Position::new(
         area.x
             .saturating_add(offset(column))
             .min(area.right().saturating_sub(1)),
-        area.y.saturating_add(offset(row)),
+        area.y
+            .saturating_add(offset(row))
+            .min(area.bottom().saturating_sub(1)),
     ));
 }
 

@@ -1,6 +1,6 @@
 //! Handlers for `TaskRun` and `TaskCancel`, and a saved task run as an
-//! unattended turn in a conversation and transcript session of its own, its
-//! prompts approved by the task's grants or paused for the user.
+//! unattended turn in a conversation and transcript session of its own, its prompts approved
+//! by the task's mode and hosts or paused for the user.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProb
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
-use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter, Grants};
+use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
 use assistd_voice::SentenceBuffer;
 
 use super::event_triggers::Occurrence;
@@ -312,7 +312,7 @@ impl AppState {
 
     /// The main agent's tools over `conversation`, each model step giving way to the user's
     /// conversation on `lane`, with every confirmation labelled as the run's and approved by
-    /// the task's grants or parked until answered.
+    /// the task's mode or hosts, or parked until answered.
     fn spawn_task_agent(
         &self,
         turn: &TaskRunTurn,
@@ -338,14 +338,18 @@ impl AppState {
             task: turn.task.id,
             run: turn.run,
         };
-        let grants = Grants::new(turn.task.spec.grants.clone());
         let parking = TaskRunParking {
-            task: turn.task.id,
-            prompt: turn.task.spec.prompt.clone(),
             lane: Arc::clone(&lane),
         };
-        let router =
-            ConfirmRouter::for_task_run(turn.id.clone(), source, grants, Arc::new(parking));
+        let spec = &turn.task.spec;
+        let router = ConfirmRouter::for_task_run(
+            turn.id.clone(),
+            source,
+            spec.mode,
+            self.safety_judge(),
+            spec.allowed_hosts.clone(),
+            Arc::new(parking),
+        );
         let prompt = turn.task.spec.prompt.as_str().to_string();
         let agent_turn = async move { agent.run_turn(prompt, Vec::new(), llm_tx, cancel).await };
         AbortOnDropHandle::new(tokio::spawn(

@@ -1,5 +1,7 @@
 //! SQLite-backed [`TaskStore`] over the `tasks` and `task_runs` tables.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
@@ -8,8 +10,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use assistd_ipc::{
-    Plan, SuspendReason, TaskGrant, TaskId, TaskPrompt, TaskRunId, TaskRunState, TaskSpec,
-    TaskTrigger,
+    PermissionMode, SuspendReason, TaskId, TaskRunId, TaskRunState, TaskSpec, TaskTrigger,
 };
 
 use crate::{
@@ -19,7 +20,11 @@ use crate::{
 use super::connection::{SqliteHandle, truncate_wal};
 use super::timestamp::{now_millis, optional_timestamp_at};
 
-const TASK_COLUMNS: &str = "id, name, prompt, triggers, enabled, grants, plan, next_fire_at";
+const TASK_COLUMNS: &str = "id, name, prompt, triggers, enabled, mode, allowed_hosts, next_fire_at";
+
+const MODE_MANUAL: i64 = 0;
+const MODE_ACCEPT_EDITS: i64 = 1;
+const MODE_AUTO: i64 = 2;
 
 const RUN_QUEUED: i64 = 0;
 const RUN_RUNNING: i64 = 1;
@@ -131,51 +136,6 @@ impl TaskStore for SqliteTaskStore {
             .await
             .map_err(MemoryError::sqlite_or_missing(
                 "task set_enabled",
-                MemoryError::TaskNotFound(id),
-            ))
-    }
-
-    async fn add_grants(
-        &self,
-        id: TaskId,
-        prompt: TaskPrompt,
-        grants: Vec<TaskGrant>,
-    ) -> Result<bool> {
-        let now = now_millis();
-        self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let added = add_grants_if_prompt(&tx, id, &prompt, grants, now)?;
-                tx.commit()?;
-                Ok(added)
-            })
-            .await
-            .map_err(MemoryError::sqlite_or_missing(
-                "task add_grants",
-                MemoryError::TaskNotFound(id),
-            ))
-    }
-
-    async fn approve_plan(
-        &self,
-        id: TaskId,
-        prompt: TaskPrompt,
-        plan: Plan,
-        grants: Vec<TaskGrant>,
-    ) -> Result<Option<TaskRecord>> {
-        let now = now_millis();
-        self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let approved = approve_plan_if_prompt(&tx, id, &prompt, &plan, &grants, now)?;
-                tx.commit()?;
-                Ok(approved)
-            })
-            .await
-            .map_err(MemoryError::sqlite_or_missing(
-                "task approve_plan",
                 MemoryError::TaskNotFound(id),
             ))
     }
@@ -397,6 +357,26 @@ impl TaskStore for SqliteTaskStore {
             .map_err(MemoryError::sqlite("task finish_run"))?;
         run_updated(updated, run)
     }
+
+    async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>> {
+        self.handle
+            .reader()
+            .call(|c| -> rusqlite::Result<_> {
+                let mut stmt = c.prepare_cached(
+                    "SELECT task_id, state, suspend_reason, failure FROM task_runs
+                     WHERE id IN (SELECT MAX(id) FROM task_runs
+                                  WHERE state IN (?1, ?2, ?3) GROUP BY task_id)",
+                )?;
+                let rows = stmt
+                    .query_map([RUN_SUCCEEDED, RUN_FAILED, RUN_CANCELLED], |row| {
+                        Ok((TaskId(row.get(0)?), run_state_at(row, 1)?))
+                    })?
+                    .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .map_err(MemoryError::sqlite("task last_finished_runs"))
+    }
 }
 
 /// The run state stored in columns `idx` (state code), `idx + 1` (suspend reason) and
@@ -549,7 +529,8 @@ fn run_updated(updated: usize, run: TaskRunId) -> Result<()> {
 
 fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Result<TaskRecord> {
     let id = tx.query_row(
-        "INSERT INTO tasks (name, prompt, triggers, enabled, grants, plan, created_at, updated_at)
+        "INSERT INTO tasks (name, prompt, triggers, enabled, mode, allowed_hosts,
+                            created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
          RETURNING id",
         rusqlite::params![
@@ -557,8 +538,8 @@ fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Resu
             spec.prompt.as_str(),
             to_json(&spec.triggers)?,
             spec.enabled,
-            to_json(&spec.grants)?,
-            spec.plan.as_ref().map(to_json).transpose()?,
+            mode_code(spec.mode),
+            to_json(&spec.allowed_hosts)?,
             now,
         ],
         |r| r.get(0),
@@ -570,25 +551,17 @@ fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Resu
     })
 }
 
-/// Overwrite task `id` with `spec`, dropping `spec`'s plan and grants when its prompt
-/// differs from the stored one.
+/// Overwrite task `id` with `spec`; `QueryReturnedNoRows` when there is no such task.
 fn replace_task(
     tx: &Transaction<'_>,
     id: TaskId,
-    mut spec: TaskSpec,
+    spec: TaskSpec,
     now: i64,
 ) -> rusqlite::Result<TaskRecord> {
-    let stored_prompt: String =
-        tx.query_row("SELECT prompt FROM tasks WHERE id = ?1", [id.0], |r| {
-            r.get(0)
-        })?;
-    if stored_prompt != spec.prompt.as_str() {
-        spec.grants.clear();
-        spec.plan = None;
-    }
-    tx.execute(
-        "UPDATE tasks SET name = ?2, prompt = ?3, triggers = ?4, enabled = ?5, grants = ?6,
-                          plan = ?7, next_fire_at = NULL, updated_at = MAX(?8, created_at)
+    let updated = tx.execute(
+        "UPDATE tasks SET name = ?2, prompt = ?3, triggers = ?4, enabled = ?5, mode = ?6,
+                          allowed_hosts = ?7, next_fire_at = NULL,
+                          updated_at = MAX(?8, created_at)
          WHERE id = ?1",
         rusqlite::params![
             id.0,
@@ -596,74 +569,19 @@ fn replace_task(
             spec.prompt.as_str(),
             to_json(&spec.triggers)?,
             spec.enabled,
-            to_json(&spec.grants)?,
-            spec.plan.as_ref().map(to_json).transpose()?,
+            mode_code(spec.mode),
+            to_json(&spec.allowed_hosts)?,
             now,
         ],
     )?;
+    if updated == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(TaskRecord {
         id,
         spec,
         next_fire: None,
     })
-}
-
-/// Add each of `grants` task `id` lacks, unless its stored prompt differs from `prompt`;
-/// returns whether they were added.
-fn add_grants_if_prompt(
-    tx: &Transaction<'_>,
-    id: TaskId,
-    prompt: &TaskPrompt,
-    grants: Vec<TaskGrant>,
-    now: i64,
-) -> rusqlite::Result<bool> {
-    let (stored_prompt, stored_grants): (String, String) = tx.query_row(
-        "SELECT prompt, grants FROM tasks WHERE id = ?1",
-        [id.0],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    if stored_prompt != prompt.as_str() {
-        return Ok(false);
-    }
-    let mut held: Vec<TaskGrant> = from_json(1, &stored_grants)?;
-    for grant in grants {
-        if !held.contains(&grant) {
-            held.push(grant);
-        }
-    }
-    tx.execute(
-        "UPDATE tasks SET grants = ?2, updated_at = MAX(?3, created_at) WHERE id = ?1",
-        rusqlite::params![id.0, to_json(&held)?, now],
-    )?;
-    Ok(true)
-}
-
-/// Set task `id`'s plan and grants when its prompt is still `prompt`, returning it as updated.
-fn approve_plan_if_prompt(
-    tx: &Transaction<'_>,
-    id: TaskId,
-    prompt: &TaskPrompt,
-    plan: &Plan,
-    grants: &[TaskGrant],
-    now: i64,
-) -> rusqlite::Result<Option<TaskRecord>> {
-    let updated = tx.execute(
-        "UPDATE tasks SET plan = ?3, grants = ?4, updated_at = MAX(?5, created_at)
-         WHERE id = ?1 AND prompt = ?2",
-        rusqlite::params![
-            id.0,
-            prompt.as_str(),
-            to_json(plan)?,
-            to_json(&grants)?,
-            now
-        ],
-    )?;
-    if updated == 0 {
-        tx.query_row("SELECT 1 FROM tasks WHERE id = ?1", [id.0], |_| Ok(()))?;
-        return Ok(None);
-    }
-    let select = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1");
-    tx.query_row(&select, [id.0], task_record).map(Some)
 }
 
 /// Map a failed save of the task named `name` to its typed error.
@@ -690,14 +608,32 @@ fn task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
             prompt: validated_text_at(row, 2)?,
             triggers: json_at(row, 3)?,
             enabled: row.get(4)?,
-            grants: json_at(row, 5)?,
-            plan: row
-                .get::<_, Option<String>>(6)?
-                .map(|plan| from_json(6, &plan))
-                .transpose()?,
+            mode: mode_at(row, 5)?,
+            allowed_hosts: json_at(row, 6)?,
         },
         next_fire: optional_timestamp_at(row, 7)?,
     })
+}
+
+fn mode_code(mode: PermissionMode) -> i64 {
+    match mode {
+        PermissionMode::Manual => MODE_MANUAL,
+        PermissionMode::AcceptEdits => MODE_ACCEPT_EDITS,
+        PermissionMode::Auto => MODE_AUTO,
+    }
+}
+
+fn mode_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<PermissionMode> {
+    match row.get(idx)? {
+        MODE_MANUAL => Ok(PermissionMode::Manual),
+        MODE_ACCEPT_EDITS => Ok(PermissionMode::AcceptEdits),
+        MODE_AUTO => Ok(PermissionMode::Auto),
+        code => Err(rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            Type::Integer,
+            Box::new(rusqlite::types::FromSqlError::OutOfRange(code)),
+        )),
+    }
 }
 
 /// The text in column `idx`, checked by `T`'s own conversion.
