@@ -56,8 +56,9 @@ impl QueueView {
                 .iter()
                 .position(|item| ItemKey::of(item) == key)
         });
-        self.selected = kept.unwrap_or(self.selected);
-        self.selected = self.selected.min(snapshot.items.len().saturating_sub(1));
+        self.selected = kept
+            .unwrap_or(self.selected)
+            .min(snapshot.items.len().saturating_sub(1));
         self.snapshot = Some(snapshot);
     }
 
@@ -113,14 +114,15 @@ impl QueueView {
             return QueueAction::Stay;
         };
         let run = *run;
-        let Some(from) = self.selected.checked_sub(self.waiting_start()) else {
+        let waiting_start = self.waiting_start();
+        let Some(from) = self.selected.checked_sub(waiting_start) else {
             return QueueAction::Stay;
         };
-        let last = self.items().len() - self.waiting_start() - 1;
+        let last = self.items().len() - waiting_start - 1;
         let Some(to) = from.checked_add_signed(by).filter(|to| *to <= last) else {
             return QueueAction::Stay;
         };
-        self.selected = self.waiting_start() + to;
+        self.selected = waiting_start + to;
         QueueAction::Change(TaskQueueOp::Move {
             run,
             to: u32::try_from(to).unwrap_or(u32::MAX),

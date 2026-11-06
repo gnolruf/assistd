@@ -371,21 +371,17 @@ impl ConfirmRouter {
     /// of the run.
     async fn ask_for_task_run(&self, run: &TaskRunAsks, req: ConfirmationRequest) -> Approval {
         let host = match &req.unattended {
-            Unattended::WebHost(host) => Some(host.clone()),
+            Unattended::WebHost(host) => HostName::try_from(host.clone()).ok(),
             _ => None,
         };
         if let Some(host) = &host
-            && run
-                .allowed_hosts
-                .lock()
-                .iter()
-                .any(|allowed| allowed.as_str().eq_ignore_ascii_case(host))
+            && run.allowed_hosts.lock().contains(host)
         {
             info!(
                 target: "assistd::policy",
                 tool = %req.tool,
                 source = ?req.source,
-                host,
+                host = %host,
                 "approved: the task allows this host"
             );
             return Approval::Once;
@@ -395,9 +391,9 @@ impl ConfirmRouter {
             run.parking.park(req).await
         };
         if approval == Approval::Always
-            && let Some(allowed) = host.and_then(|host| HostName::try_from(host).ok())
+            && let Some(host) = host
         {
-            run.allowed_hosts.lock().push(allowed);
+            run.allowed_hosts.lock().push(host);
         }
         match approval {
             Approval::Deny => Approval::Deny,

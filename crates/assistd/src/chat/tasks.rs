@@ -195,14 +195,9 @@ impl TasksPanel {
 
     /// Answer confirmation `confirm_id` of paused run `run` with `approval`.
     pub(super) fn answer_paused(&mut self, run: TaskRunId, confirm_id: String, approval: Approval) {
-        self.outbox
-            .send(PendingOp::Confirm, |id| Request::TaskConfirm {
-                id,
-                run,
-                confirm_id,
-                allow: approval != Approval::Deny,
-                always: approval == Approval::Always,
-            });
+        self.outbox.send(PendingOp::Confirm, |id| {
+            task_confirm(id, run, confirm_id, approval)
+        });
     }
 
     pub(super) fn tasks(&self) -> &[ListedTask] {
@@ -574,5 +569,21 @@ impl TasksPanel {
                 self.message = Some(Message::Error(message));
             }
         }
+    }
+}
+
+/// The `TaskConfirm` answering confirmation `confirm_id` of paused run `run` with `approval`.
+pub(super) fn task_confirm(
+    id: String,
+    run: TaskRunId,
+    confirm_id: String,
+    approval: Approval,
+) -> Request {
+    Request::TaskConfirm {
+        id,
+        run,
+        confirm_id,
+        allow: approval != Approval::Deny,
+        always: approval == Approval::Always,
     }
 }

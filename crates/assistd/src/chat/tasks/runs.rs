@@ -73,12 +73,7 @@ impl RunsView {
 
     /// Show the rows of listing `request` once it is done.
     pub(super) fn finish(&mut self, request: &str) {
-        if self
-            .listing
-            .as_ref()
-            .is_some_and(|(current, _)| current == request)
-            && let Some((_, rows)) = self.listing.take()
-        {
+        if let Some((_, rows)) = self.listing.take_if(|(current, _)| current == request) {
             self.runs = rows;
             self.loaded = true;
             self.selected = self.selected.min(self.runs.len().saturating_sub(1));
@@ -89,10 +84,9 @@ impl RunsView {
     pub(super) fn fail(&mut self, request: &str) {
         if self
             .listing
-            .as_ref()
-            .is_some_and(|(current, _)| current == request)
+            .take_if(|(current, _)| current == request)
+            .is_some()
         {
-            self.listing = None;
             self.loaded = true;
         }
     }

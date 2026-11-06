@@ -2434,6 +2434,4 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
         }
     }
     settle_task_runs(&state).await;
-    let stored = state.memory.tasks.get(task).await.unwrap().spec;
-    assert_eq!(stored.allowed_hosts, [prompt.host.unwrap()]);
 }

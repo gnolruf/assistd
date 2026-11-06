@@ -560,7 +560,7 @@ fn always_label(prompt: &ConfirmationPrompt) -> String {
         .map(|name| escape_controls_single_line(name))
         .collect::<Vec<_>>()
         .join(", ");
-    if let AnswerTo::TaskRun(_) = prompt.answer_to {
+    if matches!(prompt.answer_to, AnswerTo::TaskRun(_)) {
         return format!("Yes, and allow fetches from {names} for this task");
     }
     match request.tool.as_str() {

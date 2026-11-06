@@ -1,13 +1,13 @@
 //! `/tasks`: the tasks panel drawn in place of the transcript, its requests sent on
 //! connections of their own, and the answers to the prompts paused task runs wait on.
 
-use assistd_ipc::{Event, Request, TaskQueueSnapshot, TaskRunId};
+use assistd_ipc::{Event, TaskQueueSnapshot, TaskRunId};
 use assistd_tools::Approval;
 use crossterm::event::KeyEvent;
 use uuid::Uuid;
 
 use super::{AnswerTo, App, WireStream};
-use crate::chat::tasks::{PanelAction, TasksPanel, paused_prompts, waits_on};
+use crate::chat::tasks::{PanelAction, TasksPanel, paused_prompts, task_confirm, waits_on};
 
 impl App {
     pub(super) fn open_tasks_panel(&mut self) {
@@ -99,13 +99,7 @@ impl App {
             self.send_tasks_requests();
             return;
         }
-        let req = Request::TaskConfirm {
-            id: Uuid::new_v4().to_string(),
-            run,
-            confirm_id,
-            allow: approval != Approval::Deny,
-            always: approval == Approval::Always,
-        };
+        let req = task_confirm(Uuid::new_v4().to_string(), run, confirm_id, approval);
         self.spawn_one_shot(req, WireStream::Status, "task confirm");
     }
 

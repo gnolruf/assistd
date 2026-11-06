@@ -410,8 +410,8 @@ parked. `Request::TaskConfirm` answers it for that prompt alone, except that
 `always` on a host fetch adds the host to the task's `allowed_hosts`, for the
 rest of the run and later ones; the run then waits first in the queue for a lane,
 moving its conversation to that lane's slot. `Request::TaskRuns` lists a task's
-latest runs with their trigger, times, final reply and session. The task's prompt is the only instruction a
-run gets; no plan is stored on the task.
+latest runs with their trigger, times, final reply and session. The task's
+prompt is the only instruction a run gets; no plan is stored on the task.
 
 With one lane, a user message that finds a run on it follows
 `[tasks] interruption`. Under `interrupt` the run's turn sees the conversation
