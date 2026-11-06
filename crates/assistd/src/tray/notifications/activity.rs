@@ -271,7 +271,7 @@ fn value_inline(v: &Value) -> String {
     }
 }
 
-fn flatten_whitespace(s: &str) -> String {
+pub(super) fn flatten_whitespace(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
     for ch in s.chars() {
@@ -303,7 +303,7 @@ fn truncate_chars_from_end(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-fn truncate_chars_from_start(s: &str, max: usize) -> String {
+pub(super) fn truncate_chars_from_start(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }

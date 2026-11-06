@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
-use assistd_ipc::{ConfirmSource, Event, TaskId, TaskRunId, TaskTrigger};
+use assistd_ipc::{ConfirmSource, Event, TaskId, TaskRunId, TaskRunState, TaskTrigger};
 use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
@@ -167,6 +167,7 @@ impl AppState {
     /// unless it was cancelled.
     async fn record_run_end(&self, turn: &TaskRunTurn, end: TaskRunEnd) {
         info!(target: "assistd::tasks", end = ?end, "task run ended");
+        self.publish_run_ended(turn, &end);
         let succeeded = match &end {
             TaskRunEnd::Succeeded { .. } => Some(true),
             TaskRunEnd::Failed { .. } => Some(false),
@@ -181,6 +182,27 @@ impl AppState {
             self.fire_event_triggers(Occurrence::TaskFinished { task, succeeded })
                 .await;
         }
+    }
+
+    fn publish_run_ended(&self, turn: &TaskRunTurn, end: &TaskRunEnd) {
+        let (state, reply) = match end {
+            TaskRunEnd::Succeeded { reply } => (TaskRunState::Succeeded, Some(reply.clone())),
+            TaskRunEnd::Failed { reason } => (
+                TaskRunState::Failed {
+                    reason: reason.clone(),
+                },
+                None,
+            ),
+            TaskRunEnd::Cancelled => (TaskRunState::Cancelled, None),
+        };
+        self.runtime.publish(&Event::TaskRunEnded {
+            id: turn.id.clone(),
+            task: turn.task.id,
+            run: turn.run,
+            task_name: turn.task.spec.name.clone(),
+            state,
+            reply,
+        });
     }
 
     /// The run's final reply, `None` when it was cancelled or ended without one.

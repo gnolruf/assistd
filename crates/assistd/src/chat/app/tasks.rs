@@ -25,6 +25,11 @@ impl App {
             .filter(|_| self.confirmation.is_none())
     }
 
+    /// The task queue as last broadcast; `None` until the bus delivers it.
+    pub(in crate::chat) fn task_queue(&self) -> Option<&TaskQueueSnapshot> {
+        self.task_queue.as_ref()
+    }
+
     pub(super) fn on_tasks_key(&mut self, ev: KeyEvent) {
         let Some(panel) = self.tasks_panel.as_mut() else {
             return;

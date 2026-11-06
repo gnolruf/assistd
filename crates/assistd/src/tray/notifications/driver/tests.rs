@@ -1,6 +1,8 @@
+use assistd_ipc::{PausedPrompt, QueueItem, TaskId, TaskQueueSnapshot, TaskRunId, TaskRunState};
 use serde_json::json;
 use tokio::sync::mpsc;
 
+use super::super::task_notices::NoticeOutcome;
 use super::*;
 
 struct Harness {
@@ -74,6 +76,76 @@ fn last_delta(id: &str, text: &str) -> Event {
 
 fn done(id: &str) -> Event {
     Event::Done { id: id.into() }
+}
+
+fn queue_with_paused_run(confirm_id: &str) -> Event {
+    Event::TaskQueue {
+        id: "q".into(),
+        snapshot: TaskQueueSnapshot {
+            items: vec![QueueItem::Run {
+                run: TaskRunId(3),
+                task: TaskId(1),
+                task_name: "digest".to_string().try_into().unwrap(),
+                state: TaskRunState::NeedsInput,
+                prompt: Some(PausedPrompt {
+                    confirm_id: confirm_id.into(),
+                    tool: "bash".into(),
+                    script: "rm x".into(),
+                    matched_pattern: "rm".into(),
+                    host: None,
+                    source: assistd_ipc::ConfirmSource::Main,
+                }),
+                started_at: None,
+            }],
+            lanes: Vec::new(),
+            paused: false,
+            held: None,
+        },
+    }
+}
+
+fn run_ended(state: TaskRunState, reply: Option<&str>) -> Event {
+    Event::TaskRunEnded {
+        id: "t".into(),
+        task: TaskId(1),
+        run: TaskRunId(3),
+        task_name: "digest".to_string().try_into().unwrap(),
+        state,
+        reply: reply.map(str::to_string),
+    }
+}
+
+fn expect_announce(h: &mut Harness) -> NoticeOutcome {
+    match h.next_command() {
+        Some(NotifierCommand::Announce(notice)) => notice.outcome,
+        other => panic!("expected Announce, got {other:?}"),
+    }
+}
+
+#[test]
+fn task_notices_hold_back_for_focus_except_a_run_needing_input() {
+    let mut h = Harness::new();
+    h.event(chat_focus(true));
+    h.event(queue_with_paused_run("c1"));
+    assert!(matches!(
+        expect_announce(&mut h),
+        NoticeOutcome::NeedsInput { .. }
+    ));
+    h.event(queue_with_paused_run("c1"));
+    h.expect_nothing();
+    h.event(run_ended(TaskRunState::Succeeded, Some("all done")));
+    h.expect_nothing();
+
+    h.event(chat_focus(false));
+    h.event(run_ended(TaskRunState::Cancelled, None));
+    h.expect_nothing();
+    h.event(run_ended(TaskRunState::Succeeded, Some("all\ndone")));
+    assert_eq!(
+        expect_announce(&mut h),
+        NoticeOutcome::Finished {
+            reply_start: "all done".into()
+        }
+    );
 }
 
 #[test]

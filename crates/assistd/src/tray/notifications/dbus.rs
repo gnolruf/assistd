@@ -10,7 +10,10 @@ use zbus::zvariant::Value;
 use zbus::{Connection, Proxy};
 
 use super::driver::{DriverInput, NotifierCommand};
-use super::render::{Capabilities, HIDE_ACTION, Notification, render};
+use super::render::{
+    Capabilities, HIDE_ACTION, Notification, Rendered, render, render_task_notice,
+};
+use super::task_notices::TaskNotice;
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
@@ -50,6 +53,7 @@ pub(super) async fn run_notifier(
             command = commands.recv() => match command {
                 Some(NotifierCommand::Show(notification)) => service.show(&notification).await,
                 Some(NotifierCommand::Close) => service.close().await,
+                Some(NotifierCommand::Announce(notice)) => service.announce(&notice).await,
                 None => break,
             },
             Some(message) = signals.next() => {
@@ -90,27 +94,45 @@ impl NotificationService {
 
     async fn show(&mut self, notification: &Notification) {
         let rendered = render(notification, self.caps);
+        let replaces = self.ids.current.unwrap_or(0);
+        if let Some(id) = self.notify(replaces, &rendered, STACK_TAG).await {
+            self.ids.current = Some(id);
+        }
+    }
+
+    /// Show `notice` as a new notification, stacked with earlier ones about the same run.
+    async fn announce(&mut self, notice: &TaskNotice) {
+        let rendered = render_task_notice(notice, self.caps);
+        let stack_tag = format!("{STACK_TAG}-task-{}", notice.run);
+        self.notify(0, &rendered, &stack_tag).await;
+    }
+
+    /// The service's id for the notification, `None` when `Notify` failed.
+    async fn notify(&mut self, replaces: u32, rendered: &Rendered, stack_tag: &str) -> Option<u32> {
         let hints = HashMap::from([
             ("urgency", Value::U8(rendered.urgency)),
-            ("x-dunst-stack-tag", Value::from(STACK_TAG)),
+            ("x-dunst-stack-tag", Value::from(stack_tag)),
         ]);
         let args = (
             APP_NAME,
-            self.ids.current.unwrap_or(0),
+            replaces,
             rendered.icon,
             rendered.summary.as_str(),
             rendered.body.as_str(),
-            rendered.actions,
+            &rendered.actions,
             hints,
             rendered.expire_timeout,
         );
         let result: zbus::Result<u32> = self.proxy.call("Notify", &args).await;
         match result {
             Ok(id) => {
-                self.ids.current = Some(id);
                 self.failing = false;
+                Some(id)
             }
-            Err(e) => self.log_failure("Notify", &e),
+            Err(e) => {
+                self.log_failure("Notify", &e);
+                None
+            }
         }
     }
 

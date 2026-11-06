@@ -472,6 +472,9 @@ pub enum QueueItem {
         /// [`TaskRunState::NeedsInput`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<PausedPrompt>,
+        /// When it first took a model lane; `None` while it has never run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<DateTime<Utc>>,
     },
     /// A user message waiting its turn behind the queue, by its query's request id.
     UserTurn { id: String, preview: String },

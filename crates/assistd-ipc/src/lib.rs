@@ -406,6 +406,7 @@ pub enum EventKind {
     Relay,
     TaskRun,
     TaskQueue,
+    TaskRunEnded,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -1148,6 +1149,17 @@ pub enum Event {
         run: TaskRunId,
         event: Box<Event>,
     },
+    /// Run `run` of `task`, which request `id` queued, ended in `state`; broadcast only.
+    TaskRunEnded {
+        id: String,
+        task: TaskId,
+        run: TaskRunId,
+        task_name: TaskName,
+        state: TaskRunState,
+        /// The final reply; set only when `state` is [`TaskRunState::Succeeded`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<String>,
+    },
     /// The query `id` waits for the model behind `behind` queue items: a running task, or
     /// the runs and turns ahead of it in the queue.
     Queued { id: String, behind: u32 },
@@ -1221,6 +1233,7 @@ impl Event {
             | Event::TaskRunRecord { id, .. }
             | Event::TaskRunQueued { id, .. }
             | Event::TaskRun { id, .. }
+            | Event::TaskRunEnded { id, .. }
             | Event::TaskQueue { id, .. }
             | Event::Queued { id, .. }
             | Event::TaskRefined { id, .. }
@@ -1255,6 +1268,7 @@ impl Event {
             Event::Relay { .. } => EventKind::Relay,
             Event::TaskRun { .. } => EventKind::TaskRun,
             Event::TaskQueue { .. } => EventKind::TaskQueue,
+            Event::TaskRunEnded { .. } => EventKind::TaskRunEnded,
             Event::VoiceOutputState { .. }
             | Event::WakeWordStatus { .. }
             | Event::WakeWordTest { .. }

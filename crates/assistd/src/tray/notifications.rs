@@ -1,5 +1,5 @@
-//! Desktop notifications showing each turn's activity, spawned alongside
-//! the tray icon.
+//! Desktop notifications showing each turn's activity and task runs that finished or need
+//! input, spawned alongside the tray icon.
 
 use assistd_config::Config;
 use assistd_ipc::{Event, IpcClient};
@@ -13,6 +13,7 @@ mod activity;
 mod dbus;
 mod driver;
 mod render;
+mod task_notices;
 
 /// Cloneable handle that feeds daemon events to the notification driver.
 #[derive(Clone)]

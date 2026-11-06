@@ -1036,12 +1036,14 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
                                 reason: SuspendReason::GpuBusy,
                             },
                             prompt: None,
+                            started_at: None,
                         },
                         QueueItem::Run {
                             run: TaskRunId(8),
                             task: TaskId(5),
                             task_name: "fetch".to_string().try_into().unwrap(),
                             state: TaskRunState::NeedsInput,
+                            started_at: DateTime::from_timestamp(1_793_887_200, 0),
                             prompt: Some(PausedPrompt {
                                 confirm_id: "c".into(),
                                 tool: "web".into(),
@@ -1076,7 +1078,18 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
                     }),
                 },
             },
-            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"run","run":8,"task":5,"task_name":"fetch","state":{"state":"needs_input"},"prompt":{"confirm_id":"c","tool":"web","script":"web fetch https://example.org/","matched_pattern":"fetches from example.org","host":"example.org","source":{"agent":"task","task":5,"run":8}}},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
+            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"run","run":8,"task":5,"task_name":"fetch","state":{"state":"needs_input"},"prompt":{"confirm_id":"c","tool":"web","script":"web fetch https://example.org/","matched_pattern":"fetches from example.org","host":"example.org","source":{"agent":"task","task":5,"run":8}},"started_at":"2026-11-05T14:00:00Z"},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
+        ),
+        (
+            Event::TaskRunEnded {
+                id: id(),
+                task: TaskId(4),
+                run: TaskRunId(9),
+                task_name: "inbox".to_string().try_into().unwrap(),
+                state: TaskRunState::Succeeded,
+                reply: Some("done".into()),
+            },
+            r#"{"type":"task_run_ended","id":"r","task":4,"run":9,"task_name":"inbox","state":{"state":"succeeded"},"reply":"done"}"#,
         ),
         (
             Event::Queued {

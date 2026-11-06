@@ -23,6 +23,7 @@ use super::theme::Theme;
 use crate::client::terminal_text::escape_controls_single_line;
 
 mod agents;
+mod queue_status;
 mod tasks;
 mod wakeword;
 
@@ -756,16 +757,36 @@ fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: PermissionMode, the
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Voice capture, a model that is not active, staged attachments and then a notice, the scroll
-/// position or the interrupt hint, all gray and left-aligned.
+/// Voice capture, a model that is not active, staged attachments, tasks needing input and
+/// running, then a notice, the scroll position or the interrupt hint, left-aligned and gray
+/// but for tasks needing input.
 fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let text_style = Style::default().fg(theme.status_text);
+    let queue = app
+        .task_queue()
+        .map(queue_status::queue_segments)
+        .unwrap_or_default();
+    let queue = queue.into_iter().map(|segment| {
+        let style = if segment.needs_input {
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            text_style
+        };
+        (segment.text, style)
+    });
+    let segments = status_segments(app)
+        .into_iter()
+        .map(|text| (text, text_style))
+        .chain(queue)
+        .chain(status_hint(app).map(|text| (text, text_style)));
     let mut spans = Vec::new();
-    for text in status_segments(app).into_iter().chain(status_hint(app)) {
+    for (text, style) in segments {
         if !spans.is_empty() {
             spans.push(Span::styled(" · ", rule_style(theme)));
         }
-        spans.push(Span::styled(text, text_style));
+        spans.push(Span::styled(text, style));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

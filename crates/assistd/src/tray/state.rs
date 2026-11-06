@@ -3,7 +3,11 @@
 use std::collections::HashSet;
 
 use assistd_config::TrayIconsConfig;
-use assistd_ipc::{Event, ListenPhase, PresenceState, StartupReadiness, VoiceCaptureState};
+use assistd_ipc::{
+    Event, ListenPhase, PresenceState, QueueItem, StartupReadiness, TaskQueueSnapshot,
+    TaskRunState, VoiceCaptureState,
+};
+use chrono::{DateTime, Utc};
 
 /// What the tray icon should currently display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +36,8 @@ pub(super) struct TrayTracker {
     startup: StartupReadiness,
     in_flight: HashSet<String>,
     connected: bool,
+    /// `None` until the daemon broadcasts the queue.
+    task_queue: Option<TaskQueueSnapshot>,
 }
 
 impl Default for TrayTracker {
@@ -52,6 +58,7 @@ impl TrayTracker {
             startup: StartupReadiness::default(),
             in_flight: HashSet::new(),
             connected: false,
+            task_queue: None,
         }
     }
 
@@ -102,6 +109,11 @@ impl TrayTracker {
         (!lines.is_empty()).then(|| lines.join("\n"))
     }
 
+    /// The task queue as last broadcast; `None` until the daemon sends it.
+    pub(super) fn task_queue(&self) -> Option<&TaskQueueSnapshot> {
+        self.task_queue.as_ref()
+    }
+
     /// Returns `true` when the resolved [`TrayState`] changed.
     pub(super) fn set_connected(&mut self) -> bool {
         let before = self.current();
@@ -118,6 +130,7 @@ impl TrayTracker {
         self.listen_phase = ListenPhase::Off;
         self.ptt_capture = VoiceCaptureState::Idle;
         self.startup = StartupReadiness::default();
+        self.task_queue = None;
         before != self.current()
     }
 
@@ -147,6 +160,9 @@ impl TrayTracker {
             } => {
                 self.startup.record(component.clone(), state.clone());
             }
+            Event::TaskQueue { snapshot, .. } => {
+                self.task_queue = Some(snapshot.clone());
+            }
             _ => {}
         }
         before != self.current()
@@ -165,7 +181,34 @@ pub(super) fn icon_name_for(state: TrayState, icons: &TrayIconsConfig) -> &str {
     }
 }
 
-pub(super) fn tooltip_for(state: TrayState) -> &'static str {
+/// The tray icon's hover text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Tooltip {
+    pub title: String,
+    pub description: String,
+}
+
+/// The state's one-line title over the config error, else the task queue's lines and how far
+/// each subsystem has started.
+pub(super) fn tooltip_for(tracker: &TrayTracker, now: DateTime<Utc>) -> Tooltip {
+    let description = match tracker.config_error() {
+        Some(error) => error.to_string(),
+        None => tracker
+            .task_queue()
+            .map(|snapshot| task_lines(snapshot, now))
+            .unwrap_or_default()
+            .into_iter()
+            .chain(tracker.startup_summary())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    Tooltip {
+        title: state_title(tracker.current()).to_string(),
+        description,
+    }
+}
+
+fn state_title(state: TrayState) -> &'static str {
     match state {
         TrayState::ConfigError => "assistd: config error",
         TrayState::Disconnected => "assistd: daemon offline",
@@ -173,6 +216,66 @@ pub(super) fn tooltip_for(state: TrayState) -> &'static str {
         TrayState::Listening => "assistd: listening",
         TrayState::Active => "assistd: idle",
         TrayState::Sleeping => "assistd: sleeping",
+    }
+}
+
+/// Each running run with how long it has run, then the runs needing input, then how many
+/// items wait and whether the queue is paused.
+fn task_lines(snapshot: &TaskQueueSnapshot, now: DateTime<Utc>) -> Vec<String> {
+    let mut running = Vec::new();
+    let mut needing_input = Vec::new();
+    let mut waiting = 0usize;
+    for item in &snapshot.items {
+        match item {
+            QueueItem::Run {
+                task_name,
+                state: TaskRunState::Running,
+                started_at,
+                ..
+            } => running.push(running_line(task_name.as_str(), *started_at, now)),
+            QueueItem::Run {
+                task_name,
+                state: TaskRunState::NeedsInput,
+                ..
+            } => needing_input.push(task_name.as_str()),
+            QueueItem::Run { .. } | QueueItem::UserTurn { .. } => waiting += 1,
+        }
+    }
+    let needs_input = match needing_input.as_slice() {
+        [] => None,
+        [name] => Some(format!("1 task needs input: {name}")),
+        names => Some(format!(
+            "{} tasks need input: {}",
+            names.len(),
+            names.join(", ")
+        )),
+    };
+    let queued = (waiting > 0 || snapshot.paused).then(|| {
+        let paused = if snapshot.paused { " · paused" } else { "" };
+        format!("{waiting} queued{paused}")
+    });
+    running
+        .into_iter()
+        .chain(needs_input)
+        .chain(queued)
+        .collect()
+}
+
+fn running_line(name: &str, started_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    let elapsed = started_at
+        .and_then(|at| u64::try_from((now - at).num_minutes()).ok())
+        .map_or_else(String::new, |minutes| {
+            format!(" · running {}", elapsed_minutes(minutes))
+        });
+    format!("task: {name}{elapsed}")
+}
+
+/// `<1 min`, `4 min`, `1 hr 5 min`.
+fn elapsed_minutes(minutes: u64) -> String {
+    match (minutes / 60, minutes % 60) {
+        (0, 0) => "<1 min".to_string(),
+        (0, mins) => format!("{mins} min"),
+        (hours, mins) => format!("{hours} hr {mins} min"),
     }
 }
 

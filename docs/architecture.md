@@ -344,7 +344,8 @@ another process, waiting runs are `Suspended(GpuBusy)` instead of waking the
 model. `Request::TaskQueue` moves, cancels, pauses and resumes the queue (the pause is
 kept in the `task_queue` table, so it outlasts a restart), and
 `Event::TaskQueue` broadcasts the items, lane holders and pause flag after each
-change and greets every new subscriber.
+change and greets every new subscriber. `Event::TaskRunEnded` broadcasts each started
+run's outcome and final reply.
 
 Time triggers are `TaskTrigger::At` (one local datetime) and
 `TaskTrigger::Schedule` (a five-field local-time cron expression parsed by
@@ -487,7 +488,11 @@ manual run. The Queue tab draws the broadcast `TaskQueue` and reorders, cancels
 and pauses it through `Request::TaskQueue`; Enter on a run needing input opens
 its prompt in the chat's confirmation dialog, answered with `TaskConfirm`. The
 Runs tab lists the selected task's runs, and Enter switches to a run's session
-as `/resume` does.
+as `/resume` does. Outside the panel, the status line counts runs needing input
+(highlighted; Ctrl+T opens the panel) and names the runs running. The tray's tooltip lists
+running runs with their elapsed time, runs needing input and the queued count; its
+menu pauses and resumes the queue, and it notifies on a finished or failed run
+(held back while the chat has focus) and on every run newly needing input.
 
 ### Tools (`assistd-tools`)
 
