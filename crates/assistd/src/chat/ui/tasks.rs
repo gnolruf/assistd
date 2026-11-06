@@ -1,4 +1,5 @@
-//! The `/tasks` panel: the task list, and the editor with its trigger form and prompt box.
+//! The `/tasks` panel: its tabs, the task list, and the editor with its trigger form and
+//! prompt box.
 
 use std::borrow::Cow;
 
@@ -17,12 +18,15 @@ use super::super::settings::{
     titled_box,
 };
 use super::super::tasks::{
-    AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, RefineNote, TaskEditor,
-    TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
+    AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, PanelTab, QueueView,
+    RefineNote, TaskEditor, TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
 };
 use super::super::theme::Theme;
 use super::{picker_scroll_start, render_rule, run_outcome};
 use crate::client::terminal_text::escape_controls_single_line;
+
+mod queue;
+mod runs;
 
 /// Rows each list entry takes: a task's name and its details, or the new-task row and a gap.
 const TASK_ENTRY_ROWS: usize = 2;
@@ -35,8 +39,10 @@ const LABEL_WIDTH: usize = 14;
 const BOX_ROWS: u16 = 10;
 const FIRE_FORMAT: &str = "%a %m-%d %H:%M";
 const NEXT_FIRE_FORMAT: &str = "%Y-%m-%d %H:%M";
-const LIST_HINT: &str = "↑/↓ select · Enter open · Space on/off · Esc close";
-const NEW_TASK_HINT: &str = "↑/↓ select · Enter new task · Esc close";
+const LIST_HINT: &str =
+    "↑/↓ select · Enter open · Space on/off · r run now · Tab queue · Esc close";
+const NEW_TASK_HINT: &str = "↑/↓ select · Enter new task · Tab queue · Esc close";
+const RUNS_HINT: &str = "↑/↓ select · ←/→ task · Enter resume session · Tab tasks · Esc close";
 const FIELD_HINT: &str = "Enter apply · Esc cancel";
 const PROMPT_HINT: &str = "Enter apply · shift+Enter new line · ctrl+r refine · Esc cancel";
 const FORM_HINT: &str = "↑/↓ field · ←/→ choose · Enter apply · Esc cancel";
@@ -66,14 +72,18 @@ pub(super) fn render_tasks_panel(
         Constraint::Length(1),
     ])
     .areas(area);
-    frame.render_widget(Paragraph::new(title(panel)), title_area);
+    frame.render_widget(Paragraph::new(title(panel, theme)), title_area);
     render_rule(frame, rule_area, theme);
     render_message(frame, message_area, panel, theme);
     let upstreams = panel.upstream_choices();
     if let Some(editor) = panel.editor_mut() {
         render_editor(frame, body_area, editor, &upstreams, theme);
-    } else {
-        render_task_list(frame, body_area, panel, theme);
+        return;
+    }
+    match panel.tab() {
+        PanelTab::Tasks => render_task_list(frame, body_area, panel, theme),
+        PanelTab::Queue => queue::render_queue(frame, body_area, panel.queue(), theme),
+        PanelTab::Runs => runs::render_runs(frame, body_area, panel, theme),
     }
 }
 
@@ -93,10 +103,24 @@ pub(super) fn tasks_panel_hint(panel: &TasksPanel) -> Cow<'static, str> {
             EditorMode::ConfirmDelete => DELETE_HINT,
             EditorMode::ConfirmRemoveTrigger(_) => REMOVE_TRIGGER_HINT,
         },
-        None if panel.selected_row() == ListRow::NewTask => NEW_TASK_HINT,
-        None => LIST_HINT,
+        None => match panel.tab() {
+            PanelTab::Tasks if panel.selected_row() == ListRow::NewTask => NEW_TASK_HINT,
+            PanelTab::Tasks => LIST_HINT,
+            PanelTab::Queue => return Cow::Owned(queue_hint(panel.queue())),
+            PanelTab::Runs => RUNS_HINT,
+        },
     };
     Cow::Borrowed(hint)
+}
+
+/// The Queue tab's keys, naming what `p` does to the queue now.
+fn queue_hint(queue: &QueueView) -> String {
+    let pause = if queue.snapshot().is_some_and(|snapshot| snapshot.paused) {
+        "p resume"
+    } else {
+        "p pause"
+    };
+    format!("↑/↓ select · shift+↑/↓ move · x cancel · {pause} · Tab runs · Esc close")
 }
 
 /// The editor's keys for the selected row, with Ctrl+D once the task is saved.
@@ -114,22 +138,42 @@ fn browse_hint(editor: &TaskEditor) -> String {
     format!("↑/↓ move · {row_keys} · ctrl+s save{delete} · Esc back")
 }
 
-/// `Tasks`, then the edited task's name and the view over it.
-fn title(panel: &TasksPanel) -> Line<'static> {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
-    let mut spans = vec![Span::styled("Tasks", bold)];
-    if let Some(editor) = panel.editor() {
-        let name = if editor.name().is_empty() {
-            "new task".to_string()
-        } else {
-            escape_controls_single_line(editor.name()).into_owned()
-        };
-        spans.push(Span::raw(format!(" › {name}")));
-        if editor.is_modified() {
-            spans.push(Span::raw(" •"));
-        }
+/// The tabs, the one on screen picked out, or while editing `Tasks` and the edited task's
+/// name.
+fn title(panel: &TasksPanel, theme: &Theme) -> Line<'static> {
+    let Some(editor) = panel.editor() else {
+        return tab_bar(panel.tab(), theme);
+    };
+    let name = if editor.name().is_empty() {
+        "new task".to_string()
+    } else {
+        escape_controls_single_line(editor.name()).into_owned()
+    };
+    let mut spans = vec![
+        Span::styled("Tasks", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(format!(" › {name}")),
+    ];
+    if editor.is_modified() {
+        spans.push(Span::raw(" •"));
     }
     Line::from(spans)
+}
+
+fn tab_bar(shown: PanelTab, theme: &Theme) -> Line<'static> {
+    let spans = PanelTab::ALL.iter().flat_map(|tab| {
+        let label = match tab {
+            PanelTab::Tasks => " Tasks ",
+            PanelTab::Queue => " Queue ",
+            PanelTab::Runs => " Runs ",
+        };
+        let style = if *tab == shown {
+            pointer_style(theme)
+        } else {
+            meta(theme)
+        };
+        [Span::styled(label, style), Span::raw(" ")]
+    });
+    Line::from(spans.collect::<Vec<_>>())
 }
 
 /// The editor's open question, else the panel's last message.

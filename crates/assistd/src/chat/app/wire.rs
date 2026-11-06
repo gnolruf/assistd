@@ -14,8 +14,8 @@ use serde_json::Value;
 use super::super::output::{tool_block_label, tool_outcome, tool_output};
 use super::super::ui::turn_summary;
 use super::{
-    ActiveReply, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY, QueuedTranscription,
-    WakeWordStream, WireStream,
+    ActiveReply, AnswerTo, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY,
+    QueuedTranscription, WakeWordStream, WireStream,
 };
 
 impl App {
@@ -53,6 +53,10 @@ impl App {
         }
         if matches!(ev, Event::SessionTitle { .. }) {
             self.on_wire_event(WireStream::Status, ev);
+            return;
+        }
+        if let Event::TaskQueue { snapshot, .. } = ev {
+            self.on_task_queue(snapshot);
             return;
         }
         let id = ev.id();
@@ -125,6 +129,7 @@ impl App {
             | Event::WakeWordTest { .. }
             | Event::WakeWordSpeech { .. }
             | Event::Task { .. }
+            | Event::TaskRunRecord { .. }
             | Event::TaskRunQueued { .. }
             | Event::TaskRun { .. }
             | Event::TaskQueue { .. }
@@ -517,7 +522,8 @@ impl App {
         self.reply_started_at = None;
         self.compacting_soon = false;
         self.active_reply = None;
-        self.confirmation = None;
+        self.confirmation
+            .take_if(|prompt| prompt.answer_to == AnswerTo::Reply);
         self.last_live_seconds = None;
     }
 

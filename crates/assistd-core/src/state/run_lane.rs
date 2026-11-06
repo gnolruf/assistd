@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use assistd_config::TaskInterruption;
-use assistd_ipc::{Event, StatusKind, TaskRunId};
+use assistd_ipc::{Event, StatusKind, TaskId, TaskRunId};
 use assistd_llm::{
     ConversationKey, HistoryReplay, LlmBackend, LlmError, LlmEvent, LlmResult, OneShotReply,
     SlotAssignment, StepOutcome, ToolResultPayload,
@@ -36,6 +36,7 @@ tokio::task_local! {
 #[derive(Debug)]
 pub(crate) struct RunLane {
     pub(in crate::state) state: Arc<AppState>,
+    pub(in crate::state) task: TaskId,
     pub(in crate::state) run: TaskRunId,
     /// Tags the run's events.
     pub(in crate::state) request_id: String,

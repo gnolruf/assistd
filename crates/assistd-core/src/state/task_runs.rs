@@ -202,6 +202,7 @@ impl AppState {
             .isolated_conversation(system_prompt, lease.slot(key))?;
         let lane = Arc::new(RunLane {
             state: Arc::clone(self),
+            task: turn.task.id,
             run: turn.run,
             request_id: turn.id.clone(),
             held: LaneHold::new(lease, awake),

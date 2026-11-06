@@ -7,7 +7,7 @@ use chrono::{DateTime, Local, Utc};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use assistd_ipc::{Event, PermissionMode, TaskId, TaskSpec, TaskTrigger};
+use assistd_ipc::{Event, MAX_LISTED_RUNS, PermissionMode, TaskId, TaskSpec, TaskTrigger};
 use assistd_memory::TaskRecord;
 
 use super::event_triggers::{check_chain, resolve_watched_paths};
@@ -41,6 +41,31 @@ impl AppState {
             &tx,
         )
         .await
+    }
+
+    pub(super) async fn handle_task_runs(
+        self: Arc<Self>,
+        id: String,
+        task: TaskId,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<(), DispatchError> {
+        let records = match self.memory.tasks.runs(task, MAX_LISTED_RUNS).await {
+            Ok(records) => records,
+            Err(e) => {
+                send_error(&tx, id, format!("task runs failed: {e}")).await;
+                return Err(e.into());
+            }
+        };
+        for record in records {
+            let _ = tx
+                .send(Event::TaskRunRecord {
+                    id: id.clone(),
+                    record,
+                })
+                .await;
+        }
+        let _ = tx.send(Event::Done { id }).await;
+        Ok(())
     }
 
     pub(super) async fn handle_task_save(

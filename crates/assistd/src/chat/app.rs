@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use assistd_core::PresenceState;
 use assistd_ipc::{
-    Event, ImageMime, IpcClient, PermissionMode, Request, TaskRunSummary, VoiceCaptureState,
+    Event, ImageMime, IpcClient, PausedPrompt, PermissionMode, Request, TaskQueueSnapshot,
+    TaskRunId, TaskRunSummary, VoiceCaptureState,
 };
-use assistd_tools::{Approval, Attachment, ConfirmationRequest};
+use assistd_tools::{Approval, Attachment, ConfirmationRequest, Risk, Unattended};
 use assistd_utils::token_counter::TokenCounter;
 use chrono::{DateTime, Utc};
 use ratatui_image::picker::Picker;
@@ -167,12 +168,22 @@ impl ConfirmChoice {
     }
 }
 
+/// Where a confirmation prompt's answer goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AnswerTo {
+    /// The active reply's query connection, as a `ConfirmResponse`.
+    Reply,
+    /// A `TaskConfirm` for this paused task run, whose "always" allows the host for its task.
+    TaskRun(TaskRunId),
+}
+
 /// Command-confirmation prompt drawn in the chat panel while the daemon's
-/// agent loop blocks on the answer.
+/// agent loop or a paused task run waits on the answer.
 pub(super) struct ConfirmationPrompt {
     pub request: ConfirmationRequest,
-    /// Echoed back in the `Request::ConfirmResponse`.
+    /// Echoed back with the answer.
     confirm_id: String,
+    pub answer_to: AnswerTo,
     /// Index into [`choices`](Self::choices).
     pub selected: usize,
     /// Every script row is shown, scrolled to `scroll`, rather than the
@@ -185,9 +196,28 @@ pub(super) struct ConfirmationPrompt {
 impl ConfirmationPrompt {
     /// A prompt with "No" selected, so a stray Enter denies.
     pub(super) fn new(confirm_id: String, request: ConfirmationRequest) -> Self {
+        Self::answered_to(confirm_id, request, AnswerTo::Reply)
+    }
+
+    /// The prompt paused task run `run` waits on, offering "always" when it names a host.
+    pub(super) fn for_task_run(run: TaskRunId, prompt: PausedPrompt) -> Self {
+        let request = ConfirmationRequest {
+            tool: prompt.tool,
+            script: prompt.script,
+            matched_pattern: prompt.matched_pattern,
+            always_allow: prompt.host.into_iter().map(String::from).collect(),
+            risk: Risk::Elevated,
+            unattended: Unattended::Never,
+            source: prompt.source,
+        };
+        Self::answered_to(prompt.confirm_id, request, AnswerTo::TaskRun(run))
+    }
+
+    fn answered_to(confirm_id: String, request: ConfirmationRequest, answer_to: AnswerTo) -> Self {
         let mut prompt = Self {
             request,
             confirm_id,
+            answer_to,
             selected: 0,
             expanded: false,
             scroll: 0,
@@ -268,6 +298,8 @@ pub(super) struct App {
     /// `/tasks` panel, drawn in place of the transcript; `confirmation`
     /// takes precedence while both are open.
     pub tasks_panel: Option<TasksPanel>,
+    /// The task queue as last broadcast; `None` until the bus delivers it.
+    task_queue: Option<TaskQueueSnapshot>,
     /// The config file `/settings` edits.
     config_path: PathBuf,
     /// Throttles rewraps for a live block's timer to 1 Hz.
@@ -508,6 +540,7 @@ impl App {
             wake_word_panel: None,
             settings_panel: None,
             tasks_panel: None,
+            task_queue: None,
             config_path,
             last_live_seconds: None,
             session_title: None,

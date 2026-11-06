@@ -1,21 +1,30 @@
-//! The `/tasks` panel: saved tasks listed, edited, and their prompts refined through the
-//! daemon, which alone stores them.
+//! The `/tasks` panel: saved tasks listed, edited, run and their prompts refined, the task
+//! queue, and each task's run history, all through the daemon, which alone stores them.
 
 use std::collections::HashMap;
-use std::ops::ControlFlow;
 
-use assistd_ipc::{Event, Request, TaskId, TaskRunState, TaskSpec};
+use assistd_ipc::{
+    Event, PausedPrompt, Request, TaskId, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
+    TaskSpec,
+};
+use assistd_tools::Approval;
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 mod editor;
 mod prompt_box;
+mod queue;
+mod runs;
 mod trigger_form;
 
 use editor::EditorAction;
 pub(super) use editor::{EditorMode, EditorRow, TaskEditor, TriggerCheck, TriggerRow};
 pub(super) use prompt_box::RefineNote;
+use queue::QueueAction;
+pub(super) use queue::{QueueView, paused_prompts, waits_on};
+use runs::RunsAction;
+pub(super) use runs::RunsView;
 pub(super) use trigger_form::{AT_FORMAT, TriggerForm, UpstreamChoice};
 
 /// A task as the daemon last listed it.
@@ -38,6 +47,11 @@ enum PendingOp {
     CheckTrigger,
     Refine,
     Interrupt,
+    RunNow,
+    QueueChange,
+    Runs,
+    /// An answer to a paused run's prompt.
+    Confirm,
 }
 
 /// Requests waiting to be sent, and the op each request id still in flight is for.
@@ -57,6 +71,44 @@ impl Outbox {
     }
 }
 
+/// What a key on the panel asks the chat to do.
+pub(super) enum PanelAction {
+    Stay,
+    Close,
+    /// Close the panel and switch to this session-qualified branch.
+    Resume(String),
+    /// Show the prompt paused run `run` waits on in the chat's confirmation dialog.
+    Answer(TaskRunId, PausedPrompt),
+}
+
+/// The panel's tabs, in the order Tab steps through them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PanelTab {
+    Tasks,
+    Queue,
+    Runs,
+}
+
+impl PanelTab {
+    pub(super) const ALL: [Self; 3] = [Self::Tasks, Self::Queue, Self::Runs];
+
+    fn next(self) -> Self {
+        match self {
+            Self::Tasks => Self::Queue,
+            Self::Queue => Self::Runs,
+            Self::Runs => Self::Tasks,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Tasks => Self::Runs,
+            Self::Queue => Self::Tasks,
+            Self::Runs => Self::Queue,
+        }
+    }
+}
+
 /// One row of the task list: a task, or the row that makes a new one after them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ListRow {
@@ -70,8 +122,9 @@ pub(super) enum Message {
     Error(String),
 }
 
-/// The tasks panel: the list, and the editor on top of it.
+/// The tasks panel: its tabs, and the editor on top of the task list.
 pub(super) struct TasksPanel {
+    tab: PanelTab,
     tasks: Vec<ListedTask>,
     /// Rows of the `TaskList` in flight.
     listing: Vec<ListedTask>,
@@ -83,13 +136,16 @@ pub(super) struct TasksPanel {
     message: Option<Message>,
     /// The daemon allows Auto mode, so the editor offers it.
     auto_offered: bool,
+    queue: QueueView,
+    runs: RunsView,
 }
 
 impl TasksPanel {
-    /// An empty panel with its task list requested; its editor offers Auto mode when
-    /// `auto_offered`.
-    pub(super) fn new(auto_offered: bool) -> Self {
+    /// An empty panel with its task list requested, showing `queue` until the next
+    /// broadcast; its editor offers Auto mode when `auto_offered`.
+    pub(super) fn new(auto_offered: bool, queue: Option<TaskQueueSnapshot>) -> Self {
         let mut panel = Self {
+            tab: PanelTab::Tasks,
             tasks: Vec::new(),
             listing: Vec::new(),
             loaded: false,
@@ -98,11 +154,55 @@ impl TasksPanel {
             outbox: Outbox::default(),
             message: None,
             auto_offered,
+            queue: QueueView::default(),
+            runs: RunsView::default(),
         };
+        if let Some(snapshot) = queue {
+            panel.queue.set_snapshot(snapshot);
+        }
         panel
             .outbox
             .send(PendingOp::List, |id| Request::TaskList { id });
         panel
+    }
+
+    pub(super) fn tab(&self) -> PanelTab {
+        self.tab
+    }
+
+    pub(super) fn queue(&self) -> &QueueView {
+        &self.queue
+    }
+
+    pub(super) fn runs(&self) -> &RunsView {
+        &self.runs
+    }
+
+    /// The task the Runs tab lists, as last listed.
+    pub(super) fn runs_task(&self) -> Option<&ListedTask> {
+        let task = self.runs.task()?;
+        self.tasks.iter().find(|listed| listed.id == task)
+    }
+
+    /// Show the queue as just broadcast, and list the shown task's runs again since one
+    /// may have ended.
+    pub(super) fn set_queue(&mut self, snapshot: TaskQueueSnapshot) {
+        self.queue.set_snapshot(snapshot);
+        if self.tab == PanelTab::Runs {
+            self.request_runs();
+        }
+    }
+
+    /// Answer confirmation `confirm_id` of paused run `run` with `approval`.
+    pub(super) fn answer_paused(&mut self, run: TaskRunId, confirm_id: String, approval: Approval) {
+        self.outbox
+            .send(PendingOp::Confirm, |id| Request::TaskConfirm {
+                id,
+                run,
+                confirm_id,
+                allow: approval != Approval::Deny,
+                always: approval == Approval::Always,
+            });
     }
 
     pub(super) fn tasks(&self) -> &[ListedTask] {
@@ -162,36 +262,111 @@ impl TasksPanel {
         std::mem::take(&mut self.outbox.requests)
     }
 
-    /// Ctrl+C closes the panel from any view, stopping a refine; other keys go to the view
-    /// on top. `Break` closes the panel.
-    pub(super) fn on_key(&mut self, ev: KeyEvent) -> ControlFlow<()> {
+    /// Ctrl+C closes the panel from any view, stopping a refine; the editor takes every
+    /// other key while open, else Tab and shift+Tab change tabs and the rest go to the tab.
+    pub(super) fn on_key(&mut self, ev: KeyEvent) -> PanelAction {
         if ev.code == KeyCode::Char('c') && ev.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(editor) = self.editor.as_mut() {
                 editor.cancel_refine(&mut self.outbox);
             }
-            return ControlFlow::Break(());
+            return PanelAction::Close;
         }
         self.message = None;
         if self.editor.is_some() {
             self.on_editor_key(ev);
-        } else {
-            return self.on_list_key(ev);
+            return PanelAction::Stay;
         }
-        ControlFlow::Continue(())
+        match ev.code {
+            KeyCode::Tab => self.show_tab(self.tab.next()),
+            KeyCode::BackTab => self.show_tab(self.tab.previous()),
+            _ => return self.on_tab_key(ev),
+        }
+        PanelAction::Stay
+    }
+
+    fn on_tab_key(&mut self, ev: KeyEvent) -> PanelAction {
+        match self.tab {
+            PanelTab::Tasks => self.on_list_key(ev),
+            PanelTab::Queue => match self.queue.on_key(ev) {
+                QueueAction::Stay => PanelAction::Stay,
+                QueueAction::Close => PanelAction::Close,
+                QueueAction::Change(op) => {
+                    self.change_queue(op);
+                    PanelAction::Stay
+                }
+                QueueAction::Answer(run, prompt) => PanelAction::Answer(run, prompt),
+            },
+            PanelTab::Runs => match self.runs.on_key(ev) {
+                RunsAction::Stay => PanelAction::Stay,
+                RunsAction::Close => PanelAction::Close,
+                RunsAction::ShowTask(by) => {
+                    self.step_runs_task(by);
+                    PanelAction::Stay
+                }
+                RunsAction::Resume(target) => PanelAction::Resume(target),
+            },
+        }
+    }
+
+    fn show_tab(&mut self, tab: PanelTab) {
+        self.tab = tab;
+        if tab == PanelTab::Runs {
+            self.request_runs();
+        }
     }
 
     /// ↑/↓ select, Enter opens the task or makes a new one, Space turns the task on or off,
-    /// and Esc closes the panel.
-    fn on_list_key(&mut self, ev: KeyEvent) -> ControlFlow<()> {
+    /// `r` queues a run of it, and Esc closes the panel.
+    fn on_list_key(&mut self, ev: KeyEvent) -> PanelAction {
         match ev.code {
-            KeyCode::Esc => return ControlFlow::Break(()),
+            KeyCode::Esc => return PanelAction::Close,
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(self.tasks.len()),
             KeyCode::Enter => self.open_selected(),
             KeyCode::Char(' ') => self.toggle_selected(),
+            KeyCode::Char('r') => self.run_selected(),
             _ => {}
         }
-        ControlFlow::Continue(())
+        PanelAction::Stay
+    }
+
+    fn run_selected(&mut self) {
+        if let ListRow::Task(index) = self.selected_row() {
+            let task = self.tasks[index].id;
+            self.outbox
+                .send(PendingOp::RunNow, |id| Request::TaskRun { id, task });
+        }
+    }
+
+    fn change_queue(&mut self, op: TaskQueueOp) {
+        self.outbox
+            .send(PendingOp::QueueChange, |id| Request::TaskQueue { id, op });
+    }
+
+    /// List the runs of the task selected in the task list, or show none when the new-task
+    /// row is selected.
+    fn request_runs(&mut self) {
+        let ListRow::Task(index) = self.selected_row() else {
+            self.runs.clear();
+            return;
+        };
+        let task = self.tasks[index].id;
+        let request = self
+            .outbox
+            .send(PendingOp::Runs, |id| Request::TaskRuns { id, task });
+        self.runs.listing(task, request);
+    }
+
+    /// Select the task `by` places along the task list and list its runs.
+    fn step_runs_task(&mut self, by: isize) {
+        let Some(last) = self.tasks.len().checked_sub(1) else {
+            return;
+        };
+        let at = self.selected.min(last);
+        self.selected = at.saturating_add_signed(by).min(last);
+        if self.selected != at || self.runs.task().is_none() {
+            self.request_runs();
+        }
     }
 
     fn open_selected(&mut self) {
@@ -268,6 +443,10 @@ impl TasksPanel {
                 },
             ),
             Event::TriggerFires { fires, .. } => self.record_check(&id, TriggerCheck::Fires(fires)),
+            Event::TaskRunRecord { record, .. } => self.runs.push(&id, record),
+            Event::TaskRunQueued { run, .. } => {
+                self.message = Some(Message::Info(format!("queued run {run}")));
+            }
             Event::TaskRefined {
                 prompt,
                 plan,
@@ -293,9 +472,15 @@ impl TasksPanel {
     }
 
     fn on_task(&mut self, op: PendingOp, task: ListedTask) {
-        if op == PendingOp::List {
-            self.listing.push(task);
-            return;
+        match op {
+            PendingOp::List => {
+                self.listing.push(task);
+                return;
+            }
+            PendingOp::Confirm => {
+                self.message = Some(Message::Info("host allowed for the task".into()));
+            }
+            _ => {}
         }
         if let Some(editor) = self.editor.as_mut() {
             if op == PendingOp::Save && editor.task().is_none_or(|editing| editing == task.id) {
@@ -329,6 +514,9 @@ impl TasksPanel {
                 self.tasks = std::mem::take(&mut self.listing);
                 self.loaded = true;
                 self.selected = self.selected.min(self.tasks.len());
+                if self.tab == PanelTab::Runs {
+                    self.request_runs();
+                }
             }
             PendingOp::Save => {
                 if self
@@ -345,10 +533,14 @@ impl TasksPanel {
                 self.selected = self.selected.min(self.tasks.len());
                 self.message = Some(Message::Info("deleted".into()));
             }
+            PendingOp::Runs => self.runs.finish(request),
             PendingOp::Update
             | PendingOp::CheckTrigger
             | PendingOp::Refine
-            | PendingOp::Interrupt => {}
+            | PendingOp::Interrupt
+            | PendingOp::RunNow
+            | PendingOp::QueueChange
+            | PendingOp::Confirm => {}
         }
     }
 
@@ -369,7 +561,16 @@ impl TasksPanel {
                 self.listing.clear();
                 self.message = Some(Message::Error(message));
             }
-            PendingOp::Update | PendingOp::Delete(_) | PendingOp::Interrupt => {
+            PendingOp::Runs => {
+                self.runs.fail(request);
+                self.message = Some(Message::Error(message));
+            }
+            PendingOp::Update
+            | PendingOp::Delete(_)
+            | PendingOp::Interrupt
+            | PendingOp::RunNow
+            | PendingOp::QueueChange
+            | PendingOp::Confirm => {
                 self.message = Some(Message::Error(message));
             }
         }

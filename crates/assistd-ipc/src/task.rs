@@ -8,7 +8,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::PermissionMode;
+use crate::{ConfirmSource, PermissionMode};
 
 /// Longest task name accepted, in characters.
 pub const MAX_TASK_NAME_CHARS: usize = 80;
@@ -24,6 +24,9 @@ pub const DEFAULT_PATH_DEBOUNCE_SECS: u32 = 2;
 
 /// Longest host name accepted, in bytes.
 pub const MAX_HOST_NAME_BYTES: usize = 253;
+
+/// Most runs a `TaskRuns` lists.
+pub const MAX_LISTED_RUNS: u32 = 50;
 
 /// A saved task's row id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -367,6 +370,44 @@ pub enum TaskRunState {
     Cancelled,
 }
 
+/// One run of a task as its run history lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRunRecord {
+    pub run: TaskRunId,
+    /// What started it.
+    pub trigger: TaskTrigger,
+    pub state: TaskRunState,
+    pub queued_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    /// The final reply; set only on a run that succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+    /// The transcript session the run holds, set once it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// The confirmation a run that needs input waits on, answered with
+/// [`crate::Request::TaskConfirm`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PausedPrompt {
+    pub confirm_id: String,
+    pub tool: String,
+    pub script: String,
+    /// Why confirmation is needed, for display.
+    pub matched_pattern: String,
+    /// The web host an "always" answer adds to the task's allowed hosts; `None` when the
+    /// prompt offers no such answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostName>,
+    /// Which agent of the run asked.
+    #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
+    pub source: ConfirmSource,
+}
+
 /// The task run a transcript session holds, as listed beside the session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRunSummary {
@@ -427,6 +468,10 @@ pub enum QueueItem {
         task: TaskId,
         task_name: TaskName,
         state: TaskRunState,
+        /// The confirmation it waits on; set exactly while `state` is
+        /// [`TaskRunState::NeedsInput`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<PausedPrompt>,
     },
     /// A user message waiting its turn behind the queue, by its query's request id.
     UserTurn { id: String, preview: String },

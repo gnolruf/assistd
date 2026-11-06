@@ -272,6 +272,34 @@ impl AppState {
             Request::Subscribe { id, filter } => {
                 replied(self.handle_subscribe(id, filter, tx)).await
             }
+            task @ (Request::TaskList { .. }
+            | Request::TaskGet { .. }
+            | Request::TaskSave { .. }
+            | Request::TaskDelete { .. }
+            | Request::TaskSetEnabled { .. }
+            | Request::TaskRun { .. }
+            | Request::TaskCancel { .. }
+            | Request::TaskQueue { .. }
+            | Request::TaskConfirm { .. }
+            | Request::TaskRuns { .. }
+            | Request::TaskRefine { .. }
+            | Request::TaskCheckTrigger { .. }) => self.dispatch_task_request(task, tx).await,
+            Request::ConfirmResponse { id, confirm_id, .. } => {
+                replied(send_error(&tx, id, unmatched_confirm_response(&confirm_id))).await
+            }
+            Request::SetPermissionMode { id, .. } => {
+                replied(send_error(&tx, id, PERMISSION_MODE_OFF_QUERY.into())).await
+            }
+        }
+    }
+
+    /// Dispatch one of the `Task*` requests.
+    async fn dispatch_task_request(
+        self: Arc<Self>,
+        req: Request,
+        tx: mpsc::Sender<Event>,
+    ) -> Result<(), DispatchError> {
+        match req {
             Request::TaskList { id } => self.handle_task_list(id, tx).await,
             Request::TaskGet { id, task } => self.handle_task_get(id, task, tx).await,
             Request::TaskSave { id, task, spec } => self.handle_task_save(id, task, spec, tx).await,
@@ -287,7 +315,13 @@ impl AppState {
                 run,
                 confirm_id,
                 allow,
-            } => replied(self.handle_task_confirm(id, run, confirm_id, allow, tx)).await,
+                always,
+            } => {
+                let approval = task_confirms::approval(allow, always);
+                self.handle_task_confirm(id, run, confirm_id, approval, tx)
+                    .await
+            }
+            Request::TaskRuns { id, task } => self.handle_task_runs(id, task, tx).await,
             Request::TaskRefine {
                 id,
                 prompt,
@@ -306,12 +340,7 @@ impl AppState {
             Request::TaskCheckTrigger { id, task, trigger } => {
                 self.handle_task_check_trigger(id, task, trigger, tx).await
             }
-            Request::ConfirmResponse { id, confirm_id, .. } => {
-                replied(send_error(&tx, id, unmatched_confirm_response(&confirm_id))).await
-            }
-            Request::SetPermissionMode { id, .. } => {
-                replied(send_error(&tx, id, PERMISSION_MODE_OFF_QUERY.into())).await
-            }
+            other => unreachable!("{} is not a task request", other.kind()),
         }
     }
 }

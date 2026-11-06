@@ -8,7 +8,7 @@ use tokio::sync::{Notify, watch};
 
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
-    Component, ComponentReadiness, EventKind, ImageAttachment, ImageMime, ListenPhase,
+    Component, ComponentReadiness, EventKind, HostName, ImageAttachment, ImageMime, ListenPhase,
     PresenceState, PresenceTarget, QueueItem, StartupComponent, StatusKind, StatusSeverity,
     SubscribeFilter, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
@@ -2342,6 +2342,7 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
             run,
             confirm_id,
             allow: true,
+            always: false,
         },
     )
     .await;
@@ -2366,4 +2367,73 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
         "the parked fetch outlived the tool deadline: {results:?}"
     );
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
+}
+
+#[tokio::test]
+async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_asking() {
+    let fetch = || {
+        StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c".into(),
+            name: "fetch".into(),
+            arguments: serde_json::json!({ "host": "new.example" }),
+        }])
+    };
+    let task_conversation = ToolCallBackend::new("", "done.", vec![fetch(), fetch()]);
+    let mut tools = ToolRegistry::new();
+    tools.register(FetchTool);
+    let backend = MainConversation::new(task_conversation);
+    let (state, _conv, _branch, task) =
+        task_state_with(Config::default(), backend, Arc::new(tools)).await;
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun, EventKind::TaskQueue],
+    });
+
+    let run = queue_task_run(&state, task).await;
+    let prompt = loop {
+        if let Event::TaskQueue { snapshot, .. } = bus.recv().await.unwrap()
+            && let Some(prompt) = snapshot.items.into_iter().find_map(|item| match item {
+                QueueItem::Run { prompt, .. } => prompt,
+                QueueItem::UserTurn { .. } => None,
+            })
+        {
+            break prompt;
+        }
+    };
+    assert_eq!(
+        prompt.host.as_ref().map(HostName::as_str),
+        Some("new.example")
+    );
+
+    let (res, events) = dispatch(
+        &state,
+        Request::TaskConfirm {
+            id: "a".into(),
+            run,
+            confirm_id: prompt.confirm_id.clone(),
+            allow: true,
+            always: true,
+        },
+    )
+    .await;
+    res.unwrap();
+    let [Event::Task { spec, .. }, Event::Done { .. }] = events.as_slice() else {
+        panic!("unexpected events: {events:?}");
+    };
+    assert_eq!(spec.allowed_hosts, [prompt.host.clone().unwrap()]);
+    let mut fetched = 0;
+    while fetched < 2 {
+        let Event::TaskRun { event, .. } = bus.recv().await.unwrap() else {
+            continue;
+        };
+        match *event {
+            Event::ConfirmRequest { confirm_id, .. } if confirm_id != prompt.confirm_id => {
+                panic!("asked again about an allowed host")
+            }
+            Event::ToolResult { .. } => fetched += 1,
+            _ => {}
+        }
+    }
+    settle_task_runs(&state).await;
+    let stored = state.memory.tasks.get(task).await.unwrap().spec;
+    assert_eq!(stored.allowed_hosts, [prompt.host.unwrap()]);
 }

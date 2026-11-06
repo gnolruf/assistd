@@ -8,8 +8,8 @@ use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, oneshot, watch};
 
 use assistd_ipc::{
-    ConversationHold, LaneHolder, QueueItem, SuspendReason, TaskId, TaskQueueSnapshot, TaskRunId,
-    TaskRunState,
+    ConversationHold, LaneHolder, PausedPrompt, QueueItem, SuspendReason, TaskId,
+    TaskQueueSnapshot, TaskRunId, TaskRunState,
 };
 use assistd_memory::{MemoryError, TaskRecord};
 
@@ -159,7 +159,7 @@ impl TaskQueue {
                     state.running.push(queued.clone());
                     spawn(queued, lease);
                 }
-                RunStage::Resuming | RunStage::NeedsInput => {
+                RunStage::Resuming | RunStage::NeedsInput(_) => {
                     queued.stage = RunStage::Active;
                     state.running.push(queued);
                     if let Some(handoff) = self.handoffs.lock().remove(&run) {
@@ -180,13 +180,13 @@ impl TaskQueue {
         });
     }
 
-    /// Show running run `run` as paused on a confirmation nobody has answered yet.
-    pub(in crate::state) fn mark_needs_input(&self, run: TaskRunId) {
+    /// Show running run `run` as paused on `prompt`, which nobody has answered yet.
+    pub(in crate::state) fn mark_needs_input(&self, run: TaskRunId, prompt: PausedPrompt) {
         self.state.send_if_modified(|state| {
             let Some(queued) = state.running.iter_mut().find(|queued| queued.run == run) else {
                 return false;
             };
-            queued.stage = RunStage::NeedsInput;
+            queued.stage = RunStage::NeedsInput(Box::new(prompt));
             true
         });
     }
@@ -334,17 +334,20 @@ impl TaskQueue {
         held: Option<ConversationHold>,
     ) -> TaskQueueSnapshot {
         let state = self.state.borrow();
-        let running = state.running.iter().map(|queued| {
-            queued.item(match queued.stage {
-                RunStage::NeedsInput => TaskRunState::NeedsInput,
-                RunStage::Active | RunStage::Resuming => TaskRunState::Running,
-            })
+        let running = state.running.iter().map(|queued| match &queued.stage {
+            RunStage::NeedsInput(prompt) => {
+                queued.item(TaskRunState::NeedsInput, Some(PausedPrompt::clone(prompt)))
+            }
+            RunStage::Active | RunStage::Resuming => queued.item(TaskRunState::Running, None),
         });
         let waiting = state.waiting.iter().map(|waiting| match waiting {
-            Waiting::Run(queued) => queued.item(match queued.suspended {
-                Some(reason) => TaskRunState::Suspended { reason },
-                None => TaskRunState::Queued,
-            }),
+            Waiting::Run(queued) => {
+                let state = match queued.suspended {
+                    Some(reason) => TaskRunState::Suspended { reason },
+                    None => TaskRunState::Queued,
+                };
+                queued.item(state, None)
+            }
             Waiting::Turn(turn) => QueueItem::UserTurn {
                 id: turn.id.clone(),
                 preview: turn.preview.clone(),
@@ -426,23 +429,24 @@ pub(in crate::state) struct QueuedRun {
 }
 
 /// How far a run has got through its turn, which it may pause partway.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RunStage {
     /// Waiting to start, or running unpaused.
     Active,
-    /// Paused on a confirmation nobody has answered, its lane given up.
-    NeedsInput,
+    /// Paused on this confirmation, which nobody has answered, its lane given up.
+    NeedsInput(Box<PausedPrompt>),
     /// Answered, and waiting for a lane to carry on its turn.
     Resuming,
 }
 
 impl QueuedRun {
-    fn item(&self, state: TaskRunState) -> QueueItem {
+    fn item(&self, state: TaskRunState, prompt: Option<PausedPrompt>) -> QueueItem {
         QueueItem::Run {
             run: self.run,
             task: self.task.id,
             task_name: self.task.spec.name.clone(),
             state,
+            prompt,
         }
     }
 }

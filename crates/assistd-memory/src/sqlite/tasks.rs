@@ -10,7 +10,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use assistd_ipc::{
-    PermissionMode, SuspendReason, TaskId, TaskRunId, TaskRunState, TaskSpec, TaskTrigger,
+    PermissionMode, SuspendReason, TaskId, TaskRunId, TaskRunRecord, TaskRunState, TaskSpec,
+    TaskTrigger,
 };
 
 use crate::{
@@ -18,9 +19,12 @@ use crate::{
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
-use super::timestamp::{now_millis, optional_timestamp_at};
+use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
 
 const TASK_COLUMNS: &str = "id, name, prompt, triggers, enabled, mode, allowed_hosts, next_fire_at";
+
+const RUN_RECORD_COLUMNS: &str = "id, trigger, state, suspend_reason, failure, queued_at, \
+     started_at, ended_at, reply, session_uuid";
 
 const MODE_MANUAL: i64 = 0;
 const MODE_ACCEPT_EDITS: i64 = 1;
@@ -377,6 +381,45 @@ impl TaskStore for SqliteTaskStore {
             .await
             .map_err(MemoryError::sqlite("task last_finished_runs"))
     }
+
+    async fn runs(&self, task: TaskId, limit: u32) -> Result<Vec<TaskRunRecord>> {
+        let runs = self
+            .handle
+            .reader()
+            .call(move |c| -> rusqlite::Result<_> {
+                let exists = c
+                    .query_row("SELECT 1 FROM tasks WHERE id = ?1", [task.0], |_| Ok(()))
+                    .optional()?;
+                if exists.is_none() {
+                    return Ok(None);
+                }
+                let mut stmt = c.prepare_cached(&format!(
+                    "SELECT {RUN_RECORD_COLUMNS} FROM task_runs WHERE task_id = ?1
+                     ORDER BY id DESC LIMIT ?2"
+                ))?;
+                let rows = stmt
+                    .query_map(rusqlite::params![task.0, limit], run_record)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(Some(rows))
+            })
+            .await
+            .map_err(MemoryError::sqlite("task runs"))?;
+        runs.ok_or(MemoryError::TaskNotFound(task))
+    }
+}
+
+/// A `task_runs` row selected as [`RUN_RECORD_COLUMNS`].
+fn run_record(row: &Row<'_>) -> rusqlite::Result<TaskRunRecord> {
+    Ok(TaskRunRecord {
+        run: TaskRunId(row.get(0)?),
+        trigger: json_at(row, 1)?,
+        state: run_state_at(row, 2)?,
+        queued_at: timestamp_at(row, 5)?,
+        started_at: optional_timestamp_at(row, 6)?,
+        ended_at: optional_timestamp_at(row, 7)?,
+        reply: row.get(8)?,
+        session_id: row.get(9)?,
+    })
 }
 
 /// The run state stored in columns `idx` (state code), `idx + 1` (suspend reason) and

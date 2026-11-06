@@ -403,10 +403,14 @@ mode approves but a run does once when the host is one of the task's
 logged on `assistd::policy`, and never reaches the allowlist or the
 `approved_*.toml` files. Anything else is parked: the run turns `NeedsInput`,
 gives up its lane and request guard (on lane 0 its slot state stays in the
-stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`. The
-tool deadline stops while a prompt is parked. `Request::TaskConfirm` answers it
-for that prompt alone, and the run waits first in the queue for a lane, moving
-its conversation to that lane's slot. The task's prompt is the only instruction a
+stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`; the
+queue snapshot carries it too, as the run's `PausedPrompt`, so a client that
+subscribes later can still answer it. The tool deadline stops while a prompt is
+parked. `Request::TaskConfirm` answers it for that prompt alone, except that
+`always` on a host fetch adds the host to the task's `allowed_hosts`, for the
+rest of the run and later ones; the run then waits first in the queue for a lane,
+moving its conversation to that lane's slot. `Request::TaskRuns` lists a task's
+latest runs with their trigger, times, final reply and session. The task's prompt is the only instruction a
 run gets; no plan is stored on the task.
 
 With one lane, a user message that finds a run on it follows
@@ -478,7 +482,12 @@ editor saves the name, prompt, mode (Auto only when the daemon offers it),
 allowed hosts, triggers and enabled flag. Ctrl+R in the prompt box refines its
 text under the editor's mode and hosts without drawing the planning turn; Esc
 cancels it. The rewrite replaces the box's text, unapplied, with the
-recommended mode and a brief reason on a line below.
+recommended mode and a brief reason on a line below. `r` on a task queues a
+manual run. The Queue tab draws the broadcast `TaskQueue` and reorders, cancels
+and pauses it through `Request::TaskQueue`; Enter on a run needing input opens
+its prompt in the chat's confirmation dialog, answered with `TaskConfirm`. The
+Runs tab lists the selected task's runs, and Enter switches to a run's session
+as `/resume` does.
 
 ### Tools (`assistd-tools`)
 
