@@ -61,7 +61,7 @@ objdump -d /usr/bin/assistd | grep -cE '%zmm[0-9]+' # AVX-512 absent (should be 
 1. Merge a PR that bumps `version` in the root `Cargo.toml` (and
    `Cargo.lock`). Leave `dist/aur/assistd/` alone.
 2. Tag the merge commit and push the tag:
-   `git tag -a v1.2.0 -m v1.2.0 && git push origin v1.2.0`.
+   `git tag -a v0.6.0 -m v0.6.0 && git push origin v0.6.0`.
 3. The tag push starts the **AUR release** workflow. It stamps
    `pkgver`, fills in the checksum, regenerates `.SRCINFO`, test-builds
    the package in an Arch container and pushes it to the AUR after
