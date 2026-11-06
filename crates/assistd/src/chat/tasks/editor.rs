@@ -49,14 +49,23 @@ pub(in crate::chat) enum EditorMode {
     Prompt(PromptBox),
     Hosts(ListEditor),
     Trigger(Box<TriggerForm>),
-    /// Asking whether to drop unsaved changes.
-    Discard,
+    /// Leaving with unsaved changes: asking whether to save or drop them.
+    Unsaved,
+    /// Leaving once the `TaskSave` with this request id is done.
+    SavingToClose {
+        request: String,
+    },
+    /// Asking whether to delete the saved task.
+    ConfirmDelete,
+    /// Asking whether to remove the trigger in this row of the triggers.
+    ConfirmRemoveTrigger(usize),
 }
 
 /// What an editor key asks of the panel.
 pub(super) enum EditorAction {
     Stay,
     Close,
+    Delete(TaskId),
 }
 
 /// A task as edited.
@@ -205,8 +214,21 @@ impl TaskEditor {
         self.stored = Some(spec);
     }
 
+    /// Show why a save failed, staying open if it was to close the editor.
     pub(super) fn set_error(&mut self, message: String) {
+        self.leave_saving();
         self.error = Some(message);
+    }
+
+    /// Whether the editor closes once save `request` is done.
+    pub(super) fn closes_after(&self, request: &str) -> bool {
+        matches!(&self.mode, EditorMode::SavingToClose { request: pending } if pending == request)
+    }
+
+    fn leave_saving(&mut self) {
+        if matches!(self.mode, EditorMode::SavingToClose { .. }) {
+            self.mode = EditorMode::Browse;
+        }
     }
 
     /// Record the daemon's answer to the trigger check sent as `request`.
@@ -266,8 +288,9 @@ impl TaskEditor {
         }
     }
 
-    /// Stop waiting on a refine whose answer was lost with the connection.
-    pub(super) fn abandon_refine(&mut self) {
+    /// Stop waiting on a refine or save whose answer was lost with the connection.
+    pub(super) fn on_connection_lost(&mut self) {
+        self.leave_saving();
         if let Some(prompt) = self.prompt_box() {
             prompt.abandon_refine();
         }
@@ -342,30 +365,74 @@ impl TaskEditor {
                 FormAction::Cancel => self.mode = EditorMode::Browse,
                 FormAction::Pending => {}
             },
-            EditorMode::Discard => {
-                self.mode = EditorMode::Browse;
-                if matches!(ev.code, KeyCode::Char('y') | KeyCode::Enter) {
-                    return EditorAction::Close;
+            EditorMode::Unsaved => return self.on_unsaved_key(ev, outbox),
+            EditorMode::SavingToClose { .. } => {
+                if ev.code == KeyCode::Esc {
+                    self.mode = EditorMode::Browse;
+                }
+            }
+            EditorMode::ConfirmDelete => {
+                if let Some(confirmed) = confirmation(ev) {
+                    self.mode = EditorMode::Browse;
+                    if let Some(task) = self.task.filter(|_| confirmed) {
+                        return EditorAction::Delete(task);
+                    }
+                }
+            }
+            EditorMode::ConfirmRemoveTrigger(index) => {
+                let index = *index;
+                if let Some(confirmed) = confirmation(ev) {
+                    self.mode = EditorMode::Browse;
+                    if confirmed {
+                        self.triggers.remove(index);
+                    }
                 }
             }
         }
         EditorAction::Stay
     }
 
-    /// ↑/↓ move, Enter or Space opens the row, ←/→ change the mode, Delete drops a trigger, Ctrl+S saves and Esc leaves, asking first when something is unsaved.
+    /// Enter saves then closes, `d` closes without saving, Esc keeps editing.
+    fn on_unsaved_key(&mut self, ev: KeyEvent, outbox: &mut Outbox) -> EditorAction {
+        match ev.code {
+            KeyCode::Enter => {
+                self.mode = match self.save(outbox) {
+                    Some(request) => EditorMode::SavingToClose { request },
+                    None => EditorMode::Browse,
+                };
+            }
+            KeyCode::Char('d') => return EditorAction::Close,
+            KeyCode::Esc => self.mode = EditorMode::Browse,
+            _ => {}
+        }
+        EditorAction::Stay
+    }
+
+    /// ↑/↓ move, Enter or Space opens the row, ←/→ change the mode, Delete or Backspace
+    /// removes a trigger and Ctrl+D deletes the saved task, each after asking, Ctrl+S saves,
+    /// and Esc leaves, asking first when something is unsaved.
     fn on_browse_key(&mut self, ev: KeyEvent, outbox: &mut Outbox) -> EditorAction {
         let control = ev.modifiers.contains(KeyModifiers::CONTROL);
         match ev.code {
-            KeyCode::Char('s') if control => self.save(outbox),
+            KeyCode::Char('s') if control => {
+                self.save(outbox);
+            }
+            KeyCode::Char('d') if control && self.task.is_some() => {
+                self.mode = EditorMode::ConfirmDelete;
+            }
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(self.rows().len() - 1),
-            KeyCode::Esc if self.is_modified() => self.mode = EditorMode::Discard,
+            KeyCode::Esc if self.is_modified() => self.mode = EditorMode::Unsaved,
             KeyCode::Esc => return EditorAction::Close,
             KeyCode::Left | KeyCode::Right if self.selected_row() == EditorRow::Mode => {
                 self.cycle_permission(ev.code == KeyCode::Right);
             }
             KeyCode::Enter | KeyCode::Char(' ') => return self.open_row(),
-            KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('d') => self.remove_selected(),
+            KeyCode::Delete | KeyCode::Backspace => {
+                if let EditorRow::Trigger(index) = self.selected_row() {
+                    self.mode = EditorMode::ConfirmRemoveTrigger(index);
+                }
+            }
             _ => {}
         }
         EditorAction::Stay
@@ -379,7 +446,7 @@ impl TaskEditor {
             EditorRow::Prompt => {
                 self.mode = EditorMode::Prompt(PromptBox::new(self.prompt.clone()));
             }
-            EditorRow::Mode => self.cycle_permission(true),
+            EditorRow::Mode => {}
             EditorRow::Hosts => self.mode = EditorMode::Hosts(ListEditor::new(ListItem::Text)),
             EditorRow::Enabled => self.enabled = !self.enabled,
             EditorRow::Trigger(index) => {
@@ -407,12 +474,6 @@ impl TaskEditor {
             (index + modes.len() - 1) % modes.len()
         };
         self.permission = modes[next];
-    }
-
-    fn remove_selected(&mut self) {
-        if let EditorRow::Trigger(index) = self.selected_row() {
-            self.triggers.remove(index);
-        }
     }
 
     /// The allowed hosts as the list box's entries.
@@ -477,14 +538,19 @@ impl TaskEditor {
         }
     }
 
-    fn save(&mut self, outbox: &mut Outbox) {
+    /// Send the edited task to be saved, returning the request id; `None`, with the error
+    /// shown, when the fields make no task.
+    fn save(&mut self, outbox: &mut Outbox) -> Option<String> {
         match self.draft_spec() {
             Ok(spec) => {
                 self.error = None;
                 let task = self.task;
-                outbox.send(PendingOp::Save, |id| Request::TaskSave { id, task, spec });
+                Some(outbox.send(PendingOp::Save, |id| Request::TaskSave { id, task, spec }))
             }
-            Err(message) => self.error = Some(message),
+            Err(message) => {
+                self.error = Some(message);
+                None
+            }
         }
     }
 
@@ -504,6 +570,15 @@ impl TaskEditor {
             mode: self.permission,
             allowed_hosts: self.hosts.clone(),
         })
+    }
+}
+
+/// `Some(true)` for Enter, `Some(false)` for Esc, and `None` for any other key.
+fn confirmation(ev: KeyEvent) -> Option<bool> {
+    match ev.code {
+        KeyCode::Enter => Some(true),
+        KeyCode::Esc => Some(false),
+        _ => None,
     }
 }
 

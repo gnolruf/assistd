@@ -57,6 +57,13 @@ impl Outbox {
     }
 }
 
+/// One row of the task list: a task, or the row that makes a new one after them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ListRow {
+    Task(usize),
+    NewTask,
+}
+
 /// A line under the panel saying how the last step went.
 pub(super) enum Message {
     Info(String),
@@ -69,10 +76,8 @@ pub(super) struct TasksPanel {
     /// Rows of the `TaskList` in flight.
     listing: Vec<ListedTask>,
     loaded: bool,
-    /// Index into `tasks`.
+    /// Index into the list rows: the tasks, then the new-task row.
     selected: usize,
-    /// The selected task is about to be deleted unless the next key says no.
-    confirm_delete: bool,
     editor: Option<TaskEditor>,
     outbox: Outbox,
     message: Option<Message>,
@@ -89,7 +94,6 @@ impl TasksPanel {
             listing: Vec::new(),
             loaded: false,
             selected: 0,
-            confirm_delete: false,
             editor: None,
             outbox: Outbox::default(),
             message: None,
@@ -109,12 +113,12 @@ impl TasksPanel {
         self.loaded
     }
 
-    pub(super) fn selected(&self) -> usize {
-        self.selected
-    }
-
-    pub(super) fn confirm_delete(&self) -> bool {
-        self.confirm_delete
+    pub(super) fn selected_row(&self) -> ListRow {
+        if self.selected < self.tasks.len() {
+            ListRow::Task(self.selected)
+        } else {
+            ListRow::NewTask
+        }
     }
 
     pub(super) fn editor(&self) -> Option<&TaskEditor> {
@@ -176,42 +180,35 @@ impl TasksPanel {
         ControlFlow::Continue(())
     }
 
-    /// ↑/↓ select, Enter edits, `n` makes a task, Space turns it on or off, `d` deletes
-    /// after a `y`, and Esc closes the panel.
+    /// ↑/↓ select, Enter opens the task or makes a new one, Space turns the task on or off,
+    /// and Esc closes the panel.
     fn on_list_key(&mut self, ev: KeyEvent) -> ControlFlow<()> {
-        if std::mem::take(&mut self.confirm_delete) {
-            if matches!(ev.code, KeyCode::Char('y')) {
-                self.delete_selected();
-            }
-            return ControlFlow::Continue(());
-        }
         match ev.code {
             KeyCode::Esc => return ControlFlow::Break(()),
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.tasks.len().saturating_sub(1));
-            }
-            KeyCode::Char('n') => self.editor = Some(TaskEditor::new_task(self.auto_offered)),
-            KeyCode::Enter => self.edit_selected(),
+            KeyCode::Down => self.selected = (self.selected + 1).min(self.tasks.len()),
+            KeyCode::Enter => self.open_selected(),
             KeyCode::Char(' ') => self.toggle_selected(),
-            KeyCode::Char('d') | KeyCode::Delete if !self.tasks.is_empty() => {
-                self.confirm_delete = true;
-            }
             _ => {}
         }
         ControlFlow::Continue(())
     }
 
-    fn edit_selected(&mut self) {
-        if let Some(task) = self.tasks.get(self.selected) {
-            let spec = task.spec.clone();
-            let editor = TaskEditor::existing(task.id, spec, self.auto_offered, &mut self.outbox);
-            self.editor = Some(editor);
-        }
+    fn open_selected(&mut self) {
+        let editor = match self.selected_row() {
+            ListRow::NewTask => TaskEditor::new_task(self.auto_offered),
+            ListRow::Task(index) => {
+                let task = &self.tasks[index];
+                let spec = task.spec.clone();
+                TaskEditor::existing(task.id, spec, self.auto_offered, &mut self.outbox)
+            }
+        };
+        self.editor = Some(editor);
     }
 
     fn toggle_selected(&mut self) {
-        if let Some(task) = self.tasks.get(self.selected) {
+        if let ListRow::Task(index) = self.selected_row() {
+            let task = &self.tasks[index];
             let (task, enabled) = (task.id, !task.spec.enabled);
             self.outbox
                 .send(PendingOp::Update, |id| Request::TaskSetEnabled {
@@ -222,14 +219,12 @@ impl TasksPanel {
         }
     }
 
-    fn delete_selected(&mut self) {
-        if let Some(task) = self.tasks.get(self.selected).map(|task| task.id) {
-            self.outbox
-                .send(PendingOp::Delete(task), |id| Request::TaskDelete {
-                    id,
-                    task,
-                });
-        }
+    fn delete(&mut self, task: TaskId) {
+        self.outbox
+            .send(PendingOp::Delete(task), |id| Request::TaskDelete {
+                id,
+                task,
+            });
     }
 
     fn on_editor_key(&mut self, ev: KeyEvent) {
@@ -240,6 +235,10 @@ impl TasksPanel {
         match editor.on_key(ev, &upstreams, &mut self.outbox) {
             EditorAction::Stay => {}
             EditorAction::Close => self.editor = None,
+            EditorAction::Delete(task) => {
+                self.editor = None;
+                self.delete(task);
+            }
         }
     }
 
@@ -279,7 +278,7 @@ impl TasksPanel {
                     editor.on_refined(&id, prompt, (&plan, &recommended));
                 }
             }
-            Event::Done { .. } => self.on_done(op),
+            Event::Done { .. } => self.on_done(op, &id),
             Event::Error { message, .. } => self.on_error(op, &id, message),
             _ => {}
         }
@@ -288,7 +287,7 @@ impl TasksPanel {
     /// The connection of a request failed without a terminal event.
     pub(super) fn on_connection_lost(&mut self, message: &str) {
         if let Some(editor) = self.editor.as_mut() {
-            editor.abandon_refine();
+            editor.on_connection_lost();
         }
         self.message = Some(Message::Error(message.to_string()));
     }
@@ -323,17 +322,27 @@ impl TasksPanel {
         }
     }
 
-    fn on_done(&mut self, op: PendingOp) {
+    /// Finish `op`, sent as `request`; a save the editor was leaving after closes it.
+    fn on_done(&mut self, op: PendingOp, request: &str) {
         match op {
             PendingOp::List => {
                 self.tasks = std::mem::take(&mut self.listing);
                 self.loaded = true;
-                self.selected = self.selected.min(self.tasks.len().saturating_sub(1));
+                self.selected = self.selected.min(self.tasks.len());
             }
-            PendingOp::Save => self.message = Some(Message::Info("saved".into())),
+            PendingOp::Save => {
+                if self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.closes_after(request))
+                {
+                    self.editor = None;
+                }
+                self.message = Some(Message::Info("saved".into()));
+            }
             PendingOp::Delete(task) => {
                 self.tasks.retain(|listed| listed.id != task);
-                self.selected = self.selected.min(self.tasks.len().saturating_sub(1));
+                self.selected = self.selected.min(self.tasks.len());
                 self.message = Some(Message::Info("deleted".into()));
             }
             PendingOp::Update

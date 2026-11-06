@@ -1,5 +1,7 @@
 //! The `/tasks` panel: the task list, and the editor with its trigger form and prompt box.
 
+use std::borrow::Cow;
+
 use assistd_ipc::{
     FinishOutcome, HostName, MissedFire, PermissionMode, TaskEvent, TaskId, TaskTrigger,
 };
@@ -12,14 +14,14 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 
 use super::super::settings::{TextEditor, list_hint, render_list_editor};
 use super::super::tasks::{
-    AT_FORMAT, EditorMode, EditorRow, ListedTask, Message, RefineNote, TaskEditor, TasksPanel,
-    TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
+    AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, RefineNote, TaskEditor,
+    TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
 };
 use super::super::theme::Theme;
 use super::{locate_cursor, picker_scroll_start, render_rule, run_outcome, wrap_input};
 use crate::client::terminal_text::escape_controls_single_line;
 
-/// Rows each listed task takes: its name and its details.
+/// Rows each list entry takes: a task's name and its details, or the new-task row and a gap.
 const TASK_ENTRY_ROWS: usize = 2;
 const DETAIL_INDENT: &str = "    ";
 const POINTER: &str = "❯ ";
@@ -30,14 +32,15 @@ const LABEL_WIDTH: usize = 14;
 const BOX_ROWS: u16 = 10;
 const FIRE_FORMAT: &str = "%a %m-%d %H:%M";
 const NEXT_FIRE_FORMAT: &str = "%Y-%m-%d %H:%M";
-const LIST_HINT: &str = "↑/↓ select · Enter edit · n new · Space on/off · d delete · Esc close";
-const DELETE_HINT: &str = "y delete · any other key keeps it";
-const EDITOR_HINT: &str =
-    "↑/↓ move · Enter open · ←/→ mode · d remove trigger · ctrl+s save · Esc back";
+const LIST_HINT: &str = "↑/↓ select · Enter open · Space on/off · Esc close";
+const NEW_TASK_HINT: &str = "↑/↓ select · Enter new task · Esc close";
 const FIELD_HINT: &str = "Enter apply · Esc cancel";
 const PROMPT_HINT: &str = "Enter apply · shift+Enter new line · ctrl+r refine · Esc cancel";
 const FORM_HINT: &str = "↑/↓ field · ←/→ choose · Enter apply · Esc cancel";
-const DISCARD_HINT: &str = "y discard changes · any other key keeps editing";
+const UNSAVED_HINT: &str = "Enter save · d discard · Esc keep editing";
+const SAVING_HINT: &str = "saving… · Esc keep editing";
+const DELETE_HINT: &str = "Enter delete · Esc keep";
+const REMOVE_TRIGGER_HINT: &str = "Enter remove · Esc keep";
 /// The refining status at each count of dots, padded so the hint does not shift.
 const REFINING_HINTS: [&str; 4] = [
     "refining    · Esc cancel",
@@ -72,21 +75,40 @@ pub(super) fn render_tasks_panel(
 }
 
 /// The keys that work in the view on top, for the status line.
-pub(super) fn tasks_panel_hint(panel: &TasksPanel) -> &'static str {
-    match panel.editor() {
+pub(super) fn tasks_panel_hint(panel: &TasksPanel) -> Cow<'static, str> {
+    let hint = match panel.editor() {
         Some(editor) => match editor.mode() {
-            EditorMode::Browse => EDITOR_HINT,
+            EditorMode::Browse => return Cow::Owned(browse_hint(editor)),
             EditorMode::Name(_) => FIELD_HINT,
             EditorMode::Hosts(list) => list_hint(list.state()),
             EditorMode::Prompt(prompt) => prompt
                 .refine_dots()
                 .map_or(PROMPT_HINT, |dots| REFINING_HINTS[dots]),
             EditorMode::Trigger(_) => FORM_HINT,
-            EditorMode::Discard => DISCARD_HINT,
+            EditorMode::Unsaved => UNSAVED_HINT,
+            EditorMode::SavingToClose { .. } => SAVING_HINT,
+            EditorMode::ConfirmDelete => DELETE_HINT,
+            EditorMode::ConfirmRemoveTrigger(_) => REMOVE_TRIGGER_HINT,
         },
-        None if panel.confirm_delete() => DELETE_HINT,
+        None if panel.selected_row() == ListRow::NewTask => NEW_TASK_HINT,
         None => LIST_HINT,
-    }
+    };
+    Cow::Borrowed(hint)
+}
+
+/// The editor's keys for the selected row, with Ctrl+D once the task is saved.
+fn browse_hint(editor: &TaskEditor) -> String {
+    let row_keys = match editor.selected_row() {
+        EditorRow::Mode => "←/→ mode",
+        EditorRow::Trigger(_) => "Enter edit · Del remove",
+        _ => "Enter open",
+    };
+    let delete = if editor.task().is_some() {
+        " · ctrl+d delete task"
+    } else {
+        ""
+    };
+    format!("↑/↓ move · {row_keys} · ctrl+s save{delete} · Esc back")
 }
 
 /// `Tasks`, then the edited task's name and the view over it.
@@ -107,52 +129,84 @@ fn title(panel: &TasksPanel) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The editor's open question, else the panel's last message.
 fn render_message(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel, theme: &Theme) {
-    let line = if panel.confirm_delete() {
-        let name = panel
-            .tasks()
-            .get(panel.selected())
-            .map(|task| escape_controls_single_line(task.spec.name.as_str()).into_owned())
-            .unwrap_or_default();
-        Line::styled(
-            format!("Delete {name} and its run history? y to confirm"),
-            Style::default().fg(theme.warning),
-        )
-    } else {
-        match panel.message() {
-            Some(Message::Info(text)) => Line::styled(text.clone(), meta(theme)),
-            Some(Message::Error(text)) => Line::styled(
-                escape_controls_single_line(text).into_owned(),
-                Style::default().fg(theme.error),
-            ),
-            None => Line::raw(""),
-        }
+    let upstreams = panel.upstream_choices();
+    let question = panel
+        .editor()
+        .and_then(|editor| editor_question(editor, &upstreams));
+    let line = match (question, panel.message()) {
+        (Some(question), _) => Line::styled(question, Style::default().fg(theme.warning)),
+        (None, Some(Message::Info(text))) => Line::styled(text.clone(), meta(theme)),
+        (None, Some(Message::Error(text))) => Line::styled(
+            escape_controls_single_line(text).into_owned(),
+            Style::default().fg(theme.error),
+        ),
+        (None, None) => Line::raw(""),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Every task with its triggers, next fire and last run, or a note when there are none.
+/// What the editor is asking before it leaves or removes something, if anything;
+/// `upstreams` name the tasks a trigger may wait on.
+fn editor_question(editor: &TaskEditor, upstreams: &[UpstreamChoice]) -> Option<String> {
+    match editor.mode() {
+        EditorMode::ConfirmRemoveTrigger(index) => {
+            let summary = trigger_summary(
+                &editor.triggers()[*index].trigger,
+                &upstream_name(upstreams),
+            );
+            Some(format!("Remove trigger \"{summary}\"?"))
+        }
+        EditorMode::Unsaved => Some("Save changes before leaving?".into()),
+        EditorMode::ConfirmDelete if editor.name().is_empty() => {
+            Some("Delete this task and its run history?".into())
+        }
+        EditorMode::ConfirmDelete => Some(format!(
+            "Delete {} and its run history?",
+            escape_controls_single_line(editor.name())
+        )),
+        _ => None,
+    }
+}
+
+/// Every task with its triggers, next fire and last run, then the new-task row; a note
+/// stands above that row while there are no tasks.
 fn render_task_list(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel, theme: &Theme) {
     let tasks = panel.tasks();
-    if tasks.is_empty() {
-        let note = if panel.loaded() {
-            "No tasks yet. Press n to make one."
-        } else {
-            "Loading…"
-        };
-        frame.render_widget(Paragraph::new(Span::styled(note, meta(theme))), area);
+    if !panel.loaded() {
+        frame.render_widget(Paragraph::new(Span::styled("Loading…", meta(theme))), area);
         return;
     }
-    let visible = (usize::from(area.height) / TASK_ENTRY_ROWS).max(1);
-    let start = picker_scroll_start(panel.selected(), tasks.len(), visible);
-    let lines: Vec<Line<'static>> = tasks
+    let selected = panel.selected_row();
+    let note = tasks
+        .is_empty()
+        .then(|| Line::styled(format!("{NO_POINTER}No tasks yet."), meta(theme)));
+    let entries = tasks
         .iter()
         .enumerate()
-        .skip(start)
-        .take(visible)
-        .flat_map(|(index, task)| task_entry_rows(task, tasks, index == panel.selected(), theme))
+        .map(|(index, task)| task_entry_rows(task, tasks, selected == ListRow::Task(index), theme))
+        .chain([new_task_rows(selected == ListRow::NewTask, theme)]);
+    let selected_entry = match selected {
+        ListRow::Task(index) => index,
+        ListRow::NewTask => tasks.len(),
+    };
+    let visible = (usize::from(area.height) / TASK_ENTRY_ROWS).max(1);
+    let start = picker_scroll_start(selected_entry, tasks.len() + 1, visible);
+    let lines: Vec<Line<'static>> = note
+        .into_iter()
+        .chain(entries.skip(start).take(visible).flatten())
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn new_task_rows(selected: bool, theme: &Theme) -> [Line<'static>; TASK_ENTRY_ROWS] {
+    let pointer = if selected { POINTER } else { NO_POINTER };
+    let label = Span::styled("+ new task", Style::default().fg(theme.accent));
+    [
+        Line::from(vec![Span::styled(pointer, pointer_style(theme)), label]),
+        Line::raw(""),
+    ]
 }
 
 fn task_entry_rows(
@@ -160,7 +214,7 @@ fn task_entry_rows(
     tasks: &[ListedTask],
     selected: bool,
     theme: &Theme,
-) -> [Line<'static>; 2] {
+) -> [Line<'static>; TASK_ENTRY_ROWS] {
     let (pointer, name_style) = if selected {
         (POINTER, pointer_style(theme))
     } else {
@@ -273,7 +327,12 @@ fn render_editor(
 ) {
     let box_rows = match editor.mode() {
         EditorMode::Prompt(_) | EditorMode::Trigger(_) | EditorMode::Hosts(_) => BOX_ROWS,
-        EditorMode::Browse | EditorMode::Name(_) | EditorMode::Discard => 0,
+        EditorMode::Browse
+        | EditorMode::Name(_)
+        | EditorMode::Unsaved
+        | EditorMode::SavingToClose { .. }
+        | EditorMode::ConfirmDelete
+        | EditorMode::ConfirmRemoveTrigger(_) => 0,
     };
     let note_rows = u16::from(refine_note(editor).is_some());
     let error_rows = u16::from(editor.error().is_some());
@@ -308,7 +367,12 @@ fn render_editor(
             let entries = editor.host_entries();
             render_list_editor(frame, box_area, (list, &entries), "Allowed hosts", theme);
         }
-        EditorMode::Browse | EditorMode::Name(_) | EditorMode::Discard => {}
+        EditorMode::Browse
+        | EditorMode::Name(_)
+        | EditorMode::Unsaved
+        | EditorMode::SavingToClose { .. }
+        | EditorMode::ConfirmDelete
+        | EditorMode::ConfirmRemoveTrigger(_) => {}
     }
 }
 
@@ -496,13 +560,7 @@ fn trigger_row_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let label = if index == 0 { "Triggers" } else { "" };
-    let name_of = |id: TaskId| {
-        upstreams
-            .iter()
-            .find(|choice| choice.id == id)
-            .map(|choice| choice.name.clone())
-    };
-    let summary = trigger_summary(&row.trigger, &name_of);
+    let summary = trigger_summary(&row.trigger, &upstream_name(upstreams));
     let mut lines = vec![labelled(selected, label, Span::raw(summary), theme)];
     let indent = " ".repeat(value_column() + 2);
     let detail = match &row.check {
@@ -522,6 +580,16 @@ fn trigger_row_lines(
     };
     lines.extend(detail.map(|span| Line::from(vec![Span::raw(indent), span])));
     lines
+}
+
+/// Names a task by its id among `upstreams`.
+fn upstream_name(upstreams: &[UpstreamChoice]) -> impl Fn(TaskId) -> Option<String> + '_ {
+    |id| {
+        upstreams
+            .iter()
+            .find(|choice| choice.id == id)
+            .map(|choice| choice.name.clone())
+    }
 }
 
 /// The prompt's first line, and how many more there are.
