@@ -24,12 +24,11 @@ impl App {
         let Some(panel) = self.tasks_panel.as_mut() else {
             return;
         };
-        if panel.on_key(ev).is_break() {
-            self.send_tasks_requests();
-            self.tasks_panel = None;
-            return;
-        }
+        let closed = panel.on_key(ev).is_break();
         self.send_tasks_requests();
+        if closed {
+            self.tasks_panel = None;
+        }
     }
 
     pub(super) fn on_tasks_event(&mut self, ev: Event) {

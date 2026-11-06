@@ -352,10 +352,10 @@ Time triggers are `TaskTrigger::At` (one local datetime) and
 expressions and `At` times already past. `TaskCheckTrigger` runs the same
 checks on one trigger without saving and returns its next three fire times,
 so a client can show them, or the refusal, as the trigger is written.
-`Event::Task` carries how the task's latest finished run ended. The `TaskScheduler`, a second service
-on the `TaskRunner`, sleeps until the nearest fire time across enabled tasks,
-waking early on any task change. Each sleep is capped at a minute and
-compared against the wall clock, since tokio's clock stands still through a
+`Event::Task` carries how the task's latest finished run ended. The
+`TaskScheduler`, a second service on the `TaskRunner`, sleeps until the
+nearest fire time across enabled tasks, waking early on any task change. Each
+sleep is capped at a minute and compared against the wall clock, since tokio's clock stands still through a
 suspend. Each task's next fire time is kept in `tasks.next_fire_at`. The
 scheduler records it in the same write that queues the fired run, so a restart
 neither double-fires nor loses a fire. A schedule whose fire times passed while
@@ -442,9 +442,9 @@ telling the model to describe that step instead. A plan-mode preamble is set
 as the transient note on every step, so it renders at the conversation's
 tail and the system prompt, and its cache, are unchanged. It asks the turn to
 end with only a short list of what it found, since the plan itself is asked
-for next. When the turn answers, `complete_with_schema` holds the reply to a draft of a summary and
-steps, each with actions named by a kind (`program`, `web_host`, `mcp_tool`,
-`app`, `write`) and a target. Each action becomes a `PlannedAction`, and
+for next. When the turn answers, `complete_with_schema` holds the reply to a
+draft of a summary and steps, each with actions named by a kind (`program`,
+`web_host`, `mcp_tool`, `app`, `write`) and a target. Each action becomes a `PlannedAction`, and
 `ActionCheck` flags any that would fail: a program missing from the
 sandbox's `PATH`, a malformed host, an MCP tool no connected server offers,
 an app with no launchable desktop entry, a write directory that is relative
@@ -462,7 +462,10 @@ task-run system prompt, keyed `TaskRefine` in the `SlotStash`. Only the latest
 refine's conversation is kept; a new one ends it. It takes the main lane and
 request guard as a query does, and `InterruptTurn` cancels it; its turn reaches
 the client wrapped in `Event::TaskPlan`, and its result as `Event::TaskRefined`
-with the rewritten `TaskPrompt` and its `Plan`. It saves nothing. With
+with the rewritten `TaskPrompt`, its `Plan` and a `ModeRecommendation`: the
+least permissive mode, Auto only when allowed, under which the fewest of the
+plan's actions would ask, with the actions it covers and those that would still
+ask. It saves nothing. With
 `feedback` it continues the same conversation, so a revision keeps what the
 model already found, quoting back the rewrite the client was shown, which the
 grammar-held request left out of the conversation; it is refused unless the
@@ -472,14 +475,10 @@ In the TUI, `/tasks` opens a panel over these requests alone, since tasks
 live in the daemon's store rather than `config.toml`. It lists each task
 with its triggers, next fire, last outcome and whether it is enabled; its
 editor saves the name, prompt, mode (Auto only when the daemon offers it),
-allowed hosts, triggers and enabled flag. Ctrl+R in the prompt box refines the
-text in it under the editor's mode and hosts, out of view: the status bar shows
-an animated "refining" and the box takes no keys but Esc, which cancels it; the
-planning turn's events are not drawn. The rewrite then replaces the box's text, to edit or apply,
-with a line under the box giving the recommended mode and a brief reason. The
-daemon picks it as the least permissive mode, Auto only when allowed, under which
-the fewest of the plan's actions would ask, and sends it as a `ModeRecommendation`
-with the actions it covers and those that would still ask.
+allowed hosts, triggers and enabled flag. Ctrl+R in the prompt box refines its
+text under the editor's mode and hosts without drawing the planning turn; Esc
+cancels it. The rewrite replaces the box's text, unapplied, with the
+recommended mode and a brief reason on a line below.
 
 ### Tools (`assistd-tools`)
 

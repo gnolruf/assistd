@@ -129,21 +129,19 @@ impl PromptBox {
     }
 
     /// Put the rewrite `prompt` that answered `request` in place of the text, noting the
-    /// `recommended` mode and any problem its `plan` found; `false` when `request` is not the
-    /// refine in flight.
+    /// `recommended` mode and any problem its `plan` found, when `request` is the refine in
+    /// flight.
     pub(super) fn on_refined(
         &mut self,
         request: &str,
         prompt: TaskPrompt,
-        (plan, recommended): (&Plan, &ModeRecommendation),
-    ) -> bool {
-        if !self.refines(request) {
-            return false;
+        plan: &Plan,
+        recommended: &ModeRecommendation,
+    ) {
+        if self.on_refine_ended(request) {
+            self.text = TextEditor::new(prompt.into(), EditorShape::Box { wrap_width: 0 });
+            self.note = Some(RefineNote::of(plan, recommended));
         }
-        self.refining = None;
-        self.text = TextEditor::new(prompt.into(), EditorShape::Box { wrap_width: 0 });
-        self.note = Some(RefineNote::of(plan, recommended));
-        true
     }
 
     /// End the refine in flight when `request` was it, saying whether it was.

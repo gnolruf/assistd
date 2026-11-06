@@ -25,7 +25,10 @@ mod theme_list;
 pub(crate) use catalog::ListItem;
 pub(crate) use list_editor::{ListAction, ListEditor};
 pub(crate) use panel::{EditAction, EditorShape, SettingsPanel, TextEditor};
-pub(crate) use render::{list_hint, render_list_editor, render_settings};
+pub(crate) use render::{
+    editor_window, list_hint, place_cursor, render_list_editor, render_settings,
+    render_wrapped_editor, titled_box,
+};
 
 #[derive(Args)]
 pub(crate) struct SettingsArgs {

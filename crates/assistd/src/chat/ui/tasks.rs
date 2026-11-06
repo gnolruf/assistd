@@ -7,18 +7,21 @@ use assistd_ipc::{
 };
 use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::Paragraph;
 
-use super::super::settings::{TextEditor, list_hint, render_list_editor};
+use super::super::settings::{
+    TextEditor, editor_window, list_hint, place_cursor, render_list_editor, render_wrapped_editor,
+    titled_box,
+};
 use super::super::tasks::{
     AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, RefineNote, TaskEditor,
     TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
 };
 use super::super::theme::Theme;
-use super::{locate_cursor, picker_scroll_start, render_rule, run_outcome, wrap_input};
+use super::{picker_scroll_start, render_rule, run_outcome};
 use crate::client::terminal_text::escape_controls_single_line;
 
 /// Rows each list entry takes: a task's name and its details, or the new-task row and a gap.
@@ -357,15 +360,15 @@ fn render_editor(
             let inner = render_box(frame, box_area, "Prompt", theme);
             editor.set_prompt_width(inner.width);
             if let EditorMode::Prompt(prompt) = editor.mode() {
-                render_text_box(frame, inner, prompt.text(), !prompt.refining());
+                render_wrapped_editor(frame, inner, prompt.text(), !prompt.refining());
             }
             if let Some(note) = refine_note(editor) {
-                render_refine_note(frame, note_area, (note, editor.permission()), theme);
+                render_refine_note(frame, note_area, note, editor.permission(), theme);
             }
         }
         EditorMode::Hosts(list) => {
             let entries = editor.host_entries();
-            render_list_editor(frame, box_area, (list, &entries), "Allowed hosts", theme);
+            render_list_editor(frame, box_area, list, &entries, "Allowed hosts", theme);
         }
         EditorMode::Browse
         | EditorMode::Name(_)
@@ -389,7 +392,8 @@ fn refine_note(editor: &TaskEditor) -> Option<&RefineNote> {
 fn render_refine_note(
     frame: &mut Frame<'_>,
     area: Rect,
-    (note, current): (&RefineNote, PermissionMode),
+    note: &RefineNote,
+    current: PermissionMode,
     theme: &Theme,
 ) {
     let color = if note.warns || note.mode != current {
@@ -680,66 +684,12 @@ fn choice_span(text: &str, focused: bool, theme: &Theme) -> Span<'static> {
     }
 }
 
-/// A rounded box titled `title` over `area`, returning its inside.
+/// A box titled `title` over `area`, returning its inside.
 fn render_box(frame: &mut Frame<'_>, area: Rect, title: &str, theme: &Theme) -> Rect {
-    let accent = Style::default().fg(theme.accent);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(accent)
-        .title(Span::styled(format!(" {title} "), accent));
+    let block = titled_box(title, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
-}
-
-/// `editor`'s text wrapped into `area`, scrolled to keep the cursor in view.
-fn render_text_box(frame: &mut Frame<'_>, area: Rect, editor: &TextEditor, cursor: bool) {
-    let chars: Vec<char> = editor.text().chars().collect();
-    let rows = wrap_input(&chars, 0, area.width);
-    let (cursor_row, cursor_column) = locate_cursor(&rows, editor.cursor_chars());
-    let visible = usize::from(area.height).max(1);
-    let start = (cursor_row + 1).saturating_sub(visible);
-    let lines: Vec<Line<'static>> = rows
-        .iter()
-        .skip(start)
-        .take(visible)
-        .map(|&(row_start, row_end)| {
-            let row: String = chars[row_start..row_end].iter().collect();
-            Line::raw(escape_controls_single_line(&row).into_owned())
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
-    if cursor {
-        place_cursor(frame, area, cursor_row - start, cursor_column);
-    }
-}
-
-/// The slice of a one-line editor's text that fits `width` columns with the cursor in
-/// view, and the cursor's column within it.
-fn editor_window(editor: &TextEditor, width: usize) -> (String, usize) {
-    let cursor = editor.cursor_chars();
-    let start = cursor.saturating_sub(width.saturating_sub(1));
-    let shown: String = editor.text().chars().skip(start).take(width).collect();
-    (
-        escape_controls_single_line(&shown).into_owned(),
-        cursor - start,
-    )
-}
-
-/// Puts the terminal cursor `row` lines and `column` columns into `area`, clamped to it.
-fn place_cursor(frame: &mut Frame<'_>, area: Rect, row: usize, column: usize) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let offset = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
-    frame.set_cursor_position(Position::new(
-        area.x
-            .saturating_add(offset(column))
-            .min(area.right().saturating_sub(1)),
-        area.y
-            .saturating_add(offset(row))
-            .min(area.bottom().saturating_sub(1)),
-    ));
 }
 
 /// The column a [`labelled`] row's value starts at.

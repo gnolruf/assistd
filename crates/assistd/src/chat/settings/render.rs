@@ -402,7 +402,8 @@ fn box_block(panel: &SettingsPanel, theme: &Theme) -> Block<'static> {
     titled_box(label, theme)
 }
 
-fn titled_box(title: &str, theme: &Theme) -> Block<'static> {
+/// A rounded, accent-bordered box titled `title`.
+pub(crate) fn titled_box(title: &str, theme: &Theme) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent(theme))
@@ -416,13 +417,23 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel,
     let inner = block.inner(area);
     frame.render_widget(block, area);
     panel.set_text_box_width(inner.width);
-    let PanelMode::Edit(editor) = panel.mode() else {
-        return;
-    };
+    if let PanelMode::Edit(editor) = panel.mode() {
+        render_wrapped_editor(frame, inner, editor, true);
+    }
+}
+
+/// `editor`'s text wrapped into `area`, scrolled to keep the cursor in view, with the
+/// terminal cursor placed when `show_cursor`.
+pub(crate) fn render_wrapped_editor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &TextEditor,
+    show_cursor: bool,
+) {
     let chars: Vec<char> = editor.text().chars().collect();
-    let rows = wrap_input(&chars, 0, inner.width);
+    let rows = wrap_input(&chars, 0, area.width);
     let (cursor_row, cursor_column) = locate_cursor(&rows, editor.cursor_chars());
-    let visible = usize::from(inner.height).max(1);
+    let visible = usize::from(area.height).max(1);
     let start = (cursor_row + 1).saturating_sub(visible);
     let lines: Vec<Line<'static>> = rows
         .iter()
@@ -430,8 +441,10 @@ fn render_text_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel,
         .take(visible)
         .map(|&(row_start, row_end)| Line::raw(visible_chars(&chars[row_start..row_end])))
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
-    place_cursor(frame, inner, cursor_row - start, cursor_column);
+    frame.render_widget(Paragraph::new(lines), area);
+    if show_cursor {
+        place_cursor(frame, area, cursor_row - start, cursor_column);
+    }
 }
 
 /// The list setting's entries in the box titled with its label.
@@ -440,7 +453,7 @@ fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, the
         return;
     };
     let entries = panel.list_entries(setting.key);
-    render_list_editor(frame, area, (editor, entries), setting.label(), theme);
+    render_list_editor(frame, area, editor, entries, setting.label(), theme);
 }
 
 /// `entries` then an add row in a box titled `title`, scrolled to keep the selection in
@@ -448,7 +461,8 @@ fn render_list_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, the
 pub(crate) fn render_list_editor(
     frame: &mut Frame<'_>,
     area: Rect,
-    (editor, entries): (&ListEditor, &[toml::Value]),
+    editor: &ListEditor,
+    entries: &[toml::Value],
     title: &str,
     theme: &Theme,
 ) {
@@ -773,7 +787,7 @@ fn checkbox(on: bool) -> &'static str {
 
 /// The slice of the editor's text that fits `width` columns with the cursor
 /// in view, and the cursor's column within it.
-fn editor_window(editor: &TextEditor, width: usize) -> (String, usize) {
+pub(crate) fn editor_window(editor: &TextEditor, width: usize) -> (String, usize) {
     let cursor = editor.cursor_chars();
     let start = cursor.saturating_sub(width.saturating_sub(1));
     let chars: Vec<char> = editor.text().chars().skip(start).take(width).collect();
@@ -791,14 +805,19 @@ fn longest_label() -> usize {
 }
 
 /// Puts the terminal cursor `row` lines and `column` columns into `area`,
-/// clamped to its right edge.
-fn place_cursor(frame: &mut Frame<'_>, area: Rect, row: usize, column: usize) {
+/// clamped to it.
+pub(crate) fn place_cursor(frame: &mut Frame<'_>, area: Rect, row: usize, column: usize) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let offset = |value: usize| u16::try_from(value).unwrap_or(u16::MAX);
     frame.set_cursor_position(Position::new(
         area.x
             .saturating_add(offset(column))
             .min(area.right().saturating_sub(1)),
-        area.y.saturating_add(offset(row)),
+        area.y
+            .saturating_add(offset(row))
+            .min(area.bottom().saturating_sub(1)),
     ));
 }
 

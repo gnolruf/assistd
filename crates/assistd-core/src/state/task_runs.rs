@@ -345,7 +345,8 @@ impl AppState {
         let router = ConfirmRouter::for_task_run(
             turn.id.clone(),
             source,
-            (spec.mode, self.safety_judge()),
+            spec.mode,
+            self.safety_judge(),
             spec.allowed_hosts.clone(),
             Arc::new(parking),
         );

@@ -125,7 +125,8 @@ impl AppState {
         let planner = self.planner();
         let planning = planner.refine(
             Arc::clone(&session.conversation),
-            (plan_ask, permissions),
+            plan_ask,
+            permissions,
             id.to_string(),
             llm_tx,
             cancel.clone(),
@@ -192,10 +193,8 @@ impl AppState {
             self.subsystems.planning.clone(),
             Arc::clone(&self.subsystems.tools),
             Some(health),
-            (
-                Duration::from_secs(self.config.timeouts.tool_call_secs),
-                self.config.tools.allow_auto_mode,
-            ),
+            Duration::from_secs(self.config.timeouts.tool_call_secs),
+            self.config.tools.allow_auto_mode,
         )
     }
 }

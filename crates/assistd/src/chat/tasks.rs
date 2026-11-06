@@ -275,7 +275,7 @@ impl TasksPanel {
                 ..
             } => {
                 if let Some(editor) = self.editor.as_mut() {
-                    editor.on_refined(&id, prompt, (&plan, &recommended));
+                    editor.on_refined(&id, prompt, &plan, &recommended);
                 }
             }
             Event::Done { .. } => self.on_done(op, &id),

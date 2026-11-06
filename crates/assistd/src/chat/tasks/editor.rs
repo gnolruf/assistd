@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::prompt_box::{PromptBox, RunPermissions};
-use super::trigger_form::{FormAction, TriggerForm, UpstreamChoice};
+use super::trigger_form::{FormAction, TriggerForm, UpstreamChoice, cycled};
 use super::{Outbox, PendingOp};
 use crate::chat::settings::{
     EditAction, EditorShape, ListAction, ListEditor, ListItem, TextEditor,
@@ -240,7 +240,6 @@ impl TaskEditor {
         }
     }
 
-    /// The open prompt box.
     fn prompt_box(&mut self) -> Option<&mut PromptBox> {
         match &mut self.mode {
             EditorMode::Prompt(prompt) => Some(prompt),
@@ -271,10 +270,11 @@ impl TaskEditor {
         &mut self,
         request: &str,
         prompt: TaskPrompt,
-        answer: (&Plan, &ModeRecommendation),
+        plan: &Plan,
+        recommended: &ModeRecommendation,
     ) {
         if let Some(prompt_box) = self.prompt_box() {
-            prompt_box.on_refined(request, prompt, answer);
+            prompt_box.on_refined(request, prompt, plan, recommended);
         }
     }
 
@@ -460,20 +460,13 @@ impl TaskEditor {
 
     /// Step to the next or previous mode the daemon allows.
     fn cycle_permission(&mut self, forward: bool) {
-        let mut modes = vec![PermissionMode::Manual, PermissionMode::AcceptEdits];
-        if self.auto_offered {
-            modes.push(PermissionMode::Auto);
-        }
-        let index = modes
-            .iter()
-            .position(|mode| *mode == self.permission)
-            .unwrap_or(0);
-        let next = if forward {
-            (index + 1) % modes.len()
-        } else {
-            (index + modes.len() - 1) % modes.len()
-        };
-        self.permission = modes[next];
+        let modes = [
+            PermissionMode::Manual,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+        ];
+        let offered = if self.auto_offered { 3 } else { 2 };
+        self.permission = cycled(&modes[..offered], self.permission, forward);
     }
 
     /// The allowed hosts as the list box's entries.
@@ -554,7 +547,6 @@ impl TaskEditor {
         }
     }
 
-    /// The task to save: the edited fields.
     fn draft_spec(&self) -> Result<TaskSpec, String> {
         let name = TaskName::try_from(self.name.clone()).map_err(|e| e.to_string())?;
         let prompt = TaskPrompt::try_from(self.prompt.clone()).map_err(|e| e.to_string())?;

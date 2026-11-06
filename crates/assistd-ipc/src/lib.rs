@@ -552,8 +552,8 @@ pub enum Request {
     TaskList { id: String },
     /// Read one task. Emits `Task`, then `Done`.
     TaskGet { id: String, task: TaskId },
-    /// Create a task, or replace task `task`. Errors when `spec.mode` is Auto and the daemon does not allow it.
-    /// Errors when the name is taken. Emits the saved `Task`, then `Done`.
+    /// Create a task, or replace task `task`. Errors when the name is taken, or `spec.mode` is
+    /// Auto and the daemon does not allow it. Emits the saved `Task`, then `Done`.
     TaskSave {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

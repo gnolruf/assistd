@@ -408,9 +408,8 @@ fn register_memory_tools(
     ));
 }
 
-/// The apps approved for good, and the checks a plan's actions face: against the sandbox's
-/// programs, and against the approvals that let an action run unasked whatever the mode
-/// besides the edit scope the edit modes approve within.
+/// The approved apps, and the checks a plan's actions face: the sandbox's programs, and the
+/// standing approvals and edit scope that let an action run unasked.
 fn action_checks(
     config_dir: &Path,
     sandbox: &SandboxInfo,

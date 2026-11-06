@@ -289,17 +289,7 @@ impl TriggerForm {
     }
 
     fn move_focus(&mut self, forward: bool) {
-        let fields = self.fields();
-        let index = fields
-            .iter()
-            .position(|field| *field == self.focus)
-            .unwrap_or(0);
-        let next = if forward {
-            (index + 1) % fields.len()
-        } else {
-            (index + fields.len() - 1) % fields.len()
-        };
-        self.focus = fields[next];
+        self.focus = cycled(&self.fields(), self.focus, forward);
     }
 
     fn cycle(&mut self, forward: bool, tasks: &[UpstreamChoice]) {
@@ -398,7 +388,7 @@ fn seconds(editor: &TextEditor, name: &str) -> Result<u32, String> {
 }
 
 /// The entry after or before `current` in `all`, wrapping; the first when it is not there.
-fn cycled<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
+pub(super) fn cycled<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
     let index = all.iter().position(|item| *item == current).unwrap_or(0);
     let next = if forward {
         (index + 1) % all.len()

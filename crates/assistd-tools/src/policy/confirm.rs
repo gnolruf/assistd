@@ -247,7 +247,8 @@ impl ConfirmRouter {
     pub fn for_task_run(
         request_id: String,
         source: ConfirmSource,
-        (mode, judge): (PermissionMode, Option<SafetyJudge>),
+        mode: PermissionMode,
+        judge: Option<SafetyJudge>,
         allowed_hosts: Vec<HostName>,
         parking: Arc<dyn PromptParking>,
     ) -> Arc<Self> {
@@ -845,7 +846,8 @@ mod tests {
             let router = ConfirmRouter::for_task_run(
                 "r".into(),
                 ConfirmSource::Main,
-                (mode, None),
+                mode,
+                None,
                 vec!["allowed.example".to_string().try_into().unwrap()],
                 Arc::clone(&parking) as Arc<dyn PromptParking>,
             );

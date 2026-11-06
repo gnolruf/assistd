@@ -145,7 +145,8 @@ impl Planner {
         tools: PlanningTools,
         catalog: Arc<ToolCatalog>,
         health: Option<Arc<dyn LlmHealthProbe>>,
-        (tool_deadline, auto_offered): (Duration, bool),
+        tool_deadline: Duration,
+        auto_offered: bool,
     ) -> Self {
         Self {
             tools,
@@ -163,7 +164,8 @@ impl Planner {
     pub async fn plan(
         &self,
         conversation: Arc<dyn LlmBackend>,
-        (ask, permissions): (PlanAsk, WorkPermissions),
+        ask: PlanAsk,
+        permissions: WorkPermissions,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
@@ -187,7 +189,8 @@ impl Planner {
     pub async fn refine(
         &self,
         conversation: Arc<dyn LlmBackend>,
-        (ask, permissions): (PlanAsk, WorkPermissions),
+        ask: PlanAsk,
+        permissions: WorkPermissions,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
