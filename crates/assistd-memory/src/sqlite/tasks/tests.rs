@@ -20,6 +20,7 @@ fn sample_spec(name: &str, prompt: &str) -> TaskSpec {
         enabled: true,
         mode: PermissionMode::AcceptEdits,
         allowed_hosts: vec!["example.org".to_string().try_into().unwrap()],
+        announce: true,
     }
 }
 

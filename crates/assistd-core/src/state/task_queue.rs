@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, oneshot, watch};
@@ -57,6 +58,7 @@ impl TaskQueue {
                 request_id,
                 suspended: None,
                 stage: RunStage::Active,
+                started_at: None,
             }));
         });
     }
@@ -154,6 +156,7 @@ impl TaskQueue {
             let Waiting::Run(mut queued) = state.waiting.remove(index) else {
                 unreachable!("position matched a run");
             };
+            queued.started_at.get_or_insert_with(Utc::now);
             match queued.stage {
                 RunStage::Active => {
                     state.running.push(queued.clone());
@@ -426,6 +429,8 @@ pub(in crate::state) struct QueuedRun {
     /// Why a waiting run may not start yet; `None` once it may.
     suspended: Option<SuspendReason>,
     stage: RunStage,
+    /// When it first took a lane; `None` while it has never run.
+    started_at: Option<DateTime<Utc>>,
 }
 
 /// How far a run has got through its turn, which it may pause partway.
@@ -447,6 +452,7 @@ impl QueuedRun {
             task_name: self.task.spec.name.clone(),
             state,
             prompt,
+            started_at: self.started_at,
         }
     }
 }

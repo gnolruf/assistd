@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::activity::ActivityTracker;
 use super::render::Notification;
+use super::task_notices::{TaskNotice, TaskNoticeTracker};
 
 /// Idle-check period and update throttle: changes flush at most once a tick.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -41,6 +42,8 @@ pub(super) enum NotifierCommand {
     /// Show or update the single assistd notification.
     Show(Notification),
     Close,
+    /// Show a notification of its own about a task run.
+    Announce(TaskNotice),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +94,7 @@ pub(super) async fn drive_notifications(
 struct Driver {
     commands: UnboundedSender<NotifierCommand>,
     tracker: ActivityTracker,
+    task_notices: TaskNoticeTracker,
     /// `None` until the daemon has answered, which holds notifications.
     chat_focused: Option<bool>,
     display: Display,
@@ -108,6 +112,7 @@ impl Driver {
         Self {
             commands,
             tracker: ActivityTracker::default(),
+            task_notices: TaskNoticeTracker::default(),
             chat_focused: None,
             display: Display::Closed,
             hidden_turn: None,
@@ -137,9 +142,16 @@ impl Driver {
     /// Any event while shown, or a turn or speech finishing, restarts the
     /// auto-hide timer.
     fn ingest(&mut self, ev: &Event) {
-        if let Event::ChatFocus { focused, .. } = ev {
-            self.set_chat_focus(*focused);
-            return;
+        match ev {
+            Event::ChatFocus { focused, .. } => {
+                self.set_chat_focus(*focused);
+                return;
+            }
+            Event::TaskQueue { .. } | Event::TaskReply { .. } => {
+                self.announce_task_notices(ev);
+                return;
+            }
+            _ => {}
         }
         self.tracker.ingest(ev);
         if let Display::Shown { stale } = &mut self.display {
@@ -153,6 +165,16 @@ impl Driver {
         }
         self.was_busy = is_busy;
         self.was_speaking = is_speaking;
+    }
+
+    /// A run needing input shows whether or not the chat has focus; a reply waits on the
+    /// chat being known to be unfocused, as a turn does.
+    fn announce_task_notices(&mut self, ev: &Event) {
+        for notice in self.task_notices.notices_for(ev) {
+            if notice.ignores_focus() || self.chat_focused == Some(false) {
+                let _ = self.commands.send(NotifierCommand::Announce(notice));
+            }
+        }
     }
 
     /// Gaining focus clears the screen; losing it mid-turn shows the

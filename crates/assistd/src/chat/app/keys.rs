@@ -68,6 +68,9 @@ impl App {
             KeyCode::Char('o') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.toggle_verbose();
             }
+            KeyCode::Char('t') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_tasks_panel();
+            }
             KeyCode::Up if slash_active => {
                 self.slash_selected = self.slash_selected.saturating_sub(1);
             }

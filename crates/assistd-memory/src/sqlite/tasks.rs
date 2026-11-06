@@ -21,7 +21,8 @@ use crate::{
 use super::connection::{SqliteHandle, truncate_wal};
 use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
 
-const TASK_COLUMNS: &str = "id, name, prompt, triggers, enabled, mode, allowed_hosts, next_fire_at";
+const TASK_COLUMNS: &str =
+    "id, name, prompt, triggers, enabled, mode, allowed_hosts, announce, next_fire_at";
 
 const RUN_RECORD_COLUMNS: &str = "id, trigger, state, suspend_reason, failure, queued_at, \
      started_at, ended_at, reply, session_uuid";
@@ -572,9 +573,9 @@ fn run_updated(updated: usize, run: TaskRunId) -> Result<()> {
 
 fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Result<TaskRecord> {
     let id = tx.query_row(
-        "INSERT INTO tasks (name, prompt, triggers, enabled, mode, allowed_hosts,
+        "INSERT INTO tasks (name, prompt, triggers, enabled, mode, allowed_hosts, announce,
                             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
          RETURNING id",
         rusqlite::params![
             spec.name.as_str(),
@@ -583,6 +584,7 @@ fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Resu
             spec.enabled,
             mode_code(spec.mode),
             to_json(&spec.allowed_hosts)?,
+            spec.announce,
             now,
         ],
         |r| r.get(0),
@@ -603,8 +605,8 @@ fn replace_task(
 ) -> rusqlite::Result<TaskRecord> {
     let updated = tx.execute(
         "UPDATE tasks SET name = ?2, prompt = ?3, triggers = ?4, enabled = ?5, mode = ?6,
-                          allowed_hosts = ?7, next_fire_at = NULL,
-                          updated_at = MAX(?8, created_at)
+                          allowed_hosts = ?7, announce = ?8, next_fire_at = NULL,
+                          updated_at = MAX(?9, created_at)
          WHERE id = ?1",
         rusqlite::params![
             id.0,
@@ -614,6 +616,7 @@ fn replace_task(
             spec.enabled,
             mode_code(spec.mode),
             to_json(&spec.allowed_hosts)?,
+            spec.announce,
             now,
         ],
     )?;
@@ -653,8 +656,9 @@ fn task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
             enabled: row.get(4)?,
             mode: mode_at(row, 5)?,
             allowed_hosts: json_at(row, 6)?,
+            announce: row.get(7)?,
         },
-        next_fire: optional_timestamp_at(row, 7)?,
+        next_fire: optional_timestamp_at(row, 8)?,
     })
 }
 

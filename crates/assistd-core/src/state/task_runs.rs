@@ -23,6 +23,7 @@ use super::lanes::LaneLease;
 use super::persistence::PersistTarget;
 use super::query::{TurnScope, TurnTranslator};
 use super::run_lane::{LaneHold, RUN_LANE, RunLane, YieldingBackend};
+use super::task_announce::TaskReply;
 use super::task_confirms::TaskRunParking;
 use super::task_queue::QueuedRun;
 use super::task_runner::RegisteredRun;
@@ -122,11 +123,23 @@ impl AppState {
         registered: RegisteredRun,
     ) {
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
-        tokio::join!(
+        let (reply, ()) = tokio::join!(
             self.drive_task_run(&turn, lease, &registered, tx),
             self.publish_task_run_events(TurnScope::TaskRun(turn.run), rx)
         );
         self.runtime.task_queue.finish(turn.run);
+        if let Some(reply) = reply {
+            let announce = self.announce_task_reply(TaskReply {
+                id: turn.id,
+                run: turn.run,
+                task_name: turn.task.spec.name,
+                reply,
+            });
+            tokio::select! {
+                () = registered.cancel.cancelled() => {}
+                () = announce => {}
+            }
+        }
     }
 
     async fn publish_task_run_events(&self, scope: TurnScope, mut rx: mpsc::Receiver<Event>) {
@@ -136,31 +149,38 @@ impl AppState {
     }
 
     /// Run the turn, record how it ended, then end its event stream with `Error` for a
-    /// failed run and `Done` for a cancelled one, whose turn sent none.
+    /// failed run and `Done` for a cancelled one, whose turn sent none. Returns the final
+    /// reply of a successful run whose task announces it.
     async fn drive_task_run(
         self: &Arc<Self>,
         turn: &TaskRunTurn,
         lease: LaneLease,
         registered: &RegisteredRun,
         tx: mpsc::Sender<Event>,
-    ) {
+    ) -> Option<String> {
         let outcome = self
             .task_run_turn(turn, lease, &registered.cancel, &tx)
             .await;
         let end = run_end(outcome, registered);
         let id = turn.id.clone();
-        let terminal = match &end {
-            TaskRunEnd::Succeeded { .. } => None,
-            TaskRunEnd::Failed { reason } => Some(Event::Error {
-                id,
-                message: reason.clone(),
-            }),
-            TaskRunEnd::Cancelled => Some(Event::Done { id }),
+        let (terminal, reply) = match &end {
+            TaskRunEnd::Succeeded { reply } => {
+                (None, turn.task.spec.announce.then(|| reply.clone()))
+            }
+            TaskRunEnd::Failed { reason } => (
+                Some(Event::Error {
+                    id,
+                    message: reason.clone(),
+                }),
+                None,
+            ),
+            TaskRunEnd::Cancelled => (Some(Event::Done { id }), None),
         };
         self.record_run_end(turn, end).await;
         if let Some(terminal) = terminal {
             let _ = tx.send(terminal).await;
         }
+        reply
     }
 
     /// Record how the run ended, then fire the triggers waiting on its task finishing

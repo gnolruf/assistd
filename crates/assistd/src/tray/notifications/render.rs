@@ -1,7 +1,8 @@
-//! Turns an [`ActivityView`] into the text, actions and hints of one
+//! Turns an [`ActivityView`] or a [`TaskNotice`] into the text, actions and hints of one
 //! freedesktop notification.
 
 use super::activity::{Activity, ActivityView};
+use super::task_notices::{NoticeKind, TaskNotice};
 
 /// The action key notification daemons run on a click of the body.
 pub(super) const HIDE_ACTION: &str = "default";
@@ -55,6 +56,29 @@ pub(super) fn render(notification: &Notification, caps: Capabilities) -> Rendere
             1
         },
         expire_timeout: i32::try_from(notification.expire_ms).unwrap_or(i32::MAX),
+    }
+}
+
+/// A task notice under its task's name, left for the service to expire.
+pub(super) fn render_task_notice(notice: &TaskNotice, caps: Capabilities) -> Rendered {
+    let (icon, body) = match &notice.kind {
+        NoticeKind::NeedsInput { reason } => (
+            "dialog-question",
+            format!("Needs input: {reason} · answer it in /tasks"),
+        ),
+        NoticeKind::Reply { text } => ("dialog-information", text.clone()),
+    };
+    Rendered {
+        icon,
+        summary: format!("Task: {}", notice.task_name),
+        body: if caps.markup {
+            escape_markup(&body)
+        } else {
+            body
+        },
+        actions: Vec::new(),
+        urgency: 1,
+        expire_timeout: -1,
     }
 }
 

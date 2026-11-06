@@ -133,6 +133,7 @@ impl App {
             | Event::TaskRunQueued { .. }
             | Event::TaskRun { .. }
             | Event::TaskQueue { .. }
+            | Event::TaskReply { .. }
             | Event::Queued { .. }
             | Event::TaskRefined { .. }
             | Event::TaskPlan { .. }

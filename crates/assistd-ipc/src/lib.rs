@@ -406,6 +406,7 @@ pub enum EventKind {
     Relay,
     TaskRun,
     TaskQueue,
+    TaskReply,
 }
 
 /// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
@@ -1148,6 +1149,14 @@ pub enum Event {
         run: TaskRunId,
         event: Box<Event>,
     },
+    /// The final reply of run `run`, which request `id` queued, of a task that announces its
+    /// replies; broadcast only.
+    TaskReply {
+        id: String,
+        run: TaskRunId,
+        task_name: TaskName,
+        reply: String,
+    },
     /// The query `id` waits for the model behind `behind` queue items: a running task, or
     /// the runs and turns ahead of it in the queue.
     Queued { id: String, behind: u32 },
@@ -1222,6 +1231,7 @@ impl Event {
             | Event::TaskRunQueued { id, .. }
             | Event::TaskRun { id, .. }
             | Event::TaskQueue { id, .. }
+            | Event::TaskReply { id, .. }
             | Event::Queued { id, .. }
             | Event::TaskRefined { id, .. }
             | Event::TaskPlan { id, .. }
@@ -1255,6 +1265,7 @@ impl Event {
             Event::Relay { .. } => EventKind::Relay,
             Event::TaskRun { .. } => EventKind::TaskRun,
             Event::TaskQueue { .. } => EventKind::TaskQueue,
+            Event::TaskReply { .. } => EventKind::TaskReply,
             Event::VoiceOutputState { .. }
             | Event::WakeWordStatus { .. }
             | Event::WakeWordTest { .. }

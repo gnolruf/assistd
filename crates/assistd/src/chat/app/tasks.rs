@@ -25,6 +25,10 @@ impl App {
             .filter(|_| self.confirmation.is_none())
     }
 
+    pub(in crate::chat) fn task_queue(&self) -> Option<&TaskQueueSnapshot> {
+        self.task_queue.as_ref()
+    }
+
     pub(super) fn on_tasks_key(&mut self, ev: KeyEvent) {
         let Some(panel) = self.tasks_panel.as_mut() else {
             return;

@@ -3,7 +3,8 @@
 
 use anyhow::Result;
 use assistd_config::TrayIconsConfig;
-use assistd_ipc::{Event, IpcClient, PresenceState, PresenceTarget, Request};
+use assistd_ipc::{Event, IpcClient, PresenceState, PresenceTarget, Request, TaskQueueOp};
+use chrono::Utc;
 use ksni::{
     Category, Status, ToolTip, Tray,
     menu::{MenuItem, StandardItem},
@@ -13,10 +14,12 @@ use uuid::Uuid;
 
 use super::state::{TrayTracker, icon_name_for, tooltip_for};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) enum MenuAction {
     /// Issue `SetPresence(target)` to the daemon.
     SetPresence(PresenceTarget),
+    /// Issue `TaskQueue(op)` to the daemon.
+    ChangeTaskQueue(TaskQueueOp),
     /// Tear down the tray and exit cleanly.
     Quit,
 }
@@ -90,16 +93,12 @@ impl Tray for TrayItem {
     }
 
     fn tool_tip(&self) -> ToolTip {
+        let tooltip = tooltip_for(&self.tracker, Utc::now());
         ToolTip {
             icon_name: String::new(),
             icon_pixmap: Vec::new(),
-            title: tooltip_for(self.tracker.current()).into(),
-            description: self
-                .tracker
-                .config_error()
-                .map(str::to_string)
-                .or_else(|| self.tracker.startup_summary())
-                .unwrap_or_default(),
+            title: tooltip.title,
+            description: tooltip.description,
         }
     }
 
@@ -117,6 +116,8 @@ impl Tray for TrayItem {
                 ..Default::default()
             }
             .into(),
+            self.task_queue_item("Pause tasks", TaskQueueOp::Pause),
+            self.task_queue_item("Resume tasks", TaskQueueOp::Resume),
             MenuItem::Separator,
             StandardItem {
                 label: "Quit tray".into(),
@@ -127,6 +128,29 @@ impl Tray for TrayItem {
             }
             .into(),
         ]
+    }
+}
+
+impl TrayItem {
+    /// A menu item sending `op`, enabled only while it would change the queue.
+    fn task_queue_item(&self, label: &str, op: TaskQueueOp) -> MenuItem<Self> {
+        let queue = self.tracker.task_queue();
+        let enabled = queue.is_some_and(|queue| match op {
+            TaskQueueOp::Pause => !queue.paused,
+            TaskQueueOp::Resume => queue.paused || queue.held.is_some(),
+            TaskQueueOp::Move { .. }
+            | TaskQueueOp::Cancel { .. }
+            | TaskQueueOp::CancelTurn { .. } => false,
+        });
+        StandardItem {
+            label: label.into(),
+            enabled,
+            activate: Box::new(move |item: &mut Self| {
+                let _ = item.actions.send(MenuAction::ChangeTaskQueue(op.clone()));
+            }),
+            ..Default::default()
+        }
+        .into()
     }
 }
 
@@ -155,8 +179,21 @@ pub(super) async fn run_actions(
     while let Some(action) = rx.recv().await {
         match action {
             MenuAction::SetPresence(target) => {
-                if let Err(e) = send_set_presence(&ipc, target).await {
+                let req = Request::SetPresence {
+                    id: Uuid::new_v4().to_string(),
+                    target,
+                };
+                if let Err(e) = send_until_done(&ipc, req).await {
                     tracing::warn!(target: "tray", "set_presence({target:?}) failed: {e:#}");
+                }
+            }
+            MenuAction::ChangeTaskQueue(op) => {
+                let req = Request::TaskQueue {
+                    id: Uuid::new_v4().to_string(),
+                    op: op.clone(),
+                };
+                if let Err(e) = send_until_done(&ipc, req).await {
+                    tracing::warn!(target: "tray", "task_queue({op:?}) failed: {e:#}");
                 }
             }
             MenuAction::Quit => return Ok(()),
@@ -165,11 +202,7 @@ pub(super) async fn run_actions(
     Ok(())
 }
 
-async fn send_set_presence(ipc: &IpcClient, target: PresenceTarget) -> Result<()> {
-    let req = Request::SetPresence {
-        id: Uuid::new_v4().to_string(),
-        target,
-    };
+async fn send_until_done(ipc: &IpcClient, req: Request) -> Result<()> {
     let mut stream = ipc.one_shot(req).await?;
     loop {
         match stream.next_event().await? {

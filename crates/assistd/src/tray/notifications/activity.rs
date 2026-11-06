@@ -303,7 +303,7 @@ fn truncate_chars_from_end(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-fn truncate_chars_from_start(s: &str, max: usize) -> String {
+pub(super) fn truncate_chars_from_start(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }

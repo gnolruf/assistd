@@ -537,6 +537,12 @@ fn editor_row_lines(
             hosts_summary(editor, theme),
             theme,
         )],
+        EditorRow::Announce => vec![labelled(
+            selected,
+            "Announce reply",
+            Span::raw(if editor.announce() { "[✓]" } else { "[ ]" }),
+            theme,
+        )],
         EditorRow::Enabled => vec![labelled(
             selected,
             "Enabled",

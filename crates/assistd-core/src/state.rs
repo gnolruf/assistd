@@ -42,6 +42,7 @@ pub(crate) mod runtime;
 pub(crate) mod session_unlock;
 pub(crate) mod subscribe;
 pub(crate) mod subsystems;
+pub(crate) mod task_announce;
 pub(crate) mod task_confirms;
 pub(crate) mod task_dispatch;
 pub(crate) mod task_events;

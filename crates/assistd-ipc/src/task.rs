@@ -197,6 +197,9 @@ pub struct TaskSpec {
     /// Hosts a run's `web` fetches from without asking, on top of the approved hosts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<HostName>,
+    /// Speak a successful run's final reply and show it as a notification, as a chat reply is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub announce: bool,
 }
 
 /// A condition that starts a run of its task.
@@ -472,6 +475,9 @@ pub enum QueueItem {
         /// [`TaskRunState::NeedsInput`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<PausedPrompt>,
+        /// When it first took a model lane; `None` while it has never run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<DateTime<Utc>>,
     },
     /// A user message waiting its turn behind the queue, by its query's request id.
     UserTurn { id: String, preview: String },

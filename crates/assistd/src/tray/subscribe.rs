@@ -1,15 +1,22 @@
 //! Long-lived passive subscription to the daemon's broadcast bus.
 
+use std::time::Duration;
+
 use assistd_ipc::{
     Event, EventKind, IpcClient, IpcClientError, Request, SubscribeFilter,
     client::EventStream as IpcEventStream,
 };
 use assistd_utils::backoff::backoff_delay;
 use ksni::Handle;
+use tokio::time::{MissedTickBehavior, interval};
 use uuid::Uuid;
 
 use super::menu::TrayItem;
 use super::notifications::NotificationSink;
+
+/// How often the tray is redrawn without an event, which keeps a running task's elapsed time
+/// in the tooltip current.
+const TOOLTIP_REFRESH: Duration = Duration::from_secs(30);
 
 enum ExitReason {
     ServiceShutdown,
@@ -81,6 +88,8 @@ fn subscribe_filter() -> SubscribeFilter {
             EventKind::ChatFocus,
             EventKind::SessionTitle,
             EventKind::Readiness,
+            EventKind::TaskQueue,
+            EventKind::TaskReply,
         ],
     }
 }
@@ -90,15 +99,24 @@ async fn pump_events(
     mut stream: IpcEventStream,
     notifications: Option<&NotificationSink>,
 ) -> Result<ExitReason, IpcClientError> {
+    let mut refresh = interval(TOOLTIP_REFRESH);
+    refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        match stream.next_event().await? {
-            Some(ev) => {
+        tokio::select! {
+            next = stream.next_event() => {
+                let Some(ev) = next? else {
+                    return Ok(ExitReason::DaemonClosed);
+                };
                 if push(handle, |item| item.ingest(&ev)).await.is_none() {
                     return Ok(ExitReason::ServiceShutdown);
                 }
                 forward(notifications, &ev);
             }
-            None => return Ok(ExitReason::DaemonClosed),
+            _ = refresh.tick() => {
+                if push(handle, |_| false).await.is_none() {
+                    return Ok(ExitReason::ServiceShutdown);
+                }
+            }
         }
     }
 }
