@@ -20,6 +20,7 @@ use serde_json::Value;
 mod admission;
 mod error;
 mod server;
+mod session;
 mod stdio;
 
 pub use error::{McpError, mcp_error_line};

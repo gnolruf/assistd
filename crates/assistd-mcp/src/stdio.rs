@@ -7,18 +7,13 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use rmcp::ServiceExt;
-use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation, Tool,
-};
-use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
+use rmcp::model::ClientConfig;
+use rmcp::service::{RoleClient, RunningService};
 use rustix::process::Signal;
-use serde_json::Value;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::process::{Child, ChildStderr, Command};
 use tokio_util::task::AbortOnDropHandle;
@@ -27,8 +22,8 @@ use tracing::{debug, info, warn};
 use assistd_utils::log_lines::forward_lines;
 use assistd_utils::process_group::{ProcessGroup, set_parent_death_signal};
 
-use crate::McpClient;
 use crate::error::McpError;
+use crate::session::{McpPeer, client_config};
 
 /// Daemon variables a server inherits besides `LC_*`; anything else,
 /// credentials included, must come from [`StdioConfig::env`].
@@ -84,83 +79,44 @@ impl fmt::Debug for StdioConfig {
     }
 }
 
-/// [`McpClient`] over a child process's pipes.
-#[derive(Debug)]
-pub(crate) struct StdioMcpClient {
-    peer: Peer<RoleClient>,
-    request_timeout: Duration,
-}
+/// Spawn the server in its own process group and run the initialize handshake.
+/// Errors if either fails; a failed handshake kills the child.
+pub(crate) async fn connect(cfg: &StdioConfig) -> Result<(McpPeer, ChildLifeline), McpError> {
+    let (mut child, group) = spawn_child(cfg)?;
+    let stdout = LineCappedReader::new(child.stdout.take().expect("stdout piped"));
+    let stdin = child.stdin.take().expect("stdin piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let stderr_task =
+        AbortOnDropHandle::new(tokio::spawn(forward_stderr(stderr, cfg.label.clone())));
 
-impl StdioMcpClient {
-    /// Spawn the server in its own process group and run the initialize
-    /// handshake. Errors if either fails; a failed handshake kills the child.
-    pub(crate) async fn spawn(cfg: StdioConfig) -> Result<(Arc<Self>, ChildLifeline), McpError> {
-        let (mut child, group) = spawn_child(&cfg)?;
-        let stdout = LineCappedReader::new(child.stdout.take().expect("stdout piped"));
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stderr = child.stderr.take().expect("stderr piped");
-        let stderr_task =
-            AbortOnDropHandle::new(tokio::spawn(forward_stderr(stderr, cfg.label.clone())));
+    let handshake =
+        tokio::time::timeout(cfg.request_timeout, client_config().serve((stdout, stdin))).await;
+    let service = match handshake {
+        Ok(Ok(service)) => service,
+        Ok(Err(e)) => {
+            return Err(abandon(child, group, McpError::Initialize(Box::new(e))).await);
+        }
+        Err(_) => {
+            let timeout = McpError::RequestTimeout(cfg.request_timeout);
+            return Err(abandon(child, group, timeout).await);
+        }
+    };
 
-        let handshake =
-            tokio::time::timeout(cfg.request_timeout, client_config().serve((stdout, stdin))).await;
-        let service = match handshake {
-            Ok(Ok(service)) => service,
-            Ok(Err(e)) => {
-                return Err(abandon(child, group, McpError::Initialize(Box::new(e))).await);
-            }
-            Err(_) => {
-                let timeout = McpError::RequestTimeout(cfg.request_timeout);
-                return Err(abandon(child, group, timeout).await);
-            }
-        };
-
-        info!(
-            target: "assistd::mcp",
-            server = %cfg.label,
-            pid = group.id().as_raw_nonzero(),
-            "MCP stdio server initialized",
-        );
-        let client = Arc::new(Self {
-            peer: service.peer().clone(),
-            request_timeout: cfg.request_timeout,
-        });
-        let lifeline = ChildLifeline {
-            label: cfg.label,
-            child,
-            group,
-            service: Some(service),
-            stderr_task,
-        };
-        Ok((client, lifeline))
-    }
-
-    async fn within_timeout<T>(
-        &self,
-        request: impl Future<Output = Result<T, ServiceError>>,
-    ) -> Result<T, McpError> {
-        tokio::time::timeout(self.request_timeout, request)
-            .await
-            .map_err(|_| McpError::RequestTimeout(self.request_timeout))?
-            .map_err(McpError::from)
-    }
-}
-
-#[async_trait]
-impl McpClient for StdioMcpClient {
-    async fn list_tools(&self) -> Result<Vec<Tool>, McpError> {
-        self.within_timeout(self.peer.list_all_tools()).await
-    }
-
-    async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError> {
-        let mut params = CallToolRequestParams::new(name.to_owned());
-        params.arguments = match arguments {
-            Value::Object(arguments) => Some(arguments),
-            Value::Null => None,
-            _ => return Err(McpError::ArgumentsNotObject),
-        };
-        self.within_timeout(self.peer.call_tool(params)).await
-    }
+    info!(
+        target: "assistd::mcp",
+        server = %cfg.label,
+        pid = group.id().as_raw_nonzero(),
+        "MCP stdio server initialized",
+    );
+    let peer = McpPeer::new(service.peer().clone(), cfg.request_timeout);
+    let lifeline = ChildLifeline {
+        label: cfg.label.clone(),
+        child,
+        group,
+        service: Some(service),
+        stderr_task,
+    };
+    Ok((peer, lifeline))
 }
 
 /// The spawned child plus its MCP session. Dropping it SIGKILLs the
@@ -291,13 +247,6 @@ fn spawn_child(cfg: &StdioConfig) -> Result<(Child, ProcessGroup), McpError> {
     let group = ProcessGroup::led_by(&child)
         .ok_or_else(|| spawn_error(io::Error::other("spawned child reported no pid")))?;
     Ok((child, group))
-}
-
-fn client_config() -> ClientConfig {
-    ClientConfig::new(
-        ClientCapabilities::default(),
-        Implementation::new("assistd", env!("CARGO_PKG_VERSION")),
-    )
 }
 
 /// SIGKILL the group of a child whose handshake failed, reap it, and
