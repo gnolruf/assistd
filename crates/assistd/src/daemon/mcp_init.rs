@@ -178,8 +178,7 @@ impl McpService {
         Self { fleet: None }
     }
 
-    /// Stop every pending start and every server. The `tools` shutdown stage must already
-    /// have flipped.
+    /// Stop every pending start and every server.
     pub(super) async fn shutdown(self) {
         if let Some(fleet) = self.fleet {
             fleet.shutdown().await;

@@ -30,6 +30,20 @@ pub enum McpServerState {
     },
 }
 
+impl McpServerState {
+    /// Why server `name` offers no tools, naming the command that signs it in when it needs
+    /// authorization; `None` while it is starting or ready.
+    pub fn unavailable_reason(&self, name: &str) -> Option<String> {
+        match self {
+            Self::Starting | Self::Ready => None,
+            Self::NeedsAuthorization { .. } => Some(format!(
+                "needs authorization; run `assistd mcp login {name}`"
+            )),
+            Self::Unavailable { reason } => Some(reason.clone()),
+        }
+    }
+}
+
 /// What signing a server out did to its token at the authorization server; the stored token
 /// is deleted in every case.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

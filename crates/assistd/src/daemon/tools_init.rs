@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use assistd_core::planner::PlanningTools;
 use assistd_core::{
-    BuildToolsDeps, Config, McpAccounts, McpServerStatus, RelayDeps, ToolRegistry, WindowManager,
+    BuildToolsDeps, Config, McpServerStatus, RelayDeps, ToolRegistry, WindowManager,
 };
 use assistd_memory::SessionId;
 use assistd_tools::{
@@ -30,8 +30,6 @@ pub(super) struct ToolsSubsystem {
     pub planning: PlanningTools,
     pub mcp_servers: Vec<McpServerStatus>,
     pub mcp_fleet: Option<Arc<McpFleet>>,
-    /// The same fleet, as the hook that signs servers in and out.
-    pub mcp_accounts: Option<Arc<dyn McpAccounts>>,
     /// Set when no sandbox is available, so the registry is empty.
     pub disabled: Option<ToolsDisabled>,
 }
@@ -62,7 +60,6 @@ pub(super) fn init(
                 planning: PlanningTools::default(),
                 mcp_servers: Vec::new(),
                 mcp_fleet: None,
-                mcp_accounts: None,
                 disabled: Some(reason),
             });
         }
@@ -103,7 +100,6 @@ pub(super) fn init(
     Ok(ToolsSubsystem {
         registry: built.registry,
         planning: built.planning,
-        mcp_accounts: mcp_fleet.clone().map(|fleet| fleet as Arc<dyn McpAccounts>),
         mcp_servers,
         mcp_fleet,
         disabled: None,

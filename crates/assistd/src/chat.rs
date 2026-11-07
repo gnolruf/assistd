@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
-use assistd_ipc::{Event, EventKind, IpcClient, McpServerState, Request, SubscribeFilter};
+use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream};
@@ -477,8 +477,7 @@ fn drain_queued(app: &mut App, chat_rx: &mut mpsc::Receiver<ChatEvent>) {
     }
 }
 
-/// Each configured MCP server that is not usable, with why: the command that signs it in
-/// when it needs authorization.
+/// Each configured MCP server that is not usable, with why.
 async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
     let req = Request::McpStatus {
         id: Uuid::new_v4().to_string(),
@@ -488,14 +487,9 @@ async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
     loop {
         match stream.next_event().await? {
             Some(Event::McpServer { server, state, .. }) => {
-                let reason = match state {
-                    McpServerState::NeedsAuthorization { .. } => {
-                        format!("needs authorization; run `assistd mcp login {server}`")
-                    }
-                    McpServerState::Unavailable { reason } => reason,
-                    McpServerState::Starting | McpServerState::Ready => continue,
-                };
-                unavailable.push((server, reason));
+                if let Some(reason) = state.unavailable_reason(&server) {
+                    unavailable.push((server, reason));
+                }
             }
             Some(Event::Done { .. }) => return Ok(unavailable),
             Some(Event::Error { message, .. }) => anyhow::bail!("{message}"),
@@ -523,7 +517,7 @@ async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
                     vision_enabled: vision,
                     model_name,
                     auto_mode,
-                    mcp_unavailable: Vec::new(),
+                    ..StartupCapabilities::default()
                 };
             }
             Some(Event::Done { .. }) => return Ok(capabilities),

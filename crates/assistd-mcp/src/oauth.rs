@@ -3,7 +3,9 @@
 
 use std::fmt;
 
-use rmcp::transport::auth::{AuthError, AuthorizationManager, OAuthClientConfig};
+use rmcp::transport::auth::{
+    AuthError, AuthorizationManager, AuthorizationMetadata, OAuthClientConfig,
+};
 use url::Url;
 
 use crate::error::McpError;
@@ -85,7 +87,17 @@ async fn discovered_manager(
     url: &Url,
     oauth: &OAuthConfig,
 ) -> Result<AuthorizationManager, McpError> {
-    let mut manager = AuthorizationManager::new(url.as_str())
+    let (mut manager, metadata) = discover(url).await?;
+    if oauth.client_id.is_none() && metadata.registration_endpoint.is_none() {
+        return Err(McpError::RegistrationUnsupported);
+    }
+    manager.set_metadata(metadata);
+    Ok(manager)
+}
+
+/// A manager for the server at `url` and its authorization server's metadata, not yet set on it.
+async fn discover(url: &Url) -> Result<(AuthorizationManager, AuthorizationMetadata), McpError> {
+    let manager = AuthorizationManager::new(url.as_str())
         .await
         .map_err(|e| auth_failure(&e))?;
     let metadata = manager
@@ -93,11 +105,7 @@ async fn discovered_manager(
         .await
         .map_err(|e| auth_failure(&e))?
         .metadata;
-    if oauth.client_id.is_none() && metadata.registration_endpoint.is_none() {
-        return Err(McpError::RegistrationUnsupported);
-    }
-    manager.set_metadata(metadata);
-    Ok(manager)
+    Ok((manager, metadata))
 }
 
 /// The [`McpError`] for an OAuth failure. Only failures that never involve a token, code or

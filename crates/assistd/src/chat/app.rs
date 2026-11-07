@@ -566,13 +566,9 @@ impl App {
 
     /// Show each MCP server in `unavailable`, with why it is, under the banner.
     pub(super) fn with_mcp_unavailable(mut self, unavailable: Vec<(String, String)>) -> Self {
-        for (server, reason) in &unavailable {
-            self.output.push_info(&mcp_notice(server, reason));
-        }
-        Self {
-            mcp_unavailable: unavailable,
-            ..self
-        }
+        self.mcp_unavailable = unavailable;
+        self.push_mcp_notices();
+        self
     }
 
     /// The colors to draw with: the open settings panel's, unsaved edits
@@ -652,6 +648,10 @@ impl App {
         self.agent_panel = None;
         self.output.clear();
         self.output.push_banner(self.model_name.clone());
+        self.push_mcp_notices();
+    }
+
+    fn push_mcp_notices(&mut self) {
         for (server, reason) in &self.mcp_unavailable {
             self.output.push_info(&mcp_notice(server, reason));
         }

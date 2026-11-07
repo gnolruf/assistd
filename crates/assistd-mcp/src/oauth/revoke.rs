@@ -6,13 +6,13 @@ use std::time::Duration;
 use http::header::CONTENT_TYPE;
 use oauth2::TokenResponse;
 use reqwest::redirect;
-use rmcp::transport::auth::{AuthorizationManager, CredentialStore};
+use rmcp::transport::auth::CredentialStore;
 use serde_json::Value;
 use url::{Host, Url, form_urlencoded};
 
 use assistd_utils::http::remote_client_builder;
 
-use super::{OAuthConfig, auth_failure};
+use super::{OAuthConfig, auth_failure, discover};
 use crate::error::McpError;
 
 /// What signing out did to the token at the authorization server.
@@ -77,14 +77,7 @@ async fn revoke(url: &Url, oauth: &OAuthConfig, token: &str, kind: &str) -> Revo
 /// The revocation endpoint the authorization server advertises, if any. Fails when discovery
 /// does, or the endpoint is not `https` (or `http` to a loopback host).
 async fn revocation_endpoint(url: &Url) -> Result<Option<Url>, String> {
-    let manager = AuthorizationManager::new(url.as_str())
-        .await
-        .map_err(|e| auth_failure(&e).to_string())?;
-    let metadata = manager
-        .resolve_metadata()
-        .await
-        .map_err(|e| auth_failure(&e).to_string())?
-        .metadata;
+    let (_, metadata) = discover(url).await.map_err(|e| e.to_string())?;
     let Some(endpoint) = metadata
         .additional_fields
         .get("revocation_endpoint")

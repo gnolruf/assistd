@@ -50,16 +50,13 @@ impl McpServerStatus {
         *self.state.write() = state;
     }
 
-    /// The state as background-subsystem readiness; a server needing authorization is
-    /// unavailable with the command that signs it in.
+    /// The state as background-subsystem readiness.
     pub fn readiness(&self) -> ComponentReadiness {
-        match self.state() {
-            McpServerState::Starting => ComponentReadiness::Starting,
-            McpServerState::Ready => ComponentReadiness::Ready,
-            McpServerState::NeedsAuthorization { .. } => ComponentReadiness::Unavailable {
-                reason: format!("needs authorization; run `assistd mcp login {}`", self.name),
-            },
-            McpServerState::Unavailable { reason } => ComponentReadiness::Unavailable { reason },
+        let state = self.state.read();
+        match state.unavailable_reason(&self.name) {
+            Some(reason) => ComponentReadiness::Unavailable { reason },
+            None if *state == McpServerState::Ready => ComponentReadiness::Ready,
+            None => ComponentReadiness::Starting,
         }
     }
 }
@@ -135,10 +132,10 @@ impl Subsystems {
     pub fn with_mcp_servers(
         mut self,
         servers: Vec<McpServerStatus>,
-        accounts: Option<Arc<dyn McpAccounts>>,
+        accounts: Option<Arc<impl McpAccounts + 'static>>,
     ) -> Self {
         self.mcp_servers = servers;
-        self.mcp_accounts = accounts;
+        self.mcp_accounts = accounts.map(|accounts| accounts as Arc<dyn McpAccounts>);
         self
     }
 

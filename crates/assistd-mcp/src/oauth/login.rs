@@ -2,6 +2,7 @@
 //! lands on a one-shot listener on a loopback port.
 
 use std::fmt;
+use std::io;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -94,13 +95,12 @@ pub async fn begin_login(
     oauth: &OAuthConfig,
     request_timeout: Duration,
 ) -> Result<PendingLogin, McpError> {
+    let listen_failed =
+        |e: io::Error| McpError::Login(format!("could not listen for the redirect: {e}"));
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
-        .map_err(|e| McpError::Login(format!("could not listen for the redirect: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| McpError::Login(format!("could not listen for the redirect: {e}")))?
-        .port();
+        .map_err(listen_failed)?;
+    let port = listener.local_addr().map_err(listen_failed)?.port();
     let redirect_uri = format!("http://{}:{port}{CALLBACK_PATH}", Ipv4Addr::LOCALHOST);
     let session = tokio::time::timeout(
         request_timeout,

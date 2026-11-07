@@ -193,7 +193,7 @@ async fn start(
     let subsystems = Subsystems::new(chat, presence.clone(), tools.registry, voice.clone())
         .with_window_manager(window.manager.clone())
         .with_vision_revalidator(vision_revalidator.clone())
-        .with_mcp_servers(tools.mcp_servers, tools.mcp_accounts)
+        .with_mcp_servers(tools.mcp_servers, tools.mcp_fleet.clone())
         .with_web_search(web_search)
         .with_tools_disabled(tools.disabled)
         .with_planning_tools(tools.planning)
