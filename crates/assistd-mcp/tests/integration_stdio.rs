@@ -7,8 +7,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_mcp::{McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools};
-use assistd_tools::{AlwaysAllowGate, ApprovalGate, Approvals, Tool, VisionGate};
+use assistd_mcp::{
+    LaunchTarget, McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools, launch,
+};
+use assistd_tools::{
+    AlwaysAllowGate, ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, VisionGate,
+};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
@@ -254,6 +258,41 @@ async fn failed_initialize_kills_the_process_group() {
         wait_until_process_is_gone(orphan).await,
         "grandchild {orphan} must be killed when the handshake fails"
     );
+}
+
+#[tokio::test]
+async fn server_refused_at_first_start_offers_its_tools_after_a_retry() {
+    let marker_dir = tempfile::tempdir().unwrap();
+    let mut cfg = make_stdio_config("fake");
+    cfg.env.insert(
+        "FAKE_MCP_FAIL_FIRST_INIT_MARKER".into(),
+        marker_dir
+            .path()
+            .join("refused")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let target = LaunchTarget {
+        catalog: Arc::new(ToolCatalog::new(Arc::new(ToolRegistry::new()))),
+        approvals: ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
+        vision: VisionGate::new(true),
+    };
+    let mut retries = Vec::new();
+
+    let server = tokio::time::timeout(
+        Duration::from_secs(10),
+        launch("fake".into(), cfg, &target, |e| retries.push(e.to_string())),
+    )
+    .await
+    .expect("retry comes within the first backoff")
+    .expect("second start succeeds");
+
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    let registry = target.catalog.snapshot();
+    let echo = registry.get("mcp__fake__echo").expect("echo offered");
+    let result = echo.invoke(json!({"msg": "hi"})).await.unwrap();
+    assert_eq!(result.output, "echo:hi");
+    server.shutdown().await;
 }
 
 #[tokio::test]

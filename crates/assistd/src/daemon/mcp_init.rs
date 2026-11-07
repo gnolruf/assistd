@@ -7,11 +7,11 @@ use std::time::Duration;
 use assistd_core::config::{McpStdioTransport, McpTransport};
 use assistd_core::{AppState, Config, McpServerConfig, McpServerStatus};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
-use assistd_mcp::{McpServer, StdioConfig, adapt_client_as_tools};
-use assistd_tools::{ApprovalGate, Tool, VisionGate};
+use assistd_mcp::{LaunchTarget, McpError, McpServer, StdioConfig, launch};
+use assistd_tools::{ApprovalGate, VisionGate};
 use assistd_utils::readiness::Readiness;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tracing::info;
 
 /// What starting the configured MCP servers in the background needs.
@@ -27,8 +27,8 @@ pub(super) struct McpService {
 }
 
 impl McpStartup {
-    /// Start each server in turn, offering its tools and recording its
-    /// readiness as it settles. Stops starting servers once `shutdown` flips.
+    /// Start every server at once, retrying failed ones, offering each one's tools and
+    /// recording its readiness as it settles. Cancels pending starts once `shutdown` flips.
     pub(super) fn spawn(self, state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> McpService {
         McpService {
             startup: Some(tokio::spawn(start_all(self, state, shutdown))),
@@ -88,24 +88,42 @@ async fn start_all(
     state: Arc<AppState>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Vec<Arc<McpServer>> {
+    let target = LaunchTarget {
+        catalog: state.subsystems.tools.clone(),
+        approvals: startup.approvals,
+        vision: startup.vision,
+    };
+    let mut launches = JoinSet::new();
+    for config in startup.servers {
+        launches.spawn(start_server(config, state.clone(), target.clone()));
+    }
     let mut started = Vec::new();
-    for config in &startup.servers {
-        let outcome = tokio::select! {
+    loop {
+        tokio::select! {
             biased;
             _ = shutdown.wait_for(|stopping| *stopping) => break,
-            outcome = start_server(config, &startup) => outcome,
-        };
-        let readiness = match outcome {
-            Ok((server, tools)) => {
-                state.subsystems.tools.extend(tools);
-                started.push(server);
-                Readiness::Ready(())
-            }
-            Err(reason) => Readiness::Unavailable(reason.into()),
-        };
-        record_readiness(&state, &config.name, readiness);
+            joined = launches.join_next() => match joined {
+                Some(joined) => collect_started(joined, &mut started),
+                None => return started,
+            },
+        }
+    }
+    launches.abort_all();
+    while let Some(joined) = launches.join_next().await {
+        collect_started(joined, &mut started);
     }
     started
+}
+
+fn collect_started(
+    joined: Result<Option<Arc<McpServer>>, JoinError>,
+    started: &mut Vec<Arc<McpServer>>,
+) {
+    match joined {
+        Ok(server) => started.extend(server),
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => tracing::error!("mcp: server start task failed: {e}"),
+    }
 }
 
 fn record_readiness(state: &AppState, name: &str, readiness: Readiness<()>) {
@@ -126,37 +144,31 @@ fn record_readiness(state: &AppState, name: &str, readiness: Readiness<()>) {
     );
 }
 
-/// Start one server and discover its tools, shutting the server down again
-/// when discovery fails. `Err` is why the server is unavailable.
+/// Bring one server up, recording its readiness as attempts settle. `None` when it is
+/// unavailable until the config changes.
 async fn start_server(
-    server: &McpServerConfig,
-    startup: &McpStartup,
-) -> Result<(Arc<McpServer>, Vec<Box<dyn Tool>>), String> {
+    server: McpServerConfig,
+    state: Arc<AppState>,
+    target: LaunchTarget,
+) -> Option<Arc<McpServer>> {
     let name = server.name.clone();
+    let unavailable = |reason: String| Readiness::Unavailable(reason.into());
     let McpTransport::Stdio(stdio) = &server.transport else {
         let reason = "Streamable HTTP servers are not supported yet".to_owned();
         tracing::warn!("mcp: {name}: {reason}; skipping");
-        return Err(reason);
+        record_readiness(&state, &name, unavailable(reason));
+        return None;
     };
-    let started = match McpServer::start(name.clone(), stdio_config(server, stdio)).await {
-        Ok(started) => Arc::new(started),
-        Err(e) => {
-            let reason = format!("failed to start: {e:#}");
-            tracing::warn!("mcp: {name} {reason}; skipping");
-            return Err(reason);
-        }
-    };
-
-    match adapt_client_as_tools(started.clone(), &name, &startup.approvals, &startup.vision).await {
-        Ok(tools) => {
-            info!("mcp: {name} ready ({} tools)", tools.len());
-            Ok((started, tools))
+    let config = stdio_config(&server, stdio);
+    let on_retry = |e: &McpError| record_readiness(&state, &name, unavailable(e.to_string()));
+    match launch(name.clone(), config, &target, on_retry).await {
+        Ok(started) => {
+            record_readiness(&state, &name, Readiness::Ready(()));
+            Some(started)
         }
         Err(e) => {
-            let reason = format!("discovery failed: {e:#}");
-            tracing::warn!("mcp: {name} {reason}; shutting down server");
-            started.shutdown().await;
-            Err(reason)
+            record_readiness(&state, &name, unavailable(e.to_string()));
+            None
         }
     }
 }

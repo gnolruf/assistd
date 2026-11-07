@@ -757,11 +757,14 @@ scrubbed environment, and speaks MCP to over stdin/stdout through the
 `rmcp` crate. Discovered tools are wrapped by `McpToolAdapter`, which
 implements `Tool` over the discovered schema, and added to the
 `ToolCatalog` the LLM's tools come from, under the name
-`mcp__<server-name>__<tool-name>`. Servers start one after another in the
+`mcp__<server-name>__<tool-name>`. Servers start concurrently in the
 background; each one's tools are offered from the next turn after it
 connects, since every turn takes its own snapshot of the catalog. A
-server that fails to start is reported as unavailable in `GetReadiness`
-and `GetCapabilities`. Each call asks the user first until
+server that fails to start or to list its tools is retried with the same
+backoff as restarts, and is reported as unavailable, with its last error,
+in `GetReadiness` and `GetCapabilities` until an attempt succeeds. One
+whose command is missing or not executable is not retried. Shutdown
+cancels pending retries. Each call asks the user first until
 that tool is "always allowed". Like every tool's, their text results are
 held to the `[tools.output]` cap by the registry, spilling overflow to
 `<registry-name>-<n>.txt`.

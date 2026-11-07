@@ -1,5 +1,6 @@
 //! MCP errors and their rendering as model-facing tool error lines.
 
+use std::io::ErrorKind;
 use std::time::Duration;
 
 use rmcp::service::{ClientInitializeError, ServiceError};
@@ -37,6 +38,18 @@ pub enum McpError {
 
     #[error("MCP server is currently unavailable")]
     ServerDown,
+}
+
+impl McpError {
+    /// Whether starting the server again unchanged would fail the same way: its command is
+    /// missing or cannot be executed.
+    pub(crate) fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            Self::Spawn { source, .. }
+                if matches!(source.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied)
+        )
+    }
 }
 
 impl From<ServiceError> for McpError {
@@ -107,7 +120,7 @@ mod tests {
                 "spawn",
                 McpError::Spawn {
                     path: "/usr/bin/fake".into(),
-                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+                    source: std::io::Error::new(ErrorKind::NotFound, "missing"),
                 },
             ),
             (
