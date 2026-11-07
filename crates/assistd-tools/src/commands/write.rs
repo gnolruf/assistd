@@ -210,16 +210,19 @@ impl Command for WriteCommand {
         )
     }
 
+    /// The path expands its own `~`, and content is written as given, so a glob in either
+    /// never turns into other files' names.
+    fn expands_args(&self) -> bool {
+        false
+    }
+
     async fn run(&self, input: CommandInput) -> CommandOutput {
-        if input.args.is_empty() {
-            return CommandOutput::usage(self.help());
-        }
-        let raw_path = input.args[0].clone();
-        let content: Vec<u8> = if input.args.len() > 1 {
-            input.args[1..].join(" ").into_bytes()
-        } else {
-            input.stdin.unwrap_or_default()
+        let content: Vec<u8> = match (input.args.split_first(), input.stdin) {
+            (Some((_, words @ [_, ..])), _) => words.join(" ").into_bytes(),
+            (Some(_), Some(stdin)) => stdin,
+            (None, _) | (Some(_), None) => return CommandOutput::usage(self.help()),
         };
+        let raw_path = input.args[0].clone();
 
         let write_target = match self.resolve(raw_path.clone()).await {
             Ok(path) => path,
