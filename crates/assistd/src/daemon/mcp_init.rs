@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use assistd_core::config::{McpStdioTransport, McpTransport};
 use assistd_core::{AppState, Config, McpServerConfig, McpServerStatus};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_mcp::{McpServer, StdioConfig, adapt_client_as_tools};
@@ -132,7 +133,12 @@ async fn start_server(
     startup: &McpStartup,
 ) -> Result<(Arc<McpServer>, Vec<Box<dyn Tool>>), String> {
     let name = server.name.clone();
-    let started = match McpServer::start(name.clone(), stdio_config(server)).await {
+    let McpTransport::Stdio(stdio) = &server.transport else {
+        let reason = "Streamable HTTP servers are not supported yet".to_owned();
+        tracing::warn!("mcp: {name}: {reason}; skipping");
+        return Err(reason);
+    };
+    let started = match McpServer::start(name.clone(), stdio_config(server, stdio)).await {
         Ok(started) => Arc::new(started),
         Err(e) => {
             let reason = format!("failed to start: {e:#}");
@@ -155,13 +161,13 @@ async fn start_server(
     }
 }
 
-fn stdio_config(server: &McpServerConfig) -> StdioConfig {
+fn stdio_config(server: &McpServerConfig, transport: &McpStdioTransport) -> StdioConfig {
     let mut stdio = StdioConfig::new(
         server.name.clone(),
-        server.command.to_string_lossy().into_owned(),
+        transport.command.to_string_lossy().into_owned(),
     );
-    stdio.args.clone_from(&server.args);
-    stdio.env.clone_from(&server.env);
+    stdio.args.clone_from(&transport.args);
+    stdio.env.clone_from(&transport.env);
     stdio.request_timeout = Duration::from_secs(server.request_timeout_secs.get());
     stdio
 }

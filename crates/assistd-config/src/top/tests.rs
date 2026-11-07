@@ -57,11 +57,11 @@ fn write_default_refuses_to_overwrite_an_existing_file() {
 #[test]
 fn only_a_readable_file_with_mcp_env_is_exposed() {
     let with_env: Config = toml::from_str(MCP_SERVER_WITH_ENV).unwrap();
-    assert!(with_env.exposes_mcp_env(0o640));
-    assert!(with_env.exposes_mcp_env(0o604));
-    assert!(!with_env.exposes_mcp_env(0o600));
+    assert!(with_env.exposes_mcp_secrets(0o640));
+    assert!(with_env.exposes_mcp_secrets(0o604));
+    assert!(!with_env.exposes_mcp_secrets(0o600));
     let without_env: Config = toml::from_str(MCP_SERVER_WITHOUT_ENV).unwrap();
-    assert!(!without_env.exposes_mcp_env(0o644));
+    assert!(!without_env.exposes_mcp_secrets(0o644));
 }
 
 #[test]
@@ -82,4 +82,22 @@ fn a_removed_key_fails_to_load() {
         ),
         "{err}"
     );
+}
+
+#[test]
+fn a_rejected_mcp_header_value_is_not_echoed_by_load() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    fs::write(
+        &path,
+        "[[mcp.servers]]\nname = \"remote\"\nurl = \"https://h/mcp\"\n\
+         headers = { Authorization = \"Bearer hunter2\\n\" }\n",
+    )
+    .unwrap();
+
+    let message = Config::load_from_file(&path).unwrap_err().to_string();
+
+    assert!(message.contains("Authorization"), "{message}");
+    assert!(message.contains("line 4"), "{message}");
+    assert!(!message.contains("hunter2"), "{message}");
 }

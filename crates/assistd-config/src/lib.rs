@@ -32,7 +32,10 @@ pub use embedding::EmbeddingConfig;
 pub use errors::{
     ConfigError, CustomArgsError, SearchCommandError, ThemeColorError, UnitIntervalError,
 };
-pub use mcp::{McpConfig, McpServerConfig};
+pub use mcp::{
+    McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpServerConfig, McpServerUrl,
+    McpStdioTransport, McpTransport,
+};
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;
 pub use notifications::{NotificationsConfig, TrayIconsConfig};
