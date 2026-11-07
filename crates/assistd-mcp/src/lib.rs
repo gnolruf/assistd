@@ -19,11 +19,13 @@ use serde_json::Value;
 
 mod admission;
 mod error;
+mod launch;
 mod server;
 mod session;
 mod stdio;
 
 pub use error::{McpError, mcp_error_line};
+pub use launch::{LaunchTarget, launch};
 pub use server::McpServer;
 pub use stdio::StdioConfig;
 

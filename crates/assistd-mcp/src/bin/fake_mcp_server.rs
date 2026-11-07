@@ -12,6 +12,10 @@ use serde_json::{Value, json};
 /// to the named file, and then fails the handshake.
 const FAIL_INIT_WITH_ORPHAN_ENV: &str = "FAKE_MCP_FAIL_INIT_WITH_ORPHAN_PID_FILE";
 
+/// When set, `initialize` fails while the named file does not exist yet,
+/// creating it, so only the first start is refused.
+const FAIL_FIRST_INIT_ENV: &str = "FAKE_MCP_FAIL_FIRST_INIT_MARKER";
+
 fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -85,6 +89,15 @@ fn initialize(id: &Value) -> Value {
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": -32000, "message": "initialize refused by fixture"}
+        });
+    }
+    if let Some(marker) = std::env::var_os(FAIL_FIRST_INIT_ENV)
+        && std::fs::File::create_new(marker).is_ok()
+    {
+        return json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32000, "message": "first initialize refused by fixture"}
         });
     }
     json!({

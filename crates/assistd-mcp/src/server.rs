@@ -150,7 +150,8 @@ impl McpServer {
             Err(e) => {
                 warn!(target: "assistd::mcp", server = %self.name, error = %e, "MCP server restart failed");
                 state.policy.record_spawn_failure();
-                state.retry_at = Some(Instant::now() + self.restart_delay(&mut state.policy));
+                state.retry_at =
+                    Some(Instant::now() + restart_delay(&self.name, &mut state.policy));
                 Err(e)
             }
         }
@@ -171,7 +172,7 @@ impl McpServer {
             "MCP server stopped",
         );
         state.policy.record_session_end(ran_for);
-        state.retry_at = Some(Instant::now() + self.restart_delay(&mut state.policy));
+        state.retry_at = Some(Instant::now() + restart_delay(&self.name, &mut state.policy));
     }
 
     /// Re-list a restarted server's tools and warn when they differ from
@@ -202,34 +203,6 @@ impl McpServer {
             "MCP server's tools changed across a restart; the registry still offers the old ones \
              until the daemon restarts",
         );
-    }
-
-    /// Register the next restart and pick how long to wait before it.
-    fn restart_delay(&self, policy: &mut RestartPolicy) -> Duration {
-        match policy.next_restart(Instant::now()) {
-            RestartDecision::Backoff { delay, .. } => delay,
-            RestartDecision::ConsecutiveCapReached { failures } => {
-                error!(
-                    target: "assistd::mcp",
-                    server = %self.name,
-                    failures,
-                    retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
-                    "MCP server failed {failures} times in a row; slowing restarts",
-                );
-                UNHEALTHY_RETRY_INTERVAL
-            }
-            RestartDecision::WindowCapReached { restarts } => {
-                error!(
-                    target: "assistd::mcp",
-                    server = %self.name,
-                    restarts,
-                    window_secs = RESTART_WINDOW.as_secs(),
-                    retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
-                    "MCP server restarted {restarts} times in the rolling window; slowing restarts",
-                );
-                UNHEALTHY_RETRY_INTERVAL
-            }
-        }
     }
 }
 
@@ -317,4 +290,33 @@ async fn end_session(mut lifeline: Lifeline, stop_rx: oneshot::Receiver<()>) {
         _ = stop_rx => {}
     }
     lifeline.shutdown(TERM_TIMEOUT).await;
+}
+
+/// Register the next restart of server `name` and pick how long to wait before it, at most
+/// [`UNHEALTHY_RETRY_INTERVAL`].
+pub(crate) fn restart_delay(name: &str, policy: &mut RestartPolicy) -> Duration {
+    match policy.next_restart(Instant::now()) {
+        RestartDecision::Backoff { delay, .. } => delay,
+        RestartDecision::ConsecutiveCapReached { failures } => {
+            error!(
+                target: "assistd::mcp",
+                server = %name,
+                failures,
+                retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
+                "MCP server failed {failures} times in a row; slowing restarts",
+            );
+            UNHEALTHY_RETRY_INTERVAL
+        }
+        RestartDecision::WindowCapReached { restarts } => {
+            error!(
+                target: "assistd::mcp",
+                server = %name,
+                restarts,
+                window_secs = RESTART_WINDOW.as_secs(),
+                retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
+                "MCP server restarted {restarts} times in the rolling window; slowing restarts",
+            );
+            UNHEALTHY_RETRY_INTERVAL
+        }
+    }
 }
