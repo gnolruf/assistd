@@ -1,6 +1,8 @@
 //! Readability-style extraction: prunes page chrome from a parsed document
 //! and picks the element holding its main content.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
 use html2text::{Comment, Document, Element, Handle, RcDom};
@@ -68,39 +70,21 @@ struct TextStats {
 }
 
 impl TextStats {
-    fn of(root: &Handle) -> Self {
-        let mut stats = Self::default();
-        let mut pending = vec![(root.clone(), false)];
-        while let Some((node, in_link)) = pending.pop() {
-            if let Some(text) = text_of(&node) {
-                stats.add(&text, in_link);
-                continue;
-            }
-            let tag = tag(&node);
-            if tag.is_some_and(|tag| NON_TEXT_TAGS.contains(&tag)) {
-                continue;
-            }
-            let in_link = in_link || tag == Some("a");
-            pending.extend(
-                node.children
-                    .borrow()
-                    .iter()
-                    .map(|child| (child.clone(), in_link)),
-            );
+    fn of_text(text: &str) -> Self {
+        Self {
+            chars: text
+                .split_whitespace()
+                .map(|word| word.chars().count() + 1)
+                .sum(),
+            link_chars: 0,
+            commas: text.matches(',').count(),
         }
-        stats
     }
 
-    fn add(&mut self, text: &str, in_link: bool) {
-        let chars: usize = text
-            .split_whitespace()
-            .map(|word| word.chars().count() + 1)
-            .sum();
-        self.chars += chars;
-        if in_link {
-            self.link_chars += chars;
-        }
-        self.commas += text.matches(',').count();
+    fn add(&mut self, other: Self) {
+        self.chars += other.chars;
+        self.link_chars += other.link_chars;
+        self.commas += other.commas;
     }
 
     fn link_density(&self) -> f64 {
@@ -117,11 +101,70 @@ impl TextStats {
     }
 }
 
+/// The [`TextStats`] of every element in a tree, measured in one pass from the leaves up.
+struct TextIndex(HashMap<*const (), TextStats>);
+
+impl TextIndex {
+    fn of(root: &Handle) -> Self {
+        let mut index = Self(HashMap::new());
+        for node in descendants(root).iter().rev() {
+            if tag(node).is_some() {
+                let stats = index.measure(node);
+                index.0.insert(node_key(node), stats);
+            }
+        }
+        index
+    }
+
+    /// `node`'s stats from those of its children, which are already indexed.
+    fn measure(&self, node: &Handle) -> TextStats {
+        let tag = tag(node);
+        let mut stats = TextStats::default();
+        if tag.is_some_and(|tag| NON_TEXT_TAGS.contains(&tag)) {
+            return stats;
+        }
+        for child in node.children.borrow().iter() {
+            stats.add(self.get(child));
+        }
+        if tag == Some("a") {
+            stats.link_chars = stats.chars;
+        }
+        stats
+    }
+
+    fn get(&self, node: &Handle) -> TextStats {
+        match text_of(node) {
+            Some(text) => TextStats::of_text(&text),
+            None => self.0.get(&node_key(node)).copied().unwrap_or_default(),
+        }
+    }
+}
+
 /// An element accumulating the scores of the blocks below it.
 #[derive(Debug)]
 struct Candidate {
     node: Handle,
     score: f64,
+}
+
+/// The candidates found so far, each indexed by its node.
+#[derive(Default)]
+struct Candidates {
+    found: Vec<Candidate>,
+    by_node: HashMap<*const (), usize>,
+}
+
+impl Candidates {
+    fn add_score(&mut self, node: Handle, score: f64) {
+        let node = enclosing_table(node);
+        match self.by_node.entry(node_key(&node)) {
+            Entry::Occupied(at) => self.found[*at.get()].score += score,
+            Entry::Vacant(slot) => {
+                slot.insert(self.found.len());
+                self.found.push(Candidate { node, score });
+            }
+        }
+    }
 }
 
 /// The node to render for `dom`: its main content when one stands out,
@@ -178,10 +221,11 @@ fn sole_landmark(root: &Handle) -> Option<Handle> {
 
 /// The top-scoring container, unless its score or text is too slight to be an article.
 fn best_container(root: &Handle) -> Option<Handle> {
-    scored_candidates(root)
+    let text = TextIndex::of(root);
+    scored_candidates(root, &text)
         .into_iter()
         .map(|candidate| {
-            let stats = TextStats::of(&candidate.node);
+            let stats = text.get(&candidate.node);
             let score = candidate.score * (1.0 - stats.link_density());
             (candidate.node, score, stats.chars)
         })
@@ -192,13 +236,13 @@ fn best_container(root: &Handle) -> Option<Handle> {
 
 /// Every parent and grandparent of a scored block, with the block scores added
 /// to the parent in full and to the grandparent at half.
-fn scored_candidates(root: &Handle) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
+fn scored_candidates(root: &Handle, text: &TextIndex) -> Vec<Candidate> {
+    let mut candidates = Candidates::default();
     let blocks = descendants(root)
         .into_iter()
         .filter(|node| tag(node).is_some_and(|tag| SCORED_TAGS.contains(&tag)));
     for block in blocks {
-        let stats = TextStats::of(&block);
+        let stats = text.get(&block);
         if stats.chars < MIN_BLOCK_CHARS {
             continue;
         }
@@ -206,22 +250,16 @@ fn scored_candidates(root: &Handle) -> Vec<Candidate> {
             continue;
         };
         if let Some(grandparent) = element_parent(&parent) {
-            add_score(&mut candidates, grandparent, stats.block_score() / 2.0);
+            candidates.add_score(grandparent, stats.block_score() / 2.0);
         }
-        add_score(&mut candidates, parent, stats.block_score());
+        candidates.add_score(parent, stats.block_score());
     }
-    candidates
+    candidates.found
 }
 
-fn add_score(candidates: &mut Vec<Candidate>, node: Handle, score: f64) {
-    let node = enclosing_table(node);
-    match candidates
-        .iter_mut()
-        .find(|candidate| Rc::ptr_eq(&candidate.node, &node))
-    {
-        Some(candidate) => candidate.score += score,
-        None => candidates.push(Candidate { node, score }),
-    }
+/// The identity of `node`, for indexing by node.
+fn node_key(node: &Handle) -> *const () {
+    Rc::as_ptr(node).cast()
 }
 
 /// `node`, or the `<table>` around it when it is a table part.
