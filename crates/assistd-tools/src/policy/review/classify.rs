@@ -9,8 +9,8 @@ use super::placeholder::{self, Placeholder};
 use super::{
     Candidate, FEEDS_ARGUMENTS, FIND_EXEC_FLAGS, KEYWORDS, MAX_NESTED_SCRIPTS, SAFE_BUILTINS,
     WRAPPERS, basename, candidates, changed_sensitive_variable, changed_variables, command_start,
-    env_attached_option, evaluated, exec_flags, is_command_line, is_harmless_target, is_stdin_path,
-    is_subcommand, program, short_options, wrapper_operands,
+    env_attached_option, evaluated, exec_flags, is_assignment, is_command_line, is_harmless_target,
+    is_stdin_path, is_subcommand, program, short_options, wrapper_operands,
 };
 use crate::policy::allowlist::{Allowlist, ApprovalScope, ProgramApproval, Verdict};
 use crate::policy::shell::{self, Script, SimpleCommand, Word};
@@ -29,6 +29,13 @@ const DYNAMIC_CHARS: &[char] = &['$', '`', '*', '?', '[', '{', '('];
 
 /// The spellings of `$HOME` a path may start with.
 const HOME_VARIABLES: &[&str] = &["${HOME}", "$HOME"];
+
+/// Variables a script may export without leaving it unvetted, besides `LC_*`: the locale,
+/// time zone, terminal and colour settings, which run nothing.
+const HARMLESS_EXPORTS: &[&str] = &["LANG", "LANGUAGE", "NO_COLOR", "TERM", "TZ"];
+
+/// Builtins that export the names they declare when given `-x`.
+const EXPORTING_DECLARATIONS: &[&str] = &["declare", "local", "readonly", "typeset"];
 
 /// Characters that start an expansion whose value may name any path, `..` and absolute paths
 /// included; a glob only matches existing entries below its directory.
@@ -479,6 +486,11 @@ impl Classifier<'_> {
         {
             return Err(format!(
                 "the script changes {variable}, so what its programs do cannot be vetted"
+            ));
+        }
+        if let Some(variable) = exported_variable(&script) {
+            return Err(format!(
+                "the script exports {variable}, which the programs it runs may act on"
             ));
         }
         if let Some(why) = evaluated::in_script(&script) {
@@ -1257,6 +1269,72 @@ fn changed_git_variable(script: &Script) -> Option<&str> {
         .flat_map(|cmd| &cmd.words)
         .flat_map(|word| changed_variables(&word.text))
         .find(|name| name.starts_with("GIT_"))
+}
+
+/// The first variable the script passes to the programs it runs, other than the
+/// [`HARMLESS_EXPORTS`] and `LC_*`: a program may read one as a command to run (`EDITOR`,
+/// `PAGER`, `CARGO_TARGET_*_RUNNER`), which no list or approval vets.
+fn exported_variable(script: &Script) -> Option<&str> {
+    script
+        .commands
+        .iter()
+        .flat_map(|cmd| exported_names(&cmd.words))
+        .find(|name| !(HARMLESS_EXPORTS.contains(name) || name.starts_with("LC_")))
+}
+
+/// The names one command exports: assignments before a program or after `env`, the operands
+/// of `export` or a `-x` declaration, and every variable after `set -a`.
+fn exported_names(words: &[Word]) -> Vec<&str> {
+    let Some(start) = command_start(words) else {
+        return Vec::new();
+    };
+    let operands = &words[start + 1..];
+    let has_option = |letter: char| {
+        operands
+            .iter()
+            .any(|word| short_options(&word.text).is_some_and(|cluster| cluster.contains(letter)))
+    };
+    let runs_program = !SAFE_BUILTINS.contains(&words[start].text.as_str());
+    let mut names: Vec<&str> = words[..start]
+        .iter()
+        .filter(|word| runs_program && is_assignment(&word.text))
+        .map(exported_name)
+        .collect();
+    let declared = match words[start].text.as_str() {
+        "export" => true,
+        command => EXPORTING_DECLARATIONS.contains(&command) && has_option('x'),
+    };
+    if declared {
+        names.extend(
+            operands
+                .iter()
+                .filter(|word| !word.text.starts_with('-'))
+                .map(exported_name),
+        );
+    }
+    if words[start].text == "set"
+        && (has_option('a') || operands.iter().any(|word| word.text == "allexport"))
+    {
+        names.push("all its variables");
+    }
+    if let Some(env) = words.iter().position(|word| word.text == "env") {
+        names.extend(
+            words[env + 1..]
+                .iter()
+                .filter(|word| is_assignment(&word.text))
+                .map(exported_name),
+        );
+    }
+    names
+}
+
+/// The variable name `word` assigns or declares.
+fn exported_name(word: &Word) -> &str {
+    let name = word
+        .text
+        .split_once('=')
+        .map_or(word.text.as_str(), |(name, _)| name);
+    name.strip_suffix('+').unwrap_or(name)
 }
 
 /// Whether the script may change variable `name`.
