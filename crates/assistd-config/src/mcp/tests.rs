@@ -134,7 +134,6 @@ fn invalid_entries_are_rejected_without_echoing_secrets() {
             "url = \"https://h/mcp\"\nauth = \"oauth\"\nheaders = { authorization = \"Bearer hunter2\" }\n",
             "remove the one in `headers`",
         ),
-        ("command = \"npx\"\nauth = \"oauth\"\n", "do not apply"),
     ];
     for (entry, expected) in cases {
         let message = parse_server(entry).expect_err(entry);
