@@ -15,7 +15,8 @@ use assistd_utils::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy};
 
 use crate::McpClient;
 use crate::error::McpError;
-use crate::stdio::{ChildLifeline, StdioConfig, StdioMcpClient};
+use crate::session::{Connector, Lifeline, McpPeer};
+use crate::stdio::StdioConfig;
 
 /// Wait before the next restart once either restart cap is hit.
 const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
@@ -33,7 +34,7 @@ const HUNG_AFTER_TIMEOUTS: u32 = 2;
 #[derive(Debug)]
 pub struct McpServer {
     name: String,
-    cfg: StdioConfig,
+    connector: Connector,
     state: Mutex<ServerState>,
 }
 
@@ -47,11 +48,11 @@ struct ServerState {
     advertised: Option<Vec<Tool>>,
 }
 
-/// One running server process. Its task kills the process group as soon
-/// as the process or its MCP session ends, or when told to stop.
+/// One open session. Its task shuts the session down as soon as its
+/// lifeline ends, or when told to stop.
 #[derive(Debug)]
 struct Session {
-    client: Arc<StdioMcpClient>,
+    client: Arc<McpPeer>,
     started: Instant,
     stop_tx: oneshot::Sender<()>,
     task: AbortOnDropHandle<()>,
@@ -61,14 +62,15 @@ struct Session {
 impl McpServer {
     /// Spawn the server and run its handshake; errors if either fails.
     pub async fn start(name: String, cfg: StdioConfig) -> Result<Self, McpError> {
-        let session = Session::spawn(&cfg).await?;
+        let connector = Connector::Stdio(cfg);
+        let session = Session::open(&connector).await?;
         let state = ServerState {
             session: Some(session),
             ..ServerState::default()
         };
         Ok(Self {
             name,
-            cfg,
+            connector,
             state: Mutex::new(state),
         })
     }
@@ -86,7 +88,7 @@ impl McpServer {
         }
     }
 
-    async fn live_client(&self) -> Result<Arc<StdioMcpClient>, McpError> {
+    async fn live_client(&self) -> Result<Arc<McpPeer>, McpError> {
         let mut state = self.state.lock().await;
         if state.stopped {
             return Err(McpError::ServerDown);
@@ -101,7 +103,7 @@ impl McpServer {
 
     /// Count a timeout from `client` toward killing its session as hung,
     /// or clear the count when the server answered.
-    async fn record_outcome<T>(&self, client: &Arc<StdioMcpClient>, outcome: &Result<T, McpError>) {
+    async fn record_outcome<T>(&self, client: &Arc<McpPeer>, outcome: &Result<T, McpError>) {
         let mut state = self.state.lock().await;
         let Some(session) = state
             .session
@@ -129,12 +131,12 @@ impl McpServer {
 
     /// Replace a dead session, unless the backoff after the last death or
     /// failed spawn has yet to pass.
-    async fn restart(&self, state: &mut ServerState) -> Result<Arc<StdioMcpClient>, McpError> {
+    async fn restart(&self, state: &mut ServerState) -> Result<Arc<McpPeer>, McpError> {
         self.retire_session(state);
         if state.retry_at.is_some_and(|at| Instant::now() < at) {
             return Err(McpError::ServerDown);
         }
-        match Session::spawn(&self.cfg).await {
+        match Session::open(&self.connector).await {
             Ok(session) => {
                 info!(target: "assistd::mcp", server = %self.name, "MCP server restarted");
                 let client = session.client.clone();
@@ -174,7 +176,7 @@ impl McpServer {
 
     /// Re-list a restarted server's tools and warn when they differ from
     /// the `advertised` ones the registry still offers.
-    async fn warn_if_tools_changed(&self, advertised: &[Tool], client: &StdioMcpClient) {
+    async fn warn_if_tools_changed(&self, advertised: &[Tool], client: &McpPeer) {
         let listed = match client.list_tools().await {
             Ok(listed) => listed,
             Err(e) => {
@@ -290,8 +292,8 @@ impl<'a> ToolChanges<'a> {
 }
 
 impl Session {
-    async fn spawn(cfg: &StdioConfig) -> Result<Self, McpError> {
-        let (client, lifeline) = StdioMcpClient::spawn(cfg.clone()).await?;
+    async fn open(connector: &Connector) -> Result<Self, McpError> {
+        let (client, lifeline) = connector.open().await?;
         let (stop_tx, stop_rx) = oneshot::channel();
         let task = AbortOnDropHandle::new(tokio::spawn(end_session(lifeline, stop_rx)));
         Ok(Self {
@@ -309,9 +311,9 @@ impl Session {
     }
 }
 
-async fn end_session(mut lifeline: ChildLifeline, stop_rx: oneshot::Receiver<()>) {
+async fn end_session(mut lifeline: Lifeline, stop_rx: oneshot::Receiver<()>) {
     tokio::select! {
-        () = lifeline.wait_for_death() => {}
+        () = lifeline.wait_for_end() => {}
         _ = stop_rx => {}
     }
     lifeline.shutdown(TERM_TIMEOUT).await;
