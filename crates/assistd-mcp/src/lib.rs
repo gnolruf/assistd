@@ -1,5 +1,5 @@
-//! MCP (Model Context Protocol) client: each server runs as a child process managed by
-//! [`McpServer`], and each tool it exposes becomes a [`Tool`] via [`adapt_client_as_tools`].
+//! MCP (Model Context Protocol) client: each server, a child process or a Streamable HTTP URL,
+//! is managed by [`McpServer`], and each tool it exposes becomes a [`Tool`] via [`adapt_client_as_tools`].
 
 use std::borrow::Cow;
 use std::fmt;
@@ -23,11 +23,14 @@ mod launch;
 mod server;
 mod session;
 mod stdio;
+mod streamable;
 
 pub use error::{McpError, mcp_error_line};
 pub use launch::{LaunchTarget, launch};
 pub use server::McpServer;
+pub use session::Connector;
 pub use stdio::StdioConfig;
+pub use streamable::HttpConfig;
 
 /// A connection to a single MCP server.
 #[async_trait]

@@ -16,7 +16,6 @@ use assistd_utils::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy};
 use crate::McpClient;
 use crate::error::McpError;
 use crate::session::{Connector, Lifeline, McpPeer};
-use crate::stdio::StdioConfig;
 
 /// Wait before the next restart once either restart cap is hit.
 const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
@@ -60,9 +59,8 @@ struct Session {
 }
 
 impl McpServer {
-    /// Spawn the server and run its handshake; errors if either fails.
-    pub async fn start(name: String, cfg: StdioConfig) -> Result<Self, McpError> {
-        let connector = Connector::Stdio(cfg);
+    /// Open a session through `connector` and run its handshake; errors if either fails.
+    pub async fn start(name: String, connector: Connector) -> Result<Self, McpError> {
         let session = Session::open(&connector).await?;
         let state = ServerState {
             session: Some(session),
@@ -101,8 +99,8 @@ impl McpServer {
         self.restart(&mut state).await
     }
 
-    /// Count a timeout from `client` toward killing its session as hung,
-    /// or clear the count when the server answered.
+    /// Count a timeout from `client` toward killing its session as hung, or clear the count
+    /// when the server answered; a session the server ended is dropped at once.
     async fn record_outcome<T>(&self, client: &Arc<McpPeer>, outcome: &Result<T, McpError>) {
         let mut state = self.state.lock().await;
         let Some(session) = state
@@ -113,19 +111,29 @@ impl McpServer {
             return;
         };
         match outcome {
-            Err(McpError::RequestTimeout(_)) => session.consecutive_timeouts += 1,
-            Ok(_) | Err(McpError::RpcError { .. }) => session.consecutive_timeouts = 0,
-            Err(_) => {}
+            Err(McpError::SessionExpired) => info!(
+                target: "assistd::mcp",
+                server = %self.name,
+                "MCP server ended the session; the next call opens a new one",
+            ),
+            Err(McpError::RequestTimeout(_)) => {
+                session.consecutive_timeouts += 1;
+                if session.consecutive_timeouts < HUNG_AFTER_TIMEOUTS {
+                    return;
+                }
+                error!(
+                    target: "assistd::mcp",
+                    server = %self.name,
+                    timeouts = HUNG_AFTER_TIMEOUTS,
+                    "MCP server stopped answering; killing it so the next call restarts it",
+                );
+            }
+            Ok(_) | Err(McpError::RpcError { .. }) => {
+                session.consecutive_timeouts = 0;
+                return;
+            }
+            Err(_) => return,
         }
-        if session.consecutive_timeouts < HUNG_AFTER_TIMEOUTS {
-            return;
-        }
-        error!(
-            target: "assistd::mcp",
-            server = %self.name,
-            timeouts = HUNG_AFTER_TIMEOUTS,
-            "MCP server stopped answering; killing it so the next call restarts it",
-        );
         self.retire_session(&mut state);
     }
 

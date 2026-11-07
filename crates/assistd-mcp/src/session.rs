@@ -8,12 +8,17 @@ use async_trait::async_trait;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation, Tool,
 };
-use rmcp::service::{Peer, RoleClient, ServiceError};
+use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use serde_json::Value;
 
 use crate::McpClient;
 use crate::error::McpError;
 use crate::stdio::{self, ChildLifeline, StdioConfig};
+use crate::streamable::{self, HttpConfig, HttpLifeline};
+
+/// Longest message read from a server, as a stdio line, a JSON body or one SSE event: a
+/// largest accepted image base64-encoded, plus envelope.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The requesting side of an open session; every request is bounded by `request_timeout`.
 #[derive(Debug)]
@@ -61,7 +66,8 @@ impl McpClient for McpPeer {
 /// What keeps a session alive: it resolves once the session ends and can be told to stop.
 #[derive(Debug)]
 pub(crate) enum Lifeline {
-    Stdio(ChildLifeline),
+    Stdio(Box<ChildLifeline>),
+    Http(HttpLifeline),
 }
 
 impl Lifeline {
@@ -69,6 +75,7 @@ impl Lifeline {
     pub(crate) async fn wait_for_end(&mut self) {
         match self {
             Self::Stdio(child) => child.wait_for_death().await,
+            Self::Http(session) => session.wait_for_end().await,
         }
     }
 
@@ -76,14 +83,16 @@ impl Lifeline {
     pub(crate) async fn shutdown(self, term_timeout: Duration) {
         match self {
             Self::Stdio(child) => child.shutdown(term_timeout).await,
+            Self::Http(session) => session.shutdown(term_timeout).await,
         }
     }
 }
 
-/// How to open a fresh session to one configured server.
-#[derive(Debug)]
-pub(crate) enum Connector {
+/// How to open a fresh session to one configured server: spawn it, or reach it by URL.
+#[derive(Debug, Clone)]
+pub enum Connector {
     Stdio(StdioConfig),
+    Http(HttpConfig),
 }
 
 impl Connector {
@@ -92,7 +101,11 @@ impl Connector {
         match self {
             Self::Stdio(cfg) => {
                 let (peer, child) = stdio::connect(cfg).await?;
-                Ok((Arc::new(peer), Lifeline::Stdio(child)))
+                Ok((Arc::new(peer), Lifeline::Stdio(Box::new(child))))
+            }
+            Self::Http(cfg) => {
+                let (peer, session) = streamable::connect(cfg).await?;
+                Ok((Arc::new(peer), Lifeline::Http(session)))
             }
         }
     }
@@ -104,4 +117,14 @@ pub(crate) fn client_config() -> ClientConfig {
         ClientCapabilities::default(),
         Implementation::new("assistd", env!("CARGO_PKG_VERSION")),
     )
+}
+
+/// Resolves once `service` has stopped, or never when there is none.
+pub(crate) async fn session_end(service: Option<RunningService<RoleClient, ClientConfig>>) {
+    match service {
+        Some(service) => {
+            let _ = service.waiting().await;
+        }
+        None => std::future::pending().await,
+    }
 }

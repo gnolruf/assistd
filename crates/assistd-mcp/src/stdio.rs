@@ -23,7 +23,7 @@ use assistd_utils::log_lines::forward_lines;
 use assistd_utils::process_group::{ProcessGroup, set_parent_death_signal};
 
 use crate::error::McpError;
-use crate::session::{McpPeer, client_config};
+use crate::session::{MAX_MESSAGE_BYTES, McpPeer, client_config, session_end};
 
 /// Daemon variables a server inherits besides `LC_*`; anything else,
 /// credentials included, must come from [`StdioConfig::env`].
@@ -34,10 +34,6 @@ const INHERITED_ENV: &[&str] = &[
 /// How long a shutdown waits for the MCP session to close the child's
 /// stdin before signalling the process group.
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Longest JSON-RPC line read from a server: a largest accepted image
-/// base64-encoded, plus envelope.
-const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-server stdio transport configuration. `Debug` gives the arg count
 /// and env var names, never their values.
@@ -256,15 +252,6 @@ async fn abandon(mut child: Child, group: ProcessGroup, error: McpError) -> McpE
     drop(group);
     let _ = child.wait().await;
     error
-}
-
-async fn session_end(service: Option<RunningService<RoleClient, ClientConfig>>) {
-    match service {
-        Some(service) => {
-            let _ = service.waiting().await;
-        }
-        None => std::future::pending().await,
-    }
 }
 
 fn inherited_env(
