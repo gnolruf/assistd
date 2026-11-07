@@ -9,17 +9,18 @@ use reqwest::redirect;
 use rmcp::ServiceExt;
 use rmcp::model::ClientConfig;
 use rmcp::service::{ClientInitializeError, RoleClient, RunningService};
-use rmcp::transport::DynamicTransportError;
-use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::auth::AuthClient;
 use rmcp::transport::streamable_http_client::{
-    StreamableHttpClientTransportConfig, StreamableHttpError,
+    StreamableHttpClient, StreamableHttpClientTransportConfig, StreamableHttpError,
 };
+use rmcp::transport::{DynamicTransportError, StreamableHttpClientTransport};
 use tracing::info;
 use url::Url;
 
 use assistd_utils::http::remote_client_builder;
 
 use crate::error::McpError;
+use crate::oauth::{self, OAuthConfig, auth_failure, split_scopes};
 use crate::session::{MAX_MESSAGE_BYTES, McpPeer, client_config, session_end};
 
 mod client;
@@ -30,12 +31,13 @@ use client::{CappedHttpClient, HttpClientError, HttpError};
 const MAX_REDIRECTS: usize = 10;
 
 /// Per-server Streamable HTTP configuration. `Debug` gives the URL's origin and the header
-/// names, never the path, query or header values.
+/// names, never the path, query, header values or secrets.
 #[derive(Clone)]
 pub struct HttpConfig {
     pub url: Url,
     /// Sent with every request.
     pub headers: HeaderMap,
+    pub auth: HttpAuth,
     /// Bounds the initialize handshake and every request.
     pub request_timeout: Duration,
     /// Server name used in tracing logs.
@@ -48,6 +50,7 @@ impl HttpConfig {
         Self {
             url,
             headers: HeaderMap::new(),
+            auth: HttpAuth::None,
             request_timeout: Duration::from_secs(30),
             label: label.into(),
         }
@@ -63,10 +66,21 @@ impl fmt::Debug for HttpConfig {
         f.debug_struct("HttpConfig")
             .field("origin", &self.origin())
             .field("header_names", &self.headers.keys().collect::<Vec<_>>())
+            .field("auth", &self.auth)
             .field("request_timeout", &self.request_timeout)
             .field("label", &self.label)
             .finish()
     }
+}
+
+/// How a server authenticates the daemon beyond its static headers.
+#[derive(Debug, Clone, Default)]
+pub enum HttpAuth {
+    #[default]
+    None,
+    /// A bearer token from the [`TokenStore`](crate::TokenStore), refreshed ahead of expiry
+    /// and once when the server rejects it.
+    OAuth(OAuthConfig),
 }
 
 /// The open HTTP session. Closing it asks the server to delete the session.
@@ -95,21 +109,11 @@ pub(crate) async fn connect(cfg: &HttpConfig) -> Result<(McpPeer, HttpLifeline),
         .connect_timeout(cfg.request_timeout)
         .build()
         .map_err(|e| McpError::Connection(error_chain(&e.without_url())))?;
-    let transport_config = StreamableHttpClientTransportConfig::with_uri(cfg.url.as_str())
-        .custom_headers(
-            cfg.headers
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect(),
-        )
-        .max_sse_event_size(MAX_MESSAGE_BYTES)
-        .reinit_on_expired_session(false);
-    let transport =
-        StreamableHttpClientTransport::with_client(CappedHttpClient::new(http), transport_config);
-    let service = tokio::time::timeout(cfg.request_timeout, client_config().serve(transport))
-        .await
-        .map_err(|_| McpError::RequestTimeout(cfg.request_timeout))?
-        .map_err(initialize_error)?;
+    let http = CappedHttpClient::new(http);
+    let service = match &cfg.auth {
+        HttpAuth::None => initialize(cfg, http).await?,
+        HttpAuth::OAuth(oauth) => initialize(cfg, authorized(cfg, oauth, http).await?).await?,
+    };
     info!(
         target: "assistd::mcp",
         server = %cfg.label,
@@ -123,14 +127,58 @@ pub(crate) async fn connect(cfg: &HttpConfig) -> Result<(McpPeer, HttpLifeline),
     Ok((peer, lifeline))
 }
 
+/// `http` with the server's stored OAuth token attached to every request.
+async fn authorized(
+    cfg: &HttpConfig,
+    oauth: &OAuthConfig,
+    http: CappedHttpClient,
+) -> Result<AuthClient<CappedHttpClient>, McpError> {
+    let manager = tokio::time::timeout(
+        cfg.request_timeout,
+        oauth::authorization_manager(&cfg.label, &cfg.url, oauth),
+    )
+    .await
+    .map_err(|_| McpError::RequestTimeout(cfg.request_timeout))??;
+    Ok(AuthClient::new(http, manager))
+}
+
+async fn initialize<C>(
+    cfg: &HttpConfig,
+    client: C,
+) -> Result<RunningService<RoleClient, ClientConfig>, McpError>
+where
+    C: StreamableHttpClient<Error = HttpClientError> + Sync,
+{
+    let transport_config = StreamableHttpClientTransportConfig::with_uri(cfg.url.as_str())
+        .custom_headers(
+            cfg.headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        )
+        .max_sse_event_size(MAX_MESSAGE_BYTES)
+        .reinit_on_expired_session(false);
+    let transport = StreamableHttpClientTransport::with_client(client, transport_config);
+    tokio::time::timeout(cfg.request_timeout, client_config().serve(transport))
+        .await
+        .map_err(|_| McpError::RequestTimeout(cfg.request_timeout))?
+        .map_err(initialize_error)
+}
+
 /// The [`McpError`] for a failed HTTP request, or `None` when `error` came from another
 /// transport.
 pub(crate) fn transport_failure(error: &DynamicTransportError) -> Option<McpError> {
     let error = error.error.downcast_ref::<HttpError>()?;
     Some(match error {
-        StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_) => {
-            McpError::NeedsAuthorization
-        }
+        StreamableHttpError::AuthRequired(_) => McpError::NeedsAuthorization { scopes: Vec::new() },
+        StreamableHttpError::InsufficientScope(insufficient) => McpError::NeedsAuthorization {
+            scopes: insufficient
+                .required_scope
+                .as_deref()
+                .map(split_scopes)
+                .unwrap_or_default(),
+        },
+        StreamableHttpError::Auth(failure) => auth_failure(failure),
         StreamableHttpError::HttpStatus(status) => McpError::HttpStatus(status.status),
         StreamableHttpError::SessionExpired => McpError::SessionExpired,
         StreamableHttpError::Client(HttpClientError::Request(source)) => {

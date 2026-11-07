@@ -33,8 +33,8 @@ pub use errors::{
     ConfigError, CustomArgsError, SearchCommandError, ThemeColorError, UnitIntervalError,
 };
 pub use mcp::{
-    McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpServerConfig, McpServerUrl,
-    McpStdioTransport, McpTransport,
+    McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpOAuthClient, McpServerConfig,
+    McpServerUrl, McpStdioTransport, McpTransport,
 };
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;

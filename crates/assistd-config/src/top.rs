@@ -227,7 +227,7 @@ pub(crate) fn create_private_dir_all(dir: &Path) -> Result<(), ConfigError> {
         })
 }
 
-pub(crate) fn create_private_file(path: &Path) -> Result<File, ConfigError> {
+fn create_private_file(path: &Path) -> Result<File, ConfigError> {
     OpenOptions::new()
         .write(true)
         .create_new(true)

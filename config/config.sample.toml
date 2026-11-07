@@ -153,7 +153,15 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # name = "remote"
 # url = "https://mcp.example.com/mcp"  # a Streamable HTTP server; https, or http to loopback
 # headers = { Authorization = "Bearer ..." }  # sent with every request
-# auth = "none"
+# auth = "none"  # or "oauth": a bearer token from ~/.local/state/assistd/mcp-tokens.json
+#
+# [[mcp.servers]]
+# name = "drive"
+# url = "https://drivemcp.googleapis.com/mcp/v1"
+# auth = "oauth"
+# client_id = "....apps.googleusercontent.com"  # omit to register a client dynamically
+# client_secret = "..."  # issued with client_id
+# scopes = ["https://www.googleapis.com/auth/drive.readonly"]  # empty takes the server's
 
 # [notifications]
 # Desktop notifications from `assistd tray`; none while the chat is focused.

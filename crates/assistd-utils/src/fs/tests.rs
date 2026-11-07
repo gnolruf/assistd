@@ -33,7 +33,7 @@ fn socket_is_refused_before_it_is_opened() {
     let opened = rustix::fs::open(&socket, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty());
     let refused = open_regular_or_dir(&socket);
     drop(listener);
-    std::fs::remove_file(&socket).unwrap();
+    fs::remove_file(&socket).unwrap();
     assert_eq!(opened.unwrap_err(), rustix::io::Errno::NXIO);
     assert_not_regular(&refused.unwrap_err());
 }

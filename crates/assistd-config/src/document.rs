@@ -2,13 +2,13 @@
 //! layout, and each one is checked against the schema as it is made.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
 use crate::errors::ConfigError;
-use crate::top::{Config, create_private_dir_all, create_private_file};
+use crate::top::{Config, create_private_dir_all};
 
 /// An editable `config.toml`. Every accepted change leaves a document that
 /// parses into a [`Config`]; [`save`](Self::save) also requires it to validate.
@@ -180,22 +180,12 @@ fn replace_private_file(path: &Path, contents: &str) -> Result<(), ConfigError> 
     if let Some(parent) = target.parent() {
         create_private_dir_all(parent)?;
     }
-    let mut staging_name = target.file_name().unwrap_or_default().to_os_string();
-    staging_name.push(".tmp");
-    let staging = target.with_file_name(staging_name);
-    let write_error = |source| ConfigError::Write {
-        path: target.clone(),
-        source,
-    };
-    match fs::remove_file(&staging) {
-        Err(source) if source.kind() != io::ErrorKind::NotFound => return Err(write_error(source)),
-        _ => {}
-    }
-    let mut file = create_private_file(&staging)?;
-    file.write_all(contents.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(write_error)?;
-    fs::rename(&staging, &target).map_err(write_error)
+    assistd_utils::fs::replace_private_file(&target, contents.as_bytes()).map_err(|source| {
+        ConfigError::Write {
+            path: target.clone(),
+            source,
+        }
+    })
 }
 
 #[cfg(test)]
