@@ -17,10 +17,11 @@ use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
 };
 use assistd_memory::{
-    AdjacentChunks, BranchId, ChunkId, ChunkLocator, Embedding, EmbeddingHit, HistoryRow,
-    HistoryScope, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore, PersistedMessage,
-    PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope, SqliteHandle,
-    SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
+    AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
+    HistoryRow, HistoryScope, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore,
+    PersistedMessage, PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope,
+    SqliteHandle, SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
+    UnindexedRows,
 };
 use assistd_tools::{
     Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
@@ -1944,14 +1945,16 @@ impl SemanticStore for FixedHits {
         &self,
         _query_vector: Vec<f32>,
         top_k: usize,
-        scope: SessionScope,
+        scope: ChunkScope,
     ) -> assistd_memory::Result<Vec<EmbeddingHit>> {
         Ok(self
             .chunks
             .iter()
-            .filter(|hit| {
-                let ChunkLocator::Message { session_id, .. } = hit.locator;
-                scope != SessionScope::AllExcept(session_id)
+            .filter(|hit| match hit.locator {
+                ChunkLocator::Message { session_id, .. } => {
+                    scope != ChunkScope::Chats(SessionScope::AllExcept(session_id))
+                }
+                ChunkLocator::Document { .. } => scope == ChunkScope::Documents,
             })
             .take(top_k)
             .cloned()

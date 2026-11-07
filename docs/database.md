@@ -19,10 +19,11 @@ erDiagram
     branches ||--o{ branch_messages : "orders"
     messages ||--|{ branch_messages : "appears in"
     branches ||--o| branch_summaries : "compacted by"
-    messages ||--o{ message_chunks : "split into"
+    messages ||--o{ chunks : "split into"
+    documents ||--o{ chunks : "split into"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
-    message_chunks ||--o| chunk_embeddings : "embedded as"
+    chunks ||--o| chunk_embeddings : "embedded as"
     memories ||--o| memory_embeddings : "embedded as"
     tasks ||--o{ task_runs : "ran as"
 
@@ -107,9 +108,16 @@ erDiagram
         int created_at
         int updated_at
     }
-    message_chunks {
+    documents {
         int id PK
-        int message_id FK
+        blob path UK
+        text content "the text as indexed"
+        int indexed_at
+    }
+    chunks {
+        int id PK
+        int message_id FK "set for a message chunk"
+        int document_id FK "set for a document chunk"
         int byte_start
         int byte_end
     }
@@ -219,11 +227,17 @@ Deleting a task deletes its runs; their transcript sessions stay.
 
 ## Embeddings
 
-- **`message_chunks`**: user and assistant messages are cut into
-  overlapping windows of 512 characters (64 shared) in the same
-  transaction that saves the message. Each chunk is a byte range into
-  `messages.content`, so the text itself is never stored twice. Tool
-  results are not chunked.
+- **`chunks`**: each chunk belongs to exactly one message or one
+  document, and is a byte range into `messages.content` or
+  `documents.content`, so the text itself is never stored twice. User
+  and assistant messages are cut into overlapping windows of 512
+  characters (64 shared) in the same transaction that saves the
+  message; tool results are not chunked.
+- **`documents`**: local files indexed for search, one row per path,
+  holding the text as it was indexed. Re-indexing a path whose text
+  changed replaces its chunks, and with them their vectors; unchanged
+  text keeps both. The rows are a rebuildable cache of files on disk,
+  so a reset of `memory.db` costs only a re-index.
 - **`chunk_embeddings`** / **`memory_embeddings`**: at most one vector
   per chunk or memory, stored as a BLOB of little-endian `f32`s,
   L2-normalised by the embedder so a dot product is cosine similarity,
@@ -236,9 +250,10 @@ Deleting a task deletes its runs; their transcript sessions stay.
   queued. Rows with no vector are what `assistd memory reindex` fills
   in.
 
-Search (`recall`, `reminisce`) scans every vector on a dedicated read-only connection and keeps the top matches; there
-is no vector index. `reminisce` leaves out the current session's
-messages.
+Search (`recall`, `reminisce`) scans every vector of one source kind,
+chats or documents, on a dedicated read-only connection and keeps the
+top matches; there is no vector index. `reminisce` leaves out the
+current session's messages.
 
 ## Storage
 

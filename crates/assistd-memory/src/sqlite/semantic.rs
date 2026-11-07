@@ -1,37 +1,57 @@
 //! SQLite-backed [`SemanticStore`] over `chunk_embeddings` and `memory_embeddings`.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt;
 use std::hash::Hash;
+use std::ops::Range;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use rusqlite::types::FromSql;
 use rusqlite::{OptionalExtension, Row, Transaction};
 
+use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
-    AdjacentChunks, ChunkId, ChunkLocator, ContextChunk, Embedding, EmbeddingHit, EmbeddingTarget,
-    MemoryError, MemoryHit, MemoryId, MessageId, Result, SemanticStore, SessionId, SessionScope,
-    UnindexedRows,
+    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ContextChunk, DocumentId, Embedding,
+    EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit, MemoryId, MessageId, Result,
+    SemanticStore, SessionId, SessionScope, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
-use super::timestamp::timestamp_at;
+use super::timestamp::{now_millis, timestamp_at};
 
-/// Every chunk vector, grouped by its message.
-const ALL_CHUNK_VECTORS: &str = "
+/// Every message chunk vector, grouped by its message.
+const MESSAGE_CHUNK_VECTORS: &str = "
     SELECT cc.message_id, e.chunk_id, e.vector
-    FROM chunk_embeddings e JOIN message_chunks cc ON cc.id = e.chunk_id";
+    FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
+    WHERE cc.message_id IS NOT NULL";
+
+/// Every document chunk vector, grouped by its document.
+const DOCUMENT_CHUNK_VECTORS: &str = "
+    SELECT cc.document_id, e.chunk_id, e.vector
+    FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
+    WHERE cc.document_id IS NOT NULL";
 
 /// Every memory vector, each its own group.
 const ALL_MEMORY_VECTORS: &str = "SELECT memory_id, memory_id, vector FROM memory_embeddings";
 
-/// A chunk row's columns, read by [`context_chunk`]: chunk id, message id, session
-/// uuid, message time, role, session title, the session's opening user text, chunk text.
-const CHUNK_COLUMNS: &str = "
+/// A message chunk row's columns, read by [`message_context_chunk`]: chunk id, message
+/// id, session uuid, message time, role, session title, the session's opening user text,
+/// chunk text.
+const MESSAGE_CHUNK_COLUMNS: &str = "
     cc.id, m.id, s.uuid, m.created_at, m.role, s.title,
     (SELECT substr(f.content, 1, 256) FROM messages f
      WHERE f.session_id = s.id AND f.role = 0 ORDER BY f.id LIMIT 1),
     CAST(substr(CAST(m.content AS BLOB), cc.byte_start + 1,
+                cc.byte_end - cc.byte_start) AS TEXT)";
+
+/// A document chunk row's columns, read by [`document_context_chunk`]: chunk id,
+/// document id, path, byte range, index time, chunk text.
+const DOCUMENT_CHUNK_COLUMNS: &str = "
+    cc.id, d.id, d.path, cc.byte_start, cc.byte_end, d.indexed_at,
+    CAST(substr(CAST(d.content AS BLOB), cc.byte_start + 1,
                 cc.byte_end - cc.byte_start) AS TEXT)";
 
 /// Characters of an untitled session's opening user message kept in its label.
@@ -52,6 +72,27 @@ impl SqliteSemanticStore {
     pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
     }
+
+    /// Index `content` as the text of the document at `path`, replacing its chunks
+    /// and their vectors when the text changed. Returns the new chunks as
+    /// `(id, chunk text)` for embedding; empty when the text is unchanged.
+    pub async fn index_document(
+        &self,
+        path: PathBuf,
+        content: String,
+    ) -> Result<Vec<(ChunkId, String)>> {
+        let ranges = chunk_ranges(&content, &ChunkingConfig::DOCUMENTS);
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let chunks = replace_document(&tx, &path, &content, &ranges)?;
+                tx.commit()?;
+                Ok(chunks)
+            })
+            .await
+            .map_err(MemoryError::sqlite("index_document"))
+    }
 }
 
 #[async_trait]
@@ -60,45 +101,31 @@ impl SemanticStore for SqliteSemanticStore {
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        scope: SessionScope,
+        scope: ChunkScope,
     ) -> Result<Vec<EmbeddingHit>> {
         if top_k == 0 || query_vector.is_empty() {
             return Ok(Vec::new());
         }
         self.handle
             .search_reader()
-            .call(move |c| {
-                let filter = MessageFilter::for_scope(c, scope)?;
-                let ranked = scan_top_k::<MessageId, ChunkId>(
-                    c,
-                    ALL_CHUNK_VECTORS,
-                    &query_vector,
-                    top_k,
-                    |message| filter.admits(*message),
-                )?;
-                let select = format!(
-                    "SELECT {CHUNK_COLUMNS}
-                     FROM message_chunks cc
-                     JOIN messages m ON m.id = cc.message_id
-                     JOIN sessions s ON s.id = m.session_id
-                     WHERE cc.id IN (SELECT value FROM json_each(?1))"
-                );
-                hydrate_in_rank_order(c, &select, ranked, chunk_hit, |hit, similarity| {
-                    hit.similarity = similarity;
-                })
+            .call(move |c| match scope {
+                ChunkScope::Chats(sessions) => {
+                    nearest_message_chunks(c, &query_vector, top_k, sessions)
+                }
+                ChunkScope::Documents => nearest_document_chunks(c, &query_vector, top_k),
             })
             .await
             .map_err(MemoryError::sqlite("nearest_chunks"))
     }
 
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks> {
-        let ChunkLocator::Message { message_id, .. } = *locator;
+        let locator = locator.clone();
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 Ok(AdjacentChunks {
-                    before: adjacent_message_chunk(c, message_id, Side::Before)?,
-                    after: adjacent_message_chunk(c, message_id, Side::After)?,
+                    before: adjacent_chunk(c, &locator, Side::Before)?,
+                    after: adjacent_chunk(c, &locator, Side::After)?,
                 })
             })
             .await
@@ -161,7 +188,7 @@ impl SemanticStore for SqliteSemanticStore {
             .call(move |c| -> rusqlite::Result<_> {
                 let chunks = c.query_row(
                     "SELECT count(*)
-                     FROM message_chunks cc
+                     FROM chunks cc
                      WHERE NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = cc.id)",
                     [],
                     |r| r.get(0),
@@ -219,10 +246,11 @@ impl SemanticStore for SqliteSemanticStore {
             .call(move |c| -> rusqlite::Result<_> {
                 let mut stmt = c.prepare_cached(
                     "SELECT cc.id,
-                            CAST(substr(CAST(msg.content AS BLOB), cc.byte_start + 1,
-                                        cc.byte_end - cc.byte_start) AS TEXT)
-                     FROM message_chunks cc
-                     JOIN messages msg ON msg.id = cc.message_id
+                            CAST(substr(CAST(coalesce(msg.content, doc.content) AS BLOB),
+                                        cc.byte_start + 1, cc.byte_end - cc.byte_start) AS TEXT)
+                     FROM chunks cc
+                     LEFT JOIN messages msg ON msg.id = cc.message_id
+                     LEFT JOIN documents doc ON doc.id = cc.document_id
                      WHERE cc.id > ifnull(?1, 0) AND NOT EXISTS (
                          SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = cc.id
                      )
@@ -287,7 +315,7 @@ impl MessageFilter {
     }
 }
 
-/// Which neighbour of a message [`adjacent_message_chunk`] looks up.
+/// Which neighbour of a chunk's source position [`adjacent_chunk`] looks up.
 #[derive(Clone, Copy)]
 enum Side {
     Before,
@@ -295,9 +323,9 @@ enum Side {
 }
 
 impl Side {
-    /// The comparison against the hit's seq and the sort order that puts the
+    /// The comparison against the hit's position and the sort order that puts the
     /// nearest chunk on this side first.
-    fn seq_test_and_order(self) -> (&'static str, &'static str) {
+    fn test_and_order(self) -> (&'static str, &'static str) {
         match self {
             Self::Before => ("<", "DESC"),
             Self::After => (">", "ASC"),
@@ -406,6 +434,45 @@ fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     Ok(best.into_ranked())
 }
 
+/// The `top_k` messages in `sessions` with the best chunks against `query`, best first.
+fn nearest_message_chunks(
+    conn: &rusqlite::Connection,
+    query: &[f32],
+    top_k: usize,
+    sessions: SessionScope,
+) -> rusqlite::Result<Vec<EmbeddingHit>> {
+    let filter = MessageFilter::for_scope(conn, sessions)?;
+    let ranked =
+        scan_top_k::<MessageId, ChunkId>(conn, MESSAGE_CHUNK_VECTORS, query, top_k, |message| {
+            filter.admits(*message)
+        })?;
+    let select = format!(
+        "SELECT {MESSAGE_CHUNK_COLUMNS}
+         FROM chunks cc
+         JOIN messages m ON m.id = cc.message_id
+         JOIN sessions s ON s.id = m.session_id
+         WHERE cc.id IN (SELECT value FROM json_each(?1))"
+    );
+    hydrate_in_rank_order(conn, &select, ranked, message_chunk_hit, set_similarity)
+}
+
+/// The `top_k` documents with the best chunks against `query`, best first.
+fn nearest_document_chunks(
+    conn: &rusqlite::Connection,
+    query: &[f32],
+    top_k: usize,
+) -> rusqlite::Result<Vec<EmbeddingHit>> {
+    let ranked =
+        scan_top_k::<DocumentId, ChunkId>(conn, DOCUMENT_CHUNK_VECTORS, query, top_k, |_| true)?;
+    let select = format!(
+        "SELECT {DOCUMENT_CHUNK_COLUMNS}
+         FROM chunks cc
+         JOIN documents d ON d.id = cc.document_id
+         WHERE cc.id IN (SELECT value FROM json_each(?1))"
+    );
+    hydrate_in_rank_order(conn, &select, ranked, document_chunk_hit, set_similarity)
+}
+
 /// Every message in `session`.
 fn session_message_ids(
     conn: &rusqlite::Connection,
@@ -472,6 +539,20 @@ where
         .collect())
 }
 
+/// The chunk next to `locator` on `side` within its source.
+fn adjacent_chunk(
+    conn: &rusqlite::Connection,
+    locator: &ChunkLocator,
+    side: Side,
+) -> rusqlite::Result<Option<ContextChunk>> {
+    match locator {
+        ChunkLocator::Message { message_id, .. } => adjacent_message_chunk(conn, *message_id, side),
+        ChunkLocator::Document {
+            document_id, bytes, ..
+        } => adjacent_document_chunk(conn, *document_id, bytes.start, side),
+    }
+}
+
 /// The chunk of the nearest user or assistant message on `side` of `message` along
 /// its branch: the session's current one when it holds `message`, else its oldest.
 fn adjacent_message_chunk(
@@ -479,7 +560,7 @@ fn adjacent_message_chunk(
     message: MessageId,
     side: Side,
 ) -> rusqlite::Result<Option<ContextChunk>> {
-    let (seq_test, order) = side.seq_test_and_order();
+    let (seq_test, order) = side.test_and_order();
     let sql = format!(
         "WITH here AS (
              SELECT bm.branch_id, bm.seq
@@ -490,32 +571,67 @@ fn adjacent_message_chunk(
              ORDER BY bm.branch_id IS hs.current_branch_id DESC, bm.branch_id
              LIMIT 1
          )
-         SELECT {CHUNK_COLUMNS}
+         SELECT {MESSAGE_CHUNK_COLUMNS}
          FROM here
          JOIN branch_messages bm ON bm.branch_id = here.branch_id
          JOIN messages m ON m.id = bm.message_id
-         JOIN message_chunks cc ON cc.message_id = m.id
+         JOIN chunks cc ON cc.message_id = m.id
          JOIN sessions s ON s.id = m.session_id
          WHERE bm.seq {seq_test} here.seq AND m.role IN (0, 1)
          ORDER BY bm.seq {order}, cc.byte_start {order}
          LIMIT 1"
     );
     conn.prepare_cached(&sql)?
-        .query_row(rusqlite::params![message], context_chunk)
+        .query_row(rusqlite::params![message], message_context_chunk)
         .optional()
 }
 
-fn chunk_hit(row: &Row<'_>) -> rusqlite::Result<EmbeddingHit> {
-    let chunk = context_chunk(row)?;
-    Ok(EmbeddingHit {
+/// The chunk of `document` starting nearest `byte_start` on `side`.
+fn adjacent_document_chunk(
+    conn: &rusqlite::Connection,
+    document: DocumentId,
+    byte_start: usize,
+    side: Side,
+) -> rusqlite::Result<Option<ContextChunk>> {
+    let (byte_test, order) = side.test_and_order();
+    let sql = format!(
+        "SELECT {DOCUMENT_CHUNK_COLUMNS}
+         FROM chunks cc
+         JOIN documents d ON d.id = cc.document_id
+         WHERE cc.document_id = ?1 AND cc.byte_start {byte_test} ?2
+         ORDER BY cc.byte_start {order}
+         LIMIT 1"
+    );
+    conn.prepare_cached(&sql)?
+        .query_row(
+            rusqlite::params![document, byte_start],
+            document_context_chunk,
+        )
+        .optional()
+}
+
+fn message_chunk_hit(row: &Row<'_>) -> rusqlite::Result<EmbeddingHit> {
+    message_context_chunk(row).map(unscored_hit)
+}
+
+fn document_chunk_hit(row: &Row<'_>) -> rusqlite::Result<EmbeddingHit> {
+    document_context_chunk(row).map(unscored_hit)
+}
+
+fn unscored_hit(chunk: ContextChunk) -> EmbeddingHit {
+    EmbeddingHit {
         chunk_id: chunk.chunk_id,
         locator: chunk.locator,
         text: chunk.text,
         similarity: 0.0,
-    })
+    }
 }
 
-fn context_chunk(row: &Row<'_>) -> rusqlite::Result<ContextChunk> {
+fn set_similarity(hit: &mut EmbeddingHit, similarity: f32) {
+    hit.similarity = similarity;
+}
+
+fn message_context_chunk(row: &Row<'_>) -> rusqlite::Result<ContextChunk> {
     Ok(ContextChunk {
         chunk_id: row.get(0)?,
         locator: ChunkLocator::Message {
@@ -526,6 +642,19 @@ fn context_chunk(row: &Row<'_>) -> rusqlite::Result<ContextChunk> {
             session_label: session_label(row.get(5)?, row.get::<_, Option<String>>(6)?.as_deref()),
         },
         text: row.get(7)?,
+    })
+}
+
+fn document_context_chunk(row: &Row<'_>) -> rusqlite::Result<ContextChunk> {
+    Ok(ContextChunk {
+        chunk_id: row.get(0)?,
+        locator: ChunkLocator::Document {
+            document_id: row.get(1)?,
+            path: PathBuf::from(OsString::from_vec(row.get(2)?)),
+            bytes: row.get(3)?..row.get(4)?,
+            indexed_at: timestamp_at(row, 5)?,
+        },
+        text: row.get(6)?,
     })
 }
 
@@ -597,7 +726,7 @@ fn upsert_embedding(
         EmbeddingTarget::Chunk(id) => tx
             .prepare_cached(
                 "INSERT INTO chunk_embeddings (chunk_id, model, vector)
-                 SELECT id, ?2, ?3 FROM message_chunks WHERE id = ?1
+                 SELECT id, ?2, ?3 FROM chunks WHERE id = ?1
                  ON CONFLICT(chunk_id) DO UPDATE
                  SET model = excluded.model, vector = excluded.vector",
             )?
@@ -611,6 +740,49 @@ fn upsert_embedding(
             )?
             .execute(rusqlite::params![id, model, blob, embedding.text]),
     }
+}
+
+/// Store `content` as the document at `path` and cut it into `ranges`, returning the
+/// new chunks; nothing changes when the stored text already matches.
+fn replace_document(
+    tx: &Transaction<'_>,
+    path: &Path,
+    content: &str,
+    ranges: &[Range<usize>],
+) -> rusqlite::Result<Vec<(ChunkId, String)>> {
+    let changed: Option<DocumentId> = tx
+        .prepare_cached(
+            "INSERT INTO documents (path, content, indexed_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE
+             SET content = excluded.content, indexed_at = excluded.indexed_at
+             WHERE content IS NOT excluded.content
+             RETURNING id",
+        )?
+        .query_row(
+            rusqlite::params![path.as_os_str().as_bytes(), content, now_millis()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(document) = changed else {
+        return Ok(Vec::new());
+    };
+    tx.prepare_cached("DELETE FROM chunks WHERE document_id = ?1")?
+        .execute(rusqlite::params![document])?;
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO chunks (document_id, byte_start, byte_end)
+         VALUES (?1, ?2, ?3)
+         RETURNING id",
+    )?;
+    ranges
+        .iter()
+        .map(|bytes| {
+            let id = insert
+                .query_row(rusqlite::params![document, bytes.start, bytes.end], |r| {
+                    r.get(0)
+                })?;
+            Ok((id, content[bytes.clone()].to_string()))
+        })
+        .collect()
 }
 
 /// Encode `vector` as the little-endian `f32` BLOB the embedding tables store.

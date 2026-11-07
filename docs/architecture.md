@@ -624,7 +624,9 @@ llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
 store. A `remember` search embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
-over transcript chunks from earlier sessions. Like chat requests,
+over transcript chunks from earlier sessions. Indexed local documents
+own chunks in the same table, so one ranked search serves both,
+filtered by source; chat recall never ranks document chunks. Like chat requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays unindexed until `assistd memory reindex` picks it up.

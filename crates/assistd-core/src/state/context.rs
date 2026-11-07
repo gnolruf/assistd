@@ -3,7 +3,7 @@
 
 use tracing::debug;
 
-use assistd_memory::{MemoryHit, SessionScope, SourcePointer};
+use assistd_memory::{ChunkScope, MemoryHit, SessionScope, SourcePointer};
 use assistd_wm::FocusedWindowContext;
 
 use super::query::TurnOrigin;
@@ -87,7 +87,11 @@ impl AppState {
         let hits = self
             .memory
             .semantic
-            .nearest_chunks(embedding, top_k, SessionScope::AllExcept(session))
+            .nearest_chunks(
+                embedding,
+                top_k,
+                ChunkScope::Chats(SessionScope::AllExcept(session)),
+            )
             .await?;
         Ok(SourcePointer::group(
             hits.iter().filter(|hit| hit.similarity >= floor),

@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
 use assistd_memory::{
-    ChunkLocator, EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId, SessionScope,
-    TranscriptStore,
+    ChunkLocator, ChunkScope, EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId,
+    SessionScope, TranscriptStore,
 };
 use async_trait::async_trait;
 use regex::Regex;
@@ -297,7 +297,7 @@ impl ReminisceTool {
         };
         let hits = self
             .semantic
-            .nearest_chunks(query_vec, request.limit, scope)
+            .nearest_chunks(query_vec, request.limit, ChunkScope::Chats(scope))
             .await?;
         tracing::info!(
             target: "assistd::embed",
@@ -320,7 +320,7 @@ impl ReminisceTool {
         let Some(first) = hits.first() else {
             return Ok("(no matches in that session)".to_string());
         };
-        let header = session_header(&first.locator);
+        let header = source_header(&first.locator);
         let mut exchanges = Exchanges::default();
         let mut kept = 0;
         for hit in hits {
@@ -454,42 +454,59 @@ fn push_omitted_note(lines: &mut Vec<String>, omitted: usize) {
 }
 
 fn format_chunk(hit: &EmbeddingHit, current: Option<SessionId>) -> String {
-    let ChunkLocator::Message {
-        session_id,
-        timestamp,
-        role,
-        session_label,
-        ..
-    } = &hit.locator;
-    let source = if Some(*session_id) == current {
-        "earlier in this chat".to_string()
-    } else {
-        format!("session {} \"{session_label}\"", session_id.short())
-    };
     format!(
-        "[{source} {} {} sim={:.0}%] {}",
-        timestamp.format(TIMESTAMP_FORMAT),
-        role.as_wire(),
+        "[{} sim={:.0}%] {}",
+        hit_source(&hit.locator, current),
         hit.similarity * 100.0,
         one_line(&hit.text)
     )
 }
 
-fn session_header(locator: &ChunkLocator) -> String {
-    let ChunkLocator::Message {
-        session_id,
-        session_label,
-        ..
-    } = locator;
-    format!("session {} \"{session_label}\":", session_id.short())
+/// Where a hit came from, with its time and role for a message.
+fn hit_source(locator: &ChunkLocator, current: Option<SessionId>) -> String {
+    match locator {
+        ChunkLocator::Message {
+            session_id,
+            timestamp,
+            role,
+            session_label,
+            ..
+        } => {
+            let session = if Some(*session_id) == current {
+                "earlier in this chat".to_string()
+            } else {
+                format!("session {} \"{session_label}\"", session_id.short())
+            };
+            format!(
+                "{session} {} {}",
+                timestamp.format(TIMESTAMP_FORMAT),
+                role.as_wire()
+            )
+        }
+        ChunkLocator::Document { path, .. } => format!("document \"{}\"", path.display()),
+    }
 }
 
-/// The unclosed `[timestamp role` tag that opens a line in a session-scoped result.
+fn source_header(locator: &ChunkLocator) -> String {
+    match locator {
+        ChunkLocator::Message {
+            session_id,
+            session_label,
+            ..
+        } => format!("session {} \"{session_label}\":", session_id.short()),
+        ChunkLocator::Document { path, .. } => format!("document \"{}\":", path.display()),
+    }
+}
+
+/// The unclosed tag that opens a line in a source-scoped result: `[timestamp role`
+/// for a message, `[bytes start..end` for a document.
 fn locator_tag(locator: &ChunkLocator) -> String {
-    let ChunkLocator::Message {
-        timestamp, role, ..
-    } = locator;
-    format!("[{} {}", timestamp.format(TIMESTAMP_FORMAT), role.as_wire())
+    match locator {
+        ChunkLocator::Message {
+            timestamp, role, ..
+        } => format!("[{} {}", timestamp.format(TIMESTAMP_FORMAT), role.as_wire()),
+        ChunkLocator::Document { bytes, .. } => format!("[bytes {}..{}", bytes.start, bytes.end),
+    }
 }
 
 fn one_line(text: &str) -> String {
@@ -574,7 +591,7 @@ mod tests {
     /// Records the scope `reminisce` searched.
     #[derive(Debug, Default)]
     struct ScopeSpy {
-        scope: parking_lot::Mutex<Option<SessionScope>>,
+        scope: parking_lot::Mutex<Option<ChunkScope>>,
     }
 
     #[async_trait]
@@ -583,7 +600,7 @@ mod tests {
             &self,
             _q: Vec<f32>,
             _k: usize,
-            scope: SessionScope,
+            scope: ChunkScope,
         ) -> Result<Vec<EmbeddingHit>, MemoryError> {
             *self.scope.lock() = Some(scope);
             Ok(Vec::new())
@@ -646,7 +663,7 @@ mod tests {
         tool.invoke(query.clone()).await.unwrap();
         assert_eq!(
             *spy.scope.lock(),
-            Some(SessionScope::AllExceptInContext(first))
+            Some(ChunkScope::Chats(SessionScope::AllExceptInContext(first)))
         );
 
         let second = SessionId::new();
@@ -654,7 +671,7 @@ mod tests {
         tool.invoke(query).await.unwrap();
         assert_eq!(
             *spy.scope.lock(),
-            Some(SessionScope::AllExceptInContext(second)),
+            Some(ChunkScope::Chats(SessionScope::AllExceptInContext(second))),
             "the tool must follow a session switch, not pin its first session"
         );
     }

@@ -4,7 +4,9 @@
 use rusqlite::ToSql;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 
-use crate::{BranchId, ChunkId, MemoryId, MessageId, PersistedRole, Seq, SessionId, TurnId};
+use crate::{
+    BranchId, ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Seq, SessionId, TurnId,
+};
 
 macro_rules! row_id_sql {
     ($($name:ident),+) => {$(
@@ -22,7 +24,9 @@ macro_rules! row_id_sql {
     )+};
 }
 
-row_id_sql!(TurnId, BranchId, MessageId, ChunkId, MemoryId, Seq);
+row_id_sql!(
+    TurnId, BranchId, MessageId, ChunkId, DocumentId, MemoryId, Seq
+);
 
 impl ToSql for SessionId {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
