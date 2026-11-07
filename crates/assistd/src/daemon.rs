@@ -30,7 +30,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use embed_init::{EmbeddingHandles, EmbeddingService, EmbeddingStages, EmbeddingStartup};
-use mcp_init::{McpService, McpStartup};
+use mcp_init::{McpFleet, McpService};
 use memory_init::MemorySubsystem;
 use search_init::{SearchService, SearchStartup};
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
@@ -193,7 +193,7 @@ async fn start(
     let subsystems = Subsystems::new(chat, presence.clone(), tools.registry, voice.clone())
         .with_window_manager(window.manager.clone())
         .with_vision_revalidator(vision_revalidator.clone())
-        .with_mcp_servers(tools.mcp_servers)
+        .with_mcp_servers(tools.mcp_servers, tools.mcp_accounts)
         .with_web_search(web_search)
         .with_tools_disabled(tools.disabled)
         .with_planning_tools(tools.planning)
@@ -215,7 +215,7 @@ async fn start(
             vram,
             embed: embed_startup,
             search: search_startup,
-            mcp: tools.mcp_startup,
+            mcp: tools.mcp_fleet,
         },
         stages,
     );
@@ -246,7 +246,7 @@ struct BackgroundStarts {
     vram: Option<Arc<VramLedger>>,
     embed: Option<EmbeddingStartup>,
     search: Option<SearchStartup>,
-    mcp: Option<McpStartup>,
+    mcp: Option<Arc<McpFleet>>,
 }
 
 struct BackgroundServices {
@@ -297,9 +297,9 @@ fn spawn_background_starts(
         .map_or_else(SearchService::disabled, |startup| {
             startup.spawn(state.clone(), stages.search.subscribe())
         });
-    let mcp = starts.mcp.map_or_else(McpService::disabled, |startup| {
-        startup.spawn(state.clone(), stages.tools.subscribe())
-    });
+    let mcp = starts
+        .mcp
+        .map_or_else(McpService::disabled, |fleet| fleet.spawn(state));
     BackgroundServices {
         warmup,
         voice,

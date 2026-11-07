@@ -1,76 +1,263 @@
-//! MCP subsystem wiring for the daemon: servers start in the background
-//! and each one's tools are offered once it has connected.
+//! MCP subsystem wiring for the daemon: servers start in the background, each one's tools are
+//! offered once it has connected, and OAuth servers are signed in and out on request.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::config::{McpAuth, McpHttpTransport, McpStdioTransport, McpTransport};
-use assistd_core::{AppState, Config, McpServerConfig, McpServerStatus};
-use assistd_ipc::{ComponentReadiness, StartupComponent};
+use assistd_core::config::{
+    McpAuth, McpHttpTransport, McpOAuthClient, McpServerUrl, McpStdioTransport, McpTransport,
+};
+use assistd_core::{
+    AppState, Config, McpAccountError, McpAccounts, McpLogin, McpServerConfig, McpServerStatus,
+};
+use assistd_ipc::{McpServerState, McpTransportKind, StartupComponent, TokenRevocation};
 use assistd_mcp::{
-    Connector, HttpAuth, HttpConfig, LaunchTarget, McpError, McpServer, OAuthConfig, StdioConfig,
-    TokenStore, launch,
+    Connector, HttpAuth, HttpConfig, LaunchTarget, McpError, McpServer, OAuthConfig, Revocation,
+    StdioConfig, TokenStore, begin_login, launch, sign_out, withdraw_tools,
 };
 use assistd_tools::{ApprovalGate, VisionGate};
-use assistd_utils::readiness::Readiness;
-use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle, JoinSet};
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
 
-/// What starting the configured MCP servers in the background needs.
-pub(super) struct McpStartup {
-    servers: Vec<McpServerConfig>,
+/// Every configured server, started in the background and signed in and out on request.
+#[derive(Debug)]
+pub(super) struct McpFleet {
+    servers: Vec<Arc<ManagedServer>>,
     approvals: ApprovalGate,
     vision: Arc<VisionGate>,
     /// Where `auth = "oauth"` servers keep their tokens; `None` without a state directory.
     tokens: Option<TokenStore>,
+    stopping: CancellationToken,
 }
 
-/// The background start, joined at shutdown for the servers it started.
+/// The fleet's background start, stopped at shutdown with every server it started.
 pub(super) struct McpService {
-    startup: Option<JoinHandle<Vec<Arc<McpServer>>>>,
+    fleet: Option<Arc<McpFleet>>,
 }
 
-impl McpStartup {
-    /// Start every server at once, retrying failed ones, offering each one's tools and
-    /// recording its readiness as it settles. Cancels pending starts once `shutdown` flips.
-    pub(super) fn spawn(self, state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> McpService {
-        McpService {
-            startup: Some(tokio::spawn(start_all(self, state, shutdown))),
+/// One configured server: its pending start, if any, and the session it started.
+#[derive(Debug)]
+struct ManagedServer {
+    config: McpServerConfig,
+    starting: Mutex<Option<AbortOnDropHandle<()>>>,
+    running: Mutex<Option<Arc<McpServer>>>,
+    /// Held while the server is replaced or stopped, so those never interleave.
+    changing: AsyncMutex<()>,
+}
+
+/// Everything one start of a server needs.
+struct Start {
+    server: Arc<ManagedServer>,
+    connector: Connector,
+    target: LaunchTarget,
+    state: Arc<AppState>,
+}
+
+impl McpFleet {
+    /// Start every server at once, retrying failed ones and recording each one's state as it
+    /// settles.
+    pub(super) fn spawn(self: Arc<Self>, state: &Arc<AppState>) -> McpService {
+        for server in &self.servers {
+            let Some(connector) = connector(&server.config, self.tokens.clone()) else {
+                record_state(state, &server.config.name, no_token_store());
+                continue;
+            };
+            let start = Start {
+                server: server.clone(),
+                connector,
+                target: self.target(state),
+                state: state.clone(),
+            };
+            *server.starting.lock() = Some(start.spawn(None));
         }
+        McpService { fleet: Some(self) }
+    }
+
+    fn target(&self, state: &AppState) -> LaunchTarget {
+        LaunchTarget {
+            catalog: state.subsystems.tools.clone(),
+            approvals: self.approvals.clone(),
+            vision: self.vision.clone(),
+        }
+    }
+
+    fn server(&self, name: &str) -> Result<&Arc<ManagedServer>, McpAccountError> {
+        self.servers
+            .iter()
+            .find(|server| server.config.name == name)
+            .ok_or_else(|| McpAccountError::UnknownServer(name.to_owned()))
+    }
+
+    /// The OAuth client and URL of `server`, or why it cannot sign in.
+    fn oauth_endpoint<'a>(
+        &self,
+        server: &'a ManagedServer,
+    ) -> Result<(&'a McpServerUrl, OAuthConfig), McpAccountError> {
+        let not_oauth = || McpAccountError::NotOAuth(server.config.name.clone());
+        let McpTransport::Http(http) = &server.config.transport else {
+            return Err(not_oauth());
+        };
+        let McpAuth::OAuth(client) = &http.auth else {
+            return Err(not_oauth());
+        };
+        let tokens = self.tokens.clone().ok_or(McpAccountError::NoTokenStore)?;
+        Ok((&http.url, oauth_config(client, tokens)))
+    }
+
+    /// Cancel every pending start and stop every server.
+    async fn shutdown(&self) {
+        self.stopping.cancel();
+        for server in &self.servers {
+            let _changing = server.changing.lock().await;
+            server.stop().await;
+        }
+    }
+}
+
+#[async_trait]
+impl McpAccounts for McpFleet {
+    async fn begin_login(
+        &self,
+        state: Arc<AppState>,
+        name: &str,
+    ) -> Result<McpLogin, McpAccountError> {
+        let server = self.server(name)?;
+        let (url, oauth) = self.oauth_endpoint(server)?;
+        let request_timeout = request_timeout(&server.config);
+        let pending = begin_login(name, url.as_url(), &oauth, request_timeout)
+            .await
+            .map_err(mcp_failure)?;
+        let connector =
+            connector(&server.config, self.tokens.clone()).ok_or(McpAccountError::NoTokenStore)?;
+        let start = Start {
+            server: server.clone(),
+            connector,
+            target: self.target(&state),
+            state,
+        };
+        let stopping = self.stopping.clone();
+        Ok(McpLogin {
+            authorize_url: pending.authorize_url().to_owned(),
+            completion: Box::pin(async move {
+                pending.complete().await.map_err(mcp_failure)?;
+                start.replace(&stopping).await
+            }),
+        })
+    }
+
+    async fn logout(
+        &self,
+        state: Arc<AppState>,
+        name: &str,
+    ) -> Result<TokenRevocation, McpAccountError> {
+        let server = self.server(name)?;
+        let (url, oauth) = self.oauth_endpoint(server)?;
+        let _changing = server.changing.lock().await;
+        server.stop().await;
+        withdraw_tools(&state.subsystems.tools, name);
+        record_state(
+            &state,
+            name,
+            McpServerState::NeedsAuthorization { scopes: Vec::new() },
+        );
+        let revocation = sign_out(name, url.as_url(), &oauth, request_timeout(&server.config))
+            .await
+            .map_err(mcp_failure)?;
+        info!(target: "assistd::mcp", server = %name, "MCP server signed out");
+        Ok(wire_revocation(revocation))
     }
 }
 
 impl McpService {
     pub(super) fn disabled() -> Self {
-        Self { startup: None }
+        Self { fleet: None }
     }
 
-    /// Wait for the background start to stop, then stop every server it
-    /// started. The `tools` shutdown stage must already have flipped.
+    /// Stop every pending start and every server. The `tools` shutdown stage must already
+    /// have flipped.
     pub(super) async fn shutdown(self) {
-        let Some(startup) = self.startup else {
-            return;
-        };
-        let servers = startup.await.unwrap_or_else(|e| {
-            tracing::error!("mcp startup task failed: {e}");
-            Vec::new()
-        });
-        for server in servers {
-            server.shutdown().await;
+        if let Some(fleet) = self.fleet {
+            fleet.shutdown().await;
         }
     }
 }
 
-/// A status per configured server and what starting them needs, whose
-/// tools ask before each call unless `approvals` holds them and whose
-/// image results follow `vision`. Nothing to start when MCP is disabled.
+impl ManagedServer {
+    /// Cancel the pending start, waiting for it to end, then stop the running session.
+    async fn stop(&self) {
+        let pending = self.starting.lock().take();
+        if let Some(pending) = pending {
+            pending.abort();
+            let _ = pending.await;
+        }
+        let running = self.running.lock().take();
+        if let Some(running) = running {
+            running.shutdown().await;
+        }
+    }
+}
+
+impl Start {
+    /// Run the start in the background, firing `settled` when its first attempt settles.
+    fn spawn(self, settled: Option<oneshot::Sender<()>>) -> AbortOnDropHandle<()> {
+        AbortOnDropHandle::new(tokio::spawn(self.run(settled)))
+    }
+
+    async fn run(self, mut settled: Option<oneshot::Sender<()>>) {
+        let name = self.server.config.name.clone();
+        let on_retry = |e: &McpError| {
+            record_state(&self.state, &name, failed_state(e));
+            if let Some(settled) = settled.take() {
+                let _ = settled.send(());
+            }
+        };
+        let outcome = launch(name.clone(), self.connector, &self.target, on_retry).await;
+        match outcome {
+            Ok(started) => {
+                *self.server.running.lock() = Some(started);
+                record_state(&self.state, &name, McpServerState::Ready);
+            }
+            Err(e) => record_state(&self.state, &name, failed_state(&e)),
+        }
+        if let Some(settled) = settled {
+            let _ = settled.send(());
+        }
+    }
+
+    /// Stop the server and withdraw its tools, then start it afresh and wait for the first
+    /// attempt to settle. Refused once the daemon is shutting down.
+    async fn replace(self, stopping: &CancellationToken) -> Result<(), McpAccountError> {
+        let server = self.server.clone();
+        let name = server.config.name.clone();
+        let (settled_tx, settled_rx) = oneshot::channel();
+        {
+            let _changing = server.changing.lock().await;
+            if stopping.is_cancelled() {
+                return Err(McpAccountError::ShuttingDown);
+            }
+            server.stop().await;
+            withdraw_tools(&self.target.catalog, &name);
+            record_state(&self.state, &name, McpServerState::Starting);
+            *server.starting.lock() = Some(self.spawn(Some(settled_tx)));
+        }
+        let _ = settled_rx.await;
+        Ok(())
+    }
+}
+
+/// A status per configured server and the fleet that starts and signs them in, whose tools ask
+/// before each call unless `approvals` holds them and whose image results follow `vision`.
+/// No fleet when MCP is disabled.
 pub(super) fn prepare(
     config: &Config,
     approvals: ApprovalGate,
     vision: Arc<VisionGate>,
-) -> (Vec<McpServerStatus>, Option<McpStartup>) {
+) -> (Vec<McpServerStatus>, Option<Arc<McpFleet>>) {
     if !config.mcp.enabled {
         info!("mcp: disabled in config (mcp.enabled = false)");
         return (Vec::new(), None);
@@ -79,66 +266,32 @@ pub(super) fn prepare(
         .mcp
         .servers
         .iter()
-        .map(|server| McpServerStatus::starting(server.name.clone()))
+        .map(|server| McpServerStatus::starting(server.name.clone(), transport_kind(server)))
         .collect();
-    let startup = McpStartup {
-        servers: config.mcp.servers.clone(),
+    let servers = config
+        .mcp
+        .servers
+        .iter()
+        .map(|config| {
+            Arc::new(ManagedServer {
+                config: config.clone(),
+                starting: Mutex::new(None),
+                running: Mutex::new(None),
+                changing: AsyncMutex::new(()),
+            })
+        })
+        .collect();
+    let fleet = McpFleet {
+        servers,
         approvals,
         vision,
         tokens: token_file().map(TokenStore::new),
+        stopping: CancellationToken::new(),
     };
-    (statuses, Some(startup))
+    (statuses, Some(Arc::new(fleet)))
 }
 
-async fn start_all(
-    startup: McpStartup,
-    state: Arc<AppState>,
-    mut shutdown: watch::Receiver<bool>,
-) -> Vec<Arc<McpServer>> {
-    let target = LaunchTarget {
-        catalog: state.subsystems.tools.clone(),
-        approvals: startup.approvals,
-        vision: startup.vision,
-    };
-    let mut launches = JoinSet::new();
-    for config in startup.servers {
-        launches.spawn(start_server(
-            config,
-            startup.tokens.clone(),
-            state.clone(),
-            target.clone(),
-        ));
-    }
-    let mut started = Vec::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.wait_for(|stopping| *stopping) => break,
-            joined = launches.join_next() => match joined {
-                Some(joined) => collect_started(joined, &mut started),
-                None => return started,
-            },
-        }
-    }
-    launches.abort_all();
-    while let Some(joined) = launches.join_next().await {
-        collect_started(joined, &mut started);
-    }
-    started
-}
-
-fn collect_started(
-    joined: Result<Option<Arc<McpServer>>, JoinError>,
-    started: &mut Vec<Arc<McpServer>>,
-) {
-    match joined {
-        Ok(server) => started.extend(server),
-        Err(e) if e.is_cancelled() => {}
-        Err(e) => tracing::error!("mcp: server start task failed: {e}"),
-    }
-}
-
-fn record_readiness(state: &AppState, name: &str, readiness: Readiness<()>) {
+fn record_state(state: &AppState, name: &str, server_state: McpServerState) {
     let Some(status) = state
         .subsystems
         .mcp_servers
@@ -147,46 +300,59 @@ fn record_readiness(state: &AppState, name: &str, readiness: Readiness<()>) {
     else {
         return;
     };
-    status.set(readiness);
+    status.set(server_state);
     state.publish_readiness(
         StartupComponent::Mcp {
             server: name.to_string(),
         },
-        ComponentReadiness::from(status.readiness()),
+        status.readiness(),
     );
 }
 
-/// Bring one server up, recording its readiness as attempts settle. `None` when it is
-/// unavailable until the config changes.
-async fn start_server(
-    server: McpServerConfig,
-    tokens: Option<TokenStore>,
-    state: Arc<AppState>,
-    target: LaunchTarget,
-) -> Option<Arc<McpServer>> {
-    let name = server.name.clone();
-    let unavailable = |reason: String| Readiness::Unavailable(reason.into());
-    let Some(connector) = connector(&server, tokens) else {
-        let reason = "no XDG state directory to keep OAuth tokens in".to_owned();
-        record_readiness(&state, &name, unavailable(reason));
-        return None;
-    };
-    let on_retry = |e: &McpError| record_readiness(&state, &name, unavailable(e.to_string()));
-    match launch(name.clone(), connector, &target, on_retry).await {
-        Ok(started) => {
-            record_readiness(&state, &name, Readiness::Ready(()));
-            Some(started)
-        }
-        Err(e) => {
-            record_readiness(&state, &name, unavailable(e.to_string()));
-            None
-        }
+fn failed_state(error: &McpError) -> McpServerState {
+    match error {
+        McpError::NeedsAuthorization { scopes } => McpServerState::NeedsAuthorization {
+            scopes: scopes.clone(),
+        },
+        other => McpServerState::Unavailable {
+            reason: other.to_string(),
+        },
     }
+}
+
+fn no_token_store() -> McpServerState {
+    McpServerState::Unavailable {
+        reason: McpAccountError::NoTokenStore.to_string(),
+    }
+}
+
+fn mcp_failure(error: McpError) -> McpAccountError {
+    McpAccountError::Mcp(Box::new(error))
+}
+
+fn wire_revocation(revocation: Revocation) -> TokenRevocation {
+    match revocation {
+        Revocation::Revoked => TokenRevocation::Revoked,
+        Revocation::NotOffered => TokenRevocation::NotOffered,
+        Revocation::NothingStored => TokenRevocation::NothingStored,
+        Revocation::Failed(reason) => TokenRevocation::Failed { reason },
+    }
+}
+
+fn transport_kind(server: &McpServerConfig) -> McpTransportKind {
+    match server.transport {
+        McpTransport::Stdio(_) => McpTransportKind::Stdio,
+        McpTransport::Http(_) => McpTransportKind::Http,
+    }
+}
+
+fn request_timeout(server: &McpServerConfig) -> Duration {
+    Duration::from_secs(server.request_timeout_secs.get())
 }
 
 /// How to reach `server`; `None` for an OAuth server when there is nowhere to keep `tokens`.
 fn connector(server: &McpServerConfig, tokens: Option<TokenStore>) -> Option<Connector> {
-    let request_timeout = Duration::from_secs(server.request_timeout_secs.get());
+    let request_timeout = request_timeout(server);
     match &server.transport {
         McpTransport::Stdio(transport) => Some(Connector::Stdio(stdio_config(
             server,
@@ -196,15 +362,19 @@ fn connector(server: &McpServerConfig, tokens: Option<TokenStore>) -> Option<Con
         McpTransport::Http(transport) => {
             let mut http = http_config(server, transport, request_timeout);
             if let McpAuth::OAuth(client) = &transport.auth {
-                http.auth = HttpAuth::OAuth(OAuthConfig {
-                    client_id: client.client_id.clone(),
-                    client_secret: client.client_secret.clone(),
-                    scopes: client.scopes.clone(),
-                    tokens: tokens?,
-                });
+                http.auth = HttpAuth::OAuth(oauth_config(client, tokens?));
             }
             Some(Connector::Http(http))
         }
+    }
+}
+
+fn oauth_config(client: &McpOAuthClient, tokens: TokenStore) -> OAuthConfig {
+    OAuthConfig {
+        client_id: client.client_id.clone(),
+        client_secret: client.client_secret.clone(),
+        scopes: client.scopes.clone(),
+        tokens,
     }
 }
 

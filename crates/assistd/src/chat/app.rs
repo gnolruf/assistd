@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use assistd_core::PresenceState;
 use assistd_ipc::{
-    Event, ImageMime, IpcClient, PausedPrompt, PermissionMode, Request, TaskQueueSnapshot,
-    TaskRunId, TaskRunSummary, VoiceCaptureState,
+    ComponentReadiness, Event, ImageMime, IpcClient, PausedPrompt, PermissionMode, Request,
+    TaskQueueSnapshot, TaskRunId, TaskRunSummary, VoiceCaptureState,
 };
 use assistd_tools::{Approval, Attachment, ConfirmationRequest, Risk, Unattended};
 use assistd_utils::token_counter::TokenCounter;
@@ -319,6 +319,8 @@ pub(super) struct App {
     pub auto_mode_offered: bool,
     /// Colors from the config as last loaded or saved from `/settings`.
     theme: Theme,
+    /// Each MCP server that is unavailable, with why, redrawn under the banner.
+    mcp_unavailable: Vec<(String, String)>,
 }
 
 /// The reply turn that owns the output pane. The daemon serialises turns,
@@ -554,11 +556,23 @@ impl App {
             mode: ChatMode::Act(PermissionMode::Manual),
             auto_mode_offered,
             theme: Theme::default(),
+            mcp_unavailable: Vec::new(),
         }
     }
 
     pub(super) fn with_theme(self, theme: Theme) -> Self {
         Self { theme, ..self }
+    }
+
+    /// Show each MCP server in `unavailable`, with why it is, under the banner.
+    pub(super) fn with_mcp_unavailable(mut self, unavailable: Vec<(String, String)>) -> Self {
+        for (server, reason) in &unavailable {
+            self.output.push_info(&mcp_notice(server, reason));
+        }
+        Self {
+            mcp_unavailable: unavailable,
+            ..self
+        }
     }
 
     /// The colors to draw with: the open settings panel's, unsaved edits
@@ -638,11 +652,29 @@ impl App {
         self.agent_panel = None;
         self.output.clear();
         self.output.push_banner(self.model_name.clone());
+        for (server, reason) in &self.mcp_unavailable {
+            self.output.push_info(&mcp_notice(server, reason));
+        }
+    }
+
+    /// Track MCP server `server`'s new `state`, noting in the transcript when it becomes
+    /// unavailable.
+    fn on_mcp_readiness(&mut self, server: String, state: ComponentReadiness) {
+        self.mcp_unavailable.retain(|(known, _)| *known != server);
+        if let ComponentReadiness::Unavailable { reason } = state {
+            self.output.push_info(&mcp_notice(&server, &reason));
+            self.mcp_unavailable.push((server, reason));
+        }
     }
 
     fn set_notice(&mut self, text: &str) {
         self.notice = Some((text.to_string(), Instant::now()));
     }
+}
+
+/// The transcript line for an MCP server that is unavailable for `reason`.
+fn mcp_notice(server: &str, reason: &str) -> String {
+    format!("[MCP {server}: {reason}]")
 }
 
 #[cfg(test)]

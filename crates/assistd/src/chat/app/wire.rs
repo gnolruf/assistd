@@ -4,8 +4,8 @@
 use std::time::{Duration, Instant};
 
 use assistd_ipc::{
-    Event, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role, StatusKind,
-    StatusSeverity, TurnStats,
+    Event, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role, StartupComponent,
+    StatusKind, StatusSeverity, TurnStats,
 };
 use assistd_tools::{ConfirmationRequest, Risk, Unattended};
 use assistd_utils::time::saturating_millis;
@@ -57,6 +57,15 @@ impl App {
         }
         if let Event::TaskQueue { snapshot, .. } = ev {
             self.on_task_queue(snapshot);
+            return;
+        }
+        if let Event::Readiness {
+            component: StartupComponent::Mcp { server },
+            state,
+            ..
+        } = ev
+        {
+            self.on_mcp_readiness(server, state);
             return;
         }
         let id = ev.id();
@@ -140,6 +149,9 @@ impl App {
             | Event::TaskRefined { .. }
             | Event::TaskPlan { .. }
             | Event::TriggerFires { .. }
+            | Event::McpAuthorizeUrl { .. }
+            | Event::McpServer { .. }
+            | Event::McpLoggedOut { .. }
             | Event::LastDelta { .. } => {}
         }
     }

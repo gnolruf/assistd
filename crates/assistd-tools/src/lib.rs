@@ -126,6 +126,11 @@ impl ToolRegistry {
         }));
     }
 
+    /// Drop every tool whose name `keep` rejects.
+    pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.tools.retain(|tool| keep(tool.name()));
+    }
+
     /// Look up a registered tool by its `name()`.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools

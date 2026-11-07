@@ -1,5 +1,5 @@
-//! OAuth 2.1 for Streamable HTTP servers: discovering the authorization server, picking up
-//! the stored token for the server, and classifying OAuth failures without their secrets.
+//! OAuth 2.1 for Streamable HTTP servers: discovering the authorization server, signing in and
+//! out, picking up the stored token, and classifying OAuth failures without their secrets.
 
 use std::fmt;
 
@@ -8,8 +8,12 @@ use url::Url;
 
 use crate::error::McpError;
 
+mod login;
+mod revoke;
 mod store;
 
+pub use login::{LOGIN_TIMEOUT, PendingLogin, begin_login};
+pub use revoke::{Revocation, sign_out};
 pub use store::TokenStore;
 
 /// The OAuth client one server is authorized as, and where its tokens live. `Debug` never
@@ -46,18 +50,7 @@ pub(crate) async fn authorization_manager(
     url: &Url,
     oauth: &OAuthConfig,
 ) -> Result<AuthorizationManager, McpError> {
-    let mut manager = AuthorizationManager::new(url.as_str())
-        .await
-        .map_err(|e| auth_failure(&e))?;
-    let metadata = manager
-        .resolve_metadata()
-        .await
-        .map_err(|e| auth_failure(&e))?
-        .metadata;
-    if oauth.client_id.is_none() && metadata.registration_endpoint.is_none() {
-        return Err(McpError::RegistrationUnsupported);
-    }
-    manager.set_metadata(metadata);
+    let mut manager = discovered_manager(url, oauth).await?;
     manager.set_credential_store(
         oauth
             .tokens
@@ -85,6 +78,28 @@ pub(crate) async fn authorization_manager(
     Ok(manager)
 }
 
+/// An authorization manager for the server at `url` with its authorization server's metadata
+/// resolved. Fails with [`McpError::RegistrationUnsupported`] when the client must be
+/// registered dynamically but the authorization server does not offer it.
+async fn discovered_manager(
+    url: &Url,
+    oauth: &OAuthConfig,
+) -> Result<AuthorizationManager, McpError> {
+    let mut manager = AuthorizationManager::new(url.as_str())
+        .await
+        .map_err(|e| auth_failure(&e))?;
+    let metadata = manager
+        .resolve_metadata()
+        .await
+        .map_err(|e| auth_failure(&e))?
+        .metadata;
+    if oauth.client_id.is_none() && metadata.registration_endpoint.is_none() {
+        return Err(McpError::RegistrationUnsupported);
+    }
+    manager.set_metadata(metadata);
+    Ok(manager)
+}
+
 /// The [`McpError`] for an OAuth failure. Only failures that never involve a token, code or
 /// secret keep their detail.
 pub(crate) fn auth_failure(error: &AuthError) -> McpError {
@@ -103,6 +118,12 @@ pub(crate) fn auth_failure(error: &AuthError) -> McpError {
         }
         AuthError::CredentialStoreError(detail) => {
             McpError::OAuth(format!("token store: {detail}"))
+        }
+        AuthError::RegistrationFailed(detail) => {
+            McpError::OAuth(format!("client registration failed: {detail}"))
+        }
+        AuthError::TokenExchangeFailed(_) => {
+            McpError::OAuth("the authorization server would not issue a token for the code".into())
         }
         error @ (AuthError::MetadataError(_)
         | AuthError::NoAuthorizationSupport

@@ -28,8 +28,10 @@ mod stdio;
 mod streamable;
 
 pub use error::{McpError, mcp_error_line};
-pub use launch::{LaunchTarget, launch};
-pub use oauth::{OAuthConfig, TokenStore};
+pub use launch::{LaunchTarget, launch, withdraw_tools};
+pub use oauth::{
+    LOGIN_TIMEOUT, OAuthConfig, PendingLogin, Revocation, TokenStore, begin_login, sign_out,
+};
 pub use server::McpServer;
 pub use session::Connector;
 pub use stdio::StdioConfig;

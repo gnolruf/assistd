@@ -3,28 +3,34 @@
 
 use std::sync::Arc;
 
+use parking_lot::RwLock;
+
+use assistd_ipc::{ComponentReadiness, McpServerState, McpTransportKind};
 use assistd_llm::{LlmBackend, SlotStash};
 use assistd_tools::{ToolCatalog, ToolRegistry, ToolsDisabled};
 use assistd_utils::child_server::ChildServerStatus;
-use assistd_utils::readiness::{NotReady, Readiness, ReadinessCell};
+use assistd_utils::readiness::{Readiness, ReadinessCell};
 use assistd_voice::VoiceManager;
 use assistd_wm::{NoWindowManager, WindowManager};
 
+use super::mcp_handlers::McpAccounts;
 use crate::planner::PlanningTools;
 use crate::{PresenceManager, VisionRevalidator};
 
-/// A configured MCP server and how far its startup has got.
+/// A configured MCP server and where it stands.
 #[derive(Debug)]
 pub struct McpServerStatus {
     name: String,
-    readiness: ReadinessCell<()>,
+    transport: McpTransportKind,
+    state: RwLock<McpServerState>,
 }
 
 impl McpServerStatus {
-    pub fn starting(name: String) -> Self {
+    pub fn starting(name: String, transport: McpTransportKind) -> Self {
         Self {
             name,
-            readiness: ReadinessCell::starting(),
+            transport,
+            state: RwLock::new(McpServerState::Starting),
         }
     }
 
@@ -32,14 +38,29 @@ impl McpServerStatus {
         &self.name
     }
 
-    /// Record how far the server's startup has got.
-    pub fn set(&self, readiness: Readiness<()>) {
-        self.readiness.set(readiness);
+    pub fn transport(&self) -> McpTransportKind {
+        self.transport
     }
 
-    /// `Ok` once the server's tools are offered, else why they are not.
-    pub fn readiness(&self) -> Result<(), NotReady> {
-        self.readiness.get()
+    pub fn state(&self) -> McpServerState {
+        self.state.read().clone()
+    }
+
+    pub fn set(&self, state: McpServerState) {
+        *self.state.write() = state;
+    }
+
+    /// The state as background-subsystem readiness; a server needing authorization is
+    /// unavailable with the command that signs it in.
+    pub fn readiness(&self) -> ComponentReadiness {
+        match self.state() {
+            McpServerState::Starting => ComponentReadiness::Starting,
+            McpServerState::Ready => ComponentReadiness::Ready,
+            McpServerState::NeedsAuthorization { .. } => ComponentReadiness::Unavailable {
+                reason: format!("needs authorization; run `assistd mcp login {}`", self.name),
+            },
+            McpServerState::Unavailable { reason } => ComponentReadiness::Unavailable { reason },
+        }
     }
 }
 
@@ -55,6 +76,8 @@ pub struct Subsystems {
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
     pub mcp_servers: Vec<McpServerStatus>,
+    /// Signs OAuth MCP servers in and out; `None` while MCP is off.
+    pub mcp_accounts: Option<Arc<dyn McpAccounts>>,
     /// Readiness of the SearXNG instance web search goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub tools_disabled: Option<ToolsDisabled>,
@@ -80,6 +103,7 @@ impl Subsystems {
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
             mcp_servers: Vec::new(),
+            mcp_accounts: None,
             web_search: Arc::new(ReadinessCell::new(Readiness::Unavailable(
                 "not configured".into(),
             ))),
@@ -106,9 +130,15 @@ impl Subsystems {
         self
     }
 
-    /// Track the configured MCP servers' startup.
-    pub fn with_mcp_servers(mut self, servers: Vec<McpServerStatus>) -> Self {
+    /// Track the configured MCP servers, signing them in and out through `accounts`; `None`
+    /// while MCP is off.
+    pub fn with_mcp_servers(
+        mut self,
+        servers: Vec<McpServerStatus>,
+        accounts: Option<Arc<dyn McpAccounts>>,
+    ) -> Self {
         self.mcp_servers = servers;
+        self.mcp_accounts = accounts;
         self
     }
 

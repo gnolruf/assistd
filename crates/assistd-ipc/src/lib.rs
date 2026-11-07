@@ -13,10 +13,12 @@ use assistd_utils::readiness::NotReady;
 
 pub mod attachment;
 pub mod client;
+pub mod mcp;
 pub mod task;
 pub mod wakeword;
 pub use attachment::ImageMime;
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
+pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use task::{
     ActionOutlook, AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS,
     DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MAX_LISTED_RUNS, MissedFire,
@@ -664,6 +666,15 @@ pub enum Request {
         task: Option<TaskId>,
         trigger: TaskTrigger,
     },
+    /// Sign OAuth server `server` in through the browser. Emits `McpAuthorizeUrl`, then once
+    /// the redirect is redeemed and the server restarted, its `McpServer` and `Done`; errors
+    /// when the server is unknown or not OAuth, or the sign-in fails or times out.
+    McpLogin { id: String, server: String },
+    /// Stop OAuth server `server` and delete its token, revoking it where the authorization
+    /// server offers that. Emits `McpLoggedOut`, then `Done`.
+    McpLogout { id: String, server: String },
+    /// Report every configured MCP server. Emits one `McpServer` each, then `Done`.
+    McpStatus { id: String },
 }
 
 impl Request {
@@ -742,7 +753,10 @@ impl Request {
             | Request::TaskQueue { id, .. }
             | Request::TaskConfirm { id, .. }
             | Request::TaskRefine { id, .. }
-            | Request::TaskCheckTrigger { id, .. } => id,
+            | Request::TaskCheckTrigger { id, .. }
+            | Request::McpLogin { id, .. }
+            | Request::McpLogout { id, .. }
+            | Request::McpStatus { id } => id,
         }
     }
 
@@ -798,6 +812,9 @@ impl Request {
             Request::TaskConfirm { .. } => "task_confirm",
             Request::TaskRefine { .. } => "task_refine",
             Request::TaskCheckTrigger { .. } => "task_check_trigger",
+            Request::McpLogin { .. } => "mcp_login",
+            Request::McpLogout { .. } => "mcp_logout",
+            Request::McpStatus { .. } => "mcp_status",
         }
     }
 }
@@ -1237,6 +1254,25 @@ pub enum Event {
     },
     /// One event of the planning turn `id` asked for; never terminal itself.
     TaskPlan { id: String, event: Box<Event> },
+    /// The URL the user opens to sign MCP server `server` in.
+    McpAuthorizeUrl {
+        id: String,
+        server: String,
+        url: String,
+    },
+    /// One configured MCP server.
+    McpServer {
+        id: String,
+        server: String,
+        transport: McpTransportKind,
+        state: McpServerState,
+    },
+    /// MCP server `server` was signed out.
+    McpLoggedOut {
+        id: String,
+        server: String,
+        revocation: TokenRevocation,
+    },
     /// Terminal failure.
     Error { id: String, message: String },
     /// Terminal success.
@@ -1298,6 +1334,9 @@ impl Event {
             | Event::TaskRefined { id, .. }
             | Event::TaskPlan { id, .. }
             | Event::TriggerFires { id, .. }
+            | Event::McpAuthorizeUrl { id, .. }
+            | Event::McpServer { id, .. }
+            | Event::McpLoggedOut { id, .. }
             | Event::Error { id, .. }
             | Event::Done { id }
             | Event::LastDelta { id, .. } => id,
@@ -1353,7 +1392,10 @@ impl Event {
             | Event::Queued { .. }
             | Event::TaskRefined { .. }
             | Event::TaskPlan { .. }
-            | Event::TriggerFires { .. } => return None,
+            | Event::TriggerFires { .. }
+            | Event::McpAuthorizeUrl { .. }
+            | Event::McpServer { .. }
+            | Event::McpLoggedOut { .. } => return None,
         })
     }
 }

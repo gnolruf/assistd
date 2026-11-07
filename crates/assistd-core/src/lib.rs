@@ -75,8 +75,8 @@ pub use assistd_wm::{NoWindowManager, WindowManager};
 
 pub use presence::{PresenceError, PresenceManager, RequestGuard, VramShortfall, WakeRoom};
 pub use state::{
-    AppState, DispatchError, McpServerStatus, MemoryStack, RuntimeState, SessionContext,
-    Subsystems, TaskRunner, TurnOrigin, branch_replay,
+    AppState, DispatchError, McpAccountError, McpAccounts, McpLogin, McpServerStatus, MemoryStack,
+    RuntimeState, SessionContext, Subsystems, TaskRunner, TurnOrigin, branch_replay,
 };
 pub use subagent::{RelayReport, SubAgentError, SubAgentRunner};
 

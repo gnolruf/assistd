@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
-use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
+use assistd_ipc::{Event, EventKind, IpcClient, McpServerState, Request, SubscribeFilter};
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream};
@@ -94,6 +94,8 @@ struct StartupCapabilities {
     vision_enabled: bool,
     model_name: String,
     auto_mode: bool,
+    /// Each MCP server that is unavailable, with why.
+    mcp_unavailable: Vec<(String, String)>,
 }
 
 /// Exclusive hold on the per-user chat lock beside the daemon socket,
@@ -303,6 +305,10 @@ async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> StartupCapabi
         info!("get_capabilities failed: {e:#}");
         StartupCapabilities::default()
     });
+    capabilities.mcp_unavailable = get_mcp_unavailable(ipc).await.unwrap_or_else(|e| {
+        info!("mcp_status failed: {e:#}");
+        Vec::new()
+    });
     if capabilities.model_name.is_empty() {
         capabilities.model_name = config
             .model
@@ -339,7 +345,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         picker,
         config_path,
     )
-    .with_theme(theme);
+    .with_theme(theme)
+    .with_mcp_unavailable(capabilities.mcp_unavailable);
     app.spawn_resume_or_new(RESUME_RECENCY_SECS);
 
     let mut events = EventStream::new();
@@ -470,6 +477,34 @@ fn drain_queued(app: &mut App, chat_rx: &mut mpsc::Receiver<ChatEvent>) {
     }
 }
 
+/// Each configured MCP server that is not usable, with why: the command that signs it in
+/// when it needs authorization.
+async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
+    let req = Request::McpStatus {
+        id: Uuid::new_v4().to_string(),
+    };
+    let mut stream = ipc.one_shot(req).await?;
+    let mut unavailable = Vec::new();
+    loop {
+        match stream.next_event().await? {
+            Some(Event::McpServer { server, state, .. }) => {
+                let reason = match state {
+                    McpServerState::NeedsAuthorization { .. } => {
+                        format!("needs authorization; run `assistd mcp login {server}`")
+                    }
+                    McpServerState::Unavailable { reason } => reason,
+                    McpServerState::Starting | McpServerState::Ready => continue,
+                };
+                unavailable.push((server, reason));
+            }
+            Some(Event::Done { .. }) => return Ok(unavailable),
+            Some(Event::Error { message, .. }) => anyhow::bail!("{message}"),
+            Some(_) => {}
+            None => anyhow::bail!("daemon closed without responding"),
+        }
+    }
+}
+
 async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
     let req = Request::GetCapabilities {
         id: Uuid::new_v4().to_string(),
@@ -488,6 +523,7 @@ async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
                     vision_enabled: vision,
                     model_name,
                     auto_mode,
+                    mcp_unavailable: Vec::new(),
                 };
             }
             Some(Event::Done { .. }) => return Ok(capabilities),
@@ -592,6 +628,7 @@ async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
                 EventKind::Relay,
                 EventKind::ContextSize,
                 EventKind::TaskQueue,
+                EventKind::Readiness,
                 EventKind::Done,
                 EventKind::Error,
             ],

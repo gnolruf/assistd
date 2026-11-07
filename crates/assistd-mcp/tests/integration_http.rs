@@ -4,10 +4,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assistd_mcp::{
     Connector, HttpAuth, HttpConfig, McpClient, McpError, McpServer, OAuthConfig, TokenStore,
+    begin_login,
 };
 use axum::Router;
 use axum::extract::Request;
@@ -31,6 +32,9 @@ use url::Url;
 
 /// The client ID stored tokens are issued to.
 const CLIENT_ID: &str = "assistd-test";
+
+/// The authorization code the mock authorization server accepts.
+const GOOD_CODE: &str = "good-code";
 
 /// More text than one response may carry.
 const OVERSIZED_REPLY_BYTES: usize = 65 * 1024 * 1024;
@@ -158,7 +162,7 @@ async fn a_redirect_to_another_origin_is_refused() {
 }
 
 /// An MCP endpoint that accepts only the access token `fresh`, beside an authorization server
-/// that trades refresh token `r1` for it.
+/// that issues it for refresh token `r1` or for [`GOOD_CODE`] with a PKCE verifier.
 #[derive(Debug, Clone, Default)]
 struct OAuthMock {
     bearers_seen: Arc<Mutex<Vec<String>>>,
@@ -194,7 +198,7 @@ impl OAuthMock {
             )
             .route(
                 "/token",
-                post(move |body: String| std::future::ready(refresh(&refreshes, &body))),
+                post(move |body: String| std::future::ready(grant(&refreshes, &body))),
             );
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let url = Url::parse(&format!("{origin}/mcp")).unwrap();
@@ -223,11 +227,17 @@ async fn require_fresh_token(
         .into_response()
 }
 
-fn refresh(refreshes: &AtomicUsize, body: &str) -> Response {
-    if !body.contains("grant_type=refresh_token") || !body.contains("refresh_token=r1") {
+fn grant(refreshes: &AtomicUsize, body: &str) -> Response {
+    let refreshed = body.contains("grant_type=refresh_token") && body.contains("refresh_token=r1");
+    let redeemed = body.contains("grant_type=authorization_code")
+        && body.contains(&format!("code={GOOD_CODE}"))
+        && body.contains("code_verifier=");
+    if !refreshed && !redeemed {
         return (StatusCode::BAD_REQUEST, r#"{"error":"invalid_grant"}"#).into_response();
     }
-    refreshes.fetch_add(1, Ordering::SeqCst);
+    if refreshed {
+        refreshes.fetch_add(1, Ordering::SeqCst);
+    }
     json_reply(
         json!({
             "access_token": "fresh",
@@ -265,15 +275,41 @@ fn seed_token_file(path: &Path, url: &Url, received_at: u64) {
     std::fs::write(path, entries.to_string()).unwrap();
 }
 
-async fn start_oauth(url: Url, client_id: &str, tokens: &Path) -> Result<McpServer, McpError> {
-    let mut http = HttpConfig::new("remote", url);
-    http.auth = HttpAuth::OAuth(OAuthConfig {
+fn oauth_config(client_id: &str, tokens: &Path) -> OAuthConfig {
+    OAuthConfig {
         client_id: Some(client_id.to_owned()),
         client_secret: None,
         scopes: Vec::new(),
         tokens: TokenStore::new(tokens.to_path_buf()),
-    });
+    }
+}
+
+async fn start_oauth(url: Url, client_id: &str, tokens: &Path) -> Result<McpServer, McpError> {
+    let mut http = HttpConfig::new("remote", url);
+    http.auth = HttpAuth::OAuth(oauth_config(client_id, tokens));
     McpServer::start("remote".into(), Connector::Http(http)).await
+}
+
+/// The `redirect_uri` and `state` an authorization URL carries.
+fn redirect_and_state(authorize_url: &str) -> (Url, String) {
+    let url = Url::parse(authorize_url).unwrap();
+    let param = |name: &str| {
+        url.query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+            .unwrap()
+    };
+    (Url::parse(&param("redirect_uri")).unwrap(), param("state"))
+}
+
+/// Play the browser: follow the redirect to `redirect_uri` with `code` and `state`.
+async fn redirect_browser(mut redirect_uri: Url, state: String) -> String {
+    redirect_uri
+        .query_pairs_mut()
+        .append_pair("code", GOOD_CODE)
+        .append_pair("state", &state);
+    let response = reqwest::get(redirect_uri.as_str()).await.unwrap();
+    response.text().await.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -327,4 +363,35 @@ async fn a_token_is_not_sent_to_a_server_with_another_url_or_client_id() {
     }
     assert!(mock.bearers_seen.lock().is_empty());
     assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_stores_a_token_only_for_a_redirect_carrying_its_state() {
+    let mock = OAuthMock::default();
+    let (url, _server) = mock.serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = dir.path().join("mcp-tokens.json");
+    let oauth = oauth_config(CLIENT_ID, &tokens);
+    let timeout = Duration::from_secs(10);
+
+    let forged = begin_login("remote", &url, &oauth, timeout).await.unwrap();
+    let (redirect_uri, _) = redirect_and_state(forged.authorize_url());
+    let browser = tokio::spawn(redirect_browser(redirect_uri, "forged".into()));
+    let refused = forged.complete().await;
+    assert!(matches!(refused, Err(McpError::Login(_))), "{refused:?}");
+    assert!(browser.await.unwrap().contains("failed"));
+    assert!(!tokens.exists(), "a refused redirect stored a token");
+
+    let login = begin_login("remote", &url, &oauth, timeout).await.unwrap();
+    let (redirect_uri, state) = redirect_and_state(login.authorize_url());
+    let browser = tokio::spawn(redirect_browser(redirect_uri, state));
+    login.complete().await.expect("the redirect is redeemed");
+    assert!(browser.await.unwrap().contains("signed in"));
+
+    let server = start_oauth(url, CLIENT_ID, &tokens)
+        .await
+        .expect("the signed-in server starts");
+    assert_eq!(echo(&server, "hi").await.as_deref(), Some("hi"));
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
+    server.shutdown().await;
 }

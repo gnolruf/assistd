@@ -29,6 +29,7 @@ pub(crate) mod conversation;
 pub(crate) mod event_triggers;
 pub(crate) mod fire_times;
 pub(crate) mod lanes;
+pub(crate) mod mcp_handlers;
 pub(crate) mod memory_handlers;
 pub(crate) mod memory_stack;
 pub(crate) mod path_watch;
@@ -59,6 +60,7 @@ pub(crate) mod wire;
 
 pub use self::branches::branch_replay;
 pub use self::fire_times::TriggerError;
+pub use self::mcp_handlers::{McpAccountError, McpAccounts, McpLogin};
 pub use self::memory_stack::MemoryStack;
 pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};
@@ -199,7 +201,7 @@ impl AppState {
 
     /// Requests the envelope timeout leaves alone: a subscription lives as
     /// long as its client, an agent or planning turn is bounded per step instead,
-    /// and a wake-word session by its own idle timeout.
+    /// a wake-word session by its own idle timeout, and an MCP login by its sign-in timeout.
     fn outlives_dispatch_envelope(req: &Request) -> bool {
         matches!(
             req,
@@ -207,6 +209,7 @@ impl AppState {
                 | Request::Query { .. }
                 | Request::TaskRefine { .. }
                 | Request::PttStop { .. }
+                | Request::McpLogin { .. }
                 | Request::WakeWord {
                     op: WakeWordOp::TestStart,
                     ..
@@ -277,6 +280,13 @@ impl AppState {
             Request::Subscribe { id, filter } => {
                 replied(self.handle_subscribe(id, filter, tx)).await
             }
+            Request::McpLogin { id, server } => {
+                replied(self.handle_mcp_login(id, server, tx)).await
+            }
+            Request::McpLogout { id, server } => {
+                replied(self.handle_mcp_logout(id, server, tx)).await
+            }
+            Request::McpStatus { id } => replied(self.handle_mcp_status(id, tx)).await,
             task @ (Request::TaskList { .. }
             | Request::TaskGet { .. }
             | Request::TaskSave { .. }

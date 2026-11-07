@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use assistd_core::planner::PlanningTools;
 use assistd_core::{
-    BuildToolsDeps, Config, McpServerStatus, RelayDeps, ToolRegistry, WindowManager,
+    BuildToolsDeps, Config, McpAccounts, McpServerStatus, RelayDeps, ToolRegistry, WindowManager,
 };
 use assistd_memory::SessionId;
 use assistd_tools::{
@@ -20,7 +20,7 @@ use tokio::sync::watch;
 use tracing::info;
 
 use super::embed_init::EmbeddingHandles;
-use super::mcp_init::{self, McpStartup};
+use super::mcp_init::{self, McpFleet};
 use super::memory_init::MemorySubsystem;
 
 /// The built-in tools the model is offered from startup, and the MCP
@@ -29,7 +29,9 @@ pub(super) struct ToolsSubsystem {
     pub registry: Arc<ToolRegistry>,
     pub planning: PlanningTools,
     pub mcp_servers: Vec<McpServerStatus>,
-    pub mcp_startup: Option<McpStartup>,
+    pub mcp_fleet: Option<Arc<McpFleet>>,
+    /// The same fleet, as the hook that signs servers in and out.
+    pub mcp_accounts: Option<Arc<dyn McpAccounts>>,
     /// Set when no sandbox is available, so the registry is empty.
     pub disabled: Option<ToolsDisabled>,
 }
@@ -59,7 +61,8 @@ pub(super) fn init(
                 registry: Arc::new(ToolRegistry::new()),
                 planning: PlanningTools::default(),
                 mcp_servers: Vec::new(),
-                mcp_startup: None,
+                mcp_fleet: None,
+                mcp_accounts: None,
                 disabled: Some(reason),
             });
         }
@@ -69,7 +72,7 @@ pub(super) fn init(
         gate.clone(),
         Arc::new(assistd_core::mcp_tool_approvals(config_path)?),
     );
-    let (mcp_servers, mcp_startup) =
+    let (mcp_servers, mcp_fleet) =
         mcp_init::prepare(config, mcp_approvals.clone(), deps.vision_gate.clone());
     let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
     let built = assistd_core::build_tools(BuildToolsDeps {
@@ -100,8 +103,9 @@ pub(super) fn init(
     Ok(ToolsSubsystem {
         registry: built.registry,
         planning: built.planning,
+        mcp_accounts: mcp_fleet.clone().map(|fleet| fleet as Arc<dyn McpAccounts>),
         mcp_servers,
-        mcp_startup,
+        mcp_fleet,
         disabled: None,
     })
 }

@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Component, Event, StatusKind, StatusSeverity};
+use assistd_ipc::{Component, ComponentReadiness, Event, StatusKind, StatusSeverity};
 use assistd_llm::VisionState;
-use assistd_utils::readiness::NotReady;
 
 use super::AppState;
 
@@ -31,7 +30,7 @@ impl AppState {
                 .await;
         }
         for server in &self.subsystems.mcp_servers {
-            let Err(NotReady::Unavailable(reason)) = server.readiness() else {
+            let ComponentReadiness::Unavailable { reason } = server.readiness() else {
                 continue;
             };
             let _ = tx
