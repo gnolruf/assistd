@@ -49,11 +49,15 @@ impl App {
         } else if self.shown_tasks_panel().is_some() {
             self.on_tasks_key(ev);
         } else if self.plan_review.is_some() && self.confirmation.is_none() {
-            self.on_plan_review_key(ev);
+            if !self.held_from_prompt(ev) {
+                self.on_plan_review_key(ev);
+            }
         } else if ev.code == KeyCode::BackTab {
             self.toggle_mode();
         } else if self.confirmation.is_some() {
-            self.on_confirmation_key(ev);
+            if !self.held_from_prompt(ev) {
+                self.on_confirmation_key(ev);
+            }
         } else if !self.on_shortcut_key(ev) {
             self.on_input_key(ev);
         }
@@ -119,7 +123,7 @@ impl App {
         });
     }
 
-    fn on_input_key(&mut self, ev: KeyEvent) {
+    pub(super) fn on_input_key(&mut self, ev: KeyEvent) {
         let action = self.input.on_key(ev);
         self.refresh_slash_state();
         match action {

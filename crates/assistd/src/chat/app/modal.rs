@@ -1,5 +1,7 @@
 //! The inline command-confirmation prompt.
 
+use std::time::{Duration, Instant};
+
 use assistd_ipc::{PausedPrompt, Request, TaskRunId};
 use assistd_tools::{Approval, ConfirmationRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9,6 +11,32 @@ use super::{AnswerTo, App, ConfirmChoice, ConfirmationPrompt};
 
 /// Script rows one PgUp/PgDn moves an expanded prompt.
 const PROMPT_SCROLL_STEP: usize = 10;
+
+/// How long typing must pause after a prompt opens before a key answers it.
+const TYPE_AHEAD_GRACE: Duration = Duration::from_millis(500);
+
+/// Holds keys back from a prompt that just opened, so what the user was typing when it
+/// appeared lands in the input line instead of answering it.
+#[derive(Debug, Default)]
+pub(in crate::chat) struct TypeAheadGuard {
+    /// Keys go to the input line until then; each one held pushes it back.
+    deaf_until: Option<Instant>,
+}
+
+impl TypeAheadGuard {
+    /// A prompt opened at `now`.
+    pub(super) fn arm(&mut self, now: Instant) {
+        self.deaf_until = Some(now + TYPE_AHEAD_GRACE);
+    }
+
+    /// Whether a key at `now` is held from the prompt, which keeps holding until typing
+    /// pauses for [`TYPE_AHEAD_GRACE`].
+    fn holds(&mut self, now: Instant) -> bool {
+        let held = self.deaf_until.is_some_and(|until| now < until);
+        self.deaf_until = held.then(|| now + TYPE_AHEAD_GRACE);
+        held
+    }
+}
 
 impl App {
     /// Show a reply's command-confirmation prompt in place of an open task run's, which
@@ -23,6 +51,7 @@ impl App {
             return;
         }
         self.confirmation = Some(ConfirmationPrompt::new(confirm_id, request));
+        self.type_ahead.arm(Instant::now());
     }
 
     /// Show the prompt paused run `run` waits on, unless another prompt is open.
@@ -32,6 +61,22 @@ impl App {
             return;
         }
         self.confirmation = Some(ConfirmationPrompt::for_task_run(run, prompt));
+        self.type_ahead.arm(Instant::now());
+    }
+
+    /// Send `ev` to the input line instead of an open prompt when the prompt opened while the
+    /// user was typing; Enter is dropped rather than submitted. Esc and Ctrl+C, which only
+    /// decline, always reach the prompt. Returns whether `ev` was held.
+    pub(super) fn held_from_prompt(&mut self, ev: KeyEvent) -> bool {
+        let declines = ev.code == KeyCode::Esc
+            || (ev.code == KeyCode::Char('c') && ev.modifiers.contains(KeyModifiers::CONTROL));
+        if declines || !self.type_ahead.holds(Instant::now()) {
+            return false;
+        }
+        if ev.code != KeyCode::Enter {
+            self.on_input_key(ev);
+        }
+        true
     }
 
     pub(super) fn resolve_confirmation(&mut self, approval: Approval) {
