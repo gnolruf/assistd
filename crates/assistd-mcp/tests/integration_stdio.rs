@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_mcp::{
-    LaunchTarget, McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools, launch,
+    Connector, LaunchTarget, McpClient, McpError, McpServer, StdioConfig, adapt_client_as_tools,
+    launch,
 };
 use assistd_tools::{
     AlwaysAllowGate, ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, VisionGate,
@@ -27,7 +28,7 @@ fn make_stdio_config(label: &str) -> StdioConfig {
 }
 
 async fn start_fake() -> Arc<McpServer> {
-    let server = McpServer::start("fake".into(), make_stdio_config("fake"))
+    let server = McpServer::start("fake".into(), Connector::Stdio(make_stdio_config("fake")))
         .await
         .expect("server should start");
     Arc::new(server)
@@ -155,7 +156,7 @@ async fn crashed_server_fails_fast_then_restarts_on_a_later_call() {
 async fn unanswered_call_times_out_and_the_server_keeps_answering() {
     let mut cfg = StdioConfig::new("fake", fake_server_path());
     cfg.request_timeout = Duration::from_millis(300);
-    let server = McpServer::start("fake".into(), cfg)
+    let server = McpServer::start("fake".into(), Connector::Stdio(cfg))
         .await
         .expect("server should start");
 
@@ -181,7 +182,7 @@ async fn server_that_stops_answering_is_killed_and_restarted() {
     let mut cfg = StdioConfig::new("fake", fake_server_path());
     cfg.request_timeout = Duration::from_millis(300);
     let server = Arc::new(
-        McpServer::start("fake".into(), cfg)
+        McpServer::start("fake".into(), Connector::Stdio(cfg))
             .await
             .expect("server should start"),
     );
@@ -248,7 +249,7 @@ async fn failed_initialize_kills_the_process_group() {
         pid_file.to_string_lossy().into_owned(),
     );
 
-    let err = McpServer::start("fake".into(), cfg)
+    let err = McpServer::start("fake".into(), Connector::Stdio(cfg))
         .await
         .expect_err("fixture refuses initialize");
     assert!(matches!(err, McpError::Initialize(_)), "{err}");
@@ -281,7 +282,9 @@ async fn server_refused_at_first_start_offers_its_tools_after_a_retry() {
 
     let server = tokio::time::timeout(
         Duration::from_secs(10),
-        launch("fake".into(), cfg, &target, |e| retries.push(e.to_string())),
+        launch("fake".into(), Connector::Stdio(cfg), &target, |e| {
+            retries.push(e.to_string());
+        }),
     )
     .await
     .expect("retry comes within the first backoff")
@@ -303,7 +306,7 @@ async fn server_sees_only_inherited_and_configured_environment() {
     );
     let mut cfg = make_stdio_config("fake");
     cfg.env.insert("CONFIGURED_TOKEN".into(), "secret".into());
-    let server = McpServer::start("fake".into(), cfg)
+    let server = McpServer::start("fake".into(), Connector::Stdio(cfg))
         .await
         .expect("server should start");
 

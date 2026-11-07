@@ -6,6 +6,8 @@ use std::time::Duration;
 use rmcp::service::{ClientInitializeError, ServiceError};
 use thiserror::Error;
 
+use crate::streamable::transport_failure;
+
 /// Errors from an MCP server or its supervisor. [`mcp_error_line`]
 /// renders each variant for the model.
 #[derive(Debug, Error)]
@@ -38,17 +40,37 @@ pub enum McpError {
 
     #[error("MCP server is currently unavailable")]
     ServerDown,
+
+    /// The HTTP request never got an answer: DNS, connect, TLS, or a refused redirect.
+    #[error("could not reach the MCP server: {0}")]
+    Connection(String),
+
+    #[error("MCP server answered HTTP {0}")]
+    HttpStatus(u16),
+
+    /// The server answered 401 or 403.
+    #[error("MCP server needs authorization")]
+    NeedsAuthorization,
+
+    /// The server no longer knows the session; the next call opens a new one.
+    #[error("MCP server ended the session")]
+    SessionExpired,
 }
 
 impl McpError {
     /// Whether starting the server again unchanged would fail the same way: its command is
-    /// missing or cannot be executed.
+    /// missing or cannot be executed, or it refuses the configured credentials.
     pub(crate) fn is_permanent(&self) -> bool {
-        matches!(
-            self,
-            Self::Spawn { source, .. }
-                if matches!(source.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied)
-        )
+        match self {
+            Self::Spawn { source, .. } => {
+                matches!(
+                    source.kind(),
+                    ErrorKind::NotFound | ErrorKind::PermissionDenied
+                )
+            }
+            Self::NeedsAuthorization => true,
+            _ => false,
+        }
     }
 }
 
@@ -59,7 +81,10 @@ impl From<ServiceError> for McpError {
                 code: data.code.0,
                 message: data.message.into_owned(),
             },
-            ServiceError::TransportClosed | ServiceError::TransportSend(_) => Self::TransportClosed,
+            ServiceError::TransportSend(error) => {
+                transport_failure(&error).unwrap_or(Self::TransportClosed)
+            }
+            ServiceError::TransportClosed => Self::TransportClosed,
             ServiceError::Timeout { timeout } => Self::RequestTimeout(timeout),
             other => Self::Protocol(other.to_string()),
         }
@@ -102,6 +127,22 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
             "[error] {tool_name}: MCP server is currently unavailable. \
              Try: another tool while the server restarts\n"
         ),
+        McpError::Connection(detail) => format!(
+            "[error] {tool_name}: could not reach the MCP server: {detail}. \
+             Try: another tool; the server may be offline\n"
+        ),
+        McpError::HttpStatus(status) => format!(
+            "[error] {tool_name}: MCP server answered HTTP {status}. \
+             Try: the call again later\n"
+        ),
+        McpError::NeedsAuthorization => format!(
+            "[error] {tool_name}: MCP server needs authorization. \
+             Check: the server's headers in config.toml\n"
+        ),
+        McpError::SessionExpired => format!(
+            "[error] {tool_name}: MCP server ended the session. \
+             Try: the call again\n"
+        ),
     }
 }
 
@@ -141,6 +182,10 @@ mod tests {
             ("protocol", McpError::Protocol("bad frame".into())),
             ("arguments", McpError::ArgumentsNotObject),
             ("server_down", McpError::ServerDown),
+            ("connection", McpError::Connection("refused".into())),
+            ("http_status", McpError::HttpStatus(502)),
+            ("authorization", McpError::NeedsAuthorization),
+            ("session_expired", McpError::SessionExpired),
         ];
         for (label, err) in cases {
             let line = mcp_error_line("mcp__web__search", &err);

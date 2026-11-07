@@ -4,10 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::config::{McpStdioTransport, McpTransport};
+use assistd_core::config::{McpHttpTransport, McpStdioTransport, McpTransport};
 use assistd_core::{AppState, Config, McpServerConfig, McpServerStatus};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
-use assistd_mcp::{LaunchTarget, McpError, McpServer, StdioConfig, launch};
+use assistd_mcp::{Connector, HttpConfig, LaunchTarget, McpError, McpServer, StdioConfig, launch};
 use assistd_tools::{ApprovalGate, VisionGate};
 use assistd_utils::readiness::Readiness;
 use tokio::sync::watch;
@@ -153,15 +153,8 @@ async fn start_server(
 ) -> Option<Arc<McpServer>> {
     let name = server.name.clone();
     let unavailable = |reason: String| Readiness::Unavailable(reason.into());
-    let McpTransport::Stdio(stdio) = &server.transport else {
-        let reason = "Streamable HTTP servers are not supported yet".to_owned();
-        tracing::warn!("mcp: {name}: {reason}; skipping");
-        record_readiness(&state, &name, unavailable(reason));
-        return None;
-    };
-    let config = stdio_config(&server, stdio);
     let on_retry = |e: &McpError| record_readiness(&state, &name, unavailable(e.to_string()));
-    match launch(name.clone(), config, &target, on_retry).await {
+    match launch(name.clone(), connector(&server), &target, on_retry).await {
         Ok(started) => {
             record_readiness(&state, &name, Readiness::Ready(()));
             Some(started)
@@ -173,13 +166,40 @@ async fn start_server(
     }
 }
 
-fn stdio_config(server: &McpServerConfig, transport: &McpStdioTransport) -> StdioConfig {
+fn connector(server: &McpServerConfig) -> Connector {
+    let request_timeout = Duration::from_secs(server.request_timeout_secs.get());
+    match &server.transport {
+        McpTransport::Stdio(transport) => {
+            Connector::Stdio(stdio_config(server, transport, request_timeout))
+        }
+        McpTransport::Http(transport) => {
+            Connector::Http(http_config(server, transport, request_timeout))
+        }
+    }
+}
+
+fn stdio_config(
+    server: &McpServerConfig,
+    transport: &McpStdioTransport,
+    request_timeout: Duration,
+) -> StdioConfig {
     let mut stdio = StdioConfig::new(
         server.name.clone(),
         transport.command.to_string_lossy().into_owned(),
     );
     stdio.args.clone_from(&transport.args);
     stdio.env.clone_from(&transport.env);
-    stdio.request_timeout = Duration::from_secs(server.request_timeout_secs.get());
+    stdio.request_timeout = request_timeout;
     stdio
+}
+
+fn http_config(
+    server: &McpServerConfig,
+    transport: &McpHttpTransport,
+    request_timeout: Duration,
+) -> HttpConfig {
+    let mut http = HttpConfig::new(server.name.clone(), transport.url.as_url().clone());
+    http.headers = transport.headers.to_header_map();
+    http.request_timeout = request_timeout;
+    http
 }

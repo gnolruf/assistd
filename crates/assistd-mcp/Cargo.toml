@@ -14,19 +14,26 @@ assistd-tools = { workspace = true }
 assistd-utils = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+futures-util = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 rmcp = { workspace = true }
 rustix = { workspace = true }
 serde_json = { workspace = true }
+sse-stream = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "process", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 parking_lot = { workspace = true }
 assistd-tools = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "io-util"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "io-util", "net"] }
 
 [[bin]]
 name = "fake_mcp_server"

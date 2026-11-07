@@ -24,7 +24,7 @@ flowchart TB
         tools["<b>assistd-tools</b><br/>run tool · commands · policy gates"]
         voice["<b>assistd-voice</b><br/>sherpa-onnx STT · TTS · VAD"]
         wm["<b>assistd-wm</b><br/>i3 / Sway IPC"]
-        mcp["<b>assistd-mcp</b><br/>stdio client (rmcp)"]
+        mcp["<b>assistd-mcp</b><br/>stdio + HTTP client (rmcp)"]
         memory[("<b>assistd-memory</b><br/>SQLite stores")]
         embed["<b>assistd-embed</b><br/>embedding queue"]
         search["<b>assistd-search</b><br/>SearXNG launch spec + client"]
@@ -63,7 +63,7 @@ flowchart TB
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
 | `assistd-ipc`    | Wire-protocol types (`Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`).   | `utils`                                                                          |
 | `assistd-llm`    | `LlmBackend` trait + `LlamaChatClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
-| `assistd-mcp`    | Stdio MCP servers driven through `rmcp`, plus the adapter exposing their tools through `Tool`.       | `tools`, `utils`                                                                 |
+| `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `tools`, `utils`                                                                 |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
@@ -751,11 +751,15 @@ instead of panicking.
 
 ### MCP (`assistd-mcp`)
 
-External tool servers configured under `[[mcp.servers]]`. Each entry
-is a child process the daemon spawns in its own process group, with a
-scrubbed environment, and speaks MCP to over stdin/stdout through the
-`rmcp` crate. Discovered tools are wrapped by `McpToolAdapter`, which
-implements `Tool` over the discovered schema, and added to the
+External tool servers configured under `[[mcp.servers]]`, spoken to
+through the `rmcp` crate. A `command` entry is a child process the
+daemon spawns in its own process group, with a scrubbed environment,
+and speaks MCP to over stdin/stdout. A `url` entry is a remote server
+reached over Streamable HTTP with the entry's static `headers` on every
+request; its `Mcp-Session-Id` lasts until the server answers 404, which
+ends the session like a dead child. Discovered tools are wrapped by
+`McpToolAdapter`, which implements `Tool` over the discovered schema,
+and added to the
 `ToolCatalog` the LLM's tools come from, under the name
 `mcp__<server-name>__<tool-name>`. Servers start concurrently in the
 background; each one's tools are offered from the next turn after it
@@ -763,9 +767,10 @@ connects, since every turn takes its own snapshot of the catalog. A
 server that fails to start or to list its tools is retried with the same
 backoff as restarts, and is reported as unavailable, with its last error,
 in `GetReadiness` and `GetCapabilities` until an attempt succeeds. One
-whose command is missing or not executable is not retried. Shutdown
-cancels pending retries. Each call asks the user first until
-that tool is "always allowed". Like every tool's, their text results are
+whose command is missing or not executable, or that answers 401 or 403
+("needs authorization"), is not retried. Shutdown cancels pending
+retries. Each call asks the user first until that tool is "always
+allowed". Like every tool's, their text results are
 held to the `[tools.output]` cap by the registry, spilling overflow to
 `<registry-name>-<n>.txt`.
 
@@ -775,7 +780,10 @@ follow exponential backoff; a call inside the backoff fails with a
 "server unavailable" error instead of waiting. The daemon never blocks
 on a slow MCP server: the handshake and each call are bounded by that
 server's `request_timeout_secs`, and a timeout surfaces as a structured
-error to the model.
+error to the model. Each message is capped at 64 MiB, whether a stdio
+line, an HTTP body or one SSE event; an oversized reply fails that call
+and leaves the session up. HTTP redirects are followed only within the
+configured origin, and logs name a remote server by its origin alone.
 
 ### Web search (`assistd-search` ↔ SearXNG)
 

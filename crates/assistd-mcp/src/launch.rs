@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::adapt_client_as_tools;
 use crate::error::McpError;
 use crate::server::{McpServer, restart_delay};
-use crate::stdio::StdioConfig;
+use crate::session::Connector;
 
 /// The tools a [`launch`] offers and how their calls are gated.
 #[derive(Debug, Clone)]
@@ -22,16 +22,17 @@ pub struct LaunchTarget {
 
 /// Start server `name` and add its tools to the target's catalog, retrying with backoff after
 /// each failed attempt, which `on_retry` hears about first. Errs only on a failure retrying
-/// cannot fix, such as a missing command; dropping the future cancels pending retries.
+/// cannot fix, such as a missing command or refused credentials; dropping the future cancels
+/// pending retries.
 pub async fn launch(
     name: String,
-    cfg: StdioConfig,
+    connector: Connector,
     target: &LaunchTarget,
     mut on_retry: impl FnMut(&McpError),
 ) -> Result<Arc<McpServer>, McpError> {
     let mut policy = RestartPolicy::default();
     loop {
-        let error = match start_and_offer(&name, &cfg, target).await {
+        let error = match start_and_offer(&name, &connector, target).await {
             Ok(server) => return Ok(server),
             Err(error) if error.is_permanent() => {
                 warn!(target: "assistd::mcp", server = %name, %error, "MCP server cannot start");
@@ -57,10 +58,10 @@ pub async fn launch(
 /// them fails.
 async fn start_and_offer(
     name: &str,
-    cfg: &StdioConfig,
+    connector: &Connector,
     target: &LaunchTarget,
 ) -> Result<Arc<McpServer>, McpError> {
-    let server = Arc::new(McpServer::start(name.to_owned(), cfg.clone()).await?);
+    let server = Arc::new(McpServer::start(name.to_owned(), connector.clone()).await?);
     match adapt_client_as_tools(server.clone(), name, &target.approvals, &target.vision).await {
         Ok(tools) => {
             info!(target: "assistd::mcp", server = %name, tools = tools.len(), "MCP server ready");
