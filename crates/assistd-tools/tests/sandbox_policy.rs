@@ -133,8 +133,8 @@ async fn an_unvetted_program_asks_the_gate_and_runs_when_approved() {
 
 #[tokio::test]
 async fn only_edits_strictly_inside_the_edit_scope_may_run_unasked() {
-    let scope = tempfile::tempdir().unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
+    let scope = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let elsewhere = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let scope_dir = scope.path().canonicalize().unwrap();
     let elsewhere_dir = elsewhere.path().canonicalize().unwrap();
     let gate = RecordingGate::answering(Approval::Deny);
@@ -155,6 +155,40 @@ async fn only_edits_strictly_inside_the_edit_scope_may_run_unasked() {
             false,
         ),
         (format!("chmod -R 700 {}", scope_dir.display()), false),
+        (format!("mkdir {}/repo/.git", scope_dir.display()), false),
+        (
+            format!(
+                "printf x > {}/repo/.git/hooks/post-checkout",
+                scope_dir.display()
+            ),
+            false,
+        ),
+        (
+            format!(
+                "cp {}/source {}/copy",
+                elsewhere_dir.display(),
+                scope_dir.display()
+            ),
+            true,
+        ),
+        (
+            format!(
+                "ln -s {}/hook {}/link; printf x > {}/link",
+                elsewhere_dir.display(),
+                scope_dir.display(),
+                scope_dir.display()
+            ),
+            false,
+        ),
+        (
+            format!(
+                "cp -s {}/hook {}/link",
+                elsewhere_dir.display(),
+                scope_dir.display()
+            ),
+            false,
+        ),
+        (format!("ln -s ../hook {}/link", scope_dir.display()), false),
     ] {
         let out = cmd.run(input(&script)).await;
         assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
@@ -169,6 +203,36 @@ async fn only_edits_strictly_inside_the_edit_scope_may_run_unasked() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_redirect_through_a_symlink_in_scratch_is_an_edit_of_where_it_leads() {
+    let scratch = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let elsewhere = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let scratch_dir = scratch.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), scratch_dir.join("link")).unwrap();
+    let gate = RecordingGate::answering(Approval::Deny);
+    let cfg = BashPolicyCfg {
+        scratch: Some(scratch_dir.clone()),
+        ..BashPolicyCfg::default()
+    };
+    let cmd = BashCommand::new(Arc::new(cfg), no_sandbox(), gate.clone());
+
+    let out = cmd
+        .run(input(&format!("echo x > {}/plain", scratch_dir.display())))
+        .await;
+    assert_eq!(out.exit_code, 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(gate.asked.lock().is_empty());
+
+    let out = cmd
+        .run(input(&format!(
+            "echo x > {}/link/hook",
+            scratch_dir.display()
+        )))
+        .await;
+    assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
+    assert_eq!(gate.asked.lock().len(), 1);
+    assert!(!elsewhere.path().join("hook").exists());
 }
 
 #[tokio::test]

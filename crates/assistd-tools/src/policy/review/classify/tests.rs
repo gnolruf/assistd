@@ -427,6 +427,7 @@ fn edits_record_their_targets_as_written() {
                     "dest/b",
                     "/tmp/copy",
                     "/tmp/copy/src",
+                    "/etc/hosts",
                     "hosts",
                 ]),
                 deletes: vec![delete("a", true), delete("b", true)],

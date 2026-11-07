@@ -232,8 +232,8 @@ impl PathGuards {
     }
 
     /// The first path, as written, that `effects` change outside `scope`, inside `excluded`,
-    /// on a scope directory itself, or where it cannot be resolved; `None` when every change
-    /// lands strictly below a scope directory. Blocks on the filesystem.
+    /// on a scope directory itself, behind a hidden entry, or where it cannot be resolved;
+    /// `None` when every change lands where [`admits_edit`] allows. Blocks on the filesystem.
     pub(crate) fn first_out_of_scope<'e>(
         &self,
         effects: &'e [Effect],
@@ -246,9 +246,7 @@ impl PathGuards {
             .find(|effect| {
                 self.resolve(effect).is_none_or(|path| {
                     excluded.iter().any(|dir| path.starts_with(dir))
-                        || !scope
-                            .iter()
-                            .any(|dir| path != *dir && path.starts_with(dir))
+                        || !scope.iter().any(|dir| admits_edit(dir, &path))
                 })
             })
             .map(|effect| effect.path.as_str())
@@ -335,6 +333,19 @@ impl Guard {
             holds: tree != path && tree.starts_with(path),
         }
     }
+}
+
+/// Whether an edit of `path` stays in the scope directory `dir`: strictly below it, with no
+/// hidden (dot) entry between them, where tools keep files other programs run.
+pub(crate) fn admits_edit(dir: &Path, path: &Path) -> bool {
+    path.strip_prefix(dir)
+        .is_ok_and(|below| !below.as_os_str().is_empty() && !has_hidden_component(below))
+}
+
+/// Whether any component of `path` is a hidden (dot) entry.
+fn has_hidden_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str().as_encoded_bytes().starts_with(b"."))
 }
 
 /// Whether a recursive operation on `path` reaches `tree`: it lies below `path` and exists.

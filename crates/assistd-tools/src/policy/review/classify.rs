@@ -34,6 +34,14 @@ const HOME_VARIABLES: &[&str] = &["${HOME}", "$HOME"];
 /// included; a glob only matches existing entries below its directory.
 const ANY_PATH_CHARS: &[char] = &['$', '`', '{'];
 
+/// The options that make an edit program link its sources instead of copying them: the
+/// program, its short and long spelling, and the kind of link.
+const LINK_OPTIONS: &[(&str, char, &str, Linking)] = &[
+    ("cp", 'l', "link", Linking::Hard),
+    ("cp", 's', "symbolic-link", Linking::Symbolic),
+    ("ln", 's', "symbolic", Linking::Symbolic),
+];
+
 /// Programs that only read, each with the options that make it write a file or run a program.
 const READ_ONLY_PROGRAMS: &[(&str, &[Flag])] = &[
     ("b2sum", &[]),
@@ -377,6 +385,15 @@ enum Targets {
 struct EditArgs {
     operands: Vec<String>,
     recursive: bool,
+    linking: Linking,
+}
+
+/// Whether an edit program links its sources, so a later write through the link lands on them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Linking {
+    Copies,
+    Hard,
+    Symbolic,
 }
 
 /// How the program being classified is run.
@@ -800,7 +817,9 @@ impl Classifier<'_> {
         let EditArgs {
             operands,
             recursive,
+            linking,
         } = edit_args(edit, args, self.home_changed)?;
+        let source_action = source_action(edit, &operands, linking)?;
         self.runs_edit_program = true;
         match (edit.targets, operands.split_last()) {
             (_, None) => {}
@@ -810,7 +829,7 @@ impl Classifier<'_> {
                 self.each(Action::ChangeAttributes, &operands[1..], recursive);
             }
             (Targets::WritesLast, Some((last, sources))) if !sources.is_empty() => {
-                self.each(Action::Read, sources, recursive);
+                self.each(source_action, sources, recursive);
                 self.copied_into(last, sources, recursive);
             }
             (Targets::Moves, Some((last, sources))) if !sources.is_empty() => {
@@ -818,11 +837,11 @@ impl Classifier<'_> {
                 self.copied_into(last, sources, false);
             }
             (Targets::Links, Some((last, []))) => {
-                self.target(Action::Read, last.clone(), false);
+                self.target(Action::Write, last.clone(), false);
                 self.target(Action::Write, basename(last).to_string(), false);
             }
             (Targets::Links, Some((last, sources))) => {
-                self.each(Action::Read, sources, false);
+                self.each(Action::Write, sources, false);
                 self.copied_into(last, sources, false);
             }
             (Targets::WritesLast | Targets::Moves, Some(_)) => {}
@@ -850,7 +869,7 @@ impl Classifier<'_> {
 
     /// Record an effect on `path`, joined to the directory a `cd` entered when relative.
     fn target(&mut self, action: Action, path: String, recursive: bool) {
-        let relative = !path.starts_with(['/', '~']);
+        let relative = is_relative(&path);
         let moved = !matches!(self.directory, Directory::Start);
         let unknown = matches!(self.directory, Directory::Unknown);
         if relative && (unknown || (moved && action != Action::Read)) {
@@ -1039,6 +1058,7 @@ fn edit_args(edit: &EditProgram, args: &[Word], home_changed: bool) -> Result<Ed
     let mut parsed = EditArgs {
         operands: Vec::new(),
         recursive: false,
+        linking: Linking::Copies,
     };
     let mut options = true;
     let mut words = args.iter();
@@ -1051,16 +1071,63 @@ fn edit_args(edit: &EditProgram, args: &[Word], home_changed: bool) -> Result<Ed
                 return Err(format!("`{} {text}` is not a vetted option", edit.name));
             }
             parsed.recursive |= long == "recursive";
+            parsed.linking = parsed
+                .linking
+                .max(link_option(edit, |_, spelled| spelled == long));
         } else if let Some(cluster) = short_options(text).filter(|_| options && !arg.dynamic) {
             if edit_flags(edit, cluster)? {
                 words.next();
             }
             parsed.recursive |= cluster.contains(['r', 'R']);
+            parsed.linking = parsed
+                .linking
+                .max(link_option(edit, |flag, _| cluster.contains(flag)));
         } else {
             parsed.operands.push(edit_operand(edit, arg, home_changed)?);
         }
     }
     Ok(parsed)
+}
+
+/// What `edit` does to its sources: a link's target is written through the link later, so it
+/// counts as written. A relative symbolic target cannot be vetted, as it resolves from the
+/// link's directory rather than the working directory.
+fn source_action(
+    edit: &EditProgram,
+    operands: &[String],
+    linking: Linking,
+) -> Result<Action, String> {
+    let links = matches!(edit.targets, Targets::Links);
+    if !links && linking == Linking::Copies {
+        return Ok(Action::Read);
+    }
+    let targets = match operands {
+        [only] if links => std::slice::from_ref(only),
+        [sources @ .., _] => sources,
+        [] => &[],
+    };
+    if linking == Linking::Symbolic && targets.iter().any(|target| is_relative(target)) {
+        return Err(format!(
+            "`{}` links to a relative target, which resolves from the link's directory",
+            edit.name
+        ));
+    }
+    Ok(Action::Write)
+}
+
+/// The kind of link the option of `edit` that `given` matches makes, or [`Linking::Copies`].
+fn link_option(edit: &EditProgram, given: impl Fn(char, &str) -> bool) -> Linking {
+    LINK_OPTIONS
+        .iter()
+        .filter(|(program, flag, long, _)| *program == edit.name && given(*flag, long))
+        .map(|&(.., linking)| linking)
+        .max()
+        .unwrap_or(Linking::Copies)
+}
+
+/// Whether `path` resolves against a working directory.
+fn is_relative(path: &str) -> bool {
+    !path.starts_with(['/', '~'])
 }
 
 /// `arg` as a path, or the directory a glob for its every entry lists.
