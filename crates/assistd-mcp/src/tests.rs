@@ -109,10 +109,7 @@ fn mixed_results_keep_every_block_and_collect_images() {
     };
     assert_eq!(*text, "took screenshot");
     assert_eq!(*png, "(image: image/png)");
-    assert_eq!(
-        serde_json::from_str::<Value>(link).unwrap()["uri"],
-        "file:///a.txt"
-    );
+    assert_eq!(*link, "(resource link: a.txt, file:///a.txt)");
     assert_eq!(*jpeg, "(image: image/jpeg)");
     assert_eq!(*gif, "(image omitted: image/gif; not PNG, JPEG or WebP)");
     assert!(
@@ -125,6 +122,48 @@ fn mixed_results_keep_every_block_and_collect_images() {
             (ImageMime::Png, [0xDE, 0xAD, 0xBE, 0xEF].as_slice()),
             (ImageMime::Jpeg, [0, 0, 0].as_slice()),
         ]
+    );
+}
+
+#[test]
+fn resource_blocks_render_as_readable_text() {
+    let result = call_result(json!({
+        "content": [
+            {"type": "text", "text": "2 matches"},
+            {
+                "type": "resource_link", "uri": "drive://doc/42", "name": "Q3 plan",
+                "mimeType": "text/markdown", "size": 2048, "description": "ignored"
+            },
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": "drive://doc/42", "mimeType": "text/markdown",
+                    "text": "# Q3 plan\n\n- ship \"relay\"\n"
+                }
+            },
+            {
+                "type": "resource",
+                "resource": {"uri": "drive://doc/7", "mimeType": "application/pdf", "blob": "JVBERi0="}
+            },
+            {
+                "type": "resource",
+                "resource": {"uri": "drive://img/1", "mimeType": "image/png", "blob": "3q2+7w=="}
+            },
+        ]
+    }));
+    let output = tool_output(result, Duration::from_millis(42), true);
+    assert_eq!(
+        output.output,
+        "2 matches\n\
+         (resource link: Q3 plan, drive://doc/42, text/markdown, 2KB)\n\
+         (resource: drive://doc/42, text/markdown)\n\
+         # Q3 plan\n\n- ship \"relay\"\n\n\
+         (binary resource omitted: application/pdf, 5B)\n\
+         (image: image/png)"
+    );
+    assert_eq!(
+        image_bytes(&output.attachments),
+        [(ImageMime::Png, [0xDE, 0xAD, 0xBE, 0xEF].as_slice())]
     );
 }
 
