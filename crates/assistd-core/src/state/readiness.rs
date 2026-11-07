@@ -28,7 +28,7 @@ impl AppState {
                 StartupComponent::Mcp {
                     server: server.name().to_string(),
                 },
-                server.readiness().into(),
+                server.readiness(),
             )
         });
         self.subsystems

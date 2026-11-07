@@ -9,6 +9,7 @@ use assistd_ipc::{Event, IpcClient, IpcClientError, Request};
 use terminal_text::escape_controls;
 
 pub(crate) mod listen;
+pub(crate) mod mcp;
 pub(crate) mod memory;
 pub(crate) mod presence;
 pub(crate) mod ptt;

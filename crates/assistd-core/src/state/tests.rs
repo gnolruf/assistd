@@ -9,9 +9,9 @@ use tokio::sync::{Notify, watch};
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, HostName, ImageAttachment, ImageMime, ListenPhase,
-    PermissionMode, PlanMode, PlanVerdict, PresenceState, PresenceTarget, QueueItem,
-    StartupComponent, StatusKind, StatusSeverity, SubscribeFilter, TaskId, TaskQueueOp, TaskRunId,
-    TaskRunState, TaskSpec, VoiceCaptureState,
+    McpServerState, McpTransportKind, PermissionMode, PlanMode, PlanVerdict, PresenceState,
+    PresenceTarget, QueueItem, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
+    TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
@@ -230,11 +230,14 @@ async fn capabilities_report_disabled_tools_before_the_model() {
 fn state_mid_startup() -> Arc<AppState> {
     let mut state = Arc::into_inner(default_state()).expect("sole owner");
     state.memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Starting));
-    let git = McpServerStatus::starting("git".into());
-    git.set(Readiness::Unavailable(
-        "failed to start: no such file".into(),
-    ));
-    state.subsystems.mcp_servers = vec![McpServerStatus::starting("fs".into()), git];
+    let git = McpServerStatus::starting("git".into(), McpTransportKind::Stdio);
+    git.set(McpServerState::Unavailable {
+        reason: "failed to start: no such file".into(),
+    });
+    state.subsystems.mcp_servers = vec![
+        McpServerStatus::starting("fs".into(), McpTransportKind::Stdio),
+        git,
+    ];
     Arc::new(state)
 }
 

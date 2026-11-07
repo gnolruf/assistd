@@ -18,6 +18,7 @@ fn request_cases() -> Vec<(Request, &'static str)> {
         task_request_cases(),
         task_confirm_request_cases(),
         task_refine_request_cases(),
+        mcp_request_cases(),
     ]
     .concat()
 }
@@ -261,6 +262,7 @@ fn event_cases() -> Vec<(Event, &'static str)> {
         wake_word_event_cases(),
         task_event_cases(),
         task_queue_event_cases(),
+        mcp_event_cases(),
     ]
     .concat()
 }
@@ -1048,6 +1050,74 @@ fn task_refine_request_cases() -> Vec<(Request, &'static str)> {
                 trigger: TaskTrigger::Manual,
             },
             r#"{"type":"task_check_trigger","id":"r","trigger":{"kind":"manual"}}"#,
+        ),
+    ]
+}
+
+fn mcp_request_cases() -> Vec<(Request, &'static str)> {
+    vec![
+        (
+            Request::McpLogin {
+                id: id(),
+                server: "drive".into(),
+            },
+            r#"{"type":"mcp_login","id":"r","server":"drive"}"#,
+        ),
+        (
+            Request::McpLogout {
+                id: id(),
+                server: "drive".into(),
+            },
+            r#"{"type":"mcp_logout","id":"r","server":"drive"}"#,
+        ),
+        (
+            Request::McpStatus { id: id() },
+            r#"{"type":"mcp_status","id":"r"}"#,
+        ),
+    ]
+}
+
+fn mcp_event_cases() -> Vec<(Event, &'static str)> {
+    vec![
+        (
+            Event::McpAuthorizeUrl {
+                id: id(),
+                server: "drive".into(),
+                url: "https://auth.example/authorize?state=s".into(),
+            },
+            r#"{"type":"mcp_authorize_url","id":"r","server":"drive","url":"https://auth.example/authorize?state=s"}"#,
+        ),
+        (
+            Event::McpServer {
+                id: id(),
+                server: "drive".into(),
+                transport: McpTransportKind::Http,
+                state: McpServerState::NeedsAuthorization {
+                    scopes: vec!["drive.readonly".into()],
+                },
+            },
+            r#"{"type":"mcp_server","id":"r","server":"drive","transport":"http","state":{"state":"needs_authorization","scopes":["drive.readonly"]}}"#,
+        ),
+        (
+            Event::McpServer {
+                id: id(),
+                server: "fs".into(),
+                transport: McpTransportKind::Stdio,
+                state: McpServerState::Unavailable {
+                    reason: "missing".into(),
+                },
+            },
+            r#"{"type":"mcp_server","id":"r","server":"fs","transport":"stdio","state":{"state":"unavailable","reason":"missing"}}"#,
+        ),
+        (
+            Event::McpLoggedOut {
+                id: id(),
+                server: "drive".into(),
+                revocation: TokenRevocation::Failed {
+                    reason: "HTTP 503".into(),
+                },
+            },
+            r#"{"type":"mcp_logged_out","id":"r","server":"drive","revocation":{"outcome":"failed","reason":"HTTP 503"}}"#,
         ),
     ]
 }

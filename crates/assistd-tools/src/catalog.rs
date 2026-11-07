@@ -35,6 +35,14 @@ impl ToolCatalog {
         }
         *current = Arc::new(next);
     }
+
+    /// Stop offering every tool whose name `keep` rejects, from the next snapshot on.
+    pub fn retain(&self, keep: impl Fn(&str) -> bool) {
+        let mut current = self.current.write();
+        let mut next = ToolRegistry::clone(&current);
+        next.retain(keep);
+        *current = Arc::new(next);
+    }
 }
 
 #[cfg(test)]

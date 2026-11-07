@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use assistd_tools::{ApprovalGate, ToolCatalog, VisionGate};
+use assistd_tools::{ApprovalGate, MCP_TOOL_NAME_PREFIX, ToolCatalog, VisionGate};
 use assistd_utils::backoff::RestartPolicy;
 use tracing::{info, warn};
 
@@ -52,6 +52,12 @@ pub async fn launch(
         );
         tokio::time::sleep(delay).await;
     }
+}
+
+/// Stop offering server `name`'s tools from the next turn on.
+pub fn withdraw_tools(catalog: &ToolCatalog, name: &str) {
+    let prefix = format!("{MCP_TOOL_NAME_PREFIX}{name}__");
+    catalog.retain(|tool| !tool.starts_with(&prefix));
 }
 
 /// One attempt: start the server and offer its tools, shutting it down again when listing

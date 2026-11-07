@@ -32,10 +32,11 @@ window-manager bindings), and integrates with the running compositor for context
 - **Vision when the model has it.** `see photo.png` and `screenshot`
   attach images to the next turn whenever the loaded model has a
   vision projector; capability is detected at runtime.
-- **MCP-compatible.** Connect stdio
+- **MCP-compatible.** Connect stdio or remote
   [Model Context Protocol](https://modelcontextprotocol.io) servers
-  under `[[mcp.servers]]`; their tools register into the same registry
-  the LLM sees, namespaced as `mcp__<server>__<tool>`.
+  under `[[mcp.servers]]`, signing OAuth ones in with `assistd mcp login`;
+  their tools register into the same registry the LLM sees, namespaced
+  as `mcp__<server>__<tool>` (see [MCP servers](docs/mcp.md)).
 - **Coarse presence.** `Active → Drowsy → Sleeping`. On NVIDIA GPUs
   the daemon watches VRAM and drops to `Sleeping` when another process
   (a game, a second model runner) claims the GPU, freeing all of its

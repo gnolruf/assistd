@@ -65,6 +65,10 @@ pub enum McpError {
     /// The server no longer knows the session; the next call opens a new one.
     #[error("MCP server ended the session")]
     SessionExpired,
+
+    /// A browser sign-in did not finish: no redirect in time, or one the flow refused.
+    #[error("MCP login failed: {0}")]
+    Login(String),
 }
 
 impl McpError {
@@ -147,7 +151,7 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
         ),
         McpError::NeedsAuthorization { scopes } => format!(
             "[error] {tool_name}: MCP server needs authorization{}. \
-             Check: the server's `headers` or `auth` in config.toml\n",
+             Check: the user can sign it in with `assistd mcp login <server>`\n",
             scope_list(scopes)
         ),
         McpError::RegistrationUnsupported => format!(
@@ -160,6 +164,10 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
         McpError::SessionExpired => format!(
             "[error] {tool_name}: MCP server ended the session. \
              Try: the call again\n"
+        ),
+        McpError::Login(detail) => format!(
+            "[error] {tool_name}: MCP login failed: {detail}. \
+             Try: `assistd mcp login <server>` again\n"
         ),
     }
 }
@@ -219,6 +227,7 @@ mod tests {
             ("registration", McpError::RegistrationUnsupported),
             ("oauth", McpError::OAuth("token store: unreadable".into())),
             ("session_expired", McpError::SessionExpired),
+            ("login", McpError::Login("state mismatch".into())),
         ];
         for (label, err) in cases {
             let line = mcp_error_line("mcp__web__search", &err);

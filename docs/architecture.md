@@ -799,6 +799,23 @@ refresh that fails in transit is retried on the next call. Without a
 `client_id` the client registers dynamically; an authorization server
 that offers no registration fails with an error naming `client_id`.
 
+The daemon runs the sign-in itself, since only it holds the token
+store. `McpLogin` binds a one-shot listener on an ephemeral port of
+`127.0.0.1`, builds the PKCE authorization URL with that redirect, and
+sends it back as `McpAuthorizeUrl`; `assistd mcp login` opens it with
+`xdg-open` and prints it. The first request to the callback path ends
+the flow: a `state` other than the one in the URL is refused and stores
+nothing, a matching one has its code traded for tokens. The listener
+closes after that request or five minutes. The server is then stopped,
+its tools withdrawn from the catalog, and started afresh, and the reply
+reports its state once the first start attempt settles. `McpLogout`
+stops the server and withdraws its tools, revokes the token where the
+authorization server advertises an RFC 7009 `revocation_endpoint`, and
+deletes it either way. Core reaches the servers for both through the
+`McpAccounts` trait, which the binary implements, and answers
+`McpStatus` with each server's transport and state, including "needs
+authorization".
+
 ### Web search (`assistd-search` ↔ SearXNG)
 
 `web search` goes through a private [SearXNG](https://docs.searxng.org)
