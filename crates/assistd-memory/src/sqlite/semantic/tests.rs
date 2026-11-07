@@ -130,7 +130,7 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
         .await;
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 3, SessionScope::All)
+        .nearest_chunks(unit_vec(0.0), 3, ChunkScope::Chats(SessionScope::All))
         .await
         .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -143,12 +143,17 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     );
     assert!(hits[0].text.ends_with("tail ") && hits[0].text.len() < long_text.len());
     assert_eq!(hits[1].text, "short");
-    let ChunkLocator::Message { message_id, .. } = hits[0].locator;
+    let ChunkLocator::Message { message_id, .. } = hits[0].locator else {
+        panic!("a chat search must hit messages");
+    };
     assert_eq!(message_id, long_message);
     for hit in &hits {
         let ChunkLocator::Message {
             session_id, role, ..
-        } = hit.locator;
+        } = hit.locator
+        else {
+            panic!("a chat search must hit messages");
+        };
         assert_eq!(session_id, transcript.session);
         assert_eq!(role, PersistedRole::User);
     }
@@ -170,7 +175,7 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 
     for (top_k, expected) in [(3, &ids[..3]), (usize::MAX, &ids[..])] {
         let hits = store
-            .nearest_chunks(unit_vec(0.0), top_k, SessionScope::All)
+            .nearest_chunks(unit_vec(0.0), top_k, ChunkScope::Chats(SessionScope::All))
             .await
             .unwrap();
         let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -189,7 +194,7 @@ async fn nearest_chunks_can_exclude_one_session() {
         .await;
 
     let all = store
-        .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
         .await
         .unwrap();
     let all_ids: Vec<ChunkId> = all.iter().map(|h| h.chunk_id).collect();
@@ -200,17 +205,92 @@ async fn nearest_chunks_can_exclude_one_session() {
     );
 
     let others = store
-        .nearest_chunks(unit_vec(0.0), 5, SessionScope::AllExcept(current.session))
+        .nearest_chunks(
+            unit_vec(0.0),
+            5,
+            ChunkScope::Chats(SessionScope::AllExcept(current.session)),
+        )
         .await
         .unwrap();
     let other_ids: Vec<(ChunkId, SessionId)> = others
         .iter()
         .map(|h| {
-            let ChunkLocator::Message { session_id, .. } = h.locator;
+            let ChunkLocator::Message { session_id, .. } = h.locator else {
+                panic!("a chat search must hit messages");
+            };
             (h.chunk_id, session_id)
         })
         .collect();
     assert_eq!(other_ids, [(past_chunk, past.session)]);
+}
+
+#[tokio::test]
+async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks() {
+    let (handle, store, _temp) = fresh().await;
+    let transcript = Transcript::new(&handle).await;
+    let message_chunk = transcript
+        .embedded_chunk(&store, "chat", &unit_vec(0.0))
+        .await;
+    let path = PathBuf::from("/notes/plan.md");
+    let stale = store
+        .index_document(path.clone(), "draft".into())
+        .await
+        .unwrap();
+    embed_chunk(&store, &stale[0], &unit_vec(0.1)).await;
+    let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
+    let fresh_chunks = store
+        .index_document(path.clone(), section.clone())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .index_document(path.clone(), section)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unchanged text must keep its chunks"
+    );
+    let [intro, detail] = &fresh_chunks[..] else {
+        panic!("expected two chunks, got {fresh_chunks:?}");
+    };
+    embed_chunk(&store, &stale[0], &unit_vec(0.0)).await;
+    embed_chunk(&store, detail, &unit_vec(0.2)).await;
+
+    let chats = store
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
+        .await
+        .unwrap();
+    let chat_ids: Vec<ChunkId> = chats.iter().map(|h| h.chunk_id).collect();
+    assert_eq!(chat_ids, [message_chunk], "chat search must skip documents");
+
+    let documents = store
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .await
+        .unwrap();
+    let [hit] = &documents[..] else {
+        panic!("one document must hit through its re-indexed chunk, got {documents:?}");
+    };
+    assert_eq!(hit.chunk_id, detail.0);
+    assert_eq!(hit.text, detail.1);
+    let ChunkLocator::Document {
+        path: hit_path,
+        bytes,
+        ..
+    } = &hit.locator
+    else {
+        panic!("a document search must hit documents");
+    };
+    assert_eq!(hit_path, &path);
+    let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
+    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(intro.0));
+    assert!(adjacent.after.is_none() && bytes.start > 0);
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows {
+            chunks: 1,
+            memories: 0
+        }
+    );
 }
 
 #[tokio::test]
@@ -280,7 +360,7 @@ async fn non_finite_vectors_never_enter_top_k() {
         .await;
 
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 2, SessionScope::All)
+        .nearest_chunks(unit_vec(0.0), 2, ChunkScope::Chats(SessionScope::All))
         .await
         .unwrap();
     let got: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
@@ -371,7 +451,7 @@ async fn dropping_other_models_keeps_only_the_current_models_vectors() {
         }
     );
     let hits = store
-        .nearest_chunks(unit_vec(0.0), 5, SessionScope::All)
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
         .await
         .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();

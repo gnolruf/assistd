@@ -1,4 +1,4 @@
-//! Overlapping character-window chunker applied to messages before embedding.
+//! Overlapping character-window chunker applied to messages and documents before embedding.
 
 use std::ops::Range;
 
@@ -14,6 +14,9 @@ pub(crate) struct ChunkingConfig {
 impl ChunkingConfig {
     /// The policy applied to stored user and assistant messages.
     pub(crate) const MESSAGES: Self = Self::new(512, 64);
+
+    /// The policy applied to indexed documents.
+    pub(crate) const DOCUMENTS: Self = Self::new(512, 64);
 
     /// Panics, at compile time when used in a const, unless `overlap_chars < chunk_chars`.
     pub(crate) const fn new(chunk_chars: usize, overlap_chars: usize) -> Self {

@@ -4,8 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use assistd_memory::{
-    AdjacentChunks, ChunkId, ChunkLocator, Embedding, EmbeddingHit, MemoryHit, MemoryId,
-    Result as MemoryResult, SessionScope, UnindexedRows,
+    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit, MemoryHit,
+    MemoryId, Result as MemoryResult, UnindexedRows,
 };
 
 use super::*;
@@ -53,7 +53,7 @@ impl SemanticStore for RecordingStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _scope: SessionScope,
+        _scope: ChunkScope,
     ) -> MemoryResult<Vec<EmbeddingHit>> {
         Ok(Vec::new())
     }

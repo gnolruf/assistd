@@ -1,11 +1,13 @@
-//! Vector retrieval over embedded transcript chunks and saved memories.
+//! Vector retrieval over embedded transcript and document chunks and saved memories.
 
 use std::fmt;
+use std::ops::Range;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::{ChunkId, MemoryId, MessageId, PersistedRole, Result, SessionId};
+use crate::{ChunkId, DocumentId, MemoryId, MessageId, PersistedRole, Result, SessionId};
 
 const POINTER_DATE_FORMAT: &str = "%Y-%m-%d";
 
@@ -30,18 +32,33 @@ pub enum ChunkLocator {
         /// The session's title, or its first user message cut short when untitled.
         session_label: String,
     },
+    /// A byte range of an indexed local document's text.
+    Document {
+        document_id: DocumentId,
+        path: PathBuf,
+        bytes: Range<usize>,
+        indexed_at: DateTime<Utc>,
+    },
 }
 
 impl ChunkLocator {
-    /// Whether both chunks were cut from the same source.
+    /// Whether both chunks were cut from the same source: one chat session, or one document.
     pub fn same_source(&self, other: &Self) -> bool {
-        let (
-            Self::Message { session_id, .. },
-            Self::Message {
-                session_id: other, ..
-            },
-        ) = (self, other);
-        session_id == other
+        match (self, other) {
+            (
+                Self::Message { session_id, .. },
+                Self::Message {
+                    session_id: other, ..
+                },
+            ) => session_id == other,
+            (
+                Self::Document { document_id, .. },
+                Self::Document {
+                    document_id: other, ..
+                },
+            ) => document_id == other,
+            _ => false,
+        }
     }
 }
 
@@ -76,25 +93,31 @@ impl SourcePointer {
 
 impl fmt::Display for SourcePointer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ChunkLocator::Message {
-            session_id,
-            timestamp,
-            session_label,
-            ..
-        } = &self.locator;
-        let noun = if self.matches == 1 {
-            "message"
-        } else {
-            "messages"
-        };
-        write!(
-            f,
-            "chat {} \"{}\" {}, {} matching {noun}",
-            session_id.short(),
-            session_label.replace('\n', " "),
-            timestamp.format(POINTER_DATE_FORMAT),
-            self.matches,
-        )
+        let plural = if self.matches == 1 { "" } else { "s" };
+        match &self.locator {
+            ChunkLocator::Message {
+                session_id,
+                timestamp,
+                session_label,
+                ..
+            } => write!(
+                f,
+                "chat {} \"{}\" {}, {} matching message{plural}",
+                session_id.short(),
+                session_label.replace('\n', " "),
+                timestamp.format(POINTER_DATE_FORMAT),
+                self.matches,
+            ),
+            ChunkLocator::Document {
+                path, indexed_at, ..
+            } => write!(
+                f,
+                "document \"{}\" {}, {} matching section{plural}",
+                path.display(),
+                indexed_at.format(POINTER_DATE_FORMAT),
+                self.matches,
+            ),
+        }
     }
 }
 
@@ -122,6 +145,15 @@ pub enum SessionScope {
     /// branch's summary folded away (seq before `kept_from_seq`).
     AllExceptInContext(SessionId),
     Only(SessionId),
+}
+
+/// Which sources a chunk search ranks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkScope {
+    /// Chat messages from the sessions in scope.
+    Chats(SessionScope),
+    /// Every indexed document.
+    Documents,
 }
 
 /// One saved-memory hit, ranked by cosine similarity to the query.
@@ -167,18 +199,19 @@ pub struct UnindexedRows {
 /// Top-K vector retrieval over embedded chunks and memories.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
-    /// Top-K messages by their best chunk's cosine to the L2-normalised `query_vector`,
-    /// each hit carrying that chunk's text.
-    /// Messages outside `scope` are dropped before ranking, so never count toward `top_k`.
+    /// Top-K messages or documents in `scope` by their best chunk's cosine to the
+    /// L2-normalised `query_vector`, each hit carrying that chunk's text.
+    /// Sources outside `scope` are dropped before ranking, so never count toward `top_k`.
     async fn nearest_chunks(
         &self,
         query_vector: Vec<f32>,
         top_k: usize,
-        scope: SessionScope,
+        scope: ChunkScope,
     ) -> Result<Vec<EmbeddingHit>>;
 
     /// The chunks around `locator` in its source: for a message, the last chunk of
-    /// the previous user or assistant message in its session and the first of the next.
+    /// the previous user or assistant message in its session and the first of the next;
+    /// for a document, the chunks starting just before and just after it.
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks>;
 
     /// Top-K saved memories by cosine to the L2-normalised `query_vector`.
@@ -204,7 +237,7 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<(MemoryId, String)>>;
 
-    /// Up to `limit` message chunks after `after` (from the start when `None`) with
+    /// Up to `limit` chunks after `after` (from the start when `None`) with
     /// no embedding, in id order, as `(id, chunk text)`.
     async fn chunks_missing_embedding(
         &self,
@@ -227,7 +260,7 @@ impl SemanticStore for NoSemanticStore {
         &self,
         _query_vector: Vec<f32>,
         _top_k: usize,
-        _scope: SessionScope,
+        _scope: ChunkScope,
     ) -> Result<Vec<EmbeddingHit>> {
         Ok(Vec::new())
     }

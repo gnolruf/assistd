@@ -9,7 +9,7 @@ use tracing::warn;
 use assistd_embed::{BATCH_SIZE, EmbedJob, Embedder, embed_jobs};
 use assistd_ipc::{Event, ReindexKind};
 use assistd_memory::{
-    ChunkLocator, EmbeddingTarget, MemoryError, MemoryId, SemanticStore, SessionScope,
+    ChunkLocator, ChunkScope, EmbeddingTarget, MemoryError, MemoryId, SemanticStore, SessionScope,
 };
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
@@ -45,7 +45,7 @@ impl AppState {
         match self
             .memory
             .semantic
-            .nearest_chunks(embedding, limit, SessionScope::All)
+            .nearest_chunks(embedding, limit, ChunkScope::Chats(SessionScope::All))
             .await
         {
             Ok(hits) => {
@@ -56,7 +56,10 @@ impl AppState {
                         role,
                         timestamp,
                         ..
-                    } = hit.locator;
+                    } = hit.locator
+                    else {
+                        continue;
+                    };
                     let _ = tx
                         .send(Event::SemanticHit {
                             id: id.clone(),

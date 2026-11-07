@@ -317,6 +317,44 @@ const V10_SQL: &str = r"
 ALTER TABLE tasks ADD COLUMN announce INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// V11: chunks are owned by a message or an indexed document, exactly one.
+/// `documents` keeps each file's indexed text so a chunk stays a byte range into
+/// its source. Existing chunks and vectors are carried over with their ids.
+const V11_SQL: &str = r"
+CREATE TABLE documents (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    path       BLOB NOT NULL UNIQUE CHECK (length(path) > 0),
+    content    TEXT NOT NULL,
+    indexed_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE chunks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id  INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+    document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    byte_start  INTEGER NOT NULL,
+    byte_end    INTEGER NOT NULL,
+    CHECK (byte_start >= 0 AND byte_end > byte_start),
+    CHECK ((message_id IS NULL) <> (document_id IS NULL)),
+    UNIQUE (message_id, byte_start),
+    UNIQUE (document_id, byte_start)
+) STRICT;
+INSERT INTO chunks (id, message_id, byte_start, byte_end)
+    SELECT id, message_id, byte_start, byte_end FROM message_chunks;
+
+CREATE TABLE chunk_vectors (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    vector   BLOB NOT NULL CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+INSERT INTO chunk_vectors (chunk_id, model, vector)
+    SELECT chunk_id, model, vector FROM chunk_embeddings;
+
+DROP TABLE chunk_embeddings;
+DROP TABLE message_chunks;
+ALTER TABLE chunk_vectors RENAME TO chunk_embeddings;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -330,6 +368,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V8_SQL),
         M::up(V9_SQL),
         M::up(V10_SQL),
+        M::up(V11_SQL),
     ])
 }
 
@@ -356,6 +395,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 }

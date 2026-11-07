@@ -35,8 +35,12 @@ row_id!(
     MessageId
 );
 row_id!(
-    /// Row id in `message_chunks`.
+    /// Row id in `chunks`.
     ChunkId
+);
+row_id!(
+    /// Row id in `documents`.
+    DocumentId
 );
 row_id!(
     /// Row id in `memories`.

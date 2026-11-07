@@ -13,14 +13,15 @@ mod tasks;
 mod transcripts;
 
 pub use error::{BackendError, MemoryError, Result};
-pub use ids::{BranchId, ChunkId, MemoryId, MessageId, Seq, SessionId, TurnId};
+pub use ids::{BranchId, ChunkId, DocumentId, MemoryId, MessageId, Seq, SessionId, TurnId};
 pub use memories::{MemoryRecord, MemoryStore, NoMemoryStore, SavedMemory};
 pub use relay_traces::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep,
 };
 pub use semantic::{
-    AdjacentChunks, ChunkLocator, ContextChunk, Embedding, EmbeddingHit, EmbeddingTarget,
-    MemoryHit, NoSemanticStore, SemanticStore, SessionScope, SourcePointer, UnindexedRows,
+    AdjacentChunks, ChunkLocator, ChunkScope, ContextChunk, Embedding, EmbeddingHit,
+    EmbeddingTarget, MemoryHit, NoSemanticStore, SemanticStore, SessionScope, SourcePointer,
+    UnindexedRows,
 };
 pub use sqlite::{
     SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTaskStore, SqliteTranscriptStore,

@@ -718,7 +718,7 @@ fn insert_chunks(
     row: &MessageRow,
 ) -> rusqlite::Result<Vec<(ChunkId, String)>> {
     let mut insert = tx.prepare_cached(
-        "INSERT INTO message_chunks (message_id, byte_start, byte_end)
+        "INSERT INTO chunks (message_id, byte_start, byte_end)
          VALUES (?1, ?2, ?3)
          RETURNING id",
     )?;
