@@ -6,7 +6,7 @@ use std::fmt;
 use rmcp::transport::auth::{
     AuthError, AuthorizationManager, AuthorizationMetadata, OAuthClientConfig,
 };
-use url::Url;
+use url::{Host, Url};
 
 use crate::error::McpError;
 
@@ -142,6 +142,22 @@ pub(crate) fn auth_failure(error: &AuthError) -> McpError {
         | AuthError::AuthorizationServerMismatch { .. }
         | AuthError::AuthorizationServerMissingIssuer { .. }) => McpError::OAuth(error.to_string()),
         _ => McpError::OAuth("the authorization server refused the request".into()),
+    }
+}
+
+/// Whether `endpoint` is a web page or API a browser or client may be sent to: `https`, or
+/// `http` to a loopback host. Anything else from server metadata is refused.
+fn is_web_endpoint(endpoint: &Url) -> bool {
+    let loopback = match endpoint.host() {
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(Host::Domain(domain)) => domain == "localhost",
+        None => false,
+    };
+    match endpoint.scheme() {
+        "https" => true,
+        "http" => loopback,
+        _ => false,
     }
 }
 

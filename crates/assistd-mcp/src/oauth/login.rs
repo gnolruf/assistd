@@ -12,7 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info};
 use url::Url;
 
-use super::{OAuthConfig, auth_failure, discovered_manager};
+use super::{OAuthConfig, auth_failure, discovered_manager, is_web_endpoint};
 use crate::error::McpError;
 
 /// How long the user has to finish signing in once the authorization URL is handed out.
@@ -143,15 +143,16 @@ async fn authorization_session(
         .map_err(|(_, e)| auth_failure(&e))
 }
 
-/// The `state` the authorization URL carries, which the redirect must echo.
+/// The `state` the authorization URL carries, which the redirect must echo. Fails unless the
+/// URL is one a browser may be sent to, as the server's metadata chose it.
 fn authorization_state(authorize_url: &str) -> Result<String, McpError> {
-    Url::parse(authorize_url)
+    let url = Url::parse(authorize_url)
         .ok()
-        .and_then(|url| {
-            url.query_pairs()
-                .find(|(key, _)| key == "state")
-                .map(|(_, state)| state.into_owned())
-        })
+        .filter(is_web_endpoint)
+        .ok_or_else(|| McpError::OAuth("the authorization endpoint is not https".into()))?;
+    url.query_pairs()
+        .find(|(key, _)| key == "state")
+        .map(|(_, state)| state.into_owned())
         .ok_or_else(|| McpError::OAuth("the authorization URL carries no state".into()))
 }
 
