@@ -38,7 +38,7 @@ mod wakeword;
 mod wire;
 
 pub(super) use agents::AgentPanel;
-pub(super) use plan_mode::{ChatMode, ExecuteChoice};
+pub(super) use plan_mode::{ChatMode, PlanChoice, PlanReview};
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
     ComputerScene, LANE_COLUMNS, Mood, RECENT_RESULTS, StatusState, TestProgress, WakeWordPanel,
@@ -261,6 +261,8 @@ pub(super) struct App {
     pub presence_state: Option<PresenceState>,
     pub vision_enabled: bool,
     pub confirmation: Option<ConfirmationPrompt>,
+    /// The plan the active reply waits on the user to accept or send back.
+    pub plan_review: Option<PlanReview>,
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     /// The wake phrase was heard and its command has not arrived yet.
@@ -326,8 +328,6 @@ struct ActiveReply {
     /// Answers `ConfirmRequest`; `None` for a turn seen on the bus, whose
     /// connection belongs to another client.
     writer: Option<mpsc::Sender<Request>>,
-    /// This chat sent it in plan mode, so its reply is a plan.
-    planning: bool,
 }
 
 struct QueuedTranscription {
@@ -525,6 +525,7 @@ impl App {
             presence_state: None,
             vision_enabled,
             confirmation: None,
+            plan_review: None,
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             wake_word_heard: false,

@@ -86,17 +86,16 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
 fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let [chat_area, mode_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    let execute = app.execute_choices();
     let output_area = if let Some(prompt) = app.confirmation.as_mut() {
         render_confirmation_dock(frame, chat_area, prompt, theme)
-    } else if let Some((choices, selected)) = &execute {
-        plan_mode::render_execute_dock(frame, chat_area, choices, *selected, theme)
+    } else if let Some(review) = &app.plan_review {
+        plan_mode::render_plan_review_dock(frame, chat_area, review, theme)
     } else {
         render_input_dock(frame, chat_area, app, theme)
     };
     app.set_output_height(output_area.height);
     render_output(frame, output_area, app, theme);
-    if app.confirmation.is_none() && execute.is_none() {
+    if app.confirmation.is_none() && app.plan_review.is_none() {
         render_slash_popup(
             frame,
             output_area,
@@ -755,7 +754,7 @@ fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: ChatMode, theme: &T
         ChatMode::Act(PermissionMode::Manual) => "manual mode on",
         ChatMode::Act(PermissionMode::AcceptEdits) => "accept edits on",
         ChatMode::Act(PermissionMode::Auto) => "auto mode on",
-        ChatMode::Plan { .. } => "plan mode on",
+        ChatMode::Plan => "plan mode on",
     };
     let line = Span::styled(
         format!("{label} (shift+tab)"),

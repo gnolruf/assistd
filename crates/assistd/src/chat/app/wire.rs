@@ -14,7 +14,7 @@ use serde_json::Value;
 use super::super::output::{tool_block_label, tool_outcome, tool_output};
 use super::super::ui::turn_summary;
 use super::{
-    ActiveReply, AnswerTo, App, BranchListEntry, BranchOp, ChatEvent, OWN_TURN_MEMORY,
+    ActiveReply, AnswerTo, App, BranchListEntry, BranchOp, ChatEvent, ChatMode, OWN_TURN_MEMORY,
     QueuedTranscription, WakeWordStream, WireStream,
 };
 
@@ -102,6 +102,8 @@ impl App {
             | Event::ToolResult { .. }
             | Event::Relay { .. }
             | Event::ConfirmRequest { .. }
+            | Event::PlanReview { .. }
+            | Event::PlanModeEntered { .. }
             | Event::Transcription { .. }) => self.on_turn_event(turn),
             state @ (Event::Presence { .. }
             | Event::VoiceState { .. }
@@ -177,6 +179,10 @@ impl App {
                     source,
                 },
             ),
+            Event::PlanReview {
+                review_id, plan, ..
+            } => self.open_plan_review(review_id, &plan),
+            Event::PlanModeEntered { .. } => self.mode = ChatMode::Plan,
             Event::Transcription { text, .. } if text.trim().is_empty() => {
                 self.set_notice("no speech detected");
             }
@@ -463,7 +469,6 @@ impl App {
                 self.active_reply = Some(ActiveReply {
                     id: id.to_string(),
                     writer: None,
-                    planning: false,
                 });
                 if let Some(queued) = self.queued_transcription.take()
                     && queued.id == id
@@ -524,6 +529,7 @@ impl App {
         self.reply_started_at = None;
         self.compacting_soon = false;
         self.active_reply = None;
+        self.plan_review = None;
         self.confirmation
             .take_if(|prompt| prompt.answer_to == AnswerTo::Reply);
         self.last_live_seconds = None;
@@ -544,16 +550,7 @@ impl App {
 
     fn finish_stream(&mut self, stream: WireStream, now: Instant) {
         match stream {
-            WireStream::Reply => {
-                let planned = self
-                    .active_reply
-                    .as_ref()
-                    .is_some_and(|reply| reply.planning);
-                self.finish_reply_with_summary(now);
-                if planned {
-                    self.offer_execution();
-                }
-            }
+            WireStream::Reply => self.finish_reply_with_summary(now),
             WireStream::Branch => {
                 if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op.take() {
                     self.open_resume_picker();
@@ -586,6 +583,8 @@ fn turn_scoped_id(ev: &Event) -> Option<&str> {
         | Event::ToolResult { id, .. }
         | Event::Relay { id, .. }
         | Event::ConfirmRequest { id, .. }
+        | Event::PlanReview { id, .. }
+        | Event::PlanModeEntered { id }
         | Event::Done { id, .. }
         | Event::Error { id, .. } => Some(id),
         Event::Transcription { id, text } => (!text.trim().is_empty()).then_some(id.as_str()),

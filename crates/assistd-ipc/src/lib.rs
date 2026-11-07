@@ -89,6 +89,39 @@ pub enum PermissionMode {
     Auto,
 }
 
+/// Whether a query's turn may plan before it acts.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanMode {
+    /// The turn acts and cannot plan.
+    #[default]
+    Off,
+    /// The turn acts, and the model may ask the user to plan first.
+    Offered,
+    /// The turn starts planning: it runs only what asks for nothing until the user accepts
+    /// its plan.
+    Planning,
+}
+
+impl PlanMode {
+    pub fn is_off(&self) -> bool {
+        *self == PlanMode::Off
+    }
+}
+
+/// The user's answer to an [`Event::PlanReview`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum PlanVerdict {
+    /// Leave plan mode and carry the plan out, answering prompts under `mode`.
+    Accept { mode: PermissionMode },
+    /// Stay in plan mode; with `feedback`, revise the plan by it, else wait for the user.
+    KeepPlanning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+    },
+}
+
 /// A presence state the daemon can be driven to and settle in.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -436,10 +469,9 @@ pub enum Request {
         /// Vision inputs for this turn; empty for text-only queries.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<ImageAttachment>,
-        /// Plan mode: the turn may run only what asks for nothing, and its reply is a plan
-        /// of the work rather than the work done.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        plan: bool,
+        /// Whether the turn may plan, or starts planning.
+        #[serde(default, skip_serializing_if = "PlanMode::is_off")]
+        plan: PlanMode,
     },
     /// Drive the daemon to `target`. Emits `Presence`, then `Done`.
     SetPresence { id: String, target: PresenceTarget },
@@ -516,9 +548,20 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         always: bool,
     },
-    /// Switch how the rest of the turn's prompts on the same connection are
-    /// answered; honored only after a `Query`.
-    SetPermissionMode { id: String, mode: PermissionMode },
+    /// Switch how the rest of the turn's prompts on the same connection are answered: under
+    /// `mode`, or with `plan` refused while the turn plans; honored only after a `Query`.
+    SetPermissionMode {
+        id: String,
+        mode: PermissionMode,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        plan: bool,
+    },
+    /// Answer the [`Event::PlanReview`] with this `review_id` on the same connection.
+    PlanVerdict {
+        id: String,
+        review_id: String,
+        verdict: PlanVerdict,
+    },
     /// Probe runtime capabilities. Emits `Capabilities`, then `Done`.
     GetCapabilities { id: String },
     /// Snapshot into new branch `name` and switch to it; errors if `name` is taken or empty.
@@ -630,7 +673,7 @@ impl Request {
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),
-            plan: false,
+            plan: PlanMode::Off,
         }
     }
 
@@ -644,7 +687,7 @@ impl Request {
             id: id.into(),
             text: text.into(),
             attachments,
-            plan: false,
+            plan: PlanMode::Off,
         }
     }
 
@@ -676,6 +719,7 @@ impl Request {
             | Request::MemoryReindex { id, .. }
             | Request::ConfirmResponse { id, .. }
             | Request::SetPermissionMode { id, .. }
+            | Request::PlanVerdict { id, .. }
             | Request::GetCapabilities { id, .. }
             | Request::Fork { id, .. }
             | Request::Branches { id }
@@ -729,6 +773,7 @@ impl Request {
             Request::MemoryReindex { .. } => "memory_reindex",
             Request::ConfirmResponse { .. } => "confirm_response",
             Request::SetPermissionMode { .. } => "set_permission_mode",
+            Request::PlanVerdict { .. } => "plan_verdict",
             Request::GetCapabilities { .. } => "get_capabilities",
             Request::Fork { .. } => "fork",
             Request::Branches { .. } => "branches",
@@ -1035,6 +1080,15 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "ConfirmSource::is_main")]
         source: ConfirmSource,
     },
+    /// Asks the user to review `plan`; the turn waits for a matching `PlanVerdict`, and a
+    /// disconnect leaves it unreviewed.
+    PlanReview {
+        id: String,
+        review_id: String,
+        plan: String,
+    },
+    /// The user agreed to the model's ask to plan first; the turn now plans.
+    PlanModeEntered { id: String },
     /// Runtime capabilities; `model_name` is the basename of the configured `model.name`, and
     /// `auto_mode` whether [`PermissionMode::Auto`] is honored.
     Capabilities {
@@ -1224,6 +1278,8 @@ impl Event {
             | Event::MemoryForgetResult { id, .. }
             | Event::ReindexProgress { id, .. }
             | Event::ConfirmRequest { id, .. }
+            | Event::PlanReview { id, .. }
+            | Event::PlanModeEntered { id }
             | Event::Capabilities { id, .. }
             | Event::ContextSize { id, .. }
             | Event::Relay { id, .. }
@@ -1283,6 +1339,8 @@ impl Event {
             | Event::MemoryForgetResult { .. }
             | Event::ReindexProgress { .. }
             | Event::ConfirmRequest { .. }
+            | Event::PlanReview { .. }
+            | Event::PlanModeEntered { .. }
             | Event::Capabilities { .. }
             | Event::Status { .. }
             | Event::BranchInfo { .. }

@@ -1,5 +1,5 @@
 //! Plan mode: a turn over a conversation that may run only what asks for nothing, ending in a
-//! plan the user reads, or in a task prompt rewritten with a [`Plan`] of its steps.
+//! plan the user accepts or revises, or in a task prompt rewritten with a [`Plan`] of its steps.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -23,13 +23,15 @@ use assistd_tools::{
     ToolError, ToolOutput, ToolRegistry,
 };
 
-use crate::agent::Agent;
+use crate::agent::{Agent, planning_in_scope};
 
 mod draft;
 mod recommend;
+mod switch;
 
 use draft::RefinementDraft;
 use recommend::recommended_mode;
+use switch::{EnterPlanModeTool, ExitPlanModeTool};
 
 /// Opens the note rendered at the tail of the conversation on every step of a planning turn.
 const PLAN_MODE_RULES: &str = "Plan mode: do not do the work yet. Find out what it needs \
@@ -43,12 +45,11 @@ const FINDINGS_ENDING: &str = "Once you know enough, reply with only a short lis
      refused. Do not write the plan or the steps yet; you will be asked for them next, in a \
      fixed format.";
 
-/// Ends the note of a chat's planning turn, whose reply is the plan.
-const CHAT_PLAN_ENDING: &str = "If something about the work is unclear, ask the user. \
-     Otherwise reply with the plan: a line on what the work will do, then numbered steps \
-     naming the exact paths, commands and hosts each uses, marking the steps that change \
-     files, run programs that change things or reach new hosts. The user reads it, and once \
-     they accept it you carry it out in this conversation.";
+/// Ends the note of a chat turn while it plans.
+const CHAT_PLAN_ENDING: &str = "If something about the work is unclear, ask the user and \
+     stop. Once you know enough, call exit_plan_mode with the whole plan; do not write it as \
+     a reply. The user accepts it there, and you then carry it out, or tells you what to \
+     change.";
 
 /// Appended to a planning tool's result when something in it was refused for asking.
 const REFUSED_NOTE: &str = "\n[plan mode: this needed approval, so it was refused and did not \
@@ -163,21 +164,22 @@ impl Planner {
         }
     }
 
-    /// Run a planning turn on `text` and `attachments` in `conversation`, streaming it on
-    /// `tx`; its reply is the plan. The plan-mode note rides at the conversation's tail, so its
-    /// system prompt is unchanged; `request_id` labels refusals.
-    pub async fn run_chat_turn(
-        &self,
-        conversation: Arc<dyn LlmBackend>,
-        text: String,
-        attachments: Vec<Attachment>,
-        request_id: String,
-        tx: mpsc::Sender<LlmEvent>,
-        cancel: CancellationToken,
-    ) -> LlmResult<()> {
-        let conversation = PlanModeConversation::new(conversation, CHAT_PLAN_ENDING);
-        self.run_in_plan_mode(conversation, text, attachments, request_id, tx, cancel)
-            .await
+    /// An agent for chat turns over `conversation`. It acts with `acting` and a tool that asks
+    /// the user to plan first; while the confirm router in scope plans, it is offered the
+    /// planning tools and one that hands the plan to the user, with the plan-mode note at the
+    /// conversation's tail.
+    pub fn chat_agent(&self, conversation: Arc<dyn LlmBackend>, acting: &ToolRegistry) -> Agent {
+        let mut acting = acting.clone();
+        acting.register(EnterPlanModeTool);
+        let mut planning = ToolRegistry::clone(&self.tools.registry);
+        planning.register(ExitPlanModeTool);
+        Agent::new(
+            PlanModeConversation::new(conversation, CHAT_PLAN_ENDING),
+            Arc::new(acting),
+            self.health.clone(),
+            self.tool_deadline,
+        )
+        .with_planning_tools(Arc::new(planning))
     }
 
     /// Run a planning turn on `ask` in `conversation`, streaming it on `tx`, then ask for the
@@ -298,8 +300,8 @@ async fn draft_of<T: DeserializeOwned>(
     serde_json::from_str(&reply).map_err(PlanError::Unreadable)
 }
 
-/// A conversation whose every step ends with the plan-mode note, ahead of any one-shot note
-/// the agent loop adds.
+/// A conversation whose every step, while the confirm router in scope plans, ends with the
+/// plan-mode note, ahead of any one-shot note the agent loop adds.
 #[derive(Debug)]
 struct PlanModeConversation {
     inner: Arc<dyn LlmBackend>,
@@ -334,11 +336,15 @@ impl LlmBackend for PlanModeConversation {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        let note = match self.note.lock().take() {
-            Some(extra) => format!("{}\n\n{extra}", self.preamble),
-            None => self.preamble.clone(),
+        let extra = self.note.lock().take();
+        let note = match (planning_in_scope(), extra) {
+            (true, Some(extra)) => Some(format!("{}\n\n{extra}", self.preamble)),
+            (true, None) => Some(self.preamble.clone()),
+            (false, extra) => extra,
         };
-        self.inner.set_transient_note(note).await?;
+        if let Some(note) = note {
+            self.inner.set_transient_note(note).await?;
+        }
         self.inner.step(tools, tx).await
     }
 

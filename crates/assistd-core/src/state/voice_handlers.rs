@@ -7,10 +7,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, ListenPhase, VoiceCaptureState};
+use assistd_ipc::{Event, ListenPhase, PlanMode, VoiceCaptureState};
 use assistd_voice::VoiceCapture;
 
-use super::query::{TurnMode, TurnOrigin, finish_interrupted_before_start};
+use super::query::{TurnOrigin, finish_interrupted_before_start};
 use super::runtime::PttCapture;
 use super::wakeword_handlers::TEST_IN_PROGRESS;
 use super::{AppState, DispatchError, send_error};
@@ -143,7 +143,7 @@ impl AppState {
             id,
             text,
             Vec::new(),
-            (TurnOrigin::Voice, TurnMode::Act),
+            (TurnOrigin::Voice, PlanMode::Off),
             tx,
             cancel,
         )

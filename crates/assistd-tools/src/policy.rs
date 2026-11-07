@@ -32,7 +32,7 @@ pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
     Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate,
     ConfirmationRequest, IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS,
-    NoPendingConfirm, PromptParking, Risk, Unattended, inherit_confirm_router,
+    NoPendingConfirm, NoPendingReview, PromptParking, Risk, Unattended, inherit_confirm_router,
 };
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};

@@ -56,6 +56,8 @@ tokio::task_local! {
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
+    /// Offered in place of `tools` while the confirm router in scope plans.
+    planning_tools: Option<Arc<ToolRegistry>>,
     health: Option<Arc<dyn LlmHealthProbe>>,
     tool_deadline: Duration,
 }
@@ -72,9 +74,17 @@ impl Agent {
         Self {
             backend,
             tools,
+            planning_tools: None,
             health,
             tool_deadline,
         }
+    }
+
+    /// Offer `planning` instead of the acting tools whenever the confirm router in scope
+    /// plans; the choice is made before each step.
+    pub fn with_planning_tools(mut self, planning: Arc<ToolRegistry>) -> Self {
+        self.planning_tools = Some(planning);
+        self
     }
 
     /// Run one turn, streaming events on `tx` until the model answers or `tx` closes or
@@ -89,10 +99,12 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<(), LlmError> {
         self.backend.push_user(user_text, user_attachments).await?;
+        let tools = Arc::clone(self.tools_in_scope());
         let mut turn = Turn {
             tx,
             cancel,
-            schemas: self.tools.openai_schemas(),
+            schemas: tools.openai_schemas(),
+            tools,
             tools_withdrawn: None,
             streak: CallStreak::default(),
             iteration: 0,
@@ -127,12 +139,21 @@ impl Agent {
                     turn.truncated_steps = 0;
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
                     self.backend.push_tool_results(results).await?;
+                    turn.offer(self.tools_in_scope());
                     turn.iteration += 1;
                     if let Some(why) = ToolBudgetExhausted::check(stuck, turn.iteration) {
                         self.withdraw_tools(&mut turn, why).await;
                     }
                 }
             }
+        }
+    }
+
+    /// The planning tools while the confirm router in scope plans, else the acting ones.
+    fn tools_in_scope(&self) -> &Arc<ToolRegistry> {
+        match &self.planning_tools {
+            Some(planning) if planning_in_scope() => planning,
+            _ => &self.tools,
         }
     }
 
@@ -306,7 +327,7 @@ impl Agent {
             () = turn.cancel.cancelled() => None,
             r = TOOL_CALL_EVENTS.scope(
                 turn.tx.clone(),
-                dispatch_tool_call(&self.tools, call, turn.iteration, self.tool_deadline),
+                dispatch_tool_call(&turn.tools, call, turn.iteration, self.tool_deadline),
             ) => Some(r),
         };
         let result = dispatched.unwrap_or_else(|| {
@@ -360,6 +381,7 @@ impl Agent {
 struct Turn {
     tx: mpsc::Sender<LlmEvent>,
     cancel: CancellationToken,
+    tools: Arc<ToolRegistry>,
     schemas: Vec<Value>,
     tools_withdrawn: Option<ToolBudgetExhausted>,
     streak: CallStreak,
@@ -370,6 +392,14 @@ struct Turn {
 impl Turn {
     fn stop_requested(&self) -> bool {
         self.tx.is_closed() || self.cancel.is_cancelled()
+    }
+
+    /// Offer `tools` from the next step on.
+    fn offer(&mut self, tools: &Arc<ToolRegistry>) {
+        if !Arc::ptr_eq(&self.tools, tools) {
+            self.tools = Arc::clone(tools);
+            self.schemas = tools.openai_schemas();
+        }
     }
 
     /// [`TRUNCATION_NOTE`], restating the withdrawal the retry would otherwise lose.
@@ -449,6 +479,13 @@ impl CallStreak {
         }
         self.count
     }
+}
+
+/// Whether the confirm router in scope is planning; `false` outside any.
+pub(crate) fn planning_in_scope() -> bool {
+    CONFIRM_ROUTER
+        .try_with(|router| router.planning())
+        .unwrap_or(false)
 }
 
 fn llm_error_label(error: &LlmError) -> &'static str {

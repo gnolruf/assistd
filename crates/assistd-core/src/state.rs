@@ -60,7 +60,7 @@ pub(crate) mod wire;
 pub use self::branches::branch_replay;
 pub use self::fire_times::TriggerError;
 pub use self::memory_stack::MemoryStack;
-pub use self::query::{TurnMode, TurnOrigin};
+pub use self::query::TurnOrigin;
 pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};
 pub use self::subsystems::{McpServerStatus, Subsystems};
 pub use self::task_plans::TaskPlanError;
@@ -69,6 +69,9 @@ pub use self::wire::AttachmentError;
 
 /// Why a `SetPermissionMode` sent on its own connection is refused.
 const PERMISSION_MODE_OFF_QUERY: &str = "SetPermissionMode is honored only on a Query connection";
+
+/// Why a `PlanVerdict` sent as a connection's first request is refused.
+const PLAN_VERDICT_OFF_QUERY: &str = "PlanVerdict answers a plan review on its Query connection";
 
 /// Why a request handler failed.
 #[derive(Debug, Error)]
@@ -224,8 +227,7 @@ impl AppState {
                 attachments,
                 plan,
             } => {
-                let mode = if plan { TurnMode::Plan } else { TurnMode::Act };
-                self.handle_query(id, text, attachments, (TurnOrigin::Typed, mode), tx)
+                self.handle_query(id, text, attachments, (TurnOrigin::Typed, plan), tx)
                     .await
             }
             Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
@@ -292,6 +294,9 @@ impl AppState {
             }
             Request::SetPermissionMode { id, .. } => {
                 replied(send_error(&tx, id, PERMISSION_MODE_OFF_QUERY.into())).await
+            }
+            Request::PlanVerdict { id, .. } => {
+                replied(send_error(&tx, id, PLAN_VERDICT_OFF_QUERY.into())).await
             }
         }
     }

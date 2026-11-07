@@ -48,12 +48,12 @@ impl App {
             self.on_agent_panel_key(ev);
         } else if self.shown_tasks_panel().is_some() {
             self.on_tasks_key(ev);
+        } else if self.plan_review.is_some() && self.confirmation.is_none() {
+            self.on_plan_review_key(ev);
         } else if ev.code == KeyCode::BackTab {
             self.toggle_mode();
         } else if self.confirmation.is_some() {
             self.on_confirmation_key(ev);
-        } else if self.execute_choices().is_some() {
-            self.on_execute_choice_key(ev);
         } else if !self.on_shortcut_key(ev) {
             self.on_input_key(ev);
         }

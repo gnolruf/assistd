@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use assistd_ipc::{PlanMode, PlanVerdict};
 use assistd_tools::{ConfirmSource, Risk, Unattended};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -77,7 +78,6 @@ fn start_typed_turn(app: &mut App, id: &str, prompt: &str) {
     app.active_reply = Some(ActiveReply {
         id: id.into(),
         writer: None,
-        planning: false,
     });
 }
 
@@ -325,7 +325,6 @@ fn app_with_prompt(
     app.active_reply = Some(ActiveReply {
         id: "r".into(),
         writer: Some(writer_tx),
-        planning: false,
     });
     open_prompt_offering(&mut app, always_allow);
     (app, rx, writer_rx)
@@ -427,7 +426,7 @@ fn shift_tab_offers_auto_only_when_the_daemon_allows_it_and_ends_in_plan_mode() 
             })
             .collect::<Vec<_>>()
     };
-    let plan = ChatMode::Plan { offer: None };
+    let plan = ChatMode::Plan;
     assert_eq!(
         cycle(&mut app, 3),
         [
@@ -495,39 +494,75 @@ async fn settle_reply(app: &mut App, rx: &mut mpsc::Receiver<ChatEvent>) {
 }
 
 #[tokio::test]
-async fn a_plan_is_asked_for_in_plan_mode_and_carried_out_in_the_chosen_mode() {
+async fn plan_mode_sends_a_planning_query() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("d.sock");
-    let (daemon, mut requests) = recording_daemon(&socket, 2);
+    let (daemon, mut requests) = recording_daemon(&socket, 1);
     let (mut app, mut rx) = test_app_at(socket);
     app.on_key(key(KeyCode::BackTab));
     app.on_key(key(KeyCode::BackTab));
     app.submit_typed("tidy the repo".into());
     let planned = requests.recv().await.unwrap();
     assert!(
-        matches!(planned.as_slice(), [Request::Query { plan: true, .. }]),
+        matches!(
+            planned.as_slice(),
+            [Request::Query {
+                plan: PlanMode::Planning,
+                ..
+            }]
+        ),
         "{planned:?}"
     );
     settle_reply(&mut app, &mut rx).await;
-    assert!(app.execute_choices().is_some(), "the plan is offered");
-    app.on_key(typed('2'));
-    assert_eq!(app.mode, ChatMode::Act(PermissionMode::AcceptEdits));
-    let executed = requests.recv().await.unwrap();
-    assert!(
-        matches!(
-            executed.as_slice(),
-            [
-                Request::Query { plan: false, .. },
-                Request::SetPermissionMode {
-                    mode: PermissionMode::AcceptEdits,
-                    ..
-                }
-            ]
-        ),
-        "{executed:?}"
-    );
-    settle_reply(&mut app, &mut rx).await;
     daemon.await.unwrap();
+}
+
+/// The verdict the open plan review sent on the reply's connection.
+async fn sent_verdict(writer_rx: &mut mpsc::Receiver<Request>) -> PlanVerdict {
+    match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
+        Ok(Some(Request::PlanVerdict { verdict, .. })) => verdict,
+        other => panic!("expected PlanVerdict, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_plan_is_sent_back_with_typed_feedback_or_accepted_into_its_mode() {
+    let (mut app, _rx) = test_app();
+    let (writer_tx, mut writer_rx) = mpsc::channel(4);
+    app.active_reply = Some(ActiveReply {
+        id: "r".into(),
+        writer: Some(writer_tx),
+    });
+    let review = |app: &mut App| {
+        app.on_chat_event(reply(Event::PlanReview {
+            id: "r".into(),
+            review_id: "v".into(),
+            plan: "1. tidy".into(),
+        }));
+    };
+    review(&mut app);
+    assert_eq!(app.mode, ChatMode::Plan);
+    for c in "skip it".chars() {
+        app.on_key(typed(c));
+    }
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        sent_verdict(&mut writer_rx).await,
+        PlanVerdict::KeepPlanning {
+            feedback: Some("skip it".into())
+        }
+    );
+    assert_eq!(app.mode, ChatMode::Plan);
+    review(&mut app);
+    app.on_key(typed('1'));
+    assert_eq!(
+        sent_verdict(&mut writer_rx).await,
+        PlanVerdict::Accept {
+            mode: PermissionMode::AcceptEdits
+        }
+    );
+    assert_eq!(app.mode, ChatMode::Act(PermissionMode::AcceptEdits));
+    assert!(app.plan_review.is_none());
 }
 
 #[tokio::test]

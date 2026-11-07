@@ -1,7 +1,9 @@
 //! Daemon connections: one-shot requests and the two-way query dialog.
 //! Each reports a failure as [`ChatEvent::WireError`] before its terminal event.
 
-use assistd_ipc::{Event, ImageAttachment, IpcClient, IpcClientError, PermissionMode, Request};
+use assistd_ipc::{
+    Event, ImageAttachment, IpcClient, IpcClientError, PermissionMode, PlanMode, Request,
+};
 use assistd_tools::Attachment;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -38,29 +40,29 @@ impl App {
     /// writer carries the permission mode and confirmation answers back to the daemon.
     pub(super) fn spawn_query(&mut self, text: String, attachments: Vec<Attachment>) {
         let (writer_tx, writer_rx) = mpsc::channel::<Request>(QUERY_WRITER_CAPACITY);
-        let planning = match self.mode {
-            ChatMode::Act(PermissionMode::Manual) => false,
+        let plan = match self.mode {
+            ChatMode::Act(PermissionMode::Manual) => PlanMode::Offered,
             ChatMode::Act(mode) => {
                 let _ = writer_tx.try_send(Request::SetPermissionMode {
                     id: Uuid::new_v4().to_string(),
                     mode,
+                    plan: false,
                 });
-                false
+                PlanMode::Offered
             }
-            ChatMode::Plan { .. } => true,
+            ChatMode::Plan => PlanMode::Planning,
         };
         let id = Uuid::new_v4().to_string();
         self.remember_own_turn(&id);
         self.active_reply = Some(ActiveReply {
             id: id.clone(),
             writer: Some(writer_tx),
-            planning,
         });
         let req = Request::Query {
             id,
             text,
             attachments: wire_attachments(attachments),
-            plan: planning,
+            plan,
         };
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();

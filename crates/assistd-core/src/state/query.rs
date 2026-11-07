@@ -10,12 +10,12 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, EventKind, ImageAttachment, RelayEvent, StatusKind, TaskRunId};
+use assistd_ipc::{Event, EventKind, ImageAttachment, PlanMode, RelayEvent, StatusKind, TaskRunId};
 use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
 };
-use assistd_tools::{Attachment, ToolOutput, inherit_confirm_router};
+use assistd_tools::{Attachment, CONFIRM_ROUTER, ToolOutput, inherit_confirm_router};
 use assistd_utils::time::saturating_millis;
 use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::{
@@ -42,15 +42,6 @@ pub enum TurnOrigin {
     Typed,
     /// A push-to-talk or continuous-listening transcription.
     Voice,
-}
-
-/// What a turn may do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnMode {
-    /// Do the work, with every tool.
-    Act,
-    /// Plan the work, running only what asks for nothing; the reply is the plan.
-    Plan,
 }
 
 /// Sentence splitter and the channel to the speech worker.
@@ -433,17 +424,17 @@ enum NextLlmEvent {
 
 impl AppState {
     /// Handle a single user query: wake the daemon if needed, run the
-    /// agent loop in `mode`, stream events through `tx`, and persist the turn.
+    /// agent loop under `plan`, stream events through `tx`, and persist the turn.
     pub async fn handle_query(
         self: Arc<Self>,
         id: String,
         text: String,
         wire_attachments: Vec<ImageAttachment>,
-        (origin, mode): (TurnOrigin, TurnMode),
+        (origin, plan): (TurnOrigin, PlanMode),
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let cancel = self.runtime.turn_cancellation();
-        self.run_query(id, text, wire_attachments, (origin, mode), tx, cancel)
+        self.run_query(id, text, wire_attachments, (origin, plan), tx, cancel)
             .await
     }
 
@@ -454,7 +445,7 @@ impl AppState {
         id: String,
         text: String,
         wire_attachments: Vec<ImageAttachment>,
-        (origin, mode): (TurnOrigin, TurnMode),
+        (origin, plan): (TurnOrigin, PlanMode),
         tx: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(), DispatchError> {
@@ -480,12 +471,7 @@ impl AppState {
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
-        let agent_task = match mode {
-            TurnMode::Act => self.spawn_agent_task(text, attachments, llm_tx, cancel.clone()),
-            TurnMode::Plan => {
-                self.spawn_planning_task(&id, text, attachments, llm_tx, cancel.clone())
-            }
-        };
+        let agent_task = self.spawn_agent_task(text, attachments, plan, llm_tx, cancel.clone());
 
         let (speech, speech_rx) = self.speech_pipeline();
         let voice_output = self.subsystems.voice.speech();
@@ -669,24 +655,19 @@ impl AppState {
         )
     }
 
+    /// Run the turn's agent under `plan`, starting it planning when asked to.
     fn spawn_agent_task(
         &self,
         text: String,
         attachments: Vec<Attachment>,
+        plan: PlanMode,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
-        let llm = self.subsystems.llm.clone();
-        let tools = self.subsystems.tools.snapshot();
-        let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
-            self.subsystems.presence.clone(),
-        )));
-        let agent = Agent::new(
-            llm,
-            tools,
-            health,
-            Duration::from_secs(self.config.timeouts.tool_call_secs),
-        );
+        let agent = self.query_agent(plan);
+        if plan == PlanMode::Planning {
+            let _ = CONFIRM_ROUTER.try_with(|router| router.set_planning(true));
+        }
         AbortOnDropHandle::new(tokio::spawn(
             inherit_confirm_router(async move {
                 agent.run_turn(text, attachments, llm_tx, cancel).await
@@ -695,25 +676,22 @@ impl AppState {
         ))
     }
 
-    fn spawn_planning_task(
-        &self,
-        id: &str,
-        text: String,
-        attachments: Vec<Attachment>,
-        llm_tx: mpsc::Sender<LlmEvent>,
-        cancel: CancellationToken,
-    ) -> AbortOnDropHandle<Result<(), LlmError>> {
-        let planner = self.planner();
+    /// The agent of a turn under `plan`: one that can move through plan mode unless it is off.
+    fn query_agent(&self, plan: PlanMode) -> Agent {
         let llm = self.subsystems.llm.clone();
-        let id = id.to_string();
-        AbortOnDropHandle::new(tokio::spawn(
-            async move {
-                planner
-                    .run_chat_turn(llm, text, attachments, id, llm_tx, cancel)
-                    .await
-            }
-            .in_current_span(),
-        ))
+        let tools = self.subsystems.tools.snapshot();
+        if !plan.is_off() {
+            return self.planner().chat_agent(llm, &tools);
+        }
+        let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
+            self.subsystems.presence.clone(),
+        )));
+        Agent::new(
+            llm,
+            tools,
+            health,
+            Duration::from_secs(self.config.timeouts.tool_call_secs),
+        )
     }
 
     fn spawn_speech_worker(

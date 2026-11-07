@@ -9,8 +9,9 @@ use tokio::sync::{Notify, watch};
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, HostName, ImageAttachment, ImageMime, ListenPhase,
-    PresenceState, PresenceTarget, QueueItem, StartupComponent, StatusKind, StatusSeverity,
-    SubscribeFilter, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
+    PermissionMode, PlanMode, PlanVerdict, PresenceState, PresenceTarget, QueueItem,
+    StartupComponent, StatusKind, StatusSeverity, SubscribeFilter, TaskId, TaskQueueOp, TaskRunId,
+    TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
@@ -22,9 +23,9 @@ use assistd_memory::{
     SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
-    Approval, CommandRegistry, ConfirmationGate, ConfirmationRequest, IpcConfirmationGate,
-    OutputCap, PresentSpec, Risk, RunTool, ToolError, ToolOutput, ToolsDisabled, Unattended,
-    commands::EchoCommand,
+    Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
+    ConfirmationRequest, IpcConfirmationGate, OutputCap, PresentSpec, Risk, RunTool, ToolError,
+    ToolOutput, ToolsDisabled, Unattended, commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
@@ -107,7 +108,7 @@ fn query(id: &str, text: &str) -> Request {
         id: id.into(),
         text: text.into(),
         attachments: Vec::new(),
-        plan: false,
+        plan: PlanMode::Off,
     }
 }
 
@@ -345,7 +346,7 @@ async fn dispatch_query_refuses_images_without_vision() {
             ImageMime::Png,
             b"\x89PNG\r\n\x1a\n",
         )],
-        plan: false,
+        plan: PlanMode::Off,
     };
     let (res, events) = dispatch(&default_state(), request).await;
 
@@ -369,7 +370,7 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
             ImageMime::Jpeg,
             b"\x89PNG\r\n\x1a\n",
         )],
-        plan: false,
+        plan: PlanMode::Off,
     };
     let (res, events) = dispatch(&default_state(), request).await;
 
@@ -1099,14 +1100,14 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
     );
 }
 
-/// Records that it ran.
+/// Counts its runs.
 #[derive(Debug)]
-struct RanTool {
-    ran: Arc<AtomicBool>,
+struct ActTool {
+    runs: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
-impl assistd_tools::Tool for RanTool {
+impl assistd_tools::Tool for ActTool {
     fn name(&self) -> &'static str {
         "act"
     }
@@ -1117,28 +1118,61 @@ impl assistd_tools::Tool for RanTool {
         serde_json::json!({"type": "object"})
     }
     async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
-        self.ran.store(true, Ordering::SeqCst);
+        self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput::text("acted", Duration::ZERO))
     }
 }
 
+/// Dispatch `req` under a confirm router whose client answers every prompt with `answer` and
+/// accepts every plan it is shown.
+async fn dispatch_accepting_plans(state: &Arc<AppState>, req: Request, answer: Approval) {
+    let (tx, mut rx) = mpsc::channel::<Event>(16);
+    let router = ConfirmRouter::new(req.id().into(), tx.clone(), CONFIRM_TIMEOUT, None);
+    let client = async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                Event::PlanReview { review_id, .. } => {
+                    let accept = PlanVerdict::Accept {
+                        mode: PermissionMode::Manual,
+                    };
+                    router.route_verdict(&review_id, accept).unwrap();
+                }
+                Event::ConfirmRequest { confirm_id, .. } => {
+                    router.route_response(&confirm_id, answer).unwrap();
+                }
+                Event::Done { .. } => break,
+                _ => {}
+            }
+        }
+    };
+    let dispatched =
+        CONFIRM_ROUTER.scope(Arc::clone(&router), state.clone().dispatch(req, None, tx));
+    let (res, ()) = tokio::join!(dispatched, client);
+    res.unwrap();
+}
+
 #[tokio::test]
-async fn plan_mode_query_never_reaches_the_acting_tools() {
-    let call = || {
+async fn a_planning_turn_acts_only_once_its_plan_is_accepted() {
+    let call = |name: &str, arguments: serde_json::Value| {
         StepOutcome::ToolCalls(vec![ToolCall {
-            id: "c1".into(),
-            name: "act".into(),
-            arguments: serde_json::json!({}),
+            id: name.into(),
+            name: name.into(),
+            arguments,
         }])
     };
-    for (plan, expect_ran) in [(true, false), (false, true)] {
-        let ran = Arc::new(AtomicBool::new(false));
+    for (plan, expected_runs) in [(PlanMode::Planning, 1), (PlanMode::Offered, 2)] {
+        let runs = Arc::new(AtomicUsize::new(0));
         let mut tools = ToolRegistry::new();
-        tools.register(RanTool {
-            ran: Arc::clone(&ran),
+        tools.register(ActTool {
+            runs: Arc::clone(&runs),
         });
+        let steps = vec![
+            call("act", serde_json::json!({})),
+            call("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
+            call("act", serde_json::json!({})),
+        ];
         let state = StateParts {
-            backend: ToolCallBackend::new("", "done", vec![call()]),
+            backend: ToolCallBackend::new("", "done", steps),
             tools: Arc::new(tools),
             ..StateParts::default()
         }
@@ -1149,9 +1183,49 @@ async fn plan_mode_query_never_reaches_the_acting_tools() {
             attachments: Vec::new(),
             plan,
         };
-        let (res, _) = dispatch(&state, request).await;
-        res.unwrap();
-        assert_eq!(ran.load(Ordering::SeqCst), expect_ran, "plan={plan}");
+        dispatch_accepting_plans(&state, request, Approval::Deny).await;
+        assert_eq!(runs.load(Ordering::SeqCst), expected_runs, "{plan:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_models_ask_to_plan_holds_off_acting_only_once_the_user_agrees() {
+    let call = |name: &str, arguments: serde_json::Value| {
+        StepOutcome::ToolCalls(vec![ToolCall {
+            id: name.into(),
+            name: name.into(),
+            arguments,
+        }])
+    };
+    for (answer, expected_runs) in [(Approval::Once, 1), (Approval::Deny, 2)] {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools.register(ActTool {
+            runs: Arc::clone(&runs),
+        });
+        let steps = vec![
+            call(
+                "enter_plan_mode",
+                serde_json::json!({"reason": "many files"}),
+            ),
+            call("act", serde_json::json!({})),
+            call("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
+            call("act", serde_json::json!({})),
+        ];
+        let state = StateParts {
+            backend: ToolCallBackend::new("", "done", steps),
+            tools: Arc::new(tools),
+            ..StateParts::default()
+        }
+        .build();
+        let request = Request::Query {
+            id: "p".into(),
+            text: "tidy up".into(),
+            attachments: Vec::new(),
+            plan: PlanMode::Offered,
+        };
+        dispatch_accepting_plans(&state, request, answer).await;
+        assert_eq!(runs.load(Ordering::SeqCst), expected_runs, "{answer:?}");
     }
 }
 
@@ -2113,7 +2187,7 @@ async fn task_state_with(
         prompt: "summarize my inbox".to_string().try_into().unwrap(),
         triggers: Vec::new(),
         enabled: true,
-        mode: assistd_ipc::PermissionMode::Manual,
+        mode: PermissionMode::Manual,
         allowed_hosts: Vec::new(),
         announce: false,
     };

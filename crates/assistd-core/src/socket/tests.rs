@@ -222,7 +222,7 @@ async fn client_past_the_connection_limit_is_told_why() {
             id: "full".to_string(),
             text: "hi".to_string(),
             attachments: Vec::new(),
-            plan: false,
+            plan: assistd_ipc::PlanMode::Off,
         };
         let stream = assistd_ipc::client::IpcClient::with_path(&path)
             .one_shot(request)
