@@ -205,6 +205,7 @@ version = "0.5.0"
 dependencies = [
  "assistd-utils",
  "dirs",
+ "http",
  "serde",
  "shlex 2.0.1",
  "tempfile",
@@ -212,6 +213,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "tracing",
+ "url",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 //! Errors from loading, editing and validating configuration.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -17,11 +17,13 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
-    #[error("failed to parse config file {path}: {source}")]
+    /// Carries the line and toml's message but not the source text, which
+    /// may hold the very credential that failed to parse.
+    #[error("failed to parse config file {path}{}: {message}", at_line(*.line))]
     Parse {
         path: PathBuf,
-        #[source]
-        source: toml::de::Error,
+        line: Option<usize>,
+        message: String,
     },
 
     #[error("failed to parse config file {path}: {source}")]
@@ -65,6 +67,20 @@ pub enum ConfigError {
     Validation(Vec<String>),
 }
 
+impl ConfigError {
+    pub(crate) fn parse(path: &Path, text: &str, error: &toml::de::Error) -> Self {
+        let line = error
+            .span()
+            .and_then(|span| text.get(..span.start))
+            .map(|before| before.matches('\n').count() + 1);
+        Self::Parse {
+            path: path.to_path_buf(),
+            line,
+            message: error.message().to_owned(),
+        }
+    }
+}
+
 /// Why a `custom_args` string was refused.
 #[derive(Debug, Error)]
 pub enum CustomArgsError {
@@ -102,6 +118,11 @@ pub struct UnitIntervalError(pub f32);
     "`{0}` is not a color: use `default`, a named ANSI color such as `dark_gray`, or `#rrggbb`"
 )]
 pub struct ThemeColorError(pub String);
+
+fn at_line(line: Option<usize>) -> String {
+    line.map(|line| format!(" at line {line}"))
+        .unwrap_or_default()
+}
 
 fn format_validation_errors(errors: &[String]) -> String {
     let mut report = format!("configuration has {} error(s):", errors.len());

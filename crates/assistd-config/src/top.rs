@@ -135,10 +135,7 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        let parse_error = |source| ConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        };
+        let parse_error = |source| ConfigError::parse(path, &content, &source);
         let config: Self = toml::from_str(&content).map_err(parse_error)?;
         let raw: toml::Table = toml::from_str(&content).map_err(parse_error)?;
         let unknown = config.unknown_keys(&raw)?;
@@ -195,18 +192,22 @@ impl Config {
             })
     }
 
-    fn exposes_mcp_env(&self, mode: u32) -> bool {
+    fn exposes_mcp_secrets(&self, mode: u32) -> bool {
         mode & GROUP_OR_WORLD_READABLE != 0
-            && self.mcp.servers.iter().any(|server| !server.env.is_empty())
+            && self
+                .mcp
+                .servers
+                .iter()
+                .any(|server| server.transport.sets_secrets())
     }
 
     fn warn_if_credentials_exposed(&self, path: &Path) {
         let exposed = fs::metadata(path)
-            .is_ok_and(|metadata| self.exposes_mcp_env(metadata.permissions().mode()));
+            .is_ok_and(|metadata| self.exposes_mcp_secrets(metadata.permissions().mode()));
         if exposed {
             tracing::warn!(
                 target: "assistd::config",
-                "{} is readable by other users and sets mcp.servers[].env; \
+                "{} is readable by other users and sets mcp.servers[].env or headers; \
                  run `chmod 600 {}` to keep those values private",
                 path.display(),
                 path.display()

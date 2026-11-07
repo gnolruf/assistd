@@ -144,10 +144,16 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 #
 # [[mcp.servers]]
 # name = "filesystem"  # required
-# command = "npx"  # required
+# command = "npx"  # a stdio server; give either command or url
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"]  # secrets belong in env
 # env = { API_TOKEN = "..." }  # only PATH, HOME, locale and a few basics are inherited
 # request_timeout_secs = 30
+#
+# [[mcp.servers]]
+# name = "remote"
+# url = "https://mcp.example.com/mcp"  # a Streamable HTTP server; https, or http to loopback
+# headers = { Authorization = "Bearer ..." }  # sent with every request
+# auth = "none"
 
 # [notifications]
 # Desktop notifications from `assistd tray`; none while the chat is focused.

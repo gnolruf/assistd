@@ -38,10 +38,7 @@ impl ConfigDocument {
                 });
             }
         };
-        let parse_error = |source| ConfigError::Parse {
-            path: path.to_path_buf(),
-            source,
-        };
+        let parse_error = |source| ConfigError::parse(path, &text, &source);
         let config = toml::from_str(&text).map_err(parse_error)?;
         let raw = toml::from_str(&text).map_err(parse_error)?;
         let document = text.parse().map_err(|source| ConfigError::Document {

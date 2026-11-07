@@ -41,6 +41,12 @@ fn map_valued_keys_are_not_reported() {
 name = \"a\"
 command = \"npx\"
 env = { API_KEY = \"x\" }
+
+[[mcp.servers]]
+name = \"b\"
+url = \"https://h/mcp\"
+headers = { Authorization = \"Bearer x\" }
+auth = \"none\"
 ";
     let (_, unknown) = parse_reporting_unknown_keys(toml_src);
     assert!(unknown.is_empty(), "{unknown:?}");
