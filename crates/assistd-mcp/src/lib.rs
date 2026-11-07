@@ -12,10 +12,11 @@ use assistd_tools::{
     ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext,
     JudgedClass, Risk, Tool, ToolError, ToolOutput, Unattended, VisionGate,
 };
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use rmcp::model::{CallToolResult, ContentBlock, ImageContent};
+use rmcp::model::{CallToolResult, ContentBlock, EmbeddedResource, Resource, ResourceContents};
 use serde_json::Value;
 
 mod admission;
@@ -149,9 +150,9 @@ fn declined_output(tool_name: &str) -> ToolOutput {
     )
 }
 
-/// Render `result`'s content blocks as one output, joined by newlines (non-text as JSON),
-/// falling back to `structuredContent`. Images become attachments only with `vision`, else a
-/// note; an `isError` result is prefixed as a whole.
+/// Render `result`'s content blocks as one output, joined by newlines, falling back to
+/// `structuredContent`. Images become attachments only with `vision`, else a note; an
+/// `isError` result is prefixed as a whole.
 fn tool_output(result: CallToolResult, duration: Duration, vision: bool) -> ToolOutput {
     let (sections, attachments): (Vec<String>, Vec<Option<Attachment>>) = result
         .content
@@ -173,17 +174,82 @@ fn tool_output(result: CallToolResult, duration: Duration, vision: bool) -> Tool
 }
 
 /// The text one content block contributes to the output, plus its attachment if it is an
-/// image and `vision` is on.
+/// image and `vision` is on. Block types without a rendering are passed on as JSON.
 fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Attachment>) {
     match block {
         ContentBlock::Text(text) => (text.text, None),
-        ContentBlock::Image(image) if !vision => (
-            format!("(image omitted: {}; model has no vision)", image.mime_type),
+        ContentBlock::Image(image) => render_image(&image.mime_type, &image.data, vision),
+        ContentBlock::ResourceLink(link) => (resource_link_line(&link), None),
+        ContentBlock::Resource(embedded) => render_embedded_resource(embedded, vision),
+        other => (
+            serde_json::to_value(other).unwrap_or_default().to_string(),
             None,
         ),
-        ContentBlock::Image(image) => match image_attachment(&image) {
-            Ok(attachment) => (format!("(image: {})", image.mime_type), Some(attachment)),
-            Err(why) => (format!("(image omitted: {}; {why})", image.mime_type), None),
+    }
+}
+
+/// A note naming the image, plus the decoded image when `vision` is on and it can be shown.
+fn render_image(mime: &str, base64: &str, vision: bool) -> (String, Option<Attachment>) {
+    if !vision {
+        return (
+            format!("(image omitted: {mime}; model has no vision)"),
+            None,
+        );
+    }
+    match image_attachment(mime, base64) {
+        Ok(attachment) => (format!("(image: {mime})"), Some(attachment)),
+        Err(why) => (format!("(image omitted: {mime}; {why})"), None),
+    }
+}
+
+/// `link` on one line: its name, URI, and MIME type and size when the server gave them.
+fn resource_link_line(link: &Resource) -> String {
+    let mut line = format!("(resource link: {}, {}", link.name, link.uri);
+    for field in [link.mime_type.clone(), link.size.map(human_size)]
+        .into_iter()
+        .flatten()
+    {
+        line.push_str(", ");
+        line.push_str(&field);
+    }
+    line.push(')');
+    line
+}
+
+/// A text resource as a header line naming it followed by its text verbatim; a blob as an
+/// image when its MIME type is a supported image format, else a note with its size. Kinds
+/// without a rendering are passed on as JSON.
+fn render_embedded_resource(
+    embedded: EmbeddedResource,
+    vision: bool,
+) -> (String, Option<Attachment>) {
+    match embedded.resource {
+        ResourceContents::TextResourceContents {
+            uri,
+            mime_type,
+            text,
+            ..
+        } => {
+            let header = match mime_type {
+                Some(mime) => format!("(resource: {uri}, {mime})"),
+                None => format!("(resource: {uri})"),
+            };
+            (format!("{header}\n{text}"), None)
+        }
+        ResourceContents::BlobResourceContents {
+            mime_type, blob, ..
+        } => match mime_type {
+            Some(mime) if ImageMime::from_mime(&mime).is_some() => {
+                render_image(&mime, &blob, vision)
+            }
+            mime => (
+                format!(
+                    "(binary resource omitted: {}, {})",
+                    mime.as_deref().unwrap_or("unknown type"),
+                    human_size(decoded_len(&blob))
+                ),
+                None,
+            ),
         },
         other => (
             serde_json::to_value(other).unwrap_or_default().to_string(),
@@ -192,23 +258,27 @@ fn render_block(block: ContentBlock, vision: bool) -> (String, Option<Attachment
     }
 }
 
-/// Decode `image`, or say why it cannot be shown to the model: an unsupported format, invalid
-/// base64, or more than [`MAX_IMAGE_BYTES`].
-fn image_attachment(image: &ImageContent) -> Result<Attachment, String> {
-    let mime = ImageMime::from_mime(&image.mime_type)
-        .ok_or_else(|| "not PNG, JPEG or WebP".to_string())?;
-    if decoded_len(&image.data) > MAX_IMAGE_BYTES {
+/// Decode a base64 image of type `mime`, or say why it cannot be shown to the model: an
+/// unsupported format, invalid base64, or more than [`MAX_IMAGE_BYTES`].
+fn image_attachment(mime: &str, base64: &str) -> Result<Attachment, String> {
+    let mime = ImageMime::from_mime(mime).ok_or_else(|| "not PNG, JPEG or WebP".to_string())?;
+    if decoded_len(base64) > MAX_IMAGE_BYTES {
         return Err(format!("larger than {MAX_IMAGE_BYTES} bytes"));
     }
     let bytes = B64
-        .decode(&image.data)
+        .decode(base64)
         .map_err(|e| format!("invalid base64: {e}"))?;
     Ok(Attachment::Image { mime, bytes })
 }
 
-/// Bytes `base64` decodes to, give or take padding.
+/// Bytes well-formed padded `base64` decodes to.
 fn decoded_len(base64: &str) -> u64 {
-    base64.len() as u64 / 4 * 3
+    let padding = base64
+        .bytes()
+        .rev()
+        .take_while(|&byte| byte == b'=')
+        .count();
+    (base64.len() / 4 * 3).saturating_sub(padding) as u64
 }
 
 #[cfg(test)]
