@@ -59,6 +59,15 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
             r#"{"type":"query","id":"r","text":"describe this","attachments":[{"mime":"image/png","data_base64":"3q2+7w=="}]}"#,
         ),
         (
+            Request::Query {
+                id: "r".into(),
+                text: "tidy the repo".into(),
+                attachments: Vec::new(),
+                plan: true,
+            },
+            r#"{"type":"query","id":"r","text":"tidy the repo","plan":true}"#,
+        ),
+        (
             Request::SetPresence {
                 id: id(),
                 target: PresenceTarget::Drowsy,

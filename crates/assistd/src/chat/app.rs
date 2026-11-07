@@ -31,12 +31,14 @@ mod commands;
 mod connection;
 mod keys;
 mod modal;
+mod plan_mode;
 mod resume;
 mod tasks;
 mod wakeword;
 mod wire;
 
 pub(super) use agents::AgentPanel;
+pub(super) use plan_mode::{ChatMode, ExecuteChoice};
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
     ComputerScene, LANE_COLUMNS, Mood, RECENT_RESULTS, StatusState, TestProgress, WakeWordPanel,
@@ -308,8 +310,9 @@ pub(super) struct App {
     /// Ctrl+O: force-expands every thinking and tool block without
     /// touching their per-item `expanded` flags.
     pub verbose: bool,
-    /// Shift+Tab: how this chat's turns answer confirmation prompts.
-    pub permission_mode: PermissionMode,
+    /// Shift+Tab: whether this chat's messages act, answering prompts under a permission
+    /// mode, or plan.
+    pub mode: ChatMode,
     /// The daemon honors [`PermissionMode::Auto`], so Shift+Tab offers it.
     pub auto_mode_offered: bool,
     /// Colors from the config as last loaded or saved from `/settings`.
@@ -323,6 +326,8 @@ struct ActiveReply {
     /// Answers `ConfirmRequest`; `None` for a turn seen on the bus, whose
     /// connection belongs to another client.
     writer: Option<mpsc::Sender<Request>>,
+    /// This chat sent it in plan mode, so its reply is a plan.
+    planning: bool,
 }
 
 struct QueuedTranscription {
@@ -545,7 +550,7 @@ impl App {
             last_live_seconds: None,
             session_title: None,
             verbose: false,
-            permission_mode: PermissionMode::Manual,
+            mode: ChatMode::Act(PermissionMode::Manual),
             auto_mode_offered,
             theme: Theme::default(),
         }

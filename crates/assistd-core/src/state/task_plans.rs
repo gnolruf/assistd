@@ -185,7 +185,7 @@ impl AppState {
         }
     }
 
-    fn planner(&self) -> Planner {
+    pub(super) fn planner(&self) -> Planner {
         let health: Arc<dyn LlmHealthProbe> = Arc::new(PresenceLlmHealthProbe::new(
             self.subsystems.presence.clone(),
         ));

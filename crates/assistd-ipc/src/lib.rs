@@ -436,6 +436,10 @@ pub enum Request {
         /// Vision inputs for this turn; empty for text-only queries.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<ImageAttachment>,
+        /// Plan mode: the turn may run only what asks for nothing, and its reply is a plan
+        /// of the work rather than the work done.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        plan: bool,
     },
     /// Drive the daemon to `target`. Emits `Presence`, then `Done`.
     SetPresence { id: String, target: PresenceTarget },
@@ -626,6 +630,7 @@ impl Request {
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),
+            plan: false,
         }
     }
 
@@ -639,6 +644,7 @@ impl Request {
             id: id.into(),
             text: text.into(),
             attachments,
+            plan: false,
         }
     }
 

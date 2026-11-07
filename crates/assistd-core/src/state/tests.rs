@@ -107,6 +107,7 @@ fn query(id: &str, text: &str) -> Request {
         id: id.into(),
         text: text.into(),
         attachments: Vec::new(),
+        plan: false,
     }
 }
 
@@ -344,6 +345,7 @@ async fn dispatch_query_refuses_images_without_vision() {
             ImageMime::Png,
             b"\x89PNG\r\n\x1a\n",
         )],
+        plan: false,
     };
     let (res, events) = dispatch(&default_state(), request).await;
 
@@ -367,6 +369,7 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
             ImageMime::Jpeg,
             b"\x89PNG\r\n\x1a\n",
         )],
+        plan: false,
     };
     let (res, events) = dispatch(&default_state(), request).await;
 
@@ -1094,6 +1097,62 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
         ["Half a done."],
         "idle flush fired during tool dispatch"
     );
+}
+
+/// Records that it ran.
+#[derive(Debug)]
+struct RanTool {
+    ran: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for RanTool {
+    fn name(&self) -> &'static str {
+        "act"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "acts for testing".into()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+        self.ran.store(true, Ordering::SeqCst);
+        Ok(ToolOutput::text("acted", Duration::ZERO))
+    }
+}
+
+#[tokio::test]
+async fn plan_mode_query_never_reaches_the_acting_tools() {
+    let call = || {
+        StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c1".into(),
+            name: "act".into(),
+            arguments: serde_json::json!({}),
+        }])
+    };
+    for (plan, expect_ran) in [(true, false), (false, true)] {
+        let ran = Arc::new(AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools.register(RanTool {
+            ran: Arc::clone(&ran),
+        });
+        let state = StateParts {
+            backend: ToolCallBackend::new("", "done", vec![call()]),
+            tools: Arc::new(tools),
+            ..StateParts::default()
+        }
+        .build();
+        let request = Request::Query {
+            id: "p".into(),
+            text: "tidy up".into(),
+            attachments: Vec::new(),
+            plan,
+        };
+        let (res, _) = dispatch(&state, request).await;
+        res.unwrap();
+        assert_eq!(ran.load(Ordering::SeqCst), expect_ran, "plan={plan}");
+    }
 }
 
 /// Never returns. `dropped` flips when the invocation future is torn

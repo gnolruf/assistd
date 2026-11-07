@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use assistd_core::{
-    AppState, Component, ContinuousListener, Heard, ListenPhase, TurnOrigin, drain_join_set,
-    spawn_supervised,
+    AppState, Component, ContinuousListener, Heard, ListenPhase, TurnMode, TurnOrigin,
+    drain_join_set, spawn_supervised,
 };
 use assistd_ipc::Event;
 use assistd_utils::time::saturating_millis;
@@ -224,7 +224,7 @@ async fn run_listen_query(state: Arc<AppState>, id: String, text: String) {
     let query = async {
         if let Err(e) = state
             .clone()
-            .handle_query(id, text, Vec::new(), TurnOrigin::Voice, tx)
+            .handle_query(id, text, Vec::new(), (TurnOrigin::Voice, TurnMode::Act), tx)
             .await
         {
             warn!(

@@ -6,7 +6,7 @@ use assistd_tools::Attachment;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{ActiveReply, App, ChatEvent, WireStream};
+use super::{ActiveReply, App, ChatEvent, ChatMode, WireStream};
 
 const QUERY_WRITER_CAPACITY: usize = 8;
 
@@ -34,24 +34,34 @@ impl App {
         });
     }
 
-    /// Open a query dialog for `text` and make it the active reply, whose
-    /// writer carries the permission mode and confirmation answers back to
-    /// the daemon.
+    /// Open a query dialog for `text` in the chat's mode and make it the active reply, whose
+    /// writer carries the permission mode and confirmation answers back to the daemon.
     pub(super) fn spawn_query(&mut self, text: String, attachments: Vec<Attachment>) {
         let (writer_tx, writer_rx) = mpsc::channel::<Request>(QUERY_WRITER_CAPACITY);
-        if self.permission_mode != PermissionMode::Manual {
-            let _ = writer_tx.try_send(Request::SetPermissionMode {
-                id: Uuid::new_v4().to_string(),
-                mode: self.permission_mode,
-            });
-        }
+        let planning = match self.mode {
+            ChatMode::Act(PermissionMode::Manual) => false,
+            ChatMode::Act(mode) => {
+                let _ = writer_tx.try_send(Request::SetPermissionMode {
+                    id: Uuid::new_v4().to_string(),
+                    mode,
+                });
+                false
+            }
+            ChatMode::Plan { .. } => true,
+        };
         let id = Uuid::new_v4().to_string();
         self.remember_own_turn(&id);
         self.active_reply = Some(ActiveReply {
             id: id.clone(),
             writer: Some(writer_tx),
+            planning,
         });
-        let req = Request::query_with_attachments(id, text, wire_attachments(attachments));
+        let req = Request::Query {
+            id,
+            text,
+            attachments: wire_attachments(attachments),
+            plan: planning,
+        };
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();
         self.tasks.spawn(async move {

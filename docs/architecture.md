@@ -432,8 +432,8 @@ it lifts, rides on the `TaskQueue` snapshot.
 
 ### Plan mode (`assistd-core::Planner`)
 
-A planning turn shows how the agent means to do a piece of work, and which
-approvals it expects to need, before anything runs. The `Planner` drives the
+A planning turn shows how the agent means to do a piece of work before
+anything runs. The `Planner` drives the
 agent loop over a given conversation with the planning registry, which
 `build_tools()` assembles beside the main one: `run` over the in-process
 readers, `web` and a `bash` whose policy holds no "always allow" approvals,
@@ -442,11 +442,23 @@ plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
 `ConfirmRouter::for_planning`, which refuses every ask without prompting
 anyone in any mode, so the planning turn runs only what needs no
 confirmation; each refusal is counted and the tool result gains a note
-telling the model to describe that step instead. A plan-mode preamble is set
+telling the model to describe that step instead. A plan-mode note is set
 as the transient note on every step, so it renders at the conversation's
-tail and the system prompt, and its cache, are unchanged. It asks the turn to
-end with only a short list of what it found, since the plan itself is asked
-for next. When the turn answers, `complete_with_schema` holds the reply to a
+tail and the system prompt, and its cache, are unchanged.
+
+In the chat, Shift+Tab's cycle ends in plan mode, which the TUI holds rather
+than a `PermissionMode`. Its messages are queries sent with `plan` set: an
+ordinary turn on the main conversation, admitted, streamed and persisted as any
+other, but run by `Planner::run_chat_turn` with the planning registry, the
+planning router and a note asking for the plan as the reply. Revising is
+further messages. After a plan-mode reply the TUI offers to carry the plan out:
+choosing manual, accept-edits or auto switches the chat to that mode, which it
+keeps, and sends "Go ahead with the plan." as a normal query; the plan is
+already in the conversation.
+
+`Planner::refine` runs the same turn for a task prompt, its note asking it to
+end with only a short list of what it found. Then `complete_with_schema` holds
+the work rewritten as a self-contained brief for an unattended run, beside a
 draft of a summary and steps, each with actions named by a kind (`program`,
 `web_host`, `mcp_tool`, `app`, `write`) and a target. Each action becomes a `PlannedAction`, and
 `ActionCheck` flags any that would fail: a program missing from the
@@ -455,10 +467,7 @@ an app with no launchable desktop entry, a write directory that is relative
 or not a directory. It also gives each an `ActionOutlook` under the work's
 `WorkPermissions`: `Unasked` when a standing approval, an allowed host or the
 mode with the edit scope covers it, `JudgeDecides` for programs and MCP tools
-in Auto, else `Asks`. The result is a `Plan` with a fresh `PlanId`.
-`Planner::refine` runs the same turn but asks for a `prompt` beside the plan:
-the work rewritten as a self-contained brief for an unattended run, with the
-plan being that brief's.
+in Auto, else `Asks`. The result is a `Plan` of the brief with a fresh `PlanId`.
 
 `Request::TaskRefine` refines a task prompt, saved or not, under the permission
 mode and allowed hosts the request gives, in an isolated conversation with the

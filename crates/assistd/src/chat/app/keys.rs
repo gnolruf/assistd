@@ -1,6 +1,6 @@
 //! Keyboard and mouse input: scrolling, toggles and the slash-command popup.
 
-use assistd_ipc::{PermissionMode, Request};
+use assistd_ipc::Request;
 use assistd_tools::Approval;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use uuid::Uuid;
@@ -49,9 +49,11 @@ impl App {
         } else if self.shown_tasks_panel().is_some() {
             self.on_tasks_key(ev);
         } else if ev.code == KeyCode::BackTab {
-            self.toggle_permission_mode();
+            self.toggle_mode();
         } else if self.confirmation.is_some() {
             self.on_confirmation_key(ev);
+        } else if self.execute_choices().is_some() {
+            self.on_execute_choice_key(ev);
         } else if !self.on_shortcut_key(ev) {
             self.on_input_key(ev);
         }
@@ -115,45 +117,6 @@ impl App {
         } else {
             "verbose mode: off"
         });
-    }
-
-    /// Cycle manual, accept-edits and, when offered, auto mode, applying the mode to the open turn
-    /// too.
-    fn toggle_permission_mode(&mut self) {
-        let next = match self.permission_mode {
-            PermissionMode::Manual => PermissionMode::AcceptEdits,
-            PermissionMode::AcceptEdits if self.auto_mode_offered => PermissionMode::Auto,
-            PermissionMode::AcceptEdits | PermissionMode::Auto => PermissionMode::Manual,
-        };
-        self.set_permission_mode(next);
-    }
-
-    /// Record whether the daemon honors Auto, leaving Auto for Manual when it no longer does.
-    pub(super) fn offer_auto_mode(&mut self, offered: bool) {
-        self.auto_mode_offered = offered;
-        if !offered && self.permission_mode == PermissionMode::Auto {
-            self.set_permission_mode(PermissionMode::Manual);
-        }
-    }
-
-    /// Switch to `mode`, applying it to the open turn too.
-    fn set_permission_mode(&mut self, mode: PermissionMode) {
-        self.permission_mode = mode;
-        if let Some(writer) = self
-            .active_reply
-            .as_ref()
-            .and_then(|reply| reply.writer.clone())
-        {
-            let req = Request::SetPermissionMode {
-                id: Uuid::new_v4().to_string(),
-                mode: self.permission_mode,
-            };
-            self.tasks.spawn(async move {
-                if let Err(e) = writer.send(req).await {
-                    tracing::warn!("SetPermissionMode send failed: {e}");
-                }
-            });
-        }
     }
 
     fn on_input_key(&mut self, ev: KeyEvent) {

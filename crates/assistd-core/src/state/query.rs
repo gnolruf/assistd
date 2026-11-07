@@ -44,6 +44,15 @@ pub enum TurnOrigin {
     Voice,
 }
 
+/// What a turn may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnMode {
+    /// Do the work, with every tool.
+    Act,
+    /// Plan the work, running only what asks for nothing; the reply is the plan.
+    Plan,
+}
+
 /// Sentence splitter and the channel to the speech worker.
 struct SpeechPipeline {
     tx: mpsc::Sender<String>,
@@ -424,17 +433,17 @@ enum NextLlmEvent {
 
 impl AppState {
     /// Handle a single user query: wake the daemon if needed, run the
-    /// agent loop, stream events through `tx`, and persist the turn.
+    /// agent loop in `mode`, stream events through `tx`, and persist the turn.
     pub async fn handle_query(
         self: Arc<Self>,
         id: String,
         text: String,
         wire_attachments: Vec<ImageAttachment>,
-        origin: TurnOrigin,
+        (origin, mode): (TurnOrigin, TurnMode),
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let cancel = self.runtime.turn_cancellation();
-        self.run_query(id, text, wire_attachments, origin, tx, cancel)
+        self.run_query(id, text, wire_attachments, (origin, mode), tx, cancel)
             .await
     }
 
@@ -445,7 +454,7 @@ impl AppState {
         id: String,
         text: String,
         wire_attachments: Vec<ImageAttachment>,
-        origin: TurnOrigin,
+        (origin, mode): (TurnOrigin, TurnMode),
         tx: mpsc::Sender<Event>,
         cancel: CancellationToken,
     ) -> Result<(), DispatchError> {
@@ -471,7 +480,12 @@ impl AppState {
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
-        let agent_task = self.spawn_agent_task(text, attachments, llm_tx, cancel.clone());
+        let agent_task = match mode {
+            TurnMode::Act => self.spawn_agent_task(text, attachments, llm_tx, cancel.clone()),
+            TurnMode::Plan => {
+                self.spawn_planning_task(&id, text, attachments, llm_tx, cancel.clone())
+            }
+        };
 
         let (speech, speech_rx) = self.speech_pipeline();
         let voice_output = self.subsystems.voice.speech();
@@ -677,6 +691,27 @@ impl AppState {
             inherit_confirm_router(async move {
                 agent.run_turn(text, attachments, llm_tx, cancel).await
             })
+            .in_current_span(),
+        ))
+    }
+
+    fn spawn_planning_task(
+        &self,
+        id: &str,
+        text: String,
+        attachments: Vec<Attachment>,
+        llm_tx: mpsc::Sender<LlmEvent>,
+        cancel: CancellationToken,
+    ) -> AbortOnDropHandle<Result<(), LlmError>> {
+        let planner = self.planner();
+        let llm = self.subsystems.llm.clone();
+        let id = id.to_string();
+        AbortOnDropHandle::new(tokio::spawn(
+            async move {
+                planner
+                    .run_chat_turn(llm, text, attachments, id, llm_tx, cancel)
+                    .await
+            }
             .in_current_span(),
         ))
     }

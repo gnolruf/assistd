@@ -60,7 +60,7 @@ pub(crate) mod wire;
 pub use self::branches::branch_replay;
 pub use self::fire_times::TriggerError;
 pub use self::memory_stack::MemoryStack;
-pub use self::query::TurnOrigin;
+pub use self::query::{TurnMode, TurnOrigin};
 pub use self::runtime::{BusSubscription, RuntimeState, SessionContext};
 pub use self::subsystems::{McpServerStatus, Subsystems};
 pub use self::task_plans::TaskPlanError;
@@ -222,8 +222,10 @@ impl AppState {
                 id,
                 text,
                 attachments,
+                plan,
             } => {
-                self.handle_query(id, text, attachments, TurnOrigin::Typed, tx)
+                let mode = if plan { TurnMode::Plan } else { TurnMode::Act };
+                self.handle_query(id, text, attachments, (TurnOrigin::Typed, mode), tx)
                     .await
             }
             Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,

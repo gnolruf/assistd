@@ -15,7 +15,8 @@ use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
 use super::app::{
-    AnswerTo, App, BranchListEntry, ConfirmChoice, ConfirmationPrompt, ResumePicker, ResumeTab,
+    AnswerTo, App, BranchListEntry, ChatMode, ConfirmChoice, ConfirmationPrompt, ResumePicker,
+    ResumeTab,
 };
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use super::settings::render_settings;
@@ -23,6 +24,7 @@ use super::theme::Theme;
 use crate::client::terminal_text::escape_controls_single_line;
 
 mod agents;
+mod plan_mode;
 mod queue_status;
 mod tasks;
 mod wakeword;
@@ -84,13 +86,17 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
 fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let [chat_area, mode_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    let output_area = match app.confirmation.as_mut() {
-        Some(prompt) => render_confirmation_dock(frame, chat_area, prompt, theme),
-        None => render_input_dock(frame, chat_area, app, theme),
+    let execute = app.execute_choices();
+    let output_area = if let Some(prompt) = app.confirmation.as_mut() {
+        render_confirmation_dock(frame, chat_area, prompt, theme)
+    } else if let Some((choices, selected)) = &execute {
+        plan_mode::render_execute_dock(frame, chat_area, choices, *selected, theme)
+    } else {
+        render_input_dock(frame, chat_area, app, theme)
     };
     app.set_output_height(output_area.height);
     render_output(frame, output_area, app, theme);
-    if app.confirmation.is_none() {
+    if app.confirmation.is_none() && execute.is_none() {
         render_slash_popup(
             frame,
             output_area,
@@ -99,7 +105,7 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) 
             theme,
         );
     }
-    render_mode_line(frame, mode_area, app.permission_mode, theme);
+    render_mode_line(frame, mode_area, app.mode, theme);
 }
 
 /// Draw the input line and its rules at the bottom of `area`, returning
@@ -744,11 +750,12 @@ fn render_rule(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(Paragraph::new(Span::styled(rule, rule_style(theme))), area);
 }
 
-fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: PermissionMode, theme: &Theme) {
+fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: ChatMode, theme: &Theme) {
     let label = match mode {
-        PermissionMode::Manual => "manual mode on",
-        PermissionMode::AcceptEdits => "accept edits on",
-        PermissionMode::Auto => "auto mode on",
+        ChatMode::Act(PermissionMode::Manual) => "manual mode on",
+        ChatMode::Act(PermissionMode::AcceptEdits) => "accept edits on",
+        ChatMode::Act(PermissionMode::Auto) => "auto mode on",
+        ChatMode::Plan { .. } => "plan mode on",
     };
     let line = Span::styled(
         format!("{label} (shift+tab)"),

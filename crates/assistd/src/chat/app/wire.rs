@@ -463,6 +463,7 @@ impl App {
                 self.active_reply = Some(ActiveReply {
                     id: id.to_string(),
                     writer: None,
+                    planning: false,
                 });
                 if let Some(queued) = self.queued_transcription.take()
                     && queued.id == id
@@ -543,7 +544,16 @@ impl App {
 
     fn finish_stream(&mut self, stream: WireStream, now: Instant) {
         match stream {
-            WireStream::Reply => self.finish_reply_with_summary(now),
+            WireStream::Reply => {
+                let planned = self
+                    .active_reply
+                    .as_ref()
+                    .is_some_and(|reply| reply.planning);
+                self.finish_reply_with_summary(now);
+                if planned {
+                    self.offer_execution();
+                }
+            }
             WireStream::Branch => {
                 if let Some(BranchOp::ResumePicker) = self.in_flight_branch_op.take() {
                     self.open_resume_picker();

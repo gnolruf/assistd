@@ -10,7 +10,7 @@ use tracing::{Instrument, debug, warn};
 use assistd_ipc::{Event, ListenPhase, VoiceCaptureState};
 use assistd_voice::VoiceCapture;
 
-use super::query::{TurnOrigin, finish_interrupted_before_start};
+use super::query::{TurnMode, TurnOrigin, finish_interrupted_before_start};
 use super::runtime::PttCapture;
 use super::wakeword_handlers::TEST_IN_PROGRESS;
 use super::{AppState, DispatchError, send_error};
@@ -139,8 +139,15 @@ impl AppState {
             return Ok(());
         }
 
-        self.run_query(id, text, Vec::new(), TurnOrigin::Voice, tx, cancel)
-            .await
+        self.run_query(
+            id,
+            text,
+            Vec::new(),
+            (TurnOrigin::Voice, TurnMode::Act),
+            tx,
+            cancel,
+        )
+        .await
     }
 
     async fn transcribe_while_warming(

@@ -77,6 +77,7 @@ fn start_typed_turn(app: &mut App, id: &str, prompt: &str) {
     app.active_reply = Some(ActiveReply {
         id: id.into(),
         writer: None,
+        planning: false,
     });
 }
 
@@ -324,6 +325,7 @@ fn app_with_prompt(
     app.active_reply = Some(ActiveReply {
         id: "r".into(),
         writer: Some(writer_tx),
+        planning: false,
     });
     open_prompt_offering(&mut app, always_allow);
     (app, rx, writer_rx)
@@ -404,7 +406,7 @@ async fn prompt_swallows_typing_without_answering() {
 async fn shift_tab_switches_the_open_turn_to_accept_edits_without_answering_its_prompt() {
     let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
     app.on_key(key(KeyCode::BackTab));
-    assert_eq!(app.permission_mode, PermissionMode::AcceptEdits);
+    assert_eq!(app.mode, ChatMode::Act(PermissionMode::AcceptEdits));
     assert!(app.confirmation.is_some(), "the shown prompt stays open");
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
         Ok(Some(Request::SetPermissionMode { mode, .. })) => {
@@ -415,37 +417,117 @@ async fn shift_tab_switches_the_open_turn_to_accept_edits_without_answering_its_
 }
 
 #[test]
-fn shift_tab_offers_auto_only_when_the_daemon_allows_it() {
+fn shift_tab_offers_auto_only_when_the_daemon_allows_it_and_ends_in_plan_mode() {
     let (mut app, _rx) = test_app();
-    let cycle = |app: &mut App| {
-        (0..3)
+    let cycle = |app: &mut App, presses: usize| {
+        (0..presses)
             .map(|_| {
                 app.on_key(key(KeyCode::BackTab));
-                app.permission_mode
+                app.mode
             })
             .collect::<Vec<_>>()
     };
+    let plan = ChatMode::Plan { offer: None };
     assert_eq!(
-        cycle(&mut app),
+        cycle(&mut app, 3),
         [
-            PermissionMode::AcceptEdits,
-            PermissionMode::Manual,
-            PermissionMode::AcceptEdits
+            ChatMode::Act(PermissionMode::AcceptEdits),
+            plan,
+            ChatMode::Act(PermissionMode::Manual)
         ]
     );
-    app.permission_mode = PermissionMode::Manual;
     app.offer_auto_mode(true);
     assert_eq!(
-        cycle(&mut app),
+        cycle(&mut app, 4),
         [
-            PermissionMode::AcceptEdits,
-            PermissionMode::Auto,
-            PermissionMode::Manual
+            ChatMode::Act(PermissionMode::AcceptEdits),
+            ChatMode::Act(PermissionMode::Auto),
+            plan,
+            ChatMode::Act(PermissionMode::Manual)
         ]
     );
-    app.permission_mode = PermissionMode::Auto;
+    app.mode = ChatMode::Act(PermissionMode::Auto);
     app.offer_auto_mode(false);
-    assert_eq!(app.permission_mode, PermissionMode::Manual);
+    assert_eq!(app.mode, ChatMode::Act(PermissionMode::Manual));
+}
+
+/// Accept `connections` dialogs in turn, sending each one's request lines to the returned
+/// receiver once no more arrive, then answering it with `Done`.
+fn recording_daemon(
+    socket: &Path,
+    connections: usize,
+) -> (JoinHandle<()>, mpsc::Receiver<Vec<Request>>) {
+    let listener = UnixListener::bind(socket).unwrap();
+    let (tx, rx) = mpsc::channel(connections);
+    let daemon = tokio::spawn(async move {
+        for _ in 0..connections {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read);
+            let mut requests = Vec::new();
+            let mut line = String::new();
+            while let Ok(Ok(read)) =
+                tokio::time::timeout(Duration::from_millis(300), reader.read_line(&mut line)).await
+                && read > 0
+            {
+                requests.push(serde_json::from_str::<Request>(&line).unwrap());
+                line.clear();
+            }
+            let id = requests[0].id().to_string();
+            tx.send(requests).await.unwrap();
+            let mut out = serde_json::to_string(&Event::Done { id }).unwrap();
+            out.push('\n');
+            write.write_all(out.as_bytes()).await.unwrap();
+        }
+    });
+    (daemon, rx)
+}
+
+/// Feed the reducer until the reply on screen ends.
+async fn settle_reply(app: &mut App, rx: &mut mpsc::Receiver<ChatEvent>) {
+    while app.generating() {
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("reply ended")
+            .expect("chat channel open");
+        app.on_chat_event(event);
+    }
+}
+
+#[tokio::test]
+async fn a_plan_is_asked_for_in_plan_mode_and_carried_out_in_the_chosen_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("d.sock");
+    let (daemon, mut requests) = recording_daemon(&socket, 2);
+    let (mut app, mut rx) = test_app_at(socket);
+    app.on_key(key(KeyCode::BackTab));
+    app.on_key(key(KeyCode::BackTab));
+    app.submit_typed("tidy the repo".into());
+    let planned = requests.recv().await.unwrap();
+    assert!(
+        matches!(planned.as_slice(), [Request::Query { plan: true, .. }]),
+        "{planned:?}"
+    );
+    settle_reply(&mut app, &mut rx).await;
+    assert!(app.execute_choices().is_some(), "the plan is offered");
+    app.on_key(typed('2'));
+    assert_eq!(app.mode, ChatMode::Act(PermissionMode::AcceptEdits));
+    let executed = requests.recv().await.unwrap();
+    assert!(
+        matches!(
+            executed.as_slice(),
+            [
+                Request::Query { plan: false, .. },
+                Request::SetPermissionMode {
+                    mode: PermissionMode::AcceptEdits,
+                    ..
+                }
+            ]
+        ),
+        "{executed:?}"
+    );
+    settle_reply(&mut app, &mut rx).await;
+    daemon.await.unwrap();
 }
 
 #[tokio::test]
