@@ -9,7 +9,7 @@ use assistd_core::{
     AppState, Component, ContinuousListener, Heard, ListenPhase, TurnOrigin, drain_join_set,
     spawn_supervised,
 };
-use assistd_ipc::Event;
+use assistd_ipc::{Event, PlanMode};
 use assistd_utils::time::saturating_millis;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
@@ -224,7 +224,7 @@ async fn run_listen_query(state: Arc<AppState>, id: String, text: String) {
     let query = async {
         if let Err(e) = state
             .clone()
-            .handle_query(id, text, Vec::new(), TurnOrigin::Voice, tx)
+            .handle_query(id, text, Vec::new(), (TurnOrigin::Voice, PlanMode::Off), tx)
             .await
         {
             warn!(

@@ -432,8 +432,8 @@ it lifts, rides on the `TaskQueue` snapshot.
 
 ### Plan mode (`assistd-core::Planner`)
 
-A planning turn shows how the agent means to do a piece of work, and which
-approvals it expects to need, before anything runs. The `Planner` drives the
+A planning turn shows how the agent means to do a piece of work before
+anything runs. The `Planner` drives the
 agent loop over a given conversation with the planning registry, which
 `build_tools()` assembles beside the main one: `run` over the in-process
 readers, `web` and a `bash` whose policy holds no "always allow" approvals,
@@ -442,11 +442,39 @@ plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
 `ConfirmRouter::for_planning`, which refuses every ask without prompting
 anyone in any mode, so the planning turn runs only what needs no
 confirmation; each refusal is counted and the tool result gains a note
-telling the model to describe that step instead. A plan-mode preamble is set
+telling the model to describe that step instead. A plan-mode note is set
 as the transient note on every step, so it renders at the conversation's
-tail and the system prompt, and its cache, are unchanged. It asks the turn to
-end with only a short list of what it found, since the plan itself is asked
-for next. When the turn answers, `complete_with_schema` holds the reply to a
+tail and the system prompt, and its cache, are unchanged.
+
+Whether a turn plans is a flag on its connection's `ConfirmRouter`, so it can
+change mid-turn. While it is set every ask is refused and counted, and an agent
+built by `Planner::chat_agent` offers, before each step, the planning registry
+plus `exit_plan_mode` in place of the main registry plus `enter_plan_mode`; its
+conversation carries the plan-mode note only while planning. A query's `plan`
+says whether its turn may plan: `off` for voice and `assistd query`, which get
+the plain agent; `offered` for chat messages; `planning` for chat messages sent
+in plan mode, which start with the flag set.
+
+`enter_plan_mode` is the model's own ask to plan first, for work worth agreeing
+on before it runs. It goes to the user as a `ConfirmRequest` in every mode; a
+yes sets the flag and sends `Event::PlanModeEntered`, a no tells the model to
+do the work. `exit_plan_mode` carries the plan to the client as
+`Event::PlanReview` and waits, with no timeout, for `Request::PlanVerdict` on
+the same connection. `Accept` sets the router's mode and clears the flag, so the
+same turn carries the plan out under it; `KeepPlanning` keeps planning, revising
+by the user's feedback or, without any, asking what to change.
+`SetPermissionMode` with `plan` sets the flag mid-turn too.
+
+In the chat, Shift+Tab's cycle ends in plan mode, which the TUI holds beside
+the `PermissionMode`s and applies to the open turn. A plan review draws the
+plan in the transcript and, in place of the input line, offers auto mode when
+the daemon allows it, accept edits, manual approval, or keeping on planning
+with what to change typed on that row; accepting switches the chat to that
+mode.
+
+`Planner::refine` runs the same turn for a task prompt, its note asking it to
+end with only a short list of what it found. Then `complete_with_schema` holds
+the work rewritten as a self-contained brief for an unattended run, beside a
 draft of a summary and steps, each with actions named by a kind (`program`,
 `web_host`, `mcp_tool`, `app`, `write`) and a target. Each action becomes a `PlannedAction`, and
 `ActionCheck` flags any that would fail: a program missing from the
@@ -455,10 +483,7 @@ an app with no launchable desktop entry, a write directory that is relative
 or not a directory. It also gives each an `ActionOutlook` under the work's
 `WorkPermissions`: `Unasked` when a standing approval, an allowed host or the
 mode with the edit scope covers it, `JudgeDecides` for programs and MCP tools
-in Auto, else `Asks`. The result is a `Plan` with a fresh `PlanId`.
-`Planner::refine` runs the same turn but asks for a `prompt` beside the plan:
-the work rewritten as a self-contained brief for an unattended run, with the
-plan being that brief's.
+in Auto, else `Asks`. The result is a `Plan` of the brief with a fresh `PlanId`.
 
 `Request::TaskRefine` refines a task prompt, saved or not, under the permission
 mode and allowed hosts the request gives, in an isolated conversation with the

@@ -31,12 +31,14 @@ mod commands;
 mod connection;
 mod keys;
 mod modal;
+mod plan_mode;
 mod resume;
 mod tasks;
 mod wakeword;
 mod wire;
 
 pub(super) use agents::AgentPanel;
+pub(super) use plan_mode::{ChatMode, PlanChoice, PlanReview};
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
     ComputerScene, LANE_COLUMNS, Mood, RECENT_RESULTS, StatusState, TestProgress, WakeWordPanel,
@@ -259,6 +261,8 @@ pub(super) struct App {
     pub presence_state: Option<PresenceState>,
     pub vision_enabled: bool,
     pub confirmation: Option<ConfirmationPrompt>,
+    /// The plan the active reply waits on the user to accept or send back.
+    pub plan_review: Option<PlanReview>,
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     /// The wake phrase was heard and its command has not arrived yet.
@@ -308,8 +312,9 @@ pub(super) struct App {
     /// Ctrl+O: force-expands every thinking and tool block without
     /// touching their per-item `expanded` flags.
     pub verbose: bool,
-    /// Shift+Tab: how this chat's turns answer confirmation prompts.
-    pub permission_mode: PermissionMode,
+    /// Shift+Tab: whether this chat's messages act, answering prompts under a permission
+    /// mode, or plan.
+    pub mode: ChatMode,
     /// The daemon honors [`PermissionMode::Auto`], so Shift+Tab offers it.
     pub auto_mode_offered: bool,
     /// Colors from the config as last loaded or saved from `/settings`.
@@ -520,6 +525,7 @@ impl App {
             presence_state: None,
             vision_enabled,
             confirmation: None,
+            plan_review: None,
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             wake_word_heard: false,
@@ -545,7 +551,7 @@ impl App {
             last_live_seconds: None,
             session_title: None,
             verbose: false,
-            permission_mode: PermissionMode::Manual,
+            mode: ChatMode::Act(PermissionMode::Manual),
             auto_mode_offered,
             theme: Theme::default(),
         }

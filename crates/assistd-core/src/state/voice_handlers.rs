@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, ListenPhase, VoiceCaptureState};
+use assistd_ipc::{Event, ListenPhase, PlanMode, VoiceCaptureState};
 use assistd_voice::VoiceCapture;
 
 use super::query::{TurnOrigin, finish_interrupted_before_start};
@@ -139,8 +139,15 @@ impl AppState {
             return Ok(());
         }
 
-        self.run_query(id, text, Vec::new(), TurnOrigin::Voice, tx, cancel)
-            .await
+        self.run_query(
+            id,
+            text,
+            Vec::new(),
+            (TurnOrigin::Voice, PlanMode::Off),
+            tx,
+            cancel,
+        )
+        .await
     }
 
     async fn transcribe_while_warming(

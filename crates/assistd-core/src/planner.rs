@@ -1,6 +1,5 @@
 //! Plan mode: a turn over a conversation that may run only what asks for nothing, ending in a
-//! [`Plan`] of steps and the approvals each expects to need, or in a task prompt rewritten
-//! with its plan.
+//! plan the user accepts or revises, or in a task prompt rewritten with a [`Plan`] of its steps.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -24,29 +23,37 @@ use assistd_tools::{
     ToolError, ToolOutput, ToolRegistry,
 };
 
-use crate::agent::Agent;
+use crate::agent::{Agent, planning_in_scope};
 
 mod draft;
 mod recommend;
+mod switch;
 
-use draft::{PlanDraft, RefinementDraft};
+use draft::RefinementDraft;
 use recommend::recommended_mode;
+use switch::{EnterPlanModeTool, ExitPlanModeTool};
 
-/// Rendered at the tail of the conversation on every step of a planning turn.
-const PLAN_PREAMBLE: &str = "Plan mode: do not do the work yet. Find out what it needs \
+/// Opens the note rendered at the tail of the conversation on every step of a planning turn.
+const PLAN_MODE_RULES: &str = "Plan mode: do not do the work yet. Find out what it needs \
      using only commands that change nothing. Anything that would ask for confirmation is \
      refused while planning; when a command is refused, note that the step needs approval \
-     instead of looking for another way to run it. Once you know enough, reply with only a \
-     short list of what you found: the paths, commands and hosts the work would use, and \
-     anything missing or refused. Do not write the plan or the steps yet; you will be asked \
-     for them next, in a fixed format.";
+     instead of looking for another way to run it.";
+
+/// Ends the note of a refine's planning turn, whose plan is asked for afterwards.
+const FINDINGS_ENDING: &str = "Once you know enough, reply with only a short list of what \
+     you found: the paths, commands and hosts the work would use, and anything missing or \
+     refused. Do not write the plan or the steps yet; you will be asked for them next, in a \
+     fixed format.";
+
+/// Ends the note of a chat turn while it plans.
+const CHAT_PLAN_ENDING: &str = "If something about the work is unclear, ask the user and \
+     stop. Once you know enough, call exit_plan_mode with the whole plan; do not write it as \
+     a reply. The user accepts it there, and you then carry it out, or tells you what to \
+     change.";
 
 /// Appended to a planning tool's result when something in it was refused for asking.
 const REFUSED_NOTE: &str = "\n[plan mode: this needed approval, so it was refused and did not \
      run. Note the step, and the approval it needs, for your plan instead.]";
-
-/// Asks for the plan once the planning turn has answered.
-const PLAN_INSTRUCTION: &str = "Now give your plan as JSON.";
 
 /// Asks for the task prompt rewritten, and its plan, once the planning turn has answered.
 const REFINE_INSTRUCTION: &str = "This work will run unattended, with nobody to answer \
@@ -56,7 +63,7 @@ const REFINE_INSTRUCTION: &str = "This work will run unattended, with nobody to 
      something fails or there is nothing to do. Keep everything the user asked for and add \
      no work they did not ask for. Then give the plan for that brief.";
 
-/// How the plan is laid out, after either instruction.
+/// How the plan is laid out, after the refine instruction.
 const PLAN_LAYOUT: &str = "`summary` says in a few lines \
      what the work will do. `steps` lists the steps in order, each with a `description` and \
      the `actions` it needs approved to run without asking. An action's `kind` is `program` \
@@ -157,35 +164,28 @@ impl Planner {
         }
     }
 
-    /// Run a planning turn on `ask` in `conversation`, streaming it on `tx`, then ask for the
-    /// plan, each action checked against the machine and `permissions`. The plan-mode preamble
-    /// rides at the conversation's tail, so its system prompt is unchanged; `request_id` labels
-    /// refusals.
-    pub async fn plan(
-        &self,
-        conversation: Arc<dyn LlmBackend>,
-        ask: PlanAsk,
-        permissions: WorkPermissions,
-        request_id: String,
-        tx: mpsc::Sender<LlmEvent>,
-        cancel: CancellationToken,
-    ) -> Result<Plan, PlanError> {
-        let conversation = self
-            .explore(conversation, ask, request_id, tx, &cancel)
-            .await?;
-        let instruction = format!("{PLAN_INSTRUCTION} {PLAN_LAYOUT}");
-        let draft: PlanDraft = draft_of(
-            conversation.as_ref(),
-            instruction,
-            PlanDraft::schema(),
-            &cancel,
+    /// An agent for chat turns over `conversation`. It acts with `acting` and a tool that asks
+    /// the user to plan first; while the confirm router in scope plans, it is offered the
+    /// planning tools and one that hands the plan to the user, with the plan-mode note at the
+    /// conversation's tail.
+    pub fn chat_agent(&self, conversation: Arc<dyn LlmBackend>, acting: &ToolRegistry) -> Agent {
+        let mut acting = acting.clone();
+        acting.register(EnterPlanModeTool);
+        let mut planning = ToolRegistry::clone(&self.tools.registry);
+        planning.register(ExitPlanModeTool);
+        Agent::new(
+            PlanModeConversation::new(conversation, CHAT_PLAN_ENDING),
+            Arc::new(acting),
+            self.health.clone(),
+            self.tool_deadline,
         )
-        .await?;
-        Ok(self.checked(draft, permissions).await)
+        .with_planning_tools(Arc::new(planning))
     }
 
-    /// As [`Planner::plan`] for a task's prompt, but ending in the prompt rewritten as a brief
-    /// for an unattended run, with the plan of that brief and the mode its runs are best given.
+    /// Run a planning turn on `ask` in `conversation`, streaming it on `tx`, then ask for the
+    /// task prompt rewritten as a brief for an unattended run, with the plan of that brief,
+    /// each action checked against the machine and `permissions`, and the mode its runs are
+    /// best given.
     pub async fn refine(
         &self,
         conversation: Arc<dyn LlmBackend>,
@@ -234,7 +234,8 @@ impl Planner {
         tx: mpsc::Sender<LlmEvent>,
         cancel: &CancellationToken,
     ) -> Result<Arc<dyn LlmBackend>, PlanError> {
-        let conversation: Arc<dyn LlmBackend> = Arc::new(PlanModeConversation::new(conversation));
+        let conversation: Arc<dyn LlmBackend> =
+            PlanModeConversation::new(conversation, FINDINGS_ENDING);
         let agent = Agent::new(
             Arc::clone(&conversation),
             Arc::clone(&self.tools.registry),
@@ -248,13 +249,6 @@ impl Planner {
             return Err(PlanError::Cancelled);
         }
         Ok(conversation)
-    }
-
-    /// `draft` as a plan, each action checked against the machine and `permissions`.
-    async fn checked(&self, draft: PlanDraft, permissions: WorkPermissions) -> Plan {
-        let checks = self.tools.checks.clone();
-        let tools = self.catalog.snapshot();
-        on_blocking_pool(move || draft.into_plan(&checks, &tools, &permissions)).await
     }
 }
 
@@ -284,20 +278,24 @@ async fn draft_of<T: DeserializeOwned>(
     serde_json::from_str(&reply).map_err(PlanError::Unreadable)
 }
 
-/// A conversation whose every step ends with [`PLAN_PREAMBLE`], ahead of any one-shot note
-/// the agent loop adds.
+/// A conversation whose every step, while the confirm router in scope plans, ends with the
+/// plan-mode note, ahead of any one-shot note the agent loop adds.
 #[derive(Debug)]
 struct PlanModeConversation {
     inner: Arc<dyn LlmBackend>,
+    /// [`PLAN_MODE_RULES`] and how the turn should end.
+    preamble: String,
     note: Mutex<Option<String>>,
 }
 
 impl PlanModeConversation {
-    fn new(inner: Arc<dyn LlmBackend>) -> Self {
-        Self {
+    /// `inner` with the plan-mode rules and then `ending` at its tail.
+    fn new(inner: Arc<dyn LlmBackend>, ending: &str) -> Arc<Self> {
+        Arc::new(Self {
             inner,
+            preamble: format!("{PLAN_MODE_RULES} {ending}"),
             note: Mutex::new(None),
-        }
+        })
     }
 }
 
@@ -316,11 +314,15 @@ impl LlmBackend for PlanModeConversation {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        let note = match self.note.lock().take() {
-            Some(extra) => format!("{PLAN_PREAMBLE}\n\n{extra}"),
-            None => PLAN_PREAMBLE.to_string(),
+        let extra = self.note.lock().take();
+        let note = match (planning_in_scope(), extra) {
+            (true, Some(extra)) => Some(format!("{}\n\n{extra}", self.preamble)),
+            (true, None) => Some(self.preamble.clone()),
+            (false, extra) => extra,
         };
-        self.inner.set_transient_note(note).await?;
+        if let Some(note) = note {
+            self.inner.set_transient_note(note).await?;
+        }
         self.inner.step(tools, tx).await
     }
 

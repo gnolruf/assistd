@@ -59,6 +59,35 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
             r#"{"type":"query","id":"r","text":"describe this","attachments":[{"mime":"image/png","data_base64":"3q2+7w=="}]}"#,
         ),
         (
+            Request::Query {
+                id: "r".into(),
+                text: "tidy the repo".into(),
+                attachments: Vec::new(),
+                plan: PlanMode::Planning,
+            },
+            r#"{"type":"query","id":"r","text":"tidy the repo","plan":"planning"}"#,
+        ),
+        (
+            Request::PlanVerdict {
+                id: id(),
+                review_id: "v".into(),
+                verdict: PlanVerdict::Accept {
+                    mode: PermissionMode::AcceptEdits,
+                },
+            },
+            r#"{"type":"plan_verdict","id":"r","review_id":"v","verdict":{"verdict":"accept","mode":"accept_edits"}}"#,
+        ),
+        (
+            Request::PlanVerdict {
+                id: id(),
+                review_id: "v".into(),
+                verdict: PlanVerdict::KeepPlanning {
+                    feedback: Some("skip the tests".into()),
+                },
+            },
+            r#"{"type":"plan_verdict","id":"r","review_id":"v","verdict":{"verdict":"keep_planning","feedback":"skip the tests"}}"#,
+        ),
+        (
             Request::SetPresence {
                 id: id(),
                 target: PresenceTarget::Drowsy,

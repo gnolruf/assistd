@@ -70,6 +70,9 @@ pub use self::wire::AttachmentError;
 /// Why a `SetPermissionMode` sent on its own connection is refused.
 const PERMISSION_MODE_OFF_QUERY: &str = "SetPermissionMode is honored only on a Query connection";
 
+/// Why a `PlanVerdict` sent as a connection's first request is refused.
+const PLAN_VERDICT_OFF_QUERY: &str = "PlanVerdict answers a plan review on its Query connection";
+
 /// Why a request handler failed.
 #[derive(Debug, Error)]
 pub enum DispatchError {
@@ -222,8 +225,9 @@ impl AppState {
                 id,
                 text,
                 attachments,
+                plan,
             } => {
-                self.handle_query(id, text, attachments, TurnOrigin::Typed, tx)
+                self.handle_query(id, text, attachments, (TurnOrigin::Typed, plan), tx)
                     .await
             }
             Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
@@ -290,6 +294,9 @@ impl AppState {
             }
             Request::SetPermissionMode { id, .. } => {
                 replied(send_error(&tx, id, PERMISSION_MODE_OFF_QUERY.into())).await
+            }
+            Request::PlanVerdict { id, .. } => {
+                replied(send_error(&tx, id, PLAN_VERDICT_OFF_QUERY.into())).await
             }
         }
     }

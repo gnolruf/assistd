@@ -6,7 +6,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,11 +14,11 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-use assistd_ipc::{ConfirmSource, Event, HostName, PermissionMode};
+use assistd_ipc::{ConfirmSource, Event, HostName, PermissionMode, PlanVerdict};
 
 use super::judge::{JudgedCommand, SafetyJudge, Verdict};
 
-/// Cap on confirmation prompts in flight on one connection.
+/// Cap on confirmation prompts and plan reviews in flight on one connection.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
 
 /// How long a prompt waits for the client's answer before it is denied.
@@ -175,8 +175,6 @@ enum Answerer {
     Client,
     /// Nobody: the task's mode and allowed hosts, else its [`PromptParking`].
     TaskRun(TaskRunAsks),
-    /// Nobody: a planning turn, whose asks are all refused and counted here.
-    Planning(AtomicUsize),
 }
 
 /// The hosts a task run fetches from unasked, and where its other prompts wait.
@@ -191,12 +189,24 @@ struct PendingPrompts {
     /// The client can no longer answer; every later ask is denied.
     closed: bool,
     prompts: HashMap<String, oneshot::Sender<Approval>>,
+    reviews: HashMap<String, oneshot::Sender<PlanVerdict>>,
+}
+
+impl PendingPrompts {
+    fn in_flight(&self) -> usize {
+        self.prompts.len() + self.reviews.len()
+    }
 }
 
 /// An answer named a `confirm_id` with no prompt in flight.
 #[derive(Debug, thiserror::Error)]
 #[error("no pending confirm for this confirm_id")]
 pub struct NoPendingConfirm;
+
+/// A verdict named a `review_id` with no plan review in flight.
+#[derive(Debug, thiserror::Error)]
+#[error("no pending plan review for this review_id")]
+pub struct NoPendingReview;
 
 /// Per-connection routing table for in-flight confirmation prompts,
 /// reached through the [`CONFIRM_ROUTER`] task-local. Asks beyond
@@ -214,6 +224,9 @@ pub struct ConfirmRouter {
     /// Replaces [`ConfirmSource::Main`] on every prompt asked through this router.
     main_source: Option<ConfirmSource>,
     answerer: Answerer,
+    /// The turn is planning, so every ask is refused without prompting anyone.
+    planning: AtomicBool,
+    refused_while_planning: AtomicUsize,
     /// Raised while a prompt waits in [`PromptParking`].
     parked: watch::Sender<bool>,
 }
@@ -236,6 +249,8 @@ impl ConfirmRouter {
             judge,
             main_source: None,
             answerer: Answerer::Client,
+            planning: AtomicBool::new(false),
+            refused_while_planning: AtomicUsize::new(0),
             parked: watch::Sender::new(false),
         })
     }
@@ -264,14 +279,12 @@ impl ConfirmRouter {
         Arc::new(router)
     }
 
-    /// A router for a planning turn, which refuses every ask without prompting anyone, in
-    /// every mode.
+    /// A router for a planning turn nobody reviews, which refuses every ask without prompting
+    /// anyone, in every mode.
     pub fn for_planning(request_id: String) -> Arc<Self> {
-        Arc::new(Self::unanswered(
-            request_id,
-            None,
-            Answerer::Planning(AtomicUsize::new(0)),
-        ))
+        let router = Self::unanswered(request_id, None, Answerer::Client);
+        router.set_planning(true);
+        Arc::new(router)
     }
 
     /// A router no client answers, so it never prompts on the wire.
@@ -287,22 +300,88 @@ impl ConfirmRouter {
             timeout: CONFIRM_TIMEOUT,
             pending: Mutex::new(PendingPrompts {
                 closed: true,
-                prompts: HashMap::new(),
+                ..PendingPrompts::default()
             }),
             mode: Mutex::new(PermissionMode::Manual),
             judge: None,
             main_source,
             answerer,
+            planning: AtomicBool::new(false),
+            refused_while_planning: AtomicUsize::new(0),
             parked: watch::Sender::new(false),
         }
     }
 
-    /// How many asks a planning router has refused; always 0 for any other router.
+    /// How many asks this router has refused while planning.
     pub fn refused_while_planning(&self) -> usize {
-        match &self.answerer {
-            Answerer::Planning(refused) => refused.load(Ordering::Acquire),
-            Answerer::Client | Answerer::TaskRun(_) => 0,
+        self.refused_while_planning.load(Ordering::Acquire)
+    }
+
+    /// Whether the turn is planning.
+    pub fn planning(&self) -> bool {
+        self.planning.load(Ordering::Acquire)
+    }
+
+    /// Refuse every later ask while `planning`; prompts already shown stay open.
+    pub fn set_planning(&self, planning: bool) {
+        self.planning.store(planning, Ordering::Release);
+    }
+
+    /// Start planning at the user's request and tell the client the turn now plans.
+    pub async fn enter_plan_mode(&self) {
+        self.set_planning(true);
+        let event = Event::PlanModeEntered {
+            id: self.request_id.clone(),
+        };
+        let _ = self.wire.send(event).await;
+    }
+
+    /// Show `plan` to the client and await its verdict, with no timeout; `None` when no
+    /// client can answer, or it leaves first.
+    pub async fn review_plan(&self, plan: String) -> Option<PlanVerdict> {
+        let (review, verdict) = self.register_review()?;
+        let event = Event::PlanReview {
+            id: self.request_id.clone(),
+            review_id: review.id.clone(),
+            plan,
+        };
+        self.wire.send(event).await.ok()?;
+        verdict.await.ok()
+    }
+
+    fn register_review(&self) -> Option<(PendingPrompt<'_>, oneshot::Receiver<PlanVerdict>)> {
+        let mut pending = self.pending.lock();
+        if pending.closed || pending.in_flight() >= MAX_PENDING_CONFIRMS {
+            warn!(
+                target: "assistd::policy",
+                "plan not reviewed: the client cannot answer"
+            );
+            return None;
         }
+        let review_id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        pending.reviews.insert(review_id.clone(), tx);
+        let review = PendingPrompt {
+            router: self,
+            id: review_id,
+        };
+        Some((review, rx))
+    }
+
+    /// Deliver a client's verdict to the matching plan review.
+    pub fn route_verdict(
+        &self,
+        review_id: &str,
+        verdict: PlanVerdict,
+    ) -> Result<(), NoPendingReview> {
+        let tx = self
+            .pending
+            .lock()
+            .reviews
+            .remove(review_id)
+            .ok_or(NoPendingReview)?;
+        let _ = tx.send(verdict);
+        Ok(())
     }
 
     /// Watch whether a prompt is parked on an answer that may take any time, during which a
@@ -331,8 +410,10 @@ impl ConfirmRouter {
     /// failure is [`Approval::Deny`].
     pub async fn ask(&self, mut req: ConfirmationRequest) -> Approval {
         self.label(&mut req.source);
+        if self.planning() {
+            return refuse_while_planning(&self.refused_while_planning, &req);
+        }
         let task_run = match &self.answerer {
-            Answerer::Planning(refused) => return refuse_while_planning(refused, &req),
             Answerer::TaskRun(run) => Some(run),
             Answerer::Client => None,
         };
@@ -450,7 +531,7 @@ impl ConfirmRouter {
         };
         let event = Event::ConfirmRequest {
             id: self.request_id.clone(),
-            confirm_id: prompt.confirm_id.clone(),
+            confirm_id: prompt.id.clone(),
             tool: req.tool.clone(),
             script: req.script.clone(),
             matched_pattern: req.matched_pattern.clone(),
@@ -485,11 +566,11 @@ impl ConfirmRouter {
             );
             return None;
         }
-        if pending.prompts.len() >= MAX_PENDING_CONFIRMS {
+        if pending.in_flight() >= MAX_PENDING_CONFIRMS {
             warn!(
                 target: "assistd::policy",
                 tool = %req.tool,
-                in_flight = pending.prompts.len(),
+                in_flight = pending.in_flight(),
                 cap = MAX_PENDING_CONFIRMS,
                 "command denied: pending-confirm cap reached"
             );
@@ -500,7 +581,7 @@ impl ConfirmRouter {
         pending.prompts.insert(confirm_id.clone(), tx);
         let prompt = PendingPrompt {
             router: self,
-            confirm_id,
+            id: confirm_id,
         };
         Some((prompt, rx))
     }
@@ -549,11 +630,12 @@ impl ConfirmRouter {
         Ok(())
     }
 
-    /// Deny every prompt in flight and every later ask.
+    /// Deny every prompt in flight and every later ask, and drop every plan review.
     pub fn close(&self) {
         let drained = {
             let mut pending = self.pending.lock();
             pending.closed = true;
+            pending.reviews.clear();
             std::mem::take(&mut pending.prompts)
         };
         for (_, tx) in drained {
@@ -578,16 +660,18 @@ impl Drop for ParkedFlag<'_> {
     }
 }
 
-/// A prompt registered with a [`ConfirmRouter`], removed from its
-/// routing table when dropped.
+/// A prompt or plan review registered with a [`ConfirmRouter`], removed from its routing
+/// table when dropped.
 struct PendingPrompt<'router> {
     router: &'router ConfirmRouter,
-    confirm_id: String,
+    id: String,
 }
 
 impl Drop for PendingPrompt<'_> {
     fn drop(&mut self) {
-        self.router.pending.lock().prompts.remove(&self.confirm_id);
+        let mut pending = self.router.pending.lock();
+        pending.prompts.remove(&self.id);
+        pending.reviews.remove(&self.id);
     }
 }
 

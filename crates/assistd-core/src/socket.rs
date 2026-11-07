@@ -711,15 +711,23 @@ fn route_mid_stream_line(line: &str, router: &ConfirmRouter) {
                 warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
             }
         }
-        Ok(Request::SetPermissionMode { mode, .. }) => {
-            info!(?mode, "permission mode changed");
+        Ok(Request::SetPermissionMode { mode, plan, .. }) => {
+            info!(?mode, plan, "permission mode changed");
             router.set_mode(mode);
+            router.set_planning(plan);
+        }
+        Ok(Request::PlanVerdict {
+            review_id, verdict, ..
+        }) => {
+            if let Err(e) = router.route_verdict(&review_id, verdict) {
+                warn!(review_id = %review_id, reason = %e, "unmatched PlanVerdict");
+            }
         }
         Ok(other) => {
             warn!(
                 kind = other.kind(),
-                "unexpected mid-stream request; only ConfirmResponse and SetPermissionMode \
-                 are honored after the initial request"
+                "unexpected mid-stream request; only ConfirmResponse, SetPermissionMode and \
+                 PlanVerdict are honored after the initial request"
             );
         }
         Err(e) => {

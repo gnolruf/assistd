@@ -468,6 +468,7 @@ async fn send_query(sock: &Path, id: &str, text: &str) -> EventLines {
         id: id.into(),
         text: text.into(),
         attachments: Vec::new(),
+        plan: assistd_ipc::PlanMode::Off,
     };
     let mut body = serde_json::to_string(&req).unwrap();
     body.push('\n');

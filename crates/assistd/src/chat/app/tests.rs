@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use assistd_ipc::PlanVerdict;
 use assistd_tools::{ConfirmSource, Risk, Unattended};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -404,7 +405,7 @@ async fn prompt_swallows_typing_without_answering() {
 async fn shift_tab_switches_the_open_turn_to_accept_edits_without_answering_its_prompt() {
     let (mut app, _rx, mut writer_rx) = app_with_prompt(Vec::new());
     app.on_key(key(KeyCode::BackTab));
-    assert_eq!(app.permission_mode, PermissionMode::AcceptEdits);
+    assert_eq!(app.mode, ChatMode::Act(PermissionMode::AcceptEdits));
     assert!(app.confirmation.is_some(), "the shown prompt stays open");
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
         Ok(Some(Request::SetPermissionMode { mode, .. })) => {
@@ -415,37 +416,85 @@ async fn shift_tab_switches_the_open_turn_to_accept_edits_without_answering_its_
 }
 
 #[test]
-fn shift_tab_offers_auto_only_when_the_daemon_allows_it() {
+fn shift_tab_offers_auto_only_when_the_daemon_allows_it_and_ends_in_plan_mode() {
     let (mut app, _rx) = test_app();
-    let cycle = |app: &mut App| {
-        (0..3)
+    let cycle = |app: &mut App, presses: usize| {
+        (0..presses)
             .map(|_| {
                 app.on_key(key(KeyCode::BackTab));
-                app.permission_mode
+                app.mode
             })
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        cycle(&mut app),
+        cycle(&mut app, 3),
         [
-            PermissionMode::AcceptEdits,
-            PermissionMode::Manual,
-            PermissionMode::AcceptEdits
+            ChatMode::Act(PermissionMode::AcceptEdits),
+            ChatMode::Plan,
+            ChatMode::Act(PermissionMode::Manual)
         ]
     );
-    app.permission_mode = PermissionMode::Manual;
     app.offer_auto_mode(true);
     assert_eq!(
-        cycle(&mut app),
+        cycle(&mut app, 4),
         [
-            PermissionMode::AcceptEdits,
-            PermissionMode::Auto,
-            PermissionMode::Manual
+            ChatMode::Act(PermissionMode::AcceptEdits),
+            ChatMode::Act(PermissionMode::Auto),
+            ChatMode::Plan,
+            ChatMode::Act(PermissionMode::Manual)
         ]
     );
-    app.permission_mode = PermissionMode::Auto;
+    app.mode = ChatMode::Act(PermissionMode::Auto);
     app.offer_auto_mode(false);
-    assert_eq!(app.permission_mode, PermissionMode::Manual);
+    assert_eq!(app.mode, ChatMode::Act(PermissionMode::Manual));
+}
+
+/// The verdict the open plan review sent on the reply's connection.
+async fn sent_verdict(writer_rx: &mut mpsc::Receiver<Request>) -> PlanVerdict {
+    match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
+        Ok(Some(Request::PlanVerdict { verdict, .. })) => verdict,
+        other => panic!("expected PlanVerdict, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_plan_is_sent_back_with_typed_feedback_or_accepted_into_its_mode() {
+    let (mut app, _rx) = test_app();
+    let (writer_tx, mut writer_rx) = mpsc::channel(4);
+    app.active_reply = Some(ActiveReply {
+        id: "r".into(),
+        writer: Some(writer_tx),
+    });
+    let review = |app: &mut App| {
+        app.on_chat_event(reply(Event::PlanReview {
+            id: "r".into(),
+            review_id: "v".into(),
+            plan: "1. tidy".into(),
+        }));
+    };
+    review(&mut app);
+    assert_eq!(app.mode, ChatMode::Plan);
+    for c in "skip it".chars() {
+        app.on_key(typed(c));
+    }
+    app.on_key(key(KeyCode::Enter));
+    assert_eq!(
+        sent_verdict(&mut writer_rx).await,
+        PlanVerdict::KeepPlanning {
+            feedback: Some("skip it".into())
+        }
+    );
+    assert_eq!(app.mode, ChatMode::Plan);
+    review(&mut app);
+    app.on_key(typed('1'));
+    assert_eq!(
+        sent_verdict(&mut writer_rx).await,
+        PlanVerdict::Accept {
+            mode: PermissionMode::AcceptEdits
+        }
+    );
+    assert_eq!(app.mode, ChatMode::Act(PermissionMode::AcceptEdits));
+    assert!(app.plan_review.is_none());
 }
 
 #[tokio::test]

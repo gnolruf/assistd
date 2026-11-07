@@ -9,8 +9,9 @@ use tokio::sync::{Notify, watch};
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
     Component, ComponentReadiness, EventKind, HostName, ImageAttachment, ImageMime, ListenPhase,
-    PresenceState, PresenceTarget, QueueItem, StartupComponent, StatusKind, StatusSeverity,
-    SubscribeFilter, TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
+    PermissionMode, PlanMode, PlanVerdict, PresenceState, PresenceTarget, QueueItem,
+    StartupComponent, StatusKind, StatusSeverity, SubscribeFilter, TaskId, TaskQueueOp, TaskRunId,
+    TaskRunState, TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
@@ -22,9 +23,9 @@ use assistd_memory::{
     SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
-    Approval, CommandRegistry, ConfirmationGate, ConfirmationRequest, IpcConfirmationGate,
-    OutputCap, PresentSpec, Risk, RunTool, ToolError, ToolOutput, ToolsDisabled, Unattended,
-    commands::EchoCommand,
+    Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
+    ConfirmationRequest, IpcConfirmationGate, OutputCap, PresentSpec, Risk, RunTool, ToolError,
+    ToolOutput, ToolsDisabled, Unattended, commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
@@ -107,6 +108,7 @@ fn query(id: &str, text: &str) -> Request {
         id: id.into(),
         text: text.into(),
         attachments: Vec::new(),
+        plan: PlanMode::Off,
     }
 }
 
@@ -344,6 +346,7 @@ async fn dispatch_query_refuses_images_without_vision() {
             ImageMime::Png,
             b"\x89PNG\r\n\x1a\n",
         )],
+        plan: PlanMode::Off,
     };
     let (res, events) = dispatch(&default_state(), request).await;
 
@@ -367,6 +370,7 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
             ImageMime::Jpeg,
             b"\x89PNG\r\n\x1a\n",
         )],
+        plan: PlanMode::Off,
     };
     let (res, events) = dispatch(&default_state(), request).await;
 
@@ -1094,6 +1098,114 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
         ["Half a done."],
         "idle flush fired during tool dispatch"
     );
+}
+
+/// Counts its runs.
+#[derive(Debug)]
+struct ActTool {
+    runs: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for ActTool {
+    fn name(&self) -> &'static str {
+        "act"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "acts for testing".into()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::text("acted", Duration::ZERO))
+    }
+}
+
+/// How often `act` ran in a chat turn under `plan` whose model calls `steps` in order, its
+/// client answering every prompt with `answer` and accepting every plan it is shown.
+async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::Value)]) -> usize {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(ActTool {
+        runs: Arc::clone(&runs),
+    });
+    let steps = steps
+        .iter()
+        .map(|(name, arguments)| {
+            StepOutcome::ToolCalls(vec![ToolCall {
+                id: (*name).into(),
+                name: (*name).into(),
+                arguments: arguments.clone(),
+            }])
+        })
+        .collect();
+    let state = StateParts {
+        backend: ToolCallBackend::new("", "done", steps),
+        tools: Arc::new(tools),
+        ..StateParts::default()
+    }
+    .build();
+    let request = Request::Query {
+        id: "p".into(),
+        text: "tidy up".into(),
+        attachments: Vec::new(),
+        plan,
+    };
+    let (tx, mut rx) = mpsc::channel::<Event>(16);
+    let router = ConfirmRouter::new(request.id().into(), tx.clone(), CONFIRM_TIMEOUT, None);
+    let client = async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                Event::PlanReview { review_id, .. } => {
+                    let accept = PlanVerdict::Accept {
+                        mode: PermissionMode::Manual,
+                    };
+                    router.route_verdict(&review_id, accept).unwrap();
+                }
+                Event::ConfirmRequest { confirm_id, .. } => {
+                    router.route_response(&confirm_id, answer).unwrap();
+                }
+                Event::Done { .. } => break,
+                _ => {}
+            }
+        }
+    };
+    let dispatched = CONFIRM_ROUTER.scope(Arc::clone(&router), state.dispatch(request, None, tx));
+    let (res, ()) = tokio::join!(dispatched, client);
+    res.unwrap();
+    runs.load(Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn a_planning_turn_acts_only_once_its_plan_is_accepted() {
+    let steps = [
+        ("act", serde_json::json!({})),
+        ("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
+        ("act", serde_json::json!({})),
+    ];
+    for (plan, expected_runs) in [(PlanMode::Planning, 1), (PlanMode::Offered, 2)] {
+        let runs = act_runs(plan, Approval::Deny, &steps).await;
+        assert_eq!(runs, expected_runs, "{plan:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_models_ask_to_plan_holds_off_acting_only_once_the_user_agrees() {
+    let steps = [
+        (
+            "enter_plan_mode",
+            serde_json::json!({"reason": "many files"}),
+        ),
+        ("act", serde_json::json!({})),
+        ("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
+        ("act", serde_json::json!({})),
+    ];
+    for (answer, expected_runs) in [(Approval::Once, 1), (Approval::Deny, 2)] {
+        let runs = act_runs(PlanMode::Offered, answer, &steps).await;
+        assert_eq!(runs, expected_runs, "{answer:?}");
+    }
 }
 
 /// Never returns. `dropped` flips when the invocation future is torn
@@ -2054,7 +2166,7 @@ async fn task_state_with(
         prompt: "summarize my inbox".to_string().try_into().unwrap(),
         triggers: Vec::new(),
         enabled: true,
-        mode: assistd_ipc::PermissionMode::Manual,
+        mode: PermissionMode::Manual,
         allowed_hosts: Vec::new(),
         announce: false,
     };
