@@ -1,7 +1,7 @@
 //! The scratch directory `bash` and the in-process commands share: created
 //! owner-only at startup, with entries past their retention removed.
 
-use std::fs::{DirBuilder, Permissions};
+use std::fs::{DirBuilder, File, Permissions};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -12,8 +12,11 @@ use crate::{BuildToolsError, OVERFLOW_DIR_MODE, ToolsScratchConfig};
 
 const SECS_PER_DAY: u64 = 24 * 60 * 60;
 
-/// Create `scratch.dir` owner-only, remove what has not changed in `scratch.retention_days`,
-/// and return its canonical path. Errors with [`BuildToolsError::CreateScratchDir`] when the
+/// The file that marks a scratch directory assistd created, the only kind it prunes.
+const OWNED_MARKER: &str = ".assistd-scratch";
+
+/// Create `scratch.dir` owner-only, remove what has not changed in `scratch.retention_days`
+/// when assistd created the directory, and return its canonical path. Errors with [`BuildToolsError::CreateScratchDir`] when the
 /// directory cannot be created, restricted or resolved; failed removals are only logged.
 pub(crate) fn prepare(scratch: &ToolsScratchConfig) -> Result<PathBuf, BuildToolsError> {
     let scratch_dir = scratch.dir.as_path();
@@ -29,8 +32,39 @@ pub(crate) fn prepare(scratch: &ToolsScratchConfig) -> Result<PathBuf, BuildTool
     std::fs::set_permissions(scratch_dir, Permissions::from_mode(OVERFLOW_DIR_MODE))
         .map_err(create_error)?;
     let scratch_dir = std::fs::canonicalize(scratch_dir).map_err(create_error)?;
-    prune_entries(&scratch_dir, retention_cutoff(scratch.retention_days));
+    if claim(&scratch_dir) {
+        prune_owned(&scratch_dir, retention_cutoff(scratch.retention_days));
+    } else {
+        warn!(
+            target: "assistd::policy",
+            path = %scratch_dir.display(),
+            "tools.scratch.dir held files before assistd used it, so they are never pruned"
+        );
+    }
     Ok(scratch_dir)
+}
+
+/// Whether assistd owns `dir`: it holds [`OWNED_MARKER`], or was empty and now does.
+fn claim(dir: &Path) -> bool {
+    let marker = dir.join(OWNED_MARKER);
+    if marker.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+        return true;
+    }
+    let empty = std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none());
+    empty && File::create_new(&marker).is_ok()
+}
+
+/// Remove the entries of the owned `dir` that [`prune`] lets go, keeping its marker.
+fn prune_owned(dir: &Path, cutoff: SystemTime) {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() != OWNED_MARKER)
+            .for_each(|entry| {
+                prune(&entry.path(), cutoff);
+            }),
+        Err(error) => log_unpruned(dir, &error),
+    }
 }
 
 /// The modification time before which an entry has outlived

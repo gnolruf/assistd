@@ -11,6 +11,13 @@ fn scratch(dir: &Path, retention_days: u32) -> ToolsScratchConfig {
     }
 }
 
+/// A scratch directory assistd created earlier, with its marker.
+fn owned_dir() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().unwrap();
+    File::create(temp.path().join(OWNED_MARKER)).unwrap();
+    temp
+}
+
 fn age(path: &Path) {
     let changed = SystemTime::now() - LONG_AGO;
     File::open(path)
@@ -32,7 +39,7 @@ fn prepare_creates_a_missing_dir_owner_only() {
 
 #[test]
 fn prepare_removes_expired_entries_and_the_dirs_they_empty() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = owned_dir();
     let dir = temp.path();
     for path in ["old-dir", "mixed-dir"] {
         std::fs::create_dir(dir.join(path)).unwrap();
@@ -47,6 +54,7 @@ fn prepare_removes_expired_entries_and_the_dirs_they_empty() {
         "old-dir",
         "mixed-dir/b.txt",
         "mixed-dir",
+        OWNED_MARKER,
     ] {
         age(&dir.join(path));
     }
@@ -57,7 +65,7 @@ fn prepare_removes_expired_entries_and_the_dirs_they_empty() {
     for gone in ["old.txt", "old-dir", "mixed-dir/b.txt"] {
         assert!(!exists(gone), "{gone} outlived its retention");
     }
-    for kept in ["new.txt", "mixed-dir", "mixed-dir/fresh.txt"] {
+    for kept in ["new.txt", "mixed-dir", "mixed-dir/fresh.txt", OWNED_MARKER] {
         assert!(exists(kept), "{kept} was removed early");
     }
 }
@@ -65,7 +73,7 @@ fn prepare_removes_expired_entries_and_the_dirs_they_empty() {
 #[test]
 fn zero_retention_removes_symlinks_without_following_them() {
     let outside = tempfile::NamedTempFile::new().unwrap();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = owned_dir();
     let dir = temp.path();
     std::fs::create_dir(dir.join("sub")).unwrap();
     std::fs::write(dir.join("sub/a.txt"), b"x").unwrap();
@@ -73,6 +81,19 @@ fn zero_retention_removes_symlinks_without_following_them() {
 
     prepare(&scratch(dir, 0)).unwrap();
 
-    assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(dir).unwrap().count(), 1);
     assert!(outside.path().exists(), "the symlink's target was removed");
+}
+
+#[test]
+fn a_dir_that_held_files_before_assistd_is_never_pruned() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    std::fs::write(dir.join("thesis.tex"), b"x").unwrap();
+    age(&dir.join("thesis.tex"));
+
+    prepare(&scratch(dir, 0)).unwrap();
+
+    assert!(dir.join("thesis.tex").exists());
+    assert!(!dir.join(OWNED_MARKER).exists());
 }
