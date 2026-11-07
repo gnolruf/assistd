@@ -785,6 +785,20 @@ line, an HTTP body or one SSE event; an oversized reply fails that call
 and leaves the session up. HTTP redirects are followed only within the
 configured origin, and logs name a remote server by its origin alone.
 
+An `auth = "oauth"` entry also sends an OAuth 2.1 bearer token. At
+connect the daemon discovers the authorization server from the MCP
+server's metadata and loads the server's token from
+`$XDG_STATE_HOME/assistd/mcp-tokens.json` (mode 0600, replaced
+atomically). Each entry there is keyed by server name, URL and
+configured client ID, so changing any of them leaves the old token
+unused. The token is refreshed ahead of expiry and once when the server
+answers 401. A server with no token, a rejected refresh, or a 403
+`insufficient_scope` is marked "needs authorization", with the scopes it
+asked for, and every later call fails at once without reaching it. A
+refresh that fails in transit is retried on the next call. Without a
+`client_id` the client registers dynamically; an authorization server
+that offers no registration fails with an error naming `client_id`.
+
 ### Web search (`assistd-search` ↔ SearXNG)
 
 `web search` goes through a private [SearXNG](https://docs.searxng.org)

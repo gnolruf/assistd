@@ -15,12 +15,13 @@ use reqwest::{RequestBuilder, Response};
 use rmcp::model::{
     ClientJsonRpcMessage, ErrorData, JsonRpcMessage, RequestId, ServerJsonRpcMessage,
 };
+use rmcp::transport::auth::WWWAuthenticateParams;
 use rmcp::transport::common::http_header::{
     EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID, HEADER_SESSION_ID, JSON_MIME_TYPE,
 };
 use rmcp::transport::streamable_http_client::{
-    AuthRequiredError, HttpStatusError, SseError, StreamableHttpClient, StreamableHttpError,
-    StreamableHttpPostResponse,
+    AuthRequiredError, HttpStatusError, InsufficientScopeError, SseError, StreamableHttpClient,
+    StreamableHttpError, StreamableHttpPostResponse,
 };
 use sse_stream::{Sse, SseStream};
 use thiserror::Error;
@@ -250,21 +251,28 @@ fn with_session_headers(
     request
 }
 
-/// Fail a 401 or 403 as needing authorization, whether or not it carries a challenge.
+/// Fail a 401 or 403 as needing authorization, whether or not it carries a challenge; a 403
+/// `insufficient_scope` challenge keeps the scopes it asks for, so it is not answered with a
+/// token refresh.
 fn reject_unauthorized(response: &Response) -> Result<(), HttpError> {
-    if !matches!(
-        response.status(),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-    ) {
+    let status = response.status();
+    if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
         return Ok(());
     }
     let challenge = response
         .headers()
         .get(WWW_AUTHENTICATE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_owned();
+    let params = WWWAuthenticateParams::parse(&challenge, response.url());
+    if status == StatusCode::FORBIDDEN && params.is_insufficient_scope() {
+        return Err(StreamableHttpError::InsufficientScope(
+            InsufficientScopeError::new(challenge, params.scope),
+        ));
+    }
     Err(StreamableHttpError::AuthRequired(AuthRequiredError::new(
-        challenge.to_owned(),
+        challenge,
     )))
 }
 

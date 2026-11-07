@@ -207,7 +207,7 @@ impl Config {
         if exposed {
             tracing::warn!(
                 target: "assistd::config",
-                "{} is readable by other users and sets mcp.servers[].env or headers; \
+                "{} is readable by other users and sets mcp.servers[].env, headers or client_secret; \
                  run `chmod 600 {}` to keep those values private",
                 path.display(),
                 path.display()
@@ -227,7 +227,7 @@ pub(crate) fn create_private_dir_all(dir: &Path) -> Result<(), ConfigError> {
         })
 }
 
-pub(crate) fn create_private_file(path: &Path) -> Result<File, ConfigError> {
+fn create_private_file(path: &Path) -> Result<File, ConfigError> {
     OpenOptions::new()
         .write(true)
         .create_new(true)

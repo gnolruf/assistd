@@ -48,9 +48,19 @@ pub enum McpError {
     #[error("MCP server answered HTTP {0}")]
     HttpStatus(u16),
 
-    /// The server answered 401 or 403.
-    #[error("MCP server needs authorization")]
-    NeedsAuthorization,
+    /// The server refused the credentials sent, or none are stored; `scopes` are the ones a
+    /// 403 `insufficient_scope` asked for.
+    #[error("MCP server needs authorization{}", scope_list(scopes))]
+    NeedsAuthorization { scopes: Vec<String> },
+
+    /// No `client_id` is configured and the authorization server offers no dynamic client
+    /// registration.
+    #[error("MCP server's authorization server does not offer dynamic client registration")]
+    RegistrationUnsupported,
+
+    /// An OAuth step failed for a reason worth retrying. Never carries a token, code or secret.
+    #[error("MCP OAuth failed: {0}")]
+    OAuth(String),
 
     /// The server no longer knows the session; the next call opens a new one.
     #[error("MCP server ended the session")]
@@ -68,7 +78,7 @@ impl McpError {
                     ErrorKind::NotFound | ErrorKind::PermissionDenied
                 )
             }
-            Self::NeedsAuthorization => true,
+            Self::NeedsAuthorization { .. } | Self::RegistrationUnsupported => true,
             _ => false,
         }
     }
@@ -135,14 +145,30 @@ pub fn mcp_error_line(tool_name: &str, err: &McpError) -> String {
             "[error] {tool_name}: MCP server answered HTTP {status}. \
              Try: the call again later\n"
         ),
-        McpError::NeedsAuthorization => format!(
-            "[error] {tool_name}: MCP server needs authorization. \
-             Check: the server's headers in config.toml\n"
+        McpError::NeedsAuthorization { scopes } => format!(
+            "[error] {tool_name}: MCP server needs authorization{}. \
+             Check: the server's `headers` or `auth` in config.toml\n",
+            scope_list(scopes)
         ),
+        McpError::RegistrationUnsupported => format!(
+            "[error] {tool_name}: MCP server's authorization server does not offer dynamic \
+             client registration. Check: set the server's `client_id` in config.toml\n"
+        ),
+        McpError::OAuth(detail) => {
+            format!("[error] {tool_name}: MCP OAuth failed: {detail}. Try: the call again later\n")
+        }
         McpError::SessionExpired => format!(
             "[error] {tool_name}: MCP server ended the session. \
              Try: the call again\n"
         ),
+    }
+}
+
+/// ` (scopes: a b)`, or nothing when `scopes` is empty.
+fn scope_list(scopes: &[String]) -> String {
+    match scopes {
+        [] => String::new(),
+        scopes => format!(" (scopes: {})", scopes.join(" ")),
     }
 }
 
@@ -184,7 +210,14 @@ mod tests {
             ("server_down", McpError::ServerDown),
             ("connection", McpError::Connection("refused".into())),
             ("http_status", McpError::HttpStatus(502)),
-            ("authorization", McpError::NeedsAuthorization),
+            (
+                "authorization",
+                McpError::NeedsAuthorization {
+                    scopes: vec!["drive.readonly".into()],
+                },
+            ),
+            ("registration", McpError::RegistrationUnsupported),
+            ("oauth", McpError::OAuth("token store: unreadable".into())),
             ("session_expired", McpError::SessionExpired),
         ];
         for (label, err) in cases {

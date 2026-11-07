@@ -21,6 +21,7 @@ use serde_json::Value;
 mod admission;
 mod error;
 mod launch;
+mod oauth;
 mod server;
 mod session;
 mod stdio;
@@ -28,10 +29,11 @@ mod streamable;
 
 pub use error::{McpError, mcp_error_line};
 pub use launch::{LaunchTarget, launch};
+pub use oauth::{OAuthConfig, TokenStore};
 pub use server::McpServer;
 pub use session::Connector;
 pub use stdio::StdioConfig;
-pub use streamable::HttpConfig;
+pub use streamable::{HttpAuth, HttpConfig};
 
 /// A connection to a single MCP server.
 #[async_trait]

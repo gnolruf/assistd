@@ -29,7 +29,8 @@ const HUNG_AFTER_TIMEOUTS: u32 = 2;
 
 /// A configured server. A call that finds its process dead restarts it, or fails with
 /// [`McpError::ServerDown`] while backoff says to wait; one whose requests keep timing out is
-/// killed. Dropping it SIGKILLs the live process group.
+/// killed, and once one needs authorization every later call fails with that without
+/// reaching it. Dropping it SIGKILLs the live process group.
 #[derive(Debug)]
 pub struct McpServer {
     name: String,
@@ -43,6 +44,8 @@ struct ServerState {
     policy: RestartPolicy,
     retry_at: Option<Instant>,
     stopped: bool,
+    /// The scopes asked for once the server needed authorization.
+    needs_authorization: Option<Vec<String>>,
     /// The first tool listing, which the registry offers for good.
     advertised: Option<Vec<Tool>>,
 }
@@ -91,6 +94,11 @@ impl McpServer {
         if state.stopped {
             return Err(McpError::ServerDown);
         }
+        if let Some(scopes) = &state.needs_authorization {
+            return Err(McpError::NeedsAuthorization {
+                scopes: scopes.clone(),
+            });
+        }
         if let Some(session) = &state.session
             && !session.task.is_finished()
         {
@@ -103,6 +111,10 @@ impl McpServer {
     /// when the server answered; a session the server ended is dropped at once.
     async fn record_outcome<T>(&self, client: &Arc<McpPeer>, outcome: &Result<T, McpError>) {
         let mut state = self.state.lock().await;
+        if let Err(McpError::NeedsAuthorization { scopes }) = outcome {
+            self.hold_for_authorization(&mut state, scopes);
+            return;
+        }
         let Some(session) = state
             .session
             .as_mut()
@@ -155,6 +167,10 @@ impl McpServer {
                 }
                 Ok(client)
             }
+            Err(McpError::NeedsAuthorization { scopes }) => {
+                self.hold_for_authorization(state, &scopes);
+                Err(McpError::NeedsAuthorization { scopes })
+            }
             Err(e) => {
                 warn!(target: "assistd::mcp", server = %self.name, error = %e, "MCP server restart failed");
                 state.policy.record_spawn_failure();
@@ -163,6 +179,17 @@ impl McpServer {
                 Err(e)
             }
         }
+    }
+
+    /// Refuse every later call until the daemon restarts with new credentials.
+    fn hold_for_authorization(&self, state: &mut ServerState, scopes: &[String]) {
+        warn!(
+            target: "assistd::mcp",
+            server = %self.name,
+            ?scopes,
+            "MCP server needs authorization; refusing its calls until it is authorized",
+        );
+        state.needs_authorization = Some(scopes.to_vec());
     }
 
     /// Drop the current session, killing its process group with SIGKILL, and

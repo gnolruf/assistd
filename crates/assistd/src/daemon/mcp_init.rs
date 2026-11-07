@@ -1,13 +1,17 @@
 //! MCP subsystem wiring for the daemon: servers start in the background
 //! and each one's tools are offered once it has connected.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::config::{McpHttpTransport, McpStdioTransport, McpTransport};
+use assistd_core::config::{McpAuth, McpHttpTransport, McpStdioTransport, McpTransport};
 use assistd_core::{AppState, Config, McpServerConfig, McpServerStatus};
 use assistd_ipc::{ComponentReadiness, StartupComponent};
-use assistd_mcp::{Connector, HttpConfig, LaunchTarget, McpError, McpServer, StdioConfig, launch};
+use assistd_mcp::{
+    Connector, HttpAuth, HttpConfig, LaunchTarget, McpError, McpServer, OAuthConfig, StdioConfig,
+    TokenStore, launch,
+};
 use assistd_tools::{ApprovalGate, VisionGate};
 use assistd_utils::readiness::Readiness;
 use tokio::sync::watch;
@@ -19,6 +23,8 @@ pub(super) struct McpStartup {
     servers: Vec<McpServerConfig>,
     approvals: ApprovalGate,
     vision: Arc<VisionGate>,
+    /// Where `auth = "oauth"` servers keep their tokens; `None` without a state directory.
+    tokens: Option<TokenStore>,
 }
 
 /// The background start, joined at shutdown for the servers it started.
@@ -79,6 +85,7 @@ pub(super) fn prepare(
         servers: config.mcp.servers.clone(),
         approvals,
         vision,
+        tokens: token_file().map(TokenStore::new),
     };
     (statuses, Some(startup))
 }
@@ -95,7 +102,12 @@ async fn start_all(
     };
     let mut launches = JoinSet::new();
     for config in startup.servers {
-        launches.spawn(start_server(config, state.clone(), target.clone()));
+        launches.spawn(start_server(
+            config,
+            startup.tokens.clone(),
+            state.clone(),
+            target.clone(),
+        ));
     }
     let mut started = Vec::new();
     loop {
@@ -148,13 +160,19 @@ fn record_readiness(state: &AppState, name: &str, readiness: Readiness<()>) {
 /// unavailable until the config changes.
 async fn start_server(
     server: McpServerConfig,
+    tokens: Option<TokenStore>,
     state: Arc<AppState>,
     target: LaunchTarget,
 ) -> Option<Arc<McpServer>> {
     let name = server.name.clone();
     let unavailable = |reason: String| Readiness::Unavailable(reason.into());
+    let Some(connector) = connector(&server, tokens) else {
+        let reason = "no XDG state directory to keep OAuth tokens in".to_owned();
+        record_readiness(&state, &name, unavailable(reason));
+        return None;
+    };
     let on_retry = |e: &McpError| record_readiness(&state, &name, unavailable(e.to_string()));
-    match launch(name.clone(), connector(&server), &target, on_retry).await {
+    match launch(name.clone(), connector, &target, on_retry).await {
         Ok(started) => {
             record_readiness(&state, &name, Readiness::Ready(()));
             Some(started)
@@ -166,14 +184,26 @@ async fn start_server(
     }
 }
 
-fn connector(server: &McpServerConfig) -> Connector {
+/// How to reach `server`; `None` for an OAuth server when there is nowhere to keep `tokens`.
+fn connector(server: &McpServerConfig, tokens: Option<TokenStore>) -> Option<Connector> {
     let request_timeout = Duration::from_secs(server.request_timeout_secs.get());
     match &server.transport {
-        McpTransport::Stdio(transport) => {
-            Connector::Stdio(stdio_config(server, transport, request_timeout))
-        }
+        McpTransport::Stdio(transport) => Some(Connector::Stdio(stdio_config(
+            server,
+            transport,
+            request_timeout,
+        ))),
         McpTransport::Http(transport) => {
-            Connector::Http(http_config(server, transport, request_timeout))
+            let mut http = http_config(server, transport, request_timeout);
+            if let McpAuth::OAuth(client) = &transport.auth {
+                http.auth = HttpAuth::OAuth(OAuthConfig {
+                    client_id: client.client_id.clone(),
+                    client_secret: client.client_secret.clone(),
+                    scopes: client.scopes.clone(),
+                    tokens: tokens?,
+                });
+            }
+            Some(Connector::Http(http))
         }
     }
 }
@@ -202,4 +232,9 @@ fn http_config(
     http.headers = transport.headers.to_header_map();
     http.request_timeout = request_timeout;
     http
+}
+
+/// `$XDG_STATE_HOME/assistd/mcp-tokens.json`; `None` when there is no state directory.
+fn token_file() -> Option<PathBuf> {
+    dirs::state_dir().map(|state| state.join("assistd").join("mcp-tokens.json"))
 }
