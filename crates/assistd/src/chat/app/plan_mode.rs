@@ -96,19 +96,15 @@ impl App {
     /// Switch to `mode`, applying it to the open turn too.
     fn set_mode(&mut self, mode: ChatMode) {
         self.mode = mode;
-        let req = match mode {
-            ChatMode::Act(mode) => Request::SetPermissionMode {
-                id: Uuid::new_v4().to_string(),
-                mode,
-                plan: false,
-            },
-            ChatMode::Plan => Request::SetPermissionMode {
-                id: Uuid::new_v4().to_string(),
-                mode: PermissionMode::Manual,
-                plan: true,
-            },
+        let (mode, plan) = match mode {
+            ChatMode::Act(mode) => (mode, false),
+            ChatMode::Plan => (PermissionMode::Manual, true),
         };
-        self.send_on_reply(req);
+        self.send_on_reply(Request::SetPermissionMode {
+            id: Uuid::new_v4().to_string(),
+            mode,
+            plan,
+        });
     }
 
     /// Show the plan the turn hands over in the transcript and ask whether to carry it out.

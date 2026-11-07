@@ -234,43 +234,21 @@ impl Planner {
         tx: mpsc::Sender<LlmEvent>,
         cancel: &CancellationToken,
     ) -> Result<Arc<dyn LlmBackend>, PlanError> {
-        let conversation = PlanModeConversation::new(conversation, FINDINGS_ENDING);
-        let text = ask.into_text();
-        self.run_in_plan_mode(
-            Arc::clone(&conversation),
-            text,
-            Vec::new(),
-            request_id,
-            tx,
-            cancel.clone(),
-        )
-        .await?;
-        if cancel.is_cancelled() {
-            return Err(PlanError::Cancelled);
-        }
-        Ok(conversation)
-    }
-
-    /// Run the agent loop on `text` over `conversation` with the planning tools, refusing
-    /// every ask for confirmation.
-    async fn run_in_plan_mode(
-        &self,
-        conversation: Arc<PlanModeConversation>,
-        text: String,
-        attachments: Vec<Attachment>,
-        request_id: String,
-        tx: mpsc::Sender<LlmEvent>,
-        cancel: CancellationToken,
-    ) -> LlmResult<()> {
+        let conversation: Arc<dyn LlmBackend> =
+            PlanModeConversation::new(conversation, FINDINGS_ENDING);
         let agent = Agent::new(
-            conversation,
+            Arc::clone(&conversation),
             Arc::clone(&self.tools.registry),
             self.health.clone(),
             self.tool_deadline,
         );
         let router = ConfirmRouter::for_planning(request_id);
-        let turn = agent.run_turn(text, attachments, tx, cancel);
-        CONFIRM_ROUTER.scope(router, turn).await
+        let turn = agent.run_turn(ask.into_text(), Vec::new(), tx, cancel.clone());
+        CONFIRM_ROUTER.scope(router, turn).await?;
+        if cancel.is_cancelled() {
+            return Err(PlanError::Cancelled);
+        }
+        Ok(conversation)
     }
 }
 

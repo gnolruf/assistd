@@ -1,5 +1,7 @@
 //! The plan review drawn under the transcript while the turn waits on its plan's verdict.
 
+use std::borrow::Cow;
+
 use assistd_ipc::PermissionMode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -51,18 +53,20 @@ fn choice_rows(review: &PlanReview, width: usize, theme: &Theme) -> Vec<Line<'st
         .iter()
         .enumerate()
         .flat_map(|(index, choice)| {
-            let label = match choice {
-                PlanChoice::Accept(PermissionMode::Auto) => "Yes, and use auto mode".to_string(),
+            let label: Cow<'_, str> = match choice {
+                PlanChoice::Accept(PermissionMode::Auto) => "Yes, and use auto mode".into(),
                 PlanChoice::Accept(PermissionMode::AcceptEdits) => {
-                    "Yes, and auto-accept edits".to_string()
+                    "Yes, and auto-accept edits".into()
                 }
                 PlanChoice::Accept(PermissionMode::Manual) => {
-                    "Yes, and manually approve edits".to_string()
+                    "Yes, and manually approve edits".into()
                 }
                 PlanChoice::KeepPlanning if review.feedback.is_empty() => {
-                    FEEDBACK_PLACEHOLDER.to_string()
+                    FEEDBACK_PLACEHOLDER.into()
                 }
-                PlanChoice::KeepPlanning => format!("No, keep planning: {}▏", review.feedback),
+                PlanChoice::KeepPlanning => {
+                    format!("No, keep planning: {}▏", review.feedback).into()
+                }
             };
             let (pointer, style) = if index == review.selected {
                 ("❯", pointer_style(theme))

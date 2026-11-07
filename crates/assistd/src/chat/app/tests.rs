@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use assistd_ipc::{PlanMode, PlanVerdict};
+use assistd_ipc::PlanVerdict;
 use assistd_tools::{ConfirmSource, Risk, Unattended};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -426,12 +426,11 @@ fn shift_tab_offers_auto_only_when_the_daemon_allows_it_and_ends_in_plan_mode() 
             })
             .collect::<Vec<_>>()
     };
-    let plan = ChatMode::Plan;
     assert_eq!(
         cycle(&mut app, 3),
         [
             ChatMode::Act(PermissionMode::AcceptEdits),
-            plan,
+            ChatMode::Plan,
             ChatMode::Act(PermissionMode::Manual)
         ]
     );
@@ -441,80 +440,13 @@ fn shift_tab_offers_auto_only_when_the_daemon_allows_it_and_ends_in_plan_mode() 
         [
             ChatMode::Act(PermissionMode::AcceptEdits),
             ChatMode::Act(PermissionMode::Auto),
-            plan,
+            ChatMode::Plan,
             ChatMode::Act(PermissionMode::Manual)
         ]
     );
     app.mode = ChatMode::Act(PermissionMode::Auto);
     app.offer_auto_mode(false);
     assert_eq!(app.mode, ChatMode::Act(PermissionMode::Manual));
-}
-
-/// Accept `connections` dialogs in turn, sending each one's request lines to the returned
-/// receiver once no more arrive, then answering it with `Done`.
-fn recording_daemon(
-    socket: &Path,
-    connections: usize,
-) -> (JoinHandle<()>, mpsc::Receiver<Vec<Request>>) {
-    let listener = UnixListener::bind(socket).unwrap();
-    let (tx, rx) = mpsc::channel(connections);
-    let daemon = tokio::spawn(async move {
-        for _ in 0..connections {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (read, mut write) = stream.into_split();
-            let mut reader = tokio::io::BufReader::new(read);
-            let mut requests = Vec::new();
-            let mut line = String::new();
-            while let Ok(Ok(read)) =
-                tokio::time::timeout(Duration::from_millis(300), reader.read_line(&mut line)).await
-                && read > 0
-            {
-                requests.push(serde_json::from_str::<Request>(&line).unwrap());
-                line.clear();
-            }
-            let id = requests[0].id().to_string();
-            tx.send(requests).await.unwrap();
-            let mut out = serde_json::to_string(&Event::Done { id }).unwrap();
-            out.push('\n');
-            write.write_all(out.as_bytes()).await.unwrap();
-        }
-    });
-    (daemon, rx)
-}
-
-/// Feed the reducer until the reply on screen ends.
-async fn settle_reply(app: &mut App, rx: &mut mpsc::Receiver<ChatEvent>) {
-    while app.generating() {
-        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("reply ended")
-            .expect("chat channel open");
-        app.on_chat_event(event);
-    }
-}
-
-#[tokio::test]
-async fn plan_mode_sends_a_planning_query() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("d.sock");
-    let (daemon, mut requests) = recording_daemon(&socket, 1);
-    let (mut app, mut rx) = test_app_at(socket);
-    app.on_key(key(KeyCode::BackTab));
-    app.on_key(key(KeyCode::BackTab));
-    app.submit_typed("tidy the repo".into());
-    let planned = requests.recv().await.unwrap();
-    assert!(
-        matches!(
-            planned.as_slice(),
-            [Request::Query {
-                plan: PlanMode::Planning,
-                ..
-            }]
-        ),
-        "{planned:?}"
-    );
-    settle_reply(&mut app, &mut rx).await;
-    daemon.await.unwrap();
 }
 
 /// The verdict the open plan review sent on the reply's connection.

@@ -1123,11 +1123,38 @@ impl assistd_tools::Tool for ActTool {
     }
 }
 
-/// Dispatch `req` under a confirm router whose client answers every prompt with `answer` and
-/// accepts every plan it is shown.
-async fn dispatch_accepting_plans(state: &Arc<AppState>, req: Request, answer: Approval) {
+/// How often `act` ran in a chat turn under `plan` whose model calls `steps` in order, its
+/// client answering every prompt with `answer` and accepting every plan it is shown.
+async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::Value)]) -> usize {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(ActTool {
+        runs: Arc::clone(&runs),
+    });
+    let steps = steps
+        .iter()
+        .map(|(name, arguments)| {
+            StepOutcome::ToolCalls(vec![ToolCall {
+                id: (*name).into(),
+                name: (*name).into(),
+                arguments: arguments.clone(),
+            }])
+        })
+        .collect();
+    let state = StateParts {
+        backend: ToolCallBackend::new("", "done", steps),
+        tools: Arc::new(tools),
+        ..StateParts::default()
+    }
+    .build();
+    let request = Request::Query {
+        id: "p".into(),
+        text: "tidy up".into(),
+        attachments: Vec::new(),
+        plan,
+    };
     let (tx, mut rx) = mpsc::channel::<Event>(16);
-    let router = ConfirmRouter::new(req.id().into(), tx.clone(), CONFIRM_TIMEOUT, None);
+    let router = ConfirmRouter::new(request.id().into(), tx.clone(), CONFIRM_TIMEOUT, None);
     let client = async {
         while let Some(event) = rx.recv().await {
             match event {
@@ -1145,87 +1172,39 @@ async fn dispatch_accepting_plans(state: &Arc<AppState>, req: Request, answer: A
             }
         }
     };
-    let dispatched =
-        CONFIRM_ROUTER.scope(Arc::clone(&router), state.clone().dispatch(req, None, tx));
+    let dispatched = CONFIRM_ROUTER.scope(Arc::clone(&router), state.dispatch(request, None, tx));
     let (res, ()) = tokio::join!(dispatched, client);
     res.unwrap();
+    runs.load(Ordering::SeqCst)
 }
 
 #[tokio::test]
 async fn a_planning_turn_acts_only_once_its_plan_is_accepted() {
-    let call = |name: &str, arguments: serde_json::Value| {
-        StepOutcome::ToolCalls(vec![ToolCall {
-            id: name.into(),
-            name: name.into(),
-            arguments,
-        }])
-    };
+    let steps = [
+        ("act", serde_json::json!({})),
+        ("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
+        ("act", serde_json::json!({})),
+    ];
     for (plan, expected_runs) in [(PlanMode::Planning, 1), (PlanMode::Offered, 2)] {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let mut tools = ToolRegistry::new();
-        tools.register(ActTool {
-            runs: Arc::clone(&runs),
-        });
-        let steps = vec![
-            call("act", serde_json::json!({})),
-            call("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
-            call("act", serde_json::json!({})),
-        ];
-        let state = StateParts {
-            backend: ToolCallBackend::new("", "done", steps),
-            tools: Arc::new(tools),
-            ..StateParts::default()
-        }
-        .build();
-        let request = Request::Query {
-            id: "p".into(),
-            text: "tidy up".into(),
-            attachments: Vec::new(),
-            plan,
-        };
-        dispatch_accepting_plans(&state, request, Approval::Deny).await;
-        assert_eq!(runs.load(Ordering::SeqCst), expected_runs, "{plan:?}");
+        let runs = act_runs(plan, Approval::Deny, &steps).await;
+        assert_eq!(runs, expected_runs, "{plan:?}");
     }
 }
 
 #[tokio::test]
 async fn the_models_ask_to_plan_holds_off_acting_only_once_the_user_agrees() {
-    let call = |name: &str, arguments: serde_json::Value| {
-        StepOutcome::ToolCalls(vec![ToolCall {
-            id: name.into(),
-            name: name.into(),
-            arguments,
-        }])
-    };
+    let steps = [
+        (
+            "enter_plan_mode",
+            serde_json::json!({"reason": "many files"}),
+        ),
+        ("act", serde_json::json!({})),
+        ("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
+        ("act", serde_json::json!({})),
+    ];
     for (answer, expected_runs) in [(Approval::Once, 1), (Approval::Deny, 2)] {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let mut tools = ToolRegistry::new();
-        tools.register(ActTool {
-            runs: Arc::clone(&runs),
-        });
-        let steps = vec![
-            call(
-                "enter_plan_mode",
-                serde_json::json!({"reason": "many files"}),
-            ),
-            call("act", serde_json::json!({})),
-            call("exit_plan_mode", serde_json::json!({"plan": "1. act"})),
-            call("act", serde_json::json!({})),
-        ];
-        let state = StateParts {
-            backend: ToolCallBackend::new("", "done", steps),
-            tools: Arc::new(tools),
-            ..StateParts::default()
-        }
-        .build();
-        let request = Request::Query {
-            id: "p".into(),
-            text: "tidy up".into(),
-            attachments: Vec::new(),
-            plan: PlanMode::Offered,
-        };
-        dispatch_accepting_plans(&state, request, answer).await;
-        assert_eq!(runs.load(Ordering::SeqCst), expected_runs, "{answer:?}");
+        let runs = act_runs(PlanMode::Offered, answer, &steps).await;
+        assert_eq!(runs, expected_runs, "{answer:?}");
     }
 }
 
