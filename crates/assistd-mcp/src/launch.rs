@@ -22,7 +22,8 @@ pub struct LaunchTarget {
 
 /// Start server `name` and add its tools to the target's catalog, retrying with backoff after
 /// each failed attempt, which `on_retry` hears about first. Errs only on a failure retrying
-/// cannot fix, such as a missing command or refused credentials; dropping the future cancels pending retries.
+/// cannot fix, such as a missing command or refused credentials; dropping the future cancels
+/// pending retries.
 pub async fn launch(
     name: String,
     connector: Connector,

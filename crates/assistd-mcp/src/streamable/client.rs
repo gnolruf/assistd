@@ -296,7 +296,7 @@ async fn success_reply(
             ))),
         };
     }
-    let body = read_body(response, MAX_MESSAGE_BYTES).await?;
+    let body = read_body(response).await?;
     match serde_json::from_slice::<ServerJsonRpcMessage>(&body) {
         Ok(reply) => Ok(StreamableHttpPostResponse::Json(reply, session_id)),
         Err(_) if !expects_reply => Ok(StreamableHttpPostResponse::Accepted),
@@ -374,8 +374,8 @@ fn oversized_reply(error: &SseError, request_id: &RequestId) -> Option<Sse> {
     })
 }
 
-async fn read_body(response: Response, max: usize) -> Result<Vec<u8>, HttpError> {
-    read_capped(response, max).await.map_err(|e| {
+async fn read_body(response: Response) -> Result<Vec<u8>, HttpError> {
+    read_capped(response, MAX_MESSAGE_BYTES).await.map_err(|e| {
         let e = match e {
             BodyError::Read(source) => BodyError::Read(source.without_url()),
             too_large @ BodyError::TooLarge { .. } => too_large,

@@ -757,8 +757,9 @@ daemon spawns in its own process group, with a scrubbed environment,
 and speaks MCP to over stdin/stdout. A `url` entry is a remote server
 reached over Streamable HTTP with the entry's static `headers` on every
 request; its `Mcp-Session-Id` lasts until the server answers 404, which
-ends the session like a dead child. Discovered tools are wrapped by `McpToolAdapter`, which
-implements `Tool` over the discovered schema, and added to the
+ends the session like a dead child. Discovered tools are wrapped by
+`McpToolAdapter`, which implements `Tool` over the discovered schema,
+and added to the
 `ToolCatalog` the LLM's tools come from, under the name
 `mcp__<server-name>__<tool-name>`. Servers start concurrently in the
 background; each one's tools are offered from the next turn after it
@@ -767,9 +768,9 @@ server that fails to start or to list its tools is retried with the same
 backoff as restarts, and is reported as unavailable, with its last error,
 in `GetReadiness` and `GetCapabilities` until an attempt succeeds. One
 whose command is missing or not executable, or that answers 401 or 403
-("needs authorization"), is not retried. Shutdown
-cancels pending retries. Each call asks the user first until
-that tool is "always allowed". Like every tool's, their text results are
+("needs authorization"), is not retried. Shutdown cancels pending
+retries. Each call asks the user first until that tool is "always
+allowed". Like every tool's, their text results are
 held to the `[tools.output]` cap by the registry, spilling overflow to
 `<registry-name>-<n>.txt`.
 
