@@ -138,16 +138,16 @@ impl PromptParking for TaskRunParking {
                 answer,
             },
         );
-        self.pause(PausedPrompt {
-            confirm_id: confirm_id.clone(),
-            tool: req.tool.clone(),
-            script: req.script.clone(),
-            matched_pattern: req.matched_pattern.clone(),
+        let prompt = PausedPrompt {
+            confirm_id,
+            tool: req.tool,
+            script: req.script,
+            matched_pattern: req.matched_pattern,
             host,
-            source: req.source.clone(),
-        })
-        .await;
-        self.announce(req, confirm_id).await;
+            source: req.source,
+        };
+        self.pause(prompt.clone()).await;
+        self.announce(prompt).await;
         let approval = tokio::select! {
             biased;
             () = lane.cancel.cancelled() => return Approval::Deny,
@@ -162,22 +162,14 @@ impl PromptParking for TaskRunParking {
 }
 
 impl TaskRunParking {
-    async fn announce(&self, req: ConfirmationRequest, confirm_id: String) {
+    async fn announce(&self, prompt: PausedPrompt) {
         info!(
             target: "assistd::tasks",
-            tool = %req.tool,
-            pattern = %req.matched_pattern,
+            tool = %prompt.tool,
+            pattern = %prompt.matched_pattern,
             "task run paused for input"
         );
-        let event = Event::ConfirmRequest {
-            id: self.lane.request_id.clone(),
-            confirm_id,
-            tool: req.tool,
-            script: req.script,
-            matched_pattern: req.matched_pattern,
-            always_allow: Vec::new(),
-            source: req.source,
-        };
+        let event = confirm_request(self.lane.request_id.clone(), prompt);
         let _ = self.lane.events.send(event).await;
     }
 
@@ -251,6 +243,20 @@ impl AppState {
         }
     }
 
+    /// The prompt of each paused task run, wrapped as the run's events reach subscribers.
+    pub(super) fn paused_prompt_events(&self) -> Vec<Event> {
+        self.runtime
+            .task_queue
+            .paused_runs()
+            .into_iter()
+            .map(|paused| Event::TaskRun {
+                id: paused.request_id.clone(),
+                run: paused.run,
+                event: Box::new(confirm_request(paused.request_id, paused.prompt)),
+            })
+            .collect()
+    }
+
     /// Add `allowed.host` to its task's allowed hosts, unless already there.
     async fn allow_task_host(&self, allowed: AllowedHost) -> Result<TaskRecord, DispatchError> {
         let _pass = self.runtime.task_scheduler.hold().await;
@@ -260,6 +266,19 @@ impl AppState {
         }
         record.spec.allowed_hosts.push(allowed.host);
         Ok(self.memory.tasks.save(Some(record.id), record.spec).await?)
+    }
+}
+
+/// The `ConfirmRequest` asking the user to answer `prompt` for the run `request_id` tags.
+fn confirm_request(request_id: String, prompt: PausedPrompt) -> Event {
+    Event::ConfirmRequest {
+        id: request_id,
+        confirm_id: prompt.confirm_id,
+        tool: prompt.tool,
+        script: prompt.script,
+        matched_pattern: prompt.matched_pattern,
+        always_allow: Vec::new(),
+        source: prompt.source,
     }
 }
 
