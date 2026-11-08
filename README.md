@@ -155,9 +155,9 @@ one is denied; use `chat` for those.
 assistd chat
 ```
 
-The TUI is a long-lived client onto the running daemon; it exits
-with a hint if no daemon is listening (pass `--wait` to wait for one
-instead). Only one chat may be open at a time, since every chat
+The TUI is a long-lived client onto the running daemon; while no
+daemon is listening its status line shows the daemon offline, and it
+connects once one starts. Only one chat may be open at a time, since every chat
 drives the daemon's single conversation.
 
 `/settings` in the chat, or `assistd settings` on its own, opens the

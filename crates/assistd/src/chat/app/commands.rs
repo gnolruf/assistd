@@ -44,11 +44,25 @@ impl SlashCommand {
             _ => None,
         }
     }
+
+    /// Whether the command talks to the daemon or relies on what it reported.
+    fn needs_daemon(&self) -> bool {
+        !matches!(self, Self::Exit | Self::Settings)
+    }
+}
+
+/// Whether the slash command `name` can run while the daemon is offline.
+pub(super) fn runs_offline(name: &str) -> bool {
+    SlashCommand::parse(name).is_some_and(|command| !command.needs_daemon())
 }
 
 impl App {
     pub(super) fn submit_typed(&mut self, text: String) {
         match SlashCommand::parse(&text) {
+            Some(command) if command.needs_daemon() && !self.daemon_reachable => {
+                let verb = text.split_whitespace().next().unwrap_or_default();
+                self.set_notice(&format!("{verb} needs the daemon, which is offline"));
+            }
             Some(command) => self.run_slash_command(command),
             None => self.submit_query(text),
         }

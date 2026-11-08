@@ -763,28 +763,34 @@ fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: ChatMode, theme: &T
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Voice capture, a model that is not active, staged attachments, tasks needing input and
-/// running, then a notice, the scroll position or the interrupt hint, left-aligned and gray
-/// but for tasks needing input.
+/// An unreachable daemon, voice capture, a model that is not active, staged attachments,
+/// tasks needing input and running, then a notice, the scroll position or the interrupt
+/// hint, left-aligned and gray but for warnings.
 fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let text_style = Style::default().fg(theme.status_text);
+    let warning_style = Style::default()
+        .fg(theme.warning)
+        .add_modifier(Modifier::BOLD);
+    let offline = (!app.daemon_reachable).then(|| ("daemon offline".to_string(), warning_style));
     let queue = app
         .task_queue()
         .map(queue_status::queue_segments)
         .unwrap_or_default();
     let queue = queue.into_iter().map(|segment| {
         let style = if segment.needs_input {
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD)
+            warning_style
         } else {
             text_style
         };
         (segment.text, style)
     });
-    let segments = status_segments(app)
+    let segments = offline
         .into_iter()
-        .map(|text| (text, text_style))
+        .chain(
+            status_segments(app)
+                .into_iter()
+                .map(|text| (text, text_style)),
+        )
         .chain(queue)
         .chain(status_hint(app).map(|text| (text, text_style)));
     let mut spans = Vec::new();

@@ -672,3 +672,30 @@ fn longest_common_prefix_stops_at_char_boundaries() {
     assert_eq!(longest_common_prefix(&["abc"]), "abc");
     assert_eq!(longest_common_prefix(&[]), "");
 }
+
+#[test]
+fn an_offline_daemon_limits_slash_commands_to_those_that_run_locally() {
+    let (mut app, _rx) = test_app();
+    app.on_chat_event(ChatEvent::DaemonUnreachable);
+    app.type_ahead = TypeAheadGuard::default();
+    app.on_key(typed('/'));
+    let offered: Vec<&str> = app
+        .slash_suggestions()
+        .iter()
+        .map(|(cmd, _)| *cmd)
+        .collect();
+    assert_eq!(offered, ["/exit", "/settings"]);
+
+    for c in "new".chars() {
+        app.on_key(typed(c));
+    }
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        app.in_flight_branch_op.is_none(),
+        "/new must not reach the daemon"
+    );
+    assert_eq!(
+        app.notice(),
+        Some("/new needs the daemon, which is offline")
+    );
+}

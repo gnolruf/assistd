@@ -2,7 +2,7 @@
 //! One chat may be open per user, since every chat drives the daemon's one session.
 
 use std::fs::{DirBuilder, File, Permissions, TryLockError};
-use std::io::{self, Write};
+use std::io;
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
-use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
+use assistd_ipc::{Event, EventKind, IpcClient, IpcClientError, Request, SubscribeFilter};
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream};
@@ -55,7 +55,6 @@ const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
 const SCENE_INTERVAL: Duration = Duration::from_millis(30);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
-const DAEMON_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const INSTANCE_LOCK_FILE: &str = "chat.lock";
 /// Owner-only modes for the log directory and the stderr log.
 const LOG_DIR_MODE: u32 = 0o700;
@@ -70,10 +69,6 @@ pub(crate) struct ChatArgs {
     /// Path to config file [default: ~/.config/assistd/config.toml]
     #[arg(long, short)]
     pub config: Option<PathBuf>,
-    /// Wait for the daemon's socket instead of exiting when no daemon is
-    /// listening yet (e.g. when launched at login beside the daemon)
-    #[arg(long)]
-    pub wait: bool,
 }
 
 struct TuiContext {
@@ -83,6 +78,7 @@ struct TuiContext {
     chat_rx: mpsc::Receiver<ChatEvent>,
     shutdown_rx: watch::Receiver<bool>,
     capabilities: StartupCapabilities,
+    daemon_reachable: bool,
     config_path: PathBuf,
     theme: Theme,
 }
@@ -197,15 +193,11 @@ impl Drop for StderrRedirect {
     }
 }
 
-/// Run the TUI against the running daemon. Fails before touching the
-/// terminal when no daemon is listening or another chat is open.
+/// Run the TUI against the daemon, showing it offline until its socket accepts.
+/// Fails before touching the terminal when another chat is open.
 pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let ipc = Arc::new(IpcClient::new());
-    if args.wait {
-        wait_for_daemon(&ipc).await?;
-    } else {
-        require_daemon(&ipc).await?;
-    }
+    let daemon_reachable = UnixStream::connect(ipc.socket_path()).await.is_ok();
     let _instance_lock = InstanceLock::acquire(ipc.socket_path())?;
 
     let _stderr_redirect = StderrRedirect::to_log()?;
@@ -238,6 +230,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         ipc.clone(),
         chat_tx.clone(),
         shutdown_tx.subscribe(),
+        !daemon_reachable,
     ));
 
     let (focus_tx, focus_rx) = watch::channel(true);
@@ -254,6 +247,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         chat_rx,
         shutdown_rx: shutdown_tx.subscribe(),
         capabilities,
+        daemon_reachable,
         config_path,
         theme: Theme::new(&config.chat.theme),
     })
@@ -264,37 +258,6 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     focus::report_closed(&ipc).await;
     info!("assistd chat stopped");
     run_result
-}
-
-/// Fails with start-up instructions when nothing is listening on the
-/// daemon socket.
-async fn require_daemon(ipc: &IpcClient) -> Result<()> {
-    if UnixStream::connect(ipc.socket_path()).await.is_ok() {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "no assistd daemon is listening at {}. Start it with `systemctl --user start assistd` \
-         or `assistd daemon`; if it is already starting, wait for the model to load (see \
-         `journalctl --user -u assistd`) and retry",
-        ipc.socket_path().display()
-    )
-}
-
-/// Poll the daemon socket until something accepts, noting once on stderr
-/// that the chat is waiting.
-async fn wait_for_daemon(ipc: &IpcClient) -> Result<()> {
-    if UnixStream::connect(ipc.socket_path()).await.is_ok() {
-        return Ok(());
-    }
-    writeln!(
-        io::stderr(),
-        "waiting for the assistd daemon at {} (Ctrl-C to give up)",
-        ipc.socket_path().display()
-    )?;
-    while UnixStream::connect(ipc.socket_path()).await.is_err() {
-        tokio::time::sleep(DAEMON_WAIT_POLL_INTERVAL).await;
-    }
-    Ok(())
 }
 
 /// The daemon's capabilities, with the configured model's basename as the display name when
@@ -326,6 +289,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         mut chat_rx,
         mut shutdown_rx,
         capabilities,
+        daemon_reachable,
         config_path,
         theme,
     } = ctx;
@@ -345,8 +309,11 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         config_path,
     )
     .with_theme(theme)
-    .with_mcp_unavailable(capabilities.mcp_unavailable);
-    app.spawn_resume_or_new();
+    .with_mcp_unavailable(capabilities.mcp_unavailable)
+    .with_daemon_reachable(daemon_reachable);
+    if daemon_reachable {
+        app.spawn_resume_or_new();
+    }
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
@@ -543,7 +510,23 @@ fn spawn_status_polling(
     })
 }
 
+/// Poll presence, voice and listen state, then report whether the daemon answered.
 async fn poll_status(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
+    let link = match poll_requests(ipc, chat_tx).await {
+        Ok(()) => ChatEvent::DaemonReachable,
+        Err(e) => {
+            tracing::debug!("status poll failed: {e}");
+            ChatEvent::DaemonUnreachable
+        }
+    };
+    let _ = chat_tx.send(link).await;
+}
+
+/// Fails on the first request the daemon does not accept.
+async fn poll_requests(
+    ipc: &IpcClient,
+    chat_tx: &mpsc::Sender<ChatEvent>,
+) -> Result<(), IpcClientError> {
     let requests = [
         Request::GetPresence {
             id: Uuid::new_v4().to_string(),
@@ -556,19 +539,17 @@ async fn poll_status(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
         },
     ];
     for req in requests {
-        poll_one(ipc, chat_tx, req).await;
+        poll_one(ipc, chat_tx, req).await?;
     }
+    Ok(())
 }
 
-async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Request) {
-    let kind = req.kind();
-    let mut stream = match ipc.one_shot(req).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!("status poll {kind} failed: {e}");
-            return;
-        }
-    };
+async fn poll_one(
+    ipc: &IpcClient,
+    chat_tx: &mpsc::Sender<ChatEvent>,
+    req: Request,
+) -> Result<(), IpcClientError> {
+    let mut stream = ipc.one_shot(req).await?;
     while let Ok(Some(ev)) = stream.next_event().await {
         if ev.is_terminal() {
             break;
@@ -580,18 +561,21 @@ async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Reque
             })
             .await;
     }
+    Ok(())
 }
 
 /// Follow the daemon's broadcast bus for session titles and for turns this
 /// chat did not start (push-to-talk, continuous listening, other clients).
-/// Reconnects on a fixed delay, reporting the loss and the reconnect to the app.
+/// Reconnects on a fixed delay, reporting the loss and the reconnect to the app;
+/// `start_lost` reports the first subscribe as a reconnect too.
 fn spawn_bus_subscription(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
     mut shutdown: watch::Receiver<bool>,
+    start_lost: bool,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut lost = false;
+        let mut lost = start_lost;
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,

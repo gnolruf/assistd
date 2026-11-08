@@ -56,7 +56,7 @@ bindsym $mod+Shift+w      exec assistd wake
 ## Chat scratchpad
 
 ```sway
-exec foot --app-id assistd-tui assistd chat --wait
+exec foot --app-id assistd-tui assistd chat
 
 for_window [app_id="assistd-tui"] floating enable, move scratchpad, \
            resize set 1200 800, move position center

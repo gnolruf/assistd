@@ -121,6 +121,10 @@ pub(super) enum ChatEvent {
     BusLost,
     /// The bus subscription is back after [`ChatEvent::BusLost`].
     BusRestored,
+    /// A status poll got its answers.
+    DaemonReachable,
+    /// A status poll could not reach the daemon.
+    DaemonUnreachable,
     AttachLoaded(Box<AttachLoadedPayload>),
     AttachFailed {
         path: String,
@@ -144,6 +148,8 @@ impl std::fmt::Debug for ChatEvent {
             ChatEvent::Bus(event) => f.debug_tuple("Bus").field(event).finish(),
             ChatEvent::BusLost => f.write_str("BusLost"),
             ChatEvent::BusRestored => f.write_str("BusRestored"),
+            ChatEvent::DaemonReachable => f.write_str("DaemonReachable"),
+            ChatEvent::DaemonUnreachable => f.write_str("DaemonUnreachable"),
             ChatEvent::AttachLoaded(p) => f
                 .debug_struct("AttachLoaded")
                 .field("name", &p.name)
@@ -268,6 +274,8 @@ pub(super) struct App {
     pub last_output_height: u16,
     /// `None` until the first poll response.
     pub presence_state: Option<PresenceState>,
+    /// Whether the last status poll or bus subscribe reached the daemon.
+    pub daemon_reachable: bool,
     pub vision_enabled: bool,
     pub confirmation: Option<ConfirmationPrompt>,
     /// The plan the active reply waits on the user to accept or send back.
@@ -536,6 +544,7 @@ impl App {
             notice: None,
             last_output_height: 10,
             presence_state: None,
+            daemon_reachable: true,
             vision_enabled,
             confirmation: None,
             plan_review: None,
@@ -574,6 +583,13 @@ impl App {
 
     pub(super) fn with_theme(self, theme: Theme) -> Self {
         Self { theme, ..self }
+    }
+
+    pub(super) fn with_daemon_reachable(self, daemon_reachable: bool) -> Self {
+        Self {
+            daemon_reachable,
+            ..self
+        }
     }
 
     /// Show each MCP server in `unavailable`, with why it is, under the banner.

@@ -39,8 +39,8 @@ guides have the config snippets.
   has the model loaded, `Drowsy` keeps `llama-server` running with
   the weights unloaded, and `Sleeping` stops it, freeing its VRAM.
   `sleep` never suspends the machine; `wake` blocks until `Active`.
-- **`chat --wait`** waits for the daemon's socket instead of exiting
-  because it isn't up yet. If the chat exits, rerun the same command.
+- **`chat`** opens even when the daemon isn't up yet, showing it
+  offline until its socket accepts. If the chat exits, rerun the same command.
 - **`listen-toggle`** needs `[voice.wakeword] enabled = true` and
   exits with an error otherwise; see [wake-word listening](../voice/wake-word.md). **`voice-toggle`** silences or
   resumes spoken replies, and **`voice-skip`** stops the current one;

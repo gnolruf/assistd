@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use assistd_ipc::{
     Event, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role, StartupComponent,
-    StatusKind, StatusSeverity, TurnStats,
+    StatusKind, StatusSeverity, TurnStats, VoiceCaptureState,
 };
 use assistd_tools::{ConfirmationRequest, Risk, Unattended};
 use assistd_utils::time::saturating_millis;
@@ -33,6 +33,8 @@ impl App {
             ChatEvent::Bus(event) => self.on_bus_event(event),
             ChatEvent::BusLost => self.on_bus_lost(),
             ChatEvent::BusRestored => self.on_bus_restored(),
+            ChatEvent::DaemonReachable => self.on_daemon_reachable(),
+            ChatEvent::DaemonUnreachable => self.on_daemon_unreachable(),
             ChatEvent::AttachLoaded(payload) => self.on_attach_loaded(*payload),
             ChatEvent::AttachFailed { path, message } => self.on_attach_failed(&path, &message),
         }
@@ -49,6 +51,7 @@ impl App {
     /// End the turn shown from the bus, whose `Done` can no longer arrive; a reply
     /// this chat's own query stream carries is left to that stream.
     fn on_bus_lost(&mut self) {
+        self.on_daemon_unreachable();
         self.queued_transcription = None;
         if self
             .active_reply
@@ -56,15 +59,31 @@ impl App {
             .is_some_and(|reply| reply.writer.is_none())
         {
             self.finish_reply();
-            self.set_notice("lost the daemon's event bus · reconnecting");
         }
     }
 
     /// Replay the daemon's transcript to cover what was missed while the bus was down.
     fn on_bus_restored(&mut self) {
+        self.on_daemon_reachable();
         if !self.generating() && self.in_flight_branch_op.is_none() {
             self.spawn_resume_or_new();
         }
+    }
+
+    /// Re-read the capabilities on reconnect, since the daemon may have restarted
+    /// with another model or none was known at startup.
+    fn on_daemon_reachable(&mut self) {
+        if !std::mem::replace(&mut self.daemon_reachable, true) {
+            self.spawn_capabilities_refresh();
+        }
+    }
+
+    /// Drop the indicator state the daemon last reported, which may no longer hold.
+    fn on_daemon_unreachable(&mut self) {
+        self.daemon_reachable = false;
+        self.presence_state = None;
+        self.listening = VoiceCaptureState::Idle;
+        self.wake_word_heard = false;
     }
 
     /// Route a bus event, drawing turns this chat did not start like its own replies.
