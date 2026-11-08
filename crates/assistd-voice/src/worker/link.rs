@@ -22,7 +22,6 @@ const HEARD_BACKLOG: usize = 16;
 struct Connection {
     outgoing: mpsc::UnboundedSender<ToWorker>,
     pending: HashMap<u64, oneshot::Sender<Outcome>>,
-    /// Fired once, when a call to this worker misses its deadline.
     unresponsive: Option<oneshot::Sender<()>>,
 }
 
