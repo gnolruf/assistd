@@ -122,8 +122,8 @@ impl InstanceLock {
 struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Enter raw mode and the alternate screen with modifier-aware key reports,
-    /// saving the window title, and install a panic hook that restores the
+    /// Enter raw mode and the alternate screen with modifier-aware key reports
+    /// and bracketed paste, saving the window title, and install a panic hook that restores the
     /// terminal before the previous hook runs.
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode().context("enable_raw_mode")?;
@@ -133,6 +133,7 @@ impl TerminalGuard {
             style::Print(PUSH_WINDOW_TITLE),
             event::EnableMouseCapture,
             event::EnableFocusChange,
+            event::EnableBracketedPaste,
             event::PushKeyboardEnhancementFlags(
                 event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
             )
@@ -153,6 +154,7 @@ impl TerminalGuard {
         execute!(
             io::stdout(),
             event::PopKeyboardEnhancementFlags,
+            event::DisableBracketedPaste,
             event::DisableFocusChange,
             event::DisableMouseCapture,
             style::Print(POP_WINDOW_TITLE),
@@ -419,6 +421,7 @@ fn apply_terminal_event(
             match ev {
                 TermEvent::Key(k) => app.on_key(k),
                 TermEvent::Mouse(m) => app.on_mouse(m),
+                TermEvent::Paste(text) => app.on_paste(&text),
                 _ => {}
             }
         }

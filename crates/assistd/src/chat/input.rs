@@ -1,5 +1,5 @@
 //! Input buffer with readline keybindings and history. Shift+Enter or
-//! Alt+Enter inserts a line break; Enter submits.
+//! Alt+Enter inserts a line break; Enter submits; a paste never submits.
 
 use std::collections::VecDeque;
 
@@ -58,6 +58,13 @@ impl InputLine {
     /// Cursor position in characters, not bytes, counting line breaks.
     pub(super) fn cursor_offset(&self) -> u16 {
         u16::try_from(self.buffer[..self.cursor].chars().count()).unwrap_or(u16::MAX)
+    }
+
+    /// Insert pasted text at the cursor, line breaks included.
+    pub(super) fn insert_paste(&mut self, text: &str) {
+        let text = normalize_line_breaks(text);
+        self.buffer.insert_str(self.cursor, &text);
+        self.cursor += text.len();
     }
 
     pub(super) fn on_key(&mut self, ev: KeyEvent) -> InputAction {
@@ -298,6 +305,20 @@ impl InputLine {
     }
 }
 
+/// Pasted text as key presses for single-line fields, with line breaks and
+/// other control characters typed as spaces so a paste cannot press Enter.
+pub(super) fn paste_as_keys(text: &str) -> Vec<KeyEvent> {
+    normalize_line_breaks(text)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+        .collect()
+}
+
+fn normalize_line_breaks(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyEventState;
@@ -404,6 +425,23 @@ mod tests {
             i.on_key(key(KeyCode::Enter)),
             InputAction::Submit("one\n\ntwo".to_string())
         );
+    }
+
+    #[test]
+    fn paste_keeps_line_breaks_without_submitting() {
+        let mut input = InputLine::new();
+        type_str(&mut input, "see: ");
+        input.insert_paste("line one\r\nline two\rline three\n");
+        assert_eq!(input.buffer(), "see: line one\nline two\nline three\n");
+        assert_eq!(
+            input.on_key(key(KeyCode::Enter)),
+            InputAction::Submit("see: line one\nline two\nline three\n".to_string())
+        );
+        let replayed: String = paste_as_keys("a\r\nb\tc")
+            .into_iter()
+            .filter_map(|ev| ev.code.as_char())
+            .collect();
+        assert_eq!(replayed, "a b c");
     }
 
     #[test]
