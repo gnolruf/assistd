@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use assistd_ipc::{ListenPhase, VoiceCaptureState};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::protocol::{FromWorker, Outcome, Request, Startup, ToWorker};
 use crate::error::VoiceWorkerError;
@@ -22,6 +22,7 @@ const HEARD_BACKLOG: usize = 16;
 struct Connection {
     outgoing: mpsc::UnboundedSender<ToWorker>,
     pending: HashMap<u64, oneshot::Sender<Outcome>>,
+    unresponsive: Option<oneshot::Sender<()>>,
 }
 
 /// A component's startup as the worker reported it.
@@ -61,12 +62,19 @@ impl Link {
         }
     }
 
-    /// Route calls to a newly spawned worker through `outgoing`.
-    pub(super) fn connect(&self, outgoing: mpsc::UnboundedSender<ToWorker>) {
+    /// Route calls to a newly spawned worker through `outgoing`; the returned
+    /// receiver resolves once that worker misses a call's deadline.
+    pub(super) fn connect(
+        &self,
+        outgoing: mpsc::UnboundedSender<ToWorker>,
+    ) -> oneshot::Receiver<()> {
+        let (unresponsive_tx, unresponsive_rx) = oneshot::channel();
         *self.connection.lock() = Some(Connection {
             outgoing,
             pending: HashMap::new(),
+            unresponsive: Some(unresponsive_tx),
         });
+        unresponsive_rx
     }
 
     /// The worker is gone: fail its pending calls and reset what it mirrored.
@@ -77,21 +85,55 @@ impl Link {
         self.phase.send_replace(ListenPhase::Off);
     }
 
-    /// Send `request` and wait for the worker's answer.
+    /// Send `request` and wait for the worker's answer. A worker that misses
+    /// the request's deadline fails it with [`VoiceWorkerError::Unresponsive`]
+    /// and is marked for the supervisor to terminate.
     pub(super) async fn call(&self, request: Request) -> Result<Outcome, VoiceWorkerError> {
-        let reply = {
-            let mut connection = self.connection.lock();
-            let connection = connection.as_mut().ok_or(VoiceWorkerError::NotRunning)?;
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let (reply_tx, reply_rx) = oneshot::channel();
-            connection.pending.insert(id, reply_tx);
-            connection
-                .outgoing
-                .send(ToWorker::Call { id, request })
-                .map_err(|_| VoiceWorkerError::Exited)?;
-            reply_rx
+        let deadline = request.deadline();
+        let (id, mut reply) = self.send_call(request)?;
+        let Some(deadline) = deadline else {
+            return reply.await.map_err(|_| VoiceWorkerError::Exited);
         };
+        if let Ok(answered) = tokio::time::timeout(deadline, &mut reply).await {
+            return answered.map_err(|_| VoiceWorkerError::Exited);
+        }
+        if self.abandon(id) {
+            return Err(VoiceWorkerError::Unresponsive { deadline });
+        }
         reply.await.map_err(|_| VoiceWorkerError::Exited)
+    }
+
+    fn send_call(
+        &self,
+        request: Request,
+    ) -> Result<(u64, oneshot::Receiver<Outcome>), VoiceWorkerError> {
+        let mut connection = self.connection.lock();
+        let connection = connection.as_mut().ok_or(VoiceWorkerError::NotRunning)?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        connection.pending.insert(id, reply_tx);
+        connection
+            .outgoing
+            .send(ToWorker::Call { id, request })
+            .map_err(|_| VoiceWorkerError::Exited)?;
+        Ok((id, reply_rx))
+    }
+
+    /// Give up on call `id` and flag its worker unresponsive; false when the
+    /// call was already answered or its worker already gone.
+    fn abandon(&self, id: u64) -> bool {
+        let mut connection = self.connection.lock();
+        let Some(connection) = connection.as_mut() else {
+            return false;
+        };
+        if connection.pending.remove(&id).is_none() {
+            return false;
+        }
+        warn!(target: "assistd::voice::worker", "voice worker missed a call's deadline");
+        if let Some(unresponsive) = connection.unresponsive.take() {
+            let _ = unresponsive.send(());
+        }
+        true
     }
 
     /// Send a message that has no reply; dropped while no worker runs.

@@ -1,6 +1,8 @@
 //! Line-delimited JSON spoken between the daemon and its voice worker over
 //! the worker's stdin and stdout.
 
+use std::time::Duration;
+
 use assistd_config::VoiceConfig;
 use assistd_ipc::{ListenPhase, VoiceCaptureState};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -8,6 +10,15 @@ use thiserror::Error;
 
 use crate::error::VoiceWorkerError;
 use crate::listen::{Heard, ListenError, WakeTest};
+
+/// How long the worker has to open, close or stop the mic.
+const CAPTURE_DEADLINE: Duration = Duration::from_secs(15);
+
+/// How long the worker has to transcribe a push-to-talk recording.
+const TRANSCRIPTION_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long the worker has to synthesize and queue one sentence.
+const SYNTHESIS_DEADLINE: Duration = Duration::from_secs(60);
 
 /// A line from the other side that is not a message this build knows.
 #[derive(Debug, Error)]
@@ -44,6 +55,20 @@ pub(super) enum ToWorker {
 pub(super) enum Request {
     Capture(CaptureRequest),
     Speech(SpeechRequest),
+}
+
+impl Request {
+    /// How long the worker may take to answer; `None` for requests that last
+    /// as long as the user or the queued audio does.
+    pub(super) fn deadline(&self) -> Option<Duration> {
+        match self {
+            Self::Capture(CaptureRequest::WakeTestStart)
+            | Self::Speech(SpeechRequest::WaitIdle) => None,
+            Self::Capture(CaptureRequest::PttStop) => Some(TRANSCRIPTION_DEADLINE),
+            Self::Capture(_) | Self::Speech(SpeechRequest::Cancel) => Some(CAPTURE_DEADLINE),
+            Self::Speech(SpeechRequest::Speak { .. }) => Some(SYNTHESIS_DEADLINE),
+        }
+    }
 }
 
 /// A request for the mic: push-to-talk, listening, or a wake-word test.

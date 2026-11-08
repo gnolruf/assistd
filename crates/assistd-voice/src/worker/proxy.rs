@@ -35,12 +35,15 @@ impl WorkerListener {
         }
     }
 
-    /// Stop listening; with no worker running there is nothing to stop.
+    /// Stop listening; with no worker running, or one being terminated, there is
+    /// nothing to stop.
     async fn stop_with(&self, request: CaptureRequest) -> Result<(), ListenError> {
         self.0.listen_wanted.store(false, Ordering::SeqCst);
         match self.call(request).await {
             Err(ListenError::VoiceWorker(
-                VoiceWorkerError::NotRunning | VoiceWorkerError::Exited,
+                VoiceWorkerError::NotRunning
+                | VoiceWorkerError::Exited
+                | VoiceWorkerError::Unresponsive { .. },
             )) => Ok(()),
             stopped => stopped,
         }

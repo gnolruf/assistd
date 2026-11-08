@@ -1,6 +1,8 @@
 //! Typed errors for the [`VoiceInput`](crate::VoiceInput) and
 //! [`VoiceOutput`](crate::VoiceOutput) traits and for calls into the voice worker.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// Errors surfaced by [`VoiceInput`](crate::VoiceInput) implementations.
@@ -53,6 +55,9 @@ pub enum VoiceWorkerError {
     /// The worker exited before it answered.
     #[error("the voice worker exited")]
     Exited,
+    /// The worker missed the call's deadline and is being restarted.
+    #[error("the voice worker did not answer within {deadline:?}; restarting it")]
+    Unresponsive { deadline: Duration },
     /// The worker answered with this failure.
     #[error("{0}")]
     Failed(String),
