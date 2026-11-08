@@ -45,13 +45,14 @@ impl DescribeSettings for ToolsConfig {
 pub struct ToolsScratchConfig {
     /// Bound writable into the sandbox, and writable by `write` without
     /// asking. Created owner-only on daemon startup. Must be absolute or
-    /// start with `~/`. Defaults to `$XDG_RUNTIME_DIR/assistd/scratch`, else
+    /// start with `~/`, and must not be `/` or hold `$HOME` or assistd's config
+    /// or data directory. Defaults to `$XDG_RUNTIME_DIR/assistd/scratch`, else
     /// under the user cache dir.
     #[serde(deserialize_with = "crate::home_path::deserialize")]
     pub dir: PathBuf,
     /// Days an entry in `dir` is kept after it last changed; older ones,
-    /// and directories that leaves empty, are removed on daemon startup.
-    /// 0 empties the directory at every startup.
+    /// and directories that leaves empty, are removed on daemon startup when
+    /// assistd created `dir`. 0 empties the directory at every startup.
     pub retention_days: u32,
 }
 
@@ -93,7 +94,8 @@ pub struct ToolsOutputConfig {
     /// `<tool>-<n>.txt` for any other tool); made owner-only on daemon
     /// startup, when earlier spill files are removed and nothing else is.
     /// Each new spill deletes the oldest ones beyond the newest 64 files
-    /// or 128 MiB. Must be absolute or start with `~/`. Defaults to
+    /// or 128 MiB. Must be absolute or start with `~/`, and must not be `/`
+    /// or hold `$HOME` or assistd's config or data directory. Defaults to
     /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
     #[serde(deserialize_with = "crate::home_path::deserialize")]
     pub overflow_dir: PathBuf,

@@ -6,6 +6,7 @@ use tempfile::tempdir;
 use assistd_ipc::PermissionMode;
 
 use super::*;
+use crate::command::CommandRegistry;
 use crate::commands::test_support::{RecordingGate, router_in};
 use crate::policy::{
     AlwaysAllowGate, CONFIRM_ROUTER, DenyAllGate, GuardRoots, IpcConfirmationGate,
@@ -255,6 +256,47 @@ async fn overwrites_and_truncates_existing_file() {
     let out = write_under(dir.path(), &[&path.to_string_lossy(), "new"], None).await;
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(std::fs::read(&path).unwrap(), b"new");
+}
+
+#[tokio::test]
+async fn globs_stay_literal_and_a_missing_content_never_truncates() {
+    let dir = tempdir().unwrap();
+    let dir_path = dir.path().display();
+    for name in ["a.md", "b.md"] {
+        std::fs::write(dir.path().join(name), b"keep").unwrap();
+    }
+    let mut registry = CommandRegistry::new();
+    registry.register(WriteCommand::new(
+        cfg_from(&[dir.path()]),
+        Arc::new(AlwaysAllowGate),
+        SandboxInfo::none(),
+    ));
+    let run = |line: String| {
+        let registry = &registry;
+        async move {
+            crate::chain::execute(&crate::chain::parse_chain(&line).unwrap(), registry, None).await
+        }
+    };
+
+    let out = run(format!("write {dir_path}/notes.txt use *.md here")).await;
+    assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
+    assert_eq!(
+        std::fs::read(dir.path().join("notes.txt")).unwrap(),
+        b"use *.md here"
+    );
+
+    let out = run(format!("write {dir_path}/*.md hello")).await;
+    assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
+    assert_eq!(std::fs::read(dir.path().join("*.md")).unwrap(), b"hello");
+    let out = run(format!("write {dir_path}/a.md")).await;
+    assert_ne!(out.exit_code, 0);
+    for name in ["a.md", "b.md"] {
+        assert_eq!(
+            std::fs::read(dir.path().join(name)).unwrap(),
+            b"keep",
+            "{name}"
+        );
+    }
 }
 
 fn assert_not_regular_file_refusal(out: &CommandOutput, target: &str) {

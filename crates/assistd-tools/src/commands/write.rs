@@ -15,8 +15,8 @@ use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Action, Analysis, Approval, Class, Confirmation, ConfirmationGate, ConfirmationRequest, Effect,
-    PathGuards, Review, Risk, SandboxInfo, Unattended, guarded_review, on_blocking_pool,
-    split_at_existing,
+    PathGuards, Review, Risk, SandboxInfo, Unattended, admits_edit, guarded_review,
+    on_blocking_pool, split_at_existing,
 };
 
 /// Leading characters of the content shown when asking to confirm a write.
@@ -76,16 +76,12 @@ impl WritePolicyCfg {
         if resolved.is_symlink() {
             return Err(PathResolveError::Symlink);
         }
-        let mut covering = self
-            .prefixes()
-            .filter_map(|prefix| resolved.strip_prefix(prefix).ok())
-            .peekable();
-        if covering.peek().is_none() {
-            Err(PathResolveError::NotAllowlisted)
-        } else if covering.any(|below| !has_hidden_component(below)) {
+        if self.prefixes().any(|prefix| admits_edit(prefix, &resolved)) {
             Ok(resolved)
-        } else {
+        } else if self.prefixes().any(|prefix| resolved.starts_with(prefix)) {
             Err(PathResolveError::Hidden)
+        } else {
+            Err(PathResolveError::NotAllowlisted)
         }
     }
 }
@@ -214,16 +210,19 @@ impl Command for WriteCommand {
         )
     }
 
+    /// The path expands its own `~`, and content is written as given, so a glob in either
+    /// never turns into other files' names.
+    fn expands_args(&self) -> bool {
+        false
+    }
+
     async fn run(&self, input: CommandInput) -> CommandOutput {
-        if input.args.is_empty() {
-            return CommandOutput::usage(self.help());
-        }
-        let raw_path = input.args[0].clone();
-        let content: Vec<u8> = if input.args.len() > 1 {
-            input.args[1..].join(" ").into_bytes()
-        } else {
-            input.stdin.unwrap_or_default()
+        let content: Vec<u8> = match (input.args.split_first(), input.stdin) {
+            (Some((_, words @ [_, ..])), _) => words.join(" ").into_bytes(),
+            (Some(_), Some(stdin)) => stdin,
+            (None, _) | (Some(_), None) => return CommandOutput::usage(self.help()),
         };
+        let raw_path = input.args[0].clone();
 
         let write_target = match self.resolve(raw_path.clone()).await {
             Ok(path) => path,
@@ -435,11 +434,6 @@ fn expand_tilde(raw: &str, home: Option<&str>) -> Result<PathBuf, PathResolveErr
     }
     let home = home.ok_or(PathResolveError::HomeNotSet)?;
     Ok(assistd_utils::path::expand_tilde(raw, Path::new(home)))
-}
-
-fn has_hidden_component(path: &Path) -> bool {
-    path.components()
-        .any(|component| component.as_os_str().as_encoded_bytes().starts_with(b"."))
 }
 
 fn hidden_from_bash_note(raw_path: &str, dir: &Path, sharing_hint: &str) -> String {

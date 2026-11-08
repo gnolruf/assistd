@@ -109,6 +109,37 @@ fn relative_writable_paths_are_rejected() {
 }
 
 #[test]
+fn tool_dirs_assistd_prunes_must_not_hold_home_or_its_config() {
+    let home = dirs::home_dir().expect("a home directory");
+    let config = dirs::config_dir().expect("a config directory");
+    let parse = |key: &str, dir: &str| -> Result<(), String> {
+        let table = if key == "dir" { "scratch" } else { "output" };
+        let cfg: Config = toml::from_str(&format!("[tools.{table}]\n{key} = \"{dir}\"\n"))
+            .expect("config must parse");
+        cfg.validate().map_err(|err| err.to_string())
+    };
+    for key in ["dir", "overflow_dir"] {
+        for dir in [
+            "/".to_string(),
+            "~".to_string(),
+            "~/".to_string(),
+            home.parent()
+                .expect("home has a parent")
+                .display()
+                .to_string(),
+            config.display().to_string(),
+        ] {
+            let err = parse(key, &dir).expect_err(&format!("{key} = {dir:?} must not validate"));
+            assert!(
+                err.contains("a directory of its own"),
+                "{key} = {dir:?}: {err}"
+            );
+        }
+        parse(key, "~/.cache/assistd/tools").expect("a dedicated directory is valid");
+    }
+}
+
+#[test]
 fn home_relative_and_absolute_writable_paths_validate() {
     let cfg: Config =
         toml::from_str("[tools.write]\nwritable_paths = [\"~\", \"~/notes\", \"/tmp\"]\n")

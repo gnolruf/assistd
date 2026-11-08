@@ -38,6 +38,7 @@ mod wakeword;
 mod wire;
 
 pub(super) use agents::AgentPanel;
+pub(super) use modal::TypeAheadGuard;
 pub(super) use plan_mode::{ChatMode, PlanChoice, PlanReview};
 use wakeword::WakeWordStream;
 pub(super) use wakeword::{
@@ -263,6 +264,8 @@ pub(super) struct App {
     pub confirmation: Option<ConfirmationPrompt>,
     /// The plan the active reply waits on the user to accept or send back.
     pub plan_review: Option<PlanReview>,
+    /// Keeps keys typed for the input line from answering a prompt that just opened.
+    pub type_ahead: TypeAheadGuard,
     pub listening: VoiceCaptureState,
     pub voice_output_enabled: bool,
     /// The wake phrase was heard and its command has not arrived yet.
@@ -528,6 +531,7 @@ impl App {
             vision_enabled,
             confirmation: None,
             plan_review: None,
+            type_ahead: TypeAheadGuard::default(),
             listening: VoiceCaptureState::Idle,
             voice_output_enabled: false,
             wake_word_heard: false,

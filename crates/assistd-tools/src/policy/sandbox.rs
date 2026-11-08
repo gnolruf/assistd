@@ -313,10 +313,22 @@ impl SandboxInfo {
                 home: host_home.map(PathBuf::from),
                 config_home: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
                 data_home: std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-                cwd: std::env::current_dir().ok(),
+                cwd: self.working_dir(),
                 ..roots
             },
         })
+    }
+
+    /// The directory host-profile commands start in, as the command built for them names it.
+    /// Blocks on the filesystem.
+    fn working_dir(&self) -> Option<PathBuf> {
+        match self.mode {
+            ResolvedSandboxMode::None => std::env::current_dir().ok(),
+            ResolvedSandboxMode::Bwrap { .. } => {
+                let cmd = self.build_command("true", Vec::<String>::new()).ok()?;
+                self.mounts_of(&cmd)?.working_dir
+            }
+        }
     }
 
     /// The recovery clause of a note about a private directory: where a
@@ -445,6 +457,11 @@ impl SandboxInfo {
         let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         cmd.args(protection_flags(&self.protected, &writable));
         cmd.args(self.extra_args.iter().map(OsStr::new));
+        let mounts = Mounts::of(&cmd.as_std().get_args().collect::<Vec<_>>());
+        let home_dir = home.as_ref().map(|home| Path::new(&home.dir));
+        if let Some(dir) = host_working_dir(std::env::current_dir().ok(), &mounts, home_dir) {
+            cmd.arg("--chdir").arg(dir);
+        }
         run_limited(&mut cmd, prlimit, program, args);
         cmd
     }
@@ -552,6 +569,8 @@ struct Mounts {
     private: Vec<PathBuf>,
     /// Host binds no later tmpfs covers.
     shared: Vec<PathBuf>,
+    /// The directory the command starts in, when the flags name one.
+    working_dir: Option<PathBuf>,
 }
 
 impl Mounts {
@@ -563,6 +582,10 @@ impl Mounts {
             rest = match (flag.to_str(), tail) {
                 (Some("--tmpfs"), [dir, tail @ ..]) => {
                     mounts.mount_tmpfs(Path::new(dir));
+                    tail
+                }
+                (Some("--chdir"), [dir, tail @ ..]) => {
+                    mounts.working_dir = Some(PathBuf::from(dir));
                     tail
                 }
                 (Some("--remount-ro"), [dir, tail @ ..]) => {
@@ -868,6 +891,14 @@ fn protection_flags(protected: &Protected, writable: &[PathBuf]) -> Vec<PathBuf>
     dirs.chain(sockets).collect()
 }
 
+/// Where a host-profile command starts: the daemon's working directory `cwd` when `mounts`
+/// show it as on the host, else `home`, so a relative path names the same file inside as the
+/// path guards resolve it to outside.
+fn host_working_dir(cwd: Option<PathBuf>, mounts: &Mounts, home: Option<&Path>) -> Option<PathBuf> {
+    cwd.filter(|cwd| cwd.is_dir() && mounts.private_dir_of(cwd).is_none())
+        .or_else(|| home.map(Path::to_path_buf))
+}
+
 /// Whether `dir` is `real_home`, whose visible files the profile binds
 /// writable, or lies under one of its visible entries.
 pub(crate) fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool {
@@ -1156,7 +1187,8 @@ mod tests {
             .into_iter()
             .chain(RESOURCE_LIMITS)
             .chain(["--"]);
-        let tail: Vec<String> = ["--share-net", "--"]
+        let cwd = std::env::current_dir().expect("cwd");
+        let tail: Vec<String> = ["--share-net", "--chdir", &cwd.to_string_lossy(), "--"]
             .into_iter()
             .chain(limits)
             .chain(["make", "-j4"])
@@ -1215,8 +1247,29 @@ mod tests {
             Mounts {
                 private: vec![PathBuf::from("/srv")],
                 shared: Vec::new(),
+                working_dir: None,
             }
         );
+    }
+
+    #[test]
+    fn a_working_directory_the_sandbox_hides_is_replaced_by_home() {
+        let mounts = mounts_of(&["--ro-bind", "/", "/", "--tmpfs", "/tmp"]);
+        let hidden = tempfile::tempdir_in("/tmp").expect("tempdir");
+        let visible = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let home = Path::new("/home/someone");
+        for (cwd, expected) in [
+            (Some(visible.clone()), visible.as_path()),
+            (Some(hidden.path().to_path_buf()), home),
+            (Some(visible.join("no-such-dir")), home),
+            (None, home),
+        ] {
+            assert_eq!(
+                host_working_dir(cwd.clone(), &mounts, Some(home)).as_deref(),
+                Some(expected),
+                "{cwd:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -427,6 +427,7 @@ fn edits_record_their_targets_as_written() {
                     "dest/b",
                     "/tmp/copy",
                     "/tmp/copy/src",
+                    "/etc/hosts",
                     "hosts",
                 ]),
                 deletes: vec![delete("a", true), delete("b", true)],
@@ -517,4 +518,20 @@ async fn approvals_vet_only_the_runs_they_cover() {
     assert!(matches!(class("cargo build > out"), Class::Edit { .. }));
     assert!(matches!(class("cargo test"), Class::Unvetted { .. }));
     assert_eq!(offered("cargo test", &approvals), ["cargo test …"]);
+
+    for script in [
+        "RUSTC_WRAPPER=sh cargo build",
+        "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sh; cargo build",
+        "env RUSTC_WRAPPER=sh cargo build",
+        "declare -x RUSTC_WRAPPER=sh; cargo build",
+        "set -a; RUSTC_WRAPPER=sh; cargo build",
+    ] {
+        assert!(
+            matches!(class(script), Class::Unvetted { .. }),
+            "{script:?}"
+        );
+        assert!(offered(script, &approvals).is_empty(), "{script:?}");
+    }
+    assert_eq!(class("LC_ALL=C TZ=UTC cargo build"), Class::ReadOnly);
+    assert_eq!(class("for f in a b; do cargo build; done"), Class::ReadOnly);
 }

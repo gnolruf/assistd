@@ -167,6 +167,8 @@ async fn a_redirect_to_another_origin_is_refused() {
 struct OAuthMock {
     bearers_seen: Arc<Mutex<Vec<String>>>,
     refreshes: Arc<AtomicUsize>,
+    /// The authorization endpoint advertised in place of the mock's own.
+    authorize_endpoint: Option<String>,
 }
 
 impl OAuthMock {
@@ -178,7 +180,10 @@ impl OAuthMock {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let metadata = json!({
             "issuer": origin,
-            "authorization_endpoint": format!("{origin}/authorize"),
+            "authorization_endpoint": self
+                .authorize_endpoint
+                .clone()
+                .unwrap_or_else(|| format!("{origin}/authorize")),
             "token_endpoint": format!("{origin}/token"),
             "response_types_supported": ["code"],
             "code_challenge_methods_supported": ["S256"],
@@ -363,6 +368,25 @@ async fn a_token_is_not_sent_to_a_server_with_another_url_or_client_id() {
     }
     assert!(mock.bearers_seen.lock().is_empty());
     assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_login_refuses_an_authorization_endpoint_a_browser_must_not_open() {
+    for endpoint in [
+        "file:///home/user/Downloads/x.desktop",
+        "steam://run/1",
+        "http://example.com/authorize",
+    ] {
+        let mock = OAuthMock {
+            authorize_endpoint: Some(endpoint.into()),
+            ..OAuthMock::default()
+        };
+        let (url, _server) = mock.serve().await;
+        let dir = tempfile::tempdir().unwrap();
+        let oauth = oauth_config(CLIENT_ID, &dir.path().join("mcp-tokens.json"));
+        let refused = begin_login("remote", &url, &oauth, Duration::from_secs(10)).await;
+        assert!(refused.is_err(), "{endpoint}: login began");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

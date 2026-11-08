@@ -37,8 +37,8 @@ pub use confirm::{
 pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
 pub use file_scope::{ConfinedRoot, FileScope};
 pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
-pub(crate) use path_class::split_at_existing;
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
+pub(crate) use path_class::{admits_edit, split_at_existing};
 pub use review::{Action, Analysis, Class, Confirmation, Delete, Effect, analyze, classify};
 pub(crate) use sandbox::{ConfinedSpawner, InputBind, is_within_visible_home_entry};
 pub use sandbox::{

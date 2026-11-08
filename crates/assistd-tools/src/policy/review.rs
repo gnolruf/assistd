@@ -1,10 +1,12 @@
 //! Command review: the classifier, the shell-word helpers it shares, and why a script needs the
 //! user's confirmation.
 
+use std::path::Path;
 use std::{fmt, mem};
 
 use super::allowlist::ProgramApproval;
 use super::confirm::Risk;
+use super::path_class::canonical_existing;
 use super::shell::{self, Script, Word};
 
 mod classify;
@@ -255,9 +257,9 @@ fn is_subcommand(text: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// A literal redirection target that is a standard stream, `/dev/null`, or
-/// a path under `/tmp` or `scratch` with no `..` a symlink could lead out
-/// through.
+/// A literal redirection target that is a standard stream, `/dev/null`, a path under `/tmp`
+/// with no `..` a symlink could lead out through, or one that also stays under the canonical
+/// `scratch` once the symlinks already there are followed. Blocks on the filesystem.
 fn is_harmless_target(target: &Word, scratch: Option<&str>) -> bool {
     let path = target.text.as_str();
     !target.dynamic
@@ -266,7 +268,14 @@ fn is_harmless_target(target: &Word, scratch: Option<&str>) -> bool {
                 .strip_prefix("/dev/fd/")
                 .is_some_and(|fd| !fd.is_empty() && fd.bytes().all(|b| b.is_ascii_digit()))
             || stays_under(path, "/tmp")
-            || scratch.is_some_and(|scratch| stays_under(path, scratch)))
+            || scratch.is_some_and(|scratch| {
+                stays_under(path, scratch) && resolves_under(path, Path::new(scratch))
+            }))
+}
+
+/// Whether `path` still lands strictly below `dir` with the symlinks on disk followed.
+fn resolves_under(path: &str, dir: &Path) -> bool {
+    canonical_existing(Path::new(path)).is_some_and(|real| real != dir && real.starts_with(dir))
 }
 
 fn stays_under(path: &str, dir: &str) -> bool {

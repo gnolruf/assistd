@@ -1,6 +1,8 @@
 //! Plan mode: Shift+Tab or the model's ask puts the chat in it, and the plan the model hands
 //! over is accepted under a permission mode or sent back with what to change.
 
+use std::time::Instant;
+
 use assistd_ipc::{PermissionMode, PlanVerdict, Request};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
@@ -113,6 +115,7 @@ impl App {
         self.output.append_assistant(plan);
         self.output.finish_assistant();
         self.plan_review = Some(PlanReview::new(review_id, self.auto_mode_offered));
+        self.type_ahead.arm(Instant::now());
     }
 
     /// Arrows move the selection, Enter or a row's number answers, typing writes what to

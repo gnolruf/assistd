@@ -327,6 +327,7 @@ fn app_with_prompt(
         writer: Some(writer_tx),
     });
     open_prompt_offering(&mut app, always_allow);
+    app.type_ahead = TypeAheadGuard::default();
     (app, rx, writer_rx)
 }
 
@@ -387,6 +388,37 @@ async fn prompt_answers_match_the_numbered_choices_on_screen() {
             "{always_allow:?} {keys:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn keys_typed_as_a_prompt_opens_go_to_the_input_line_instead_of_answering() {
+    let (mut app, _rx) = test_app();
+    let (writer_tx, mut writer_rx) = mpsc::channel(4);
+    app.active_reply = Some(ActiveReply {
+        id: "r".into(),
+        writer: Some(writer_tx),
+    });
+    open_prompt_offering(&mut app, Vec::new());
+    for ev in [typed('s'), typed('1'), key(KeyCode::Enter), typed('2')] {
+        app.on_key(ev);
+    }
+    assert!(app.confirmation.is_some(), "type-ahead answered the prompt");
+    assert!(writer_rx.try_recv().is_err());
+    assert_eq!(app.input.buffer(), "s12");
+
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.confirmation.is_none(), "Esc always declines");
+    assert_eq!(confirm_answer(&mut writer_rx).await, (false, false));
+
+    app.on_chat_event(reply(Event::PlanReview {
+        id: "r".into(),
+        review_id: "v".into(),
+        plan: "1. tidy".into(),
+    }));
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(typed('1'));
+    assert!(app.plan_review.is_some(), "type-ahead accepted the plan");
+    assert!(writer_rx.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -471,6 +503,7 @@ async fn a_plan_is_sent_back_with_typed_feedback_or_accepted_into_its_mode() {
             review_id: "v".into(),
             plan: "1. tidy".into(),
         }));
+        app.type_ahead = TypeAheadGuard::default();
     };
     review(&mut app);
     assert_eq!(app.mode, ChatMode::Plan);

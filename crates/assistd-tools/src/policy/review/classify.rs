@@ -9,8 +9,8 @@ use super::placeholder::{self, Placeholder};
 use super::{
     Candidate, FEEDS_ARGUMENTS, FIND_EXEC_FLAGS, KEYWORDS, MAX_NESTED_SCRIPTS, SAFE_BUILTINS,
     WRAPPERS, basename, candidates, changed_sensitive_variable, changed_variables, command_start,
-    env_attached_option, evaluated, exec_flags, is_command_line, is_harmless_target, is_stdin_path,
-    is_subcommand, program, short_options, wrapper_operands,
+    env_attached_option, evaluated, exec_flags, is_assignment, is_command_line, is_harmless_target,
+    is_stdin_path, is_subcommand, program, short_options, wrapper_operands,
 };
 use crate::policy::allowlist::{Allowlist, ApprovalScope, ProgramApproval, Verdict};
 use crate::policy::shell::{self, Script, SimpleCommand, Word};
@@ -30,9 +30,24 @@ const DYNAMIC_CHARS: &[char] = &['$', '`', '*', '?', '[', '{', '('];
 /// The spellings of `$HOME` a path may start with.
 const HOME_VARIABLES: &[&str] = &["${HOME}", "$HOME"];
 
+/// Variables a script may export without leaving it unvetted, besides `LC_*`: the locale,
+/// time zone, terminal and colour settings, which run nothing.
+const HARMLESS_EXPORTS: &[&str] = &["LANG", "LANGUAGE", "NO_COLOR", "TERM", "TZ"];
+
+/// Builtins that export the names they declare when given `-x`.
+const EXPORTING_DECLARATIONS: &[&str] = &["declare", "local", "readonly", "typeset"];
+
 /// Characters that start an expansion whose value may name any path, `..` and absolute paths
 /// included; a glob only matches existing entries below its directory.
 const ANY_PATH_CHARS: &[char] = &['$', '`', '{'];
+
+/// The options that make an edit program link its sources instead of copying them: the
+/// program, its short and long spelling, and the kind of link.
+const LINK_OPTIONS: &[(&str, char, &str, Linking)] = &[
+    ("cp", 'l', "link", Linking::Hard),
+    ("cp", 's', "symbolic-link", Linking::Symbolic),
+    ("ln", 's', "symbolic", Linking::Symbolic),
+];
 
 /// Programs that only read, each with the options that make it write a file or run a program.
 const READ_ONLY_PROGRAMS: &[(&str, &[Flag])] = &[
@@ -377,6 +392,15 @@ enum Targets {
 struct EditArgs {
     operands: Vec<String>,
     recursive: bool,
+    linking: Linking,
+}
+
+/// Whether an edit program links its sources, so a later write through the link lands on them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Linking {
+    Copies,
+    Hard,
+    Symbolic,
 }
 
 /// How the program being classified is run.
@@ -462,6 +486,11 @@ impl Classifier<'_> {
         {
             return Err(format!(
                 "the script changes {variable}, so what its programs do cannot be vetted"
+            ));
+        }
+        if let Some(variable) = exported_variable(&script) {
+            return Err(format!(
+                "the script exports {variable}, which the programs it runs may act on"
             ));
         }
         if let Some(why) = evaluated::in_script(&script) {
@@ -800,7 +829,9 @@ impl Classifier<'_> {
         let EditArgs {
             operands,
             recursive,
+            linking,
         } = edit_args(edit, args, self.home_changed)?;
+        let source_action = source_action(edit, &operands, linking)?;
         self.runs_edit_program = true;
         match (edit.targets, operands.split_last()) {
             (_, None) => {}
@@ -810,7 +841,7 @@ impl Classifier<'_> {
                 self.each(Action::ChangeAttributes, &operands[1..], recursive);
             }
             (Targets::WritesLast, Some((last, sources))) if !sources.is_empty() => {
-                self.each(Action::Read, sources, recursive);
+                self.each(source_action, sources, recursive);
                 self.copied_into(last, sources, recursive);
             }
             (Targets::Moves, Some((last, sources))) if !sources.is_empty() => {
@@ -818,11 +849,11 @@ impl Classifier<'_> {
                 self.copied_into(last, sources, false);
             }
             (Targets::Links, Some((last, []))) => {
-                self.target(Action::Read, last.clone(), false);
+                self.target(Action::Write, last.clone(), false);
                 self.target(Action::Write, basename(last).to_string(), false);
             }
             (Targets::Links, Some((last, sources))) => {
-                self.each(Action::Read, sources, false);
+                self.each(Action::Write, sources, false);
                 self.copied_into(last, sources, false);
             }
             (Targets::WritesLast | Targets::Moves, Some(_)) => {}
@@ -850,7 +881,7 @@ impl Classifier<'_> {
 
     /// Record an effect on `path`, joined to the directory a `cd` entered when relative.
     fn target(&mut self, action: Action, path: String, recursive: bool) {
-        let relative = !path.starts_with(['/', '~']);
+        let relative = is_relative(&path);
         let moved = !matches!(self.directory, Directory::Start);
         let unknown = matches!(self.directory, Directory::Unknown);
         if relative && (unknown || (moved && action != Action::Read)) {
@@ -1039,6 +1070,7 @@ fn edit_args(edit: &EditProgram, args: &[Word], home_changed: bool) -> Result<Ed
     let mut parsed = EditArgs {
         operands: Vec::new(),
         recursive: false,
+        linking: Linking::Copies,
     };
     let mut options = true;
     let mut words = args.iter();
@@ -1051,16 +1083,63 @@ fn edit_args(edit: &EditProgram, args: &[Word], home_changed: bool) -> Result<Ed
                 return Err(format!("`{} {text}` is not a vetted option", edit.name));
             }
             parsed.recursive |= long == "recursive";
+            parsed.linking = parsed
+                .linking
+                .max(link_option(edit, |_, spelled| spelled == long));
         } else if let Some(cluster) = short_options(text).filter(|_| options && !arg.dynamic) {
             if edit_flags(edit, cluster)? {
                 words.next();
             }
             parsed.recursive |= cluster.contains(['r', 'R']);
+            parsed.linking = parsed
+                .linking
+                .max(link_option(edit, |flag, _| cluster.contains(flag)));
         } else {
             parsed.operands.push(edit_operand(edit, arg, home_changed)?);
         }
     }
     Ok(parsed)
+}
+
+/// What `edit` does to its sources: a link's target is written through the link later, so it
+/// counts as written. A relative symbolic target cannot be vetted, as it resolves from the
+/// link's directory rather than the working directory.
+fn source_action(
+    edit: &EditProgram,
+    operands: &[String],
+    linking: Linking,
+) -> Result<Action, String> {
+    let links = matches!(edit.targets, Targets::Links);
+    if !links && linking == Linking::Copies {
+        return Ok(Action::Read);
+    }
+    let targets = match operands {
+        [only] if links => std::slice::from_ref(only),
+        [sources @ .., _] => sources,
+        [] => &[],
+    };
+    if linking == Linking::Symbolic && targets.iter().any(|target| is_relative(target)) {
+        return Err(format!(
+            "`{}` links to a relative target, which resolves from the link's directory",
+            edit.name
+        ));
+    }
+    Ok(Action::Write)
+}
+
+/// The kind of link the option of `edit` that `given` matches makes, or [`Linking::Copies`].
+fn link_option(edit: &EditProgram, given: impl Fn(char, &str) -> bool) -> Linking {
+    LINK_OPTIONS
+        .iter()
+        .filter(|(program, flag, long, _)| *program == edit.name && given(*flag, long))
+        .map(|&(.., linking)| linking)
+        .max()
+        .unwrap_or(Linking::Copies)
+}
+
+/// Whether `path` resolves against a working directory.
+fn is_relative(path: &str) -> bool {
+    !path.starts_with(['/', '~'])
 }
 
 /// `arg` as a path, or the directory a glob for its every entry lists.
@@ -1190,6 +1269,72 @@ fn changed_git_variable(script: &Script) -> Option<&str> {
         .flat_map(|cmd| &cmd.words)
         .flat_map(|word| changed_variables(&word.text))
         .find(|name| name.starts_with("GIT_"))
+}
+
+/// The first variable the script passes to the programs it runs, other than the
+/// [`HARMLESS_EXPORTS`] and `LC_*`: a program may read one as a command to run (`EDITOR`,
+/// `PAGER`, `CARGO_TARGET_*_RUNNER`), which no list or approval vets.
+fn exported_variable(script: &Script) -> Option<&str> {
+    script
+        .commands
+        .iter()
+        .flat_map(|cmd| exported_names(&cmd.words))
+        .find(|name| !(HARMLESS_EXPORTS.contains(name) || name.starts_with("LC_")))
+}
+
+/// The names one command exports: assignments before a program or after `env`, the operands
+/// of `export` or a `-x` declaration, and every variable after `set -a`.
+fn exported_names(words: &[Word]) -> Vec<&str> {
+    let Some(start) = command_start(words) else {
+        return Vec::new();
+    };
+    let operands = &words[start + 1..];
+    let has_option = |letter: char| {
+        operands
+            .iter()
+            .any(|word| short_options(&word.text).is_some_and(|cluster| cluster.contains(letter)))
+    };
+    let runs_program = !SAFE_BUILTINS.contains(&words[start].text.as_str());
+    let mut names: Vec<&str> = words[..start]
+        .iter()
+        .filter(|word| runs_program && is_assignment(&word.text))
+        .map(exported_name)
+        .collect();
+    let declared = match words[start].text.as_str() {
+        "export" => true,
+        command => EXPORTING_DECLARATIONS.contains(&command) && has_option('x'),
+    };
+    if declared {
+        names.extend(
+            operands
+                .iter()
+                .filter(|word| !word.text.starts_with('-'))
+                .map(exported_name),
+        );
+    }
+    if words[start].text == "set"
+        && (has_option('a') || operands.iter().any(|word| word.text == "allexport"))
+    {
+        names.push("all its variables");
+    }
+    if let Some(env) = words.iter().position(|word| word.text == "env") {
+        names.extend(
+            words[env + 1..]
+                .iter()
+                .filter(|word| is_assignment(&word.text))
+                .map(exported_name),
+        );
+    }
+    names
+}
+
+/// The variable name `word` assigns or declares.
+fn exported_name(word: &Word) -> &str {
+    let name = word
+        .text
+        .split_once('=')
+        .map_or(word.text.as_str(), |(name, _)| name);
+    name.strip_suffix('+').unwrap_or(name)
 }
 
 /// Whether the script may change variable `name`.

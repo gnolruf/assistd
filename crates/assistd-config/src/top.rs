@@ -10,7 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use assistd_utils::hf::HfFileId;
-use assistd_utils::path::tilde_remainder;
+use assistd_utils::path::{lexical_clean, tilde_remainder};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatConfig;
@@ -476,12 +476,14 @@ fn validate_sleep(errors: &mut Vec<String>, sleep: &SleepConfig) {
 }
 
 fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
-    require_absolute_dir(errors, "tools.scratch.dir", Some(&tools.scratch.dir));
-    require_absolute_dir(
-        errors,
-        "tools.output.overflow_dir",
-        Some(&tools.output.overflow_dir),
-    );
+    let owned_by_others = owned_by_others();
+    for (key, dir) in [
+        ("tools.scratch.dir", &tools.scratch.dir),
+        ("tools.output.overflow_dir", &tools.output.overflow_dir),
+    ] {
+        require_absolute_dir(errors, key, Some(dir));
+        require_dedicated_dir(errors, key, dir, &owned_by_others);
+    }
     if tools.write.writable_paths.is_empty() {
         errors.push(
             "tools.write.writable_paths must not be empty (the write command would be unusable)"
@@ -576,6 +578,27 @@ fn require_absolute_dir(errors: &mut Vec<String>, key: &str, dir: Option<&Path>)
     if dir.is_some_and(|dir| !dir.is_absolute()) {
         errors.push(format!("{key} must be an absolute path or start with `~/`"));
     }
+}
+
+/// Refuse `dir` when it is `/`, or holds `$HOME` or assistd's config or data: the daemon
+/// restricts it to its owner and removes old files from it at startup.
+fn require_dedicated_dir(errors: &mut Vec<String>, key: &str, dir: &Path, owned: &[PathBuf]) {
+    let dir = lexical_clean(dir);
+    if dir.parent().is_none() || owned.iter().any(|owned| owned.starts_with(&dir)) {
+        errors.push(format!(
+            "{key} must be a directory of its own, not {} (assistd removes old files from it)",
+            dir.display()
+        ));
+    }
+}
+
+/// `$HOME` and assistd's config and data directories, which no tool directory may hold.
+fn owned_by_others() -> Vec<PathBuf> {
+    let assistd_dirs = [dirs::config_dir(), dirs::data_dir()]
+        .into_iter()
+        .flatten()
+        .map(|dir| dir.join("assistd"));
+    dirs::home_dir().into_iter().chain(assistd_dirs).collect()
 }
 
 fn require_loopback(errors: &mut Vec<String>, key: &str, host: IpAddr) {

@@ -8,11 +8,11 @@ use oauth2::TokenResponse;
 use reqwest::redirect;
 use rmcp::transport::auth::CredentialStore;
 use serde_json::Value;
-use url::{Host, Url, form_urlencoded};
+use url::{Url, form_urlencoded};
 
 use assistd_utils::http::remote_client_builder;
 
-use super::{OAuthConfig, auth_failure, discover};
+use super::{OAuthConfig, auth_failure, discover, is_web_endpoint};
 use crate::error::McpError;
 
 /// What signing out did to the token at the authorization server.
@@ -86,16 +86,10 @@ async fn revocation_endpoint(url: &Url) -> Result<Option<Url>, String> {
         return Ok(None);
     };
     let endpoint = Url::parse(endpoint).map_err(|e| format!("invalid revocation endpoint: {e}"))?;
-    let loopback = match endpoint.host() {
-        Some(Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(Host::Domain(domain)) => domain == "localhost",
-        None => false,
-    };
-    match endpoint.scheme() {
-        "https" => Ok(Some(endpoint)),
-        "http" if loopback => Ok(Some(endpoint)),
-        _ => Err("the revocation endpoint is not https".into()),
+    if is_web_endpoint(&endpoint) {
+        Ok(Some(endpoint))
+    } else {
+        Err("the revocation endpoint is not https".into())
     }
 }
 

@@ -207,6 +207,11 @@ impl Command for WmCommand {
         "<focus|move|open|active|resize|list|workspaces|outputs|layout> [args...]".to_string()
     }
 
+    /// URLs and window criteria never name files, and `open` expands its own `~`.
+    fn expands_args(&self) -> bool {
+        false
+    }
+
     async fn run(&self, input: CommandInput) -> CommandOutput {
         if input.args.is_empty() {
             return CommandOutput::usage(self.help());
