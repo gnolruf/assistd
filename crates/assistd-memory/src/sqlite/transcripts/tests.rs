@@ -28,10 +28,7 @@ fn contents(history: &[HistoryRow]) -> Vec<(PersistedRole, &str)> {
 async fn a_tool_turn_round_trips_with_its_stats_on_its_last_row() {
     let (store, _temp) = fresh_store().await;
     let session = SessionId::new();
-    let branch = store
-        .begin_session_with_main_branch(session, 1)
-        .await
-        .unwrap();
+    let branch = store.begin_session_with_main_branch(session).await.unwrap();
     let turn = store
         .begin_turn(branch, PersistedMessage::user("list files"))
         .await
@@ -115,10 +112,7 @@ async fn a_tool_turn_round_trips_with_its_stats_on_its_last_row() {
 async fn fork_creates_independent_branch_sharing_history() {
     let (store, _temp) = fresh_store().await;
     let session = SessionId::new();
-    let main = store
-        .begin_session_with_main_branch(session, 1)
-        .await
-        .unwrap();
+    let main = store.begin_session_with_main_branch(session).await.unwrap();
     let turn = store
         .begin_turn(main, PersistedMessage::user("hello"))
         .await
@@ -167,12 +161,9 @@ async fn fork_creates_independent_branch_sharing_history() {
 async fn branches_list_by_newest_message_not_session_start() {
     let (store, _temp) = fresh_store().await;
     let older = SessionId::new();
-    let older_main = store
-        .begin_session_with_main_branch(older, 1)
-        .await
-        .unwrap();
+    let older_main = store.begin_session_with_main_branch(older).await.unwrap();
     let newer_main = store
-        .begin_session_with_main_branch(SessionId::new(), 1)
+        .begin_session_with_main_branch(SessionId::new())
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
@@ -191,10 +182,7 @@ async fn branches_list_by_newest_message_not_session_start() {
 async fn append_to_one_branch_does_not_show_on_the_other() {
     let (store, _temp) = fresh_store().await;
     let session = SessionId::new();
-    let main = store
-        .begin_session_with_main_branch(session, 1)
-        .await
-        .unwrap();
+    let main = store.begin_session_with_main_branch(session).await.unwrap();
     store
         .begin_turn(main, PersistedMessage::user("q"))
         .await
@@ -225,10 +213,7 @@ async fn append_to_one_branch_does_not_show_on_the_other() {
 async fn undo_removes_only_the_last_turn() {
     let (store, _temp) = fresh_store().await;
     let session = SessionId::new();
-    let main = store
-        .begin_session_with_main_branch(session, 1)
-        .await
-        .unwrap();
+    let main = store.begin_session_with_main_branch(session).await.unwrap();
     let t1 = store
         .begin_turn(main, PersistedMessage::user("first"))
         .await
@@ -295,10 +280,7 @@ async fn undo_removes_only_the_last_turn() {
 async fn summary_follows_kept_turns_forks_and_undo() {
     let (store, _temp) = fresh_store().await;
     let session = SessionId::new();
-    let branch = store
-        .begin_session_with_main_branch(session, 1)
-        .await
-        .unwrap();
+    let branch = store.begin_session_with_main_branch(session).await.unwrap();
     for question in ["one", "two", "three"] {
         let turn = store
             .begin_turn(branch, PersistedMessage::user(question))
@@ -390,9 +372,9 @@ async fn summary_follows_kept_turns_forks_and_undo() {
 async fn resolve_branch_prefers_given_session_or_qualified_prefix() {
     let (store, _temp) = fresh_store().await;
     let s1 = SessionId::new();
-    let b1 = store.begin_session_with_main_branch(s1, 1).await.unwrap();
+    let b1 = store.begin_session_with_main_branch(s1).await.unwrap();
     let s2 = SessionId::new();
-    let b2 = store.begin_session_with_main_branch(s2, 2).await.unwrap();
+    let b2 = store.begin_session_with_main_branch(s2).await.unwrap();
     let bare = store.resolve_branch("main", Some(s1)).await.unwrap();
     assert_eq!(bare, Some((s1, b1)));
     let prefix = s2.to_string()[..8].to_ascii_uppercase();
@@ -409,7 +391,7 @@ async fn resolve_branch_prefers_given_session_or_qualified_prefix() {
 async fn find_resumable_session_returns_unended() {
     let (store, _temp) = fresh_store().await;
     let s = SessionId::new();
-    let branch = store.begin_session_with_main_branch(s, 99).await.unwrap();
+    let branch = store.begin_session_with_main_branch(s).await.unwrap();
     let cand = store
         .find_resumable_session()
         .await
@@ -417,7 +399,6 @@ async fn find_resumable_session_returns_unended() {
         .expect("unended session is resumable");
     assert_eq!(cand.session_id, s);
     assert_eq!(cand.current_branch_id, branch);
-    assert_eq!(cand.daemon_pid, 99);
 
     store.end_session(s).await.unwrap();
     assert_eq!(store.find_resumable_session().await.unwrap(), None);
@@ -488,7 +469,7 @@ fn relay_plan() -> Vec<PersistedRelayStep> {
 async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
     let (store, _temp) = fresh_store().await;
     let branch = store
-        .begin_session_with_main_branch(SessionId::new(), 1)
+        .begin_session_with_main_branch(SessionId::new())
         .await
         .unwrap();
     let turn = store

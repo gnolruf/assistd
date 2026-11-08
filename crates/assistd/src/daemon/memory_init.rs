@@ -1,5 +1,5 @@
-//! Memory subsystem wiring for the daemon: open SQLite, then resume a
-//! session whose daemon has died or start an unsaved one.
+//! Memory subsystem wiring for the daemon: open SQLite, then resume the
+//! latest unended session or start an unsaved one.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -12,8 +12,6 @@ use assistd_memory::{
     NoTranscriptStore, SessionId, SqliteHandle, SqliteMemoryStore, SqliteTaskStore,
     SqliteTranscriptStore, TaskStore, TranscriptStore,
 };
-use rustix::io::Errno;
-use rustix::process::Pid;
 use tracing::info;
 
 pub(super) struct MemorySubsystem {
@@ -99,28 +97,22 @@ pub(super) async fn init() -> MemorySubsystem {
     }
 }
 
-/// Resume the most recent session whose daemon is dead, else start an
-/// unsaved session that is inserted with its first message.
+/// Resume the most recent unended session, else start an unsaved session
+/// that is inserted with its first message.
 async fn resume_or_start_unsaved_session(
     transcripts: &SqliteTranscriptStore,
     db_path: &Path,
 ) -> (SessionId, Option<BranchId>, HistoryReplay) {
     match transcripts.find_resumable_session().await {
-        Ok(Some(cand)) if !pid_is_alive(cand.daemon_pid) => {
+        Ok(Some(cand)) => {
             info!(
                 "memory: resuming prior session {} (branch={})",
                 cand.session_id, cand.current_branch_id
             );
-            if let Err(e) = transcripts
-                .claim_session(cand.session_id, std::process::id())
-                .await
-            {
-                tracing::warn!("memory: claim_session failed for resume ({e:#})");
-            }
             let history = load_resumed_replay(transcripts, cand.current_branch_id).await;
             (cand.session_id, Some(cand.current_branch_id), history)
         }
-        Ok(_) => {
+        Ok(None) => {
             info!(
                 "memory: SQLite ready at {} (new session)",
                 db_path.display()
@@ -151,15 +143,4 @@ async fn load_resumed_replay(
 /// `$XDG_DATA_HOME/assistd/memory.db`; `None` when there is no data directory.
 fn db_path() -> Option<PathBuf> {
     dirs::data_dir().map(|data| data.join("assistd").join("memory.db"))
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
-        return false;
-    };
-    match rustix::process::test_kill_process(pid) {
-        Ok(()) => true,
-        Err(Errno::PERM) => true,
-        Err(_) => false,
-    }
 }

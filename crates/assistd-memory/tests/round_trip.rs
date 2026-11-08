@@ -18,10 +18,7 @@ async fn turn_persists_across_store_reopen() {
         let mems = SqliteMemoryStore::new(handle.clone());
 
         let session = SessionId::new();
-        let main = convs
-            .begin_session_with_main_branch(session, std::process::id())
-            .await
-            .unwrap();
+        let main = convs.begin_session_with_main_branch(session).await.unwrap();
         branch = main;
 
         let turn = convs

@@ -98,21 +98,6 @@ impl TranscriptStore for SqliteTranscriptStore {
         session_updated(updated, session)
     }
 
-    async fn claim_session(&self, session: SessionId, daemon_pid: u32) -> Result<()> {
-        let updated = self
-            .handle
-            .writer()
-            .call(move |c| {
-                c.execute(
-                    "UPDATE sessions SET daemon_pid = ?1 WHERE uuid = ?2",
-                    rusqlite::params![daemon_pid, session],
-                )
-            })
-            .await
-            .map_err(MemoryError::sqlite("claim_session"))?;
-        session_updated(updated, session)
-    }
-
     async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn> {
         let row = MessageRow::new(prompt, now_millis());
         self.handle
@@ -134,20 +119,15 @@ impl TranscriptStore for SqliteTranscriptStore {
             ))
     }
 
-    async fn begin_session_with_main_branch(
-        &self,
-        session: SessionId,
-        daemon_pid: u32,
-    ) -> Result<BranchId> {
+    async fn begin_session_with_main_branch(&self, session: SessionId) -> Result<BranchId> {
         let started = now_millis();
         self.handle
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
                 let session_rowid: i64 = tx.query_row(
-                    "INSERT INTO sessions (uuid, started_at, daemon_pid) VALUES (?1, ?2, ?3)
-                     RETURNING id",
-                    rusqlite::params![session, started, daemon_pid],
+                    "INSERT INTO sessions (uuid, started_at) VALUES (?1, ?2) RETURNING id",
+                    rusqlite::params![session, started],
                     |r| r.get(0),
                 )?;
                 let branch_id: BranchId = tx.query_row(
@@ -512,7 +492,7 @@ impl TranscriptStore for SqliteTranscriptStore {
             .reader()
             .call(|c| {
                 c.query_row(
-                    "SELECT uuid, current_branch_id, daemon_pid, started_at
+                    "SELECT uuid, current_branch_id, started_at
                      FROM sessions s
                      WHERE ended_at IS NULL AND current_branch_id IS NOT NULL
                        AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.session_uuid = s.uuid)
@@ -522,8 +502,7 @@ impl TranscriptStore for SqliteTranscriptStore {
                         Ok(ResumeCandidate {
                             session_id: r.get(0)?,
                             current_branch_id: r.get(1)?,
-                            daemon_pid: r.get(2)?,
-                            started_at: timestamp_at(r, 3)?,
+                            started_at: timestamp_at(r, 2)?,
                         })
                     },
                 )

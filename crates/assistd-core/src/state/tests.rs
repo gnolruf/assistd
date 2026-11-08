@@ -1543,10 +1543,7 @@ async fn branch_state_with(
     let handle = SqliteHandle::open(&path).await.unwrap();
     let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let session = SessionId::new();
-    let branch = conv
-        .begin_session_with_main_branch(session, 123)
-        .await
-        .unwrap();
+    let branch = conv.begin_session_with_main_branch(session).await.unwrap();
     let ctx = Arc::new(SessionContext::new(session, Some(branch)));
     let config = Config::default();
     let subsystems = Subsystems::new(
@@ -1643,7 +1640,7 @@ async fn fork_creates_branch_and_switches() {
 async fn branches_lists_active_session_first() {
     let (state, conv, _session, main_branch) = fresh_branch_state().await;
     conv.fork_and_switch(main_branch, "alt").await.unwrap();
-    conv.begin_session_with_main_branch(SessionId::new(), 456)
+    conv.begin_session_with_main_branch(SessionId::new())
         .await
         .unwrap();
 
@@ -2162,10 +2159,7 @@ async fn task_state_with(
     let conv: Arc<dyn TranscriptStore> = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let tasks: Arc<dyn TaskStore> = Arc::new(SqliteTaskStore::new(handle));
     let session = SessionId::new();
-    let branch = conv
-        .begin_session_with_main_branch(session, 123)
-        .await
-        .unwrap();
+    let branch = conv.begin_session_with_main_branch(session).await.unwrap();
     append_turn(&conv, branch, "hi", "hello").await;
     let spec = TaskSpec {
         name: "digest".to_string().try_into().unwrap(),

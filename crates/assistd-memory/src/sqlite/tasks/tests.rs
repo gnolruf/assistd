@@ -55,14 +55,14 @@ async fn a_run_session_is_listed_with_its_outcome_and_never_resumed() {
     let task = tasks.save(None, sample_spec("digest", "a")).await.unwrap();
     let user_session = SessionId::new();
     transcripts
-        .begin_session_with_main_branch(user_session, 1)
+        .begin_session_with_main_branch(user_session)
         .await
         .unwrap();
 
     let run = tasks.queue_run(task.id, TaskTrigger::Manual).await.unwrap();
     let run_session = SessionId::new();
     transcripts
-        .begin_session_with_main_branch(run_session, 1)
+        .begin_session_with_main_branch(run_session)
         .await
         .unwrap();
     tasks.start_run(run, run_session).await.unwrap();

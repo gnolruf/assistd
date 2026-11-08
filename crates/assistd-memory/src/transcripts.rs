@@ -256,7 +256,6 @@ pub struct UndoOutcome {
 pub struct ResumeCandidate {
     pub session_id: SessionId,
     pub current_branch_id: BranchId,
-    pub daemon_pid: u32,
     pub started_at: DateTime<Utc>,
 }
 
@@ -264,21 +263,12 @@ pub struct ResumeCandidate {
 #[async_trait]
 pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// Atomically insert `session` and create its `main` branch.
-    async fn begin_session_with_main_branch(
-        &self,
-        session: SessionId,
-        daemon_pid: u32,
-    ) -> Result<BranchId>;
+    async fn begin_session_with_main_branch(&self, session: SessionId) -> Result<BranchId>;
 
     /// Mark `session` as ended by stamping `ended_at`. Errors with
     /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) when
     /// `session` was never saved.
     async fn end_session(&self, session: SessionId) -> Result<()>;
-
-    /// Record `daemon_pid` as the daemon now owning `session`. Errors with
-    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) when
-    /// `session` was never saved.
-    async fn claim_session(&self, session: SessionId, daemon_pid: u32) -> Result<()>;
 
     /// Open a new turn in `branch`'s session and append `prompt` to `branch` as its
     /// first message, as [`append_message_to_branch`](Self::append_message_to_branch)
@@ -367,8 +357,7 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// no other branch references them.
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome>;
 
-    /// The newest unended session with a current branch that holds no task run; its
-    /// `daemon_pid` is not checked.
+    /// The newest unended session with a current branch that holds no task run.
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>>;
 
     /// Current `sessions.title`, or `None` when none has been set.
@@ -387,19 +376,11 @@ pub struct NoTranscriptStore;
 
 #[async_trait]
 impl TranscriptStore for NoTranscriptStore {
-    async fn begin_session_with_main_branch(
-        &self,
-        _session: SessionId,
-        _daemon_pid: u32,
-    ) -> Result<BranchId> {
+    async fn begin_session_with_main_branch(&self, _session: SessionId) -> Result<BranchId> {
         Ok(BranchId(0))
     }
 
     async fn end_session(&self, _session: SessionId) -> Result<()> {
-        Ok(())
-    }
-
-    async fn claim_session(&self, _session: SessionId, _daemon_pid: u32) -> Result<()> {
         Ok(())
     }
 

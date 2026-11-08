@@ -26,10 +26,7 @@ impl Transcript {
     async fn new(handle: &SqliteHandle) -> Self {
         let store = SqliteTranscriptStore::new(handle.clone());
         let session = SessionId::new();
-        let branch = store
-            .begin_session_with_main_branch(session, 0)
-            .await
-            .unwrap();
+        let branch = store.begin_session_with_main_branch(session).await.unwrap();
         Self {
             store,
             session,

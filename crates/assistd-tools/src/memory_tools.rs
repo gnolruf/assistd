@@ -689,7 +689,7 @@ mod tests {
             let transcripts = Arc::new(SqliteTranscriptStore::new(handle.clone()));
             let session = SessionId::new();
             let branch = transcripts
-                .begin_session_with_main_branch(session, 0)
+                .begin_session_with_main_branch(session)
                 .await
                 .unwrap();
             Self {
