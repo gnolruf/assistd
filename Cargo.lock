@@ -437,6 +437,7 @@ dependencies = [
  "clap",
  "cpal",
  "dirs",
+ "futures-util",
  "hound",
  "num-traits",
  "nvml-wrapper",

@@ -1,6 +1,8 @@
 //! Small text formatting helpers and the classes of invisible characters that
 //! can disguise or reorder text.
 
+use std::any::Any;
+
 /// `bytes` as `B`, `KB`, `MB` or `GB`, with one decimal from megabytes up.
 pub fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -14,6 +16,17 @@ pub fn human_size(bytes: u64) -> String {
         format!("{}KB", bytes / KB)
     } else {
         format!("{bytes}B")
+    }
+}
+
+/// The message a panic carried, or a placeholder when its payload is not a string.
+pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
     }
 }
 

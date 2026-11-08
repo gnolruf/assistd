@@ -20,8 +20,9 @@ use assistd_llm::{
     ToolResultPayload,
 };
 use assistd_tools::{Attachment, CONFIRM_ROUTER, ToolOutput, ToolRegistry};
+use assistd_utils::text::panic_message;
 
-use crate::recovery::{Component, StatusSeverity, panic_message};
+use crate::recovery::{Component, StatusSeverity};
 use crate::recovery_event;
 
 /// How long a turn waits for an LLM restart: the supervisor's worst-case
