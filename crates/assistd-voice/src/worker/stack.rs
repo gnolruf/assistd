@@ -8,6 +8,7 @@ use assistd_config::{SynthesisConfig, VoiceConfig};
 use tracing::{info, warn};
 
 use crate::listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
+use crate::mic::capture::validate;
 use crate::{
     BusyProbe, CpuFallbackFactory, MicVoiceInput, QueuedTranscriber, SherpaTranscriber,
     SherpaVoiceOutput, SileroVad, Transcriber, VoiceCapture, VoiceOutput, VoiceOutputController,
@@ -70,6 +71,7 @@ pub(super) async fn start_capture(
         info!("voice: disabled in config (voice.enabled = false)");
         return Err("disabled in config (voice.enabled = false)".into());
     }
+    check_mic_device(config.mic_device.clone()).await?;
     info!("voice: building mic input ({})", config.transcription.model);
     let primary = SherpaTranscriber::load(&config.transcription)
         .await
@@ -87,6 +89,17 @@ pub(super) async fn start_capture(
     Ok(VoiceCapture {
         input: Arc::new(mic),
         listener,
+    })
+}
+
+/// Whether the configured input device is plugged in, or why capture cannot use it.
+async fn check_mic_device(mic_device: Option<String>) -> Result<(), String> {
+    let checked = tokio::task::spawn_blocking(move || validate(mic_device.as_deref()))
+        .await
+        .map_err(|e| format!("mic device check failed: {e}"))?;
+    checked.map_err(|e| {
+        warn!("voice: {e}; voice capture unavailable");
+        e.to_string()
     })
 }
 

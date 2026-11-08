@@ -16,7 +16,7 @@ pub mod capture;
 pub mod consumer;
 pub(crate) mod resample;
 
-pub use capture::{AudioCaptureError, DeviceValidationError};
+pub use capture::AudioCaptureError;
 
 /// Push-to-talk voice input backed by cpal and a [`Transcriber`]. The
 /// audio device is opened on [`start_recording`](VoiceInput::start_recording),
