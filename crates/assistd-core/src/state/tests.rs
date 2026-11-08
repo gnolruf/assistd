@@ -1742,6 +1742,22 @@ async fn undo_drops_last_turn_and_emits_count() {
 }
 
 #[tokio::test]
+async fn branch_operations_do_not_wait_for_the_model_lane() {
+    let (state, _conv, _session, _branch) = fresh_branch_state().await;
+    let task_run_lane = state.runtime.agent_turn_lock.clone().lock_owned().await;
+    for request in [
+        Request::Undo { id: "undo".into() },
+        Request::NewSession { id: "new".into() },
+    ] {
+        let (res, _) = tokio::time::timeout(Duration::from_secs(5), dispatch(&state, request))
+            .await
+            .expect("a branch operation waited behind the model lane");
+        res.unwrap();
+    }
+    drop(task_run_lane);
+}
+
+#[tokio::test]
 async fn new_session_writes_no_rows_until_the_first_message() {
     let (state, conv, session, _branch) = fresh_branch_state().await;
     let (res, events) = dispatch(&state, Request::NewSession { id: "rq".into() }).await;

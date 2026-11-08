@@ -457,6 +457,7 @@ impl AppState {
         };
         let MainLaneTurn {
             lane: agent_guard,
+            user_turn,
             turn: _conversation_turn,
         } = main_lane;
         if !self.revalidate_vision(&cancel).await {
@@ -484,7 +485,7 @@ impl AppState {
             .await;
 
         let agent_result = agent_task.await;
-        drop(agent_guard);
+        drop((agent_guard, user_turn));
 
         if done_emitted && matches!(&agent_result, Ok(Ok(()))) {
             self.clone().spawn_session_title_broadcast(

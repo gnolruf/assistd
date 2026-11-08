@@ -70,7 +70,7 @@ impl AppState {
             send_error(&tx, id, "/fork: name must not be empty".into()).await;
             return;
         }
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
         let (session, current_branch) = match self.saved_session().await {
@@ -266,7 +266,7 @@ impl AppState {
         target: String,
         tx: mpsc::Sender<Event>,
     ) {
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
         let (active_session, _active_branch) = self.runtime.session_ctx.current().await;
@@ -314,7 +314,7 @@ impl AppState {
     /// followed it from the current branch.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_undo(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
         let (_, branch) = self.runtime.session_ctx.current().await;
         let outcome = match branch {
@@ -357,7 +357,7 @@ impl AppState {
         recency_secs: u64,
         tx: mpsc::Sender<Event>,
     ) {
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
 
         let (session, branch) = self.runtime.session_ctx.current().await;
@@ -384,7 +384,7 @@ impl AppState {
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
     pub(super) async fn handle_new_session(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         self.runtime.conversation.end();
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
+        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
         self.drain_persistence_inflight().await;
         if let Some(stash) = &self.subsystems.slot_stash {
             stash.end(ConversationKey::Main).await;

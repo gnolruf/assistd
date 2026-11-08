@@ -112,8 +112,10 @@ pub(in crate::state) struct PttCapture {
 #[derive(Debug)]
 pub struct RuntimeState {
     pub session_ctx: Arc<SessionContext>,
-    /// Serialises the main conversation's turns; it is also the main model lane.
+    /// The main model lane, held by user turns and by a task run on it.
     pub(in crate::state) agent_turn_lock: Arc<Mutex<()>>,
+    /// Serialises user turns with the branch operations that edit the main conversation.
+    pub(in crate::state) user_turn_lock: Arc<Mutex<()>>,
     pub(in crate::state) lanes: Arc<ModelLanes>,
     /// The user's conversation, which holds the task queue off a lone lane.
     pub(in crate::state) conversation: Arc<UserConversation>,
@@ -153,6 +155,7 @@ impl RuntimeState {
             session_ctx: Arc::new(SessionContext::new(SessionId::new(), None)),
             lanes: ModelLanes::new(Arc::clone(&agent_turn_lock), one_slot),
             agent_turn_lock,
+            user_turn_lock: Arc::default(),
             conversation: Arc::default(),
             task_queue: TaskQueue::default(),
             task_confirms: TaskConfirms::default(),

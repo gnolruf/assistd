@@ -15,10 +15,12 @@ use super::task_queue::{TaskQueue, TurnStart};
 /// Longest preview of a queued user turn's text, in characters.
 const TURN_PREVIEW_CHARS: usize = 80;
 
-/// What a user turn holds: the main lane, and its place in the user's conversation.
+/// What a user turn holds: the main lane, the main conversation against branch
+/// operations, and its place in the user's conversation.
 #[derive(Debug)]
 pub(super) struct MainLaneTurn {
     pub(super) lane: OwnedMutexGuard<()>,
+    pub(super) user_turn: OwnedMutexGuard<()>,
     pub(super) turn: ConversationTurn,
 }
 
@@ -72,7 +74,7 @@ impl AppState {
                         .await;
                 }
                 let lane = self.runtime.agent_turn_lock.clone().lock_owned().await;
-                Some(MainLaneTurn { lane, turn })
+                Some(self.main_lane_turn(lane, turn).await)
             }
             TaskInterruption::AfterQueue if self.turn_waits_for_queue() => {
                 self.queue_behind_tasks(id, text, tx).await
@@ -91,7 +93,22 @@ impl AppState {
             .conversation
             .begin_turn(self.conversation_quiet_time());
         let lane = self.runtime.agent_turn_lock.clone().lock_owned().await;
-        MainLaneTurn { lane, turn }
+        self.main_lane_turn(lane, turn).await
+    }
+
+    /// Take the user-turn lock for `turn`, which already holds `lane`. Always lane first:
+    /// branch operations take only the user-turn lock, so they never wait on the lane.
+    async fn main_lane_turn(
+        &self,
+        lane: OwnedMutexGuard<()>,
+        turn: ConversationTurn,
+    ) -> MainLaneTurn {
+        let user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
+        MainLaneTurn {
+            lane,
+            user_turn,
+            turn,
+        }
     }
 
     /// Whether an `after_queue` turn joins the queue: no conversation holds it, and a task
@@ -123,6 +140,6 @@ impl AppState {
             })
             .await;
         let TurnStart { lane, turn } = started.await.ok()?;
-        Some(MainLaneTurn { lane, turn })
+        Some(self.main_lane_turn(lane, turn).await)
     }
 }

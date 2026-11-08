@@ -184,7 +184,7 @@ impl AppState {
     }
 
     /// Wait for every queued message and summary write to land. Hold
-    /// `agent_turn_lock` across the call so no new writes queue during the wait.
+    /// `user_turn_lock` across the call so no new user-turn writes queue during the wait.
     pub(super) async fn drain_persistence_inflight(&self) {
         let (previous, landed_tx) = self.join_persist_chain();
         if let Some(previous) = previous {
