@@ -226,6 +226,31 @@ fn bus_turn_from_another_client_renders_with_its_transcript() {
     assert!(!app.generating());
 }
 
+#[tokio::test]
+async fn losing_the_bus_mid_turn_frees_the_input_but_keeps_this_chats_own_reply() {
+    let (mut app, _rx) = test_app();
+    app.on_chat_event(ChatEvent::Bus(transcription_for("ptt", "spoken question")));
+    app.on_chat_event(ChatEvent::Bus(delta_for("ptt", "spoken answer")));
+    app.on_chat_event(ChatEvent::BusLost);
+    assert!(
+        !app.generating(),
+        "a bus turn's Done cannot arrive once the bus is gone"
+    );
+
+    app.type_ahead = TypeAheadGuard::default();
+    for c in "typed question".chars() {
+        app.on_key(typed(c));
+    }
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.generating(), "the next submit must start a query");
+
+    app.on_chat_event(ChatEvent::BusLost);
+    assert!(
+        app.generating(),
+        "the chat's own query stream still carries its reply"
+    );
+}
+
 #[test]
 fn bus_copies_of_this_chats_query_are_ignored() {
     let (mut app, _rx) = test_app();

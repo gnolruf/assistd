@@ -31,6 +31,8 @@ impl App {
                 self.fail_stream(stream);
             }
             ChatEvent::Bus(event) => self.on_bus_event(event),
+            ChatEvent::BusLost => self.on_bus_lost(),
+            ChatEvent::BusRestored => self.on_bus_restored(),
             ChatEvent::AttachLoaded(payload) => self.on_attach_loaded(*payload),
             ChatEvent::AttachFailed { path, message } => self.on_attach_failed(&path, &message),
         }
@@ -42,6 +44,27 @@ impl App {
             self.own_turn_ids.pop_front();
         }
         self.own_turn_ids.push_back(id.to_string());
+    }
+
+    /// End the turn shown from the bus, whose `Done` can no longer arrive; a reply
+    /// this chat's own query stream carries is left to that stream.
+    fn on_bus_lost(&mut self) {
+        self.queued_transcription = None;
+        if self
+            .active_reply
+            .as_ref()
+            .is_some_and(|reply| reply.writer.is_none())
+        {
+            self.finish_reply();
+            self.set_notice("lost the daemon's event bus · reconnecting");
+        }
+    }
+
+    /// Replay the daemon's transcript to cover what was missed while the bus was down.
+    fn on_bus_restored(&mut self) {
+        if !self.generating() && self.in_flight_branch_op.is_none() {
+            self.spawn_resume_or_new();
+        }
     }
 
     /// Route a bus event, drawing turns this chat did not start like its own replies.

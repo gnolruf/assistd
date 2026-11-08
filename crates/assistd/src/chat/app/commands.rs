@@ -4,7 +4,7 @@ use assistd_config::ConfigDocument;
 use assistd_ipc::Request;
 use uuid::Uuid;
 
-use super::{App, BranchOp, PendingAttachment, WireStream};
+use super::{App, BranchOp, PendingAttachment, RESUME_RECENCY_SECS, WireStream};
 use crate::chat::settings::SettingsPanel;
 
 /// A typed slash command with its trimmed argument.
@@ -120,10 +120,10 @@ impl App {
         self.spawn_query(text, attachments);
     }
 
-    pub(crate) fn spawn_resume_or_new(&mut self, recency_secs: u64) {
+    pub(crate) fn spawn_resume_or_new(&mut self) {
         let req = Request::ResumeOrNew {
             id: Uuid::new_v4().to_string(),
-            recency_secs,
+            recency_secs: RESUME_RECENCY_SECS,
         };
         self.spawn_branch_command(BranchOp::Resume, req);
     }
