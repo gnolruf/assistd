@@ -35,7 +35,7 @@ impl WorkerListener {
         }
     }
 
-    /// Stop listening; with no worker running, or one being killed, there is
+    /// Stop listening; with no worker running, or one being terminated, there is
     /// nothing to stop.
     async fn stop_with(&self, request: CaptureRequest) -> Result<(), ListenError> {
         self.0.listen_wanted.store(false, Ordering::SeqCst);

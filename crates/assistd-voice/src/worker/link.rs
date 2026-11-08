@@ -88,7 +88,7 @@ impl Link {
 
     /// Send `request` and wait for the worker's answer. A worker that misses
     /// the request's deadline fails it with [`VoiceWorkerError::Unresponsive`]
-    /// and is marked for the supervisor to kill.
+    /// and is marked for the supervisor to terminate.
     pub(super) async fn call(&self, request: Request) -> Result<Outcome, VoiceWorkerError> {
         let deadline = request.deadline();
         let (id, mut reply) = self.send_call(request)?;

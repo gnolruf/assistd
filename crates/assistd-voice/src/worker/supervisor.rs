@@ -116,7 +116,7 @@ impl Session<'_> {
         let mut resumes = JoinSet::new();
         let ended = tokio::select! {
             Ok(()) = unresponsive => {
-                warn!(target: "assistd::voice::worker", "killing the unresponsive voice worker");
+                warn!(target: "assistd::voice::worker", "terminating the unresponsive voice worker");
                 SessionEnd::Died
             }
             () = write_messages(stdin, outgoing_rx) => SessionEnd::Died,
