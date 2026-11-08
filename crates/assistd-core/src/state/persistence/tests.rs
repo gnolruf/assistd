@@ -67,9 +67,6 @@ impl TranscriptStore for SlowingStore {
     async fn end_session(&self, _s: SessionId) -> assistd_memory::Result<()> {
         Ok(())
     }
-    async fn claim_session(&self, _s: SessionId, _pid: u32) -> assistd_memory::Result<()> {
-        Ok(())
-    }
     async fn begin_turn(
         &self,
         _b: BranchId,
@@ -83,7 +80,6 @@ impl TranscriptStore for SlowingStore {
     async fn begin_session_with_main_branch(
         &self,
         _s: SessionId,
-        _pid: u32,
     ) -> assistd_memory::Result<BranchId> {
         Ok(BranchId(0))
     }

@@ -34,7 +34,7 @@ impl AppState {
         let branch = self
             .memory
             .transcripts
-            .begin_session_with_main_branch(session, std::process::id())
+            .begin_session_with_main_branch(session)
             .await?;
         self.runtime
             .session_ctx

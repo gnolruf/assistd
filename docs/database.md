@@ -32,7 +32,6 @@ erDiagram
         text uuid UK
         int started_at
         int ended_at "NULL while open"
-        int daemon_pid
         text title
         int current_branch_id FK
     }
@@ -168,8 +167,7 @@ cascades to the rows that hang off it.
 - **`sessions`**: one row per conversation, written with its first
   message. A clean daemon shutdown sets `ended_at`. If a daemon dies
   without one, the next daemon resumes the newest session that is still
-  open and whose `daemon_pid` is dead, and writes its own pid there.
-  `title` is a short name the model generates from the first prompt.
+  open. `title` is a short name the model generates from the first prompt.
 - **`branches`**: each session starts with a `main` branch. Forking
   copies the source branch's `branch_messages` rows (and its summary)
   under a new name, records `parent_branch_id` and `fork_point_seq`

@@ -286,7 +286,7 @@ impl AppState {
             let branch = self
                 .memory
                 .transcripts
-                .begin_session_with_main_branch(session, std::process::id())
+                .begin_session_with_main_branch(session)
                 .await?;
             self.memory.tasks.start_run(turn.run, session).await?;
             Ok::<_, MemoryError>(branch)

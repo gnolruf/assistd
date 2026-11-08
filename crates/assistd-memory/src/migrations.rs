@@ -355,6 +355,9 @@ DROP TABLE message_chunks;
 ALTER TABLE chunk_vectors RENAME TO chunk_embeddings;
 ";
 
+/// V12: sessions no longer record the owning daemon's pid.
+const V12_SQL: &str = "ALTER TABLE sessions DROP COLUMN daemon_pid;";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -369,6 +372,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V9_SQL),
         M::up(V10_SQL),
         M::up(V11_SQL),
+        M::up(V12_SQL),
     ])
 }
 
@@ -395,6 +399,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 }
