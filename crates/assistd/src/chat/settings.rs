@@ -13,6 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use super::TerminalGuard;
+use super::input::paste_as_keys;
 
 mod catalog;
 mod color_picker;
@@ -54,6 +55,14 @@ pub(crate) async fn run(args: SettingsArgs) -> Result<()> {
         match events.next().await {
             Some(Ok(TermEvent::Key(key))) => {
                 if panel.on_key(key).is_break() {
+                    break;
+                }
+            }
+            Some(Ok(TermEvent::Paste(text))) => {
+                if paste_as_keys(&text)
+                    .into_iter()
+                    .any(|key| panel.on_key(key).is_break())
+                {
                     break;
                 }
             }

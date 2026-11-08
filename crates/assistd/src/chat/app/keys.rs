@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::commands::runs_offline;
 use super::{App, WireStream};
-use crate::chat::input::InputAction;
+use crate::chat::input::{InputAction, paste_as_keys};
 
 const MOUSE_WHEEL_STEP: u16 = 3;
 
@@ -36,6 +36,30 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Pasted text goes into the input line, never answering a prompt; an open
+    /// panel receives it as typed characters until the paste closes it.
+    pub(crate) fn on_paste(&mut self, text: &str) {
+        if !self.panel_shown() {
+            self.input.insert_paste(text);
+            self.refresh_slash_state();
+            return;
+        }
+        for key in paste_as_keys(text) {
+            if !self.panel_shown() {
+                break;
+            }
+            self.on_key(key);
+        }
+    }
+
+    fn panel_shown(&self) -> bool {
+        self.shown_resume_picker().is_some()
+            || self.shown_wake_word_panel().is_some()
+            || self.shown_settings_panel().is_some()
+            || self.shown_agent_panel().is_some()
+            || self.shown_tasks_panel().is_some()
     }
 
     pub(crate) fn on_key(&mut self, ev: KeyEvent) {

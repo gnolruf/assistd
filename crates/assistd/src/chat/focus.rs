@@ -14,11 +14,11 @@ use uuid::Uuid;
 const RESEND_INTERVAL: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Update `focus` from a terminal event. A keypress counts as focus,
+/// Update `focus` from a terminal event. A keypress or paste counts as focus,
 /// which covers terminals that never report it.
 pub(super) fn track(focus: &watch::Sender<bool>, ev: &TermEvent) {
     let focused = match ev {
-        TermEvent::FocusGained | TermEvent::Key(_) => true,
+        TermEvent::FocusGained | TermEvent::Key(_) | TermEvent::Paste(_) => true,
         TermEvent::FocusLost => false,
         _ => return,
     };
