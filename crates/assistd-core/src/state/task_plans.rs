@@ -8,7 +8,7 @@ use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 use assistd_ipc::{Event, HostName, PermissionMode, TaskPrompt};
 use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, LlmHealthProbe, SlotAssignment};
@@ -73,7 +73,8 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let cancel = self.runtime.turn_cancellation();
-        match self.refine_prompt(&id, ask, &tx, &cancel).await {
+        let refining = self.refine_prompt(&id, ask, &tx, &cancel);
+        match cancel_when_client_leaves(refining, &id, &tx, &cancel).await {
             Ok(Refinement {
                 prompt,
                 plan,
@@ -196,6 +197,26 @@ impl AppState {
             Duration::from_secs(self.config.timeouts.tool_call_secs),
             self.config.tools.allow_auto_mode,
         )
+    }
+}
+
+/// Run `refining` to completion, cancelling it through `cancel` if the client behind `tx`
+/// disconnects first, so an abandoned refine gives up the main lane.
+async fn cancel_when_client_leaves<T>(
+    refining: impl Future<Output = T>,
+    id: &str,
+    tx: &mpsc::Sender<Event>,
+    cancel: &CancellationToken,
+) -> T {
+    tokio::pin!(refining);
+    tokio::select! {
+        biased;
+        outcome = &mut refining => outcome,
+        () = tx.closed() => {
+            debug!(target: "assistd::tasks", id = %id, "client left mid-refine; cancelling it");
+            cancel.cancel();
+            refining.await
+        }
     }
 }
 
