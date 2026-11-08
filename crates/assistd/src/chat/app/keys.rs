@@ -5,6 +5,7 @@ use assistd_tools::Approval;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use uuid::Uuid;
 
+use super::commands::runs_offline;
 use super::{App, WireStream};
 use crate::chat::input::InputAction;
 
@@ -147,7 +148,8 @@ impl App {
         self.spawn_one_shot(req, WireStream::Status, "interrupt");
     }
 
-    /// Empty when the popup should be hidden.
+    /// Empty when the popup should be hidden; only offline-capable commands while the daemon
+    /// is offline.
     pub(crate) fn slash_suggestions(&self) -> Vec<&'static (&'static str, &'static str)> {
         if self.slash_dismissed {
             return Vec::new();
@@ -159,6 +161,7 @@ impl App {
         SLASH_COMMANDS
             .iter()
             .filter(|(cmd, _)| cmd.starts_with(buf) && *cmd != buf)
+            .filter(|(cmd, _)| self.daemon_reachable || runs_offline(cmd))
             .collect()
     }
 
