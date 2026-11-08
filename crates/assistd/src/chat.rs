@@ -48,7 +48,6 @@ mod theme;
 mod ui;
 
 const CHAT_CHANNEL_CAPACITY: usize = 64;
-const RESUME_RECENCY_SECS: u64 = 10;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Frame interval of the live thinking and compaction glyphs.
 const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
@@ -347,7 +346,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     )
     .with_theme(theme)
     .with_mcp_unavailable(capabilities.mcp_unavailable);
-    app.spawn_resume_or_new(RESUME_RECENCY_SECS);
+    app.spawn_resume_or_new();
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(TICK_INTERVAL);
@@ -585,17 +584,18 @@ async fn poll_one(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, req: Reque
 
 /// Follow the daemon's broadcast bus for session titles and for turns this
 /// chat did not start (push-to-talk, continuous listening, other clients).
-/// Reconnects on a fixed delay.
+/// Reconnects on a fixed delay, reporting the loss and the reconnect to the app.
 fn spawn_bus_subscription(
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut lost = false;
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
-                () = pump_bus(&ipc, &chat_tx) => {
+                () = pump_bus(&ipc, &chat_tx, &mut lost) => {
                     tokio::select! {
                         _ = shutdown.changed() => break,
                         () = tokio::time::sleep(BUS_RECONNECT_DELAY) => {}
@@ -606,7 +606,25 @@ fn spawn_bus_subscription(
     })
 }
 
-async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
+/// Forward bus events until the subscription ends. `lost` says a previous
+/// subscription ended, so a successful subscribe sends `BusRestored`.
+async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, lost: &mut bool) {
+    let Some(mut stream) = subscribe_bus(ipc).await else {
+        return;
+    };
+    if std::mem::take(lost) && chat_tx.send(ChatEvent::BusRestored).await.is_err() {
+        return;
+    }
+    while let Ok(Some(ev)) = stream.next_event().await {
+        if chat_tx.send(ChatEvent::Bus(ev)).await.is_err() {
+            return;
+        }
+    }
+    *lost = true;
+    let _ = chat_tx.send(ChatEvent::BusLost).await;
+}
+
+async fn subscribe_bus(ipc: &IpcClient) -> Option<assistd_ipc::EventStream> {
     let req = Request::Subscribe {
         id: Uuid::new_v4().to_string(),
         filter: SubscribeFilter {
@@ -628,18 +646,10 @@ async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
             ],
         },
     };
-    let mut stream = match ipc.one_shot(req).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!("bus subscribe failed: {e}");
-            return;
-        }
-    };
-    while let Ok(Some(ev)) = stream.next_event().await {
-        if chat_tx.send(ChatEvent::Bus(ev)).await.is_err() {
-            return;
-        }
-    }
+    ipc.one_shot(req)
+        .await
+        .inspect_err(|e| tracing::debug!("bus subscribe failed: {e}"))
+        .ok()
 }
 
 fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {

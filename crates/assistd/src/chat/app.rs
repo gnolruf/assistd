@@ -48,6 +48,8 @@ pub(super) use wakeword::{
 
 const SPINNER_CHARS: &[char] = &['⣷', '⣯', '⣟', '⡿', '⢿', '⣻', '⣽', '⣾'];
 const NOTICE_HOLD: Duration = Duration::from_secs(3);
+/// How recently the daemon's branch must have been written for the chat to resume it.
+const RESUME_RECENCY_SECS: u64 = 10;
 
 /// Query ids remembered so their copies on the broadcast bus are ignored;
 /// the daemon runs one turn at a time, so a few suffice.
@@ -115,6 +117,10 @@ pub(super) enum ChatEvent {
     },
     /// An event from the daemon's broadcast bus subscription.
     Bus(Event),
+    /// The bus subscription ended; events sent until it is restored are missed.
+    BusLost,
+    /// The bus subscription is back after [`ChatEvent::BusLost`].
+    BusRestored,
     AttachLoaded(Box<AttachLoadedPayload>),
     AttachFailed {
         path: String,
@@ -136,6 +142,8 @@ impl std::fmt::Debug for ChatEvent {
                 .field("message", message)
                 .finish(),
             ChatEvent::Bus(event) => f.debug_tuple("Bus").field(event).finish(),
+            ChatEvent::BusLost => f.write_str("BusLost"),
+            ChatEvent::BusRestored => f.write_str("BusRestored"),
             ChatEvent::AttachLoaded(p) => f
                 .debug_struct("AttachLoaded")
                 .field("name", &p.name)
