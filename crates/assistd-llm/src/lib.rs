@@ -285,7 +285,8 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     }
 
     /// Answer `prompt` outside the conversation within the summary token
-    /// allowance, returning the final text with reasoning discarded.
+    /// allowance, returning the final text with reasoning discarded. The
+    /// conversation's cached prompt on its slot survives the request.
     async fn complete_oneshot(&self, _prompt: String, _reply: OneShotReply) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),

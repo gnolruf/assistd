@@ -108,12 +108,15 @@ impl LlamaChatClient {
     }
 
     async fn claim_slot(&self) {
-        let shared = match &*self.slot.lock() {
+        if let Some((stash, key)) = self.shared_slot() {
+            stash.switch_to(key).await;
+        }
+    }
+
+    fn shared_slot(&self) -> Option<(Arc<SlotStash>, ConversationKey)> {
+        match &*self.slot.lock() {
             SlotBinding::Shared { stash, key } => Some((Arc::clone(stash), *key)),
             SlotBinding::Unassigned | SlotBinding::Pinned(_) => None,
-        };
-        if let Some((stash, key)) = shared {
-            stash.switch_to(key).await;
         }
     }
 
@@ -226,7 +229,6 @@ impl LlamaChatClient {
         compaction_headroom: Option<NonZeroU32>,
         tx: &mpsc::Sender<LlmEvent>,
     ) -> StreamOutcome {
-        self.claim_slot().await;
         let Ok(pid_at_request) = self.serving_pid().await else {
             return StreamOutcome::ServerRestart {
                 accum: Box::default(),
@@ -560,6 +562,7 @@ impl LlmBackend for LlamaChatClient {
             }
         };
 
+        self.claim_slot().await;
         let outcome = self
             .stream_openai(body_bytes, compaction_headroom, &tx)
             .await;
@@ -632,6 +635,7 @@ impl LlmBackend for LlamaChatClient {
             )
         };
 
+        self.claim_slot().await;
         let outcome = self
             .stream_openai(body_bytes, compaction_headroom, &tx)
             .await;
@@ -696,6 +700,7 @@ impl LlmBackend for LlamaChatClient {
                 wire::ContentBody::Text(prompt.as_str().into()),
             )]);
             payload.max_tokens = self.chat.max_summary_tokens();
+            payload.id_slot = None;
             match &reply {
                 OneShotReply::Text(thinking) => {
                     payload.reasoning_budget_tokens = Some(
@@ -716,7 +721,11 @@ impl LlmBackend for LlamaChatClient {
             }
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
-        self.stream_text(body_bytes, "complete_oneshot").await
+        let request = self.stream_text(body_bytes, "complete_oneshot");
+        match self.shared_slot() {
+            Some((stash, _)) => stash.preserve_across(request).await,
+            None => request.await,
+        }
     }
 
     async fn recent_user_messages(&self, limit: usize) -> Vec<String> {
@@ -742,6 +751,7 @@ impl LlmBackend for LlamaChatClient {
             payload.response_format = Some(wire::ResponseFormat::json_schema(&schema));
             serde_json::to_vec(&payload).map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?
         };
+        self.claim_slot().await;
         self.stream_text(body_bytes, "complete_with_schema").await
     }
 

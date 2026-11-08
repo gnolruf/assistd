@@ -19,7 +19,8 @@ use assistd_core::PresenceManager;
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_ipc::TaskRunId;
 use assistd_llm::{
-    ConversationKey, LlamaChatClient, LlmBackend, LlmHealthProbe, SlotAssignment, SlotStash,
+    ConversationKey, LlamaChatClient, LlmBackend, LlmHealthProbe, OneShotReply, SlotAssignment,
+    SlotStash, Thinking,
 };
 
 use common::FakeLlama;
@@ -242,6 +243,24 @@ async fn a_dropped_group_is_restored_before_the_next_main_request() {
     assert!(
         !harness.has_slot_file(),
         "the saved slot outlived its restore"
+    );
+}
+
+#[tokio::test]
+async fn a_one_shot_hands_the_main_conversation_back_its_slot() {
+    let harness = Harness::start().await;
+    let slot = Arc::new(harness.slot_stash());
+    let main = harness.chat_client().with_slot_stash(Arc::clone(&slot));
+    chat_request(&main).await;
+
+    main.complete_oneshot("title?".into(), OneShotReply::Text(Thinking::Disabled))
+        .await
+        .expect("one-shot request");
+    chat_request(&main).await;
+
+    assert_eq!(
+        harness.slot_actions().await,
+        (names(&["main.bin"]), names(&["main.bin"]))
     );
 }
 
