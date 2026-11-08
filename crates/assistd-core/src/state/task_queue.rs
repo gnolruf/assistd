@@ -194,6 +194,23 @@ impl TaskQueue {
         });
     }
 
+    /// Each running run paused on a confirmation nobody has answered yet.
+    pub(in crate::state) fn paused_runs(&self) -> Vec<PausedRun> {
+        self.state
+            .borrow()
+            .running
+            .iter()
+            .filter_map(|queued| match &queued.stage {
+                RunStage::NeedsInput(prompt) => Some(PausedRun {
+                    run: queued.run,
+                    request_id: queued.request_id.clone(),
+                    prompt: PausedPrompt::clone(prompt),
+                }),
+                RunStage::Active | RunStage::Resuming => None,
+            })
+            .collect()
+    }
+
     /// Put running run `run`, which gave up its lane to wait on a confirmation or the user's
     /// conversation, first among the waiting items; the receiver gets its lane once it starts
     /// again. `None` when it is not running.
@@ -363,6 +380,14 @@ impl TaskQueue {
             held,
         }
     }
+}
+
+/// A running run paused on `prompt`, with the request id its events are tagged with.
+#[derive(Debug)]
+pub(in crate::state) struct PausedRun {
+    pub(in crate::state) run: TaskRunId,
+    pub(in crate::state) request_id: String,
+    pub(in crate::state) prompt: PausedPrompt,
 }
 
 /// What a queued user turn is handed when it may run: the main lane, and its place in

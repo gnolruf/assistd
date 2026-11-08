@@ -2602,3 +2602,82 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
     }
     settle_task_runs(&state).await;
 }
+
+#[tokio::test]
+async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run() {
+    let fetch = StepOutcome::ToolCalls(vec![ToolCall {
+        id: "c".into(),
+        name: "fetch".into(),
+        arguments: serde_json::json!({ "host": "new.example" }),
+    }]);
+    let task_conversation = ToolCallBackend::new("", "done.", vec![fetch]);
+    let mut tools = ToolRegistry::new();
+    tools.register(FetchTool);
+    let backend = MainConversation::new(task_conversation);
+    let (state, _conv, _branch, task) =
+        task_state_with(Config::default(), backend, Arc::new(tools)).await;
+    let kinds = vec![EventKind::TaskRun, EventKind::TaskQueue];
+    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+        kinds: kinds.clone(),
+    });
+    let run = queue_task_run(&state, task).await;
+    while !matches!(bus.recv().await.unwrap(), Event::TaskRun { event, .. }
+        if matches!(*event, Event::ConfirmRequest { .. }))
+    {}
+    drop(bus);
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let subscriber = tokio::spawn(Arc::clone(&state).handle_subscribe(
+        "sub".into(),
+        SubscribeFilter { kinds },
+        tx,
+    ));
+    assert!(matches!(rx.recv().await, Some(Event::TaskQueue { .. })));
+    for _ in 0..1024 {
+        state.runtime.publish(&Event::TaskQueue {
+            id: "flood".into(),
+            snapshot: state.task_queue_snapshot(),
+        });
+    }
+
+    let Some(Event::TaskQueue { id, snapshot }) = rx.recv().await else {
+        panic!("no queue snapshot after the lag");
+    };
+    assert_eq!(id, "sub");
+    let prompt = snapshot
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            QueueItem::Run { prompt, .. } => prompt,
+            QueueItem::UserTurn { .. } => None,
+        })
+        .expect("the snapshot carries the paused prompt");
+    let Some(Event::TaskRun {
+        run: prompted,
+        event,
+        ..
+    }) = rx.recv().await
+    else {
+        panic!("the paused prompt was not resent");
+    };
+    let Event::ConfirmRequest { confirm_id, .. } = *event else {
+        panic!("resent {event:?} instead of the prompt");
+    };
+    assert_eq!((prompted, confirm_id), (run, prompt.confirm_id.clone()));
+
+    drop(rx);
+    subscriber.await.unwrap();
+    let (res, _) = dispatch(
+        &state,
+        Request::TaskConfirm {
+            id: "a".into(),
+            run,
+            confirm_id: prompt.confirm_id,
+            allow: false,
+            always: false,
+        },
+    )
+    .await;
+    res.unwrap();
+    settle_task_runs(&state).await;
+}
