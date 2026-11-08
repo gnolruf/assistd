@@ -15,6 +15,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
 
+use super::panic_handler::with_panic_handler;
+
 /// What starting the SearXNG instance in the background needs.
 pub(super) struct SearchStartup {
     config: SearchConfig,
@@ -33,8 +35,22 @@ impl SearchStartup {
         state: Arc<AppState>,
         shutdown: watch::Receiver<bool>,
     ) -> SearchService {
+        let panic_state = Arc::clone(&state);
+        let startup = with_panic_handler(start_and_record(self, state, shutdown), move || {
+            let reason = "startup panicked";
+            panic_state
+                .subsystems
+                .web_search
+                .set(Readiness::Unavailable(reason.into()));
+            panic_state.publish_readiness(
+                StartupComponent::WebSearch,
+                ComponentReadiness::Unavailable {
+                    reason: reason.to_owned(),
+                },
+            );
+        });
         SearchService {
-            startup: Some(tokio::spawn(start_and_record(self, state, shutdown))),
+            startup: Some(tokio::spawn(startup)),
         }
     }
 }

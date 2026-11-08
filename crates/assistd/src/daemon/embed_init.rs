@@ -19,6 +19,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
+use super::panic_handler::with_panic_handler;
+
 const EMBED_QUEUE_CAPACITY: usize = 256;
 
 /// Longest the worker gets at shutdown to embed and store what is still queued.
@@ -176,43 +178,61 @@ fn spawn_startup(
     mut model_settled: watch::Receiver<bool>,
     stages: EmbeddingStages,
 ) -> JoinHandle<Option<RunningEmbedding>> {
-    tokio::spawn(async move {
-        if model_settled.wait_for(|settled| *settled).await.is_err() {
-            return None;
-        }
-        let running = match start_server(&startup.config, &startup.api_key, stages.server).await {
-            Ok((server, embedder)) => {
-                info!(
-                    "embedding: ready (model={}, dim={}, port={})",
-                    embedder.model(),
-                    embedder.dim(),
-                    startup.config.port,
-                );
-                let worker =
-                    drop_other_models_then_serve(&state, embedder, startup, stages.worker).await;
-                Some(RunningEmbedding { server, worker })
+    let panic_state = Arc::clone(&state);
+    tokio::spawn(with_panic_handler(
+        async move {
+            if model_settled.wait_for(|settled| *settled).await.is_err() {
+                return None;
             }
-            Err(failure) => {
-                tracing::warn!(
-                    "embedding: {}; semantic search disabled this run",
-                    failure.reason
-                );
-                state
-                    .memory
-                    .embedder
-                    .set(Readiness::Unavailable(failure.reason.into()));
-                failure.server.map(|server| RunningEmbedding {
-                    server,
-                    worker: None,
-                })
-            }
-        };
-        state.publish_readiness(
-            StartupComponent::Embedding,
-            ComponentReadiness::from(state.memory.embedder.readiness()),
-        );
-        running
-    })
+            let running = match start_server(&startup.config, &startup.api_key, stages.server).await
+            {
+                Ok((server, embedder)) => {
+                    info!(
+                        "embedding: ready (model={}, dim={}, port={})",
+                        embedder.model(),
+                        embedder.dim(),
+                        startup.config.port,
+                    );
+                    let worker =
+                        drop_other_models_then_serve(&state, embedder, startup, stages.worker)
+                            .await;
+                    Some(RunningEmbedding { server, worker })
+                }
+                Err(failure) => {
+                    tracing::warn!(
+                        "embedding: {}; semantic search disabled this run",
+                        failure.reason
+                    );
+                    state
+                        .memory
+                        .embedder
+                        .set(Readiness::Unavailable(failure.reason.into()));
+                    failure.server.map(|server| RunningEmbedding {
+                        server,
+                        worker: None,
+                    })
+                }
+            };
+            state.publish_readiness(
+                StartupComponent::Embedding,
+                ComponentReadiness::from(state.memory.embedder.readiness()),
+            );
+            running
+        },
+        move || {
+            let reason = "startup panicked";
+            panic_state
+                .memory
+                .embedder
+                .set(Readiness::Unavailable(reason.into()));
+            panic_state.publish_readiness(
+                StartupComponent::Embedding,
+                ComponentReadiness::Unavailable {
+                    reason: reason.to_owned(),
+                },
+            );
+        },
+    ))
 }
 
 /// Drop vectors from other models, then start the worker and mark the embedder

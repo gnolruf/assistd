@@ -45,6 +45,7 @@ mod idle_monitor;
 mod listen_dispatcher;
 mod mcp_init;
 mod memory_init;
+mod panic_handler;
 mod relay_answers;
 mod search_init;
 mod shutdown;
