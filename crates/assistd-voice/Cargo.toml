@@ -29,6 +29,7 @@ required-features = ["stt", "tts"]
 [dependencies]
 dirs = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "io-std", "fs", "process"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }

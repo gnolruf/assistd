@@ -1,13 +1,14 @@
 //! Supervised task spawning and the daemon panic hook. Recovery events
 //! log under `target = "assistd::recovery"`.
 
-use std::any::Any;
 use std::future::Future;
 use std::time::Duration;
 
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, warn};
+
+use assistd_utils::text::panic_message;
 
 pub use assistd_ipc::{Component, StatusSeverity};
 
@@ -135,16 +136,6 @@ pub async fn drain_join_set(tasks: &mut JoinSet<()>, what: &str) {
             "shutdown grace expired; aborting remaining {what} tasks"
         );
         tasks.shutdown().await;
-    }
-}
-
-pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "<non-string panic payload>".to_string()
     }
 }
 

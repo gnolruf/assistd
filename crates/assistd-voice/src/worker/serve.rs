@@ -2,15 +2,19 @@
 //! stdin and stdout until stdin closes.
 
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 
-use assistd_config::VoiceConfig;
+use futures_util::FutureExt;
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
-use tracing::warn;
+use tracing::{error, warn};
+
+use assistd_config::VoiceConfig;
+use assistd_utils::text::panic_message;
 
 use super::protocol::{
     CaptureRequest, Failure, FromWorker, Outcome, ProtocolError, Request, SpeechRequest, Startup,
@@ -117,15 +121,27 @@ impl Worker {
         }
     }
 
+    /// Answer `request`, turning a panic in the call into a failed outcome.
     async fn answer(&self, request: Request) -> Outcome {
-        let answered = match request {
-            Request::Speech(request) => self.answer_speech(request).await,
-            Request::Capture(request) => match self.ready_capture() {
-                Ok(capture) => self.answer_capture(capture, request).await,
-                Err(failure) => Err(failure),
-            },
+        let answered = async {
+            match request {
+                Request::Speech(request) => self.answer_speech(request).await,
+                Request::Capture(request) => {
+                    self.answer_capture(self.ready_capture()?, request).await
+                }
+            }
         };
-        answered.unwrap_or_else(|failure| Outcome::Failed { failure })
+        AssertUnwindSafe(answered)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| {
+                let message = panic_message(panic.as_ref());
+                error!(panic = %message, "voice worker: call panicked");
+                Err(Failure::Other(format!(
+                    "the voice worker panicked: {message}"
+                )))
+            })
+            .unwrap_or_else(|failure| Outcome::Failed { failure })
     }
 
     async fn answer_speech(&self, request: SpeechRequest) -> Result<Outcome, Failure> {
