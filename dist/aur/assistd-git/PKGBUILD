@@ -65,7 +65,7 @@ prepare() {
 build() {
   cd "$_pkgname"
   export CARGO_HOME="$srcdir/cargo-home"
-  export CARGO_TARGET_DIR=target
+  export CARGO_TARGET_DIR="$PWD/target"
 
   cargo build --release --frozen --locked
 }
