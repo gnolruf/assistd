@@ -4,7 +4,6 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use assistd_config::VoiceConfig;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Error as CpalError, SampleFormat, Stream, StreamConfig};
 use parking_lot::Mutex;
@@ -50,7 +49,7 @@ pub enum AudioCaptureError {
 
 /// Errors from [`validate`].
 #[derive(Debug, Error)]
-pub enum DeviceValidationError {
+pub(crate) enum DeviceValidationError {
     #[error(
         "failed to enumerate cpal input devices while validating voice.mic_device \
          = {requested:?}: {source}"
@@ -232,15 +231,11 @@ fn capture_ptt(
     Ok(pcm)
 }
 
-/// Startup check that a configured `mic_device` exists; logs the available
-/// input devices. Only a named device that cannot be found or enumerated is rejected.
-pub fn validate(config: &VoiceConfig) -> Result<(), DeviceValidationError> {
-    if !config.enabled {
-        return Ok(());
-    }
-
+/// Check that the named input device exists, logging the available ones.
+/// `None` (the system default) always passes; a named device that cannot be
+/// found or enumerated is rejected.
+pub(crate) fn validate(requested: Option<&str>) -> Result<(), DeviceValidationError> {
     let host = cpal::default_host();
-    let requested = config.mic_device.as_deref();
     let names: Vec<String> = match host.input_devices() {
         Ok(devices) => devices
             .map(|device| device_name(&device).unwrap_or_else(|_| "<unknown>".to_string()))

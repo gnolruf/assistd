@@ -44,9 +44,7 @@ pub use listen::{
 #[cfg(feature = "listen")]
 pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
 #[cfg(feature = "mic")]
-pub use mic::{
-    AudioCaptureError, DeviceValidationError, MicVoiceInput, capture::validate as mic_validate,
-};
+pub use mic::{AudioCaptureError, MicVoiceInput};
 pub use sentence::SentenceBuffer;
 #[cfg(feature = "stt")]
 pub use stt::SherpaTranscriber;
