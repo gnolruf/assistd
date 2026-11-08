@@ -112,9 +112,13 @@ impl Session<'_> {
         let _ = outgoing.send(ToWorker::Configure {
             config: Box::new(config.clone()),
         });
-        self.link.connect(outgoing);
+        let unresponsive = self.link.connect(outgoing);
         let mut resumes = JoinSet::new();
         let ended = tokio::select! {
+            Ok(()) = unresponsive => {
+                warn!(target: "assistd::voice::worker", "killing the unresponsive voice worker");
+                SessionEnd::Died
+            }
             () = write_messages(stdin, outgoing_rx) => SessionEnd::Died,
             () = self.read_messages(&mut stdout, &mut resumes) => SessionEnd::Died,
             () = self.forward_gpu() => SessionEnd::Died,
