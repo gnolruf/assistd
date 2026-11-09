@@ -363,6 +363,12 @@ const V13_SQL: &str = r"
 ALTER TABLE tasks ADD COLUMN kept_runs INTEGER CHECK (kept_runs BETWEEN 1 AND 10000);
 ";
 
+/// V14: indexes for looking up a run by its session and for the queue's next position.
+const V14_SQL: &str = r"
+CREATE INDEX idx_task_runs_session ON task_runs(session_uuid);
+CREATE INDEX idx_task_runs_queue_pos ON task_runs(queue_pos);
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -379,6 +385,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V11_SQL),
         M::up(V12_SQL),
         M::up(V13_SQL),
+        M::up(V14_SQL),
     ])
 }
 
@@ -405,6 +412,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
 }
