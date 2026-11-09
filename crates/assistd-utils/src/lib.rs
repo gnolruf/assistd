@@ -8,6 +8,7 @@ pub mod fs;
 pub mod hf;
 pub mod http;
 pub mod log_lines;
+pub mod net;
 pub mod path;
 pub mod process_group;
 pub mod program;

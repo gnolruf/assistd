@@ -9,7 +9,7 @@ rust-version.workspace = true
 test-support = []
 
 [dependencies]
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 rustix = { workspace = true }
 procfs = { workspace = true }
 tracing = { workspace = true }

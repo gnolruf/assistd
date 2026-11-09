@@ -3,12 +3,10 @@
 
 use std::error::Error;
 use std::fmt::Display;
-use std::io;
 use std::net::IpAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
 use reqwest::redirect::{Attempt, Policy};
 use reqwest::{Response, Url};
@@ -17,12 +15,12 @@ use url::Host;
 use assistd_ipc::ConfirmSource;
 use assistd_search::SearxngClient;
 use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
+use assistd_utils::net::{FilteredResolver, NonPublic, is_non_public, is_public};
 
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
-    ApprovalGate, ConfirmationRequest, EgressPolicy, NonPublic, Risk, Unattended, is_public,
-    on_blocking_pool, reachable_addrs,
+    ApprovalGate, ConfirmationRequest, EgressPolicy, Risk, Unattended, on_blocking_pool,
 };
 
 mod page;
@@ -297,22 +295,6 @@ impl Command for WebCommand {
     }
 }
 
-/// Resolves names with the system resolver, keeping only addresses `reachable` accepts.
-#[derive(Debug)]
-struct FilteredResolver {
-    reachable: fn(IpAddr) -> bool,
-}
-
-impl Resolve for FilteredResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let reachable = self.reachable;
-        Box::pin(async move {
-            let addrs = reachable_addrs(name.as_str(), 0, reachable).await?;
-            Ok(Box::new(addrs.into_iter()) as Addrs)
-        })
-    }
-}
-
 /// A URL was refused before anything was resolved.
 #[derive(Debug, thiserror::Error)]
 enum Refused {
@@ -513,16 +495,6 @@ fn is_downgrade(target: &Url, previous: &[Url]) -> bool {
         && !previous
             .iter()
             .all(|hop| hop.scheme() == "http" && hop.host_str() == target.host_str())
-}
-
-/// Whether `err` failed because the host resolves only to unreachable addresses.
-fn is_non_public(err: &reqwest::Error) -> bool {
-    std::iter::successors(Some(err as &dyn Error), |&e| e.source()).any(|e| {
-        matches!(
-            e.downcast_ref::<io::Error>().and_then(io::Error::get_ref),
-            Some(inner) if inner.is::<NonPublic>()
-        )
-    })
 }
 
 fn error_chain(err: &dyn Error) -> String {
