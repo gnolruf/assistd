@@ -181,7 +181,7 @@ async fn nearest_chunks_keeps_the_best_top_k() {
 }
 
 #[tokio::test]
-async fn nearest_chunks_can_exclude_one_session() {
+async fn nearest_chunks_can_exclude_or_keep_one_session() {
     let (handle, store, _temp) = fresh().await;
     let past = Transcript::new(&handle).await;
     let current = Transcript::new(&handle).await;
@@ -219,6 +219,17 @@ async fn nearest_chunks_can_exclude_one_session() {
         })
         .collect();
     assert_eq!(other_ids, [(past_chunk, past.session)]);
+
+    let only_past = store
+        .nearest_chunks(
+            unit_vec(0.0),
+            5,
+            ChunkScope::Chats(SessionScope::Only(past.session)),
+        )
+        .await
+        .unwrap();
+    let only_past_ids: Vec<ChunkId> = only_past.iter().map(|h| h.chunk_id).collect();
+    assert_eq!(only_past_ids, [past_chunk]);
 }
 
 #[tokio::test]

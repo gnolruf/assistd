@@ -1,6 +1,6 @@
 //! SQLite-backed [`SemanticStore`] over `chunk_embeddings` and `memory_embeddings`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::hash::Hash;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use rusqlite::types::FromSql;
-use rusqlite::{OptionalExtension, Row, Transaction};
+use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
@@ -27,6 +27,30 @@ const MESSAGE_CHUNK_VECTORS: &str = "
     SELECT cc.message_id, e.chunk_id, e.vector
     FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
     WHERE cc.message_id IS NOT NULL";
+
+/// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages of session `?1`.
+const IN_SESSION: &str = "
+    AND cc.message_id IN (
+        SELECT m.id FROM sessions s JOIN messages m ON m.session_id = s.id
+        WHERE s.uuid = ?1)";
+
+/// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages outside session `?1`.
+const OUTSIDE_SESSION: &str = "
+    AND cc.message_id NOT IN (
+        SELECT m.id FROM sessions s JOIN messages m ON m.session_id = s.id
+        WHERE s.uuid = ?1)";
+
+/// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages outside session `?1`'s live
+/// context: other sessions' messages, and those its current branch's summary folded.
+const OUTSIDE_SESSION_CONTEXT: &str = "
+    AND cc.message_id NOT IN (
+        SELECT m.id FROM sessions s JOIN messages m ON m.session_id = s.id
+        WHERE s.uuid = ?1
+          AND m.id NOT IN (
+              SELECT bm.message_id
+              FROM branch_messages bm
+              JOIN branch_summaries bs ON bs.branch_id = bm.branch_id
+              WHERE bm.branch_id = s.current_branch_id AND bm.seq < bs.kept_from_seq))";
 
 /// Every document chunk vector, grouped by its document.
 const DOCUMENT_CHUNK_VECTORS: &str = "
@@ -146,9 +170,9 @@ impl SemanticStore for SqliteSemanticStore {
                 let ranked = scan_top_k::<MemoryId, MemoryId>(
                     c,
                     ALL_MEMORY_VECTORS,
+                    [],
                     &query_vector,
                     top_k,
-                    |_| true,
                 )?;
                 hydrate_in_rank_order(
                     c,
@@ -287,34 +311,6 @@ impl SemanticStore for SqliteSemanticStore {
     }
 }
 
-/// The messages a chunk search may rank.
-enum MessageFilter {
-    Any,
-    Skip(HashSet<MessageId>),
-    Keep(HashSet<MessageId>),
-}
-
-impl MessageFilter {
-    fn for_scope(conn: &rusqlite::Connection, scope: SessionScope) -> rusqlite::Result<Self> {
-        Ok(match scope {
-            SessionScope::All => Self::Any,
-            SessionScope::AllExcept(session) => Self::Skip(session_message_ids(conn, session)?),
-            SessionScope::AllExceptInContext(session) => {
-                Self::Skip(in_context_message_ids(conn, session)?)
-            }
-            SessionScope::Only(session) => Self::Keep(session_message_ids(conn, session)?),
-        })
-    }
-
-    fn admits(&self, message: MessageId) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Skip(skipped) => !skipped.contains(&message),
-            Self::Keep(kept) => kept.contains(&message),
-        }
-    }
-}
-
 /// Which neighbour of a chunk's source position [`adjacent_chunk`] looks up.
 #[derive(Clone, Copy)]
 enum Side {
@@ -409,26 +405,22 @@ impl<Group: PartialEq, Id> TopK<Group, Id> {
     }
 }
 
-/// The `top_k` best `(group, id, vector)` rows of `sql` against `query`, one per
-/// group, best first, skipping groups `admits` rejects.
+/// The `top_k` best `(group, id, vector)` rows of `sql` bound to `params` against
+/// `query`, one per group, best first.
 fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     conn: &rusqlite::Connection,
     sql: &str,
+    params: impl Params,
     query: &[f32],
     top_k: usize,
-    admits: impl Fn(&Group) -> bool,
 ) -> rusqlite::Result<Vec<(Id, f32)>> {
     let mut stmt = conn.prepare_cached(sql)?;
     let mut best = TopK::new(top_k);
-    let mut rows = stmt.query([])?;
+    let mut rows = stmt.query(params)?;
     while let Some(row) = rows.next()? {
-        let group = row.get(0)?;
-        if !admits(&group) {
-            continue;
-        }
         let bytes = row.get_ref(2)?.as_blob()?;
         if let Some(similarity) = score_against(query, bytes) {
-            best.offer(group, row.get(1)?, similarity);
+            best.offer(row.get::<_, Group>(0)?, row.get(1)?, similarity);
         }
     }
     Ok(best.into_ranked())
@@ -441,11 +433,16 @@ fn nearest_message_chunks(
     top_k: usize,
     sessions: SessionScope,
 ) -> rusqlite::Result<Vec<EmbeddingHit>> {
-    let filter = MessageFilter::for_scope(conn, sessions)?;
-    let ranked =
-        scan_top_k::<MessageId, ChunkId>(conn, MESSAGE_CHUNK_VECTORS, query, top_k, |message| {
-            filter.admits(*message)
-        })?;
+    let ranked = match scope_clause(sessions) {
+        None => scan_top_k::<MessageId, ChunkId>(conn, MESSAGE_CHUNK_VECTORS, [], query, top_k)?,
+        Some((clause, session)) => scan_top_k::<MessageId, ChunkId>(
+            conn,
+            &format!("{MESSAGE_CHUNK_VECTORS}{clause}"),
+            [session],
+            query,
+            top_k,
+        )?,
+    };
     let select = format!(
         "SELECT {MESSAGE_CHUNK_COLUMNS}
          FROM chunks cc
@@ -462,8 +459,7 @@ fn nearest_document_chunks(
     query: &[f32],
     top_k: usize,
 ) -> rusqlite::Result<Vec<EmbeddingHit>> {
-    let ranked =
-        scan_top_k::<DocumentId, ChunkId>(conn, DOCUMENT_CHUNK_VECTORS, query, top_k, |_| true)?;
+    let ranked = scan_top_k::<DocumentId, ChunkId>(conn, DOCUMENT_CHUNK_VECTORS, [], query, top_k)?;
     let select = format!(
         "SELECT {DOCUMENT_CHUNK_COLUMNS}
          FROM chunks cc
@@ -473,38 +469,15 @@ fn nearest_document_chunks(
     hydrate_in_rank_order(conn, &select, ranked, document_chunk_hit, set_similarity)
 }
 
-/// Every message in `session`.
-fn session_message_ids(
-    conn: &rusqlite::Connection,
-    session: SessionId,
-) -> rusqlite::Result<HashSet<MessageId>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT m.id
-         FROM sessions s JOIN messages m ON m.session_id = s.id
-         WHERE s.uuid = ?1",
-    )?;
-    stmt.query_map(rusqlite::params![session], |r| r.get(0))?
-        .collect()
-}
-
-/// The messages of `session` not folded into its current branch's summary.
-fn in_context_message_ids(
-    conn: &rusqlite::Connection,
-    session: SessionId,
-) -> rusqlite::Result<HashSet<MessageId>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT m.id
-         FROM sessions s JOIN messages m ON m.session_id = s.id
-         WHERE s.uuid = ?1
-           AND m.id NOT IN (
-               SELECT bm.message_id
-               FROM branch_messages bm
-               JOIN branch_summaries bs ON bs.branch_id = bm.branch_id
-               WHERE bm.branch_id = s.current_branch_id AND bm.seq < bs.kept_from_seq
-           )",
-    )?;
-    stmt.query_map(rusqlite::params![session], |r| r.get(0))?
-        .collect()
+/// The clause restricting message chunk vectors to `scope` and the session it binds
+/// to `?1`; `None` when every message is in scope.
+fn scope_clause(scope: SessionScope) -> Option<(&'static str, SessionId)> {
+    match scope {
+        SessionScope::All => None,
+        SessionScope::AllExcept(session) => Some((OUTSIDE_SESSION, session)),
+        SessionScope::AllExceptInContext(session) => Some((OUTSIDE_SESSION_CONTEXT, session)),
+        SessionScope::Only(session) => Some((IN_SESSION, session)),
+    }
 }
 
 /// The rows `select` finds for the `ranked` ids, bound to `?1` as a JSON array and
