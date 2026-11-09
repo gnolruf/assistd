@@ -28,6 +28,9 @@ pub const MAX_HOST_NAME_BYTES: usize = 253;
 /// Most runs a `TaskRuns` lists.
 pub const MAX_LISTED_RUNS: u32 = 50;
 
+/// Most finished runs a task may keep.
+pub const MAX_KEPT_RUNS: u32 = 10_000;
+
 /// A saved task's row id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -67,6 +70,9 @@ pub enum TaskSpecError {
 
     #[error("{0:?} is not a host name")]
     NotAHost(String),
+
+    #[error("a task keeps 1 to {MAX_KEPT_RUNS} finished runs, not {0}")]
+    KeptRunsOutOfRange(u32),
 }
 
 /// A task's display name: trimmed, non-empty, at most [`MAX_TASK_NAME_CHARS`] characters.
@@ -183,6 +189,40 @@ impl fmt::Display for HostName {
     }
 }
 
+/// How many finished runs a task keeps, `1..=`[`MAX_KEPT_RUNS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct KeptRuns(u32);
+
+impl KeptRuns {
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for KeptRuns {
+    type Error = TaskSpecError;
+
+    fn try_from(count: u32) -> Result<Self, Self::Error> {
+        if !(1..=MAX_KEPT_RUNS).contains(&count) {
+            return Err(TaskSpecError::KeptRunsOutOfRange(count));
+        }
+        Ok(Self(count))
+    }
+}
+
+impl From<KeptRuns> for u32 {
+    fn from(count: KeptRuns) -> Self {
+        count.0
+    }
+}
+
+impl fmt::Display for KeptRuns {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// A saved task: its prompt, what starts it, and how its runs' prompts are answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSpec {
@@ -200,6 +240,9 @@ pub struct TaskSpec {
     /// Speak a successful run's final reply and show it as a notification, as a chat reply is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub announce: bool,
+    /// Finished runs kept, with their transcripts; `None` keeps the configured default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_runs: Option<KeptRuns>,
 }
 
 /// A condition that starts a run of its task.

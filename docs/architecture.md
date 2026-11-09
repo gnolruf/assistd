@@ -391,7 +391,9 @@ saved as a transcript session of its own, linked from its `task_runs` row, and
 its events reach subscribers wrapped in `Event::TaskRun`. The main conversation,
 its branch and the active session are never touched. `Request::TaskCancel`
 cancels a run the way `InterruptTurn` cancels a turn. A run still going at
-shutdown is recorded as failed.
+shutdown is recorded as failed. At startup and after each run ends, every task's
+finished runs beyond its `kept_runs` (else `tasks.kept_runs`) are deleted with
+their sessions and saved relay answers, sparing the session the user is in.
 
 A run's prompts are labelled `ConfirmSource::Task` (a relayed sub-agent's
 prompts name the run too) and go through `ConfirmRouter::for_task_run`, set to

@@ -21,10 +21,11 @@ pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use task::{
     ActionOutlook, AnticipatedAction, ConversationHold, DEFAULT_EVENT_COOLDOWN_SECS,
-    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, LaneHolder, MAX_LISTED_RUNS, MissedFire,
-    ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep, PlannedAction, QueueItem,
-    SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp, TaskQueueSnapshot,
-    TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec, TaskSpecError, TaskTrigger,
+    DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, KeptRuns, LaneHolder, MAX_KEPT_RUNS,
+    MAX_LISTED_RUNS, MissedFire, ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep,
+    PlannedAction, QueueItem, SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp,
+    TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec,
+    TaskSpecError, TaskTrigger,
 };
 pub use wakeword::WakeWordOp;
 

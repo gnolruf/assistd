@@ -26,6 +26,7 @@ use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
 
 mod relays;
 
+pub(super) use relays::session_answer_files;
 use relays::{all_answer_files, insert_relay_steps, relay_traces, unreferenced_answer_files};
 
 /// Columns [`branch_info`] reads, over `branches b JOIN sessions s` and the task run, if any,

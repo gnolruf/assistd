@@ -39,6 +39,7 @@ const MAX_UTTERANCE_SECS: u32 = 300;
 const WAKEWORD_COMMAND_TIMEOUT_MS: RangeInclusive<u32> = 500..=15000;
 const MAX_WAKEWORD_FOLLOW_UP_MS: u32 = 30_000;
 const MAX_RESUME_AFTER_IDLE_SECS: u32 = 3600;
+const MAX_TASKS_KEPT_RUNS: u32 = 10_000;
 const MAX_WAKE_PHRASE_WORDS: usize = 6;
 const MAX_WAKEWORD_SILENCE_MS: u32 = 1400;
 /// Keys a config may no longer set, each with what replaced it.
@@ -644,6 +645,12 @@ fn validate_tasks(errors: &mut Vec<String>, tasks: &TasksConfig) {
         errors.push(format!(
             "tasks.resume_after_idle_secs must be at most {MAX_RESUME_AFTER_IDLE_SECS}, got {}",
             tasks.resume_after_idle_secs
+        ));
+    }
+    if !(1..=MAX_TASKS_KEPT_RUNS).contains(&tasks.kept_runs) {
+        errors.push(format!(
+            "tasks.kept_runs must be in the range 1..={MAX_TASKS_KEPT_RUNS}, got {}",
+            tasks.kept_runs
         ));
     }
 }

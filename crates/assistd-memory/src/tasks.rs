@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -48,6 +49,14 @@ pub struct RecoveredQueue {
     /// The runs waiting to start, in queue order.
     pub waiting: Vec<WaitingRun>,
     pub paused: bool,
+}
+
+/// What [`TaskStore::prune_runs`] deleted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrunedRuns {
+    pub runs: u64,
+    /// Saved relay answers the deleted sessions named, for the caller to delete.
+    pub released_answer_files: Vec<PathBuf>,
 }
 
 /// Persistent saved tasks.
@@ -128,6 +137,10 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
     /// Task `task`'s latest `limit` runs, newest first; [`MemoryError::TaskNotFound`] when
     /// there is no such task.
     async fn runs(&self, task: TaskId, limit: u32) -> Result<Vec<TaskRunRecord>>;
+
+    /// Delete each task's finished runs beyond those it keeps, `default_keep` when it names
+    /// none, with their transcript sessions; a run whose session is `spare` is kept.
+    async fn prune_runs(&self, default_keep: u32, spare: SessionId) -> Result<PrunedRuns>;
 }
 
 /// Store with no database: lists nothing and refuses every write.
@@ -215,5 +228,9 @@ impl TaskStore for NoTaskStore {
 
     async fn runs(&self, task: TaskId, _limit: u32) -> Result<Vec<TaskRunRecord>> {
         Err(MemoryError::TaskNotFound(task))
+    }
+
+    async fn prune_runs(&self, _default_keep: u32, _spare: SessionId) -> Result<PrunedRuns> {
+        Ok(PrunedRuns::default())
     }
 }

@@ -180,3 +180,4 @@ type = "auto"  # auto | i3 | sway | hyprland; also picks the screenshot tools
 # [tasks]
 # interruption = "interrupt"  # or "after_task", "after_queue"; only with one model lane
 # resume_after_idle_secs = 120  # quiet time after a reply before held tasks resume
+# kept_runs = 50  # finished runs kept per task unless the task sets its own; older ones are deleted

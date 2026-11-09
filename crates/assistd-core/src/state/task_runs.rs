@@ -18,6 +18,7 @@ use assistd_memory::{
 use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
 use assistd_voice::SentenceBuffer;
 
+use super::branches::delete_answer_files;
 use super::event_triggers::Occurrence;
 use super::lanes::LaneLease;
 use super::persistence::PersistTarget;
@@ -196,10 +197,35 @@ impl AppState {
             warn!(target: "assistd::tasks", error = %e, "recording how the task run ended failed");
             return;
         }
+        self.prune_task_runs().await;
         if let Some(succeeded) = succeeded {
             let task = turn.task.id;
             self.fire_event_triggers(Occurrence::TaskFinished { task, succeeded })
                 .await;
+        }
+    }
+
+    /// Delete each task's finished runs beyond those it keeps, `tasks.kept_runs` unless it
+    /// names its own, with their sessions, sparing
+    /// the session the user is in; skipped while a user turn or switch holds it.
+    pub(super) async fn prune_task_runs(&self) {
+        let Ok(_user_turn) = self.runtime.user_turn_lock.clone().try_lock_owned() else {
+            return;
+        };
+        let (session, _branch) = self.runtime.session_ctx.current().await;
+        match self
+            .memory
+            .tasks
+            .prune_runs(self.config.tasks.kept_runs, session)
+            .await
+        {
+            Ok(pruned) => {
+                if pruned.runs > 0 {
+                    info!(target: "assistd::tasks", runs = pruned.runs, "pruned old task runs");
+                }
+                delete_answer_files(pruned.released_answer_files).await;
+            }
+            Err(e) => warn!(target: "assistd::tasks", error = %e, "pruning old task runs failed"),
         }
     }
 

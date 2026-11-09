@@ -23,6 +23,7 @@ fn task(id: i64, triggers: Vec<TaskTrigger>) -> TaskRecord {
             mode: assistd_ipc::PermissionMode::Manual,
             allowed_hosts: Vec::new(),
             announce: false,
+            kept_runs: None,
         },
         next_fire: None,
     }

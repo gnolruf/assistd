@@ -1,9 +1,9 @@
 //! The task editor: a task's name, prompt, permission mode, allowed hosts, announce flag,
-//! triggers and enabled flag, saved through the daemon, which checks each trigger as written.
+//! kept runs, triggers and enabled flag, saved through the daemon, which checks each trigger as written.
 
 use assistd_ipc::{
-    HostName, ModeRecommendation, PermissionMode, Plan, Request, TaskId, TaskName, TaskPrompt,
-    TaskSpec, TaskTrigger,
+    HostName, KeptRuns, ModeRecommendation, PermissionMode, Plan, Request, TaskId, TaskName,
+    TaskPrompt, TaskSpec, TaskTrigger,
 };
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -23,6 +23,7 @@ pub(in crate::chat) enum EditorRow {
     Mode,
     Hosts,
     Announce,
+    KeptRuns,
     Enabled,
     Trigger(usize),
     AddTrigger,
@@ -47,6 +48,7 @@ pub(in crate::chat) struct TriggerRow {
 pub(in crate::chat) enum EditorMode {
     Browse,
     Name(TextEditor),
+    KeptRuns(TextEditor),
     Prompt(PromptBox),
     Hosts(ListEditor),
     Trigger(Box<TriggerForm>),
@@ -81,6 +83,8 @@ pub(in crate::chat) struct TaskEditor {
     /// The daemon allows Auto mode, so the mode row offers it.
     auto_offered: bool,
     announce: bool,
+    /// `None` keeps the daemon's configured default.
+    kept_runs: Option<KeptRuns>,
     enabled: bool,
     triggers: Vec<TriggerRow>,
     /// Index into [`rows`](Self::rows).
@@ -102,6 +106,7 @@ impl TaskEditor {
             hosts: Vec::new(),
             auto_offered,
             announce: false,
+            kept_runs: None,
             enabled: false,
             triggers: Vec::new(),
             selected: 0,
@@ -149,6 +154,10 @@ impl TaskEditor {
         self.announce
     }
 
+    pub(in crate::chat) fn kept_runs(&self) -> Option<KeptRuns> {
+        self.kept_runs
+    }
+
     pub(in crate::chat) fn enabled(&self) -> bool {
         self.enabled
     }
@@ -180,6 +189,7 @@ impl TaskEditor {
             EditorRow::Mode,
             EditorRow::Hosts,
             EditorRow::Announce,
+            EditorRow::KeptRuns,
             EditorRow::Enabled,
         ]
         .into_iter()
@@ -198,6 +208,7 @@ impl TaskEditor {
                     || self.permission != spec.mode
                     || self.hosts != spec.allowed_hosts
                     || self.announce != spec.announce
+                    || self.kept_runs != spec.kept_runs
                     || self.enabled != spec.enabled
                     || !triggers.eq(&spec.triggers)
             }
@@ -207,6 +218,7 @@ impl TaskEditor {
                     || self.permission != PermissionMode::Manual
                     || !self.hosts.is_empty()
                     || self.announce
+                    || self.kept_runs.is_some()
                     || !self.triggers.is_empty()
             }
         }
@@ -319,6 +331,7 @@ impl TaskEditor {
         self.permission = spec.mode;
         self.hosts.clone_from(&spec.allowed_hosts);
         self.announce = spec.announce;
+        self.kept_runs = spec.kept_runs;
         self.enabled = spec.enabled;
         let task = self.task;
         self.triggers = spec
@@ -345,6 +358,21 @@ impl TaskEditor {
                     self.mode = EditorMode::Browse;
                 }
                 EditAction::Cancel => self.mode = EditorMode::Browse,
+                EditAction::Pending => {}
+            },
+            EditorMode::KeptRuns(editor) => match editor.on_key(ev) {
+                EditAction::Apply => match parsed_kept_runs(editor.text()) {
+                    Ok(kept_runs) => {
+                        self.kept_runs = kept_runs;
+                        self.error = None;
+                        self.mode = EditorMode::Browse;
+                    }
+                    Err(reason) => self.error = Some(reason),
+                },
+                EditAction::Cancel => {
+                    self.error = None;
+                    self.mode = EditorMode::Browse;
+                }
                 EditAction::Pending => {}
             },
             EditorMode::Prompt(prompt) => {
@@ -460,6 +488,13 @@ impl TaskEditor {
             EditorRow::Mode => {}
             EditorRow::Hosts => self.mode = EditorMode::Hosts(ListEditor::new(ListItem::Text)),
             EditorRow::Announce => self.announce = !self.announce,
+            EditorRow::KeptRuns => {
+                let shown = self.kept_runs.map(|count| count.to_string());
+                self.mode = EditorMode::KeptRuns(TextEditor::new(
+                    shown.unwrap_or_default(),
+                    EditorShape::Line,
+                ));
+            }
             EditorRow::Enabled => self.enabled = !self.enabled,
             EditorRow::Trigger(index) => {
                 let form = TriggerForm::editing(index, &self.triggers[index].trigger);
@@ -574,8 +609,23 @@ impl TaskEditor {
             mode: self.permission,
             allowed_hosts: self.hosts.clone(),
             announce: self.announce,
+            kept_runs: self.kept_runs,
         })
     }
+}
+
+/// The kept-runs count written as `text`; blank means the configured default.
+fn parsed_kept_runs(text: &str) -> Result<Option<KeptRuns>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let count: u32 = trimmed
+        .parse()
+        .map_err(|_| format!("{trimmed:?} is not a whole number"))?;
+    KeptRuns::try_from(count)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// `Some(true)` for Enter, `Some(false)` for Esc, and `None` for any other key.

@@ -146,6 +146,7 @@ pub const DEFAULT_NOTIFICATIONS_AUTO_HIDE_MS: u64 = 3000;
 pub const DEFAULT_NOTIFICATIONS_BRIEF_WHEN_AWAY: bool = true;
 
 pub const DEFAULT_TASKS_RESUME_AFTER_IDLE_SECS: u32 = 120;
+pub const DEFAULT_TASKS_KEPT_RUNS: u32 = 50;
 
 /// The `assistd` built-in theme.
 pub const DEFAULT_THEME: ThemeConfig = ThemeConfig {

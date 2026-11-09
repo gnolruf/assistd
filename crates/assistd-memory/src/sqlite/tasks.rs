@@ -10,19 +10,21 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use assistd_ipc::{
-    PermissionMode, SuspendReason, TaskId, TaskRunId, TaskRunRecord, TaskRunState, TaskSpec,
-    TaskTrigger,
+    KeptRuns, PermissionMode, SuspendReason, TaskId, TaskRunId, TaskRunRecord, TaskRunState,
+    TaskSpec, TaskTrigger,
 };
 
 use crate::{
-    MemoryError, RecoveredQueue, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore, WaitingRun,
+    MemoryError, PrunedRuns, RecoveredQueue, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore,
+    WaitingRun,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
 use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
+use super::transcripts::session_answer_files;
 
 const TASK_COLUMNS: &str =
-    "id, name, prompt, triggers, enabled, mode, allowed_hosts, announce, next_fire_at";
+    "id, name, prompt, triggers, enabled, mode, allowed_hosts, announce, next_fire_at, kept_runs";
 
 const RUN_RECORD_COLUMNS: &str = "id, trigger, state, suspend_reason, failure, queued_at, \
      started_at, ended_at, reply, session_uuid";
@@ -407,6 +409,73 @@ impl TaskStore for SqliteTaskStore {
             .map_err(MemoryError::sqlite("task runs"))?;
         runs.ok_or(MemoryError::TaskNotFound(task))
     }
+
+    /// Truncates the WAL so the deleted transcripts leave no trace.
+    async fn prune_runs(&self, default_keep: u32, spare: SessionId) -> Result<PrunedRuns> {
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let pruned = delete_runs_beyond(&tx, default_keep, spare)?;
+                tx.commit()?;
+                if pruned.runs > 0 {
+                    truncate_wal(c);
+                }
+                Ok(pruned)
+            })
+            .await
+            .map_err(MemoryError::sqlite("task prune_runs"))
+    }
+}
+
+/// Delete each task's finished runs beyond those it keeps, `default_keep` when it names
+/// none, except one whose session is `spare`, with their sessions.
+fn delete_runs_beyond(
+    tx: &Transaction<'_>,
+    default_keep: u32,
+    spare: SessionId,
+) -> rusqlite::Result<PrunedRuns> {
+    let mut pruned = PrunedRuns::default();
+    for (run, session) in runs_beyond(tx, default_keep, spare)? {
+        if let Some(session) = session {
+            pruned
+                .released_answer_files
+                .extend(session_answer_files(tx, session)?);
+            tx.execute("DELETE FROM sessions WHERE uuid = ?1", [session])?;
+        }
+        tx.execute("DELETE FROM task_runs WHERE id = ?1", [run.0])?;
+        pruned.runs += 1;
+    }
+    Ok(pruned)
+}
+
+/// Each task's finished runs beyond those it keeps, `default_keep` when it names none,
+/// except one whose session is `spare`, with their sessions.
+fn runs_beyond(
+    tx: &Transaction<'_>,
+    default_keep: u32,
+    spare: SessionId,
+) -> rusqlite::Result<Vec<(TaskRunId, Option<SessionId>)>> {
+    let mut select = tx.prepare_cached(
+        "SELECT r.id, r.session_uuid
+         FROM (SELECT id, task_id, session_uuid,
+                      ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id DESC) AS newest
+               FROM task_runs WHERE state IN (?1, ?2, ?3)) r
+         JOIN tasks t ON t.id = r.task_id
+         WHERE r.newest > COALESCE(t.kept_runs, ?4) AND r.session_uuid IS NOT ?5",
+    )?;
+    select
+        .query_map(
+            rusqlite::params![
+                RUN_SUCCEEDED,
+                RUN_FAILED,
+                RUN_CANCELLED,
+                default_keep,
+                spare
+            ],
+            |r| Ok((TaskRunId(r.get(0)?), r.get(1)?)),
+        )?
+        .collect()
 }
 
 /// A `task_runs` row selected as [`RUN_RECORD_COLUMNS`].
@@ -574,8 +643,8 @@ fn run_updated(updated: usize, run: TaskRunId) -> Result<()> {
 fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Result<TaskRecord> {
     let id = tx.query_row(
         "INSERT INTO tasks (name, prompt, triggers, enabled, mode, allowed_hosts, announce,
-                            created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                            kept_runs, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
          RETURNING id",
         rusqlite::params![
             spec.name.as_str(),
@@ -585,6 +654,7 @@ fn insert_task(tx: &Transaction<'_>, spec: TaskSpec, now: i64) -> rusqlite::Resu
             mode_code(spec.mode),
             to_json(&spec.allowed_hosts)?,
             spec.announce,
+            spec.kept_runs.map(u32::from),
             now,
         ],
         |r| r.get(0),
@@ -605,8 +675,8 @@ fn replace_task(
 ) -> rusqlite::Result<TaskRecord> {
     let updated = tx.execute(
         "UPDATE tasks SET name = ?2, prompt = ?3, triggers = ?4, enabled = ?5, mode = ?6,
-                          allowed_hosts = ?7, announce = ?8, next_fire_at = NULL,
-                          updated_at = MAX(?9, created_at)
+                          allowed_hosts = ?7, announce = ?8, kept_runs = ?9, next_fire_at = NULL,
+                          updated_at = MAX(?10, created_at)
          WHERE id = ?1",
         rusqlite::params![
             id.0,
@@ -617,6 +687,7 @@ fn replace_task(
             mode_code(spec.mode),
             to_json(&spec.allowed_hosts)?,
             spec.announce,
+            spec.kept_runs.map(u32::from),
             now,
         ],
     )?;
@@ -657,6 +728,7 @@ fn task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
             mode: mode_at(row, 5)?,
             allowed_hosts: json_at(row, 6)?,
             announce: row.get(7)?,
+            kept_runs: kept_runs_at(row, 9)?,
         },
         next_fire: optional_timestamp_at(row, 8)?,
     })
@@ -681,6 +753,17 @@ fn mode_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<PermissionMode> {
             Box::new(rusqlite::types::FromSqlError::OutOfRange(code)),
         )),
     }
+}
+
+/// The kept-runs count in column `idx`, checked as [`KeptRuns`]; `None` when `NULL`.
+fn kept_runs_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<KeptRuns>> {
+    row.get::<_, Option<u32>>(idx)?
+        .map(|count| {
+            KeptRuns::try_from(count).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(idx, Type::Integer, Box::new(e))
+            })
+        })
+        .transpose()
 }
 
 /// The text in column `idx`, checked by `T`'s own conversion.
