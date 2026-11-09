@@ -2,6 +2,7 @@
 //! startup, and the embedding server that comes up behind them afterwards.
 
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use assistd_memory::{
 };
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
+use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -173,46 +175,70 @@ fn disabled_handles(reason: &str) -> EmbeddingHandles {
 fn spawn_startup(
     startup: EmbeddingStartup,
     state: Arc<AppState>,
-    mut model_settled: watch::Receiver<bool>,
+    model_settled: watch::Receiver<bool>,
     stages: EmbeddingStages,
 ) -> JoinHandle<Option<RunningEmbedding>> {
     tokio::spawn(async move {
-        if model_settled.wait_for(|settled| *settled).await.is_err() {
-            return None;
-        }
-        let running = match start_server(&startup.config, &startup.api_key, stages.server).await {
-            Ok((server, embedder)) => {
-                info!(
-                    "embedding: ready (model={}, dim={}, port={})",
-                    embedder.model(),
-                    embedder.dim(),
-                    startup.config.port,
-                );
-                let worker =
-                    drop_other_models_then_serve(&state, embedder, startup, stages.worker).await;
-                Some(RunningEmbedding { server, worker })
-            }
-            Err(failure) => {
-                tracing::warn!(
-                    "embedding: {}; semantic search disabled this run",
-                    failure.reason
-                );
-                state
-                    .memory
-                    .embedder
-                    .set(Readiness::Unavailable(failure.reason.into()));
-                failure.server.map(|server| RunningEmbedding {
-                    server,
-                    worker: None,
-                })
-            }
-        };
-        state.publish_readiness(
-            StartupComponent::Embedding,
-            ComponentReadiness::from(state.memory.embedder.readiness()),
-        );
-        running
+        let started = AssertUnwindSafe(start_and_record(startup, &state, model_settled, stages))
+            .catch_unwind()
+            .await;
+        started.unwrap_or_else(|_| {
+            tracing::error!("embedding: startup panicked; semantic search disabled this run");
+            state
+                .memory
+                .embedder
+                .set(Readiness::Unavailable("startup panicked".into()));
+            publish_readiness(&state);
+            None
+        })
     })
+}
+
+async fn start_and_record(
+    startup: EmbeddingStartup,
+    state: &AppState,
+    mut model_settled: watch::Receiver<bool>,
+    stages: EmbeddingStages,
+) -> Option<RunningEmbedding> {
+    if model_settled.wait_for(|settled| *settled).await.is_err() {
+        return None;
+    }
+    let running = match start_server(&startup.config, &startup.api_key, stages.server).await {
+        Ok((server, embedder)) => {
+            info!(
+                "embedding: ready (model={}, dim={}, port={})",
+                embedder.model(),
+                embedder.dim(),
+                startup.config.port,
+            );
+            let worker =
+                drop_other_models_then_serve(state, embedder, startup, stages.worker).await;
+            Some(RunningEmbedding { server, worker })
+        }
+        Err(failure) => {
+            tracing::warn!(
+                "embedding: {}; semantic search disabled this run",
+                failure.reason
+            );
+            state
+                .memory
+                .embedder
+                .set(Readiness::Unavailable(failure.reason.into()));
+            failure.server.map(|server| RunningEmbedding {
+                server,
+                worker: None,
+            })
+        }
+    };
+    publish_readiness(state);
+    running
+}
+
+fn publish_readiness(state: &AppState) {
+    state.publish_readiness(
+        StartupComponent::Embedding,
+        ComponentReadiness::from(state.memory.embedder.readiness()),
+    );
 }
 
 /// Drop vectors from other models, then start the worker and mark the embedder

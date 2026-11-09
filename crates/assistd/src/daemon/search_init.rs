@@ -1,6 +1,7 @@
 //! Web search wiring for the daemon: the SearXNG instance starts in the
 //! background as soon as the socket opens, since it needs no GPU.
 
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use assistd_search::SearxngServerSpec;
 use assistd_utils::child_server::{ChildServer, ChildServerStatus};
 use assistd_utils::program::find_program;
 use assistd_utils::readiness::{Readiness, ReadinessCell};
+use futures_util::FutureExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -34,7 +36,9 @@ impl SearchStartup {
         shutdown: watch::Receiver<bool>,
     ) -> SearchService {
         SearchService {
-            startup: Some(tokio::spawn(start_and_record(self, state, shutdown))),
+            startup: Some(tokio::spawn(start_and_record_unless_panicked(
+                self, state, shutdown,
+            ))),
         }
     }
 }
@@ -81,9 +85,26 @@ pub(super) fn prepare(
     (Arc::new(ReadinessCell::starting()), Some(startup))
 }
 
-async fn start_and_record(
+/// Like [`start_and_record`], but a panic marks web search unavailable
+/// instead of leaving it starting.
+async fn start_and_record_unless_panicked(
     startup: SearchStartup,
     state: Arc<AppState>,
+    shutdown: watch::Receiver<bool>,
+) -> Option<ChildServer> {
+    let started = AssertUnwindSafe(start_and_record(startup, &state, shutdown))
+        .catch_unwind()
+        .await;
+    started.unwrap_or_else(|_| {
+        tracing::error!("web search: startup panicked; web search disabled this run");
+        record_readiness(&state, Readiness::Unavailable("startup panicked".into()));
+        None
+    })
+}
+
+async fn start_and_record(
+    startup: SearchStartup,
+    state: &AppState,
     shutdown: watch::Receiver<bool>,
 ) -> Option<ChildServer> {
     let port = startup.config.port;
@@ -98,12 +119,16 @@ async fn start_and_record(
             (None, Readiness::Unavailable(reason.into()))
         }
     };
+    record_readiness(state, readiness);
+    server
+}
+
+fn record_readiness(state: &AppState, readiness: Readiness<ChildServerStatus>) {
     state.subsystems.web_search.set(readiness);
     state.publish_readiness(
         StartupComponent::WebSearch,
         ComponentReadiness::from(state.subsystems.web_search.get()),
     );
-    server
 }
 
 /// `Err` is why web search is unavailable. A program missing from `$PATH`

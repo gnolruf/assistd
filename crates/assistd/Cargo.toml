@@ -16,7 +16,6 @@ sway = ["assistd-wm/sway"]
 chat = [
     "dep:ratatui",
     "dep:crossterm",
-    "dep:futures-util",
     "dep:tracing-appender",
     "dep:textwrap",
     "dep:pulldown-cmark",
@@ -28,7 +27,6 @@ chat = [
 tray = [
     "dep:ksni",
     "dep:zbus",
-    "dep:futures-util",
 ]
 
 [dependencies]
@@ -49,6 +47,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+futures-util = { workspace = true }
 nvml-wrapper = { workspace = true }
 parking_lot = { workspace = true }
 procfs = { workspace = true }
@@ -62,7 +61,6 @@ uuid = { workspace = true }
 
 ratatui          = { workspace = true, optional = true }
 crossterm        = { workspace = true, optional = true }
-futures-util     = { workspace = true, optional = true }
 tracing-appender = { workspace = true, optional = true }
 textwrap         = { workspace = true, optional = true }
 pulldown-cmark   = { workspace = true, optional = true }
