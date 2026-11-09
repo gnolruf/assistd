@@ -34,7 +34,7 @@ pub use confirm::{
     ConfirmationRequest, IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS,
     NoPendingConfirm, NoPendingReview, PromptParking, Risk, Unattended, inherit_confirm_router,
 };
-pub(crate) use egress::{EgressPolicy, NonPublic, is_public, reachable_addrs};
+pub(crate) use egress::EgressPolicy;
 pub use file_scope::{ConfinedRoot, FileScope};
 pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
