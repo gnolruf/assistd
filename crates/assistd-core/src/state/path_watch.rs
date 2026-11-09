@@ -1,7 +1,7 @@
 //! Watching a `PathChanged` trigger's path with inotify and gathering each
 //! burst of changes under it into one fire.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +34,7 @@ impl AppState {
         };
         let debounce = Duration::from_secs(u64::from(*debounce_secs));
         let (tx, mut changes) = mpsc::channel(CHANGE_BUFFER);
-        let _watcher = match watch_changes(path, tx) {
+        let _watcher = match watch_changes_off_runtime(path.clone(), tx).await {
             Ok(watcher) => watcher,
             Err(e) => {
                 warn!(
@@ -51,6 +51,17 @@ impl AppState {
             self.fire_watched_trigger(task, &trigger).await;
         }
     }
+}
+
+/// [`watch_changes`] run on the blocking pool, since a recursive watch walks the
+/// whole tree adding one inotify watch per directory.
+async fn watch_changes_off_runtime(
+    path: PathBuf,
+    tx: mpsc::Sender<()>,
+) -> notify::Result<RecommendedWatcher> {
+    tokio::task::spawn_blocking(move || watch_changes(&path, tx))
+        .await
+        .map_err(|e| notify::Error::generic(&e.to_string()))?
 }
 
 /// An inotify watch on `path` and everything under it, sending to `tx` on each change.
