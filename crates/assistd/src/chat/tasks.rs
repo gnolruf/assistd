@@ -33,6 +33,7 @@ pub(super) struct ListedTask {
     pub spec: TaskSpec,
     pub next_fire: Option<DateTime<Utc>>,
     pub last_run: Option<TaskRunState>,
+    pub trigger_failure: Option<String>,
 }
 
 /// What a request the panel sent is for, so its events land in the right place.
@@ -427,6 +428,7 @@ impl TasksPanel {
                 spec,
                 next_fire,
                 last_run,
+                trigger_failure,
                 ..
             } => self.on_task(
                 op,
@@ -435,6 +437,7 @@ impl TasksPanel {
                     spec,
                     next_fire,
                     last_run,
+                    trigger_failure,
                 },
             ),
             Event::TriggerFires { fires, .. } => self.record_check(&id, TriggerCheck::Fires(fires)),

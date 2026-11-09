@@ -20,11 +20,12 @@ use super::event_triggers::{Occurrence, event_trigger, fires_on};
 use super::task_dispatch::unrequested_run_id;
 
 /// Wakes the event watcher when a task changes, and holds when each task's event
-/// triggers last fired.
+/// triggers last fired and why each trigger whose watch is retrying last stopped.
 #[derive(Debug, Default)]
 pub(in crate::state) struct TaskEvents {
     changed: Notify,
     last_fired: StdMutex<HashMap<TaskId, Instant>>,
+    watch_failures: StdMutex<HashMap<(TaskId, TaskTrigger), String>>,
 }
 
 /// The watches running for enabled event triggers.
@@ -52,6 +53,39 @@ impl TaskEvents {
         }
         last_fired.insert(task, now);
         true
+    }
+
+    /// Why a watch for one of `task`'s triggers last stopped, while it is retrying.
+    pub(in crate::state) fn watch_failure(&self, task: TaskId) -> Option<String> {
+        self.watch_failures
+            .lock()
+            .iter()
+            .find(|((failed, _), _)| *failed == task)
+            .map(|(_, reason)| reason.clone())
+    }
+
+    /// Note that the watch for `trigger` of `task` stopped because of `reason`.
+    pub(in crate::state) fn record_watch_failure(
+        &self,
+        task: TaskId,
+        trigger: &TaskTrigger,
+        reason: String,
+    ) {
+        self.watch_failures
+            .lock()
+            .insert((task, trigger.clone()), reason);
+    }
+
+    /// Note that the watch for `trigger` of `task` is running.
+    pub(in crate::state) fn clear_watch_failure(&self, task: TaskId, trigger: &TaskTrigger) {
+        self.watch_failures.lock().remove(&(task, trigger.clone()));
+    }
+
+    /// Forget the failures of watches no longer in `watched`.
+    fn keep_watch_failures(&self, watched: &HashSet<(TaskId, TaskTrigger)>) {
+        self.watch_failures
+            .lock()
+            .retain(|failed, _| watched.contains(failed));
     }
 }
 
@@ -159,6 +193,7 @@ impl AppState {
         watches
             .paths
             .retain(|watched, watch| wanted.contains(watched) && !watch.is_finished());
+        self.runtime.task_events.keep_watch_failures(&wanted);
         for watched in wanted {
             if let Entry::Vacant(slot) = watches.paths.entry(watched) {
                 let (task, trigger) = slot.key().clone();

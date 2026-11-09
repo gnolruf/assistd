@@ -292,6 +292,9 @@ fn task_entry_rows(
     if let Some(state) = &task.last_run {
         details.push(format!("last {}", run_outcome(state)));
     }
+    if let Some(failure) = &task.trigger_failure {
+        details.push(escape_controls_single_line(failure).into_owned());
+    }
     [
         Line::from(title),
         Line::styled(
