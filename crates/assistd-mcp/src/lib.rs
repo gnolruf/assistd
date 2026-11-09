@@ -118,9 +118,9 @@ impl Tool for McpToolAdapter {
     }
 }
 
-/// [`Tool`] entries for every tool `client` exposes, named `mcp__<server_name>__<tool>`; tools
-/// with an invalid or duplicate name or oversized description or schema are skipped. Calls ask
-/// first unless `approvals` holds the tool; images become a text note when `vision` says no.
+/// [`Tool`] entries for every tool `client` exposes, named `mcp__<server_name>__<tool>`, minus
+/// malformed, duplicate or oversized tools and any past the server's count or total-size cap.
+/// Calls ask first unless `approvals` holds the tool; images become a text note when `vision` says no.
 pub async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
     server_name: &str,

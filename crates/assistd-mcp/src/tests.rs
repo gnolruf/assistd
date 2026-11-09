@@ -356,3 +356,27 @@ async fn only_well_formed_unique_tools_are_registered() {
         ]
     );
 }
+
+#[tokio::test]
+async fn tools_past_the_server_catalog_cap_are_skipped() {
+    let client = Arc::new(ListingClient(
+        (0..200)
+            .map(|index| mcp_tool(&format!("tool{index}"), "short"))
+            .collect(),
+    ));
+    let tools = adapt_allowing(client).await.unwrap();
+    assert_eq!(tools.len(), 128);
+    assert_eq!(tools.last().unwrap().name(), "mcp__web__tool127");
+
+    let client = Arc::new(ListingClient(
+        (0..100)
+            .map(|index| mcp_tool(&format!("tool{index}"), &"x".repeat(4_000)))
+            .collect(),
+    ));
+    let tools = adapt_allowing(client).await.unwrap();
+    assert!(
+        tools.len() < 40,
+        "admitted {} oversized-catalog tools",
+        tools.len()
+    );
+}
