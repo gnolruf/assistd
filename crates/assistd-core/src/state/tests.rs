@@ -2195,6 +2195,7 @@ async fn task_state_with(
         mode: PermissionMode::Manual,
         allowed_hosts: Vec::new(),
         announce: false,
+        kept_runs: None,
     };
     let task = tasks.save(None, spec).await.unwrap().id;
     let subsystems = Subsystems::new(

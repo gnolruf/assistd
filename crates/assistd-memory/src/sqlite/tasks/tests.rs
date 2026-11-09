@@ -1,7 +1,12 @@
+use std::path::PathBuf;
+
 use assistd_ipc::{PermissionMode, SuspendReason, TaskRunSummary, TaskTrigger};
 
 use super::*;
-use crate::{SqliteTranscriptStore, TranscriptStore};
+use crate::{
+    PersistedMessage, PersistedRelayEnd, PersistedRelayRun, PersistedRelayStep,
+    SqliteTranscriptStore, ToolOutcome, TranscriptStore,
+};
 
 /// The returned temp dir must outlive the store.
 async fn fresh() -> (SqliteTaskStore, tempfile::TempDir) {
@@ -21,6 +26,7 @@ fn sample_spec(name: &str, prompt: &str) -> TaskSpec {
         mode: PermissionMode::AcceptEdits,
         allowed_hosts: vec!["example.org".to_string().try_into().unwrap()],
         announce: true,
+        kept_runs: None,
     }
 }
 
@@ -179,4 +185,126 @@ async fn a_fire_coalesces_into_an_unfinished_run_and_records_the_next_fire() {
     );
     store.set_enabled(task, true).await.unwrap();
     assert_eq!(store.get(task).await.unwrap().next_fire, None);
+}
+
+/// Run task `task` to success in a new session holding one relay answer saved to `answer`.
+async fn finished_run_with_relay(
+    tasks: &SqliteTaskStore,
+    transcripts: &SqliteTranscriptStore,
+    task: TaskId,
+    answer: &str,
+) -> SessionId {
+    let run = tasks.queue_run(task, TaskTrigger::Manual).await.unwrap();
+    let session = SessionId::new();
+    let branch = transcripts
+        .begin_session_with_main_branch(session)
+        .await
+        .unwrap();
+    tasks.start_run(run, session).await.unwrap();
+    let turn = transcripts
+        .begin_turn(branch, PersistedMessage::user("go"))
+        .await
+        .unwrap()
+        .turn;
+    let outcome = ToolOutcome {
+        exit_code: 0,
+        duration_ms: 1,
+    };
+    let step = PersistedRelayStep {
+        task: "look".into(),
+        agent: "web_research".into(),
+        run: Some(PersistedRelayRun {
+            end: PersistedRelayEnd::Answered {
+                answer_file: PathBuf::from(answer),
+            },
+            duration_ms: 1,
+            tokens: None,
+            entries: Vec::new(),
+        }),
+    };
+    let result = PersistedMessage::tool_result("done", "c-1", "relay", outcome);
+    transcripts
+        .append_relay_result(branch, turn, result, vec![step])
+        .await
+        .unwrap();
+    tasks
+        .finish_run(run, TaskRunEnd::Succeeded { reply: "ok".into() })
+        .await
+        .unwrap();
+    session
+}
+
+#[tokio::test]
+async fn prune_keeps_each_tasks_newest_finished_runs_and_the_spared_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let tasks = SqliteTaskStore::new(handle.clone());
+    let transcripts = SqliteTranscriptStore::new(handle.clone());
+    let task = tasks
+        .save(None, sample_spec("digest", "a"))
+        .await
+        .unwrap()
+        .id;
+    let mut sessions = Vec::new();
+    for answer in ["/r/1", "/r/2", "/r/3", "/r/4"] {
+        sessions.push(finished_run_with_relay(&tasks, &transcripts, task, answer).await);
+    }
+    tasks.queue_run(task, TaskTrigger::Manual).await.unwrap();
+    let weekly_spec = TaskSpec {
+        kept_runs: Some(KeptRuns::try_from(2).unwrap()),
+        ..sample_spec("weekly", "b")
+    };
+    let weekly = tasks.save(None, weekly_spec.clone()).await.unwrap().id;
+    assert_eq!(tasks.get(weekly).await.unwrap().spec, weekly_spec);
+    for answer in ["/w/1", "/w/2", "/w/3"] {
+        finished_run_with_relay(&tasks, &transcripts, weekly, answer).await;
+    }
+
+    let mut pruned = tasks.prune_runs(1, sessions[1]).await.unwrap();
+
+    assert_eq!(pruned.runs, 3);
+    pruned.released_answer_files.sort();
+    assert_eq!(
+        pruned.released_answer_files,
+        [
+            PathBuf::from("/r/1"),
+            PathBuf::from("/r/3"),
+            PathBuf::from("/w/1")
+        ]
+    );
+    let kept: Vec<_> = tasks
+        .runs(task, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.session_id)
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            None,
+            Some(sessions[3].to_string()),
+            Some(sessions[1].to_string())
+        ]
+    );
+    let mut remaining = transcripts.relay_answer_files().await.unwrap();
+    remaining.sort();
+    assert_eq!(
+        remaining,
+        ["/r/2", "/r/4", "/w/2", "/w/3"].map(PathBuf::from)
+    );
+    let counts: (i64, i64) = handle
+        .reader()
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT COUNT(*) FROM sessions), (SELECT COUNT(*) FROM messages)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (4, 8));
 }

@@ -203,6 +203,7 @@ pub(crate) const SECTIONS: &[Section] = &[
                 SettingKind::Choice(TASK_INTERRUPTIONS),
             ),
             setting("tasks.resume_after_idle_secs", SettingKind::Integer),
+            setting("tasks.kept_runs", SettingKind::Integer),
         ],
     ),
     section(

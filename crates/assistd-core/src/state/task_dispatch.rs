@@ -32,10 +32,11 @@ enum Admitted {
 
 impl AppState {
     /// Reload the runs left waiting when the daemon last stopped, failing those it
-    /// stopped mid-run, then start queued runs as lanes free up and queue runs as time
+    /// stopped mid-run, prune old finished runs, then start queued runs as lanes free up and queue runs as time
     /// and event triggers fire, until the task runner stops.
     pub async fn start_task_queue(self: &Arc<Self>) {
         self.reload_task_queue().await;
+        self.prune_task_runs().await;
         let dispatcher = Arc::clone(self);
         self.runtime
             .task_runner

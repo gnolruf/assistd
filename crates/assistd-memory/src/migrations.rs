@@ -358,6 +358,11 @@ ALTER TABLE chunk_vectors RENAME TO chunk_embeddings;
 /// V12: sessions no longer record the owning daemon's pid.
 const V12_SQL: &str = "ALTER TABLE sessions DROP COLUMN daemon_pid;";
 
+/// V13: how many finished runs a task keeps; `NULL` keeps the configured default.
+const V13_SQL: &str = r"
+ALTER TABLE tasks ADD COLUMN kept_runs INTEGER CHECK (kept_runs BETWEEN 1 AND 10000);
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -373,6 +378,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V10_SQL),
         M::up(V11_SQL),
         M::up(V12_SQL),
+        M::up(V13_SQL),
     ])
 }
 
@@ -399,6 +405,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 }

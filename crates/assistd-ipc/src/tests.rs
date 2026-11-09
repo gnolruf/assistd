@@ -841,6 +841,7 @@ fn sample_task_spec() -> TaskSpec {
         mode: PermissionMode::AcceptEdits,
         allowed_hosts: vec!["Example.org".to_string().try_into().unwrap()],
         announce: true,
+        kept_runs: Some(KeptRuns::try_from(200).unwrap()),
     }
 }
 
@@ -894,7 +895,7 @@ fn sample_plan() -> Plan {
 
 const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","steps":[{"description":"list mail","actions":[{"action":{"kind":"program","program":"git","subcommand":"status"},"outlook":"judge_decides"},{"action":{"kind":"web_host","host":"example.org"},"outlook":"unasked"},{"action":{"kind":"mcp_tool","name":"mcp__mail__list"},"problem":"no such tool","outlook":"asks"},{"action":{"kind":"app","desktop_entry":"firefox.desktop"},"outlook":"asks"},{"action":{"kind":"write","under":"/home/u/notes"},"outlook":"unasked"}]}]}"#;
 
-const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"],"announce":true}"#;
+const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"],"announce":true,"kept_runs":200}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
     let save_wire =
@@ -927,6 +928,7 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
                     mode: PermissionMode::Manual,
                     allowed_hosts: Vec::new(),
                     announce: false,
+                    kept_runs: None,
                     triggers: Vec::new(),
                     ..sample_task_spec()
                 },
@@ -1336,7 +1338,7 @@ fn task_run_states_match_pinned_wire_format() {
 }
 
 #[test]
-fn task_save_refuses_blank_names_and_oversized_prompts_at_parse() {
+fn task_save_refuses_blank_names_oversized_prompts_and_kept_runs_out_of_range_at_parse() {
     let save = |name: &str, prompt: &str| {
         serde_json::to_string(&json!({
             "type": "task_save",
@@ -1351,6 +1353,14 @@ fn task_save_refuses_blank_names_and_oversized_prompts_at_parse() {
     assert!(parse(save(&"n".repeat(MAX_TASK_NAME_CHARS + 1), "hi")).is_err());
     assert!(parse(save("digest", " \n ")).is_err());
     assert!(parse(save("digest", &"p".repeat(MAX_TASK_PROMPT_BYTES + 1))).is_err());
+    for kept_runs in [0, MAX_KEPT_RUNS + 1] {
+        let line = json!({
+            "type": "task_save",
+            "id": "r",
+            "spec": {"name": "n", "prompt": "p", "enabled": true, "kept_runs": kept_runs},
+        });
+        assert!(parse(line.to_string()).is_err(), "{kept_runs} was taken");
+    }
 
     let Request::TaskSave { spec, .. } = parse(save("  digest  ", "hi")).unwrap() else {
         panic!("not a task_save");

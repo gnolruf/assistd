@@ -33,6 +33,7 @@ const TASK_ENTRY_ROWS: usize = 2;
 const DETAIL_INDENT: &str = "    ";
 const POINTER: &str = "❯ ";
 const NO_POINTER: &str = "  ";
+const KEPT_RUNS_LABEL: &str = "Keep runs";
 /// Columns the editor's and form's labels are padded to.
 const LABEL_WIDTH: usize = 14;
 /// Rows the prompt box or trigger form takes while open.
@@ -44,6 +45,7 @@ const LIST_HINT: &str =
 const NEW_TASK_HINT: &str = "↑/↓ select · Enter new task · Tab queue · Esc close";
 const RUNS_HINT: &str = "↑/↓ select · ←/→ task · Enter resume session · Tab tasks · Esc close";
 const FIELD_HINT: &str = "Enter apply · Esc cancel";
+const KEPT_RUNS_HINT: &str = "Enter apply (empty for default) · Esc cancel";
 const PROMPT_HINT: &str = "Enter apply · shift+Enter new line · ctrl+r refine · Esc cancel";
 const FORM_HINT: &str = "↑/↓ field · ←/→ choose · Enter apply · Esc cancel";
 const UNSAVED_HINT: &str = "Enter save · d discard · Esc keep editing";
@@ -93,6 +95,7 @@ pub(super) fn tasks_panel_hint(panel: &TasksPanel) -> Cow<'static, str> {
         Some(editor) => match editor.mode() {
             EditorMode::Browse => return Cow::Owned(browse_hint(editor)),
             EditorMode::Name(_) => FIELD_HINT,
+            EditorMode::KeptRuns(_) => KEPT_RUNS_HINT,
             EditorMode::Hosts(list) => list_hint(list.state()),
             EditorMode::Prompt(prompt) => prompt
                 .refine_dots()
@@ -379,6 +382,7 @@ fn render_editor(
         EditorMode::Prompt(_) | EditorMode::Trigger(_) | EditorMode::Hosts(_) => BOX_ROWS,
         EditorMode::Browse
         | EditorMode::Name(_)
+        | EditorMode::KeptRuns(_)
         | EditorMode::Unsaved
         | EditorMode::SavingToClose { .. }
         | EditorMode::ConfirmDelete
@@ -419,6 +423,7 @@ fn render_editor(
         }
         EditorMode::Browse
         | EditorMode::Name(_)
+        | EditorMode::KeptRuns(_)
         | EditorMode::Unsaved
         | EditorMode::SavingToClose { .. }
         | EditorMode::ConfirmDelete
@@ -504,6 +509,7 @@ fn render_editor_rows(
 fn inline_editor(editor: &TaskEditor, row: EditorRow) -> Option<(&'static str, &TextEditor)> {
     match (row, editor.mode()) {
         (EditorRow::Name, EditorMode::Name(text)) => Some(("Name", text)),
+        (EditorRow::KeptRuns, EditorMode::KeptRuns(text)) => Some((KEPT_RUNS_LABEL, text)),
         _ => None,
     }
 }
@@ -544,6 +550,12 @@ fn editor_row_lines(
             selected,
             "Announce reply",
             Span::raw(if editor.announce() { "[✓]" } else { "[ ]" }),
+            theme,
+        )],
+        EditorRow::KeptRuns => vec![labelled(
+            selected,
+            KEPT_RUNS_LABEL,
+            kept_runs_span(editor, theme),
             theme,
         )],
         EditorRow::Enabled => vec![labelled(
@@ -597,6 +609,14 @@ fn mode_span(mode: PermissionMode, selected: bool, theme: &Theme) -> Span<'stati
         Span::styled(format!("◂ {name} ▸"), Style::default().fg(theme.accent))
     } else {
         Span::raw(name)
+    }
+}
+
+/// The task's own kept-runs count, or `default`.
+fn kept_runs_span(editor: &TaskEditor, theme: &Theme) -> Span<'static> {
+    match editor.kept_runs() {
+        Some(count) => Span::raw(count.to_string()),
+        None => Span::styled("default", meta(theme)),
     }
 }
 

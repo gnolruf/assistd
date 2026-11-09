@@ -10,7 +10,7 @@ use rusqlite::{Connection, Row, Transaction};
 
 use crate::{
     BranchId, MessageId, PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun,
-    PersistedRelayStep, ToolOutcome, TurnId,
+    PersistedRelayStep, SessionId, ToolOutcome, TurnId,
 };
 
 const OUTCOME_ANSWERED: i64 = 0;
@@ -258,6 +258,25 @@ pub(super) fn unreferenced_answer_files(
     )?;
     select
         .query_map(rusqlite::params![turn], |r| r.get(0).map(path_from_bytes))?
+        .collect()
+}
+
+/// The answer files of every relay step in the session with uuid `session`.
+pub(in crate::sqlite) fn session_answer_files(
+    tx: &Transaction<'_>,
+    session: SessionId,
+) -> rusqlite::Result<Vec<PathBuf>> {
+    let mut select = tx.prepare_cached(
+        "SELECT rs.answer_file
+         FROM sessions s
+         JOIN messages m ON m.session_id = s.id
+         JOIN relay_steps rs ON rs.message_id = m.id
+         WHERE s.uuid = ?1 AND rs.answer_file IS NOT NULL",
+    )?;
+    select
+        .query_map(rusqlite::params![session], |r| {
+            r.get(0).map(path_from_bytes)
+        })?
         .collect()
 }
 
