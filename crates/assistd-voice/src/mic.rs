@@ -34,8 +34,38 @@ pub struct MicVoiceInput {
 
 #[derive(Debug)]
 struct PttState {
-    session: Option<capture::CaptureSession>,
+    press: Option<Press>,
     forwarder: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct Press {
+    session_id: u64,
+    capture: capture::CaptureSession,
+}
+
+/// Publishes a press's state only while it is still the active press.
+#[derive(Debug)]
+struct PressPublisher {
+    state_tx: watch::Sender<VoiceCaptureState>,
+    active_session_id: Arc<AtomicU64>,
+    session_id: u64,
+}
+
+impl PressPublisher {
+    /// Return whether the press is still active; the check runs under the
+    /// channel's write lock, so a newer press's first state always lands last.
+    fn publish(&self, state: VoiceCaptureState) -> bool {
+        let mut active = false;
+        self.state_tx.send_if_modified(|current| {
+            active = self.active_session_id.load(Ordering::SeqCst) == self.session_id;
+            if active {
+                *current = state;
+            }
+            active
+        });
+        active
+    }
 }
 
 impl MicVoiceInput {
@@ -49,7 +79,7 @@ impl MicVoiceInput {
             state_tx,
             active_session_id: Arc::new(AtomicU64::new(0)),
             ptt: Arc::new(Mutex::new(PttState {
-                session: None,
+                press: None,
                 forwarder: None,
             })),
         }
@@ -58,29 +88,29 @@ impl MicVoiceInput {
     /// Mirror the transcriber's `Queued`/`Transcribing` states until a newer
     /// press starts; `stop_and_transcribe` owns the terminal `Idle`.
     fn spawn_state_forwarder(
-        &self,
         mut transcriber_state: watch::Receiver<VoiceCaptureState>,
-        session_id: u64,
+        publisher: PressPublisher,
     ) -> JoinHandle<()> {
-        let state_tx = self.state_tx.clone();
-        let active_session_id = Arc::clone(&self.active_session_id);
         tokio::spawn(async move {
-            loop {
-                if transcriber_state.changed().await.is_err() {
-                    return;
-                }
+            while transcriber_state.changed().await.is_ok() {
                 let state = *transcriber_state.borrow_and_update();
-                if active_session_id.load(Ordering::SeqCst) != session_id {
-                    return;
-                }
-                if matches!(
+                let forwarded = matches!(
                     state,
                     VoiceCaptureState::Queued | VoiceCaptureState::Transcribing
-                ) {
-                    let _ = state_tx.send(state);
+                );
+                if forwarded && !publisher.publish(state) {
+                    return;
                 }
             }
         })
+    }
+
+    fn publisher(&self, session_id: u64) -> PressPublisher {
+        PressPublisher {
+            state_tx: self.state_tx.clone(),
+            active_session_id: Arc::clone(&self.active_session_id),
+            session_id,
+        }
     }
 
     /// Wait for the stopped capture and transcribe what it recorded.
@@ -119,14 +149,15 @@ impl MicVoiceInput {
     }
 }
 
-/// Ends a press: aborts its state forwarder and publishes `Idle`, on drop
-/// too, so a cancelled release cannot leave the state stuck.
-struct PressCleanup<'a> {
-    state_tx: &'a watch::Sender<VoiceCaptureState>,
+/// Ends a press: aborts its state forwarder and publishes `Idle` unless a
+/// newer press has started, on drop too, so a cancelled release cannot
+/// leave the state stuck.
+struct PressCleanup {
+    publisher: PressPublisher,
     forwarder: Option<JoinHandle<()>>,
 }
 
-impl PressCleanup<'_> {
+impl PressCleanup {
     /// Wait for the forwarder to exit so it cannot publish after `Idle`.
     async fn finish(mut self) {
         if let Some(forwarder) = self.forwarder.take() {
@@ -136,12 +167,12 @@ impl PressCleanup<'_> {
     }
 }
 
-impl Drop for PressCleanup<'_> {
+impl Drop for PressCleanup {
     fn drop(&mut self) {
         if let Some(forwarder) = self.forwarder.take() {
             forwarder.abort();
         }
-        let _ = self.state_tx.send(VoiceCaptureState::Idle);
+        self.publisher.publish(VoiceCaptureState::Idle);
     }
 }
 
@@ -149,48 +180,52 @@ impl Drop for PressCleanup<'_> {
 impl VoiceInput for MicVoiceInput {
     async fn start_recording(&self) -> Result<(), VoiceInputError> {
         let mut ptt = self.ptt.lock().await;
-        if ptt.session.is_some() {
+        if ptt.press.is_some() {
             return Ok(());
         }
 
         let session_id = self.active_session_id.fetch_add(1, Ordering::SeqCst) + 1;
 
-        let session = ptt
-            .session
-            .insert(capture::start(self.mic_device.as_deref()));
-        if let Err(err) = await_capture_open(session).await {
-            ptt.session = None;
+        let press = ptt.press.insert(Press {
+            session_id,
+            capture: capture::start(self.mic_device.as_deref()),
+        });
+        if let Err(err) = await_capture_open(&mut press.capture).await {
+            ptt.press = None;
             return Err(err);
         }
 
         if let Some(transcriber_state) = self.transcriber.subscribe_state() {
-            ptt.forwarder = Some(self.spawn_state_forwarder(transcriber_state, session_id));
+            ptt.forwarder = Some(Self::spawn_state_forwarder(
+                transcriber_state,
+                self.publisher(session_id),
+            ));
         }
 
+        let _ = self.state_tx.send(VoiceCaptureState::Recording);
         drop(ptt);
 
-        let _ = self.state_tx.send(VoiceCaptureState::Recording);
         info!(target: "assistd::voice::mic", session_id, "recording started");
         Ok(())
     }
 
     async fn stop_and_transcribe(&self) -> Result<String, VoiceInputError> {
-        let (session, forwarder) = {
+        let (press, forwarder) = {
             let mut ptt = self.ptt.lock().await;
-            match ptt.session.take() {
-                Some(session) => (session, ptt.forwarder.take()),
+            match ptt.press.take() {
+                Some(press) => (press, ptt.forwarder.take()),
                 None => return Ok(String::new()),
             }
         };
         let cleanup = PressCleanup {
-            state_tx: &self.state_tx,
+            publisher: self.publisher(press.session_id),
             forwarder,
         };
 
-        let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-        session.stop_flag.store(true, Ordering::SeqCst);
+        cleanup.publisher.publish(VoiceCaptureState::Transcribing);
+        press.capture.stop_flag.store(true, Ordering::SeqCst);
 
-        let result = self.transcribe_session(session).await;
+        let result = self.transcribe_session(press.capture).await;
         cleanup.finish().await;
         result
     }
