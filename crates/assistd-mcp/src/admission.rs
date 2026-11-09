@@ -17,6 +17,12 @@ const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 /// Largest input schema, in bytes of compact JSON.
 const MAX_SCHEMA_BYTES: usize = 16 * 1024;
 
+/// Most tools admitted from one server.
+const MAX_TOOLS_PER_SERVER: usize = 128;
+
+/// Largest combined description-plus-schema size, in bytes, admitted from one server.
+const MAX_SERVER_CATALOG_BYTES: usize = 128 * 1024;
+
 /// Why an advertised tool was left out of the registry.
 #[derive(Debug, Error)]
 enum Rejection {
@@ -32,36 +38,56 @@ enum Rejection {
 
 /// Pair each acceptable tool from `server_name` with its registry name
 /// `mcp__<server_name>__<tool>`, skipping with a warning any whose name is
-/// invalid or taken, or whose description or schema is over its cap.
+/// invalid or taken, or whose description or schema is over its cap. Tools are
+/// admitted in listed order until the server's count or byte budget runs out.
 pub(crate) fn admit_tools(server_name: &str, tools: Vec<Tool>) -> Vec<(String, Tool)> {
     let mut taken = HashSet::new();
-    tools
-        .into_iter()
-        .filter_map(|tool| {
-            let registry_name = format!("{MCP_TOOL_NAME_PREFIX}{server_name}__{}", tool.name);
-            match check_tool(&registry_name, &tool, &mut taken) {
-                Ok(()) => Some((registry_name, tool)),
-                Err(rejection) => {
-                    warn!(
-                        target: "assistd::mcp",
-                        server = %server_name,
-                        tool = %tool.name.escape_debug(),
-                        reason = %rejection,
-                        "skipping MCP tool",
-                    );
-                    None
-                }
+    let mut admitted = Vec::new();
+    let mut catalog_bytes = 0;
+    let listed = tools.len();
+    for (position, tool) in tools.into_iter().enumerate() {
+        let registry_name = format!("{MCP_TOOL_NAME_PREFIX}{server_name}__{}", tool.name);
+        let size = match check_tool(&registry_name, &tool, &mut taken) {
+            Ok(size) => size,
+            Err(rejection) => {
+                warn_skipped(server_name, &tool, &rejection);
+                continue;
             }
-        })
-        .collect()
+        };
+        if admitted.len() == MAX_TOOLS_PER_SERVER || catalog_bytes + size > MAX_SERVER_CATALOG_BYTES
+        {
+            warn!(
+                target: "assistd::mcp",
+                server = %server_name,
+                skipped = listed - position,
+                "MCP server is over its {MAX_TOOLS_PER_SERVER}-tool or \
+                 {MAX_SERVER_CATALOG_BYTES}-byte catalog cap; skipping its remaining tools",
+            );
+            break;
+        }
+        catalog_bytes += size;
+        admitted.push((registry_name, tool));
+    }
+    admitted
 }
 
-/// Accept `tool` under `registry_name`, recording the name in `taken`.
+fn warn_skipped(server_name: &str, tool: &Tool, rejection: &Rejection) {
+    warn!(
+        target: "assistd::mcp",
+        server = %server_name,
+        tool = %tool.name.escape_debug(),
+        reason = %rejection,
+        "skipping MCP tool",
+    );
+}
+
+/// Accept `tool` under `registry_name`, recording the name in `taken`, and
+/// return its description-plus-schema size in bytes.
 fn check_tool(
     registry_name: &str,
     tool: &Tool,
     taken: &mut HashSet<String>,
-) -> Result<(), Rejection> {
+) -> Result<usize, Rejection> {
     if tool.name.is_empty() || !is_valid_tool_name(registry_name) {
         return Err(Rejection::InvalidName(
             registry_name.escape_debug().to_string(),
@@ -78,7 +104,7 @@ fn check_tool(
     if !taken.insert(registry_name.to_string()) {
         return Err(Rejection::Duplicate(registry_name.to_string()));
     }
-    Ok(())
+    Ok(description_len + schema_len)
 }
 
 fn is_valid_tool_name(name: &str) -> bool {
