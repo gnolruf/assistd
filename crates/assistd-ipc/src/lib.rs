@@ -1205,6 +1205,10 @@ pub enum Event {
         /// How its latest finished run ended; `None` before any has finished.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_run: Option<TaskRunState>,
+        /// Why the watch for one of its event triggers last stopped, while it retries;
+        /// `None` while every watch runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_failure: Option<String>,
     },
     /// The next fire times of the trigger a `TaskCheckTrigger` checked, soonest first, at
     /// most three; empty for a trigger that fires on request or on an event.

@@ -1202,7 +1202,7 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
 
 fn task_event_cases() -> Vec<(Event, &'static str)> {
     let wire = format!(
-        r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z","last_run":{{"state":"failed","reason":"timed out"}}}}"#
+        r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z","last_run":{{"state":"failed","reason":"timed out"}},"trigger_failure":"watching /tmp/in stopped: No such file or directory"}}"#
     );
     vec![
         (
@@ -1214,6 +1214,9 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                 last_run: Some(TaskRunState::Failed {
                     reason: "timed out".into(),
                 }),
+                trigger_failure: Some(
+                    "watching /tmp/in stopped: No such file or directory".into(),
+                ),
             },
             wire.leak(),
         ),

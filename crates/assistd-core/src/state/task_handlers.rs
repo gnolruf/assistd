@@ -196,6 +196,7 @@ impl AppState {
                     id: id.clone(),
                     task_id: record.id,
                     last_run: last_runs.remove(&record.id),
+                    trigger_failure: self.runtime.task_events.watch_failure(record.id),
                     spec: record.spec,
                     next_fire,
                 })
