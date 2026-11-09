@@ -128,12 +128,13 @@ impl AppState {
     }
 }
 
-/// One saved memory as a `key: value` bullet, its value cut to [`MAX_MEMORY_VALUE_CHARS`].
-fn format_memory_line(hit: &MemoryHit) -> String {
+/// One saved memory as a single-line `key: value` bullet, its value cut to
+/// [`MAX_MEMORY_VALUE_CHARS`].
+pub(super) fn format_memory_line(hit: &MemoryHit) -> String {
     format!(
         "- {}: {}\n",
         hit.key,
-        truncate_for_context(&hit.value, MAX_MEMORY_VALUE_CHARS)
+        truncate_for_context(&flatten_line_breaks(&hit.value), MAX_MEMORY_VALUE_CHARS)
     )
 }
 
@@ -190,8 +191,15 @@ pub(super) fn combine_context_blocks(
 }
 
 fn sanitize_window_field(raw: &str) -> Option<String> {
-    let flat: String = raw
-        .chars()
+    let flat = flatten_line_breaks(raw);
+    let flat = flat.trim();
+    (!flat.is_empty()).then(|| truncate_for_context(flat, MAX_WINDOW_FIELD_CHARS))
+}
+
+/// `raw` with every control character and Unicode line or paragraph
+/// separator replaced by a space, so it cannot start a new line.
+fn flatten_line_breaks(raw: &str) -> String {
+    raw.chars()
         .map(|c| {
             if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
                 ' '
@@ -199,23 +207,13 @@ fn sanitize_window_field(raw: &str) -> Option<String> {
                 c
             }
         })
-        .collect();
-    let flat = flat.trim();
-    (!flat.is_empty()).then(|| truncate_for_context(flat, MAX_WINDOW_FIELD_CHARS))
+        .collect()
 }
 
-/// Flatten newlines and cut `text` to `max_chars` characters, marking a
-/// cut with `…`.
+/// Cut `text` to `max_chars` characters, marking a cut with `…`.
 fn truncate_for_context(text: &str, max_chars: usize) -> String {
-    let total = text.chars().count();
-    if total <= max_chars {
-        return text.replace('\n', " ");
+    match text.char_indices().nth(max_chars) {
+        Some((cutoff, _)) => format!("{}…", &text[..cutoff]),
+        None => text.to_string(),
     }
-    let cutoff = text
-        .char_indices()
-        .nth(max_chars)
-        .map_or(text.len(), |(byte_idx, _)| byte_idx);
-    let mut head = text[..cutoff].replace('\n', " ");
-    head.push('…');
-    head
 }
