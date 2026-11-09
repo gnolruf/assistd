@@ -26,6 +26,10 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant via zbus 5, pinned by ksni" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names via zbus 5, pinned by ksni" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via zbus 5, pinned by ksni" },
+    # Bundled SQLite before 3.54; the fix needs rusqlite 0.41, which neither
+    # tokio-rusqlite nor rusqlite_migration supports yet. Exploiting it needs
+    # write access to the user's own memory.db. Drop once both support 0.41.
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys via rusqlite 0.37, pinned by tokio-rusqlite and rusqlite_migration" },
 ]
 
 # ---------------------------------------------------------------------------

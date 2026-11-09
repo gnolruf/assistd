@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, HeaderName, HeaderValue};
@@ -13,6 +14,7 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::defaults::{DEFAULT_MCP_ENABLED, DEFAULT_MCP_REQUEST_TIMEOUT_SECS};
+use crate::errors::McpServerNameError;
 use crate::settings::{DescribeSettings, describe_fields};
 
 /// Model Context Protocol client settings.
@@ -45,15 +47,20 @@ impl Default for McpConfig {
 /// of the other transport fails to parse.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct McpServerConfig {
-    /// Label in tool names (`mcp__<name>__<tool>`) and logs. Must be
-    /// unique, use only ASCII letters, digits, `_` or `-`, and contain
-    /// no `__` and no trailing `_`, so no two servers' tools share a name.
-    pub name: String,
+    /// Label in tool names (`mcp__<name>__<tool>`) and logs; must be unique.
+    pub name: McpServerName,
     #[serde(flatten)]
     pub transport: McpTransport,
     /// Timeout in seconds for the initialize handshake and each request.
     pub request_timeout_secs: NonZeroU64,
 }
+
+/// A server's label in tool names `mcp__<name>__<tool>`: non-empty ASCII letters, digits, `_`
+/// or `-`, with no `__` and no trailing `_`, so each tool name splits into server and tool
+/// only one way.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct McpServerName(String);
 
 /// How the daemon reaches an MCP server.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -137,7 +144,7 @@ enum McpAuthKind {
 /// A `[[mcp.servers]]` entry as written, before its transport is decided.
 #[derive(Deserialize)]
 struct RawMcpServerConfig {
-    name: String,
+    name: McpServerName,
     command: Option<PathBuf>,
     args: Option<Vec<String>>,
     env: Option<HashMap<String, String>>,
@@ -166,27 +173,27 @@ enum McpEntryError {
         "mcp server '{0}' sets both `command` and `url`; use `command` for a \
          stdio server or `url` for a Streamable HTTP one"
     )]
-    BothTransports(String),
+    BothTransports(McpServerName),
     #[error("mcp server '{0}' needs `command` (stdio) or `url` (Streamable HTTP)")]
-    NoTransport(String),
+    NoTransport(McpServerName),
     #[error(
         "mcp server '{0}' runs `command`, so `headers`, `auth`, `client_id`, \
          `client_secret` and `scopes` do not apply"
     )]
-    HttpKeysOnStdio(String),
+    HttpKeysOnStdio(McpServerName),
     #[error("mcp server '{0}' connects to `url`, so `args` and `env` do not apply")]
-    StdioKeysOnHttp(String),
+    StdioKeysOnHttp(McpServerName),
     #[error(
         "mcp server '{0}' sets `client_id`, `client_secret` or `scopes` without `auth = \"oauth\"`"
     )]
-    OAuthKeysWithoutOAuth(String),
+    OAuthKeysWithoutOAuth(McpServerName),
     #[error("mcp server '{0}' sets `client_secret` without the `client_id` it was issued with")]
-    SecretWithoutClientId(String),
+    SecretWithoutClientId(McpServerName),
     #[error(
         "mcp server '{0}' uses `auth = \"oauth\"`, which sends its own `Authorization` header; \
          remove the one in `headers`"
     )]
-    AuthorizationHeaderWithOAuth(String),
+    AuthorizationHeaderWithOAuth(McpServerName),
     #[error("invalid mcp server url: {0}")]
     UrlSyntax(#[from] url::ParseError),
     #[error("mcp server url must not carry a user name or password; put credentials in `headers`")]
@@ -265,6 +272,48 @@ impl RawOAuthKeys {
     }
 }
 
+impl McpServerName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for McpServerName {
+    type Err = McpServerNameError;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::try_from(name.to_owned())
+    }
+}
+
+impl TryFrom<String> for McpServerName {
+    type Error = McpServerNameError;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        let unambiguous = !name.is_empty()
+            && name.chars().all(is_server_name_char)
+            && !name.contains("__")
+            && !name.ends_with('_');
+        if unambiguous {
+            Ok(Self(name))
+        } else {
+            Err(McpServerNameError(name))
+        }
+    }
+}
+
+impl From<McpServerName> for String {
+    fn from(name: McpServerName) -> Self {
+        name.0
+    }
+}
+
+impl fmt::Display for McpServerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl McpTransport {
     /// Whether the entry holds credentials: stdio `env`, HTTP `headers` or
     /// an OAuth `client_secret`.
@@ -281,7 +330,7 @@ impl McpTransport {
 
 impl McpHttpTransport {
     fn new(
-        name: &str,
+        name: &McpServerName,
         url: McpServerUrl,
         headers: McpHeaders,
         auth: Option<McpAuthKind>,
@@ -290,21 +339,21 @@ impl McpHttpTransport {
         let auth = match auth {
             Some(McpAuthKind::OAuth) => McpAuth::OAuth(McpOAuthClient::new(name, oauth_keys)?),
             _ if oauth_keys.any_set() => {
-                return Err(McpEntryError::OAuthKeysWithoutOAuth(name.to_owned()));
+                return Err(McpEntryError::OAuthKeysWithoutOAuth(name.clone()));
             }
             _ => McpAuth::None,
         };
         if matches!(auth, McpAuth::OAuth(_)) && headers.sets(&AUTHORIZATION) {
-            return Err(McpEntryError::AuthorizationHeaderWithOAuth(name.to_owned()));
+            return Err(McpEntryError::AuthorizationHeaderWithOAuth(name.clone()));
         }
         Ok(Self { url, headers, auth })
     }
 }
 
 impl McpOAuthClient {
-    fn new(name: &str, keys: RawOAuthKeys) -> Result<Self, McpEntryError> {
+    fn new(name: &McpServerName, keys: RawOAuthKeys) -> Result<Self, McpEntryError> {
         if keys.client_secret.is_some() && keys.client_id.is_none() {
-            return Err(McpEntryError::SecretWithoutClientId(name.to_owned()));
+            return Err(McpEntryError::SecretWithoutClientId(name.clone()));
         }
         Ok(Self {
             client_id: keys.client_id,
@@ -433,6 +482,10 @@ impl<'de> Deserialize<'de> for McpHeaders {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::parse(HashMap::deserialize(deserializer)?).map_err(de::Error::custom)
     }
+}
+
+fn is_server_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
 fn is_loopback_host(host: &Host<&str>) -> bool {

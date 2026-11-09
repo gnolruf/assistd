@@ -112,6 +112,14 @@ pub enum SearchCommandError {
 #[error("{0} is outside the range 0.0..=1.0")]
 pub struct UnitIntervalError(pub f32);
 
+/// A string refused by [`crate::mcp::McpServerName`].
+#[derive(Debug, Error)]
+#[error(
+    "MCP server name `{0}` must be non-empty and use only ASCII letters, digits, '_' or '-', \
+     with no '__' and no trailing '_' (it becomes the `<name>` in tool names `mcp__<name>__<tool>`)"
+)]
+pub struct McpServerNameError(pub String);
+
 /// A string refused by [`crate::theme::ThemeColor`].
 #[derive(Debug, Error)]
 #[error(

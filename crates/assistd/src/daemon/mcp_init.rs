@@ -65,7 +65,7 @@ impl McpFleet {
     pub(super) fn spawn(self: Arc<Self>, state: &Arc<AppState>) -> McpService {
         for server in &self.servers {
             let Some(connector) = connector(&server.config, self.tokens.clone()) else {
-                record_state(state, &server.config.name, no_token_store());
+                record_state(state, server.config.name.as_str(), no_token_store());
                 continue;
             };
             let start = Start {
@@ -90,7 +90,7 @@ impl McpFleet {
     fn server(&self, name: &str) -> Result<&Arc<ManagedServer>, McpAccountError> {
         self.servers
             .iter()
-            .find(|server| server.config.name == name)
+            .find(|server| server.config.name.as_str() == name)
             .ok_or_else(|| McpAccountError::UnknownServer(name.to_owned()))
     }
 
@@ -99,7 +99,7 @@ impl McpFleet {
         &self,
         server: &'a ManagedServer,
     ) -> Result<(&'a McpServerUrl, OAuthConfig), McpAccountError> {
-        let not_oauth = || McpAccountError::NotOAuth(server.config.name.clone());
+        let not_oauth = || McpAccountError::NotOAuth(server.config.name.to_string());
         let McpTransport::Http(http) = &server.config.transport else {
             return Err(not_oauth());
         };
@@ -161,7 +161,7 @@ impl McpAccounts for McpFleet {
         let (url, oauth) = self.oauth_endpoint(server)?;
         let _changing = server.changing.lock().await;
         server.stop().await;
-        withdraw_tools(&state.subsystems.tools, name);
+        withdraw_tools(&state.subsystems.tools, &server.config.name);
         record_state(
             &state,
             name,
@@ -212,7 +212,7 @@ impl Start {
     async fn run(self, mut settled: Option<oneshot::Sender<()>>) {
         let name = self.server.config.name.clone();
         let on_retry = |e: &McpError| {
-            record_state(&self.state, &name, failed_state(e));
+            record_state(&self.state, name.as_str(), failed_state(e));
             if let Some(settled) = settled.take() {
                 let _ = settled.send(());
             }
@@ -221,9 +221,9 @@ impl Start {
         match outcome {
             Ok(started) => {
                 *self.server.running.lock() = Some(started);
-                record_state(&self.state, &name, McpServerState::Ready);
+                record_state(&self.state, name.as_str(), McpServerState::Ready);
             }
-            Err(e) => record_state(&self.state, &name, failed_state(&e)),
+            Err(e) => record_state(&self.state, name.as_str(), failed_state(&e)),
         }
         if let Some(settled) = settled {
             let _ = settled.send(());
@@ -243,7 +243,7 @@ impl Start {
             }
             server.stop().await;
             withdraw_tools(&self.target.catalog, &name);
-            record_state(&self.state, &name, McpServerState::Starting);
+            record_state(&self.state, name.as_str(), McpServerState::Starting);
             *server.starting.lock() = Some(self.spawn(Some(settled_tx)));
         }
         let _ = settled_rx.await;
@@ -267,7 +267,7 @@ pub(super) fn prepare(
         .mcp
         .servers
         .iter()
-        .map(|server| McpServerStatus::starting(server.name.clone(), transport_kind(server)))
+        .map(|server| McpServerStatus::starting(server.name.to_string(), transport_kind(server)))
         .collect();
     let servers = config
         .mcp
@@ -385,7 +385,7 @@ fn stdio_config(
     request_timeout: Duration,
 ) -> StdioConfig {
     let mut stdio = StdioConfig::new(
-        server.name.clone(),
+        server.name.to_string(),
         transport.command.to_string_lossy().into_owned(),
     );
     stdio.args.clone_from(&transport.args);
@@ -399,7 +399,7 @@ fn http_config(
     transport: &McpHttpTransport,
     request_timeout: Duration,
 ) -> HttpConfig {
-    let mut http = HttpConfig::new(server.name.clone(), transport.url.as_url().clone());
+    let mut http = HttpConfig::new(server.name.to_string(), transport.url.as_url().clone());
     http.headers = transport.headers.to_header_map();
     http.request_timeout = request_timeout;
     http

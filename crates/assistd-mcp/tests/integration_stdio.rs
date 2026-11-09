@@ -38,9 +38,14 @@ async fn start_fake() -> Arc<McpServer> {
 /// [`adapt_client_as_tools`] with every call allowed.
 async fn adapt_allowing(server: &Arc<McpServer>) -> Vec<Box<dyn Tool>> {
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    adapt_client_as_tools(server.clone(), "fake", &approvals, &VisionGate::new(true))
-        .await
-        .expect("discovery should succeed")
+    adapt_client_as_tools(
+        server.clone(),
+        &"fake".parse().unwrap(),
+        &approvals,
+        &VisionGate::new(true),
+    )
+    .await
+    .expect("discovery should succeed")
 }
 
 fn find<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
@@ -299,9 +304,14 @@ async fn server_refused_at_first_start_offers_its_tools_after_a_retry() {
 
     let server = tokio::time::timeout(
         Duration::from_secs(10),
-        launch("fake".into(), Connector::Stdio(cfg), &target, |e| {
-            retries.push(e.to_string());
-        }),
+        launch(
+            "fake".parse().unwrap(),
+            Connector::Stdio(cfg),
+            &target,
+            |e| {
+                retries.push(e.to_string());
+            },
+        ),
     )
     .await
     .expect("retry comes within the first backoff")

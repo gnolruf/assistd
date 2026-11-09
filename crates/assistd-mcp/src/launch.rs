@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use assistd_config::McpServerName;
 use assistd_tools::{ApprovalGate, MCP_TOOL_NAME_PREFIX, ToolCatalog, VisionGate};
 use assistd_utils::backoff::RestartPolicy;
 use tracing::{info, warn};
@@ -25,7 +26,7 @@ pub struct LaunchTarget {
 /// cannot fix, such as a missing command or refused credentials; dropping the future cancels
 /// pending retries.
 pub async fn launch(
-    name: String,
+    name: McpServerName,
     connector: Connector,
     target: &LaunchTarget,
     mut on_retry: impl FnMut(&McpError),
@@ -42,7 +43,7 @@ pub async fn launch(
         };
         on_retry(&error);
         policy.record_spawn_failure();
-        let delay = restart_delay(&name, &mut policy);
+        let delay = restart_delay(name.as_str(), &mut policy);
         warn!(
             target: "assistd::mcp",
             server = %name,
@@ -55,7 +56,7 @@ pub async fn launch(
 }
 
 /// Stop offering server `name`'s tools from the next turn on.
-pub fn withdraw_tools(catalog: &ToolCatalog, name: &str) {
+pub fn withdraw_tools(catalog: &ToolCatalog, name: &McpServerName) {
     let prefix = format!("{MCP_TOOL_NAME_PREFIX}{name}__");
     catalog.retain(|tool| !tool.starts_with(&prefix));
 }
@@ -63,11 +64,11 @@ pub fn withdraw_tools(catalog: &ToolCatalog, name: &str) {
 /// One attempt: start the server and offer its tools, shutting it down again when listing
 /// them fails.
 async fn start_and_offer(
-    name: &str,
+    name: &McpServerName,
     connector: &Connector,
     target: &LaunchTarget,
 ) -> Result<Arc<McpServer>, McpError> {
-    let server = Arc::new(McpServer::start(name.to_owned(), connector.clone()).await?);
+    let server = Arc::new(McpServer::start(name.to_string(), connector.clone()).await?);
     match adapt_client_as_tools(server.clone(), name, &target.approvals, &target.vision).await {
         Ok(tools) => {
             info!(target: "assistd::mcp", server = %name, tools = tools.len(), "MCP server ready");
