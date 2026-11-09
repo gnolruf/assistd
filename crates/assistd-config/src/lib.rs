@@ -30,11 +30,12 @@ pub use custom_args::{ChatServer, CustomArgs, EmbeddingServer, ServerKind};
 pub use document::ConfigDocument;
 pub use embedding::EmbeddingConfig;
 pub use errors::{
-    ConfigError, CustomArgsError, SearchCommandError, ThemeColorError, UnitIntervalError,
+    ConfigError, CustomArgsError, McpServerNameError, SearchCommandError, ThemeColorError,
+    UnitIntervalError,
 };
 pub use mcp::{
     McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpOAuthClient, McpServerConfig,
-    McpServerUrl, McpStdioTransport, McpTransport,
+    McpServerName, McpServerUrl, McpStdioTransport, McpTransport,
 };
 pub use memory::MemoryConfig;
 pub use model::ModelConfig;

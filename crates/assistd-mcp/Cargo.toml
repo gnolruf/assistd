@@ -10,6 +10,7 @@ default = []
 test-support = []
 
 [dependencies]
+assistd-config = { workspace = true }
 assistd-tools = { workspace = true }
 assistd-utils = { workspace = true }
 async-trait = { workspace = true }

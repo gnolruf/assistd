@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use assistd_config::McpServerName;
 use assistd_tools::MCP_TOOL_NAME_PREFIX;
 use rmcp::model::Tool;
 use thiserror::Error;
@@ -40,7 +41,7 @@ enum Rejection {
 /// `mcp__<server_name>__<tool>`, skipping with a warning any whose name is
 /// invalid or taken, or whose description or schema is over its cap. Tools are
 /// admitted in listed order until the server's count or byte budget runs out.
-pub(crate) fn admit_tools(server_name: &str, tools: Vec<Tool>) -> Vec<(String, Tool)> {
+pub(crate) fn admit_tools(server_name: &McpServerName, tools: Vec<Tool>) -> Vec<(String, Tool)> {
     let mut taken = HashSet::new();
     let mut admitted = Vec::new();
     let mut catalog_bytes = 0;
@@ -71,7 +72,7 @@ pub(crate) fn admit_tools(server_name: &str, tools: Vec<Tool>) -> Vec<(String, T
     admitted
 }
 
-fn warn_skipped(server_name: &str, tool: &Tool, rejection: &Rejection) {
+fn warn_skipped(server_name: &McpServerName, tool: &Tool, rejection: &Rejection) {
     warn!(
         target: "assistd::mcp",
         server = %server_name,

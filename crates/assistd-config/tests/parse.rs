@@ -167,25 +167,18 @@ fn history_and_response_must_fit_the_context_together() {
 
 #[test]
 fn mcp_server_names_that_could_share_a_tool_name_are_rejected() {
-    for name in ["a__b", "a_", "a___b"] {
-        let cfg: Config = toml::from_str(&format!(
-            "[mcp]\nenabled = true\n[[mcp.servers]]\nname = \"{name}\"\n\
+    let parse = |name: &str| {
+        toml::from_str::<Config>(&format!(
+            "[mcp]\nenabled = false\n[[mcp.servers]]\nname = \"{name}\"\n\
              command = \"npx\"\n"
         ))
-        .expect("config must parse");
-        let err = cfg
-            .validate()
-            .expect_err("a name that can end early in `mcp__<name>__<tool>` must not validate");
-        let message = err.to_string();
-        assert!(message.contains("mcp.servers[0].name"), "{name}: {message}");
+    };
+    for name in ["a__b", "a_", "a___b", ""] {
+        let err = parse(name)
+            .expect_err("a name that can end early in `mcp__<name>__<tool>` must not parse");
+        assert!(err.to_string().contains("MCP server name"), "{name}: {err}");
     }
-    let cfg: Config = toml::from_str(
-        "[mcp]\nenabled = true\n[[mcp.servers]]\nname = \"google_calendar-v2\"\n\
-         command = \"npx\"\n",
-    )
-    .expect("config must parse");
-    cfg.validate()
-        .expect("single inner underscores are unambiguous");
+    parse("google_calendar-v2").expect("single inner underscores are unambiguous");
 }
 
 fn parse_reporting_unknown_keys(toml_src: &str) -> (Config, Vec<String>) {

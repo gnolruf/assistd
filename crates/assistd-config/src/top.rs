@@ -613,21 +613,12 @@ fn validate_mcp(errors: &mut Vec<String>, mcp: &McpConfig) {
     if !mcp.enabled {
         return;
     }
-    let mut seen_names: HashSet<&str> = HashSet::new();
+    let mut seen_names = HashSet::new();
     for (i, server) in mcp.servers.iter().enumerate() {
-        let name = server.name.as_str();
-        if name.is_empty() {
-            errors.push(format!("mcp.servers[{i}].name must not be empty"));
-        } else if !seen_names.insert(name) {
+        let name = &server.name;
+        if !seen_names.insert(name) {
             errors.push(format!(
                 "mcp.servers[{i}].name '{name}' is duplicated; names must be unique"
-            ));
-        }
-        if !is_mcp_server_name(name) {
-            errors.push(format!(
-                "mcp.servers[{i}].name must use only ASCII letters, digits, '_' or '-', \
-                 with no '__' and no trailing '_' (becomes the `<name>` in the \
-                 LLM-visible tool name `mcp__<name>__<tool>`)"
             ));
         }
     }
@@ -684,14 +675,6 @@ fn require_hf_id(errors: &mut Vec<String>, field: &str, value: &str) -> Option<H
             ));
         })
         .ok()
-}
-
-fn is_mcp_server_name(name: &str) -> bool {
-    name.chars().all(is_tool_name_char) && !name.contains("__") && !name.ends_with('_')
-}
-
-fn is_tool_name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
 #[cfg(test)]

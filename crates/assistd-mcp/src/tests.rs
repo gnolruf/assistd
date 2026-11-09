@@ -9,7 +9,13 @@ use super::*;
 /// [`adapt_client_as_tools`] for server `web` with every call allowed.
 async fn adapt_allowing(client: Arc<dyn McpClient>) -> Result<Vec<Box<dyn Tool>>, McpError> {
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    adapt_client_as_tools(client, "web", &approvals, &VisionGate::new(true)).await
+    adapt_client_as_tools(
+        client,
+        &"web".parse().unwrap(),
+        &approvals,
+        &VisionGate::new(true),
+    )
+    .await
 }
 
 fn mcp_tool(name: &str, description: &str) -> rmcp::model::Tool {
@@ -188,9 +194,14 @@ impl McpClient for ImageClient {
 async fn adapter_follows_the_vision_gate_on_every_call() {
     let vision = VisionGate::new(false);
     let approvals = ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved()));
-    let tools = adapt_client_as_tools(Arc::new(ImageClient), "shots", &approvals, &vision)
-        .await
-        .unwrap();
+    let tools = adapt_client_as_tools(
+        Arc::new(ImageClient),
+        &"shots".parse().unwrap(),
+        &approvals,
+        &vision,
+    )
+    .await
+    .unwrap();
     let without = tools[0].invoke(json!({})).await.unwrap();
     assert!(without.attachments.is_empty());
     vision.set(true);
@@ -253,7 +264,7 @@ async fn gated_tool(
     let client = Arc::new(CountingClient::default());
     let mut tools = adapt_client_as_tools(
         client.clone(),
-        "files",
+        &"files".parse().unwrap(),
         &ApprovalGate::new(gate, approvals),
         &VisionGate::new(true),
     )

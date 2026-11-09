@@ -313,6 +313,7 @@ dependencies = [
 name = "assistd-mcp"
 version = "0.6.0"
 dependencies = [
+ "assistd-config",
  "assistd-tools",
  "assistd-utils",
  "async-trait",

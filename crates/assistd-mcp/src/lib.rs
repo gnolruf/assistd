@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use assistd_config::McpServerName;
 use assistd_tools::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::{
     ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext,
@@ -123,7 +124,7 @@ impl Tool for McpToolAdapter {
 /// Calls ask first unless `approvals` holds the tool; images become a text note when `vision` says no.
 pub async fn adapt_client_as_tools(
     client: Arc<dyn McpClient>,
-    server_name: &str,
+    server_name: &McpServerName,
     approvals: &ApprovalGate,
     vision: &Arc<VisionGate>,
 ) -> Result<Vec<Box<dyn Tool>>, McpError> {
