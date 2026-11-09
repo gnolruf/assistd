@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assistd_mcp::{
-    Connector, HttpAuth, HttpConfig, McpClient, McpError, McpServer, OAuthConfig, TokenStore,
-    begin_login,
+    Connector, HttpAuth, HttpConfig, McpClient, McpError, McpServer, OAuthConfig, Revocation,
+    TokenStore, begin_login, sign_out,
 };
 use axum::Router;
 use axum::extract::Request;
@@ -167,6 +167,7 @@ async fn a_redirect_to_another_origin_is_refused() {
 struct OAuthMock {
     bearers_seen: Arc<Mutex<Vec<String>>>,
     refreshes: Arc<AtomicUsize>,
+    revocations_seen: Arc<Mutex<Vec<String>>>,
     /// The authorization endpoint advertised in place of the mock's own.
     authorize_endpoint: Option<String>,
 }
@@ -185,12 +186,14 @@ impl OAuthMock {
                 .clone()
                 .unwrap_or_else(|| format!("{origin}/authorize")),
             "token_endpoint": format!("{origin}/token"),
+            "revocation_endpoint": format!("{origin}/revoke"),
             "response_types_supported": ["code"],
             "code_challenge_methods_supported": ["S256"],
         })
         .to_string();
         let refreshes = self.refreshes.clone();
         let bearers_seen = self.bearers_seen.clone();
+        let revocations_seen = self.revocations_seen.clone();
         let mcp = Router::new()
             .nest_service("/mcp", service)
             .layer(middleware::from_fn(move |request, next| {
@@ -204,6 +207,13 @@ impl OAuthMock {
             .route(
                 "/token",
                 post(move |body: String| std::future::ready(grant(&refreshes, &body))),
+            )
+            .route(
+                "/revoke",
+                post(move |body: String| {
+                    revocations_seen.lock().push(body);
+                    std::future::ready(StatusCode::OK)
+                }),
             );
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let url = Url::parse(&format!("{origin}/mcp")).unwrap();
@@ -261,12 +271,24 @@ fn json_reply(body: String) -> Response {
 /// Write a token file holding access token `stale` and refresh token `r1` for server `remote`
 /// at `url`, received at `received_at` seconds since the epoch and valid for an hour.
 fn seed_token_file(path: &Path, url: &Url, received_at: u64) {
+    seed_tokens_for_client(path, url, Some(CLIENT_ID), CLIENT_ID, received_at);
+}
+
+/// Write a token file like [`seed_token_file`], for a client configured as `configured` and
+/// registered as `registered`.
+fn seed_tokens_for_client(
+    path: &Path,
+    url: &Url,
+    configured: Option<&str>,
+    registered: &str,
+    received_at: u64,
+) {
     let entries = json!({"entries": [{
         "server": "remote",
         "url": url.as_str(),
-        "client_id": CLIENT_ID,
+        "client_id": configured,
         "credentials": {
-            "client_id": CLIENT_ID,
+            "client_id": registered,
             "token_response": {
                 "access_token": "stale",
                 "token_type": "bearer",
@@ -418,4 +440,28 @@ async fn a_login_stores_a_token_only_for_a_redirect_carrying_its_state() {
     assert_eq!(echo(&server, "hi").await.as_deref(), Some("hi"));
     assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
     server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_out_a_dynamically_registered_client_names_its_registered_id() {
+    let mock = OAuthMock::default();
+    let (url, _server) = mock.serve().await;
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = dir.path().join("mcp-tokens.json");
+    seed_tokens_for_client(&tokens, &url, None, "registered-client", 1);
+    let mut oauth = oauth_config(CLIENT_ID, &tokens);
+    oauth.client_id = None;
+
+    let revocation = sign_out("remote", &url, &oauth, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    assert_eq!(revocation, Revocation::Revoked);
+    let revocations = mock.revocations_seen.lock().clone();
+    assert_eq!(revocations.len(), 1, "{revocations:?}");
+    assert!(
+        revocations[0].contains("client_id=registered-client"),
+        "{revocations:?}"
+    );
+    assert!(!std::fs::read_to_string(&tokens).unwrap().contains("r1"));
 }
