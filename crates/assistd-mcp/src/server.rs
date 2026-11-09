@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, info, warn};
 
-use assistd_utils::backoff::{RESTART_WINDOW, RestartDecision, RestartPolicy};
+use assistd_utils::backoff::{MIN_HEALTHY_SECONDS, RESTART_WINDOW, RestartDecision, RestartPolicy};
 
 use crate::McpClient;
 use crate::error::McpError;
@@ -59,6 +59,15 @@ struct Session {
     stop_tx: oneshot::Sender<()>,
     task: AbortOnDropHandle<()>,
     consecutive_timeouts: u32,
+}
+
+/// Why a session is being retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnd {
+    /// The server exited or ended the session itself.
+    Died,
+    /// The daemon killed it for not answering.
+    Hung,
 }
 
 impl McpServer {
@@ -123,11 +132,14 @@ impl McpServer {
             return;
         };
         match outcome {
-            Err(McpError::SessionExpired) => info!(
-                target: "assistd::mcp",
-                server = %self.name,
-                "MCP server ended the session; the next call opens a new one",
-            ),
+            Err(McpError::SessionExpired) => {
+                info!(
+                    target: "assistd::mcp",
+                    server = %self.name,
+                    "MCP server ended the session; the next call opens a new one",
+                );
+                self.retire_session(&mut state, SessionEnd::Died);
+            }
             Err(McpError::RequestTimeout(_)) => {
                 session.consecutive_timeouts += 1;
                 if session.consecutive_timeouts < HUNG_AFTER_TIMEOUTS {
@@ -139,20 +151,17 @@ impl McpServer {
                     timeouts = HUNG_AFTER_TIMEOUTS,
                     "MCP server stopped answering; killing it so the next call restarts it",
                 );
+                self.retire_session(&mut state, SessionEnd::Hung);
             }
-            Ok(_) | Err(McpError::RpcError { .. }) => {
-                session.consecutive_timeouts = 0;
-                return;
-            }
-            Err(_) => return,
+            Ok(_) | Err(McpError::RpcError { .. }) => session.consecutive_timeouts = 0,
+            Err(_) => {}
         }
-        self.retire_session(&mut state);
     }
 
     /// Replace a dead session, unless the backoff after the last death or
     /// failed spawn has yet to pass.
     async fn restart(&self, state: &mut ServerState) -> Result<Arc<McpPeer>, McpError> {
-        self.retire_session(state);
+        self.retire_session(state, SessionEnd::Died);
         if state.retry_at.is_some_and(|at| Instant::now() < at) {
             return Err(McpError::ServerDown);
         }
@@ -192,9 +201,10 @@ impl McpServer {
         state.needs_authorization = Some(scopes.to_vec());
     }
 
-    /// Drop the current session, killing its process group with SIGKILL, and
-    /// schedule the next restart.
-    fn retire_session(&self, state: &mut ServerState) {
+    /// Drop the current session, killing its process group with SIGKILL, and schedule the
+    /// next restart: at once after a healthy run that died on its own, unless a restart cap
+    /// is hit, and after the backoff otherwise.
+    fn retire_session(&self, state: &mut ServerState, end: SessionEnd) {
         let Some(ended) = state.session.take() else {
             return;
         };
@@ -207,7 +217,14 @@ impl McpServer {
             "MCP server stopped",
         );
         state.policy.record_session_end(ran_for);
-        state.retry_at = Some(Instant::now() + restart_delay(&self.name, &mut state.policy));
+        let ran_healthy = ran_for >= Duration::from_secs(MIN_HEALTHY_SECONDS);
+        let delay = match state.policy.next_restart(Instant::now()) {
+            RestartDecision::Backoff { .. } if end == SessionEnd::Died && ran_healthy => {
+                Duration::ZERO
+            }
+            decision => decision_delay(&self.name, decision),
+        };
+        state.retry_at = Some(Instant::now() + delay);
     }
 
     /// Re-list a restarted server's tools and warn when they differ from
@@ -330,7 +347,12 @@ async fn end_session(mut lifeline: Lifeline, stop_rx: oneshot::Receiver<()>) {
 /// Register the next restart of server `name` and pick how long to wait before it, at most
 /// [`UNHEALTHY_RETRY_INTERVAL`].
 pub(crate) fn restart_delay(name: &str, policy: &mut RestartPolicy) -> Duration {
-    match policy.next_restart(Instant::now()) {
+    decision_delay(name, policy.next_restart(Instant::now()))
+}
+
+/// How long `decision` says server `name` waits before its restart, logging a hit cap.
+fn decision_delay(name: &str, decision: RestartDecision) -> Duration {
+    match decision {
         RestartDecision::Backoff { delay, .. } => delay,
         RestartDecision::ConsecutiveCapReached { failures } => {
             error!(
