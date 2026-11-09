@@ -14,6 +14,7 @@ use assistd_mcp::{
 use assistd_tools::{
     AlwaysAllowGate, ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, VisionGate,
 };
+use assistd_utils::backoff::MIN_HEALTHY_SECONDS;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
@@ -148,6 +149,22 @@ async fn crashed_server_fails_fast_then_restarts_on_a_later_call() {
         echo_answers_again(echo).await,
         "a call after the backoff must restart the server"
     );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn first_call_after_a_healthy_server_exits_restarts_it() {
+    let server = start_fake().await;
+    let tools = adapt_allowing(&server).await;
+    let echo = find(&tools, "mcp__fake__echo");
+
+    tokio::time::sleep(Duration::from_secs(MIN_HEALTHY_SECONDS + 1)).await;
+    let _ = find(&tools, "mcp__fake__crash_me").invoke(json!({})).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let post = echo.invoke(json!({"msg": "after"})).await.unwrap();
+    assert_eq!(post.output, "echo:after", "{post:?}");
 
     server.shutdown().await;
 }
