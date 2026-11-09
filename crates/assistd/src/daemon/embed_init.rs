@@ -19,6 +19,7 @@ use assistd_utils::readiness::Readiness;
 use futures_util::FutureExt;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::info;
 
 const EMBED_QUEUE_CAPACITY: usize = 256;
@@ -81,12 +82,13 @@ impl EmbeddingService {
     }
 
     /// Drain queued jobs while the server is still up, abandoning them after
-    /// [`EMBED_DRAIN_BUDGET`], then stop it. A start still under way is
-    /// cancelled. The memory database must still be open.
+    /// [`EMBED_DRAIN_BUDGET`] or at `deadline`, then stop it. A start still
+    /// under way is cancelled. The memory database must still be open.
     pub(super) async fn shutdown(
         self,
         worker_shutdown: &watch::Sender<bool>,
         server_shutdown: &watch::Sender<bool>,
+        deadline: Instant,
     ) {
         worker_shutdown.send_replace(true);
         let Some(startup) = self.startup else {
@@ -106,7 +108,7 @@ impl EmbeddingService {
             return;
         };
         if let Some(worker) = worker {
-            join_worker_within_budget(worker).await;
+            join_worker_within_budget(worker, deadline).await;
         }
         server_shutdown.send_replace(true);
         if let Err(e) = server.shutdown().await {
@@ -115,8 +117,9 @@ impl EmbeddingService {
     }
 }
 
-async fn join_worker_within_budget(mut worker: JoinHandle<()>) {
-    if tokio::time::timeout(EMBED_DRAIN_BUDGET, &mut worker)
+async fn join_worker_within_budget(mut worker: JoinHandle<()>, deadline: Instant) {
+    let drain_until = deadline.min(Instant::now() + EMBED_DRAIN_BUDGET);
+    if tokio::time::timeout_at(drain_until, &mut worker)
         .await
         .is_err()
     {
