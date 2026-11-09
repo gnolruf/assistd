@@ -6,7 +6,7 @@ use std::time::Duration;
 use http::header::CONTENT_TYPE;
 use oauth2::TokenResponse;
 use reqwest::redirect;
-use rmcp::transport::auth::CredentialStore;
+use rmcp::transport::auth::{CredentialStore, StoredCredentials};
 use serde_json::Value;
 use url::{Url, form_urlencoded};
 
@@ -41,34 +41,47 @@ pub async fn sign_out(
         .tokens
         .for_server(label, url, oauth.client_id.as_deref());
     let stored = tokens.load().await.map_err(|e| auth_failure(&e))?;
-    let revocation = match stored.and_then(|credentials| credentials.token_response) {
-        None => Revocation::NothingStored,
-        Some(token) => {
+    let revocation = match stored {
+        Some(StoredCredentials {
+            client_id: registered,
+            token_response: Some(token),
+            ..
+        }) => {
             let (secret, kind) = match token.refresh_token() {
                 Some(refresh) => (refresh.secret(), "refresh_token"),
                 None => (token.access_token().secret(), "access_token"),
             };
-            let revoking = revoke(url, oauth, secret, kind);
+            let client_id = Some(registered.as_str())
+                .filter(|id| !id.is_empty())
+                .or(oauth.client_id.as_deref());
+            let revoking = revoke(url, oauth, client_id, secret, kind);
             tokio::time::timeout(request_timeout, revoking)
                 .await
                 .unwrap_or_else(|_| {
                     Revocation::Failed(format!("timed out after {}s", request_timeout.as_secs()))
                 })
         }
+        _ => Revocation::NothingStored,
     };
     tokens.clear().await.map_err(|e| auth_failure(&e))?;
     Ok(revocation)
 }
 
 /// Ask the authorization server of the server at `url` to revoke `token`, a token of type
-/// `kind`.
-async fn revoke(url: &Url, oauth: &OAuthConfig, token: &str, kind: &str) -> Revocation {
+/// `kind` issued to `client_id`.
+async fn revoke(
+    url: &Url,
+    oauth: &OAuthConfig,
+    client_id: Option<&str>,
+    token: &str,
+    kind: &str,
+) -> Revocation {
     let endpoint = match revocation_endpoint(url).await {
         Ok(Some(endpoint)) => endpoint,
         Ok(None) => return Revocation::NotOffered,
         Err(reason) => return Revocation::Failed(reason),
     };
-    match post_revocation(&endpoint, oauth, token, kind).await {
+    match post_revocation(&endpoint, oauth, client_id, token, kind).await {
         Ok(()) => Revocation::Revoked,
         Err(reason) => Revocation::Failed(reason),
     }
@@ -96,6 +109,7 @@ async fn revocation_endpoint(url: &Url) -> Result<Option<Url>, String> {
 async fn post_revocation(
     endpoint: &Url,
     oauth: &OAuthConfig,
+    client_id: Option<&str>,
     token: &str,
     kind: &str,
 ) -> Result<(), String> {
@@ -106,8 +120,13 @@ async fn post_revocation(
     let mut request = http
         .post(endpoint.as_str())
         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(revocation_form(oauth, token, kind));
-    if let (Some(client_id), Some(secret)) = (&oauth.client_id, &oauth.client_secret) {
+        .body(revocation_form(
+            client_id,
+            oauth.client_secret.is_some(),
+            token,
+            kind,
+        ));
+    if let (Some(client_id), Some(secret)) = (client_id, &oauth.client_secret) {
         request = request.basic_auth(client_id, Some(secret));
     }
     let response = request.send().await.map_err(|e| {
@@ -127,13 +146,13 @@ async fn post_revocation(
     }
 }
 
-/// The form body revoking `token`; a public client names itself in it, a confidential one
+/// The form body revoking `token`; a public client names itself in it, a `confidential` one
 /// authenticates with HTTP Basic instead.
-fn revocation_form(oauth: &OAuthConfig, token: &str, kind: &str) -> String {
+fn revocation_form(client_id: Option<&str>, confidential: bool, token: &str, kind: &str) -> String {
     let mut form = form_urlencoded::Serializer::new(String::new());
     form.append_pair("token", token)
         .append_pair("token_type_hint", kind);
-    if let (Some(client_id), None) = (&oauth.client_id, &oauth.client_secret) {
+    if let Some(client_id) = client_id.filter(|_| !confidential) {
         form.append_pair("client_id", client_id);
     }
     form.finish()
