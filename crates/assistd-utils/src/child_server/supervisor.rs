@@ -19,8 +19,9 @@ use crate::backoff::{
     RestartPolicy,
 };
 
-/// Graceful shutdown budget per child; fits under systemd's 15s stop budget.
-const TERM_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a stopping child gets to exit after SIGTERM before its process
+/// group gets SIGKILL.
+const TERM_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What happened during one supervisor cycle.
 enum CycleResult {

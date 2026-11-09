@@ -1,6 +1,7 @@
 //! Staged daemon teardown: signal handling, intake drain, and subsystem
 //! shutdown in dependency order.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use assistd_core::{Component, PresenceManager, TaskRunner, spawn_supervised};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, timeout_at};
 use tokio_util::task::TaskTracker;
 use tracing::info;
 
@@ -18,6 +20,9 @@ use super::search_init::SearchService;
 use super::voice_init::VoiceService;
 use super::wm_init::WindowSubsystem;
 
+/// Whole-teardown budget, leaving systemd's 15 s `TimeoutStopSec` room to
+/// close the memory database and exit before it sends SIGKILL.
+const TEARDOWN_BUDGET: Duration = Duration::from_secs(12);
 const PERSISTENCE_DRAIN_BUDGET: Duration = Duration::from_secs(5);
 const TASK_RUN_STOP_BUDGET: Duration = Duration::from_secs(10);
 
@@ -78,31 +83,66 @@ pub(super) struct DaemonShutdown {
 impl DaemonShutdown {
     /// Tear down after the socket has stopped: stop intake, finish intake
     /// tasks and persistence, then stop each subsystem before its dependencies.
+    /// Every stage before closing memory shares one [`TEARDOWN_BUDGET`]
+    /// deadline, and a stage that overruns it is abandoned.
     pub(super) async fn shutdown(self, stages: &ShutdownStages) {
+        let deadline = TeardownDeadline::after(TEARDOWN_BUDGET);
         stages.intake.send_replace(true);
-        join_intake_tasks(self.intake_tasks).await;
-        stop_task_runs(&self.task_runner).await;
-        drain_persistence(&self.persistence_tracker).await;
+        deadline
+            .bound("intake tasks", join_intake_tasks(self.intake_tasks))
+            .await;
+        stop_task_runs(&self.task_runner, deadline).await;
+        drain_persistence(&self.persistence_tracker, deadline).await;
 
         stages.voice.send_replace(true);
-        self.voice.shutdown().await;
+        deadline.bound("voice worker", self.voice.shutdown()).await;
 
         stages.llm.send_replace(true);
-        if let Err(e) = self.presence.shutdown().await {
+        if let Some(Err(e)) = deadline.bound("presence", self.presence.shutdown()).await {
             tracing::error!("presence shutdown error: {e:#}");
         }
 
         stages.tools.send_replace(true);
-        self.window.shutdown().await;
-        self.mcp.shutdown().await;
-
         stages.search.send_replace(true);
-        self.search.shutdown().await;
-
-        self.embed
-            .shutdown(&stages.embed_worker, &stages.embed_server)
-            .await;
+        tokio::join!(
+            deadline.bound("window manager", self.window.shutdown()),
+            deadline.bound("MCP servers", self.mcp.shutdown()),
+            deadline.bound("web search", self.search.shutdown()),
+            deadline.bound(
+                "embedding",
+                self.embed
+                    .shutdown(&stages.embed_worker, &stages.embed_server, deadline.at),
+            ),
+        );
         self.memory.shutdown().await;
+    }
+}
+
+/// The instant every teardown stage before closing memory must finish by.
+#[derive(Clone, Copy)]
+struct TeardownDeadline {
+    at: Instant,
+}
+
+impl TeardownDeadline {
+    fn after(budget: Duration) -> Self {
+        Self {
+            at: Instant::now() + budget,
+        }
+    }
+
+    /// The earlier of the deadline and `budget` from now.
+    fn capped(self, budget: Duration) -> Instant {
+        self.at.min(Instant::now() + budget)
+    }
+
+    /// Run `stage`, abandoning it with a warning at the deadline.
+    async fn bound<F: Future>(self, stage: &'static str, work: F) -> Option<F::Output> {
+        let outcome = timeout_at(self.at, work).await.ok();
+        if outcome.is_none() {
+            tracing::warn!("{stage} did not stop before the shutdown deadline; abandoning it");
+        }
+        outcome
     }
 }
 
@@ -158,8 +198,8 @@ async fn join_intake_tasks(tasks: IntakeTasks) {
     }
 }
 
-async fn stop_task_runs(task_runner: &TaskRunner) {
-    if tokio::time::timeout(TASK_RUN_STOP_BUDGET, task_runner.stop())
+async fn stop_task_runs(task_runner: &TaskRunner, deadline: TeardownDeadline) {
+    if timeout_at(deadline.capped(TASK_RUN_STOP_BUDGET), task_runner.stop())
         .await
         .is_err()
     {
@@ -171,10 +211,10 @@ async fn stop_task_runs(task_runner: &TaskRunner) {
 }
 
 /// Wait for fire-and-forget persistence tasks, abandoning them after
-/// [`PERSISTENCE_DRAIN_BUDGET`].
-async fn drain_persistence(tracker: &TaskTracker) {
+/// [`PERSISTENCE_DRAIN_BUDGET`] or at the deadline.
+async fn drain_persistence(tracker: &TaskTracker, deadline: TeardownDeadline) {
     tracker.close();
-    if tokio::time::timeout(PERSISTENCE_DRAIN_BUDGET, tracker.wait())
+    if timeout_at(deadline.capped(PERSISTENCE_DRAIN_BUDGET), tracker.wait())
         .await
         .is_err()
     {

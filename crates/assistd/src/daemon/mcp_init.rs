@@ -18,6 +18,7 @@ use assistd_mcp::{
 };
 use assistd_tools::{ApprovalGate, VisionGate};
 use async_trait::async_trait;
+use futures_util::future::join_all;
 use parking_lot::Mutex;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -112,10 +113,11 @@ impl McpFleet {
     /// Cancel every pending start and stop every server.
     async fn shutdown(&self) {
         self.stopping.cancel();
-        for server in &self.servers {
+        join_all(self.servers.iter().map(|server| async move {
             let _changing = server.changing.lock().await;
             server.stop().await;
-        }
+        }))
+        .await;
     }
 }
 
