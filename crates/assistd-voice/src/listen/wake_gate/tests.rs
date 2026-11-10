@@ -30,6 +30,11 @@ async fn follow_up_admits_one_utterance_inside_the_window_only() {
         Admission::Dropped,
         "speech that began before the reply ended is not a reply to it"
     );
+    assert_eq!(
+        gate.admit(false, ended + Duration::from_secs(1)),
+        Admission::Command,
+        "speech that began before the window leaves it open"
+    );
 
     gate.open_follow_up(ended);
     assert_eq!(
