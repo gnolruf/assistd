@@ -84,13 +84,6 @@ pub(crate) async fn run(action: PttAction) -> Result<()> {
                     escape_controls_single_line(message)
                 )?;
             }
-            Event::ConfirmRequest { .. } => {
-                writeln!(
-                    io::stderr(),
-                    "[daemon asked for confirmation; denying \
-                     (non-interactive ptt)]"
-                )?;
-            }
             Event::Done { .. } | Event::Error { .. } if wrote_delta => {
                 writeln!(stdout)?;
             }

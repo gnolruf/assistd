@@ -583,8 +583,10 @@ yet approved, in every mode, and follows redirects only to the same or an approv
 vision projector. "Always allow" for a web host, an MCP tool or an application is saved
 beside the config in `approved_hosts.toml`, `approved_mcp_tools.toml` or
 `approved_apps.toml`.
-Clients that cannot answer prompts (`assistd query`, push-to-talk) deny
-them, so there only approved hosts, tools and programs run.
+`assistd query` cannot answer prompts and denies them, so there only
+approved hosts, tools and programs run. A turn asked by voice (push-to-talk
+or the wake word) has nobody to answer either: it runs in accept-edits mode
+and every other prompt is denied at once, without being shown to any client.
 
 A query connection starts in manual mode, where every prompt goes to the
 client. A client can switch modes with a mid-stream `Request::SetPermissionMode`

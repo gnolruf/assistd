@@ -15,14 +15,16 @@ use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
 };
-use assistd_tools::{Attachment, CONFIRM_ROUTER, ToolOutput, inherit_confirm_router};
+use assistd_tools::{
+    Attachment, CONFIRM_ROUTER, ConfirmRouter, ToolOutput, inherit_confirm_router,
+};
 use assistd_utils::time::saturating_millis;
 use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::{
     SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
 };
 
-use super::context::combine_context_blocks;
+use super::context::{combine_context_blocks, voice_approvals_note};
 use super::persistence::PersistTarget;
 use super::relay_trace::RelayTraceBuilder;
 use super::turn_admission::MainLaneTurn;
@@ -472,7 +474,13 @@ impl AppState {
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
-        let agent_task = self.spawn_agent_task(text, attachments, plan, llm_tx, cancel.clone());
+        let spawn_agent = || self.spawn_agent_task(text, attachments, plan, llm_tx, cancel.clone());
+        let agent_task = match origin {
+            TurnOrigin::Typed => spawn_agent(),
+            TurnOrigin::Voice => {
+                CONFIRM_ROUTER.sync_scope(ConfirmRouter::for_voice_turn(id.clone()), spawn_agent)
+            }
+        };
 
         let (speech, speech_rx) = self.speech_pipeline();
         let voice_output = self.subsystems.voice.speech();
@@ -622,8 +630,9 @@ impl AppState {
             None
         };
         let window = self.build_window_context().await;
+        let approvals = voice_approvals_note(origin);
         let brief = self.brief_reply_note(origin, chat_focused);
-        if let Some(block) = combine_context_blocks([semantic, window, brief])
+        if let Some(block) = combine_context_blocks([semantic, window, approvals, brief])
             && let Err(e) = self.subsystems.llm.set_transient_context(block).await
         {
             debug!(
@@ -656,7 +665,8 @@ impl AppState {
         )
     }
 
-    /// Run the turn's agent under `plan`, starting it planning when asked to.
+    /// Run the turn's agent under `plan` and the confirm router in scope, starting it
+    /// planning when asked to.
     fn spawn_agent_task(
         &self,
         text: String,
