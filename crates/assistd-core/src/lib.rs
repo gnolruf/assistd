@@ -23,9 +23,8 @@ use assistd_tools::{
     PresentSpec, Protected, RememberTool, ReminisceTool, RunTool, SandboxError, SandboxInfo,
     SandboxRequest, SharedDirs, StandingApprovals, ToolSandbox, VisionGate,
     commands::{
-        BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
-        ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand, TailCommand, UniqCommand,
-        WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
+        BashCommand, BashPolicyCfg, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WebCommand,
+        WmCommand, WriteCommand, WritePolicyCfg, register_readers,
     },
     presentation::is_spill_file_name,
     probe_sandbox,
@@ -523,8 +522,8 @@ struct PlanningCommandDeps {
     search: Option<SearxngClient>,
 }
 
-/// The commands of a planning turn: the in-process readers, `web`, and `bash` with no
-/// "always allow" approvals, so a script it runs unasked is read-only by its own class.
+/// The commands of a planning turn: the readers, `web`, and `bash`, with no "always allow"
+/// approvals, so a script or text program run unasked is read-only by its own class.
 fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
     let PlanningCommandDeps {
         bash_cfg,
@@ -537,27 +536,12 @@ fn planning_commands(deps: PlanningCommandDeps) -> CommandRegistry {
         allowlist: Arc::new(Allowlist::unsaved(sandbox.search_path())),
         ..BashPolicyCfg::clone(&bash_cfg)
     };
+    let unapproved = Arc::new(unapproved);
     let mut commands = CommandRegistry::new();
-    register_readers(&mut commands);
+    register_readers(&mut commands, &unapproved, &sandbox, &confirmation_gate);
     commands.register(WebCommand::new(approved_hosts, search));
-    commands.register(BashCommand::new(
-        Arc::new(unapproved),
-        sandbox,
-        confirmation_gate,
-    ));
+    commands.register(BashCommand::new(unapproved, sandbox, confirmation_gate));
     commands
-}
-
-fn register_readers(commands: &mut CommandRegistry) {
-    commands.register(CatCommand);
-    commands.register(LsCommand);
-    commands.register(GrepCommand);
-    commands.register(WcCommand);
-    commands.register(HeadCommand);
-    commands.register(TailCommand);
-    commands.register(SortCommand);
-    commands.register(UniqCommand);
-    commands.register(EchoCommand);
 }
 
 struct BuiltinCommandDeps {
@@ -588,7 +572,7 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
     } = deps;
 
     let mut commands = CommandRegistry::new();
-    register_readers(&mut commands);
+    register_readers(&mut commands, &bash_cfg, &sandbox, &confirmation_gate);
     commands.register(WriteCommand::new(
         write_cfg,
         confirmation_gate.clone(),

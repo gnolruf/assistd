@@ -15,9 +15,8 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use super::{
-    BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
-    ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, SortCommand, TailCommand, UniqCommand,
-    WcCommand, WebCommand, WmCommand, WriteCommand, WritePolicyCfg,
+    BashCommand, BashPolicyCfg, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WebCommand,
+    WmCommand, WriteCommand, WritePolicyCfg, register_readers,
 };
 use crate::command::CommandRegistry;
 use crate::policy::{
@@ -28,15 +27,7 @@ use crate::vision::VisionGate;
 
 pub(crate) fn test_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
-    registry.register(CatCommand);
-    registry.register(LsCommand);
-    registry.register(GrepCommand);
-    registry.register(WcCommand);
-    registry.register(HeadCommand);
-    registry.register(TailCommand);
-    registry.register(SortCommand);
-    registry.register(UniqCommand);
-    registry.register(EchoCommand);
+    register_test_readers(&mut registry);
     registry.register(permissive_write());
     registry.register(test_see());
     registry.register(test_screenshot());
@@ -47,6 +38,17 @@ pub(crate) fn test_registry() -> CommandRegistry {
     registry.register(test_bash());
     registry.register(test_wm(Arc::new(NoWindowManager)));
     registry
+}
+
+/// The readers, with the text programs unsandboxed and never asking.
+pub(crate) fn register_test_readers(registry: &mut CommandRegistry) {
+    let gate: Arc<dyn ConfirmationGate> = Arc::new(AlwaysAllowGate);
+    register_readers(
+        registry,
+        &Arc::new(BashPolicyCfg::default()),
+        &SandboxInfo::none(),
+        &gate,
+    );
 }
 
 /// `write` with an allowlist of `/`, permitting any absolute path without asking.

@@ -89,7 +89,7 @@ pub fn io_error_nav(cmd: &str, path: &str, e: &io::Error) -> String {
             cmd,
             format_args!("{path}: {e}"),
             Hint::Use,
-            format_args!("bash \"tail -n 200 {path}\" or bash \"grep PATTERN {path}\""),
+            format_args!("tail -n 200 {path} or grep PATTERN {path}"),
         ),
         ErrorKind::InvalidInput => error_line(
             cmd,

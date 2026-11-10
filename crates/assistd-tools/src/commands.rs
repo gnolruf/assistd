@@ -2,25 +2,22 @@
 
 use std::io::{self, ErrorKind};
 use std::path::Path;
+use std::sync::Arc;
 
 use assistd_utils::text::human_size;
 use tokio::io::AsyncReadExt;
 
 use crate::chain::OUTPUT_MAX;
-use crate::command::{CommandOutput, Hint, error_line, io_error_nav};
-use crate::policy::FileScope;
+use crate::command::CommandRegistry;
+use crate::policy::{ConfirmationGate, FileScope, SandboxInfo};
 
 pub mod bash;
 pub mod cat;
 pub mod echo;
-pub mod grep;
-pub mod head_tail;
 pub mod ls;
+pub mod program;
 pub mod screenshot;
 pub mod see;
-pub mod sort;
-pub mod uniq;
-pub mod wc;
 pub mod web;
 pub mod wm;
 pub mod write;
@@ -32,22 +29,18 @@ pub use crate::policy::BashPolicyCfg;
 pub use bash::BashCommand;
 pub use cat::CatCommand;
 pub use echo::EchoCommand;
-pub use grep::GrepCommand;
-pub use head_tail::{HeadCommand, TailCommand};
 pub use ls::LsCommand;
+pub use program::ProgramCommand;
 pub use screenshot::{ScreenshotCommand, ScreenshotPolicyCfg};
 pub use see::SeeCommand;
-pub use sort::SortCommand;
-pub use uniq::UniqCommand;
-pub use wc::WcCommand;
 pub use web::WebCommand;
 pub use wm::WmCommand;
 pub use write::{WriteCommand, WritePolicyCfg};
 
 #[cfg(test)]
 pub(crate) use test_support::{
-    RecordingGate, hold_fifo_open, make_fifo, permissive_write, test_bash, test_registry,
-    test_screenshot, test_see, test_wm,
+    RecordingGate, hold_fifo_open, make_fifo, permissive_write, register_test_readers, test_bash,
+    test_registry, test_screenshot, test_see, test_wm,
 };
 
 /// Largest file a command reads into memory; a bigger one would overflow
@@ -106,56 +99,18 @@ async fn open_regular(scope: &FileScope, path: &Path) -> io::Result<(tokio::fs::
     Ok((tokio::fs::File::from_std(file), size))
 }
 
-/// Input for a stdin-or-files command: named files in `scope` (concatenated,
-/// binary refused, at most [`OUTPUT_MAX`] in all) win over stdin. `Ok(None)`
-/// means neither was supplied.
-pub(crate) async fn collect_input(
-    cmd: &str,
-    scope: &FileScope,
-    files: &[String],
-    stdin: Option<Vec<u8>>,
-) -> Result<Option<Vec<u8>>, CommandOutput> {
-    if files.is_empty() {
-        return Ok(stdin);
+/// Register the file and text commands: `cat`, `ls` and `echo` in-process, and every
+/// [`ProgramCommand`] under `cfg`, inside `sandbox`, asking `gate`.
+pub fn register_readers(
+    registry: &mut CommandRegistry,
+    cfg: &Arc<BashPolicyCfg>,
+    sandbox: &Arc<SandboxInfo>,
+    gate: &Arc<dyn ConfirmationGate>,
+) {
+    registry.register(CatCommand);
+    registry.register(LsCommand);
+    registry.register(EchoCommand);
+    for program in ProgramCommand::all(cfg, sandbox, gate) {
+        registry.register(program);
     }
-    let mut out = Vec::new();
-    for path in files {
-        let bytes = read_regular_file(scope, path)
-            .await
-            .map_err(|e| CommandOutput::failed(1, io_error_nav(cmd, path, &e).into_bytes()))?;
-        if let Some(mime) = cat::sniff_binary(&bytes) {
-            return Err(binary_refusal(cmd, &mime, bytes.len() as u64, path));
-        }
-        out.extend_from_slice(&bytes);
-        if out.len() > OUTPUT_MAX {
-            return Err(CommandOutput::failed(
-                1,
-                error_line(
-                    cmd,
-                    format_args!(
-                        "files together exceed the {} read limit",
-                        human_size(OUTPUT_MAX as u64)
-                    ),
-                    Hint::Try,
-                    format_args!("fewer files per {cmd}"),
-                )
-                .into_bytes(),
-            ));
-        }
-    }
-    Ok(Some(out))
-}
-
-/// The failure for a named file whose head sniffs as binary `mime`.
-fn binary_refusal(cmd: &str, mime: &str, size: u64, path: &str) -> CommandOutput {
-    CommandOutput::failed(
-        1,
-        error_line(
-            cmd,
-            format_args!("binary {mime} file ({}): {path}", human_size(size)),
-            Hint::Use,
-            format_args!("cat -b {path}"),
-        )
-        .into_bytes(),
-    )
 }
