@@ -1,4 +1,4 @@
-//! The seccomp filter bwrap loads for every quarantine command: no `AF_UNIX`
+//! The seccomp filter bwrap loads for every sandboxed command: no `AF_UNIX`
 //! sockets, so no host Unix socket bound in is reachable, and no `io_uring`.
 
 use std::fs::File;
