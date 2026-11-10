@@ -2,8 +2,8 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use assistd_config::SearchConfig;
@@ -11,7 +11,7 @@ use assistd_utils::child_server::{ChildServerSpec, random_secret};
 use tokio::process::Command;
 
 use crate::error::SearchServerError;
-use crate::settings::write_settings;
+use crate::settings::SettingsFile;
 
 const SEARXNG_ENV_PREFIX: &[u8] = b"SEARXNG_";
 
@@ -20,18 +20,18 @@ const SEARXNG_ENV_PREFIX: &[u8] = b"SEARXNG_";
 /// daemon's own `SEARXNG_*` environment. `Debug` omits the secret.
 pub struct SearxngServerSpec {
     cfg: SearchConfig,
-    settings_path: PathBuf,
+    settings: SettingsFile,
     secret: String,
 }
 
 impl SearxngServerSpec {
-    /// Draw a fresh secret and write the settings file the instance loads.
+    /// Draw a fresh secret and render the settings file the instance loads.
     pub fn prepare(cfg: SearchConfig) -> Result<Self, SearchServerError> {
         let secret = random_secret().map_err(SearchServerError::Secret)?;
-        let settings_path = write_settings(&cfg.engines)?;
+        let settings = SettingsFile::render(&cfg.engines)?;
         Ok(Self {
             cfg,
-            settings_path,
+            settings,
             secret,
         })
     }
@@ -43,7 +43,7 @@ impl SearxngServerSpec {
         {
             cmd.env_remove(name);
         }
-        cmd.env("SEARXNG_SETTINGS_PATH", &self.settings_path)
+        cmd.env("SEARXNG_SETTINGS_PATH", self.settings.path())
             .env("SEARXNG_BIND_ADDRESS", self.cfg.host.to_string())
             .env("SEARXNG_PORT", self.cfg.port.to_string())
             .env("SEARXNG_SECRET", &self.secret);
@@ -54,7 +54,7 @@ impl fmt::Debug for SearxngServerSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SearxngServerSpec")
             .field("cfg", &self.cfg)
-            .field("settings_path", &self.settings_path)
+            .field("settings", &self.settings)
             .finish_non_exhaustive()
     }
 }
@@ -62,6 +62,10 @@ impl fmt::Debug for SearxngServerSpec {
 impl ChildServerSpec for SearxngServerSpec {
     fn name(&self) -> &'static str {
         "search-server"
+    }
+
+    fn prepare_spawn(&self) -> io::Result<()> {
+        self.settings.write()
     }
 
     fn command(&self) -> Command {
@@ -95,9 +99,11 @@ mod tests {
     use super::*;
 
     fn spec() -> SearxngServerSpec {
+        let cfg = SearchConfig::default();
+        let settings = SettingsFile::render(&cfg.engines).unwrap();
         SearxngServerSpec {
-            cfg: SearchConfig::default(),
-            settings_path: PathBuf::from("/run/settings.yml"),
+            cfg,
+            settings,
             secret: "s3cret".into(),
         }
     }
@@ -106,7 +112,8 @@ mod tests {
     fn only_the_daemons_searxng_settings_reach_the_child() {
         let mut cmd = Command::new("searxng-run");
         let inherited = ["SEARXNG_LIMITER", "PATH", "SEARXNG_PORT", "SEARXNG_SECRET"];
-        spec().set_managed_env(&mut cmd, inherited.map(OsString::from));
+        let spec = spec();
+        spec.set_managed_env(&mut cmd, inherited.map(OsString::from));
         let env: BTreeMap<_, _> = cmd
             .as_std()
             .get_envs()
@@ -120,7 +127,10 @@ mod tests {
                 ("SEARXNG_LIMITER".into(), None),
                 ("SEARXNG_PORT".into(), set("8387")),
                 ("SEARXNG_SECRET".into(), set("s3cret")),
-                ("SEARXNG_SETTINGS_PATH".into(), set("/run/settings.yml")),
+                (
+                    "SEARXNG_SETTINGS_PATH".into(),
+                    Some(spec.settings.path().as_os_str().to_owned())
+                ),
             ])
         );
     }
