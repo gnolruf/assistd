@@ -115,7 +115,7 @@ pub struct ChatMessage<'a> {
     pub tool_call_id: Option<&'a str>,
     /// The reasoning that led to an assistant message's `tool_calls`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_content: Option<&'a str>,
+    pub reasoning_content: Option<Cow<'a, str>>,
 }
 
 impl<'a> ChatMessage<'a> {

@@ -495,9 +495,12 @@ impl Conversation {
             .map(|m| m.content.as_str());
         let head = match (self.system_prompt.as_str(), summary) {
             ("", None) => return None,
-            ("", Some(summary)) => Cow::Borrowed(summary),
+            ("", Some(summary)) => neutralise_template_tokens(summary),
             (prompt, None) => Cow::Borrowed(prompt),
-            (prompt, Some(summary)) => Cow::Owned(format!("{prompt}\n\n{summary}")),
+            (prompt, Some(summary)) => Cow::Owned(format!(
+                "{prompt}\n\n{}",
+                neutralise_template_tokens(summary)
+            )),
         };
         Some(wire::ChatMessage::plain(
             Role::System.as_wire(),
@@ -876,10 +879,11 @@ fn tool_calls_message(message: &Message) -> wire::ChatMessage<'_> {
     wire::ChatMessage {
         role: message.role.as_wire(),
         content: (!message.content.is_empty())
-            .then(|| wire::ContentBody::Text(Cow::Borrowed(&message.content))),
+            .then(|| wire::ContentBody::Text(neutralise_template_tokens(&message.content))),
         tool_calls: Some(specs),
         tool_call_id: None,
-        reasoning_content: (!message.reasoning.is_empty()).then_some(message.reasoning.as_str()),
+        reasoning_content: (!message.reasoning.is_empty())
+            .then(|| neutralise_template_tokens(&message.reasoning)),
     }
 }
 
@@ -922,7 +926,7 @@ fn text_with_context(message: &Message) -> Cow<'_, str> {
                 message.content
             ))
         }
-        None if Conversation::is_tool_result(message) => {
+        None if message.role == Role::Assistant || Conversation::is_tool_result(message) => {
             neutralise_template_tokens(&message.content)
         }
         None => Cow::Borrowed(&message.content),
