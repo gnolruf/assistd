@@ -74,10 +74,21 @@ impl Worker {
     }
 
     /// Build capture, report it, then forward its state to the daemon for
-    /// as long as the worker runs.
+    /// as long as the worker runs. A missing mic device is reported as
+    /// unavailable, then as ready once it is plugged in and capture builds.
     async fn start_capture(self: Arc<Self>, config: VoiceConfig) {
-        let capture =
-            stack::start_capture(&config, Arc::clone(&self.gpu), self.speech.clone()).await;
+        let report_missing = |reason| {
+            self.send(FromWorker::CaptureReadiness {
+                startup: Startup::Unavailable { reason },
+            });
+        };
+        let capture = stack::start_capture(
+            &config,
+            Arc::clone(&self.gpu),
+            self.speech.clone(),
+            report_missing,
+        )
+        .await;
         let startup = startup_of(&capture);
         let capture = self.capture.get_or_init(|| capture);
         self.send(FromWorker::CaptureReadiness { startup });

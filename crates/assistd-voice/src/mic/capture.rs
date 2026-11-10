@@ -231,9 +231,9 @@ fn capture_ptt(
     Ok(pcm)
 }
 
-/// Check that the named input device exists, logging the available ones.
-/// `None` (the system default) always passes; a named device that cannot be
-/// found or enumerated is rejected.
+/// Check that the named input device exists, logging the available ones when
+/// it does. `None` (the system default) always passes; a named device that
+/// cannot be found or enumerated is rejected.
 pub(crate) fn validate(requested: Option<&str>) -> Result<(), DeviceValidationError> {
     let host = cpal::default_host();
     let names: Vec<String> = match host.input_devices() {
@@ -250,6 +250,19 @@ pub(crate) fn validate(requested: Option<&str>) -> Result<(), DeviceValidationEr
             None => return Ok(()),
         },
     };
+    if let Some(requested) = requested
+        && !names.iter().any(|name| name == requested)
+    {
+        return Err(DeviceValidationError::NotFound {
+            requested: requested.to_string(),
+            listing: device_listing(&names),
+        });
+    }
+    log_devices(&host, &names);
+    Ok(())
+}
+
+fn log_devices(host: &cpal::Host, names: &[String]) {
     let default_name = host
         .default_input_device()
         .and_then(|device| device_name(&device).ok())
@@ -260,17 +273,6 @@ pub(crate) fn validate(requested: Option<&str>) -> Result<(), DeviceValidationEr
         available = ?names,
         "cpal input devices"
     );
-
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    if names.iter().any(|name| name == requested) {
-        return Ok(());
-    }
-    Err(DeviceValidationError::NotFound {
-        requested: requested.to_string(),
-        listing: device_listing(&names),
-    })
 }
 
 fn device_listing(names: &[String]) -> String {

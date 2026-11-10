@@ -22,7 +22,8 @@ use crate::settings::{DescribeSettings, describe_fields};
 pub struct VoiceConfig {
     /// Enables voice input.
     pub enabled: bool,
-    /// ALSA/PulseAudio input device. `None` uses the system default.
+    /// ALSA/PulseAudio input device. `None` uses the system default. A named
+    /// device that is unplugged when voice starts is polled for until it appears.
     pub mic_device: Option<String>,
     pub transcription: TranscriptionConfig,
     pub wakeword: WakeWordConfig,

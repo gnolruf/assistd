@@ -3,17 +3,22 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use assistd_config::{SynthesisConfig, VoiceConfig};
+use assistd_utils::backoff::backoff_delay;
 use tracing::{info, warn};
 
 use crate::listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
-use crate::mic::capture::validate;
+use crate::mic::capture::{DeviceValidationError, validate};
 use crate::{
     BusyProbe, CpuFallbackFactory, MicVoiceInput, QueuedTranscriber, SherpaTranscriber,
     SherpaVoiceOutput, SileroVad, Transcriber, VoiceCapture, VoiceOutput, VoiceOutputController,
     WakeWordSpotter,
 };
+
+/// Longest wait between checks for an unplugged `voice.mic_device`.
+const MIC_POLL_CAP: Duration = Duration::from_secs(10);
 
 /// GPU availability as the daemon last reported it; the GPU counts as
 /// unavailable until the first report.
@@ -61,17 +66,20 @@ pub(super) async fn start_output(config: &SynthesisConfig) -> Result<Arc<dyn Voi
 }
 
 /// Push-to-talk input and the listener, or why there are none. `speech`
-/// supplies the reply text barge-in checks reject as echo.
+/// supplies the reply text barge-in checks reject as echo. While the
+/// configured device is unplugged this waits for it, handing `on_missing`
+/// the reason once.
 pub(super) async fn start_capture(
     config: &VoiceConfig,
     gpu: Arc<ReportedGpu>,
     speech: Arc<VoiceOutputController>,
+    on_missing: impl FnOnce(String),
 ) -> Result<VoiceCapture, String> {
     if !config.enabled {
         info!("voice: disabled in config (voice.enabled = false)");
         return Err("disabled in config (voice.enabled = false)".into());
     }
-    check_mic_device(config.mic_device.clone()).await?;
+    wait_for_mic_device(config.mic_device.as_deref(), on_missing).await?;
     info!("voice: building mic input ({})", config.transcription.model);
     let primary = SherpaTranscriber::load(&config.transcription)
         .await
@@ -92,15 +100,40 @@ pub(super) async fn start_capture(
     })
 }
 
-/// Whether the configured input device is plugged in, or why capture cannot use it.
-async fn check_mic_device(mic_device: Option<String>) -> Result<(), String> {
-    let checked = tokio::task::spawn_blocking(move || validate(mic_device.as_deref()))
+/// Return once the configured input device is plugged in, polling with
+/// backoff while it is missing; errors when devices cannot be enumerated.
+async fn wait_for_mic_device(
+    mic_device: Option<&str>,
+    on_missing: impl FnOnce(String),
+) -> Result<(), String> {
+    let mut on_missing = Some(on_missing);
+    let mut attempt = 0;
+    loop {
+        let missing = match check_mic_device(mic_device.map(str::to_owned)).await? {
+            Ok(()) => return Ok(()),
+            Err(missing @ DeviceValidationError::NotFound { .. }) => missing.to_string(),
+            Err(e) => {
+                warn!("voice: {e}; voice capture unavailable");
+                return Err(e.to_string());
+            }
+        };
+        if let Some(report_missing) = on_missing.take() {
+            warn!("voice: {missing}; voice capture waits for the device to appear");
+            report_missing(missing);
+        }
+        tokio::time::sleep(backoff_delay(attempt).min(MIC_POLL_CAP)).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Whether the configured input device is plugged in; errors when the check
+/// itself could not run.
+async fn check_mic_device(
+    mic_device: Option<String>,
+) -> Result<Result<(), DeviceValidationError>, String> {
+    tokio::task::spawn_blocking(move || validate(mic_device.as_deref()))
         .await
-        .map_err(|e| format!("mic device check failed: {e}"))?;
-    checked.map_err(|e| {
-        warn!("voice: {e}; voice capture unavailable");
-        e.to_string()
-    })
+        .map_err(|e| format!("mic device check failed: {e}"))
 }
 
 /// Wake-word listening, or `None` when it is off in config or its Silero or
