@@ -1,16 +1,17 @@
 //! `grep`: filter lines of files, directories or stdin by a GNU-style regex.
 
+use std::borrow::Cow;
 use std::fs::Metadata;
-use std::io;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use fancy_regex::Regex;
 
 use crate::chain::OUTPUT_MAX;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
-use crate::commands::cat::sniff_binary;
-use crate::commands::read_regular_file;
+use crate::commands::{FILE_READ_MAX, read_regular_file};
 use crate::policy::{FileScope, on_blocking_pool};
 
 use self::pattern::{Dialect, MatchOptions, has_bare_pipe};
@@ -113,15 +114,67 @@ enum Root<'a> {
     Tree(&'a Path),
 }
 
-/// Running state of one `grep` over files: accumulated output, match
-/// total, and how many directory entries the walk may still visit.
+/// One input line, decoded lossily; unprintable when its file holds a
+/// NUL byte or the line itself is not valid UTF-8.
+struct Line<'a> {
+    text: Cow<'a, str>,
+    printable: bool,
+}
+
+/// Matched-line count of one input, and whether a selected line was
+/// withheld for being binary.
+struct ScanResult {
+    count: usize,
+    suppressed: bool,
+}
+
+/// Writes selected lines to `out`, withholding unprintable ones and
+/// emitting a group separator before the next printed line when pending.
+struct Printer<'a> {
+    lines: &'a [Line<'a>],
+    label: Option<&'a str>,
+    line_numbers: bool,
+    out: &'a mut Vec<u8>,
+    pending_separator: bool,
+    suppressed: bool,
+}
+
+impl Printer<'_> {
+    fn is_full(&self) -> bool {
+        self.out.len() > OUTPUT_MAX
+    }
+
+    fn print(&mut self, index: usize, matched: bool) {
+        let line = &self.lines[index];
+        if !line.printable {
+            self.suppressed = true;
+            return;
+        }
+        if std::mem::take(&mut self.pending_separator) && !self.out.is_empty() {
+            self.out.extend_from_slice(b"--\n");
+        }
+        OutputLine {
+            label: self.label,
+            number: self.line_numbers.then_some(index + 1),
+            matched,
+            text: &line.text,
+        }
+        .write_to(self.out);
+    }
+}
+
+/// Running state of one `grep` over files: accumulated output and
+/// binary-match notices, match total, oversized files skipped, and how
+/// many directory entries the walk may still visit.
 struct Search<'a> {
     scope: &'a FileScope,
     re: &'a Regex,
     flags: &'a Flags,
     label_lines: bool,
     out: Vec<u8>,
+    notices: Vec<u8>,
     total: usize,
+    too_large_skipped: usize,
     entries_left: usize,
 }
 
@@ -131,21 +184,41 @@ impl Search<'_> {
     }
 
     async fn search_target(&mut self, target: &Target) -> Result<(), TargetError> {
-        let Some(text) = read_text(self.scope, target).await? else {
+        let Some(bytes) = self.read_bytes(target).await? else {
             return Ok(());
         };
         let display = target.path().to_string_lossy();
         let label = self.label_lines.then_some(display.as_ref());
-        let count = scan(self.re, self.flags, &text, label, &mut self.out)
+        let result = scan(self.re, self.flags, &bytes, label, &mut self.out)
             .map_err(TargetError::MatchFailed)?;
+        if result.suppressed {
+            self.notices
+                .extend(binary_match_line(&display).into_bytes());
+        }
         if self.flags.files_only {
-            self.out.extend(matching_file_line(&display, count));
+            self.out.extend(matching_file_line(&display, result.count));
         } else if self.flags.count_only && self.label_lines {
             self.out
-                .extend_from_slice(format!("{display}:{count}\n").as_bytes());
+                .extend_from_slice(format!("{display}:{}\n", result.count).as_bytes());
         }
-        self.total += count;
+        self.total += result.count;
         Ok(())
+    }
+
+    /// Bytes of `target`, or `None` for an unreadable [`Target::Found`],
+    /// counting the ones over the read limit.
+    async fn read_bytes(&mut self, target: &Target) -> Result<Option<Vec<u8>>, TargetError> {
+        match (read_regular_file(self.scope, target.path()).await, target) {
+            (Ok(bytes), _) => Ok(Some(bytes)),
+            (Err(source), Target::Found(_)) => {
+                self.too_large_skipped += usize::from(source.kind() == ErrorKind::FileTooLarge);
+                Ok(None)
+            }
+            (Err(source), Target::Named(path)) => Err(TargetError::Unreadable {
+                path: path.to_string_lossy().into_owned(),
+                source,
+            }),
+        }
     }
 
     /// Search every file under `root` in sorted depth-first order while
@@ -175,14 +248,20 @@ impl Search<'_> {
             self.out
         };
         let mut output = outcome(self.total, stdout);
+        output.stderr = self.notices;
+        if let Some(note) = too_large_note(self.too_large_skipped) {
+            output.stderr.extend_from_slice(note.as_bytes());
+        }
         if self.entries_left == 0 {
-            output.stderr = error_line(
-                "grep",
-                format_args!("stopped after visiting {WALK_ENTRY_MAX} directory entries"),
-                Hint::Try,
-                "a narrower directory",
-            )
-            .into_bytes();
+            output.stderr.extend(
+                error_line(
+                    "grep",
+                    format_args!("stopped after visiting {WALK_ENTRY_MAX} directory entries"),
+                    Hint::Try,
+                    "a narrower directory",
+                )
+                .into_bytes(),
+            );
         }
         output
     }
@@ -254,10 +333,14 @@ impl Command for GrepCommand {
          before PATTERN. With -e, every operand is a path. Context lines \
          use `-` where a matching line has `:`, and `--` separates \
          groups that are not adjacent. Output lines carry a `PATH:` \
-         prefix whenever more than one file is searched. Binary \
-         files, symlinks and unreadable entries found while descending \
-         are skipped; a path named on the command line that cannot be \
-         read is an error.\n\
+         prefix whenever more than one file is searched. As in GNU \
+         grep, an input with a NUL byte prints none of its lines, and a \
+         line that is not valid UTF-8 is never printed; when such a line \
+         is selected, stderr says `grep: PATH: binary file matches`. \
+         Symlinks, unreadable entries and files over the read limit found \
+         while descending are skipped, with a count of the oversized ones \
+         on stderr; a path named on the command line that cannot be read \
+         is an error.\n\
          \n\
          Exit 0 if any line matched (or the count is non-zero under \
          `-c`), 1 if no matches, 2 on usage/input errors.\n"
@@ -392,31 +475,23 @@ fn parse_context_lines(flag: char, value: Option<&str>) -> Result<usize, String>
 }
 
 fn search_stdin(re: &Regex, flags: &Flags, stdin: &[u8]) -> CommandOutput {
-    let Ok(text) = std::str::from_utf8(stdin) else {
-        return CommandOutput::failed(
-            2,
-            error_line(
-                "grep",
-                "input is not valid UTF-8",
-                Hint::Try,
-                "grep on a text file or pipe from cat",
-            )
-            .into_bytes(),
-        );
-    };
     let mut out = Vec::new();
-    let count = match scan(re, flags, text, None, &mut out) {
-        Ok(count) => count,
+    let result = match scan(re, flags, stdin, None, &mut out) {
+        Ok(result) => result,
         Err(source) => return CommandOutput::failed(2, match_failed_line(&source).into_bytes()),
     };
     let stdout = if flags.files_only {
-        matching_file_line(STDIN_LABEL, count)
+        matching_file_line(STDIN_LABEL, result.count)
     } else if flags.count_only {
-        format!("{count}\n").into_bytes()
+        format!("{}\n", result.count).into_bytes()
     } else {
         out
     };
-    outcome(count, stdout)
+    let mut output = outcome(result.count, stdout);
+    if result.suppressed {
+        output.stderr = binary_match_line(STDIN_LABEL).into_bytes();
+    }
+    output
 }
 
 async fn search_paths(
@@ -432,7 +507,9 @@ async fn search_paths(
         flags,
         label_lines: roots.len() > 1 || flags.recursive,
         out: Vec::new(),
+        notices: Vec::new(),
         total: 0,
+        too_large_skipped: 0,
         entries_left: WALK_ENTRY_MAX,
     };
     for root in &roots {
@@ -451,46 +528,66 @@ async fn search_paths(
     Ok(search.into_output())
 }
 
-/// Text of `target`, or `None` when it is binary, not UTF-8, or an
-/// unreadable [`Target::Found`].
-async fn read_text(scope: &FileScope, target: &Target) -> Result<Option<String>, TargetError> {
-    let bytes = match (read_regular_file(scope, target.path()).await, target) {
-        (Ok(bytes), _) => bytes,
-        (Err(_), Target::Found(_)) => return Ok(None),
-        (Err(source), Target::Named(path)) => {
-            return Err(TargetError::Unreadable {
-                path: path.to_string_lossy().into_owned(),
-                source,
-            });
-        }
-    };
-    if sniff_binary(&bytes).is_some() {
-        return Ok(None);
-    }
-    Ok(String::from_utf8(bytes).ok())
+fn files_noun(count: usize) -> &'static str {
+    if count == 1 { "file" } else { "files" }
 }
 
-/// Write the lines of `text` that `flags` selects to `out` and return how
-/// many matched; fails when the matcher exceeds its backtracking limit.
+fn too_large_note(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        error_line(
+            "grep",
+            format_args!(
+                "skipped {count} {} over the {} read limit",
+                files_noun(count),
+                human_size(FILE_READ_MAX)
+            ),
+            Hint::Try,
+            "a narrower directory, or head/tail on a large file",
+        )
+    })
+}
+
+/// GNU grep's stderr notice for a matching input whose lines were withheld.
+fn binary_match_line(name: &str) -> String {
+    format!("grep: {name}: binary file matches\n")
+}
+
+/// Lines of `bytes`, all unprintable when it holds a NUL byte.
+fn split_lines(bytes: &[u8]) -> Vec<Line<'_>> {
+    let has_nul = bytes.contains(&0);
+    bytes
+        .split_inclusive(|&byte| byte == b'\n')
+        .map(|raw| {
+            let text = String::from_utf8_lossy(raw);
+            let printable = !has_nul && matches!(text, Cow::Borrowed(_));
+            Line { text, printable }
+        })
+        .collect()
+}
+
+/// Write the printable lines of `bytes` that `flags` selects to `out` and
+/// count the matches; fails when the matcher exceeds its backtracking limit.
 fn scan(
     re: &Regex,
     flags: &Flags,
-    text: &str,
+    bytes: &[u8],
     label: Option<&str>,
     out: &mut Vec<u8>,
-) -> Result<usize, fancy_regex::Error> {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let output_line = |index: usize, matched: bool| OutputLine {
+) -> Result<ScanResult, fancy_regex::Error> {
+    let lines = split_lines(bytes);
+    let mut printer = Printer {
+        lines: &lines,
         label,
-        number: flags.line_numbers.then_some(index + 1),
-        matched,
-        text: lines[index],
+        line_numbers: flags.line_numbers,
+        out,
+        pending_separator: false,
+        suppressed: false,
     };
     let mut count = 0;
     let mut next_unprinted = 0;
     let mut trailing = 0;
     for (index, line) in lines.iter().enumerate() {
-        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = line.text.strip_suffix('\n').unwrap_or(&line.text);
         let matched = re.is_match(content)? ^ flags.invert;
         count += usize::from(matched);
         if !flags.prints_lines() {
@@ -499,29 +596,30 @@ fn scan(
         if matched {
             let first = index.saturating_sub(flags.before).max(next_unprinted);
             let starts_group = next_unprinted == 0 || first > next_unprinted;
-            if flags.has_context() && starts_group && !out.is_empty() {
-                out.extend_from_slice(b"--\n");
-            }
+            printer.pending_separator |= flags.has_context() && starts_group;
             for before in first..index {
-                output_line(before, false).write_to(out);
-                if out.len() > OUTPUT_MAX {
+                printer.print(before, false);
+                if printer.is_full() {
                     break;
                 }
             }
-            output_line(index, true).write_to(out);
+            printer.print(index, true);
             trailing = flags.after;
         } else if trailing > 0 {
-            output_line(index, false).write_to(out);
+            printer.print(index, false);
             trailing -= 1;
         } else {
             continue;
         }
         next_unprinted = index + 1;
-        if out.len() > OUTPUT_MAX {
+        if printer.is_full() {
             break;
         }
     }
-    Ok(count)
+    Ok(ScanResult {
+        count,
+        suppressed: printer.suppressed,
+    })
 }
 
 fn matching_file_line(name: &str, count: usize) -> Vec<u8> {
@@ -649,7 +747,6 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use super::*;
-    use crate::commands::FILE_READ_MAX;
 
     /// `root/top.txt`, `root/sub/deep.txt`, `root/sub/notes.bin`.
     fn tree() -> TempDir {
@@ -791,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r_flag_descends_in_order_and_skips_binary_files() {
+    async fn r_flag_descends_in_order_and_reports_binary_matches() {
         let dir = tree();
         let root = dir.path().to_string_lossy().into_owned();
         let out = run_grep(&["-rn", "ERROR", &root], b"").await;
@@ -800,6 +897,50 @@ mod tests {
             String::from_utf8_lossy(&out.stdout),
             format!("{root}/top.txt:1:alpha ERROR\n{root}/sub/deep.txt:2:delta ERROR\n")
         );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("grep: {root}/sub/notes.bin: binary file matches\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_lines_are_withheld_as_gnu_grep_does() {
+        let dir = tree();
+        let latin1 = dir.path().join("app.log");
+        std::fs::write(&latin1, b"ok one\ncaf\xe9 ok\nok three\n").expect("latin1");
+        let latin1 = latin1.to_string_lossy().into_owned();
+        let binary = dir
+            .path()
+            .join("sub/notes.bin")
+            .to_string_lossy()
+            .into_owned();
+        let cases: [(&[&str], &[u8], &str, String); 5] = [
+            (&["ERROR", &latin1], b"", "", String::new()),
+            (
+                &["-n", "ok", &latin1],
+                b"",
+                "1:ok one\n3:ok three\n",
+                format!("grep: {latin1}: binary file matches\n"),
+            ),
+            (
+                &["ERROR", &binary],
+                b"",
+                "",
+                format!("grep: {binary}: binary file matches\n"),
+            ),
+            (&["-c", "ERROR", &binary], b"", "1\n", String::new()),
+            (
+                &["x"],
+                b"x\0y\n",
+                "",
+                "grep: (standard input): binary file matches\n".to_owned(),
+            ),
+        ];
+        for (args, stdin, stdout, stderr) in cases {
+            let out = run_grep(args, stdin).await;
+            assert_eq!(String::from_utf8_lossy(&out.stdout), stdout, "{args:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stderr), stderr, "{args:?}");
+        }
     }
 
     #[tokio::test]
@@ -848,10 +989,13 @@ mod tests {
         let root = dir.path().to_string_lossy().into_owned();
         let out = run_grep(&["-rl", "ERROR", &root], b"").await;
         assert_eq!(out.exit_code, 0);
-        assert!(out.stderr.is_empty(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("skipped 1 file over the"),
+            "{out:?}"
+        );
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            format!("{root}/top.txt\n{root}/sub/deep.txt\n")
+            format!("{root}/top.txt\n{root}/sub/deep.txt\n{root}/sub/notes.bin\n")
         );
     }
 }
