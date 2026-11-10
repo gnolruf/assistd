@@ -1,12 +1,24 @@
 //! `head` and `tail`: take lines from one end of the named files or stdin.
 
-use async_trait::async_trait;
+use std::io::{self, SeekFrom};
+use std::path::Path;
 
-use crate::command::{Command, CommandInput, CommandOutput};
-use crate::commands::collect_input;
+use assistd_utils::text::human_size;
+use async_trait::async_trait;
+use tokio::fs::File;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+
+use crate::chain::OUTPUT_MAX;
+use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
+use crate::commands::cat::{SNIFF_LEN, sniff_binary};
+use crate::commands::{FILE_READ_MAX, binary_refusal, open_regular};
+use crate::policy::FileScope;
 
 /// Lines emitted when no count flag is given, matching coreutils.
 const DEFAULT_LINES: usize = 10;
+
+/// Bytes `tail` reads per step while seeking back from the end of a file.
+const TAIL_BLOCK: u64 = 64 * 1024;
 
 /// `head [-n N] [FILE]...`: emit the first `N` lines of the named
 /// files, or of stdin when none are given.
@@ -42,12 +54,13 @@ impl Command for HeadCommand {
             Ok(v) => v,
             Err(e) => return count_error("head", e),
         };
-        let data = match collect_input("head", &input.scope, &files, input.stdin).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return CommandOutput::usage(self.help()),
-            Err(failure) => return failure,
-        };
-        CommandOutput::ok(first_lines(&data, count.amount()))
+        if !files.is_empty() {
+            return finish(head_of_files(&input.scope, &files, count.amount()).await);
+        }
+        match input.stdin {
+            Some(data) => CommandOutput::ok(first_lines(&data, count.amount())),
+            None => CommandOutput::usage(self.help()),
+        }
     }
 }
 
@@ -86,16 +99,19 @@ impl Command for TailCommand {
             Ok(v) => v,
             Err(e) => return count_error("tail", e),
         };
-        let data = match collect_input("tail", &input.scope, &files, input.stdin).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return CommandOutput::usage(self.help()),
-            Err(failure) => return failure,
+        if !files.is_empty() {
+            return finish(match count {
+                LineCount::Last(count) => tail_of_files(&input.scope, &files, count).await,
+                LineCount::FromLine(line) => files_from_line(&input.scope, &files, line).await,
+            });
+        }
+        let Some(data) = input.stdin else {
+            return CommandOutput::usage(self.help());
         };
-        let lines = match count {
+        CommandOutput::ok(match count {
             LineCount::Last(count) => last_lines(&data, count),
             LineCount::FromLine(line) => lines_from(&data, line),
-        };
-        CommandOutput::ok(lines)
+        })
     }
 }
 
@@ -113,6 +129,70 @@ impl LineCount {
         match self {
             Self::Last(n) | Self::FromLine(n) => n,
         }
+    }
+}
+
+/// Where a backward search for the start of the last lines stands.
+#[derive(Debug, PartialEq, Eq)]
+enum ScanProgress {
+    Searching,
+    Found,
+    Overflow,
+}
+
+/// Blocks kept while reading a stream backward until the start of its last
+/// `lines` lines is found.
+#[derive(Debug)]
+struct BackwardScan {
+    lines: usize,
+    newlines_owed: Option<usize>,
+    blocks: Vec<Vec<u8>>,
+    kept: usize,
+}
+
+impl BackwardScan {
+    fn new(lines: usize) -> Self {
+        Self {
+            lines,
+            newlines_owed: None,
+            blocks: Vec::new(),
+            kept: 0,
+        }
+    }
+
+    /// Take the block just before every block taken so far. `lines` must be
+    /// non-zero; a trailing newline at the very end of the stream ends the
+    /// last line rather than starting a new one.
+    fn take_block(&mut self, mut block: Vec<u8>) -> ScanProgress {
+        if block.is_empty() {
+            return ScanProgress::Searching;
+        }
+        let owed = *self
+            .newlines_owed
+            .get_or_insert(self.lines + usize::from(block.ends_with(b"\n")));
+        let line_start = nth_newline_from_end(&block, owed - 1).map(|newline| newline + 1);
+        let progress = match line_start {
+            Some(start) => {
+                block.drain(..start);
+                ScanProgress::Found
+            }
+            None => {
+                self.newlines_owed = Some(owed - count_newlines(&block));
+                ScanProgress::Searching
+            }
+        };
+        self.kept += block.len();
+        self.blocks.push(block);
+        if self.kept > OUTPUT_MAX {
+            ScanProgress::Overflow
+        } else {
+            progress
+        }
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        self.blocks.reverse();
+        self.blocks.concat()
     }
 }
 
@@ -177,6 +257,202 @@ fn count_error(cmd: &str, e: CountError) -> CommandOutput {
     CommandOutput::usage_error(cmd, e.what, e.recovery)
 }
 
+fn finish(result: Result<Vec<u8>, CommandOutput>) -> CommandOutput {
+    result.map_or_else(|failure| failure, CommandOutput::ok)
+}
+
+/// The first `count` lines of the named files read as one stream, opening
+/// each only once the files before it ran out of lines.
+async fn head_of_files(
+    scope: &FileScope,
+    files: &[String],
+    count: usize,
+) -> Result<Vec<u8>, CommandOutput> {
+    let mut out = Vec::new();
+    let mut lines_owed = count;
+    for path in files {
+        if lines_owed == 0 {
+            break;
+        }
+        let (file, _) = open_text("head", scope, path).await?;
+        let mut reader = BufReader::new(file.take(output_budget(&out)));
+        lines_owed = pass_lines(&mut reader, lines_owed, Some(&mut out))
+            .await
+            .map_err(|e| read_failure("head", path, &e))?;
+        if out.len() > OUTPUT_MAX {
+            return Err(output_too_large("head"));
+        }
+    }
+    Ok(out)
+}
+
+/// The named files read as one stream from 1-based `line` onward.
+async fn files_from_line(
+    scope: &FileScope,
+    files: &[String],
+    line: usize,
+) -> Result<Vec<u8>, CommandOutput> {
+    let mut out = Vec::new();
+    let mut lines_to_skip = line.saturating_sub(1);
+    for path in files {
+        let (file, _) = open_text("tail", scope, path).await?;
+        let mut reader = BufReader::new(file);
+        lines_to_skip = pass_lines(&mut reader, lines_to_skip, None)
+            .await
+            .map_err(|e| read_failure("tail", path, &e))?;
+        reader
+            .take(output_budget(&out))
+            .read_to_end(&mut out)
+            .await
+            .map_err(|e| read_failure("tail", path, &e))?;
+        if out.len() > OUTPUT_MAX {
+            return Err(output_too_large("tail"));
+        }
+    }
+    Ok(out)
+}
+
+/// The last `count` lines of the named files read as one stream. Every file
+/// is opened and checked first; then they are read backward from the end.
+async fn tail_of_files(
+    scope: &FileScope,
+    files: &[String],
+    count: usize,
+) -> Result<Vec<u8>, CommandOutput> {
+    let mut opened = Vec::with_capacity(files.len());
+    for path in files {
+        opened.push((path, open_text("tail", scope, path).await?));
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut scan = BackwardScan::new(count);
+    for (path, (mut file, size)) in opened.into_iter().rev() {
+        let progress = scan_backward(&mut file, size, &mut scan)
+            .await
+            .map_err(|e| read_failure("tail", path, &e))?;
+        match progress {
+            ScanProgress::Searching => {}
+            ScanProgress::Found => break,
+            ScanProgress::Overflow => return Err(output_too_large("tail")),
+        }
+    }
+    Ok(scan.into_bytes())
+}
+
+/// Feed `file` to `scan` block by block from its end. A file reporting size
+/// zero may be a pseudo-file whose content only shows on read, so it is read
+/// forward whole instead.
+async fn scan_backward(
+    file: &mut File,
+    size: u64,
+    scan: &mut BackwardScan,
+) -> io::Result<ScanProgress> {
+    if size == 0 {
+        let mut whole = Vec::new();
+        file.take(FILE_READ_MAX + 1).read_to_end(&mut whole).await?;
+        return Ok(scan.take_block(whole));
+    }
+    let mut end = size;
+    while end > 0 {
+        let start = end.saturating_sub(TAIL_BLOCK);
+        file.seek(SeekFrom::Start(start)).await?;
+        let mut block = vec![0; usize::try_from(end - start).map_err(io::Error::other)?];
+        file.read_exact(&mut block).await?;
+        match scan.take_block(block) {
+            ScanProgress::Searching => end = start,
+            done => return Ok(done),
+        }
+    }
+    Ok(ScanProgress::Searching)
+}
+
+/// Open `path` and refuse it when its head sniffs as binary; the file is
+/// returned rewound, with its size.
+async fn open_text(cmd: &str, scope: &FileScope, path: &str) -> Result<(File, u64), CommandOutput> {
+    let failure = |e: io::Error| read_failure(cmd, path, &e);
+    let (mut file, size) = open_regular(scope, Path::new(path))
+        .await
+        .map_err(failure)?;
+    let mut head = Vec::new();
+    (&mut file)
+        .take(SNIFF_LEN as u64)
+        .read_to_end(&mut head)
+        .await
+        .map_err(failure)?;
+    if let Some(mime) = sniff_binary(&head) {
+        return Err(binary_refusal(cmd, &mime, size, path));
+    }
+    file.seek(SeekFrom::Start(0)).await.map_err(failure)?;
+    Ok((file, size))
+}
+
+/// Move `reader` past `lines` newlines, appending the bytes passed to `out`
+/// when given; returns the newlines still owed when the reader ran dry.
+async fn pass_lines(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    mut lines: usize,
+    mut out: Option<&mut Vec<u8>>,
+) -> io::Result<usize> {
+    while lines > 0 {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            break;
+        }
+        let (taken, passed) = match nth_newline(buf, lines - 1) {
+            Some(newline) => (newline + 1, lines),
+            None => (buf.len(), count_newlines(buf)),
+        };
+        if let Some(out) = out.as_deref_mut() {
+            out.extend_from_slice(&buf[..taken]);
+        }
+        reader.consume(taken);
+        lines -= passed;
+    }
+    Ok(lines)
+}
+
+fn nth_newline(bytes: &[u8], n: usize) -> Option<usize> {
+    newline_positions(bytes).nth(n)
+}
+
+fn nth_newline_from_end(bytes: &[u8], n: usize) -> Option<usize> {
+    newline_positions(bytes).rev().nth(n)
+}
+
+fn newline_positions(bytes: &[u8]) -> impl DoubleEndedIterator<Item = usize> + '_ {
+    bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(at, byte)| (*byte == b'\n').then_some(at))
+}
+
+fn count_newlines(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|byte| **byte == b'\n').count()
+}
+
+/// Bytes still readable before `out` passes [`OUTPUT_MAX`] by one.
+fn output_budget(out: &[u8]) -> u64 {
+    (OUTPUT_MAX + 1).saturating_sub(out.len()) as u64
+}
+
+fn read_failure(cmd: &str, path: &str, e: &io::Error) -> CommandOutput {
+    CommandOutput::failed(1, io_error_nav(cmd, path, e).into_bytes())
+}
+
+fn output_too_large(cmd: &str) -> CommandOutput {
+    CommandOutput::failed(
+        1,
+        error_line(
+            cmd,
+            format_args!("output exceeds the {} limit", human_size(OUTPUT_MAX as u64)),
+            Hint::Try,
+            format_args!("a smaller -n, or grep FILE for the lines you need"),
+        )
+        .into_bytes(),
+    )
+}
+
 fn first_lines(text: &[u8], count: usize) -> Vec<u8> {
     let end: usize = text
         .split_inclusive(|b| *b == b'\n')
@@ -209,7 +485,7 @@ mod tests {
         cmd.run(CommandInput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: Some(stdin.to_vec()),
-            scope: crate::FileScope::Host,
+            scope: FileScope::Host,
         })
         .await
     }
@@ -245,6 +521,20 @@ mod tests {
             assert_eq!(out.exit_code, 0, "{label}");
             assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{label}");
         }
+    }
+
+    #[tokio::test]
+    async fn reads_both_ends_of_a_file_over_the_read_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("big.log");
+        let mut body = b"first\n".repeat(OUTPUT_MAX / 6 + 1);
+        body.extend_from_slice(b"penultimate\nlast\n");
+        std::fs::write(&log, &body).unwrap();
+        let log = log.to_str().unwrap();
+        let tail = run(&TailCommand, &["-n", "2", log], b"").await;
+        assert_eq!(tail.stdout, b"penultimate\nlast\n", "{tail:?}");
+        let head = run(&HeadCommand, &["-n", "1", log], b"").await;
+        assert_eq!(head.stdout, b"first\n", "{head:?}");
     }
 
     #[tokio::test]

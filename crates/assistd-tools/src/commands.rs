@@ -124,17 +124,7 @@ pub(crate) async fn collect_input(
             .await
             .map_err(|e| CommandOutput::failed(1, io_error_nav(cmd, path, &e).into_bytes()))?;
         if let Some(mime) = cat::sniff_binary(&bytes) {
-            let size = human_size(bytes.len() as u64);
-            return Err(CommandOutput::failed(
-                1,
-                error_line(
-                    cmd,
-                    format_args!("binary {mime} file ({size}): {path}"),
-                    Hint::Use,
-                    format_args!("cat -b {path}"),
-                )
-                .into_bytes(),
-            ));
+            return Err(binary_refusal(cmd, &mime, bytes.len() as u64, path));
         }
         out.extend_from_slice(&bytes);
         if out.len() > OUTPUT_MAX {
@@ -154,4 +144,18 @@ pub(crate) async fn collect_input(
         }
     }
     Ok(Some(out))
+}
+
+/// The failure for a named file whose head sniffs as binary `mime`.
+fn binary_refusal(cmd: &str, mime: &str, size: u64, path: &str) -> CommandOutput {
+    CommandOutput::failed(
+        1,
+        error_line(
+            cmd,
+            format_args!("binary {mime} file ({}): {path}", human_size(size)),
+            Hint::Use,
+            format_args!("cat -b {path}"),
+        )
+        .into_bytes(),
+    )
 }
