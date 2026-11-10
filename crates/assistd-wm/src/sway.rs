@@ -256,7 +256,7 @@ fn collect_windows(node: &Node, parent_workspace: Option<&str>, out: &mut Vec<Wi
         parent_workspace
     };
 
-    if matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
+    if is_view(node)
         && let Some(id) = sway_id(node.id)
     {
         let props = node.window_properties.as_ref();
@@ -279,6 +279,15 @@ fn collect_windows(node: &Node, parent_workspace: Option<&str>, out: &mut Vec<Wi
     }
 }
 
+/// A `Con` holding a client, as opposed to a split container of other cons.
+fn is_view(node: &Node) -> bool {
+    matches!(node.node_type, NodeType::Con | NodeType::FloatingCon)
+        && (node.pid.is_some() || SwayIpc::children(node).next().is_none())
+}
+
 fn sway_id(raw: i64) -> Option<WindowId> {
     u64::try_from(raw).ok().and_then(WindowId::new)
 }
+
+#[cfg(test)]
+mod tests;
