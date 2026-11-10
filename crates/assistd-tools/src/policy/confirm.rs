@@ -287,6 +287,14 @@ impl ConfirmRouter {
         Arc::new(router)
     }
 
+    /// A router for a turn asked by voice, where nobody can answer a prompt: it approves what
+    /// [`PermissionMode::AcceptEdits`] runs unasked and denies every other ask at once.
+    pub fn for_voice_turn(request_id: String) -> Arc<Self> {
+        let router = Self::unanswered(request_id, None, Answerer::Client);
+        router.set_mode(PermissionMode::AcceptEdits);
+        Arc::new(router)
+    }
+
     /// A router no client answers, so it never prompts on the wire.
     fn unanswered(
         request_id: String,
@@ -806,6 +814,27 @@ mod tests {
                     assert_eq!(approval, expected, "{case}");
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_turn_runs_scoped_edits_and_denies_the_rest_without_waiting() {
+        let router = ConfirmRouter::for_voice_turn("r".into());
+        for (unattended, expected) in [
+            (Unattended::ScopedEdit, Approval::Once),
+            (Unattended::Never, Approval::Deny),
+            (judged(JudgedClass::Unvetted), Approval::Deny),
+            (Unattended::WebHost("example.com".into()), Approval::Deny),
+        ] {
+            let case = format!("{unattended:?}");
+            let ask = router.ask(ConfirmationRequest {
+                unattended,
+                ..sample_request()
+            });
+            let approval = tokio::time::timeout(Duration::from_secs(1), ask)
+                .await
+                .expect("answered without waiting on a client");
+            assert_eq!(approval, expected, "{case}");
         }
     }
 
