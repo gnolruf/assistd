@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -216,18 +215,12 @@ pub struct BranchHistory {
     pub rows: Vec<HistoryRow>,
 }
 
-/// What a compaction summary leaves of a branch: its `kept_turns` newest user
-/// turns, the oldest of them cut to its `kept_steps` newest tool steps when set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SummaryCut {
-    pub kept_turns: NonZeroUsize,
-    pub kept_steps: Option<NonZeroUsize>,
-}
-
 /// Result of [`TranscriptStore::append_message_to_branch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendedMessage {
     pub id: MessageId,
+    /// Its position on the branch it was appended to.
+    pub seq: Seq,
     /// The chunks cut from it for embedding; empty for tool results.
     pub chunks: Vec<ChunkId>,
 }
@@ -335,20 +328,16 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// `branch`'s summary and the rows `scope` selects; empty when the branch is missing.
     async fn load_branch(&self, branch: BranchId, scope: HistoryScope) -> Result<BranchHistory>;
 
-    /// Make `summary`, which took `duration_ms` to write, the branch's summary of
-    /// everything `cut` leaves out; a no-op when the branch has fewer user
-    /// messages than `cut` keeps.
-    async fn record_branch_summary(
-        &self,
-        branch: BranchId,
-        summary: String,
-        cut: SummaryCut,
-        duration_ms: u64,
-    ) -> Result<()>;
+    /// Make `summary` the summary of `branch`, replacing any earlier one.
+    async fn record_branch_summary(&self, branch: BranchId, summary: BranchSummary) -> Result<()>;
 
     /// Record how finished `turn` ran, replacing any earlier record. Errors with
     /// [`MemoryError::TurnNotFound`](crate::MemoryError::TurnNotFound) when `turn` is missing.
     async fn record_turn_stats(&self, turn: TurnId, stats: TurnStats) -> Result<()>;
+
+    /// Flag `turn` as missing a message whose write failed. Errors with
+    /// [`MemoryError::TurnNotFound`](crate::MemoryError::TurnNotFound) when `turn` is missing.
+    async fn mark_turn_incomplete(&self, turn: TurnId) -> Result<()>;
 
     /// When the newest message on `branch` was written, or `None` when the branch is empty.
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>>;
@@ -389,6 +378,7 @@ impl TranscriptStore for NoTranscriptStore {
             turn: TurnId(0),
             message: AppendedMessage {
                 id: MessageId(0),
+                seq: Seq(0),
                 chunks: Vec::new(),
             },
         })
@@ -410,6 +400,7 @@ impl TranscriptStore for NoTranscriptStore {
     ) -> Result<AppendedMessage> {
         Ok(AppendedMessage {
             id: MessageId(0),
+            seq: Seq(0),
             chunks: Vec::new(),
         })
     }
@@ -462,14 +453,16 @@ impl TranscriptStore for NoTranscriptStore {
     async fn record_branch_summary(
         &self,
         _branch: BranchId,
-        _summary: String,
-        _cut: SummaryCut,
-        _duration_ms: u64,
+        _summary: BranchSummary,
     ) -> Result<()> {
         Ok(())
     }
 
     async fn record_turn_stats(&self, _turn: TurnId, _stats: TurnStats) -> Result<()> {
+        Ok(())
+    }
+
+    async fn mark_turn_incomplete(&self, _turn: TurnId) -> Result<()> {
         Ok(())
     }
 

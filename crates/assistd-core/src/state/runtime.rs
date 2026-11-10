@@ -1,12 +1,12 @@
 //! `RuntimeState`: per-process bookkeeping owned by `AppState`.
 
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex as StdMutex;
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -17,12 +17,14 @@ use assistd_memory::{BranchId, SessionId};
 use super::chat_focus::ChatFocusSlot;
 use super::conversation::UserConversation;
 use super::lanes::ModelLanes;
+use super::seq_ledger::SharedLedger;
 use super::task_confirms::TaskConfirms;
 use super::task_events::TaskEvents;
 use super::task_plans::TaskPlans;
 use super::task_queue::TaskQueue;
 use super::task_runner::TaskRunner;
 use super::task_scheduler::TaskScheduler;
+use super::transcript_writer::WriteCommand;
 use super::wakeword_handlers::MicSession;
 
 const EVENTS_BUS_CAPACITY: usize = 256;
@@ -124,16 +126,17 @@ pub struct RuntimeState {
     pub(in crate::state) task_scheduler: TaskScheduler,
     pub(in crate::state) task_events: TaskEvents,
     pub(in crate::state) task_plans: TaskPlans,
-    /// Fire-and-forget persistence tasks, drained at daemon shutdown.
+    /// Background session-title tasks, drained at daemon shutdown.
     pub(in crate::state) persistence_tracker: TaskTracker,
     /// The push-to-talk press awaiting its release.
     pub(in crate::state) ptt_capture: Arc<Mutex<Option<PttCapture>>>,
     /// Parent of every turn's cancellation token; an interrupt cancels it
     /// and installs a fresh one.
     interrupt: StdMutex<CancellationToken>,
-    /// Completion signal of the most recently queued persistence write,
-    /// which the next write awaits so `seq` follows emission order.
-    pub(in crate::state) persist_chain: StdMutex<Option<oneshot::Receiver<()>>>,
+    /// The transcript writer's queue, once its first write started the writer.
+    pub(in crate::state) transcript_writes: OnceLock<mpsc::Sender<WriteCommand>>,
+    /// Seqs of the rows behind the user's conversation.
+    pub(in crate::state) user_ledger: SharedLedger,
     /// The chat's last focus report.
     pub(in crate::state) chat_focus: ChatFocusSlot,
     /// The open wake-word test session, which holds the mic.
@@ -165,7 +168,8 @@ impl RuntimeState {
             persistence_tracker: TaskTracker::new(),
             ptt_capture: Arc::new(Mutex::new(None)),
             interrupt: StdMutex::new(CancellationToken::new()),
-            persist_chain: StdMutex::new(None),
+            transcript_writes: OnceLock::new(),
+            user_ledger: SharedLedger::default(),
             chat_focus: ChatFocusSlot::default(),
             mic_session: StdMutex::new(None),
             task_runner: Arc::default(),
@@ -197,11 +201,6 @@ impl RuntimeState {
     pub(in crate::state) fn interrupt_turns(&self) {
         let interrupted = std::mem::replace(&mut *self.interrupt.lock(), CancellationToken::new());
         interrupted.cancel();
-    }
-
-    /// A handle to the tracker of fire-and-forget persistence tasks.
-    pub fn persistence_tracker_handle(&self) -> TaskTracker {
-        self.persistence_tracker.clone()
     }
 
     /// The broadcast bus [`Self::publish`] sends on.

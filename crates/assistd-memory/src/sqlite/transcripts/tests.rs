@@ -296,21 +296,18 @@ async fn summary_follows_kept_turns_forks_and_undo() {
             .await
             .unwrap();
     }
-    let cut = SummaryCut {
-        kept_turns: NonZeroUsize::new(2).unwrap(),
-        kept_steps: None,
-    };
-    store
-        .record_branch_summary(branch, "turn one".into(), cut, 4200)
-        .await
-        .unwrap();
-    let expected = Some(BranchSummary {
+    let summary = BranchSummary {
         kept_from_seq: Seq(2),
         steps_folded_through: None,
         compacted_after_seq: Seq(5),
         content: "turn one".into(),
         duration_ms: 4200,
-    });
+    };
+    store
+        .record_branch_summary(branch, summary.clone())
+        .await
+        .unwrap();
+    let expected = Some(summary);
     assert_eq!(
         store
             .load_branch(branch, HistoryScope::Whole)

@@ -32,5 +32,5 @@ pub use tasks::{
 pub use transcripts::{
     AppendedMessage, BranchHistory, BranchInfo, BranchSummary, HistoryRow, HistoryScope,
     MessageKind, NoTranscriptStore, OpenedTurn, PersistedMessage, PersistedRole, PersistedToolCall,
-    Reasoning, ResumeCandidate, SummaryCut, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
+    Reasoning, ResumeCandidate, ToolOutcome, TranscriptStore, TurnStats, UndoOutcome,
 };

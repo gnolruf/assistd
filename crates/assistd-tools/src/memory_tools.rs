@@ -527,13 +527,11 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, ChunkId, Embedding, EmbeddingTarget, MemoryError, MemoryId,
-        MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, PersistedMessage,
-        SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, SummaryCut,
+        AdjacentChunks, BranchId, BranchSummary, ChunkId, Embedding, EmbeddingTarget, MemoryError,
+        MemoryId, MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, PersistedMessage,
+        Seq, SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore,
         UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
@@ -810,12 +808,15 @@ mod tests {
         live.exchange("which port?", "the folded port is 8431", true)
             .await;
         live.exchange("and now?", "the kept answer", true).await;
-        let cut = SummaryCut {
-            kept_turns: NonZeroUsize::MIN,
-            kept_steps: None,
+        let summary = BranchSummary {
+            kept_from_seq: Seq(2),
+            steps_folded_through: None,
+            compacted_after_seq: Seq(3),
+            content: "summary".into(),
+            duration_ms: 0,
         };
         live.transcripts
-            .record_branch_summary(live.branch, "summary".into(), cut, 0)
+            .record_branch_summary(live.branch, summary)
             .await
             .unwrap();
         let tool = ReminisceTool::new(
