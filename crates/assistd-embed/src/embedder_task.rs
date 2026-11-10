@@ -1,161 +1,136 @@
-//! Background worker that embeds queued rows in batches and stores each batch in the
-//! semantic store. A row whose embed fails is logged and left unindexed.
+//! Background worker that embeds the rows the semantic store lists as missing an
+//! embedding, a batch at a time, each time it is woken.
 
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::future::Future;
+use std::sync::Arc;
 
-use assistd_memory::{EmbeddingTarget, SemanticStore};
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, watch};
+use assistd_memory::{EmbeddingTarget, MemoryError, SemanticStore};
+use assistd_utils::backoff::backoff_delay;
+use thiserror::Error;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
-use crate::{BATCH_SIZE, Embedder, embed_jobs};
+use crate::{BATCH_SIZE, EmbedError, Embedder, embed_rows};
 
-/// Shortest gap between two "embed queue full" warnings.
-const QUEUE_FULL_WARN_INTERVAL: Duration = Duration::from_secs(60);
-
-static QUEUE_FULL_WARNINGS: Mutex<DropWarnLimiter> = Mutex::new(DropWarnLimiter::new());
-
-/// One row to embed: `text` is the content of `target`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EmbedJob {
-    pub target: EmbeddingTarget,
-    pub text: String,
+/// Why a pass over the missing rows stopped before reaching the end.
+#[derive(Debug, Error)]
+enum PassError {
+    #[error(transparent)]
+    Embed(#[from] EmbedError),
+    #[error(transparent)]
+    Store(#[from] MemoryError),
 }
 
-/// Rate limit for queue-full warnings, counting the drops it holds back.
-#[derive(Debug)]
-struct DropWarnLimiter {
-    last_warn: Option<Instant>,
-    suppressed: u64,
-}
-
-impl DropWarnLimiter {
-    const fn new() -> Self {
-        Self {
-            last_warn: None,
-            suppressed: 0,
-        }
-    }
-
-    /// Record a drop at `now`; when a warning is due, the drops held back since the last one.
-    fn record_drop(&mut self, now: Instant) -> Option<u64> {
-        let due = self
-            .last_warn
-            .is_none_or(|last| now.duration_since(last) >= QUEUE_FULL_WARN_INTERVAL);
-        if !due {
-            self.suppressed += 1;
-            return None;
-        }
-        self.last_warn = Some(now);
-        Some(std::mem::take(&mut self.suppressed))
-    }
-}
-
-/// Queue `job` without waiting. A full queue drops it with a rate-limited warning; a
-/// closed queue (embedding disabled) drops it quietly. A dropped row stays unindexed.
-pub fn enqueue_embed_job(tx: &mpsc::Sender<EmbedJob>, job: EmbedJob) {
-    match tx.try_send(job) {
-        Ok(()) => {}
-        Err(TrySendError::Full(job)) => warn_queue_full(&job),
-        Err(TrySendError::Closed(job)) => tracing::debug!(
-            target: "assistd::embed",
-            row = %job.target,
-            "embed queue closed; row stays unindexed"
-        ),
-    }
-}
-
-fn warn_queue_full(job: &EmbedJob) {
-    let due = QUEUE_FULL_WARNINGS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .record_drop(Instant::now());
-    match due {
-        Some(suppressed) => tracing::warn!(
-            target: "assistd::embed",
-            row = %job.target,
-            suppressed,
-            "embed queue full; dropping job, row stays unindexed until `assistd memory reindex`"
-        ),
-        None => tracing::debug!(
-            target: "assistd::embed",
-            row = %job.target,
-            "embed queue full; dropping job"
-        ),
-    }
-}
-
-/// Spawn the worker, embedding queued jobs in batches of up to [`BATCH_SIZE`]. It exits
-/// when the job channel closes, or on `shutdown` once queued jobs are stored; the database
-/// behind `store` must stay open until it exits.
+/// Spawn the worker. It embeds every row missing an embedding at once and again after
+/// each `wake`, retrying a pass that stopped early with backoff. It exits on `shutdown`
+/// between batches; the database behind `store` must stay open until it exits.
 pub fn spawn_embedder_task(
     embedder: Arc<dyn Embedder>,
     store: Arc<dyn SemanticStore>,
-    mut rx: mpsc::Receiver<EmbedJob>,
+    wake: Arc<Notify>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut batch = Vec::with_capacity(BATCH_SIZE);
+        let mut failed_passes = 0u32;
         loop {
+            let retry_in = match embed_missing_rows(&*embedder, &*store, &shutdown).await {
+                Ok(()) => {
+                    failed_passes = 0;
+                    None
+                }
+                Err(err) => {
+                    let delay = backoff_delay(failed_passes);
+                    log_stopped_pass(&err, failed_passes);
+                    failed_passes = failed_passes.saturating_add(1);
+                    Some(delay)
+                }
+            };
             tokio::select! {
                 biased;
-                received = rx.recv_many(&mut batch, BATCH_SIZE) => {
-                    if received == 0 {
-                        tracing::debug!(
-                            target: "assistd::embed",
-                            "embed channel closed; worker exiting"
-                        );
-                        break;
-                    }
-                    embed_and_store_batch(&*embedder, &*store, &mut batch).await;
-                }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        drain_queue(&*embedder, &*store, &mut rx, &mut batch).await;
-                        break;
-                    }
-                }
+                _ = shutdown.wait_for(|stop| *stop) => break,
+                () = wake.notified() => {}
+                () = tokio::time::sleep(retry_in.unwrap_or_default()), if retry_in.is_some() => {}
             }
         }
+        tracing::debug!(target: "assistd::embed", "embed worker exiting");
     })
 }
 
-async fn drain_queue(
-    embedder: &dyn Embedder,
-    store: &dyn SemanticStore,
-    rx: &mut mpsc::Receiver<EmbedJob>,
-    batch: &mut Vec<EmbedJob>,
-) {
-    tracing::debug!(
-        target: "assistd::embed",
-        "shutdown received; draining embed queue"
-    );
-    loop {
-        batch.extend(std::iter::from_fn(|| rx.try_recv().ok()).take(BATCH_SIZE));
-        if batch.is_empty() {
-            break;
-        }
-        embed_and_store_batch(embedder, store, batch).await;
+fn log_stopped_pass(err: &PassError, earlier_failures: u32) {
+    if earlier_failures == 0 {
+        tracing::warn!(
+            target: "assistd::embed",
+            error = %err,
+            "embedding pass stopped early; rows stay unindexed until a retry succeeds"
+        );
+    } else {
+        tracing::debug!(
+            target: "assistd::embed",
+            error = %err,
+            earlier_failures,
+            "embedding pass stopped early again"
+        );
     }
 }
 
-/// Embed and store every job in `batch`, leaving it empty.
-async fn embed_and_store_batch(
+/// Embed and store every chunk, then every memory, missing an embedding.
+async fn embed_missing_rows(
     embedder: &dyn Embedder,
     store: &dyn SemanticStore,
-    batch: &mut Vec<EmbedJob>,
-) {
-    let embeddings = embed_jobs(embedder, batch.drain(..)).await;
-    let rows = embeddings.len();
-    if let Err(err) = store.store_embeddings(embedder.model(), embeddings).await {
-        tracing::warn!(
-            target: "assistd::embed",
-            rows,
-            error = %err,
-            "storing embeddings failed; rows stay unindexed until `assistd memory reindex`"
-        );
+    shutdown: &watch::Receiver<bool>,
+) -> Result<(), PassError> {
+    embed_missing_of_kind(
+        embedder,
+        store,
+        shutdown,
+        |after, limit| store.chunks_missing_embedding(after, limit),
+        EmbeddingTarget::Chunk,
+    )
+    .await?;
+    embed_missing_of_kind(
+        embedder,
+        store,
+        shutdown,
+        |after, limit| store.memories_missing_embedding(after, limit),
+        EmbeddingTarget::Memory,
+    )
+    .await
+}
+
+/// Page through `list` in id order, embedding and storing each page, until it runs
+/// out, `shutdown` flips, or a page has rows left for a later attempt.
+async fn embed_missing_of_kind<Id, L, LFut>(
+    embedder: &dyn Embedder,
+    store: &dyn SemanticStore,
+    shutdown: &watch::Receiver<bool>,
+    list: L,
+    to_target: fn(Id) -> EmbeddingTarget,
+) -> Result<(), PassError>
+where
+    Id: Copy,
+    L: Fn(Option<Id>, usize) -> LFut,
+    LFut: Future<Output = Result<Vec<(Id, String)>, MemoryError>>,
+{
+    let mut after = None;
+    while !*shutdown.borrow() {
+        let page = list(after, BATCH_SIZE).await?;
+        let Some(&(last_id, _)) = page.last() else {
+            break;
+        };
+        after = Some(last_id);
+        let rows = page
+            .into_iter()
+            .map(|(id, text)| (to_target(id), text))
+            .collect();
+        let embedded = embed_rows(embedder, rows).await;
+        store
+            .store_embeddings(embedder.model(), embedded.embeddings)
+            .await?;
+        if let Some(err) = embedded.deferred {
+            return Err(err.into());
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]

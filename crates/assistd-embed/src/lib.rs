@@ -1,14 +1,13 @@
 //! Embedding subsystem: the [`Embedder`] trait, an HTTP client and launch spec for a
-//! dedicated embedding llama-server, and the background task that embeds queued rows.
+//! dedicated embedding llama-server, and the background task that embeds rows missing one.
 
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
-use std::vec;
 
 use async_trait::async_trait;
 
-use assistd_memory::Embedding;
+use assistd_memory::{Embedding, EmbeddingTarget};
 
 pub mod client;
 pub mod embedder_task;
@@ -17,7 +16,7 @@ mod handle;
 pub mod server;
 
 pub use client::LlamaEmbedder;
-pub use embedder_task::{EmbedJob, enqueue_embed_job, spawn_embedder_task};
+pub use embedder_task::spawn_embedder_task;
 pub use error::EmbedError;
 pub use handle::EmbedderHandle;
 pub use server::EmbedServerSpec;
@@ -81,33 +80,52 @@ async fn embed_each(embedder: &dyn Embedder, texts: &[&str]) -> Vec<Result<Vec<f
     }
 }
 
-/// Embed the jobs' texts in one batch, retrying alone any input that fails it, and
-/// return the embeddings; jobs whose embed still fails are logged and dropped.
-pub async fn embed_jobs(embedder: &dyn Embedder, jobs: vec::Drain<'_, EmbedJob>) -> Vec<Embedding> {
-    let texts: Vec<&str> = jobs
-        .as_slice()
-        .iter()
-        .map(|job| job.text.as_str())
-        .collect();
+/// What [`embed_rows`] made of one batch of rows.
+#[derive(Debug)]
+pub struct EmbeddedRows {
+    /// A vector for each row embedded, and none for each row its own content failed.
+    pub embeddings: Vec<Embedding>,
+    /// Why the remaining rows were left to a later attempt, when any were.
+    pub deferred: Option<EmbedError>,
+}
+
+/// Embed the rows' texts in one batch, retrying alone any input that fails it. A row
+/// that fails for its own content ([`EmbedError::is_input_caused`]) comes back with no
+/// vector; one that fails for any other reason is left out.
+pub async fn embed_rows(
+    embedder: &dyn Embedder,
+    rows: Vec<(EmbeddingTarget, String)>,
+) -> EmbeddedRows {
+    let texts: Vec<&str> = rows.iter().map(|(_, text)| text.as_str()).collect();
     let results = embed_each(embedder, &texts).await;
-    jobs.zip(results)
-        .filter_map(|(job, result)| match result {
-            Ok(vector) => Some(Embedding {
-                target: job.target,
-                text: job.text,
-                vector,
-            }),
-            Err(err) => {
+    let mut embedded = EmbeddedRows {
+        embeddings: Vec::with_capacity(rows.len()),
+        deferred: None,
+    };
+    for ((target, text), result) in rows.into_iter().zip(results) {
+        let vector = match result {
+            Ok(vector) => Some(vector),
+            Err(err) if err.is_input_caused() => {
                 tracing::warn!(
                     target: "assistd::embed",
-                    row = %job.target,
+                    row = %target,
                     error = %err,
-                    "embed failed; row stays unindexed until `assistd memory reindex`"
+                    "row cannot be embedded; marking it so it is not retried"
                 );
                 None
             }
-        })
-        .collect()
+            Err(err) => {
+                embedded.deferred.get_or_insert(err);
+                continue;
+            }
+        };
+        embedded.embeddings.push(Embedding {
+            target,
+            text,
+            vector,
+        });
+    }
+    embedded
 }
 
 /// Fallback when embedding is disabled: `embed` errors, `model` is empty, `dim` is zero.

@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Notify, watch};
 use tracing::{info, warn};
 
-use assistd_embed::{EmbedJob, EmbedderHandle};
+use assistd_embed::EmbedderHandle;
 use assistd_llm::{LlamaServerControl, VisionState, probe_capabilities_routed};
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_search::{SearchError, SearxngClient};
@@ -141,7 +141,8 @@ pub struct BuildToolsDeps<'a> {
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
-    pub embed_tx: mpsc::Sender<EmbedJob>,
+    /// Wakes the embedding worker after `remember` saves a value.
+    pub embed_wake: Arc<Notify>,
     /// The active session, whose messages still in context `reminisce` excludes.
     pub current_session: watch::Receiver<SessionId>,
     pub window_manager: Arc<dyn WindowManager>,
@@ -294,7 +295,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
         memory_ops,
         embedder,
         semantic,
-        embed_tx,
+        embed_wake,
         current_session,
         window_manager,
         web_search,
@@ -375,7 +376,7 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     });
     tools.register(relay);
     if config.memory.enabled {
-        let memory = (memory_ops, embed_tx);
+        let memory = (memory_ops, embed_wake);
         register_memory_tools(&mut tools, memory, embedder, semantic, current_session);
     }
     Ok(BuiltTools {
@@ -384,10 +385,10 @@ pub fn build_tools(deps: BuildToolsDeps<'_>) -> Result<BuiltTools, BuildToolsErr
     })
 }
 
-/// Register `remember` over `memory`'s store and embedding queue, and `reminisce`.
+/// Register `remember` over `memory`'s store and embedding wake signal, and `reminisce`.
 fn register_memory_tools(
     tools: &mut ToolRegistry,
-    (memory_ops, embed_tx): (Arc<MemoryOps>, mpsc::Sender<EmbedJob>),
+    (memory_ops, embed_wake): (Arc<MemoryOps>, Arc<Notify>),
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
     current_session: watch::Receiver<SessionId>,
@@ -395,7 +396,7 @@ fn register_memory_tools(
     let transcripts = Arc::clone(&memory_ops.transcripts);
     tools.register(RememberTool::new(
         memory_ops,
-        embed_tx,
+        embed_wake,
         embedder.clone(),
         semantic.clone(),
     ));

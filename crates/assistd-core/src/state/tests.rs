@@ -2025,6 +2025,9 @@ impl SemanticStore for FixedHits {
     ) -> assistd_memory::Result<()> {
         NoSemanticStore.store_embeddings(model, embeddings).await
     }
+    async fn clear_unembeddable(&self) -> assistd_memory::Result<u64> {
+        NoSemanticStore.clear_unembeddable().await
+    }
 }
 
 fn recall_hit(session_id: SessionId, message: i64, similarity: f32, text: &str) -> EmbeddingHit {

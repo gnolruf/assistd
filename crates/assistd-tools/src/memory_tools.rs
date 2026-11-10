@@ -5,15 +5,15 @@ use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use assistd_embed::{EmbedJob, Embedder, EmbedderHandle, enqueue_embed_job};
+use assistd_embed::{Embedder, EmbedderHandle};
 use assistd_memory::{
-    ChunkLocator, ChunkScope, EmbeddingHit, EmbeddingTarget, MemoryHit, SemanticStore, SessionId,
-    SessionScope, TranscriptStore,
+    ChunkLocator, ChunkScope, EmbeddingHit, MemoryHit, SemanticStore, SessionId, SessionScope,
+    TranscriptStore,
 };
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, watch};
 
 use crate::memory::MemoryOps;
 use crate::{Tool, ToolError, ToolOutput};
@@ -36,13 +36,12 @@ const KEY_PATTERN: &str = r"^[a-z0-9._-]+$";
 static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
-/// Saves `(key, value)` facts about the user, queueing each new or changed
-/// value for embedding, and searches them by semantic similarity to a query.
+/// Saves `(key, value)` facts about the user, waking the embedding worker for each
+/// new or changed value, and searches them by semantic similarity to a query.
 #[derive(Debug)]
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
-    /// Closed when embedding is disabled; the memory still saves unindexed.
-    embed_tx: mpsc::Sender<EmbedJob>,
+    embed_wake: Arc<Notify>,
     embedder: Arc<EmbedderHandle>,
     semantic: Arc<dyn SemanticStore>,
 }
@@ -71,32 +70,26 @@ impl RememberRequest {
 }
 
 impl RememberTool {
-    /// A tool saving through `ops`, queueing each value on `embed_tx`, and
+    /// A tool saving through `ops`, signalling `embed_wake` for each value, and
     /// searching memories in `semantic` by vectors from `embedder`.
     pub fn new(
         ops: Arc<MemoryOps>,
-        embed_tx: mpsc::Sender<EmbedJob>,
+        embed_wake: Arc<Notify>,
         embedder: Arc<EmbedderHandle>,
         semantic: Arc<dyn SemanticStore>,
     ) -> Self {
         Self {
             ops,
-            embed_tx,
+            embed_wake,
             embedder,
             semantic,
         }
     }
 
     async fn save(&self, key: &str, value: String) -> Result<String, ToolError> {
-        let saved = self.ops.save(key, value.clone()).await?;
+        let saved = self.ops.save(key, value).await?;
         if saved.value_changed {
-            enqueue_embed_job(
-                &self.embed_tx,
-                EmbedJob {
-                    target: EmbeddingTarget::Memory(saved.id),
-                    text: value,
-                },
-            );
+            self.embed_wake.notify_one();
         }
         tracing::info!(target: "assistd::memory", key = %key, "remember saved");
         Ok(format!("remembered {key}"))
@@ -538,25 +531,15 @@ mod tests {
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, ChunkId, Embedding, MemoryError, MemoryId, MemoryStore,
-        NoMemoryStore, NoSemanticStore, NoTranscriptStore, PersistedMessage, SqliteHandle,
-        SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, SummaryCut, UnindexedRows,
+        AdjacentChunks, BranchId, ChunkId, Embedding, EmbeddingTarget, MemoryError, MemoryId,
+        MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, PersistedMessage,
+        SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore, SummaryCut,
+        UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
 
     use super::*;
-
-    /// A sender whose receiver is dropped, so every `try_send` fails.
-    fn closed_embed_tx() -> mpsc::Sender<EmbedJob> {
-        let (tx, rx) = mpsc::channel::<EmbedJob>(1);
-        drop(rx);
-        tx
-    }
-
-    fn live_embed_tx() -> (mpsc::Sender<EmbedJob>, mpsc::Receiver<EmbedJob>) {
-        mpsc::channel::<EmbedJob>(8)
-    }
 
     fn ready(embedder: Arc<dyn Embedder>) -> Arc<EmbedderHandle> {
         Arc::new(EmbedderHandle::new(Readiness::Ready(embedder)))
@@ -645,6 +628,9 @@ mod tests {
         ) -> Result<(), MemoryError> {
             Ok(())
         }
+        async fn clear_unembeddable(&self) -> Result<u64, MemoryError> {
+            Ok(0)
+        }
     }
 
     #[tokio::test]
@@ -724,10 +710,10 @@ mod tests {
             };
             let embeddings = embedded
                 .into_iter()
-                .map(|(chunk, text)| Embedding {
+                .map(|chunk| Embedding {
                     target: EmbeddingTarget::Chunk(chunk),
-                    text,
-                    vector: vec![1.0],
+                    text: String::new(),
+                    vector: Some(vec![1.0]),
                 })
                 .collect();
             self.semantic
@@ -867,8 +853,8 @@ mod tests {
         ))
     }
 
-    fn remember_tool(ops: Arc<MemoryOps>, embed_tx: mpsc::Sender<EmbedJob>) -> RememberTool {
-        RememberTool::new(ops, embed_tx, no_embedder(), no_semantic())
+    fn remember_tool(ops: Arc<MemoryOps>) -> RememberTool {
+        RememberTool::new(ops, Arc::default(), no_embedder(), no_semantic())
     }
 
     fn invalid_args(err: ToolError) -> String {
@@ -881,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn remember_dedups_by_key() {
         let (ops, _dir) = fresh_ops().await;
-        let tool = remember_tool(ops.clone(), closed_embed_tx());
+        let tool = remember_tool(ops.clone());
         tool.invoke(json!({"action": "save", "key": "editor_preference", "text": "vim"}))
             .await
             .unwrap();
@@ -898,7 +884,7 @@ mod tests {
 
     #[tokio::test]
     async fn remember_rejects_invalid_key() {
-        let tool = remember_tool(no_ops(), closed_embed_tx());
+        let tool = remember_tool(no_ops());
         for bad in ["has spaces", "Editor_Pref", "trailing!", "slash/ed", ""] {
             let err = tool
                 .invoke(json!({"action": "save", "key": bad, "text": "x"}))
@@ -914,7 +900,7 @@ mod tests {
 
     #[tokio::test]
     async fn remember_save_needs_a_key_but_search_does_not() {
-        let tool = remember_tool(no_ops(), closed_embed_tx());
+        let tool = remember_tool(no_ops());
         let err = tool
             .invoke(json!({"action": "save", "key": null, "text": "vim"}))
             .await
@@ -932,35 +918,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn remember_enqueues_embed_job_with_value_text() {
-        let (ops, _dir) = fresh_ops().await;
-        let (etx, mut erx) = live_embed_tx();
-        let tool = remember_tool(ops.clone(), etx);
-        tool.invoke(
-            json!({"action": "save", "key": "editor_preference", "text": "vim is the way"}),
-        )
-        .await
-        .unwrap();
-        let job = erx
-            .try_recv()
-            .expect("embed job queued before invoke returns");
-        let EmbeddingTarget::Memory(memory_id) = job.target else {
-            panic!("expected a memory job, got {job:?}");
-        };
-        assert!(
-            memory_id > MemoryId(0),
-            "expected real rowid, got {memory_id}"
-        );
-        assert_eq!(job.text, "vim is the way");
-    }
-
     /// Strict mode requires every declared property to be listed as
     /// required and no others to be accepted.
     #[test]
     fn schemas_satisfy_strict_mode() {
         let tools: [Box<dyn Tool>; 2] = [
-            Box::new(remember_tool(no_ops(), closed_embed_tx())),
+            Box::new(remember_tool(no_ops())),
             Box::new(ReminisceTool::new(
                 no_embedder(),
                 no_semantic(),

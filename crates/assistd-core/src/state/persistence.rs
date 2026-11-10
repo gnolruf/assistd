@@ -3,13 +3,12 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, oneshot};
 use tracing::{debug, warn};
 
-use assistd_embed::{EmbedJob, enqueue_embed_job};
 use assistd_memory::{
-    BranchId, ChunkId, EmbeddingTarget, PersistedMessage, PersistedRelayStep, SessionId,
-    SummaryCut, TurnId, TurnStats,
+    BranchId, ChunkId, PersistedMessage, PersistedRelayStep, SessionId, SummaryCut, TurnId,
+    TurnStats,
 };
 use assistd_utils::time::saturating_millis;
 
@@ -55,13 +54,13 @@ impl AppState {
             turn: Arc::default(),
         };
         let transcripts = self.memory.transcripts.clone();
-        let embed_tx = self.embed_tx();
+        let embed_wake = self.embed_wake();
         let turn = Arc::clone(&target.turn);
         self.spawn_in_persist_chain(async move {
             match transcripts.begin_turn(branch, prompt).await {
                 Ok(opened) => {
                     let _ = turn.set(opened.turn);
-                    queue_chunk_embeddings(embed_tx.as_ref(), opened.message.chunks);
+                    wake_embedder_for(embed_wake.as_deref(), &opened.message.chunks);
                 }
                 Err(e) => warn!(
                     target: "assistd::memory",
@@ -73,8 +72,8 @@ impl AppState {
         target
     }
 
-    /// Persist one message to `target` on a background task, then queue the
-    /// chunks the store cut from it for embedding (dropped if the queue is full).
+    /// Persist one message to `target` on a background task, then wake the
+    /// embedding worker for the chunks the store cut from it.
     /// Dropped when the turn's opening write failed.
     pub(super) fn persist_message_fire_and_forget(
         &self,
@@ -82,7 +81,7 @@ impl AppState {
         msg: PersistedMessage,
     ) {
         let transcripts = self.memory.transcripts.clone();
-        let embed_tx = self.embed_tx();
+        let embed_wake = self.embed_wake();
         self.spawn_in_persist_chain(async move {
             let Some(&turn) = target.turn.get() else {
                 debug!(
@@ -95,7 +94,7 @@ impl AppState {
                 .append_message_to_branch(target.branch, turn, msg)
                 .await
             {
-                Ok(appended) => queue_chunk_embeddings(embed_tx.as_ref(), appended.chunks),
+                Ok(appended) => wake_embedder_for(embed_wake.as_deref(), &appended.chunks),
                 Err(e) => warn!(
                     target: "assistd::memory",
                     error = %e,
@@ -214,30 +213,20 @@ impl AppState {
         (previous, landed_tx)
     }
 
-    /// The embedding queue, when embedding is enabled.
-    fn embed_tx(&self) -> Option<mpsc::Sender<EmbedJob>> {
+    /// The embedding worker's wake signal, when embedding is enabled.
+    fn embed_wake(&self) -> Option<Arc<Notify>> {
         self.memory
             .embedding_cfg
             .enabled
-            .then(|| self.memory.embed_tx.clone())
+            .then(|| Arc::clone(&self.memory.embed_wake))
     }
 }
 
-fn queue_chunk_embeddings(
-    embed_tx: Option<&mpsc::Sender<EmbedJob>>,
-    chunks: Vec<(ChunkId, String)>,
-) {
-    let Some(embed_tx) = embed_tx else {
-        return;
-    };
-    for (chunk_id, text) in chunks {
-        enqueue_embed_job(
-            embed_tx,
-            EmbedJob {
-                target: EmbeddingTarget::Chunk(chunk_id),
-                text,
-            },
-        );
+fn wake_embedder_for(embed_wake: Option<&Notify>, chunks: &[ChunkId]) {
+    if let Some(embed_wake) = embed_wake
+        && !chunks.is_empty()
+    {
+        embed_wake.notify_one();
     }
 }
 

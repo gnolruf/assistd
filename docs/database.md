@@ -123,12 +123,12 @@ erDiagram
     chunk_embeddings {
         int chunk_id PK, FK
         text model
-        blob vector
+        blob vector "NULL when the model cannot embed the row"
     }
     memory_embeddings {
         int memory_id PK, FK
         text model
-        blob vector
+        blob vector "NULL when the model cannot embed the row"
     }
     tasks {
         int id PK
@@ -243,10 +243,11 @@ Deleting a task deletes its runs; their transcript sessions stay.
   embedder comes up, vectors from any other model are deleted before
   anything can search or write, so vectors from two models are never
   compared.
-  Vectors are written by the background embedding queue; a memory's
-  vector is only stored if its value hasn't changed since the job was
-  queued. Rows with no vector are what `assistd memory reindex` fills
-  in.
+  A chunk or memory with no row here is pending, and the background
+  embedding worker fills it in; a memory's vector is only stored if its
+  value hasn't changed since it was read for embedding. A row with a
+  `NULL` vector marks text the model rejected, so the worker does not
+  retry it; `assistd memory reindex` clears those marks and tries again.
 
 Search (`recall`, `reminisce`) scans every vector of one source kind,
 chats or documents, on a dedicated read-only connection and keeps the

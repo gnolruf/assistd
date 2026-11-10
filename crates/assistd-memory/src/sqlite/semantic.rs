@@ -26,7 +26,7 @@ use super::timestamp::{now_millis, timestamp_at};
 const MESSAGE_CHUNK_VECTORS: &str = "
     SELECT cc.message_id, e.chunk_id, e.vector
     FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
-    WHERE cc.message_id IS NOT NULL";
+    WHERE cc.message_id IS NOT NULL AND e.vector IS NOT NULL";
 
 /// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages of session `?1`.
 const IN_SESSION: &str = "
@@ -56,10 +56,11 @@ const OUTSIDE_SESSION_CONTEXT: &str = "
 const DOCUMENT_CHUNK_VECTORS: &str = "
     SELECT cc.document_id, e.chunk_id, e.vector
     FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
-    WHERE cc.document_id IS NOT NULL";
+    WHERE cc.document_id IS NOT NULL AND e.vector IS NOT NULL";
 
 /// Every memory vector, each its own group.
-const ALL_MEMORY_VECTORS: &str = "SELECT memory_id, memory_id, vector FROM memory_embeddings";
+const ALL_MEMORY_VECTORS: &str =
+    "SELECT memory_id, memory_id, vector FROM memory_embeddings WHERE vector IS NOT NULL";
 
 /// A message chunk row's columns, read by [`message_context_chunk`]: chunk id, message
 /// id, session uuid, message time, role, session title, the session's opening user text,
@@ -98,13 +99,9 @@ impl SqliteSemanticStore {
     }
 
     /// Index `content` as the text of the document at `path`, replacing its chunks
-    /// and their vectors when the text changed. Returns the new chunks as
-    /// `(id, chunk text)` for embedding; empty when the text is unchanged.
-    pub async fn index_document(
-        &self,
-        path: PathBuf,
-        content: String,
-    ) -> Result<Vec<(ChunkId, String)>> {
+    /// and their vectors when the text changed. Returns the new chunks, left
+    /// for embedding; empty when the text is unchanged.
+    pub async fn index_document(&self, path: PathBuf, content: String) -> Result<Vec<ChunkId>> {
         let ranges = chunk_ranges(&content, &ChunkingConfig::DOCUMENTS);
         self.handle
             .writer()
@@ -308,6 +305,21 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .map_err(MemoryError::sqlite("store_embeddings"))
+    }
+
+    async fn clear_unembeddable(&self) -> Result<u64> {
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let cleared = tx
+                    .execute("DELETE FROM chunk_embeddings WHERE vector IS NULL", [])?
+                    + tx.execute("DELETE FROM memory_embeddings WHERE vector IS NULL", [])?;
+                tx.commit()?;
+                Ok(u64::try_from(cleared).unwrap_or(u64::MAX))
+            })
+            .await
+            .map_err(MemoryError::sqlite("clear_unembeddable"))
     }
 }
 
@@ -686,7 +698,8 @@ fn dot_le_words(words: &[[u8; 4]], query: &[f32]) -> f32 {
         .sum()
 }
 
-/// Upsert `embedding` into its target's table. The `SELECT` makes a since-deleted
+/// Upsert `embedding` into its target's table, with a `NULL` vector when it has
+/// none. The `SELECT` makes a since-deleted
 /// target, or a memory whose value has changed since, a no-op rather than an error
 /// or a vector for the wrong text.
 fn upsert_embedding(
@@ -694,7 +707,7 @@ fn upsert_embedding(
     model: &str,
     embedding: &Embedding,
 ) -> rusqlite::Result<usize> {
-    let blob = vector_to_blob(&embedding.vector);
+    let blob = embedding.vector.as_deref().map(vector_to_blob);
     match embedding.target {
         EmbeddingTarget::Chunk(id) => tx
             .prepare_cached(
@@ -722,7 +735,7 @@ fn replace_document(
     path: &Path,
     content: &str,
     ranges: &[Range<usize>],
-) -> rusqlite::Result<Vec<(ChunkId, String)>> {
+) -> rusqlite::Result<Vec<ChunkId>> {
     let changed: Option<DocumentId> = tx
         .prepare_cached(
             "INSERT INTO documents (path, content, indexed_at) VALUES (?1, ?2, ?3)
@@ -749,11 +762,9 @@ fn replace_document(
     ranges
         .iter()
         .map(|bytes| {
-            let id = insert
-                .query_row(rusqlite::params![document, bytes.start, bytes.end], |r| {
-                    r.get(0)
-                })?;
-            Ok((id, content[bytes.clone()].to_string()))
+            insert.query_row(rusqlite::params![document, bytes.start, bytes.end], |r| {
+                r.get(0)
+            })
         })
         .collect()
 }

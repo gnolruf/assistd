@@ -228,8 +228,8 @@ pub struct SummaryCut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendedMessage {
     pub id: MessageId,
-    /// The chunks stored for embedding, as `(id, chunk text)`; empty for tool results.
-    pub chunks: Vec<(ChunkId, String)>,
+    /// The chunks cut from it for embedding; empty for tool results.
+    pub chunks: Vec<ChunkId>,
 }
 
 /// Result of [`TranscriptStore::begin_turn`].

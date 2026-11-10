@@ -8,38 +8,33 @@ use std::time::Duration;
 
 use assistd_core::{AppState, Config};
 use assistd_embed::{
-    EmbedJob, EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
+    EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
-use assistd_memory::{
-    NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore, UnindexedRows,
-};
+use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore};
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
 use futures_util::FutureExt;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::info;
 
-const EMBED_QUEUE_CAPACITY: usize = 256;
-
-/// Longest the worker gets at shutdown to embed and store what is still queued.
+/// Longest the worker gets at shutdown to finish the batch it is embedding.
 const EMBED_DRAIN_BUDGET: Duration = Duration::from_secs(10);
 
 /// The handles the daemon serves from startup.
 pub(super) struct EmbeddingHandles {
     pub embedder: Arc<EmbedderHandle>,
     pub semantic_store: Arc<dyn SemanticStore>,
-    pub embed_tx: mpsc::Sender<EmbedJob>,
+    pub embed_wake: Arc<Notify>,
 }
 
 /// What starting the embedding server in the background still needs.
-/// Jobs queued before it is up wait in `embed_rx`.
 pub(super) struct EmbeddingStartup {
     config: assistd_config::EmbeddingConfig,
     api_key: ApiKey,
-    embed_rx: mpsc::Receiver<EmbedJob>,
+    embed_wake: Arc<Notify>,
 }
 
 /// The shutdown signals the embedding server and worker stop on.
@@ -54,7 +49,7 @@ pub(super) struct EmbeddingService {
 }
 
 /// The server and, when its client probe passed, the worker embedding
-/// queued jobs.
+/// rows missing an embedding.
 struct RunningEmbedding {
     server: ChildServer,
     worker: Option<JoinHandle<()>>,
@@ -81,9 +76,9 @@ impl EmbeddingService {
         Self { startup: None }
     }
 
-    /// Drain queued jobs while the server is still up, abandoning them after
-    /// [`EMBED_DRAIN_BUDGET`] or at `deadline`, then stop it. A start still
-    /// under way is cancelled. The memory database must still be open.
+    /// Let the worker finish its batch while the server is still up, abandoning
+    /// it after [`EMBED_DRAIN_BUDGET`] or at `deadline`, then stop the server. A
+    /// start still under way is cancelled. The memory database must still be open.
     pub(super) async fn shutdown(
         self,
         worker_shutdown: &watch::Sender<bool>,
@@ -125,7 +120,7 @@ async fn join_worker_within_budget(mut worker: JoinHandle<()>, deadline: Instant
     {
         tracing::warn!(
             target: "assistd::embed",
-            "embed queue drain timed out at shutdown; queued rows stay unindexed"
+            "embed worker still busy at shutdown; its rows are embedded on the next start"
         );
         worker.abort();
         let _ = worker.await;
@@ -151,27 +146,25 @@ pub(super) fn prepare(
     };
     let semantic_store: Arc<dyn SemanticStore> =
         Arc::new(SqliteSemanticStore::new(sqlite_handle.clone()));
-    let (embed_tx, embed_rx) = mpsc::channel(EMBED_QUEUE_CAPACITY);
+    let embed_wake = Arc::new(Notify::new());
     let handles = EmbeddingHandles {
         embedder: Arc::new(EmbedderHandle::new(Readiness::Starting)),
         semantic_store,
-        embed_tx,
+        embed_wake: embed_wake.clone(),
     };
     let startup = EmbeddingStartup {
         config: config.embedding.clone(),
         api_key: api_key.clone(),
-        embed_rx,
+        embed_wake,
     };
     (handles, Some(startup))
 }
 
 fn disabled_handles(reason: &str) -> EmbeddingHandles {
-    let (embed_tx, embed_rx) = mpsc::channel(1);
-    drop(embed_rx);
     EmbeddingHandles {
         embedder: Arc::new(EmbedderHandle::new(Readiness::Unavailable(reason.into()))),
         semantic_store: Arc::new(NoSemanticStore),
-        embed_tx,
+        embed_wake: Arc::default(),
     }
 }
 
@@ -261,9 +254,7 @@ async fn drop_other_models_then_serve(
             .set(Readiness::Unavailable(reason.into()));
         return None;
     }
-    let worker = serve_embedder(state, embedder.clone(), startup, worker_shutdown);
-    warn_if_missing_rows(semantic, embedder.model()).await;
-    Some(worker)
+    Some(serve_embedder(state, embedder, startup, worker_shutdown))
 }
 
 fn serve_embedder(
@@ -275,7 +266,7 @@ fn serve_embedder(
     let worker = spawn_embedder_task(
         embedder.clone(),
         state.memory.semantic.clone(),
-        startup.embed_rx,
+        startup.embed_wake,
         worker_shutdown,
     );
     state.memory.embedder.set(Readiness::Ready(embedder));
@@ -326,21 +317,5 @@ async fn drop_other_models(semantic: &dyn SemanticStore, model_name: &str) -> Re
             Ok(())
         }
         Err(e) => Err(format!("dropping other models' vectors failed: {e}")),
-    }
-}
-
-async fn warn_if_missing_rows(semantic: &dyn SemanticStore, model_name: &str) {
-    match semantic.count_missing().await {
-        Ok(UnindexedRows { chunks, memories }) if chunks + memories > 0 => {
-            tracing::warn!(
-                "embedding: {chunks} transcript chunks and {memories} memories have no \
-                 {model_name} embedding and are invisible to semantic recall; \
-                 run `assistd memory reindex` to index them"
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::debug!("embedding: count_missing check failed ({e:#}); skipping diagnostic");
-        }
     }
 }

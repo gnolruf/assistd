@@ -26,7 +26,7 @@ flowchart TB
         wm["<b>assistd-wm</b><br/>i3 / Sway IPC"]
         mcp["<b>assistd-mcp</b><br/>stdio + HTTP client (rmcp)"]
         memory[("<b>assistd-memory</b><br/>SQLite stores")]
-        embed["<b>assistd-embed</b><br/>embedding queue"]
+        embed["<b>assistd-embed</b><br/>embedding worker"]
         search["<b>assistd-search</b><br/>SearXNG launch spec + client"]
     end
 
@@ -622,26 +622,30 @@ compaction summary. On resume, the LLM gets that summary plus only the
 rows after it, so it sees the same prompt it had before; the client
 still gets every row.
 
-Saving through the `remember` tool inserts the K/V row and queues an embedding job
-for its value on a `tokio::sync::mpsc` channel. Each user or assistant
-message is chunked in the transaction that saves it, and its chunks are
-queued on the same channel. A background task drains the queue,
-sends batches to the embedding server (a second, smaller
-llama-server child process configured under
+Saving through the `remember` tool inserts the K/V row, and each user
+or assistant message is chunked in the transaction that saves it. The
+database is the embedding queue: a memory or chunk with no row in its
+embeddings table is pending. Each write wakes a background task, which
+pages through the pending rows, sends batches to the embedding server
+(a second, smaller llama-server child process configured under
 `[embedding]`), and inserts the resulting vectors into the semantic
-store. A `remember` search embeds its query and ranks saved memories by
+store. A pass cut short by the server or the database is retried with
+backoff, so nothing is dropped. A row the server rejects for its own
+content is marked and skipped until `assistd memory reindex` retries
+it. A `remember` search embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
 over transcript chunks from earlier sessions. Indexed local documents
 own chunks in the same table, so one ranked search serves both,
 filtered by source; chat recall never ranks document chunks. Like chat requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
-meantime stays unindexed until `assistd memory reindex` picks it up.
+meantime stays pending and is embedded by a later pass.
 
-The queue and the semantic store exist from daemon start, but the
+The semantic store exists from daemon start, but the
 embedder sits behind an `EmbedderHandle` that is `Starting` until the
-embedding server answers. Jobs queued before then wait in the channel and
-are embedded once the worker starts. Semantic search, reindex, `remember`
+embedding server answers. The worker starts then, and its first pass
+embeds every row still pending, whether written during startup or left
+over from an earlier run. Semantic search, reindex, `remember`
 searches and `reminisce` report "embedding is still starting" (or why it is
 unavailable) until then, and per-turn context injection skips recall.
 

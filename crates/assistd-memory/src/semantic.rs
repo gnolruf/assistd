@@ -181,15 +181,16 @@ impl fmt::Display for EmbeddingTarget {
     }
 }
 
-/// An L2-normalised embedding of `text`, the content of `target` when it was embedded.
+/// The L2-normalised embedding of `text`, the content of `target` when it was embedded,
+/// or no `vector` when the model cannot embed that text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Embedding {
     pub target: EmbeddingTarget,
     pub text: String,
-    pub vector: Vec<f32>,
+    pub vector: Option<Vec<f32>>,
 }
 
-/// Rows with no embedding, by table.
+/// Rows neither embedded nor marked unembeddable, by table.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnindexedRows {
     pub chunks: u64,
@@ -226,19 +227,19 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// vectors from two models.
     async fn drop_other_models(&self, model: &str) -> Result<u64>;
 
-    /// Rows with no embedding.
+    /// Rows neither embedded nor marked unembeddable.
     async fn count_missing(&self) -> Result<UnindexedRows>;
 
-    /// Up to `limit` memories after `after` (from the start when `None`) with no
-    /// embedding, in id order, as `(id, value)`.
+    /// Up to `limit` memories after `after` (from the start when `None`) neither
+    /// embedded nor marked unembeddable, in id order, as `(id, value)`.
     async fn memories_missing_embedding(
         &self,
         after: Option<MemoryId>,
         limit: usize,
     ) -> Result<Vec<(MemoryId, String)>>;
 
-    /// Up to `limit` chunks after `after` (from the start when `None`) with
-    /// no embedding, in id order, as `(id, chunk text)`.
+    /// Up to `limit` chunks after `after` (from the start when `None`) neither
+    /// embedded nor marked unembeddable, in id order, as `(id, chunk text)`.
     async fn chunks_missing_embedding(
         &self,
         after: Option<ChunkId>,
@@ -246,8 +247,12 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<Vec<(ChunkId, String)>>;
 
     /// Upsert `embeddings` from `model` in one transaction, skipping targets deleted
-    /// since they were embedded and memories whose value no longer matches.
+    /// since they were embedded and memories whose value no longer matches. One with
+    /// no vector marks its target unembeddable by `model`.
     async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()>;
+
+    /// Clear every unembeddable mark, returning how many, so those rows are missing again.
+    async fn clear_unembeddable(&self) -> Result<u64>;
 }
 
 /// No-op store: writes are discarded and searches find nothing.
@@ -296,5 +301,8 @@ impl SemanticStore for NoSemanticStore {
     }
     async fn store_embeddings(&self, _model: &str, _embeddings: Vec<Embedding>) -> Result<()> {
         Ok(())
+    }
+    async fn clear_unembeddable(&self) -> Result<u64> {
+        Ok(0)
     }
 }
