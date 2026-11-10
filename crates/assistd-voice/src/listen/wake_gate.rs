@@ -19,7 +19,8 @@ pub enum Admission {
 
 /// Admits an utterance when the wake phrase was spotted in it, or when it
 /// began inside a command window: `command_timeout` after a bare phrase,
-/// or `follow_up` after a reply ended. One utterance closes the window.
+/// or `follow_up` after a reply ended. The first utterance that began
+/// inside or after the window closes it.
 #[derive(Debug)]
 pub struct WakeGate {
     command_timeout: Duration,
@@ -79,11 +80,12 @@ impl WakeGate {
     }
 
     /// Gate an utterance that began at `started`, `spotted` when the wake
-    /// phrase is in it. A spotted phrase wins over an open window.
+    /// phrase is in it. A spotted phrase wins over an open window, and an
+    /// utterance that began before the window opened leaves it open.
     pub fn admit(&mut self, spotted: bool, started: Instant) -> Admission {
         let in_window = self
             .window
-            .take()
+            .take_if(|window| window.opens <= started)
             .is_some_and(|window| window.contains(started));
         match (spotted, in_window) {
             (true, _) => Admission::WakePhrase,
