@@ -9,7 +9,7 @@ use crate::commands::{read_regular_file, read_regular_head};
 use crate::policy::FileScope;
 
 /// How much of a file's head [`sniff_binary`] looks at for a NUL byte.
-const SNIFF_LEN: usize = 8192;
+pub(crate) const SNIFF_LEN: usize = 8192;
 
 /// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if none are
 /// given. Binary files are rejected so their bytes stay out of the context.
