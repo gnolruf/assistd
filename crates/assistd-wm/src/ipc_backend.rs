@@ -104,24 +104,32 @@ impl<P: IpcProtocol> fmt::Debug for IpcBackend<P> {
 
 impl<P: IpcProtocol> IpcBackend<P> {
     /// Connect, seed the focus snapshot, and spawn the reconnecting
-    /// supervisor. Errors only when the initial connect fails.
+    /// supervisor. Errors when the initial connect fails; a connect that
+    /// exceeds [`WM_IPC_TIMEOUT`] starts disconnected and the supervisor retries.
     pub(crate) async fn start(
         protocol: P,
         shutdown: watch::Receiver<bool>,
     ) -> WmResult<(Arc<Self>, JoinHandle<()>)> {
-        let (mut cmd, events) = protocol.connect().await?;
-        let initial = seed_snapshot::<P>(&mut cmd).await.unwrap_or_else(|e| {
-            tracing::warn!(
-            target: "assistd::wm",
-                "{} seed_snapshot failed: {e:#}; starting with empty focus state",
-                P::NAME
-            );
-            Snapshot::default()
-        });
+        let (cmd, events, initial) = match connect_and_seed(&protocol).await {
+            Ok(Connection {
+                cmd,
+                events,
+                seeded,
+            }) => (Some(cmd), Some(events), seeded_or_empty::<P>(seeded)),
+            Err(WmError::Timeout(after)) => {
+                tracing::warn!(
+                    target: "assistd::wm",
+                    "{} did not answer within {after:?}; starting disconnected",
+                    P::NAME
+                );
+                (None, None, Snapshot::default())
+            }
+            Err(e) => return Err(e),
+        };
         let backend = Arc::new(Self {
             protocol,
-            cmd: Mutex::new(Some(cmd)),
-            connected: AtomicBool::new(true),
+            connected: AtomicBool::new(cmd.is_some()),
+            cmd: Mutex::new(cmd),
             snapshot: RwLock::new(initial),
             reconnect: Notify::new(),
         });
@@ -236,13 +244,23 @@ impl<P: IpcProtocol> IpcBackend<P> {
     }
 }
 
+/// A fresh command connection, its event stream, and the result of seeding
+/// the focus snapshot over it.
+struct Connection<P: IpcProtocol> {
+    cmd: P::Cmd,
+    events: P::Events,
+    seeded: WmResult<Snapshot>,
+}
+
 async fn supervise<P: IpcProtocol>(
     backend: Arc<IpcBackend<P>>,
-    initial_events: P::Events,
+    initial_events: Option<P::Events>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let name = P::NAME;
-    if !backend.drive_events(initial_events, &mut shutdown).await {
+    if let Some(events) = initial_events
+        && !backend.drive_events(events, &mut shutdown).await
+    {
         tracing::info!(
             target: "assistd::wm",
             "{name} supervisor exited (shutdown during initial events stream)"
@@ -259,23 +277,24 @@ async fn supervise<P: IpcProtocol>(
             attempt + 1
         );
 
-        let delay = backoff_delay(attempt);
-        tokio::select! {
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    tracing::info!(
-                        target: "assistd::wm",
-                        "{name} supervisor exited (shutdown during backoff)"
-                    );
-                    return;
-                }
+        let reconnected = tokio::select! {
+            _ = shutdown.wait_for(|stop| *stop) => {
+                tracing::info!(
+                    target: "assistd::wm",
+                    "{name} supervisor exited (shutdown while reconnecting)"
+                );
+                return;
             }
-            () = tokio::time::sleep(delay) => {}
-        }
+            reconnected = reconnect_after_backoff(&backend.protocol, attempt) => reconnected,
+        };
 
-        match backend.protocol.connect().await {
-            Ok((mut cmd, events)) => {
-                if let Ok(seeded) = seed_snapshot::<P>(&mut cmd).await {
+        match reconnected {
+            Ok(Connection {
+                cmd,
+                events,
+                seeded,
+            }) => {
+                if let Ok(seeded) = seeded {
                     *backend.snapshot.write().await = seeded;
                 }
                 backend.set_conn(&mut *backend.cmd.lock().await, Some(cmd));
@@ -298,6 +317,42 @@ async fn supervise<P: IpcProtocol>(
             }
         }
     }
+}
+
+async fn reconnect_after_backoff<P: IpcProtocol>(
+    protocol: &P,
+    attempt: u32,
+) -> WmResult<Connection<P>> {
+    tokio::time::sleep(backoff_delay(attempt)).await;
+    connect_and_seed(protocol).await
+}
+
+/// Connect and seed under one [`WM_IPC_TIMEOUT`] deadline, so a compositor
+/// that accepts the socket but never answers fails like a refused connect.
+async fn connect_and_seed<P: IpcProtocol>(protocol: &P) -> WmResult<Connection<P>> {
+    let attempt = async {
+        let (mut cmd, events) = protocol.connect().await?;
+        let seeded = seed_snapshot::<P>(&mut cmd).await;
+        Ok(Connection {
+            cmd,
+            events,
+            seeded,
+        })
+    };
+    tokio::time::timeout(WM_IPC_TIMEOUT, attempt)
+        .await
+        .unwrap_or(Err(WmError::Timeout(WM_IPC_TIMEOUT)))
+}
+
+fn seeded_or_empty<P: IpcProtocol>(seeded: WmResult<Snapshot>) -> Snapshot {
+    seeded.unwrap_or_else(|e| {
+        tracing::warn!(
+            target: "assistd::wm",
+            "{} seed_snapshot failed: {e:#}; starting with empty focus state",
+            P::NAME
+        );
+        Snapshot::default()
+    })
 }
 
 async fn seed_snapshot<P: IpcProtocol>(cmd: &mut P::Cmd) -> WmResult<Snapshot> {

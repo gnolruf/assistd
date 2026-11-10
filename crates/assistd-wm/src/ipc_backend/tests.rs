@@ -117,3 +117,31 @@ async fn is_connected_tracks_disconnect_and_reconnect() {
     shutdown_tx.send(true).unwrap();
     supervisor.await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_connect_starts_disconnected_and_shutdown_interrupts_reconnect() {
+    let (connections_tx, connections_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let protocol = FakeProtocol {
+        connections: Mutex::new(connections_rx),
+    };
+    let (backend, supervisor) = IpcBackend::start(protocol, shutdown_rx).await.unwrap();
+    assert!(!backend.is_connected());
+
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    connections_tx.send(events_rx).unwrap();
+    wait_until("the supervisor connects", || backend.is_connected()).await;
+
+    drop(events_tx);
+    wait_until("the event stream drop is noticed", || {
+        !backend.is_connected()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    shutdown_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), supervisor)
+        .await
+        .expect("shutdown interrupts a hung reconnect")
+        .unwrap();
+}
