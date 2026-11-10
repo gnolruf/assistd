@@ -44,8 +44,8 @@ impl SwayHandle {
 }
 
 impl SwayBackend {
-    /// Connect to Sway and spawn the reconnecting supervisor. Errors only
-    /// when the initial connect fails.
+    /// Connect to Sway and spawn the reconnecting supervisor. Errors when the initial
+    /// connect fails; a compositor that never answers starts disconnected.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
         let (ipc, supervisor_task) = IpcBackend::start(SwayIpc, shutdown).await?;
         Ok(SwayHandle {

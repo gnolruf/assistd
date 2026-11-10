@@ -46,8 +46,8 @@ impl I3Handle {
 }
 
 impl I3Backend {
-    /// Connect to i3 and spawn the reconnecting supervisor. Errors only
-    /// when the initial connect fails.
+    /// Connect to i3 and spawn the reconnecting supervisor. Errors when the initial
+    /// connect fails; a compositor that never answers starts disconnected.
     pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<I3Handle> {
         let (ipc, supervisor_task) = IpcBackend::start(I3Ipc, shutdown).await?;
         Ok(I3Handle {

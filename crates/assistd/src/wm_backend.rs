@@ -49,7 +49,9 @@ async fn connect(compositor: Compositor, shutdown_rx: watch::Receiver<bool>) -> 
         #[cfg(feature = "i3")]
         Compositor::I3 => match I3Backend::start(shutdown_rx).await {
             Ok(handle) => {
-                tracing::info!(target: "assistd::wm", "i3 backend connected");
+                if handle.backend.is_connected() {
+                    tracing::info!(target: "assistd::wm", "i3 backend connected");
+                }
                 WmBackend {
                     manager: handle.backend.clone(),
                     handle: Some(WmHandle::I3(handle)),
@@ -66,7 +68,9 @@ async fn connect(compositor: Compositor, shutdown_rx: watch::Receiver<bool>) -> 
         #[cfg(feature = "sway")]
         Compositor::Sway => match SwayBackend::start(shutdown_rx).await {
             Ok(handle) => {
-                tracing::info!(target: "assistd::wm", "sway backend connected");
+                if handle.backend.is_connected() {
+                    tracing::info!(target: "assistd::wm", "sway backend connected");
+                }
                 WmBackend {
                     manager: handle.backend.clone(),
                     handle: Some(WmHandle::Sway(handle)),
