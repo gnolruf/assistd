@@ -13,13 +13,6 @@ pub enum SearchServerError {
     #[error("failed to generate the SearXNG secret: {0}")]
     Secret(#[source] io::Error),
 
-    #[error("failed to write SearXNG settings to {}: {source}", path.display())]
-    Settings {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-
     #[error("failed to read the {engine} API key from {}: {source}", path.display())]
     ApiKey {
         engine: String,

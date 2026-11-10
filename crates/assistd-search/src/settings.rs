@@ -1,6 +1,7 @@
 //! The settings file the daemon's SearXNG instance loads, holding only what
 //! has no `SEARXNG_*` environment override.
 
+use std::fmt;
 use std::fs::{DirBuilder, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -34,22 +35,52 @@ struct EngineEntry<'a> {
     api_key: Option<String>,
 }
 
-/// Write the settings file loading only `engines`, with their API keys read
-/// from their key files, replacing any left by an earlier launch, and return
-/// its path.
-pub(crate) fn write_settings(engines: &[SearchEngine]) -> Result<PathBuf, SearchServerError> {
-    let entries = engines
-        .iter()
-        .map(engine_entry)
-        .collect::<Result<Vec<_>, _>>()?;
-    let dir = settings_dir();
-    let path = dir.join(SETTINGS_FILE_NAME);
-    let settings = settings_yaml(&entries);
-    replace_file(&dir, &path, &settings).map_err(|source| SearchServerError::Settings {
-        path: path.clone(),
-        source,
-    })?;
-    Ok(path)
+/// The rendered settings file, written afresh before every spawn. `Debug`
+/// omits the contents, which hold the engines' API keys.
+pub(crate) struct SettingsFile {
+    dir: PathBuf,
+    path: PathBuf,
+    contents: String,
+}
+
+impl SettingsFile {
+    /// Render the settings loading only `engines`, with their API keys read
+    /// from their key files; nothing is written until [`Self::write`].
+    pub(crate) fn render(engines: &[SearchEngine]) -> Result<Self, SearchServerError> {
+        let entries = engines
+            .iter()
+            .map(engine_entry)
+            .collect::<Result<Vec<_>, _>>()?;
+        let dir = settings_dir();
+        let path = dir.join(SETTINGS_FILE_NAME);
+        Ok(Self {
+            dir,
+            path,
+            contents: settings_yaml(&entries),
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Write the file, replacing whatever is at its path.
+    pub(crate) fn write(&self) -> io::Result<()> {
+        replace_file(&self.dir, &self.path, &self.contents).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("write SearXNG settings to {}: {e}", self.path.display()),
+            )
+        })
+    }
+}
+
+impl fmt::Debug for SettingsFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SettingsFile")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
 }
 
 fn engine_entry(engine: &SearchEngine) -> Result<EngineEntry<'_>, SearchServerError> {
