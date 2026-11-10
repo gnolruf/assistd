@@ -499,7 +499,7 @@ fn build_memory_stack(
         .with_tasks(memory.task_store.clone())
         .with_embedder(embed.embedder.clone())
         .with_semantic(embed.semantic_store.clone())
-        .with_embed_tx(embed.embed_tx.clone())
+        .with_embed_wake(embed.embed_wake.clone())
 }
 
 async fn replay_history(chat: &dyn LlmBackend, replay: HistoryReplay) {

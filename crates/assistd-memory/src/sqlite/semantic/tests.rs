@@ -35,7 +35,7 @@ impl Transcript {
     }
 
     /// Append user message `text`, returning its id and stored chunks.
-    async fn append(&self, text: &str) -> (MessageId, Vec<(ChunkId, String)>) {
+    async fn append(&self, text: &str) -> (MessageId, Vec<ChunkId>) {
         let appended = self
             .store
             .begin_turn(self.branch, PersistedMessage::user(text))
@@ -53,11 +53,11 @@ impl Transcript {
         vector: &[f32],
     ) -> ChunkId {
         let (_, chunks) = self.append(text).await;
-        let [chunk] = &chunks[..] else {
+        let [chunk] = chunks[..] else {
             panic!("{text:?} should be one chunk, got {chunks:?}");
         };
         embed_chunk(store, chunk, vector).await;
-        chunk.0
+        chunk
     }
 }
 
@@ -66,18 +66,14 @@ fn unit_vec(angle: f32) -> Vec<f32> {
     vec![angle.cos(), angle.sin()]
 }
 
-async fn embed_chunk(
-    store: &SqliteSemanticStore,
-    (chunk_id, text): &(ChunkId, String),
-    vector: &[f32],
-) {
+async fn embed_chunk(store: &SqliteSemanticStore, chunk_id: ChunkId, vector: &[f32]) {
     store
         .store_embeddings(
             MODEL,
             vec![Embedding {
-                target: EmbeddingTarget::Chunk(*chunk_id),
-                text: text.clone(),
-                vector: vector.to_vec(),
+                target: EmbeddingTarget::Chunk(chunk_id),
+                text: String::new(),
+                vector: Some(vector.to_vec()),
             }],
         )
         .await
@@ -104,7 +100,7 @@ async fn embed_memory(
             vec![Embedding {
                 target: EmbeddingTarget::Memory(memory_id),
                 text: value.to_string(),
-                vector: vector.to_vec(),
+                vector: Some(vector.to_vec()),
             }],
         )
         .await
@@ -117,7 +113,7 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
     let transcript = Transcript::new(&handle).await;
     let long_text = format!("{}{}", "head ".repeat(100), "tail ".repeat(60));
     let (long_message, long_chunks) = transcript.append(&long_text).await;
-    let [first, second] = &long_chunks[..] else {
+    let [first, second] = long_chunks[..] else {
         panic!("expected two chunks, got {}", long_chunks.len());
     };
     embed_chunk(&store, first, &unit_vec(0.3)).await;
@@ -131,14 +127,13 @@ async fn nearest_chunks_returns_each_message_once_through_its_best_chunk() {
         .await
         .unwrap();
     let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
-    assert_eq!(ids, [second.0, short]);
+    assert_eq!(ids, [second, short]);
     assert!((hits[0].similarity - 1.0).abs() < 1e-4);
     assert!(hits[0].similarity > hits[1].similarity);
-    assert_eq!(
-        hits[0].text, second.1,
+    assert!(
+        hits[0].text.ends_with("tail ") && hits[0].text.len() < long_text.len(),
         "a tail match must return the tail window, not the message"
     );
-    assert!(hits[0].text.ends_with("tail ") && hits[0].text.len() < long_text.len());
     assert_eq!(hits[1].text, "short");
     let ChunkLocator::Message { message_id, .. } = hits[0].locator else {
         panic!("a chat search must hit messages");
@@ -244,7 +239,7 @@ async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks(
         .index_document(path.clone(), "draft".into())
         .await
         .unwrap();
-    embed_chunk(&store, &stale[0], &unit_vec(0.1)).await;
+    embed_chunk(&store, stale[0], &unit_vec(0.1)).await;
     let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
     let fresh_chunks = store
         .index_document(path.clone(), section.clone())
@@ -252,16 +247,16 @@ async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks(
         .unwrap();
     assert!(
         store
-            .index_document(path.clone(), section)
+            .index_document(path.clone(), section.clone())
             .await
             .unwrap()
             .is_empty(),
         "unchanged text must keep its chunks"
     );
-    let [intro, detail] = &fresh_chunks[..] else {
+    let [intro, detail] = fresh_chunks[..] else {
         panic!("expected two chunks, got {fresh_chunks:?}");
     };
-    embed_chunk(&store, &stale[0], &unit_vec(0.0)).await;
+    embed_chunk(&store, stale[0], &unit_vec(0.0)).await;
     embed_chunk(&store, detail, &unit_vec(0.2)).await;
 
     let chats = store
@@ -278,8 +273,7 @@ async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks(
     let [hit] = &documents[..] else {
         panic!("one document must hit through its re-indexed chunk, got {documents:?}");
     };
-    assert_eq!(hit.chunk_id, detail.0);
-    assert_eq!(hit.text, detail.1);
+    assert_eq!(hit.chunk_id, detail);
     let ChunkLocator::Document {
         path: hit_path,
         bytes,
@@ -289,8 +283,9 @@ async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks(
         panic!("a document search must hit documents");
     };
     assert_eq!(hit_path, &path);
+    assert_eq!(hit.text, section[bytes.clone()]);
     let adjacent = store.adjacent_chunks(&hit.locator).await.unwrap();
-    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(intro.0));
+    assert_eq!(adjacent.before.map(|chunk| chunk.chunk_id), Some(intro));
     assert!(adjacent.after.is_none() && bytes.start > 0);
     assert_eq!(
         store.count_missing().await.unwrap(),
@@ -383,9 +378,9 @@ async fn missing_embedding_lists_only_unindexed_rows() {
 
     transcript.embedded_chunk(&store, "x", &unit_vec(0.0)).await;
     let (_, first) = transcript.append("y").await;
-    let first_bare = first[0].0;
+    let first_bare = first[0];
     let (_, second) = transcript.append("z").await;
-    let second_bare = second[0].0;
+    let second_bare = second[0];
 
     let indexed_mem = save_memory(&handle, "indexed", "v1").await;
     embed_memory(&store, indexed_mem, "v1", &unit_vec(0.0)).await;
@@ -422,6 +417,66 @@ async fn missing_embedding_lists_only_unindexed_rows() {
 }
 
 #[tokio::test]
+async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_changed() {
+    let (handle, store, _temp) = fresh().await;
+    let transcript = Transcript::new(&handle).await;
+    let (_, chunks) = transcript.append("y").await;
+    let chunk = chunks[0];
+    let cleared_mem = save_memory(&handle, "cleared", "v1").await;
+    let changed_mem = save_memory(&handle, "changed", "v2").await;
+    let unembeddable = [
+        (EmbeddingTarget::Chunk(chunk), "y"),
+        (EmbeddingTarget::Memory(cleared_mem), "v1"),
+        (EmbeddingTarget::Memory(changed_mem), "v2"),
+    ]
+    .map(|(target, text)| Embedding {
+        target,
+        text: text.to_string(),
+        vector: None,
+    })
+    .to_vec();
+    store.store_embeddings(MODEL, unembeddable).await.unwrap();
+
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows::default()
+    );
+    assert!(
+        store
+            .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .nearest_memories(unit_vec(0.0), 5)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    save_memory(&handle, "changed", "v3").await;
+    assert_eq!(
+        store.memories_missing_embedding(None, 100).await.unwrap(),
+        [(changed_mem, "v3".to_string())]
+    );
+
+    assert_eq!(store.clear_unembeddable().await.unwrap(), 2);
+    assert_eq!(
+        store.chunks_missing_embedding(None, 100).await.unwrap(),
+        [(chunk, "y".to_string())]
+    );
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows {
+            chunks: 1,
+            memories: 2
+        }
+    );
+}
+
+#[tokio::test]
 async fn dropping_other_models_keeps_only_the_current_models_vectors() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
@@ -432,14 +487,14 @@ async fn dropping_other_models_keeps_only_the_current_models_vectors() {
             "old",
             vec![
                 Embedding {
-                    target: EmbeddingTarget::Chunk(old_chunks[0].0),
+                    target: EmbeddingTarget::Chunk(old_chunks[0]),
                     text: "old".to_string(),
-                    vector: unit_vec(0.0),
+                    vector: Some(unit_vec(0.0)),
                 },
                 Embedding {
                     target: EmbeddingTarget::Memory(mem_id),
                     text: "v".to_string(),
-                    vector: unit_vec(0.0),
+                    vector: Some(unit_vec(0.0)),
                 },
             ],
         )
@@ -487,7 +542,7 @@ async fn batch_skips_targets_deleted_before_it_lands() {
         .map(|memory_id| Embedding {
             target: EmbeddingTarget::Memory(memory_id),
             text: "v".to_string(),
-            vector: unit_vec(0.0),
+            vector: Some(unit_vec(0.0)),
         })
         .to_vec();
     store.store_embeddings(MODEL, embeddings).await.unwrap();

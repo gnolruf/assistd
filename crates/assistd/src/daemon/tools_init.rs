@@ -85,7 +85,7 @@ pub(super) fn init(
         )),
         embedder: deps.embed.embedder.clone(),
         semantic: deps.embed.semantic_store.clone(),
-        embed_tx: deps.embed.embed_tx.clone(),
+        embed_wake: deps.embed.embed_wake.clone(),
         current_session: deps.current_session,
         window_manager: deps.window_manager,
         web_search: deps.web_search,

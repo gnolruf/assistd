@@ -691,12 +691,12 @@ fn insert_message(
     )
 }
 
-/// Store `row`'s chunks under `message`, returning each as `(id, chunk text)` in order.
+/// Store `row`'s chunks under `message`, returning their ids in order.
 fn insert_chunks(
     tx: &Transaction<'_>,
     message: MessageId,
     row: &MessageRow,
-) -> rusqlite::Result<Vec<(ChunkId, String)>> {
+) -> rusqlite::Result<Vec<ChunkId>> {
     let mut insert = tx.prepare_cached(
         "INSERT INTO chunks (message_id, byte_start, byte_end)
          VALUES (?1, ?2, ?3)
@@ -705,10 +705,9 @@ fn insert_chunks(
     row.chunk_bytes
         .iter()
         .map(|bytes| {
-            let id = insert.query_row(rusqlite::params![message, bytes.start, bytes.end], |r| {
+            insert.query_row(rusqlite::params![message, bytes.start, bytes.end], |r| {
                 r.get(0)
-            })?;
-            Ok((id, row.content[bytes.clone()].to_string()))
+            })
         })
         .collect()
 }

@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use assistd_config::EmbeddingConfig;
-use assistd_embed::{EmbedJob, EmbedderHandle};
+use assistd_embed::EmbedderHandle;
 use assistd_memory::{
     MemoryStore, NoMemoryStore, NoSemanticStore, NoTaskStore, NoTranscriptStore, SemanticStore,
     TaskStore, TranscriptStore,
@@ -23,7 +23,8 @@ pub struct MemoryStack {
     pub memory_ops: Arc<MemoryOps>,
     pub embedder: Arc<EmbedderHandle>,
     pub semantic: Arc<dyn SemanticStore>,
-    pub embed_tx: mpsc::Sender<EmbedJob>,
+    /// Wakes the embedding worker after a write leaves rows to embed.
+    pub embed_wake: Arc<Notify>,
     pub embedding_cfg: EmbeddingConfig,
 }
 
@@ -34,8 +35,6 @@ impl MemoryStack {
         let memory: Arc<dyn MemoryStore> = Arc::new(NoMemoryStore);
         let transcripts: Arc<dyn TranscriptStore> = Arc::new(NoTranscriptStore);
         let memory_ops = Arc::new(MemoryOps::new(memory.clone(), transcripts.clone()));
-        let (embed_tx, embed_rx) = mpsc::channel::<EmbedJob>(1);
-        drop(embed_rx);
         Self {
             memory,
             transcripts,
@@ -45,7 +44,7 @@ impl MemoryStack {
                 "embedding not configured".into(),
             ))),
             semantic: Arc::new(NoSemanticStore),
-            embed_tx,
+            embed_wake: Arc::default(),
             embedding_cfg,
         }
     }
@@ -82,9 +81,9 @@ impl MemoryStack {
         self
     }
 
-    /// Replace the embed-job queue sender.
-    pub fn with_embed_tx(mut self, tx: mpsc::Sender<EmbedJob>) -> Self {
-        self.embed_tx = tx;
+    /// Replace the embedding worker's wake signal.
+    pub fn with_embed_wake(mut self, embed_wake: Arc<Notify>) -> Self {
+        self.embed_wake = embed_wake;
         self
     }
 }

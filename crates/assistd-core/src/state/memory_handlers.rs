@@ -6,10 +6,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use assistd_embed::{BATCH_SIZE, EmbedJob, Embedder, embed_jobs};
+use assistd_embed::{BATCH_SIZE, Embedder, embed_rows};
 use assistd_ipc::{Event, ReindexKind};
 use assistd_memory::{
     ChunkLocator, ChunkScope, EmbeddingTarget, MemoryError, MemoryId, SemanticStore, SessionScope,
+    UnindexedRows,
 };
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
@@ -229,8 +230,8 @@ impl AppState {
     }
 
     /// Embed every memory and chunk lacking an embedding under the current
-    /// model, streaming `ReindexProgress`. Per-item failures are logged and
-    /// counted as done.
+    /// model, rows marked unembeddable included, streaming `ReindexProgress`.
+    /// Per-item failures are logged and counted as done.
     pub(super) async fn handle_memory_reindex(
         self: Arc<Self>,
         id: String,
@@ -243,7 +244,7 @@ impl AppState {
                 return Err(e.into());
             }
         };
-        let unindexed = match self.memory.semantic.count_missing().await {
+        let unindexed = match self.unindexed_rows_with_marks_cleared().await {
             Ok(unindexed) => unindexed,
             Err(e) => {
                 send_error(&tx, id, format!("reindex: count missing rows: {e}")).await;
@@ -299,6 +300,11 @@ impl AppState {
 
         let _ = tx.send(Event::Done { id }).await;
         Ok(())
+    }
+
+    async fn unindexed_rows_with_marks_cleared(&self) -> Result<UnindexedRows, MemoryError> {
+        self.memory.semantic.clear_unembeddable().await?;
+        self.memory.semantic.count_missing().await
     }
 }
 
@@ -358,21 +364,28 @@ where
     LFut: Future<Output = Result<Vec<(Id, String)>, MemoryError>>,
 {
     let mut after = None;
-    let mut jobs = Vec::with_capacity(BATCH_SIZE);
     while progress.remaining() > 0 {
         let batch = list(after, progress.remaining().min(BATCH_SIZE)).await?;
         let Some(&(last_id, _)) = batch.last() else {
             break;
         };
         after = Some(last_id);
-        jobs.extend(batch.into_iter().map(|(id, text)| EmbedJob {
-            target: to_target(id),
-            text,
-        }));
-        let job_count = jobs.len();
-        let embeddings = embed_jobs(embedder, jobs.drain(..)).await;
+        let row_count = batch.len();
+        let rows = batch
+            .into_iter()
+            .map(|(id, text)| (to_target(id), text))
+            .collect();
+        let embedded = embed_rows(embedder, rows).await;
+        if let Some(e) = embedded.deferred {
+            warn!(
+                target: "assistd::memory",
+                kind = progress.kind.as_str(),
+                error = %e,
+                "reindex: embedding failed; rows stay unindexed"
+            );
+        }
         if let Err(e) = semantic
-            .store_embeddings(embedder.model(), embeddings)
+            .store_embeddings(embedder.model(), embedded.embeddings)
             .await
         {
             warn!(
@@ -382,7 +395,7 @@ where
                 "reindex: store embeddings failed"
             );
         }
-        progress.advance(job_count).await;
+        progress.advance(row_count).await;
     }
     Ok(())
 }

@@ -369,6 +369,37 @@ CREATE INDEX idx_task_runs_session ON task_runs(session_uuid);
 CREATE INDEX idx_task_runs_queue_pos ON task_runs(queue_pos);
 ";
 
+/// V15: a `NULL` vector marks a row its model could not embed, so it is not retried.
+const V15_SQL: &str = r"
+DROP TRIGGER memory_value_changed;
+
+CREATE TABLE chunk_vectors (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    vector   BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+INSERT INTO chunk_vectors (chunk_id, model, vector)
+    SELECT chunk_id, model, vector FROM chunk_embeddings;
+DROP TABLE chunk_embeddings;
+ALTER TABLE chunk_vectors RENAME TO chunk_embeddings;
+
+CREATE TABLE memory_vectors (
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    model     TEXT NOT NULL,
+    vector    BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+INSERT INTO memory_vectors (memory_id, model, vector)
+    SELECT memory_id, model, vector FROM memory_embeddings;
+DROP TABLE memory_embeddings;
+ALTER TABLE memory_vectors RENAME TO memory_embeddings;
+
+CREATE TRIGGER memory_value_changed AFTER UPDATE OF value ON memories
+WHEN old.value IS NOT new.value
+BEGIN
+    DELETE FROM memory_embeddings WHERE memory_id = new.id;
+END;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -386,6 +417,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V12_SQL),
         M::up(V13_SQL),
         M::up(V14_SQL),
+        M::up(V15_SQL),
     ])
 }
 
@@ -412,6 +444,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 }
