@@ -17,11 +17,14 @@ use tracing::{info, warn};
 use super::allowlist::SearchPath;
 use super::on_blocking_pool;
 use super::path_class::{GuardRoots, PathGuards};
+use scope::CommandScope;
 
 mod confined;
+mod scope;
 mod seccomp;
 
 pub(crate) use confined::ConfinedSpawner;
+pub use scope::ScopeError;
 
 /// The `PATH` sandboxed commands run with, and the fallback when the
 /// daemon has no usable one.
@@ -31,6 +34,10 @@ const SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 /// threads included, in the sandbox's own user namespace; bytes of a
 /// process's data segment; bytes of any one file it writes.
 const RESOURCE_LIMITS: [&str; 3] = ["--nproc=512", "--data=4294967296", "--fsize=4294967296"];
+
+/// The `choom` flags that make every sandboxed process the kernel's first
+/// pick when the host runs out of memory.
+const OOM_SCORE_ADJUSTMENT: [&str; 3] = ["-n", "1000", "--"];
 
 /// Variables sandboxed commands inherit, besides `LC_*`; the rest, such as
 /// agent sockets and tokens, are cleared.
@@ -101,10 +108,15 @@ pub enum ToolsDisabled {
     #[error("tools are disabled: cannot run bubblewrap (`bwrap`): {0}; install it to enable them")]
     BwrapMissing(ProgramError),
     #[error(
-        "tools are disabled: cannot run `prlimit` from the sandbox's PATH to cap sandboxed \
-         commands: {0}; install util-linux to enable them"
+        "tools are disabled: cannot run `{program}` from the sandbox's PATH to cap sandboxed \
+         commands: {reason}; install util-linux to enable them"
     )]
-    PrlimitMissing(ProgramError),
+    UtilLinuxMissing {
+        program: &'static str,
+        reason: ProgramError,
+    },
+    #[error("tools are disabled: sandboxed commands cannot run in a capped systemd scope: {0}")]
+    ScopeUnavailable(ScopeError),
     #[error(
         "tools are disabled: tools.bash.bwrap_extra_args shares the network, and the kernel \
          cannot keep sandboxed commands off abstract sockets such as the X server's (needs \
@@ -117,12 +129,18 @@ pub enum ToolsDisabled {
 #[derive(Debug, Clone)]
 pub enum ResolvedSandboxMode {
     None,
-    /// `bwrap` was found at `path`, and `prlimit` at `prlimit` on the
-    /// sandbox's `PATH`.
-    Bwrap {
-        path: PathBuf,
-        prlimit: PathBuf,
-    },
+    Bwrap(SandboxPrograms),
+}
+
+/// The programs a bwrap sandbox starts each command through.
+#[derive(Debug, Clone)]
+pub struct SandboxPrograms {
+    pub bwrap: PathBuf,
+    /// Found on the sandbox's `PATH`, since it runs inside the sandbox.
+    prlimit: PathBuf,
+    /// Found on the sandbox's `PATH`, since it runs inside the sandbox.
+    choom: PathBuf,
+    scope: CommandScope,
 }
 
 /// Resolved sandbox configuration shared by every subprocess-spawning
@@ -361,15 +379,10 @@ impl SandboxInfo {
     }
 
     fn mounts_of(&self, cmd: &ProcCommand) -> Option<Mounts> {
-        match self.mode {
+        match &self.mode {
             ResolvedSandboxMode::None => None,
-            ResolvedSandboxMode::Bwrap { .. } => {
-                let flags: Vec<&OsStr> = cmd
-                    .as_std()
-                    .get_args()
-                    .take_while(|arg| *arg != "--")
-                    .collect();
-                Some(Mounts::of(&flags))
+            ResolvedSandboxMode::Bwrap(programs) => {
+                Some(Mounts::of(&bwrap_flags(cmd, &programs.bwrap)))
             }
         }
     }
@@ -397,12 +410,12 @@ impl SandboxInfo {
     {
         match &self.mode {
             ResolvedSandboxMode::None => Ok(self.unwrapped_command(program, args)),
-            ResolvedSandboxMode::Bwrap { path, prlimit } => match &self.profile {
+            ResolvedSandboxMode::Bwrap(programs) => match &self.profile {
                 Profile::Host => {
-                    self.bwrap_command(path, prlimit, std::env::var("HOME").ok(), program, args)
+                    self.bwrap_command(programs, std::env::var("HOME").ok(), program, args)
                 }
                 Profile::Quarantine(quarantine) => {
-                    self.quarantine_command(path, prlimit, quarantine, program, args)
+                    self.quarantine_command(programs, quarantine, program, args)
                 }
             },
         }
@@ -423,12 +436,12 @@ impl SandboxInfo {
 
     /// Flag order is load-bearing: profile, ancestor self-binds, shared directories, read-only
     /// mounts over `home`'s command directories and protections, the seccomp filter, then
-    /// `extra_args` so they win. Inside, `prlimit` applies
-    /// [`RESOURCE_LIMITS`] before running `program`. Fails when the filter cannot be written.
+    /// `extra_args` so they win. The whole sandbox runs in a capped systemd scope; inside, `prlimit`
+    /// applies [`RESOURCE_LIMITS`] before running `program`. Fails when the filter cannot be
+    /// written.
     fn bwrap_command<I, S>(
         &self,
-        bwrap: &Path,
-        prlimit: &Path,
+        programs: &SandboxPrograms,
         home: Option<String>,
         program: &str,
         args: I,
@@ -442,8 +455,7 @@ impl SandboxInfo {
             .as_ref()
             .map(|home| home.command_dirs(&self.host_path, &self.protected.dirs))
             .unwrap_or_default();
-        let mut cmd = ProcCommand::new(bwrap);
-        cmd.env_clear().envs(kept_env(std::env::vars_os()));
+        let mut cmd = scoped_bwrap(programs);
         cmd.args(
             default_bwrap_flags_for(home.as_ref())
                 .iter()
@@ -457,12 +469,12 @@ impl SandboxInfo {
         let filter = load_seccomp_filter(&mut cmd)?;
         cmd.preserved_fds(vec![filter]);
         cmd.args(self.extra_args.iter().map(OsStr::new));
-        let mounts = Mounts::of(&cmd.as_std().get_args().collect::<Vec<_>>());
+        let mounts = Mounts::of(&bwrap_flags(&cmd, &programs.bwrap));
         let home_dir = home.as_ref().map(|home| Path::new(&home.dir));
         if let Some(dir) = host_working_dir(std::env::current_dir().ok(), &mounts, home_dir) {
             cmd.arg("--chdir").arg(dir);
         }
-        run_limited(&mut cmd, prlimit, program, args);
+        run_limited(&mut cmd, programs, program, args);
         Ok(cmd)
     }
 
@@ -472,8 +484,7 @@ impl SandboxInfo {
     /// Unix socket; no `extra_args`, so the network stays unshared.
     fn quarantine_command<I, S>(
         &self,
-        bwrap: &Path,
-        prlimit: &Path,
+        programs: &SandboxPrograms,
         quarantine: &QuarantineProfile,
         program: &str,
         args: I,
@@ -482,16 +493,34 @@ impl SandboxInfo {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut cmd = ProcCommand::new(bwrap);
-        cmd.env_clear().envs(kept_env(std::env::vars_os()));
+        let mut cmd = scoped_bwrap(programs);
         cmd.args(quarantine_flags(&quarantine.home));
         cmd.args(shared_flags(&self.shared));
         let mut fds = bind_inputs(&mut cmd, &quarantine.inputs)?;
         fds.push(load_seccomp_filter(&mut cmd)?);
         cmd.preserved_fds(fds);
-        run_limited(&mut cmd, prlimit, program, args);
+        run_limited(&mut cmd, programs, program, args);
         Ok(cmd)
     }
+}
+
+/// `bwrap` in a new capped scope, keeping only [`kept_env`] of the daemon's
+/// environment.
+fn scoped_bwrap(programs: &SandboxPrograms) -> ProcCommand {
+    let mut cmd = ProcCommand::from(programs.scope.command(&programs.bwrap));
+    cmd.envs(kept_env(std::env::vars_os()));
+    cmd
+}
+
+/// The bwrap flags of `cmd`, built by [`scoped_bwrap`]: its arguments after
+/// `bwrap` itself, up to `--`.
+fn bwrap_flags<'cmd>(cmd: &'cmd ProcCommand, bwrap: &Path) -> Vec<&'cmd OsStr> {
+    cmd.as_std()
+        .get_args()
+        .skip_while(|arg| *arg != bwrap)
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .collect()
 }
 
 /// Have bwrap load the seccomp filter that keeps the command off every Unix
@@ -522,15 +551,20 @@ fn bind_inputs(cmd: &mut ProcCommand, inputs: &[InputBind]) -> io::Result<Vec<Ow
     Ok(fds)
 }
 
-/// End `cmd`'s bwrap flags and run `program` with `args` under `prlimit`'s
-/// [`RESOURCE_LIMITS`].
-fn run_limited<I, S>(cmd: &mut ProcCommand, prlimit: &Path, program: &str, args: I)
+/// End `cmd`'s bwrap flags, unsetting what the scope added to the
+/// environment, and run `program` with `args` under `prlimit`'s
+/// [`RESOURCE_LIMITS`] and `choom`'s [`OOM_SCORE_ADJUSTMENT`].
+fn run_limited<I, S>(cmd: &mut ProcCommand, programs: &SandboxPrograms, program: &str, args: I)
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    for name in scope::SCOPE_ENV {
+        cmd.arg("--unsetenv").arg(name);
+    }
     cmd.arg("--");
-    cmd.arg(prlimit).args(RESOURCE_LIMITS).arg("--");
+    cmd.arg(&programs.prlimit).args(RESOURCE_LIMITS).arg("--");
+    cmd.arg(&programs.choom).args(OOM_SCORE_ADJUSTMENT);
     cmd.arg(program).args(args);
 }
 
@@ -543,24 +577,41 @@ pub enum SandboxError {
     )]
     BwrapNotFound(ProgramError),
     #[error(
-        "tools.bash.sandbox = \"bwrap\" but `prlimit` cannot be run from the sandbox's PATH: \
-         {0}. Install util-linux, or set sandbox to \"auto\" to start with tools disabled."
+        "tools.bash.sandbox = \"bwrap\" but `{program}` cannot be run from the sandbox's \
+         PATH: {reason}. Install util-linux, or set sandbox to \"auto\" to start with tools \
+         disabled."
     )]
-    PrlimitNotFound(ProgramError),
+    UtilLinuxNotFound {
+        program: &'static str,
+        reason: ProgramError,
+    },
+    #[error(
+        "tools.bash.sandbox = \"bwrap\" but sandboxed commands cannot run in a capped systemd \
+         scope: {0}. Run assistd in a systemd user session, or set sandbox to \"auto\" to start \
+         with tools disabled."
+    )]
+    ScopeUnavailable(ScopeError),
 }
 
 /// A program the bwrap sandbox needs and cannot run.
 #[derive(Debug)]
 enum MissingProgram {
     Bwrap(ProgramError),
-    Prlimit(ProgramError),
+    UtilLinux {
+        program: &'static str,
+        reason: ProgramError,
+    },
+    Scope(ScopeError),
 }
 
 impl From<MissingProgram> for SandboxError {
     fn from(missing: MissingProgram) -> Self {
         match missing {
             MissingProgram::Bwrap(reason) => Self::BwrapNotFound(reason),
-            MissingProgram::Prlimit(reason) => Self::PrlimitNotFound(reason),
+            MissingProgram::UtilLinux { program, reason } => {
+                Self::UtilLinuxNotFound { program, reason }
+            }
+            MissingProgram::Scope(error) => Self::ScopeUnavailable(error),
         }
     }
 }
@@ -569,7 +620,10 @@ impl From<MissingProgram> for ToolsDisabled {
     fn from(missing: MissingProgram) -> Self {
         match missing {
             MissingProgram::Bwrap(reason) => Self::BwrapMissing(reason),
-            MissingProgram::Prlimit(reason) => Self::PrlimitMissing(reason),
+            MissingProgram::UtilLinux { program, reason } => {
+                Self::UtilLinuxMissing { program, reason }
+            }
+            MissingProgram::Scope(error) => Self::ScopeUnavailable(error),
         }
     }
 }
@@ -1034,15 +1088,12 @@ fn probe_sandbox_with_path(
         (SandboxRequest::Bwrap, Err(missing)) => return Err(missing.into()),
         (SandboxRequest::None, _) => ToolsDisabled::ByConfig,
         (SandboxRequest::Auto, Err(missing)) => missing.into(),
-        (SandboxRequest::Auto | SandboxRequest::Bwrap, Ok((bwrap, prlimit))) => {
-            match confined_spawner(&bwrap, &extra_args) {
+        (SandboxRequest::Auto | SandboxRequest::Bwrap, Ok(programs)) => {
+            match confined_spawner(&programs.bwrap, &extra_args) {
                 Ok(confined) => {
-                    announce_bwrap(&bwrap);
+                    announce_bwrap(&programs.bwrap);
                     return Ok(ToolSandbox::Bwrap(Arc::new(SandboxInfo {
-                        mode: ResolvedSandboxMode::Bwrap {
-                            path: bwrap,
-                            prlimit,
-                        },
+                        mode: ResolvedSandboxMode::Bwrap(programs),
                         extra_args,
                         protected,
                         shared,
@@ -1060,13 +1111,25 @@ fn probe_sandbox_with_path(
     Ok(ToolSandbox::Disabled(disabled))
 }
 
-/// `bwrap` on `path_env`, and `prlimit` on [`SANDBOX_PATH`], where the
-/// sandbox runs it.
-fn find_sandbox_programs(path_env: &OsStr) -> Result<(PathBuf, PathBuf), MissingProgram> {
+/// `bwrap` and `systemd-run` on `path_env`, with a scope started to check
+/// the manager accepts one, and `prlimit` and `choom` on [`SANDBOX_PATH`],
+/// where the sandbox runs them.
+fn find_sandbox_programs(path_env: &OsStr) -> Result<SandboxPrograms, MissingProgram> {
     let bwrap = find_program(Path::new("bwrap"), path_env).map_err(MissingProgram::Bwrap)?;
-    let prlimit = find_program(Path::new("prlimit"), OsStr::new(SANDBOX_PATH))
-        .map_err(MissingProgram::Prlimit)?;
-    Ok((bwrap, prlimit))
+    let prlimit = find_util_linux("prlimit")?;
+    let choom = find_util_linux("choom")?;
+    let scope = CommandScope::probe(path_env).map_err(MissingProgram::Scope)?;
+    Ok(SandboxPrograms {
+        bwrap,
+        prlimit,
+        choom,
+        scope,
+    })
+}
+
+fn find_util_linux(program: &'static str) -> Result<PathBuf, MissingProgram> {
+    find_program(Path::new(program), OsStr::new(SANDBOX_PATH))
+        .map_err(|reason| MissingProgram::UtilLinux { program, reason })
 }
 
 /// The spawner that keeps commands off abstract sockets, needed only when
@@ -1158,12 +1221,21 @@ fn is_setuid(_path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    fn programs() -> SandboxPrograms {
+        SandboxPrograms {
+            bwrap: PathBuf::from("/usr/bin/bwrap"),
+            prlimit: PathBuf::from("/usr/bin/prlimit"),
+            choom: PathBuf::from("/usr/bin/choom"),
+            scope: CommandScope {
+                systemd_run: PathBuf::from("/usr/bin/systemd-run"),
+                runtime_dir: OsString::from("/run/user/1000"),
+            },
+        }
+    }
+
     fn bwrap_info(extra_args: Vec<String>) -> SandboxInfo {
         SandboxInfo {
-            mode: ResolvedSandboxMode::Bwrap {
-                path: PathBuf::from("/usr/bin/bwrap"),
-                prlimit: PathBuf::from("/usr/bin/prlimit"),
-            },
+            mode: ResolvedSandboxMode::Bwrap(programs()),
             extra_args,
             protected: Protected::default(),
             shared: SharedDirs::default(),
@@ -1197,10 +1269,19 @@ mod tests {
         let limits = ["/usr/bin/prlimit"]
             .into_iter()
             .chain(RESOURCE_LIMITS)
-            .chain(["--"]);
+            .chain(["--", "/usr/bin/choom"])
+            .chain(OOM_SCORE_ADJUSTMENT);
         let cwd = std::env::current_dir().expect("cwd");
-        let tail: Vec<String> = ["--share-net", "--chdir", &cwd.to_string_lossy(), "--"]
+        let unset_scope_env = [
+            "--unsetenv",
+            "XDG_RUNTIME_DIR",
+            "--unsetenv",
+            "INVOCATION_ID",
+        ];
+        let tail: Vec<String> = ["--share-net", "--chdir", &cwd.to_string_lossy()]
             .into_iter()
+            .chain(unset_scope_env)
+            .chain(["--"])
             .chain(limits)
             .chain(["make", "-j4"])
             .map(String::from)
@@ -1211,23 +1292,24 @@ mod tests {
         }
         assert!(profile.iter().any(|flag| flag == "--unshare-net"));
         let cmd = info
-            .bwrap_command(
-                Path::new("/usr/bin/bwrap"),
-                Path::new("/usr/bin/prlimit"),
-                home,
-                "make",
-                ["-j4"],
-            )
+            .bwrap_command(&programs(), home, "make", ["-j4"])
             .expect("bwrap command");
-        assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
+        assert_eq!(cmd.as_std().get_program(), "/usr/bin/systemd-run");
         let argv = argv_of(&cmd);
+        let scope: Vec<String> = ["--user", "--scope", "--quiet", "--collect"]
+            .into_iter()
+            .chain(["--expand-environment=no", "--property=MemoryMax=4G"])
+            .chain(["--property=MemorySwapMax=0", "--property=TasksMax=512"])
+            .chain(["/usr/bin/bwrap"])
+            .map(String::from)
+            .collect();
         let filter_fd = argv
             .iter()
             .position(|flag| flag == "--seccomp")
             .and_then(|at| argv.get(at + 1))
             .expect("the seccomp filter is loaded with the network shared");
         let seccomp = vec!["--seccomp".to_string(), filter_fd.clone()];
-        assert_eq!(argv, [profile, seccomp, tail].concat());
+        assert_eq!(argv, [scope, profile, seccomp, tail].concat());
     }
 
     fn mounts_of(flags: &[&str]) -> Mounts {
@@ -1355,10 +1437,13 @@ mod tests {
         let cmd = info
             .build_command("true", Vec::<String>::new())
             .expect("command");
-        let expected: Vec<_> = kept_env(std::env::vars_os())
+        let runtime_dir = (OsString::from("XDG_RUNTIME_DIR"), "/run/user/1000".into());
+        let mut expected: Vec<_> = kept_env(std::env::vars_os())
             .into_iter()
+            .chain([runtime_dir])
             .map(|(name, value)| (name, Some(value)))
             .collect();
+        expected.sort();
         let envs: Vec<_> = cmd
             .as_std()
             .get_envs()
@@ -1520,8 +1605,7 @@ mod tests {
         let argv = argv_of(
             &info
                 .bwrap_command(
-                    Path::new("/usr/bin/bwrap"),
-                    Path::new("/usr/bin/prlimit"),
+                    &programs(),
                     Some(home.to_string_lossy().into_owned()),
                     "true",
                     [""; 0],
@@ -1687,13 +1771,7 @@ mod tests {
         };
         let argv = argv_of(
             &info
-                .bwrap_command(
-                    Path::new("/usr/bin/bwrap"),
-                    Path::new("/usr/bin/prlimit"),
-                    Some(path_of("")),
-                    "true",
-                    [""; 0],
-                )
+                .bwrap_command(&programs(), Some(path_of("")), "true", [""; 0])
                 .expect("bwrap command"),
         );
         let position_of = |flag: &str, dir: &str| {

@@ -54,7 +54,8 @@ window-manager bindings), and integrates with the running compositor for context
   `libasound2-dev`) to build.
 - `llama-server` from `llama.cpp` on your `$PATH`. The daemon spawns it
   as a child process.
-- `bubblewrap`, and `prlimit` from `util-linux`. Without them the model
+- `bubblewrap`, `prlimit` and `choom` from `util-linux`, and a systemd
+  user session for `systemd-run --user --scope`. Without them the model
   gets no tools.
 
 Optional: `espeak-ng` for TTS with Piper voices, `grim` (Wayland) or `maim` (X11) for

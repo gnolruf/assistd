@@ -422,6 +422,25 @@ async fn bwrap_unshares_network_namespace() {
     assert_ne!(Path::new(&inside), host);
 }
 
+#[tokio::test]
+async fn bwrap_commands_run_in_a_memory_capped_scope_as_first_oom_victims() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
+    let script = "cat /proc/self/oom_score_adj \
+                  /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max \
+                  /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/pids.max";
+    let out = cmd.run(input(script)).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.exit_code, 0, "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["1000", "4294967296", "512"]
+    );
+}
+
 /// Returns early without `python3`; skips the networked sandbox without
 /// Landlock scoping.
 #[tokio::test]
