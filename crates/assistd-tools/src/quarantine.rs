@@ -17,8 +17,7 @@ use assistd_search::SearxngClient;
 
 use crate::command::CommandRegistry;
 use crate::commands::{
-    BashCommand, BashPolicyCfg, CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand,
-    SortCommand, TailCommand, UniqCommand, WcCommand, WebCommand, WriteCommand, WritePolicyCfg,
+    BashCommand, BashPolicyCfg, WebCommand, WriteCommand, WritePolicyCfg, register_readers,
 };
 use crate::policy::{
     ApprovalGate, ConfinedRoot, ConfirmationGate, EgressPolicy, InputBind, SandboxInfo,
@@ -141,8 +140,9 @@ impl Quarantine {
         self.dir.path.join(OUTPUT_DIR)
     }
 
-    /// The file commands, confined to this directory, plus `echo`, `write` limited to the home,
-    /// and `bash` in the quarantine sandbox under `bash`'s rules, asking `gate` as usual. With
+    /// `cat` and `ls` confined to this directory, `echo`, `write` limited to the home, and
+    /// `bash` and the text programs in the quarantine sandbox under `bash`'s rules, asking
+    /// `gate` as usual. With
     /// egress, also `web`, held to HTTPS on port 443 of approved public hosts.
     pub fn commands(
         &self,
@@ -150,30 +150,18 @@ impl Quarantine {
         gate: Arc<dyn ConfirmationGate>,
     ) -> CommandRegistry {
         let home = self.home_dir();
-        let bash_cfg = BashPolicyCfg {
+        let bash_cfg = Arc::new(BashPolicyCfg {
             scratch: Some(home.clone()),
             ..bash.clone()
-        };
+        });
         let mut commands = CommandRegistry::confined(Arc::clone(&self.root));
-        commands.register(CatCommand);
-        commands.register(LsCommand);
-        commands.register(GrepCommand);
-        commands.register(WcCommand);
-        commands.register(HeadCommand);
-        commands.register(TailCommand);
-        commands.register(SortCommand);
-        commands.register(UniqCommand);
-        commands.register(EchoCommand);
+        register_readers(&mut commands, &bash_cfg, &self.sandbox, &gate);
         commands.register(WriteCommand::new(
             Arc::new(WritePolicyCfg::within(home)),
             Arc::clone(&gate),
             Arc::clone(&self.sandbox),
         ));
-        commands.register(BashCommand::new(
-            Arc::new(bash_cfg),
-            Arc::clone(&self.sandbox),
-            gate,
-        ));
+        commands.register(BashCommand::new(bash_cfg, Arc::clone(&self.sandbox), gate));
         if let Some(egress) = &self.egress {
             commands.register(WebCommand::under(
                 egress.policy.clone(),

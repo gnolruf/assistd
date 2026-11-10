@@ -235,8 +235,8 @@ a fresh `relay-*` directory whose `input/` shows the inputs it was handed,
 read-only and in place, a writable `home/` that is `$HOME` and the working
 directory, and `output/` for spilled output. Each input is opened once with
 `O_PATH`, and an empty file or directory is made under its name in `input/` as
-its mount point. The in-process readers resolve paths under `input/<name>`
-beneath that descriptor, and each `bash` gets a duplicate of it, inherited by
+its mount point. `cat` and `ls` resolve paths under `input/<name>`
+beneath that descriptor, and each sandboxed command gets a duplicate of it, inherited by
 bwrap alone, for a `--ro-bind-fd` over the mount point, so both read the file
 opened at handover even if the host path is later renamed or replaced. bwrap
 closes the descriptor before the command starts. On the host,
@@ -260,9 +260,8 @@ around the rule, and the filter kills any system call from a foreign ABI
 (i386, x32), whose arguments it cannot read. Abstract sockets need no rule;
 they belong to the unshared network namespace.
 
-The in-process file commands (`cat`, `grep`, `head`, `tail`, `ls`, `sort`,
-`uniq`, `wc`) and glob and `~` expansion go through the registry's
-`FileScope`. In a quarantine that scope cleans `..` lexically, then opens every
+The in-process file commands (`cat`, `ls`) and glob and `~` expansion go
+through the registry's `FileScope`. In a quarantine that scope cleans `..` lexically, then opens every
 path with `openat2(RESOLVE_BENEATH)` on the descriptor of the input it falls
 under, or else of the relay directory, so the kernel refuses `..`, absolute
 symlinks and anything outside it. They never connect to sockets. Relative
@@ -437,7 +436,7 @@ it lifts, rides on the `TaskQueue` snapshot.
 A planning turn shows how the agent means to do a piece of work before
 anything runs. The `Planner` drives the
 agent loop over a given conversation with the planning registry, which
-`build_tools()` assembles beside the main one: `run` over the in-process
+`build_tools()` assembles beside the main one: `run` over the
 readers, `web` and a `bash` whose policy holds no "always allow" approvals,
 plus `reminisce` when memory is on. No `write`, `wm`, `see`, `screenshot`,
 `relay`, `remember` or MCP tools. The turn runs under
@@ -527,10 +526,9 @@ chat turn starting meanwhile cuts it off.
 
 Two-tier system. The LLM sees a single `run` tool whose argument is a
 shell-style command line; that line is parsed into a pipeline AST
-and dispatched through an internal `CommandRegistry` of in-process
-Rust handlers. So `cat /etc/hosts | grep -v '^#'` is one tool call
-that fans out into two in-process commands chained by a byte-level
-pipe.
+and dispatched through an internal `CommandRegistry` of Rust handlers.
+So `cat /etc/hosts | grep -v '^#'` is one tool call that fans out into
+two commands chained by a byte-level pipe.
 
 Three additional `Tool`s sit alongside `run`: `relay` (hand a task to a
 sub-agent), `remember` (save or search facts) and `reminisce`. They don't fit the shell mold, so they're regular
@@ -538,7 +536,12 @@ LLM-facing tools with their own JSON schemas.
 
 Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
 `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`,
-`write`.
+`write`. `cat`, `ls` and `echo` run in the daemon. `grep`, `head`,
+`tail`, `sort`, `uniq` and `wc` are the system's GNU programs: their
+arguments are quoted into a script that runs as a `bash` script does,
+through the classifier, the path guards and the sandbox, so they see the
+sandbox's files (a private `/tmp` and `/run`) and a writing option such
+as `sort -o` asks.
 
 Policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`)
 intercept the dangerous paths. Before a `bash` script runs, the

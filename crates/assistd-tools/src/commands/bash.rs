@@ -51,7 +51,7 @@ impl Command for BashCommand {
              \n\
              Spawn a real `bash -c <script>` subprocess; a leading `-c` is \
              accepted and ignored. The escape hatch for \
-             anything the in-process commands can't express: redirections, env \
+             anything the other commands can't express: redirections, env \
              expansion, backgrounding, pipes the chain parser doesn't support.\n\
              \n\
              Stdin is forwarded to the script's stdin. Stdout/stderr/exit-code \
@@ -79,34 +79,8 @@ impl Command for BashCommand {
             return CommandOutput::usage(self.help());
         }
         let script = script_words.join(" ");
-        let review = self.policy.review_script(script.clone()).await;
-        if let Err(denied) = self
-            .policy
-            .authorize("bash", "command", &script, review)
-            .await
-        {
-            return denied;
-        }
-
-        let cmd = match self
-            .policy
-            .sandbox
-            .command("bash", vec!["-c".to_string(), script.clone()])
-            .await
-        {
-            Ok(cmd) => cmd,
-            Err(error) => return spawn_failed(&error),
-        };
-        let private_dirs = display_list(&self.policy.sandbox.private_dirs_named(&cmd, &script));
-        let out = supervise(
-            "bash",
-            cmd,
-            self.policy.sandbox.confined_spawner(),
-            input.stdin.as_deref().unwrap_or_default(),
-            self.policy.cfg.timeout,
-        )
-        .await
-        .unwrap_or_else(|error| spawn_failed(&error));
+        let stdin = input.stdin.as_deref().unwrap_or_default();
+        let ScriptRun { out, private_dirs } = run_script(&self.policy, "bash", script, stdin).await;
         if private_dirs.is_empty() {
             return out;
         }
@@ -119,11 +93,55 @@ impl Command for BashCommand {
     }
 }
 
-fn spawn_failed(error: &io::Error) -> CommandOutput {
+/// What [`run_script`] produced, and the directories the script names that the sandbox gave
+/// it empty and private, comma-separated.
+pub(crate) struct ScriptRun {
+    pub(crate) out: CommandOutput,
+    pub(crate) private_dirs: String,
+}
+
+/// Run `script` as `bash -c` under `policy`, reporting as `tool`: reviewed and authorized,
+/// then sandboxed, fed `stdin`, timed and capped.
+pub(crate) async fn run_script(
+    policy: &SubprocessPolicy,
+    tool: &str,
+    script: String,
+    stdin: &[u8],
+) -> ScriptRun {
+    let failed = |out| ScriptRun {
+        out,
+        private_dirs: String::new(),
+    };
+    let review = policy.review_script(script.clone()).await;
+    if let Err(denied) = policy.authorize(tool, "command", &script, review).await {
+        return failed(denied);
+    }
+    let cmd = match policy
+        .sandbox
+        .command("bash", vec!["-c".to_string(), script.clone()])
+        .await
+    {
+        Ok(cmd) => cmd,
+        Err(error) => return failed(spawn_failed(tool, &error)),
+    };
+    let private_dirs = display_list(&policy.sandbox.private_dirs_named(&cmd, &script));
+    let out = supervise(
+        tool,
+        cmd,
+        policy.sandbox.confined_spawner(),
+        stdin,
+        policy.cfg.timeout,
+    )
+    .await
+    .unwrap_or_else(|error| spawn_failed(tool, &error));
+    ScriptRun { out, private_dirs }
+}
+
+fn spawn_failed(tool: &str, error: &io::Error) -> CommandOutput {
     CommandOutput::failed(
         SPAWN_FAILED_EXIT,
         error_line(
-            "bash",
+            tool,
             format_args!("spawn failed: {error}"),
             Hint::Check,
             "bash and (if configured) bwrap are on PATH",

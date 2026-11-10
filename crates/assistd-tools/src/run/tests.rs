@@ -7,9 +7,7 @@ use tempfile::{TempDir, tempdir};
 
 use super::*;
 use crate::command::{Command, CommandInput};
-use crate::commands::{
-    CatCommand, EchoCommand, GrepCommand, HeadCommand, LsCommand, TailCommand, WcCommand, test_see,
-};
+use crate::commands::{register_test_readers, test_see};
 use crate::fixtures::PNG_BYTES;
 
 /// Fake command: emits a configurable number of lines.
@@ -56,11 +54,7 @@ impl Command for ByteCount {
 
 fn registry() -> Arc<CommandRegistry> {
     let mut reg = CommandRegistry::new();
-    reg.register(CatCommand);
-    reg.register(EchoCommand);
-    reg.register(GrepCommand);
-    reg.register(LsCommand);
-    reg.register(WcCommand);
+    register_test_readers(&mut reg);
     reg.register(test_see());
     Arc::new(reg)
 }
@@ -145,7 +139,7 @@ fn run_composes_flags_globs_and_stream_filters() {
         &tool,
         &format!("cat {root}/hits.txt | sort | uniq -c | sort -nr | head -1"),
     );
-    assert_eq!(freq["stdout"], "2\tb\n", "{freq}");
+    assert_eq!(freq["stdout"], "      2 b\n", "{freq}");
 
     let numbered = invoke(&tool, &format!("cat -n {root}/b.log | tail -1"));
     assert_eq!(numbered["stdout"], "2\tERROR three\n");
@@ -194,9 +188,7 @@ fn run_pipe_integrity_full_bytes_reach_final_stage() {
 fn run_overflow_next_page_hint_runs_as_printed() {
     let mut reg = CommandRegistry::new();
     reg.register(Lines(5000));
-    reg.register(CatCommand);
-    reg.register(HeadCommand);
-    reg.register(TailCommand);
+    register_test_readers(&mut reg);
     let dir = fresh_dir();
     let tool = tool_with(dir.path(), Arc::new(reg));
 

@@ -4,9 +4,8 @@ use assistd_wm::NoWindowManager;
 
 use super::*;
 use crate::commands::{
-    BashCommand, CatCommand, GrepCommand, HeadCommand, LsCommand, SortCommand, TailCommand,
-    UniqCommand, WcCommand, WebCommand, WmCommand, permissive_write, test_screenshot, test_see,
-    test_wm,
+    BashCommand, CatCommand, LsCommand, WebCommand, WmCommand, permissive_write, test_screenshot,
+    test_see, test_wm,
 };
 use crate::policy::{
     AlwaysAllowGate, ApprovalGate, Approvals, BashPolicyCfg, DenyAllGate, SandboxInfo,
@@ -59,8 +58,8 @@ fn wm_without_compositor() -> WmCommand {
     test_wm(Arc::new(NoWindowManager))
 }
 
-/// One failing invocation per command that has a failure mode (`echo` has
-/// none), paired with the command name its error line must carry.
+/// One failing invocation per command that writes its own error lines (`echo` cannot fail,
+/// and the text programs print GNU's), paired with the command name its line must carry.
 async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
     let missing = || vec!["/nonexistent/assistd-convention-test".to_string()];
     vec![
@@ -79,10 +78,6 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
             run_cmd(test_screenshot(), vec!["--bogus-flag".into()]).await,
         ),
         (
-            "grep",
-            run_cmd(GrepCommand, vec!["-x".into(), "pat".into()]).await,
-        ),
-        (
             "write",
             run_cmd(
                 permissive_write(),
@@ -90,14 +85,6 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
             )
             .await,
         ),
-        ("wc", run_cmd(WcCommand, vec!["-q".into()]).await),
-        (
-            "head",
-            run_cmd(HeadCommand, vec!["-n".into(), "lots".into()]).await,
-        ),
-        ("tail", run_cmd(TailCommand, vec!["notes.md".into()]).await),
-        ("sort", run_cmd(SortCommand, vec!["-q".into()]).await),
-        ("uniq", run_cmd(UniqCommand, vec!["notes.md".into()]).await),
         (
             "web",
             run_cmd(
