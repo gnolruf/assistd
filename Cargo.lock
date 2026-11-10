@@ -466,6 +466,7 @@ dependencies = [
  "assistd-utils",
  "async-trait",
  "futures-util",
+ "serde_json",
  "swayipc-async",
  "thiserror 2.0.21",
  "tokio",
