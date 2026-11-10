@@ -246,7 +246,7 @@ dropped, so on cancel or panic too, even if a script left subdirectories
 unwritable. Its `bash` runs in a separate bwrap profile: read-only `/usr` and
 the merged-`/usr` links, `/etc/ssl`, `/etc/ca-certificates`, `/etc/resolv.conf`
 and the loader config, fresh `/tmp`, `/dev` and `/proc`, the relay's three
-directories bound at their own host paths, the same `prlimit` caps, and always
+directories bound at their own host paths, the same `prlimit`, scope and `choom` caps, and always
 `--unshare-net`, with its inputs bound over their mount points. bwrap binds are
 `nosuid,nodev`, so device nodes in an input cannot be opened.
 `bwrap_extra_args` does not apply. The host home, `/run` and the daemon socket
@@ -892,7 +892,14 @@ A walk through `assistd query "what files changed this week?"`:
    `/proc` and `/run`, unshared user/pid/ipc/uts/network namespaces,
    an environment cleared down to locale and terminal variables, and
    fixed `prlimit` caps of 512 tasks in the sandbox, 4 GiB of data
-   segment per process and 4 GiB per written file. It also gets the
+   segment per process and 4 GiB per written file. Each command also
+   runs in its own transient systemd user scope (`systemd-run --user
+   --scope`) capping all its processes together at 4 GiB of memory, no
+   swap and 512 tasks, so a runaway script is OOM-killed inside its scope
+   rather than the host OOM killer picking `llama-server` or the
+   compositor; `choom` raises every sandboxed process's `oom_score_adj` to
+   1000 for host-wide memory pressure. Without a user manager to start
+   scopes, the model gets no tools. It also gets the
    quarantine's seccomp filter, so no command can make an `AF_UNIX`
    socket: the read-only `$HOME` still holds pathname sockets, such as an
    ssh `ControlMaster` under `~/.ssh` or gpg-agent's under `~/.gnupg`,
