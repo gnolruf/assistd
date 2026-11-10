@@ -21,13 +21,13 @@ use assistd_voice::SentenceBuffer;
 use super::branches::delete_answer_files;
 use super::event_triggers::Occurrence;
 use super::lanes::LaneLease;
-use super::persistence::PersistTarget;
 use super::query::{TurnScope, TurnTranslator};
 use super::run_lane::{LaneHold, RUN_LANE, RunLane, YieldingBackend};
 use super::task_announce::TaskReply;
 use super::task_confirms::TaskRunParking;
 use super::task_queue::QueuedRun;
 use super::task_runner::RegisteredRun;
+use super::transcript_writer::PersistTarget;
 use super::{AppState, DispatchError, send_error};
 use crate::Agent;
 use crate::presence::{PresenceLlmHealthProbe, RequestGuard};
@@ -320,7 +320,7 @@ impl AppState {
         match opened.await {
             Ok(branch) => {
                 let prompt = PersistedMessage::user(turn.task.spec.prompt.as_str());
-                Some(self.open_turn_fire_and_forget(branch, prompt))
+                Some(self.open_task_run_turn(branch, prompt).await)
             }
             Err(e) => {
                 warn!(
@@ -417,11 +417,11 @@ impl AppState {
         let max_sentence_chars = self.config.voice.synthesis.max_sentence_chars.get() as usize;
         let mut unspoken = SentenceBuffer::new(max_sentence_chars);
         while let Some(event) = llm_rx.recv().await {
-            if let Some((wire, _)) = translator.translate(self, event, &mut unspoken) {
+            if let Some((wire, _)) = translator.translate(self, event, &mut unspoken).await {
                 let _ = tx.send(wire).await;
             }
         }
-        translator.persist_turn_stats(self);
+        translator.persist_turn_stats(self).await;
     }
 }
 

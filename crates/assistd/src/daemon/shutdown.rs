@@ -5,12 +5,11 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::{Component, PresenceManager, TaskRunner, spawn_supervised};
+use assistd_core::{AppState, Component, PresenceManager, TaskRunner, spawn_supervised};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
-use tokio_util::task::TaskTracker;
 use tracing::info;
 
 use super::embed_init::EmbeddingService;
@@ -68,7 +67,7 @@ impl ShutdownStages {
 }
 
 pub(super) struct DaemonShutdown {
-    pub(super) persistence_tracker: TaskTracker,
+    pub(super) state: Arc<AppState>,
     pub(super) task_runner: Arc<TaskRunner>,
     pub(super) presence: Arc<PresenceManager>,
     pub(super) memory: MemorySubsystem,
@@ -92,7 +91,7 @@ impl DaemonShutdown {
             .bound("intake tasks", join_intake_tasks(self.intake_tasks))
             .await;
         stop_task_runs(&self.task_runner, deadline).await;
-        drain_persistence(&self.persistence_tracker, deadline).await;
+        drain_persistence(&self.state, deadline).await;
 
         stages.voice.send_replace(true);
         deadline.bound("voice worker", self.voice.shutdown()).await;
@@ -210,18 +209,17 @@ async fn stop_task_runs(task_runner: &TaskRunner, deadline: TeardownDeadline) {
     }
 }
 
-/// Wait for fire-and-forget persistence tasks, abandoning them after
-/// [`PERSISTENCE_DRAIN_BUDGET`] or at the deadline.
-async fn drain_persistence(tracker: &TaskTracker, deadline: TeardownDeadline) {
-    tracker.close();
-    if timeout_at(deadline.capped(PERSISTENCE_DRAIN_BUDGET), tracker.wait())
-        .await
-        .is_err()
-    {
+/// Wait for queued transcript writes and background persistence tasks,
+/// abandoning them after [`PERSISTENCE_DRAIN_BUDGET`] or at the deadline.
+async fn drain_persistence(state: &AppState, deadline: TeardownDeadline) {
+    let drained = timeout_at(
+        deadline.capped(PERSISTENCE_DRAIN_BUDGET),
+        state.finish_persistence(),
+    );
+    if drained.await.is_err() {
         tracing::warn!(
             target: "assistd::memory",
-            in_flight = tracker.len(),
-            "persistence task drain timed out at shutdown; abandoning remaining tasks"
+            "persistence drain timed out at shutdown; abandoning the remaining writes"
         );
     }
 }

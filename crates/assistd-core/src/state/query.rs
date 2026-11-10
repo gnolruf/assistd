@@ -13,7 +13,8 @@ use tracing::{Instrument, debug, warn};
 use assistd_ipc::{Event, EventKind, ImageAttachment, PlanMode, RelayEvent, StatusKind, TaskRunId};
 use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
-    PersistedMessage, PersistedToolCall, Reasoning, SessionId, SummaryCut, ToolOutcome, TurnStats,
+    PersistedMessage, PersistedRelayStep, PersistedToolCall, Reasoning, SessionId, ToolOutcome,
+    TurnStats,
 };
 use assistd_tools::{
     Attachment, CONFIRM_ROUTER, ConfirmRouter, ToolOutput, inherit_confirm_router,
@@ -25,8 +26,8 @@ use assistd_voice::{
 };
 
 use super::context::{combine_context_blocks, voice_approvals_note};
-use super::persistence::PersistTarget;
 use super::relay_trace::RelayTraceBuilder;
+use super::transcript_writer::PersistTarget;
 use super::turn_admission::MainLaneTurn;
 use super::wire::decode_wire_attachments;
 use super::{AppState, DispatchError, RuntimeState, send_error};
@@ -197,7 +198,7 @@ impl TurnTranslator {
 
     /// The wire event and sentences to speak for `event`, or `None` when
     /// it has no wire form.
-    pub(super) fn translate(
+    pub(super) async fn translate(
         &mut self,
         state: &AppState,
         event: LlmEvent,
@@ -219,7 +220,7 @@ impl TurnTranslator {
                 (Event::ReasoningDelta { id, text }, Vec::new())
             }
             LlmEvent::ToolCallsRequested { calls } => {
-                self.persist_tool_calls(state, &calls);
+                self.persist_tool_calls(state, &calls).await;
                 return None;
             }
             LlmEvent::ToolCall {
@@ -240,7 +241,8 @@ impl TurnTranslator {
                 name,
                 result,
             } => {
-                self.persist_tool_result(state, call_id, &name, &result);
+                self.persist_tool_result(state, call_id, &name, &result)
+                    .await;
                 let result = result.to_json();
                 (Event::ToolResult { id, name, result }, Vec::new())
             }
@@ -282,7 +284,7 @@ impl TurnTranslator {
                 cut,
                 elapsed,
             } => {
-                self.persist_summary(state, summary, &cut, elapsed);
+                self.persist_summary(state, summary, cut, elapsed).await;
                 return None;
             }
             LlmEvent::Done => {
@@ -290,7 +292,7 @@ impl TurnTranslator {
                 if let TurnScope::TaskRun(_) = self.scope {
                     self.reply = Some(self.assistant_accum.clone());
                 }
-                self.persist_final_text(state);
+                self.persist_final_text(state).await;
                 self.done_emitted = true;
                 (Event::Done { id }, sentences)
             }
@@ -317,16 +319,17 @@ impl TurnTranslator {
         }
     }
 
-    fn persist_tool_calls(&mut self, state: &AppState, calls: &[ToolCall]) {
+    async fn persist_tool_calls(&mut self, state: &AppState, calls: &[ToolCall]) {
         let narration = std::mem::take(&mut self.assistant_accum);
         if !narration.is_empty() {
             self.publish_last_delta(&state.runtime, &narration);
         }
         let reasoning = self.take_reasoning();
-        self.persist_message(state, tool_calls_message(narration, calls, reasoning));
+        let msg = tool_calls_message(narration, calls, reasoning);
+        self.persist_message(state, msg, None).await;
     }
 
-    fn persist_tool_result(
+    async fn persist_tool_result(
         &mut self,
         state: &AppState,
         call_id: String,
@@ -340,12 +343,8 @@ impl TurnTranslator {
         };
         let msg =
             PersistedMessage::tool_result(result.output.clone(), call_id, name.to_owned(), outcome);
-        match (self.relay.take(), &self.persist) {
-            (Some(trace), Some(target)) => {
-                state.persist_relay_result_fire_and_forget(target.clone(), msg, trace.finish());
-            }
-            _ => self.persist_message(state, msg),
-        }
+        let relay_steps = self.relay.take().map(RelayTraceBuilder::finish);
+        self.persist_message(state, msg, relay_steps).await;
     }
 
     /// Record `event` into the running relay's trace, starting one at its plan.
@@ -365,37 +364,33 @@ impl TurnTranslator {
         let _ = sentence_buf.finish();
     }
 
-    fn persist_summary(
+    async fn persist_summary(
         &self,
         state: &AppState,
         summary: String,
-        cut: &CompactionCut,
+        cut: CompactionCut,
         elapsed: Duration,
     ) {
         if let Some(target) = &self.persist {
-            let cut = SummaryCut {
-                kept_turns: cut.kept_turns,
-                kept_steps: cut.kept_steps,
-            };
-            state.persist_summary_fire_and_forget(target.branch, summary, cut, elapsed);
+            state
+                .persist_summary(target.clone(), summary, cut, elapsed)
+                .await;
         }
     }
 
-    fn persist_final_text(&mut self, state: &AppState) {
+    async fn persist_final_text(&mut self, state: &AppState) {
         let reasoning = self.take_reasoning();
         if self.assistant_accum.is_empty() {
             return;
         }
         let final_text = std::mem::take(&mut self.assistant_accum);
         self.publish_last_delta(&state.runtime, &final_text);
-        self.persist_message(
-            state,
-            PersistedMessage::assistant_text(final_text, reasoning),
-        );
+        let msg = PersistedMessage::assistant_text(final_text, reasoning);
+        self.persist_message(state, msg, None).await;
     }
 
     /// Record how long the turn ran and the tokens it produced.
-    pub(super) fn persist_turn_stats(&self, state: &AppState) {
+    pub(super) async fn persist_turn_stats(&self, state: &AppState) {
         let Some(target) = &self.persist else {
             return;
         };
@@ -404,16 +399,23 @@ impl TurnTranslator {
             duration_ms: saturating_millis(elapsed),
             generated_tokens: self.tokens.tokens(),
         };
-        state.persist_turn_stats_fire_and_forget(target.clone(), stats);
+        state.persist_turn_stats(target.clone(), stats).await;
     }
 
     fn take_reasoning(&mut self) -> Option<Reasoning> {
         self.reasoning.take().map(ReasoningTrace::into_reasoning)
     }
 
-    fn persist_message(&self, state: &AppState, msg: PersistedMessage) {
+    async fn persist_message(
+        &self,
+        state: &AppState,
+        msg: PersistedMessage,
+        relay_steps: Option<Vec<PersistedRelayStep>>,
+    ) {
         if let Some(target) = &self.persist {
-            state.persist_message_fire_and_forget(target.clone(), msg);
+            state
+                .persist_message(target.clone(), msg, relay_steps)
+                .await;
         }
     }
 }
@@ -598,7 +600,9 @@ impl AppState {
     async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<PersistTarget>) {
         match self.saved_session().await {
             Ok((session, branch)) => {
-                let target = self.open_turn_fire_and_forget(branch, PersistedMessage::user(text));
+                let target = self
+                    .open_user_turn(branch, PersistedMessage::user(text))
+                    .await;
                 (session, Some(target))
             }
             Err(e) => {
@@ -760,8 +764,9 @@ impl AppState {
                     continue;
                 }
             };
-            let Some((wire_event, sentences)) =
-                translator.translate(self, llm_event, &mut speech.sentences)
+            let Some((wire_event, sentences)) = translator
+                .translate(self, llm_event, &mut speech.sentences)
+                .await
             else {
                 continue;
             };
@@ -771,7 +776,7 @@ impl AppState {
             }
             speech.speak(sentences).await;
         }
-        translator.persist_turn_stats(self);
+        translator.persist_turn_stats(self).await;
         translator.done_emitted
     }
 

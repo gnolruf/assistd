@@ -327,14 +327,15 @@ impl AppState {
                 }
             },
         };
-        if outcome.removed_messages > 0
-            && let Err(e) = self.subsystems.llm.truncate_to_last_real_user().await
-        {
-            warn!(
-                target: "assistd::state",
-                error = %e,
-                "truncate_to_last_real_user failed (non-fatal)"
-            );
+        if outcome.removed_messages > 0 {
+            self.runtime.user_ledger.forget_last_turn();
+            if let Err(e) = self.subsystems.llm.truncate_to_last_real_user().await {
+                warn!(
+                    target: "assistd::state",
+                    error = %e,
+                    "truncate_to_last_real_user failed (non-fatal)"
+                );
+            }
         }
         delete_answer_files(outcome.released_answer_files).await;
         let _ = tx
@@ -418,6 +419,7 @@ impl AppState {
             .as_ref()
             .and_then(|s| Some((compaction_marker(&rows, s)?, s.duration_ms)));
         let replay = branch_replay(&rows, summary);
+        self.runtime.user_ledger.invalidate();
         if let Err(e) = self.subsystems.llm.replace_history(replay).await {
             warn!(
                 target: "assistd::state",
@@ -517,6 +519,7 @@ impl AppState {
         let new_session = SessionId::new();
         self.runtime.session_ctx.replace(new_session, None).await;
         let empty = HistoryReplay::default();
+        self.runtime.user_ledger.invalidate();
         if let Err(e) = self.subsystems.llm.replace_history(empty).await {
             warn!(
                 target: "assistd::state",

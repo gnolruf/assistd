@@ -205,7 +205,6 @@ async fn start(
         runtime: build_runtime(session_ctx, &vision_revalidator),
     });
     state.start_task_queue().await;
-    let persistence_tracker = state.runtime.persistence_tracker_handle();
     let task_runner = Arc::clone(&state.runtime.task_runner);
     let background = spawn_background_starts(
         &state,
@@ -220,9 +219,9 @@ async fn start(
     );
 
     Ok((
-        state,
+        state.clone(),
         DaemonShutdown {
-            persistence_tracker,
+            state,
             task_runner,
             presence,
             memory,

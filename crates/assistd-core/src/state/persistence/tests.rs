@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,10 +8,11 @@ use parking_lot::Mutex;
 
 use assistd_config::Config;
 use assistd_ipc::PresenceTarget;
-use assistd_llm::EchoBackend;
+use assistd_llm::{CompactionCut, EchoBackend};
 use assistd_memory::{
-    AppendedMessage, BranchHistory, BranchId, BranchInfo, HistoryScope, MessageId, OpenedTurn,
-    PersistedRelayStep, ResumeCandidate, SessionId, TranscriptStore, UndoOutcome,
+    AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, HistoryScope, MemoryError,
+    MessageId, OpenedTurn, PersistedMessage, PersistedRelayStep, PersistedToolCall,
+    ResumeCandidate, Seq, SessionId, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 use assistd_tools::ToolRegistry;
 
@@ -20,24 +22,27 @@ use crate::state::memory_stack::MemoryStack;
 use crate::state::runtime::{RuntimeState, SessionContext};
 use crate::state::subsystems::Subsystems;
 
-/// Records the order writes arrive in, and makes each write finish
-/// faster than the one before it. Unchained, that inverts the order
-/// the daemon queued the messages in.
+/// Records what reaches it, makes each write finish faster than the one
+/// before it, and fails any message whose content is `lost`.
 #[derive(Debug)]
-struct SlowingStore {
+struct RecordingStore {
     arrivals: Mutex<Vec<String>>,
     remaining_delay_ms: Mutex<u64>,
+    incomplete_turns: Mutex<Vec<TurnId>>,
+    summaries: Mutex<Vec<BranchSummary>>,
 }
 
-impl SlowingStore {
+impl RecordingStore {
     fn new(first_delay_ms: u64) -> Self {
         Self {
             arrivals: Mutex::new(Vec::new()),
             remaining_delay_ms: Mutex::new(first_delay_ms),
+            incomplete_turns: Mutex::new(Vec::new()),
+            summaries: Mutex::new(Vec::new()),
         }
     }
 
-    async fn arrive(&self, msg: PersistedMessage) -> AppendedMessage {
+    async fn arrive(&self, msg: PersistedMessage) -> assistd_memory::Result<AppendedMessage> {
         let delay = {
             let mut d = self.remaining_delay_ms.lock();
             let taken = *d;
@@ -45,23 +50,29 @@ impl SlowingStore {
             taken
         };
         tokio::time::sleep(Duration::from_millis(delay)).await;
-        self.arrivals.lock().push(msg.content);
-        AppendedMessage {
-            id: MessageId(0),
-            chunks: Vec::new(),
+        if msg.content == "lost" {
+            return Err(MemoryError::BranchNotFound(BranchId(1)));
         }
+        let mut arrivals = self.arrivals.lock();
+        let seq = Seq(i64::try_from(arrivals.len()).unwrap());
+        arrivals.push(msg.content);
+        Ok(AppendedMessage {
+            id: MessageId(0),
+            seq,
+            chunks: Vec::new(),
+        })
     }
 }
 
 #[async_trait::async_trait]
-impl TranscriptStore for SlowingStore {
+impl TranscriptStore for RecordingStore {
     async fn append_message_to_branch(
         &self,
         _b: BranchId,
         _t: TurnId,
         m: PersistedMessage,
     ) -> assistd_memory::Result<AppendedMessage> {
-        Ok(self.arrive(m).await)
+        self.arrive(m).await
     }
 
     async fn end_session(&self, _s: SessionId) -> assistd_memory::Result<()> {
@@ -74,7 +85,7 @@ impl TranscriptStore for SlowingStore {
     ) -> assistd_memory::Result<OpenedTurn> {
         Ok(OpenedTurn {
             turn: TurnId(1),
-            message: self.arrive(prompt).await,
+            message: self.arrive(prompt).await?,
         })
     }
     async fn begin_session_with_main_branch(
@@ -96,7 +107,7 @@ impl TranscriptStore for SlowingStore {
         m: PersistedMessage,
         _steps: Vec<PersistedRelayStep>,
     ) -> assistd_memory::Result<AppendedMessage> {
-        Ok(self.arrive(m).await)
+        self.arrive(m).await
     }
     async fn load_relay_traces(
         &self,
@@ -137,10 +148,14 @@ impl TranscriptStore for SlowingStore {
     async fn record_branch_summary(
         &self,
         _b: BranchId,
-        _summary: String,
-        _cut: SummaryCut,
-        _duration_ms: u64,
+        summary: BranchSummary,
     ) -> assistd_memory::Result<()> {
+        self.summaries.lock().push(summary);
+        Ok(())
+    }
+
+    async fn mark_turn_incomplete(&self, turn: TurnId) -> assistd_memory::Result<()> {
+        self.incomplete_turns.lock().push(turn);
         Ok(())
     }
 
@@ -190,24 +205,81 @@ fn state_with_store(store: Arc<dyn TranscriptStore>) -> Arc<AppState> {
     })
 }
 
+fn tool_step(content: &str) -> PersistedMessage {
+    let call = PersistedToolCall {
+        id: "call".into(),
+        name: "run".into(),
+        arguments: serde_json::Value::Null,
+    };
+    PersistedMessage::assistant_tool_calls(content, vec![call], None)
+}
+
 #[tokio::test(start_paused = true)]
-async fn messages_reach_the_store_in_the_order_they_were_queued() {
-    let store = Arc::new(SlowingStore::new(60));
+async fn messages_reach_the_store_in_queue_order_past_an_abandoned_drain() {
+    let store = Arc::new(RecordingStore::new(60));
     let state = state_with_store(store.clone());
 
-    let target = state.open_turn_fire_and_forget(BranchId(1), PersistedMessage::user("first"));
-    for text in ["second", "third", "fourth"] {
-        state.persist_message_fire_and_forget(
-            target.clone(),
-            PersistedMessage::assistant_text(text, None),
-        );
+    let target = state
+        .open_user_turn(BranchId(1), PersistedMessage::user("first"))
+        .await;
+    let reply = |text| PersistedMessage::assistant_text(text, None);
+    state
+        .persist_message(target.clone(), reply("second"), None)
+        .await;
+    let abandoned = Duration::from_millis(10);
+    tokio::time::timeout(abandoned, state.drain_persistence_inflight())
+        .await
+        .unwrap_err();
+    for text in ["third", "fourth"] {
+        state
+            .persist_message(target.clone(), reply(text), None)
+            .await;
     }
-    state.runtime.persistence_tracker.close();
-    state.runtime.persistence_tracker.wait().await;
+    state.drain_persistence_inflight().await;
 
     assert_eq!(
         *store.arrivals.lock(),
         ["first", "second", "third", "fourth"],
         "a slower early write must not let a later message take its seq"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_write_marks_its_turn_and_still_counts_toward_the_summary_cut() {
+    let store = Arc::new(RecordingStore::new(0));
+    let state = state_with_store(store.clone());
+
+    let target = state
+        .open_user_turn(BranchId(1), PersistedMessage::user("question"))
+        .await;
+    for step in ["step one", "lost", "step three"] {
+        state
+            .persist_message(target.clone(), tool_step(step), None)
+            .await;
+    }
+    let cut = CompactionCut {
+        kept_turns: NonZeroUsize::MIN,
+        kept_steps: NonZeroUsize::new(2),
+    };
+    state
+        .persist_summary(target, "summary".into(), cut, Duration::ZERO)
+        .await;
+    state.drain_persistence_inflight().await;
+
+    assert_eq!(*store.incomplete_turns.lock(), [TurnId(1)]);
+    assert_eq!(
+        *store.arrivals.lock(),
+        ["question", "step one", "step three"]
+    );
+    assert_eq!(
+        *store.summaries.lock(),
+        [BranchSummary {
+            kept_from_seq: Seq(0),
+            steps_folded_through: Some(Seq(1)),
+            compacted_after_seq: Seq(2),
+            content: "summary".into(),
+            duration_ms: 0,
+        }],
+        "the model kept the unsaved step, so only the first step is folded"
     );
 }

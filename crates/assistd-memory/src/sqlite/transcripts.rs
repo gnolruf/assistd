@@ -1,7 +1,6 @@
 //! SQLite-backed [`TranscriptStore`] over sessions, turns, branches, and messages.
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -17,7 +16,7 @@ use crate::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, ChunkId, HistoryRow,
     HistoryScope, MemoryError, MessageId, MessageKind, OpenedTurn, PersistedMessage,
     PersistedRelayStep, PersistedRole, PersistedToolCall, Reasoning, Result, ResumeCandidate, Seq,
-    SessionId, SummaryCut, ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
+    SessionId, ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 
 use super::connection::{SqliteHandle, truncate_wal};
@@ -376,46 +375,27 @@ impl TranscriptStore for SqliteTranscriptStore {
             .map_err(MemoryError::sqlite("load_branch"))
     }
 
-    async fn record_branch_summary(
-        &self,
-        branch: BranchId,
-        summary: String,
-        cut: SummaryCut,
-        duration_ms: u64,
-    ) -> Result<()> {
+    async fn record_branch_summary(&self, branch: BranchId, summary: BranchSummary) -> Result<()> {
         self.handle
             .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let Some(kept_from) = nth_newest_user_seq(&tx, branch, cut.kept_turns)? else {
-                    return Ok(());
-                };
-                let folded_through = match cut.kept_steps {
-                    Some(kept_steps) => steps_folded_through(&tx, branch, kept_from, kept_steps)?,
-                    None => None,
-                };
-                let newest: Seq = tx.query_row(
-                    "SELECT MAX(seq) FROM branch_messages WHERE branch_id = ?1",
-                    rusqlite::params![branch],
-                    |r| r.get(0),
-                )?;
-                tx.execute(
+            .call(move |c| {
+                c.execute(
                     "INSERT OR REPLACE INTO branch_summaries
                          (branch_id, kept_from_seq, steps_folded_through, compacted_after_seq,
                           content, duration_ms)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     rusqlite::params![
                         branch,
-                        kept_from,
-                        folded_through,
-                        newest,
-                        summary,
-                        duration_ms
+                        summary.kept_from_seq,
+                        summary.steps_folded_through,
+                        summary.compacted_after_seq,
+                        summary.content,
+                        summary.duration_ms
                     ],
-                )?;
-                tx.commit()
+                )
             })
             .await
+            .map(drop)
             .map_err(MemoryError::sqlite("record_branch_summary"))
     }
 
@@ -431,10 +411,22 @@ impl TranscriptStore for SqliteTranscriptStore {
             })
             .await
             .map_err(MemoryError::sqlite("record_turn_stats"))?;
-        if updated == 0 {
-            return Err(MemoryError::TurnNotFound(turn));
-        }
-        Ok(())
+        turn_updated(updated, turn)
+    }
+
+    async fn mark_turn_incomplete(&self, turn: TurnId) -> Result<()> {
+        let updated = self
+            .handle
+            .writer()
+            .call(move |c| {
+                c.execute(
+                    "UPDATE turns SET incomplete = 1 WHERE id = ?1",
+                    rusqlite::params![turn],
+                )
+            })
+            .await
+            .map_err(MemoryError::sqlite("mark_turn_incomplete"))?;
+        turn_updated(updated, turn)
     }
 
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>> {
@@ -654,7 +646,11 @@ fn store_message(
     )?
     .execute(rusqlite::params![branch, slot.seq, id])?;
     let chunks = insert_chunks(tx, id, row)?;
-    Ok(AppendedMessage { id, chunks })
+    Ok(AppendedMessage {
+        id,
+        seq: slot.seq,
+        chunks,
+    })
 }
 
 /// Insert `row` into the session with rowid `session_rowid`, returning its id.
@@ -746,6 +742,14 @@ fn session_updated(updated: usize, session: SessionId) -> Result<()> {
     Ok(())
 }
 
+/// `Ok` when an update by turn matched a row.
+fn turn_updated(updated: usize, turn: TurnId) -> Result<()> {
+    if updated == 0 {
+        return Err(MemoryError::TurnNotFound(turn));
+    }
+    Ok(())
+}
+
 /// Map a failed switch to `branch` to its typed error; the foreign key rejects a
 /// branch outside the session.
 fn set_current_branch_error(error: tokio_rusqlite::Error, branch: BranchId) -> MemoryError {
@@ -781,58 +785,6 @@ fn first_user_text_of_turn(tx: &Transaction<'_>, turn: TurnId) -> rusqlite::Resu
         |r| r.get(0),
     )
     .optional()
-}
-
-/// Seq of the `n`th newest user message on `branch`, counting from 1.
-fn nth_newest_user_seq(
-    tx: &Transaction<'_>,
-    branch: BranchId,
-    n: NonZeroUsize,
-) -> rusqlite::Result<Option<Seq>> {
-    tx.query_row(
-        "SELECT bm.seq FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
-         WHERE bm.branch_id = ?1 AND m.role = ?2
-         ORDER BY bm.seq DESC LIMIT 1 OFFSET ?3",
-        rusqlite::params![branch, PersistedRole::User, n.get() - 1],
-        |r| r.get(0),
-    )
-    .optional()
-}
-
-/// Last seq of the turn opened at `question` that falls before its
-/// `kept_steps` newest tool steps; `None` when no step comes before them.
-fn steps_folded_through(
-    tx: &Transaction<'_>,
-    branch: BranchId,
-    question: Seq,
-    kept_steps: NonZeroUsize,
-) -> rusqlite::Result<Option<Seq>> {
-    let folded_through: Option<Option<Seq>> = tx
-        .query_row(
-            "SELECT (SELECT MAX(prev.seq) FROM branch_messages prev
-                     WHERE prev.branch_id = ?1 AND prev.seq > ?2 AND prev.seq < step.seq)
-             FROM (
-                 SELECT bm.seq FROM branch_messages bm JOIN messages m ON m.id = bm.message_id
-                 WHERE bm.branch_id = ?1 AND bm.seq > ?2
-                   AND m.role = ?3 AND m.tool_calls IS NOT NULL
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM branch_messages next JOIN messages nm ON nm.id = next.message_id
-                       WHERE next.branch_id = ?1 AND next.seq > ?2 AND next.seq < bm.seq
-                         AND nm.role = ?4)
-                 ORDER BY bm.seq DESC LIMIT 1 OFFSET ?5
-             ) AS step",
-            rusqlite::params![
-                branch,
-                question,
-                PersistedRole::Assistant,
-                PersistedRole::User,
-                kept_steps.get() - 1
-            ],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(folded_through.flatten())
 }
 
 /// Drop the branch's summary once it stands in for any message of `turn`,

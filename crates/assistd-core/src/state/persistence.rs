@@ -1,26 +1,22 @@
-//! Fire-and-forget message persistence and its drain.
+//! Queueing transcript writes for the transcript writer, and its drain.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Notify, oneshot};
-use tracing::{debug, warn};
+use tokio::sync::{Notify, mpsc, oneshot};
+use tracing::warn;
 
-use assistd_memory::{
-    BranchId, ChunkId, PersistedMessage, PersistedRelayStep, SessionId, SummaryCut, TurnId,
-    TurnStats,
-};
+use assistd_ipc::Component;
+use assistd_llm::CompactionCut;
+use assistd_memory::{BranchId, PersistedMessage, PersistedRelayStep, SessionId, TurnStats};
 use assistd_utils::time::saturating_millis;
 
 use super::AppState;
-
-/// Where a turn's messages are written: the branch current when the turn
-/// opened, and the turn's row once the write opening it has landed.
-#[derive(Debug, Clone)]
-pub(super) struct PersistTarget {
-    pub(super) branch: BranchId,
-    turn: Arc<OnceLock<TurnId>>,
-}
+use super::seq_ledger::SharedLedger;
+use super::transcript_writer::{
+    PersistTarget, TranscriptWriter, WRITE_QUEUE_CAPACITY, WriteCommand,
+};
+use crate::recovery::spawn_supervised;
 
 impl AppState {
     /// The active session and branch, inserting the session and its `main`
@@ -42,175 +38,120 @@ impl AppState {
         Ok((session, branch))
     }
 
-    /// Open a turn on `branch` with `prompt` as its first message on a
-    /// background task, returning the target the turn's later messages go to.
-    pub(super) fn open_turn_fire_and_forget(
+    /// Queue the write opening a turn of the user's conversation on `branch`
+    /// with `prompt`, returning the target the turn's later messages go to.
+    pub(super) async fn open_user_turn(
         &self,
         branch: BranchId,
         prompt: PersistedMessage,
     ) -> PersistTarget {
-        let target = PersistTarget {
-            branch,
-            turn: Arc::default(),
+        let ledger = self.runtime.user_ledger.clone();
+        self.open_turn(PersistTarget::new(branch, ledger), prompt)
+            .await
+    }
+
+    /// [`Self::open_user_turn`] for a task run's turn on its new, empty `branch`.
+    pub(super) async fn open_task_run_turn(
+        &self,
+        branch: BranchId,
+        prompt: PersistedMessage,
+    ) -> PersistTarget {
+        let ledger = SharedLedger::of_new_branch();
+        self.open_turn(PersistTarget::new(branch, ledger), prompt)
+            .await
+    }
+
+    async fn open_turn(&self, target: PersistTarget, prompt: PersistedMessage) -> PersistTarget {
+        let command = WriteCommand::OpenTurn {
+            target: target.clone(),
+            prompt,
         };
-        let transcripts = self.memory.transcripts.clone();
-        let embed_wake = self.embed_wake();
-        let turn = Arc::clone(&target.turn);
-        self.spawn_in_persist_chain(async move {
-            match transcripts.begin_turn(branch, prompt).await {
-                Ok(opened) => {
-                    let _ = turn.set(opened.turn);
-                    wake_embedder_for(embed_wake.as_deref(), &opened.message.chunks);
-                }
-                Err(e) => warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "failed to open the turn; it will not be persisted (continuing)"
-                ),
-            }
-        });
+        self.queue_write(command).await;
         target
     }
 
-    /// Persist one message to `target` on a background task, then wake the
-    /// embedding worker for the chunks the store cut from it.
-    /// Dropped when the turn's opening write failed.
-    pub(super) fn persist_message_fire_and_forget(
+    /// Queue `msg` for `target`'s turn, with the sub-agent `relay_steps`
+    /// behind it when it is a `relay` tool result.
+    pub(super) async fn persist_message(
         &self,
         target: PersistTarget,
         msg: PersistedMessage,
+        relay_steps: Option<Vec<PersistedRelayStep>>,
     ) {
-        let transcripts = self.memory.transcripts.clone();
-        let embed_wake = self.embed_wake();
-        self.spawn_in_persist_chain(async move {
-            let Some(&turn) = target.turn.get() else {
-                debug!(
-                    target: "assistd::memory",
-                    "turn was never opened; dropping message"
-                );
-                return;
-            };
-            match transcripts
-                .append_message_to_branch(target.branch, turn, msg)
-                .await
-            {
-                Ok(appended) => wake_embedder_for(embed_wake.as_deref(), &appended.chunks),
-                Err(e) => warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "failed to persist message (continuing)"
-                ),
-            }
-        });
+        let command = WriteCommand::Message {
+            target,
+            msg,
+            relay_steps,
+        };
+        self.queue_write(command).await;
     }
 
-    /// Persist the `relay` tool result `msg` to `target` with the sub-agent
-    /// `steps` behind it on a background task. Never embedded, like every tool
-    /// result; dropped when the turn's opening write failed.
-    pub(super) fn persist_relay_result_fire_and_forget(
+    /// Queue `stats` for `target`'s turn, ordered after its messages.
+    pub(super) async fn persist_turn_stats(&self, target: PersistTarget, stats: TurnStats) {
+        self.queue_write(WriteCommand::TurnStats { target, stats })
+            .await;
+    }
+
+    /// Queue `summary` as the compaction summary of `target`'s branch, standing
+    /// in for what `cut` leaves out of every message queued before it.
+    pub(super) async fn persist_summary(
         &self,
         target: PersistTarget,
-        msg: PersistedMessage,
-        steps: Vec<PersistedRelayStep>,
-    ) {
-        let transcripts = self.memory.transcripts.clone();
-        self.spawn_in_persist_chain(async move {
-            let Some(&turn) = target.turn.get() else {
-                debug!(
-                    target: "assistd::memory",
-                    "turn was never opened; dropping relay result"
-                );
-                return;
-            };
-            if let Err(e) = transcripts
-                .append_relay_result(target.branch, turn, msg, steps)
-                .await
-            {
-                warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "failed to persist relay result (continuing)"
-                );
-            }
-        });
-    }
-
-    /// Record `stats` on `target`'s turn on a background task, ordered after
-    /// its messages. Dropped when the turn's opening write failed.
-    pub(super) fn persist_turn_stats_fire_and_forget(
-        &self,
-        target: PersistTarget,
-        stats: TurnStats,
-    ) {
-        let transcripts = self.memory.transcripts.clone();
-        self.spawn_in_persist_chain(async move {
-            let Some(&turn) = target.turn.get() else {
-                return;
-            };
-            if let Err(e) = transcripts.record_turn_stats(turn, stats).await {
-                warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "failed to persist turn stats (continuing)"
-                );
-            }
-        });
-    }
-
-    /// Record `summary` as `branch`'s compaction summary on a background
-    /// task, ordered after every message persisted before it.
-    pub(super) fn persist_summary_fire_and_forget(
-        &self,
-        branch: BranchId,
         summary: String,
-        cut: SummaryCut,
+        cut: CompactionCut,
         elapsed: Duration,
     ) {
-        let transcripts = self.memory.transcripts.clone();
-        let duration_ms = saturating_millis(elapsed);
-        self.spawn_in_persist_chain(async move {
-            if let Err(e) = transcripts
-                .record_branch_summary(branch, summary, cut, duration_ms)
-                .await
-            {
-                warn!(
-                    target: "assistd::memory",
-                    error = %e,
-                    "failed to persist compaction summary (continuing)"
-                );
-            }
-        });
+        let command = WriteCommand::Summary {
+            target,
+            summary,
+            cut,
+            duration_ms: saturating_millis(elapsed),
+        };
+        self.queue_write(command).await;
     }
 
-    /// Wait for every queued message and summary write to land. Hold
-    /// `user_turn_lock` across the call so no new user-turn writes queue during the wait.
+    /// Wait for every queued transcript write to land. Hold `user_turn_lock`
+    /// across the call so no new user-turn writes queue during the wait.
     pub(super) async fn drain_persistence_inflight(&self) {
-        let (previous, landed_tx) = self.join_persist_chain();
-        if let Some(previous) = previous {
-            let _ = previous.await;
-        }
-        let _ = landed_tx.send(());
-    }
-
-    /// Run `write` on a background task once every write queued before it has
-    /// finished, since the store assigns `seq` in arrival order.
-    fn spawn_in_persist_chain(&self, write: impl Future<Output = ()> + Send + 'static) {
-        let (previous, landed_tx) = self.join_persist_chain();
-        self.runtime.persistence_tracker.spawn(async move {
-            if let Some(previous) = previous {
-                let _ = previous.await;
-            }
-            write.await;
-            let _ = landed_tx.send(());
-        });
-    }
-
-    /// Take the next place in `runtime.persist_chain`: the predecessor's
-    /// completion signal to await, and this write's own to fire once it lands.
-    fn join_persist_chain(&self) -> (Option<oneshot::Receiver<()>>, oneshot::Sender<()>) {
+        let Some(writes) = self.runtime.transcript_writes.get() else {
+            return;
+        };
         let (landed_tx, landed_rx) = oneshot::channel();
-        let previous = self.runtime.persist_chain.lock().replace(landed_rx);
-        (previous, landed_tx)
+        if writes.send(WriteCommand::Barrier(landed_tx)).await.is_ok() {
+            let _ = landed_rx.await;
+        }
+    }
+
+    /// Wait for every queued transcript write and every background
+    /// persistence task; none may be started afterwards.
+    pub async fn finish_persistence(&self) {
+        self.runtime.persistence_tracker.close();
+        self.drain_persistence_inflight().await;
+        self.runtime.persistence_tracker.wait().await;
+    }
+
+    /// Hand `command` to the transcript writer, waiting while its queue is full.
+    async fn queue_write(&self, command: WriteCommand) {
+        if self.transcript_writes().send(command).await.is_err() {
+            warn!(
+                target: "assistd::memory",
+                "the transcript writer has stopped; dropping a write"
+            );
+        }
+    }
+
+    /// The transcript writer's queue, starting the writer on first use.
+    fn transcript_writes(&self) -> &mpsc::Sender<WriteCommand> {
+        self.runtime.transcript_writes.get_or_init(|| {
+            let (writes_tx, writes_rx) = mpsc::channel(WRITE_QUEUE_CAPACITY);
+            let writer = TranscriptWriter::new(self.memory.transcripts.clone(), self.embed_wake());
+            spawn_supervised(
+                "transcript_writer",
+                Component::Memory,
+                writer.run(writes_rx),
+            );
+            writes_tx
+        })
     }
 
     /// The embedding worker's wake signal, when embedding is enabled.
@@ -219,14 +160,6 @@ impl AppState {
             .embedding_cfg
             .enabled
             .then(|| Arc::clone(&self.memory.embed_wake))
-    }
-}
-
-fn wake_embedder_for(embed_wake: Option<&Notify>, chunks: &[ChunkId]) {
-    if let Some(embed_wake) = embed_wake
-        && !chunks.is_empty()
-    {
-        embed_wake.notify_one();
     }
 }
 

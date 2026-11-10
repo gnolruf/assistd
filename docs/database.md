@@ -49,6 +49,7 @@ erDiagram
         int session_id FK
         int duration_ms
         int generated_tokens
+        int incomplete
     }
     messages {
         int id PK
@@ -175,7 +176,8 @@ cascades to the rows that hang off it.
   current branch. `next_seq` hands out the branch's next position.
 - **`turns`**: one row per user prompt and everything the model did in
   response. `duration_ms` and `generated_tokens` are filled in together
-  once the turn finishes.
+  once the turn finishes. `incomplete` is set once a message of the turn
+  failed to save.
 - **`messages`**: every user prompt, assistant step, and tool result.
   Assistant rows may carry `reasoning` (with how long it took) and a
   non-empty `tool_calls` JSON array; tool rows always carry the call

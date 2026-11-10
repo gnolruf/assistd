@@ -400,6 +400,11 @@ BEGIN
 END;
 ";
 
+/// V16: a turn is flagged once a message of it failed to save.
+const V16_SQL: &str = r"
+ALTER TABLE turns ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0 CHECK (incomplete IN (0, 1));
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -418,6 +423,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V13_SQL),
         M::up(V14_SQL),
         M::up(V15_SQL),
+        M::up(V16_SQL),
     ])
 }
 
@@ -444,6 +450,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 }
