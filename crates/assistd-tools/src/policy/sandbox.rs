@@ -148,7 +148,8 @@ pub struct SandboxInfo {
 /// What of the host a bwrap sandbox mounts.
 #[derive(Debug, Clone)]
 enum Profile {
-    /// The host's root read-only, with `$HOME`'s visible entries writable.
+    /// The host's root read-only, with `$HOME`'s visible entries writable,
+    /// and no `AF_UNIX` sockets.
     Host,
     Quarantine(QuarantineProfile),
 }
@@ -397,13 +398,9 @@ impl SandboxInfo {
         match &self.mode {
             ResolvedSandboxMode::None => Ok(self.unwrapped_command(program, args)),
             ResolvedSandboxMode::Bwrap { path, prlimit } => match &self.profile {
-                Profile::Host => Ok(self.bwrap_command(
-                    path,
-                    prlimit,
-                    std::env::var("HOME").ok(),
-                    program,
-                    args,
-                )),
+                Profile::Host => {
+                    self.bwrap_command(path, prlimit, std::env::var("HOME").ok(), program, args)
+                }
                 Profile::Quarantine(quarantine) => {
                     self.quarantine_command(path, prlimit, quarantine, program, args)
                 }
@@ -425,8 +422,9 @@ impl SandboxInfo {
     }
 
     /// Flag order is load-bearing: profile, ancestor self-binds, shared directories, read-only
-    /// mounts over `home`'s command directories and protections, then `extra_args` so they win.
-    /// Inside, `prlimit` applies [`RESOURCE_LIMITS`] before running `program`.
+    /// mounts over `home`'s command directories and protections, the seccomp filter, then
+    /// `extra_args` so they win. Inside, `prlimit` applies
+    /// [`RESOURCE_LIMITS`] before running `program`. Fails when the filter cannot be written.
     fn bwrap_command<I, S>(
         &self,
         bwrap: &Path,
@@ -434,7 +432,7 @@ impl SandboxInfo {
         home: Option<String>,
         program: &str,
         args: I,
-    ) -> ProcCommand
+    ) -> io::Result<ProcCommand>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -456,6 +454,8 @@ impl SandboxInfo {
         cmd.args(command_dirs.lock_flags());
         let writable: Vec<PathBuf> = home.iter().map(|home| PathBuf::from(&home.dir)).collect();
         cmd.args(protection_flags(&self.protected, &writable));
+        let filter = load_seccomp_filter(&mut cmd)?;
+        cmd.preserved_fds(vec![filter]);
         cmd.args(self.extra_args.iter().map(OsStr::new));
         let mounts = Mounts::of(&cmd.as_std().get_args().collect::<Vec<_>>());
         let home_dir = home.as_ref().map(|home| Path::new(&home.dir));
@@ -463,7 +463,7 @@ impl SandboxInfo {
             cmd.arg("--chdir").arg(dir);
         }
         run_limited(&mut cmd, prlimit, program, args);
-        cmd
+        Ok(cmd)
     }
 
     /// The quarantine profile, then the shared directories, which its home is
@@ -487,13 +487,24 @@ impl SandboxInfo {
         cmd.args(quarantine_flags(&quarantine.home));
         cmd.args(shared_flags(&self.shared));
         let mut fds = bind_inputs(&mut cmd, &quarantine.inputs)?;
-        let filter = seccomp::filter_fd()?;
-        cmd.arg("--seccomp").arg(filter.as_raw_fd().to_string());
-        fds.push(filter);
+        fds.push(load_seccomp_filter(&mut cmd)?);
         cmd.preserved_fds(fds);
         run_limited(&mut cmd, prlimit, program, args);
         Ok(cmd)
     }
+}
+
+/// Have bwrap load the seccomp filter that keeps the command off every Unix
+/// socket, from the returned descriptor, which only `cmd`'s child may inherit.
+fn load_seccomp_filter(cmd: &mut ProcCommand) -> io::Result<OwnedFd> {
+    let filter = seccomp::filter_fd()?;
+    cmd.arg("--seccomp").arg(filter.as_raw_fd().to_string());
+    Ok(filter)
+}
+
+/// Whether `extra_args` share the host's network namespace with commands.
+fn shares_network(extra_args: &[String]) -> bool {
+    extra_args.iter().any(|arg| arg == "--share-net")
 }
 
 /// Bind each of `inputs` from a duplicate of its descriptor, returned for only
@@ -1064,7 +1075,7 @@ fn confined_spawner(
     bwrap: &Path,
     extra_args: &[String],
 ) -> Result<Option<ConfinedSpawner>, ToolsDisabled> {
-    if !extra_args.iter().any(|arg| arg == "--share-net") {
+    if !shares_network(extra_args) {
         return Ok(None);
     }
     let spawner = ConfinedSpawner::start().map_err(|error| {
@@ -1199,15 +1210,24 @@ mod tests {
             assert!(profile.windows(2).any(|w| w == private), "{private:?}");
         }
         assert!(profile.iter().any(|flag| flag == "--unshare-net"));
-        let cmd = info.bwrap_command(
-            Path::new("/usr/bin/bwrap"),
-            Path::new("/usr/bin/prlimit"),
-            home,
-            "make",
-            ["-j4"],
-        );
+        let cmd = info
+            .bwrap_command(
+                Path::new("/usr/bin/bwrap"),
+                Path::new("/usr/bin/prlimit"),
+                home,
+                "make",
+                ["-j4"],
+            )
+            .expect("bwrap command");
         assert_eq!(cmd.as_std().get_program(), "/usr/bin/bwrap");
-        assert_eq!(argv_of(&cmd), [profile, tail].concat());
+        let argv = argv_of(&cmd);
+        let filter_fd = argv
+            .iter()
+            .position(|flag| flag == "--seccomp")
+            .and_then(|at| argv.get(at + 1))
+            .expect("the seccomp filter is loaded with the network shared");
+        let seccomp = vec!["--seccomp".to_string(), filter_fd.clone()];
+        assert_eq!(argv, [profile, seccomp, tail].concat());
     }
 
     fn mounts_of(flags: &[&str]) -> Mounts {
@@ -1497,13 +1517,17 @@ mod tests {
             unit_dirs: Vec::new(),
             ..bwrap_info(Vec::new())
         };
-        let argv = argv_of(&info.bwrap_command(
-            Path::new("/usr/bin/bwrap"),
-            Path::new("/usr/bin/prlimit"),
-            Some(home.to_string_lossy().into_owned()),
-            "true",
-            [""; 0],
-        ));
+        let argv = argv_of(
+            &info
+                .bwrap_command(
+                    Path::new("/usr/bin/bwrap"),
+                    Path::new("/usr/bin/prlimit"),
+                    Some(home.to_string_lossy().into_owned()),
+                    "true",
+                    [""; 0],
+                )
+                .expect("bwrap command"),
+        );
         let go_bin = go_bin.to_string_lossy().into_owned();
         let go = home.join("go").to_string_lossy().into_owned();
         assert!(writable_binds(&argv).contains(&go.as_str()), "{argv:?}");
@@ -1661,13 +1685,17 @@ mod tests {
             unit_dirs: Vec::new(),
             ..bwrap_info(Vec::new())
         };
-        let argv = argv_of(&info.bwrap_command(
-            Path::new("/usr/bin/bwrap"),
-            Path::new("/usr/bin/prlimit"),
-            Some(path_of("")),
-            "true",
-            [""; 0],
-        ));
+        let argv = argv_of(
+            &info
+                .bwrap_command(
+                    Path::new("/usr/bin/bwrap"),
+                    Path::new("/usr/bin/prlimit"),
+                    Some(path_of("")),
+                    "true",
+                    [""; 0],
+                )
+                .expect("bwrap command"),
+        );
         let position_of = |flag: &str, dir: &str| {
             let dir = path_of(dir);
             argv.windows(3)

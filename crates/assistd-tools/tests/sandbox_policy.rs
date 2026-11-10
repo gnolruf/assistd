@@ -422,6 +422,41 @@ async fn bwrap_unshares_network_namespace() {
     assert_ne!(Path::new(&inside), host);
 }
 
+/// Returns early without `python3`; skips the networked sandbox without
+/// Landlock scoping.
+#[tokio::test]
+async fn bwrap_cannot_reach_a_host_unix_socket_on_a_visible_path() {
+    if !Path::new("/usr/bin/python3").exists() {
+        return;
+    }
+    for extra_args in [Vec::new(), vec!["--share-net".to_string()]] {
+        if let Some(sandbox) = bwrap_with(extra_args) {
+            assert_host_socket_unreachable(sandbox).await;
+        }
+    }
+}
+
+async fn assert_host_socket_unreachable(sandbox: Arc<SandboxInfo>) {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("socket dir");
+    let path = dir.path().join("agent.sock");
+    let listener = UnixListener::bind(&path).expect("host socket");
+    listener.set_nonblocking(true).expect("nonblocking socket");
+    let probe = format!(
+        "python3 -I -c 'import socket; socket.socket(socket.AF_UNIX).connect(\"{}\"); \
+         print(\"connected\")'",
+        path.display()
+    );
+    let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
+    let out = cmd.run(input(&probe)).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.stdout.is_empty(), "reached a host Unix socket");
+    assert!(stderr.contains("PermissionError"), "{stderr}");
+    assert!(
+        listener.accept().is_err(),
+        "the sandbox reached a host socket"
+    );
+}
+
 /// Returns early without `python3` or Landlock scoping.
 #[tokio::test]
 async fn networked_bwrap_cannot_reach_abstract_sockets() {
@@ -442,7 +477,7 @@ async fn networked_bwrap_cannot_reach_abstract_sockets() {
     let out = cmd.run(input(&probe)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.stdout.is_empty(), "reached the host's abstract socket");
-    assert!(stderr.contains("Operation not permitted"), "{stderr}");
+    assert!(stderr.contains("PermissionError"), "{stderr}");
 }
 
 #[tokio::test]

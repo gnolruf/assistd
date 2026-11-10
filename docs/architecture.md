@@ -892,7 +892,12 @@ A walk through `assistd query "what files changed this week?"`:
    `/proc` and `/run`, unshared user/pid/ipc/uts/network namespaces,
    an environment cleared down to locale and terminal variables, and
    fixed `prlimit` caps of 512 tasks in the sandbox, 4 GiB of data
-   segment per process and 4 GiB per written file. With
+   segment per process and 4 GiB per written file. It also gets the
+   quarantine's seccomp filter, so no command can make an `AF_UNIX`
+   socket: the read-only `$HOME` still holds pathname sockets, such as an
+   ssh `ControlMaster` under `~/.ssh` or gpg-agent's under `~/.gnupg`,
+   that would otherwise reach the network or the user's keys, with or
+   without `--share-net`. With
    `--share-net` in `bwrap_extra_args`, `bwrap` is spawned from a thread
    Landlock bars from abstract Unix sockets, such as the X server's, that
    the shared network namespace would otherwise expose; kernels without
