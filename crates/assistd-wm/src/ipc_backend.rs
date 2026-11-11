@@ -7,13 +7,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use assistd_utils::backoff::backoff_delay;
+use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 
+use crate::criteria::{
+    format_exec, format_focus, format_layout, format_move_to_workspace, format_resize_width,
+};
 use crate::snapshot::{self, Snapshot, WindowChangeKind};
 use crate::{
-    FocusedWindowContext, TransportError, WM_IPC_TIMEOUT, Window, WindowId, WmError, WmResult,
-    WorkspaceInfo,
+    ExecCommand, FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir,
+    TransportError, WM_IPC_TIMEOUT, Window, WindowId, WindowManager, WmError, WmHandle, WmResult,
+    WorkspaceId, WorkspaceInfo,
 };
 
 /// Labels for the IPC calls the shared machinery makes, reported as the
@@ -22,6 +27,7 @@ pub(crate) struct OpLabels {
     pub run_command: &'static str,
     pub get_tree: &'static str,
     pub get_workspaces: &'static str,
+    pub get_outputs: &'static str,
 }
 
 /// The focus-relevant identity of a tree node.
@@ -74,6 +80,10 @@ pub(crate) trait IpcProtocol: Send + Sync + Sized + 'static {
         cmd: &mut Self::Cmd,
     ) -> impl Future<Output = Result<Vec<WorkspaceInfo>, TransportError>> + Send;
 
+    fn get_outputs(
+        cmd: &mut Self::Cmd,
+    ) -> impl Future<Output = Result<Vec<OutputInfo>, TransportError>> + Send;
+
     /// Tiled children, then floating children.
     fn children(node: &Self::Node) -> impl Iterator<Item = &Self::Node>;
 
@@ -106,7 +116,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
     /// Connect, seed the focus snapshot, and spawn the reconnecting
     /// supervisor. Errors when the initial connect fails; a connect that
     /// exceeds [`WM_IPC_TIMEOUT`] starts disconnected and the supervisor retries.
-    pub(crate) async fn start(
+    async fn start(
         protocol: P,
         shutdown: watch::Receiver<bool>,
     ) -> WmResult<(Arc<Self>, JoinHandle<()>)> {
@@ -137,11 +147,6 @@ impl<P: IpcProtocol> IpcBackend<P> {
         Ok((backend, supervisor_task))
     }
 
-    /// Whether the command socket is connected. Never blocks.
-    pub(crate) fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed)
-    }
-
     fn set_conn(&self, slot: &mut Option<P::Cmd>, conn: Option<P::Cmd>) {
         self.connected.store(conn.is_some(), Ordering::Relaxed);
         *slot = conn;
@@ -150,7 +155,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
     /// Run one IPC call on the command socket under [`WM_IPC_TIMEOUT`].
     /// A timeout or transport error drops the connection and wakes the
     /// supervisor to reconnect.
-    pub(crate) async fn with_conn<T, E: Into<TransportError>>(
+    async fn with_conn<T, E: Into<TransportError>>(
         &self,
         op_label: &'static str,
         op: impl AsyncFnOnce(&mut P::Cmd) -> Result<T, E>,
@@ -168,34 +173,12 @@ impl<P: IpcProtocol> IpcBackend<P> {
         Err(err)
     }
 
-    pub(crate) async fn run_command(&self, payload: &str) -> WmResult<()> {
+    async fn run_command(&self, payload: &str) -> WmResult<()> {
         self.with_conn(P::OPS.run_command, async |conn| {
             P::run_command(conn, payload).await
         })
         .await?
         .map_err(|e| WmError::Rejected(format!("{payload}: {e}")))
-    }
-
-    pub(crate) async fn focused_window(&self) -> Option<WindowId> {
-        snapshot::read_focused_id(&self.snapshot).await
-    }
-
-    pub(crate) async fn focused_context(&self) -> Option<FocusedWindowContext> {
-        snapshot::read_focused_context(&self.snapshot).await
-    }
-
-    pub(crate) async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        let tree = self
-            .with_conn(P::OPS.get_tree, async |conn| P::get_tree(conn).await)
-            .await?;
-        Ok(P::collect_windows(&tree))
-    }
-
-    pub(crate) async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        self.with_conn(P::OPS.get_workspaces, async |conn| {
-            P::get_workspaces(conn).await
-        })
-        .await
     }
 
     /// Drive one event stream. Returns `true` when the caller should
@@ -244,12 +227,97 @@ impl<P: IpcProtocol> IpcBackend<P> {
     }
 }
 
+#[async_trait]
+impl<P: IpcProtocol> WindowManager for IpcBackend<P> {
+    async fn focus(&self, window: &WindowId) -> WmResult<()> {
+        self.run_command(&format_focus(window)).await
+    }
+
+    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
+        self.run_command(&format_move_to_workspace(window, workspace))
+            .await
+    }
+
+    async fn focused_window(&self) -> WmResult<Option<WindowId>> {
+        Ok(snapshot::read_focused_id(&self.snapshot).await)
+    }
+
+    async fn list_windows(&self) -> WmResult<Vec<Window>> {
+        let tree = self
+            .with_conn(P::OPS.get_tree, async |conn| P::get_tree(conn).await)
+            .await?;
+        Ok(P::collect_windows(&tree))
+    }
+
+    async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
+        self.with_conn(P::OPS.get_workspaces, async |conn| {
+            P::get_workspaces(conn).await
+        })
+        .await
+    }
+
+    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
+        Ok(snapshot::read_focused_context(&self.snapshot).await)
+    }
+
+    async fn resize_width(
+        &self,
+        window: &WindowId,
+        direction: ResizeDir,
+        pixels: u32,
+    ) -> WmResult<()> {
+        self.run_command(&format_resize_width(window, direction, pixels))
+            .await
+    }
+
+    async fn set_layout(&self, layout: Layout) -> WmResult<()> {
+        self.run_command(&format_layout(layout)).await
+    }
+
+    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()> {
+        self.run_command(&format_exec(workspace, command)).await
+    }
+
+    async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
+        self.with_conn(P::OPS.get_outputs, async |conn| P::get_outputs(conn).await)
+            .await
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+}
+
 /// A fresh command connection, its event stream, and the result of seeding
 /// the focus snapshot over it.
 struct Connection<P: IpcProtocol> {
     cmd: P::Cmd,
     events: P::Events,
     seeded: WmResult<Snapshot>,
+}
+
+/// Start `protocol`'s backend and supervisor; [`NoWindowManager`] and no
+/// handle when the first connect is refused.
+pub(crate) async fn start_or_disconnected<P: IpcProtocol>(
+    protocol: P,
+    shutdown: watch::Receiver<bool>,
+) -> (Arc<dyn WindowManager>, Option<WmHandle>) {
+    match IpcBackend::start(protocol, shutdown).await {
+        Ok((backend, supervisor_task)) => {
+            if backend.is_connected() {
+                tracing::info!(target: "assistd::wm", "{} backend connected", P::NAME);
+            }
+            (backend, Some(WmHandle { supervisor_task }))
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "assistd::wm",
+                "{} backend unavailable ({e:#}); window operations disabled",
+                P::NAME
+            );
+            (Arc::new(NoWindowManager), None)
+        }
+    }
 }
 
 async fn supervise<P: IpcProtocol>(

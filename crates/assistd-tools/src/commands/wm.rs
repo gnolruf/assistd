@@ -539,10 +539,6 @@ fn hint_for(err: &WmError) -> (Hint, &'static str) {
             Hint::Note,
             "compositor unresponsive; retry once before assuming it crashed",
         ),
-        WmError::Unsupported(_) => (
-            Hint::Note,
-            "the active backend may not support this operation (i3 does not list outputs)",
-        ),
         WmError::Ipc { .. } => (Hint::Check, "compositor connection (see daemon logs)"),
     }
 }

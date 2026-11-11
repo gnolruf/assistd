@@ -11,6 +11,7 @@ i3 = ["dep:tokio-i3ipc"]
 sway = ["dep:swayipc-async"]
 
 [dependencies]
+assistd-config = { workspace = true }
 assistd-utils = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }

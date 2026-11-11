@@ -22,6 +22,7 @@ impl IpcProtocol for FakeProtocol {
         run_command: "fake RUN_COMMAND",
         get_tree: "fake GET_TREE",
         get_workspaces: "fake GET_WORKSPACES",
+        get_outputs: "fake GET_OUTPUTS",
     };
 
     async fn connect(&self) -> WmResult<((), FakeEvents)> {
@@ -47,6 +48,10 @@ impl IpcProtocol for FakeProtocol {
     }
 
     async fn get_workspaces((): &mut ()) -> Result<Vec<WorkspaceInfo>, TransportError> {
+        Ok(Vec::new())
+    }
+
+    async fn get_outputs((): &mut ()) -> Result<Vec<OutputInfo>, TransportError> {
         Ok(Vec::new())
     }
 

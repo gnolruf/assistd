@@ -1,115 +1,19 @@
-//! i3 backend for [`crate::WindowManager`] over `tokio-i3ipc`: one socket serves commands, a
+//! i3 IPC protocol over `tokio-i3ipc`: one socket serves commands, a
 //! second feeds the event stream that keeps the focus snapshot current.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tokio_i3ipc::{
     I3,
     event::{Event, Subscribe, WindowChange, WindowData, WorkspaceChange},
     reply,
 };
 
-use crate::criteria::{
-    format_exec, format_focus, format_layout, format_move_to_workspace, format_resize_width,
-};
-use crate::ipc_backend::{IpcBackend, IpcEvent, IpcProtocol, NodeIdentity, OpLabels};
+use crate::ipc_backend::{IpcEvent, IpcProtocol, NodeIdentity, OpLabels};
 use crate::snapshot::WindowChangeKind;
-use crate::{
-    ExecCommand, FocusedWindowContext, Layout, ResizeDir, TransportError, Window, WindowId,
-    WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
-};
+use crate::{OutputInfo, TransportError, Window, WindowId, WmError, WmResult, WorkspaceInfo};
 
-/// [`WindowManager`] over a single i3 IPC command socket.
-#[derive(Debug)]
-pub struct I3Backend {
-    ipc: Arc<IpcBackend<I3Ipc>>,
-}
-
-/// The backend plus its supervisor task, returned by [`I3Backend::start`].
-#[derive(Debug)]
-pub struct I3Handle {
-    pub backend: Arc<I3Backend>,
-    pub(crate) supervisor_task: JoinHandle<()>,
-}
-
-impl I3Handle {
-    /// Awaits the supervisor task. Flip the shutdown watch first or
-    /// this blocks until the socket drops.
-    pub async fn shutdown(self) {
-        let _ = self.supervisor_task.await;
-    }
-}
-
-impl I3Backend {
-    /// Connect to i3 and spawn the reconnecting supervisor. Errors when the initial
-    /// connect fails; a compositor that never answers starts disconnected.
-    pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<I3Handle> {
-        let (ipc, supervisor_task) = IpcBackend::start(I3Ipc, shutdown).await?;
-        Ok(I3Handle {
-            backend: Arc::new(Self { ipc }),
-            supervisor_task,
-        })
-    }
-}
-
-#[async_trait]
-impl WindowManager for I3Backend {
-    async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        self.ipc.run_command(&format_focus(window)).await
-    }
-
-    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
-        self.ipc
-            .run_command(&format_move_to_workspace(window, workspace))
-            .await
-    }
-
-    async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self.ipc.focused_window().await)
-    }
-
-    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
-        Ok(self.ipc.focused_context().await)
-    }
-
-    async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        self.ipc.list_windows().await
-    }
-
-    async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        self.ipc.list_workspaces().await
-    }
-
-    async fn resize_width(
-        &self,
-        window: &WindowId,
-        direction: ResizeDir,
-        pixels: u32,
-    ) -> WmResult<()> {
-        self.ipc
-            .run_command(&format_resize_width(window, direction, pixels))
-            .await
-    }
-
-    async fn set_layout(&self, layout: Layout) -> WmResult<()> {
-        self.ipc.run_command(&format_layout(layout)).await
-    }
-
-    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()> {
-        self.ipc.run_command(&format_exec(workspace, command)).await
-    }
-
-    fn is_connected(&self) -> bool {
-        self.ipc.is_connected()
-    }
-}
-
-struct I3Ipc;
+pub(crate) struct I3Ipc;
 
 impl IpcProtocol for I3Ipc {
     type Cmd = I3;
@@ -121,6 +25,7 @@ impl IpcProtocol for I3Ipc {
         run_command: "i3 RUN_COMMAND",
         get_tree: "i3 GET_TREE",
         get_workspaces: "i3 GET_WORKSPACES",
+        get_outputs: "i3 GET_OUTPUTS",
     };
 
     async fn connect(&self) -> WmResult<(I3, Self::Events)> {
@@ -166,6 +71,22 @@ impl IpcProtocol for I3Ipc {
                 name: workspace.name,
                 focused: workspace.focused,
                 output: workspace.output,
+            })
+            .collect())
+    }
+
+    async fn get_outputs(cmd: &mut I3) -> Result<Vec<OutputInfo>, TransportError> {
+        Ok(cmd
+            .get_outputs()
+            .await?
+            .into_iter()
+            .map(|output| OutputInfo {
+                name: output.name,
+                active: output.active,
+                primary: output.primary,
+                current_mode: None,
+                scale: None,
+                focused_workspace: output.current_workspace,
             })
             .collect())
     }
