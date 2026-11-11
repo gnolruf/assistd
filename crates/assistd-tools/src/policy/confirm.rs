@@ -6,7 +6,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -366,7 +366,7 @@ impl ConfirmRouter {
             );
             return None;
         }
-        let review_id = uuid::Uuid::new_v4().to_string();
+        let review_id = next_prompt_id();
         let (tx, rx) = oneshot::channel();
         pending.reviews.insert(review_id.clone(), tx);
         let review = PendingPrompt {
@@ -584,7 +584,7 @@ impl ConfirmRouter {
             );
             return None;
         }
-        let confirm_id = uuid::Uuid::new_v4().to_string();
+        let confirm_id = next_prompt_id();
         let (tx, rx) = oneshot::channel();
         pending.prompts.insert(confirm_id.clone(), tx);
         let prompt = PendingPrompt {
@@ -684,6 +684,13 @@ impl Drop for PendingPrompt<'_> {
 }
 
 /// Count and log `req`'s refusal by a planning turn.
+/// An id no other prompt or plan review of this process has had, so a late answer to a
+/// finished prompt never matches a newer one.
+fn next_prompt_id() -> String {
+    static NEXT_PROMPT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_PROMPT_ID.fetch_add(1, Ordering::Relaxed).to_string()
+}
+
 fn refuse_while_planning(refused: &AtomicUsize, req: &ConfirmationRequest) -> Approval {
     refused.fetch_add(1, Ordering::AcqRel);
     info!(

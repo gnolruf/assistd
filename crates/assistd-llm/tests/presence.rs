@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tracing_subscriber::EnvFilter;
 
 use assistd_config::defaults::{nz32, nz64};
 use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
@@ -39,7 +40,12 @@ use common::FakeLlama;
 mod common;
 
 fn init_tracing() {
-    assistd_utils::tracing_init::init_test_tracing("info");
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_test_writer()
+        .try_init();
 }
 
 async fn grab_port() -> u16 {

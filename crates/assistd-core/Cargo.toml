@@ -26,7 +26,6 @@ chrono = { workspace = true }
 croner = { workspace = true }
 notify = { workspace = true }
 futures-util = { workspace = true }
-libc = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

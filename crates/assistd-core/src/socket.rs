@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::OFlags;
+use rustix::io::Errno;
 use rustix::process::geteuid;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -241,7 +243,7 @@ pub fn open_private_lock_file(lock_path: &Path) -> Result<File, SocketError> {
         .create(true)
         .truncate(false)
         .mode(LOCK_FILE_MODE)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
         .open(lock_path)
         .map_err(|source| SocketError::LockFile {
             path: lock_path.to_path_buf(),
@@ -452,7 +454,10 @@ async fn back_off_from_fd_exhaustion(err: &io::Error, fd_exhausted: &mut bool) {
 /// Matches the raw errno because EMFILE maps to the unstable
 /// `io::ErrorKind::Uncategorized`.
 fn is_fd_exhaustion(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+    matches!(
+        err.raw_os_error().map(Errno::from_raw_os_error),
+        Some(Errno::MFILE | Errno::NFILE)
+    )
 }
 
 async fn handle_connection(

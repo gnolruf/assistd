@@ -25,6 +25,7 @@ base64 = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 rustix = { workspace = true }
 assistd-config = { workspace = true }
 assistd-core = { workspace = true }

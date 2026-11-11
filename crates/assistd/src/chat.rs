@@ -15,7 +15,6 @@ use anyhow::{Context, Result};
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
 use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
-use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream, MouseEventKind};
 use crossterm::{cursor, execute, style, terminal};
@@ -655,7 +654,7 @@ fn init_file_tracing() -> Result<WorkerGuard> {
     fmt()
         .with_writer(writer)
         .with_ansi(false)
-        .with_env_filter(env_filter_or("info"))
+        .with_env_filter(crate::env_filter_or("info"))
         .init();
 
     Ok(guard)

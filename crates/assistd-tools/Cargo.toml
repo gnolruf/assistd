@@ -34,7 +34,6 @@ reqwest = { workspace = true, features = ["brotli", "gzip"] }
 url = { workspace = true }
 base64 = { workspace = true }
 infer = { workspace = true }
-uuid = { workspace = true }
 parking_lot = { workspace = true }
 rustix = { workspace = true }
 landlock = { workspace = true }

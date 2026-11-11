@@ -237,7 +237,6 @@ dependencies = [
  "chrono-tz",
  "croner",
  "futures-util",
- "libc",
  "notify",
  "parking_lot 0.13.0",
  "rustix 1.1.6",
@@ -260,7 +259,6 @@ dependencies = [
  "assistd-memory",
  "assistd-utils",
  "async-trait",
- "num-traits",
  "reqwest",
  "serde",
  "serde_json",
@@ -276,7 +274,6 @@ dependencies = [
  "assistd-utils",
  "base64 0.23.1",
  "chrono",
- "dirs",
  "infer",
  "rustix 1.1.6",
  "serde",
@@ -307,6 +304,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -406,7 +404,6 @@ dependencies = [
  "toml",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -424,7 +421,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -518,7 +518,7 @@ async fn a_fully_shown_write_in_the_edit_scope_asks_only_in_manual_mode() {
 #[tokio::test]
 async fn declined_write_outside_tmp_exits_126_without_writing() {
     let prefix = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let target = prefix.join(format!("declined-{}.txt", uuid::Uuid::new_v4()));
+    let target = prefix.join(format!("declined-{}.txt", std::process::id()));
     let target_str = target.to_string_lossy().into_owned();
     let out = WriteCommand::new(
         cfg_from(&[prefix]),
