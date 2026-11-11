@@ -40,6 +40,7 @@ zbus = { workspace = true }
 
 [dev-dependencies]
 chrono-tz = { workspace = true }
+assistd-llm = { workspace = true, features = ["test-support"] }
 assistd-tools = { workspace = true, features = ["test-support"] }
 assistd-utils = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

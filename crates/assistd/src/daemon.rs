@@ -79,17 +79,11 @@ pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     };
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
-    idle_monitor::validate(&config.sleep)?;
 
     info!(
         "assistd v{}: local model agent OS assistant daemon",
-        assistd_core::version()
+        crate::VERSION
     );
-    info!("  core  v{}", assistd_core::version());
-    info!("  llm   v{}", assistd_llm::version());
-    info!("  voice v{}", assistd_voice::version());
-    info!("  tools v{}", assistd_tools::version());
-    info!("  wm    v{}", assistd_wm::version());
     info!("loaded config from {}", config_path.display());
 
     let _startup_lock = StartupLock::acquire()?;

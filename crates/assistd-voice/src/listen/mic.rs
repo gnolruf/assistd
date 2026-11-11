@@ -300,7 +300,6 @@ impl MicContinuousListener {
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
         let ListenCaptureSession {
             stop_flag,
-            overrun: _,
             opened: _,
             handle: mut capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
@@ -348,7 +347,6 @@ impl ContinuousListener for MicContinuousListener {
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
         let ListenCaptureSession {
             stop_flag,
-            overrun: _,
             opened,
             handle: mut capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);

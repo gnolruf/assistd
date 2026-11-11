@@ -9,18 +9,22 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use assistd_ipc::{Component, RelayEvent, StatusKind, StatusSeverity};
 use assistd_tools::{Attachment, ToolOutput};
 
 pub mod chat;
+#[cfg(feature = "test-support")]
+mod echo;
 mod judge;
 pub mod llama_server;
 
 pub use assistd_utils::child_server::ReadyState;
 pub use chat::conversation::{CompactionCut, ToolCallRecord};
 pub use chat::{ChatClientError, LlamaChatClient};
+#[cfg(feature = "test-support")]
+pub use echo::EchoBackend;
 pub use judge::BackendJudgeModel;
 pub use llama_server::{
     ConversationKey, LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotAssignment,
@@ -328,94 +332,4 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     /// Send this conversation's later requests to the server slot `slot` names; call only
     /// between requests. A backend without slots ignores it.
     fn move_to_slot(&self, _slot: SlotAssignment) {}
-}
-
-/// Trivial backend that echoes the user's most recent push as a single
-/// delta on the next `step`. Tool calls are never emitted.
-#[derive(Debug)]
-pub struct EchoBackend {
-    last_user: Mutex<String>,
-}
-
-impl Default for EchoBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl EchoBackend {
-    /// Create a backend with no pending user message.
-    pub fn new() -> Self {
-        Self {
-            last_user: Mutex::new(String::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmBackend for EchoBackend {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        let _ = tx.send(LlmEvent::Delta { text: prompt }).await;
-        let _ = tx.send(LlmEvent::Done).await;
-        Ok(())
-    }
-
-    async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
-        *self.last_user.lock().await = text;
-        Ok(())
-    }
-
-    async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> LlmResult<()> {
-        Ok(())
-    }
-
-    async fn step(&self, _tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        let text = std::mem::take(&mut *self.last_user.lock().await);
-        if !text.is_empty() {
-            let _ = tx.send(LlmEvent::Delta { text }).await;
-        }
-        Ok(StepOutcome::Final)
-    }
-}
-
-/// Backend whose every call fails with [`LlmError::Unavailable`] and a
-/// fixed reason.
-#[derive(Debug)]
-pub struct FailedBackend {
-    reason: String,
-}
-
-impl FailedBackend {
-    /// Create a backend that fails every call with `reason`.
-    pub fn new(reason: String) -> Self {
-        Self { reason }
-    }
-}
-
-#[async_trait]
-impl LlmBackend for FailedBackend {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        Err(LlmError::Unavailable(self.reason.clone()))
-    }
-
-    async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
-        Err(LlmError::Unavailable(self.reason.clone()))
-    }
-
-    async fn push_tool_results(&self, _results: Vec<ToolResultPayload>) -> LlmResult<()> {
-        Err(LlmError::Unavailable(self.reason.clone()))
-    }
-
-    async fn step(
-        &self,
-        _tools: Vec<Value>,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> LlmResult<StepOutcome> {
-        Err(LlmError::Unavailable(self.reason.clone()))
-    }
-}
-
-/// Crate version.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
 }

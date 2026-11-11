@@ -65,9 +65,8 @@ pub use assistd_ipc::{ListenPhase, PresenceState, PresenceTarget, VoiceCaptureSt
 pub use assistd_tools::{CommandRegistry, ToolRegistry};
 
 pub use assistd_voice::{
-    CaptureUnavailable, ContinuousListener, Heard, NoContinuousListener, NoVoiceInput,
-    NoVoiceOutput, SpeakDecision, VoiceCapture, VoiceInput, VoiceManager, VoiceOutput,
-    VoiceOutputController,
+    CaptureUnavailable, ContinuousListener, Heard, NoContinuousListener, SpeakDecision,
+    VoiceCapture, VoiceInput, VoiceManager, VoiceOutput, VoiceOutputController,
 };
 
 pub use assistd_wm::{NoWindowManager, WindowManager};
@@ -679,11 +678,6 @@ fn apply_probe(gate: &VisionGate, probe: &VisionState) -> bool {
     }
     gate.set(probe.vision_supported);
     true
-}
-
-/// This crate's version string.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
 }
 
 #[cfg(test)]

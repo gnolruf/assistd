@@ -20,7 +20,6 @@ const LISTEN_RING_NATIVE_RATE_ASSUMED: usize = 48_000;
 #[derive(Debug)]
 pub struct ListenCaptureSession {
     pub stop_flag: Arc<AtomicBool>,
-    pub overrun: Arc<AtomicU64>,
     pub opened: oneshot::Receiver<()>,
     pub handle: JoinHandle<Result<(), AudioCaptureError>>,
 }
@@ -32,17 +31,14 @@ pub fn start(
     frame_tx: mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
 ) -> ListenCaptureSession {
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let overrun = Arc::new(AtomicU64::new(0));
     let device_hint_owned = device_hint.map(str::to_string);
 
     let (opened_tx, opened) = oneshot::channel();
     let worker_stop = Arc::clone(&stop_flag);
-    let worker_overrun = Arc::clone(&overrun);
     let handle = tokio::task::spawn_blocking(move || {
         capture_continuous(
             device_hint_owned.as_deref(),
             &worker_stop,
-            &worker_overrun,
             &frame_tx,
             opened_tx,
         )
@@ -50,7 +46,6 @@ pub fn start(
 
     ListenCaptureSession {
         stop_flag,
-        overrun,
         opened,
         handle,
     }
@@ -59,16 +54,16 @@ pub fn start(
 fn capture_continuous(
     device_hint: Option<&str>,
     stop_flag: &AtomicBool,
-    overrun: &Arc<AtomicU64>,
     frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
     opened: oneshot::Sender<()>,
 ) -> Result<(), AudioCaptureError> {
+    let overrun = Arc::new(AtomicU64::new(0));
     let ring_capacity = LISTEN_RING_SECONDS.saturating_mul(LISTEN_RING_NATIVE_RATE_ASSUMED);
     let ProducerStream {
         consumer,
         native_rate,
         stream,
-    } = open_producer_stream(device_hint, ring_capacity, Arc::clone(overrun))?;
+    } = open_producer_stream(device_hint, ring_capacity, Arc::clone(&overrun))?;
     let _ = opened.send(());
 
     debug!(

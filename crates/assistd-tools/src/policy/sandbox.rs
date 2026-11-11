@@ -128,6 +128,7 @@ pub enum ToolsDisabled {
 /// How subprocesses are wrapped, as resolved once by [`probe_sandbox`].
 #[derive(Debug, Clone)]
 pub enum ResolvedSandboxMode {
+    #[cfg(any(test, feature = "test-support"))]
     None,
     Bwrap(SandboxPrograms),
 }
@@ -256,22 +257,23 @@ impl SandboxInfo {
         read_only: Vec<PathBuf>,
         inputs: Vec<InputBind>,
     ) -> Option<Self> {
-        let ResolvedSandboxMode::Bwrap { .. } = self.mode else {
-            return None;
-        };
-        Some(Self {
-            mode: self.mode.clone(),
-            extra_args: Vec::new(),
-            protected: Protected::default(),
-            shared: SharedDirs {
-                scratch: Some(home.clone()),
-                read_only,
-            },
-            host_path: self.host_path.clone(),
-            unit_dirs: self.unit_dirs.clone(),
-            confined: None,
-            profile: Profile::Quarantine(QuarantineProfile { home, inputs }),
-        })
+        match self.mode {
+            #[cfg(any(test, feature = "test-support"))]
+            ResolvedSandboxMode::None => None,
+            ResolvedSandboxMode::Bwrap(_) => Some(Self {
+                mode: self.mode.clone(),
+                extra_args: Vec::new(),
+                protected: Protected::default(),
+                shared: SharedDirs {
+                    scratch: Some(home.clone()),
+                    read_only,
+                },
+                host_path: self.host_path.clone(),
+                unit_dirs: self.unit_dirs.clone(),
+                confined: None,
+                profile: Profile::Quarantine(QuarantineProfile { home, inputs }),
+            }),
+        }
     }
 
     /// The spawner commands built by [`SandboxInfo::command`] must start
@@ -284,6 +286,7 @@ impl SandboxInfo {
     /// names.
     pub fn search_path(&self) -> SearchPath {
         match self.mode {
+            #[cfg(any(test, feature = "test-support"))]
             ResolvedSandboxMode::None => SearchPath {
                 dirs: self.host_path.clone(),
             },
@@ -342,6 +345,7 @@ impl SandboxInfo {
     /// Blocks on the filesystem.
     fn working_dir(&self) -> Option<PathBuf> {
         match self.mode {
+            #[cfg(any(test, feature = "test-support"))]
             ResolvedSandboxMode::None => std::env::current_dir().ok(),
             ResolvedSandboxMode::Bwrap { .. } => {
                 let cmd = self.build_command("true", Vec::<String>::new()).ok()?;
@@ -380,6 +384,7 @@ impl SandboxInfo {
 
     fn mounts_of(&self, cmd: &ProcCommand) -> Option<Mounts> {
         match &self.mode {
+            #[cfg(any(test, feature = "test-support"))]
             ResolvedSandboxMode::None => None,
             ResolvedSandboxMode::Bwrap(programs) => {
                 Some(Mounts::of(&bwrap_flags(cmd, &programs.bwrap)))
@@ -409,6 +414,7 @@ impl SandboxInfo {
         S: AsRef<OsStr>,
     {
         match &self.mode {
+            #[cfg(any(test, feature = "test-support"))]
             ResolvedSandboxMode::None => Ok(self.unwrapped_command(program, args)),
             ResolvedSandboxMode::Bwrap(programs) => match &self.profile {
                 Profile::Host => {
@@ -421,6 +427,7 @@ impl SandboxInfo {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn unwrapped_command<I, S>(&self, program: &str, args: I) -> ProcCommand
     where
         I: IntoIterator<Item = S>,

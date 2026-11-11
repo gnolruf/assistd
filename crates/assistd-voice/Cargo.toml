@@ -20,7 +20,7 @@ tts = [
     "dep:rodio",
     "dep:sherpa-onnx",
 ]
-test-support = ["stt", "mic", "listen", "tts"]
+test-support = ["stt", "mic", "listen", "tts", "assistd-utils/test-support"]
 
 [[example]]
 name = "voice_latency_bench"

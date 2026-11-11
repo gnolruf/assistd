@@ -1,5 +1,5 @@
 use super::*;
-use crate::{NoVoiceOutput, VoiceOutputError};
+use crate::VoiceOutputError;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
@@ -48,7 +48,7 @@ async fn should_speak_decision() {
         (false, false, false, SpeakDecision::DropSilent),
         (false, false, true, SpeakDecision::DropForSkip),
     ] {
-        let ctrl = VoiceOutputController::ready(Arc::new(NoVoiceOutput), enabled);
+        let ctrl = VoiceOutputController::ready(Arc::new(RecordingOutput::default()), enabled);
         if skip_before_start {
             ctrl.skip().await;
         }
@@ -66,7 +66,7 @@ async fn should_speak_decision() {
 
 #[tokio::test]
 async fn speaking_is_raised_while_any_guard_is_alive() {
-    let ctrl = VoiceOutputController::ready(Arc::new(NoVoiceOutput), true);
+    let ctrl = VoiceOutputController::ready(Arc::new(RecordingOutput::default()), true);
     let mut speaking = ctrl.subscribe_speaking();
     assert!(!ctrl.is_speaking());
     assert!(!*speaking.borrow_and_update());

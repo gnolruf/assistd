@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
 use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -16,20 +15,6 @@ enum Action {
     None,
     Drowse,
     Sleep,
-}
-
-/// Reject a sleep threshold at or below the drowsy threshold.
-pub(super) fn validate(cfg: &SleepConfig) -> Result<()> {
-    if cfg.idle_to_drowsy_mins > 0
-        && cfg.idle_to_sleep_mins > 0
-        && cfg.idle_to_sleep_mins <= cfg.idle_to_drowsy_mins
-    {
-        bail!(
-            "sleep.idle_to_sleep_mins must be greater than sleep.idle_to_drowsy_mins \
-             (set either to 0 to disable that transition)"
-        );
-    }
-    Ok(())
 }
 
 /// Spawn the idle monitor. `None` when both thresholds are 0.
@@ -145,18 +130,6 @@ mod tests {
         c.idle_to_drowsy_mins = drowsy;
         c.idle_to_sleep_mins = sleep;
         c
-    }
-
-    #[test]
-    fn validate_rejects_sleep_at_or_below_drowsy() {
-        for (drowsy, sleep) in [(60, 30), (60, 60)] {
-            let err = validate(&cfg(drowsy, sleep)).expect_err("must be rejected");
-            assert!(
-                err.to_string()
-                    .contains("idle_to_sleep_mins must be greater than"),
-                "({drowsy}, {sleep}): {err}"
-            );
-        }
     }
 
     #[test]
