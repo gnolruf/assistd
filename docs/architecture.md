@@ -953,4 +953,7 @@ For `assistd chat`, the TUI is a long-lived client but not a single
 connection: each turn opens its own connection, kept writable so the
 TUI can answer confirmation prompts with `Request::ConfirmResponse`,
 while separate long-lived `Request::Subscribe` connections carry
-broadcast events such as session titles.
+broadcast events such as session titles. A subscription opens with the
+current task queue, presence, listen phase and capture state and is sent
+every presence change after, so the chat's indicators follow the daemon
+without polling it.

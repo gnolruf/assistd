@@ -2,6 +2,7 @@
 //! One chat may be open per user, since every chat drives the daemon's one session.
 
 use std::fs::{DirBuilder, File, Permissions, TryLockError};
+use std::future;
 use std::io;
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
@@ -13,10 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
-use assistd_ipc::{Event, EventKind, IpcClient, IpcClientError, Request, SubscribeFilter};
+use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
 use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
-use crossterm::event::{self, Event as TermEvent, EventStream};
+use crossterm::event::{self, Event as TermEvent, EventStream, MouseEventKind};
 use crossterm::{cursor, execute, style, terminal};
 use futures_util::StreamExt;
 use ratatui::Terminal;
@@ -25,16 +26,16 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use rustix::fs::{Mode, OFlags};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt;
 use uuid::Uuid;
 
-use self::app::{App, ChatEvent, WireStream};
+use self::app::{App, ChatEvent};
 use self::theme::Theme;
 
 mod app;
@@ -53,7 +54,8 @@ const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const GLYPH_INTERVAL: Duration = Duration::from_millis(150);
 /// Frame interval of the `/wakeword` computer's audio and bit lanes.
 const SCENE_INTERVAL: Duration = Duration::from_millis(30);
-const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Shortest time between two frames, so a burst of events costs one draw.
+const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const BUS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const INSTANCE_LOCK_FILE: &str = "chat.lock";
 /// Owner-only modes for the log directory and the stderr log.
@@ -223,14 +225,13 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
 
-    let _polling_handle = AbortOnDropHandle::new(spawn_status_polling(
-        ipc.clone(),
-        chat_tx.clone(),
-        shutdown_tx.subscribe(),
-    ));
+    let bus_attached = Arc::new(Notify::new());
     let _bus_handle = AbortOnDropHandle::new(spawn_bus_subscription(
-        ipc.clone(),
-        chat_tx.clone(),
+        BusFollower {
+            ipc: ipc.clone(),
+            chat_tx: chat_tx.clone(),
+            attached: bus_attached.clone(),
+        },
         shutdown_tx.subscribe(),
         !daemon_reachable,
     ));
@@ -239,6 +240,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let focus_reporter = AbortOnDropHandle::new(focus::spawn_reporter(
         ipc.clone(),
         focus_rx,
+        bus_attached,
         shutdown_tx.subscribe(),
     ));
 
@@ -317,7 +319,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         app.spawn_resume_or_new();
     }
 
-    let mut events = EventStream::new();
+    let mut events = EventStream::new().filter(|ev| future::ready(is_acted_on(ev)));
     let mut tick = tokio::time::interval(TICK_INTERVAL);
     let mut glyph_tick = tokio::time::interval(GLYPH_INTERVAL);
     glyph_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -325,8 +327,8 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
     scene_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut window_title = String::new();
-    sync_window_title(&mut window_title, app.session_title.as_deref())?;
-    terminal.draw(|f| ui::render(f, &mut app))?;
+    let mut redraw = true;
+    let mut frame_due = Instant::now();
 
     while !app.should_quit() {
         tokio::select! {
@@ -334,26 +336,33 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
                 if apply_terminal_event(&mut app, &focus_tx, maybe_ev).is_break() {
                     break;
                 }
+                redraw = true;
             }
             Some(ev) = chat_rx.recv() => {
                 app.on_chat_event(ev);
+                redraw = true;
             }
             _ = tick.tick() => {
-                app.on_tick().context("a chat task panicked")?;
+                redraw |= app.on_tick().context("a chat task panicked")?;
             }
             _ = glyph_tick.tick(), if app.glyph_live() => {
                 app.advance_live_glyphs();
+                redraw = true;
             }
             _ = scene_tick.tick(), if app.wake_word_scene_live() => {
                 app.advance_wake_word_scene();
+                redraw = true;
+            }
+            () = tokio::time::sleep_until(frame_due), if redraw => {
+                sync_window_title(&mut window_title, app.session_title.as_deref())?;
+                terminal.draw(|f| ui::render(f, &mut app))?;
+                redraw = false;
+                frame_due = Instant::now() + FRAME_INTERVAL;
             }
             _ = shutdown_rx.changed() => {
                 break;
             }
         }
-        drain_queued(&mut app, &mut chat_rx);
-        sync_window_title(&mut window_title, app.session_title.as_deref())?;
-        terminal.draw(|f| ui::render(f, &mut app))?;
     }
 
     drop(terminal);
@@ -409,6 +418,18 @@ fn probe_graphics() -> Option<Picker> {
     }
 }
 
+/// Whether the chat acts on `ev`. Mouse capture also reports pointer motion, clicks and
+/// drags, which nothing reads.
+fn is_acted_on(ev: &io::Result<TermEvent>) -> bool {
+    match ev {
+        Ok(TermEvent::Mouse(mouse)) => matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ),
+        _ => true,
+    }
+}
+
 /// Breaks when the terminal event stream ends or fails.
 fn apply_terminal_event(
     app: &mut App,
@@ -432,18 +453,6 @@ fn apply_terminal_event(
         None => return ControlFlow::Break(()),
     }
     ControlFlow::Continue(())
-}
-
-/// Apply already-queued channel events so a burst of deltas costs one frame,
-/// bounded so a fast producer cannot starve redraws. Terminal events stay with
-/// the select loop: polling `EventStream` outside it would drop its waker.
-fn drain_queued(app: &mut App, chat_rx: &mut mpsc::Receiver<ChatEvent>) {
-    for _ in 0..CHAT_CHANNEL_CAPACITY {
-        let Ok(ev) = chat_rx.try_recv() else {
-            break;
-        };
-        app.on_chat_event(ev);
-    }
 }
 
 /// Each configured MCP server that is not usable, with why.
@@ -497,83 +506,20 @@ async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
     }
 }
 
-fn spawn_status_polling(
+/// What the bus subscription task reports to.
+struct BusFollower {
     ipc: Arc<IpcClient>,
     chat_tx: mpsc::Sender<ChatEvent>,
-    mut shutdown: watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(STATUS_POLL_INTERVAL);
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => break,
-                _ = tick.tick() => poll_status(&ipc, &chat_tx).await,
-            }
-        }
-    })
+    /// Notified on every successful subscribe.
+    attached: Arc<Notify>,
 }
 
-/// Poll presence, voice and listen state, then report whether the daemon answered.
-async fn poll_status(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>) {
-    let link = match poll_requests(ipc, chat_tx).await {
-        Ok(()) => ChatEvent::DaemonReachable,
-        Err(e) => {
-            tracing::debug!("status poll failed: {e}");
-            ChatEvent::DaemonUnreachable
-        }
-    };
-    let _ = chat_tx.send(link).await;
-}
-
-/// Fails on the first request the daemon does not accept.
-async fn poll_requests(
-    ipc: &IpcClient,
-    chat_tx: &mpsc::Sender<ChatEvent>,
-) -> Result<(), IpcClientError> {
-    let requests = [
-        Request::GetPresence {
-            id: Uuid::new_v4().to_string(),
-        },
-        Request::GetVoiceState {
-            id: Uuid::new_v4().to_string(),
-        },
-        Request::GetListenState {
-            id: Uuid::new_v4().to_string(),
-        },
-    ];
-    for req in requests {
-        poll_one(ipc, chat_tx, req).await?;
-    }
-    Ok(())
-}
-
-async fn poll_one(
-    ipc: &IpcClient,
-    chat_tx: &mpsc::Sender<ChatEvent>,
-    req: Request,
-) -> Result<(), IpcClientError> {
-    let mut stream = ipc.one_shot(req).await?;
-    while let Ok(Some(ev)) = stream.next_event().await {
-        if ev.is_terminal() {
-            break;
-        }
-        let _ = chat_tx
-            .send(ChatEvent::Wire {
-                stream: WireStream::Status,
-                event: ev,
-            })
-            .await;
-    }
-    Ok(())
-}
-
-/// Follow the daemon's broadcast bus for session titles and for turns this
+/// Follow the daemon's broadcast bus for the daemon's state, session titles and turns this
 /// chat did not start (push-to-talk, continuous listening, other clients).
 /// Reconnects on a fixed delay, reporting the loss and the reconnect to the app;
 /// `start_lost` reports the first subscribe as a reconnect too.
 fn spawn_bus_subscription(
-    ipc: Arc<IpcClient>,
-    chat_tx: mpsc::Sender<ChatEvent>,
+    follower: BusFollower,
     mut shutdown: watch::Receiver<bool>,
     start_lost: bool,
 ) -> JoinHandle<()> {
@@ -582,7 +528,7 @@ fn spawn_bus_subscription(
         loop {
             tokio::select! {
                 _ = shutdown.changed() => break,
-                () = pump_bus(&ipc, &chat_tx, &mut lost) => {
+                () = pump_bus(&follower, &mut lost) => {
                     tokio::select! {
                         _ = shutdown.changed() => break,
                         () = tokio::time::sleep(BUS_RECONNECT_DELAY) => {}
@@ -595,10 +541,16 @@ fn spawn_bus_subscription(
 
 /// Forward bus events until the subscription ends. `lost` says a previous
 /// subscription ended, so a successful subscribe sends `BusRestored`.
-async fn pump_bus(ipc: &IpcClient, chat_tx: &mpsc::Sender<ChatEvent>, lost: &mut bool) {
+async fn pump_bus(follower: &BusFollower, lost: &mut bool) {
+    let BusFollower {
+        ipc,
+        chat_tx,
+        attached,
+    } = follower;
     let Some(mut stream) = subscribe_bus(ipc).await else {
         return;
     };
+    attached.notify_one();
     if std::mem::take(lost) && chat_tx.send(ChatEvent::BusRestored).await.is_err() {
         return;
     }
@@ -618,6 +570,8 @@ async fn subscribe_bus(ipc: &IpcClient) -> Option<assistd_ipc::EventStream> {
             kinds: vec![
                 EventKind::SessionTitle,
                 EventKind::Transcription,
+                EventKind::Presence,
+                EventKind::VoiceState,
                 EventKind::ListenState,
                 EventKind::WakeWordDetected,
                 EventKind::Delta,

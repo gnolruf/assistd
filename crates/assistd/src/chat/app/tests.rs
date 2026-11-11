@@ -676,7 +676,7 @@ fn longest_common_prefix_stops_at_char_boundaries() {
 #[test]
 fn an_offline_daemon_limits_slash_commands_to_those_that_run_locally() {
     let (mut app, _rx) = test_app();
-    app.on_chat_event(ChatEvent::DaemonUnreachable);
+    app.on_chat_event(ChatEvent::BusLost);
     app.type_ahead = TypeAheadGuard::default();
     app.on_key(typed('/'));
     let offered: Vec<&str> = app

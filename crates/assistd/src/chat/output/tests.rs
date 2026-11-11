@@ -244,10 +244,68 @@ fn streaming_delta_rewraps_only_the_open_reply() {
     p.sync_wrap(40, &Theme::default());
     let before_tail = p.wrap.starts[1];
     p.append_assistant(" world");
-    assert_eq!(p.wrap.stale, [1]);
+    assert!(p.wrap.stale.is_empty());
     p.sync_wrap(40, &Theme::default());
     assert_eq!(p.wrap.starts, [0, before_tail]);
     assert_eq!(line_text(&p.wrap.lines[before_tail]), "hello world");
+}
+
+const STREAMED_REPLY: &str = "\
+Here is the plan, with **bold** text that wraps past the edge of a narrow pane.
+
+1. first step
+
+1. second step
+
+**Then** some code:
+
+```sh
+echo one
+
+echo two
+```
+
+| name | size |
+|------|------|
+| a.txt | 12 |
+
+> a quote
+
+## Done
+
+- [x] shipped
+";
+
+#[test]
+fn streamed_reply_settles_blocks_and_still_matches_a_full_rewrap() {
+    let mut p = OutputPane::new();
+    p.push_user("go");
+    p.begin_assistant();
+    assert_matches_full_rewrap(&mut p, 30);
+    let mut settled = Vec::new();
+    for chunk in STREAMED_REPLY.as_bytes().chunks(5) {
+        p.append_assistant(std::str::from_utf8(chunk).unwrap());
+        assert_matches_full_rewrap(&mut p, 30);
+        settled.extend(p.wrap.streaming.as_ref().map(|reply| reply.settled_bytes));
+    }
+    let boundaries: Vec<&str> = settled
+        .chunk_by(|a, b| a == b)
+        .map(|run| STREAMED_REPLY[run[0]..].lines().next().unwrap())
+        .collect();
+    assert_eq!(
+        boundaries,
+        [
+            "Here is the plan, with **bold** text that wraps past the edge of a narrow pane.",
+            "**Then** some code:",
+            "```sh",
+            "| name | size |",
+            "> a quote",
+            "## Done",
+        ]
+    );
+    p.finish_assistant();
+    assert!(p.wrap.streaming.is_none());
+    assert_matches_full_rewrap(&mut p, 30);
 }
 
 #[test]
