@@ -239,7 +239,6 @@ dependencies = [
  "nvml-wrapper",
  "parking_lot 0.13.0",
  "procfs",
- "reqwest",
  "rustix 1.1.6",
  "serde",
  "serde_json",
@@ -248,7 +247,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "zbus",
 ]

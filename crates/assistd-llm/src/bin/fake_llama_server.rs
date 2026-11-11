@@ -1,24 +1,24 @@
-//! Test-only fake llama-server for exercising lifecycle, presence, and chat-completion paths
-//! without a real llama-server binary.
+//! Test-only stand-in for the llama-server process: binds the port and answers `/health`,
+//! so the supervisor's lifecycle paths run without a real llama-server.
 
 use std::env;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
-use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::Mutex;
 
-const MAX_HEADER_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_LINE_BYTES: usize = 16 * 1024;
 
-/// Server behaviour, from `--mode`, else a `mode` file beside the binary,
-/// else `normal`.
-#[derive(Debug, Clone)]
+const HEALTHY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
+
+const LOADING: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{\"status\":\"loading\"}";
+
+/// Process behaviour, from a `mode` file beside the binary, else `normal`.
+#[derive(Debug, Clone, Copy)]
 enum Mode {
     /// `normal`: serve 200 on `/health` until SIGTERM.
     Normal,
@@ -26,8 +26,6 @@ enum Mode {
     NeverReady,
     /// `bind-fail`: exit 1 without binding.
     BindFail,
-    /// `load-failure`: fail `POST /models/load` with 500.
-    LoadFailure,
     /// `slow-term=<secs>`: serve normally, then exit that long after SIGTERM.
     SlowTerm(u64),
     /// `with-orphan`: first spawn a grandchild that ignores SIGTERM and write
@@ -40,49 +38,16 @@ struct Args {
     host: String,
     port: u16,
     mode: Mode,
-    api_key: Option<String>,
-    slot_dir: Option<PathBuf>,
 }
 
-#[derive(Default)]
-struct ServerState {
-    api_key: Option<String>,
-    slot_dir: Option<PathBuf>,
-    loaded_model: Option<String>,
-    load_count: u32,
-    unload_count: u32,
-    /// The file each slot save wrote, in order.
-    saved: Vec<String>,
-    /// The file each slot restore read, in order.
-    restored: Vec<String>,
-}
-
-impl ServerState {
-    /// Whether a request with headers `head` may proceed: always without a
-    /// key, else only with `Authorization: Bearer <key>`.
-    fn authorizes(&self, head: &str) -> bool {
-        let Some(key) = &self.api_key else {
-            return true;
-        };
-        let expected = format!("Bearer {key}");
-        head.lines()
-            .filter_map(|line| line.split_once(':'))
-            .any(|(name, value)| {
-                name.trim().eq_ignore_ascii_case("authorization") && value.trim() == expected
-            })
+fn parse_mode(text: &str) -> Option<Mode> {
+    if let Some(secs) = text.strip_prefix("slow-term=") {
+        return Some(Mode::SlowTerm(secs.parse().ok()?));
     }
-}
-
-fn parse_mode(s: &str) -> Option<Mode> {
-    if let Some(rest) = s.strip_prefix("slow-term=") {
-        let secs: u64 = rest.parse().ok()?;
-        return Some(Mode::SlowTerm(secs));
-    }
-    match s {
+    match text {
         "normal" => Some(Mode::Normal),
         "never-ready" => Some(Mode::NeverReady),
         "bind-fail" => Some(Mode::BindFail),
-        "load-failure" => Some(Mode::LoadFailure),
         "with-orphan" => Some(Mode::WithOrphan),
         _ => None,
     }
@@ -95,61 +60,23 @@ fn mode_beside(program: &str) -> Option<Mode> {
     Some(parse_mode(text.trim()).expect("invalid mode file"))
 }
 
-/// Parses `--host <addr> --port <port> --mode <mode> --api-key-file <path>
-/// --slot-save-path <dir>`,
-/// skipping the other flags a router-mode spawn passes.
+/// Reads `--host <addr>` and `--port <port>`, ignoring the other flags a
+/// router-mode spawn passes.
 fn parse_args() -> Args {
-    let mut host = "127.0.0.1".to_string();
-    let mut port: u16 = 0;
     let argv: Vec<String> = env::args().collect();
     let program = argv.first().cloned().unwrap_or_default();
-    let mut mode = mode_beside(&program).unwrap_or(Mode::Normal);
-    let mut api_key = None;
-    let mut slot_dir = None;
-
-    let mut i = 1;
-    while i < argv.len() {
-        match argv[i].as_str() {
-            "--host" => {
-                host.clone_from(&argv[i + 1]);
-                i += 2;
-            }
-            "--port" => {
-                port = argv[i + 1].parse().expect("--port must be u16");
-                i += 2;
-            }
-            "--mode" => {
-                mode = parse_mode(&argv[i + 1]).expect("invalid --mode");
-                i += 2;
-            }
-            "--api-key-file" => {
-                api_key = Some(read_api_key(&argv[i + 1]));
-                i += 2;
-            }
-            "--slot-save-path" => {
-                slot_dir = Some(PathBuf::from(&argv[i + 1]));
-                i += 2;
-            }
-            "--jinja" => i += 1,
-            "-ngl" | "-c" => i += 2,
-            _ => i += 1,
-        }
-    }
+    let value_of = |flag: &str| {
+        argv.windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+    };
+    let mode = mode_beside(&program).unwrap_or(Mode::Normal);
     Args {
-        program,
-        host,
-        port,
+        host: value_of("--host").unwrap_or_else(|| "127.0.0.1".to_string()),
+        port: value_of("--port").map_or(0, |port| port.parse().expect("--port must be u16")),
         mode,
-        api_key,
-        slot_dir,
+        program,
     }
-}
-
-fn read_api_key(path: &str) -> String {
-    std::fs::read_to_string(path)
-        .expect("--api-key-file must be readable")
-        .trim()
-        .to_string()
 }
 
 /// Spawn a `sleep` that ignores SIGTERM and record its pid in `orphan.pid`
@@ -197,358 +124,64 @@ async fn main() -> ExitCode {
         args.mode
     );
 
-    let state = Arc::new(Mutex::new(ServerState {
-        api_key: args.api_key,
-        slot_dir: args.slot_dir,
-        ..ServerState::default()
-    }));
-
-    if let Mode::SlowTerm(secs) = args.mode {
-        let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        let state = state.clone();
-        tokio::spawn(async move {
-            serve_loop(listener, Mode::Normal, state).await;
-        });
-        term.recv().await;
-        let _ = writeln!(
-            io::stderr(),
-            "fake_llama_server: SIGTERM received; exiting in {secs}s"
-        );
-        tokio::time::sleep(Duration::from_secs(secs)).await;
+    let health = if matches!(args.mode, Mode::NeverReady) {
+        LOADING
+    } else {
+        HEALTHY
+    };
+    let serving = serve_loop(listener, health);
+    let Mode::SlowTerm(secs) = args.mode else {
+        serving.await;
         return ExitCode::SUCCESS;
-    }
-
-    serve_loop(listener, args.mode, state).await;
+    };
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::spawn(serving);
+    term.recv().await;
+    let _ = writeln!(
+        io::stderr(),
+        "fake_llama_server: SIGTERM received; exiting in {secs}s"
+    );
+    tokio::time::sleep(Duration::from_secs(secs)).await;
     ExitCode::SUCCESS
 }
 
-async fn serve_loop(listener: TcpListener, mode: Mode, state: Arc<Mutex<ServerState>>) {
+async fn serve_loop(listener: TcpListener, health: &'static [u8]) {
     loop {
-        let (sock, _) = match listener.accept().await {
+        let (client, _) = match listener.accept().await {
             Ok(accepted) => accepted,
             Err(e) => {
                 let _ = writeln!(io::stderr(), "fake_llama_server: accept error: {e}");
                 continue;
             }
         };
-        let mode = mode.clone();
-        let state = state.clone();
         tokio::spawn(async move {
-            let _ = serve_connection(sock, mode, state).await;
+            let _ = serve_connection(client, health).await;
         });
     }
 }
 
-/// Serves one request: `/health`, `/models` (load, unload, state), `/v1/chat/completions` (SSE
-/// or JSON summary), `/slots/0` (save, restore) and `/debug/counters`. With `--api-key-file`, every route but `/health` and
-/// `/debug/counters` answers 401 unless the request bears the key.
-async fn serve_connection(
-    mut sock: TcpStream,
-    mode: Mode,
-    state: Arc<Mutex<ServerState>>,
-) -> io::Result<()> {
-    let (head, body) = read_request(&mut sock).await?;
-    let (method, path) = parse_request_line(&head);
-
-    let public = matches!(path.as_str(), "/health" | "/debug/counters");
-    if !public && !state.lock().await.authorizes(&head) {
-        return write_one_shot(&mut sock, unauthorized_response()).await;
+/// Answer `GET /health` with `health` and close any other connection unanswered.
+async fn serve_connection(mut client: TcpStream, health: &'static [u8]) -> io::Result<()> {
+    let received = read_request_line(&mut client).await?;
+    if received.starts_with(b"GET /health ") {
+        client.write_all(health).await?;
+        client.shutdown().await?;
     }
-    if (method.as_str(), path.as_str()) == ("POST", "/v1/chat/completions") {
-        return serve_chat_completion(&mut sock, &body).await;
-    }
-
-    let resp = match (method.as_str(), path.as_str()) {
-        ("GET", "/health") => health_response(&mode),
-        ("POST", "/models/load") => load_response(&mode, &state, &body).await,
-        ("POST", "/models/unload") => unload_response(&state, &body).await,
-        ("GET", "/models") => list_models_response(&state).await,
-        ("GET", "/debug/counters") => counters_response(&state).await,
-        ("POST", "/slots/0?action=save") => save_slot_response(&state, &body).await,
-        ("POST", "/slots/0?action=restore") => restore_slot_response(&state, &body).await,
-        _ => (
-            "HTTP/1.1 404 Not Found",
-            "text/plain",
-            format!("unknown route: {method} {path}"),
-        ),
-    };
-    write_one_shot(&mut sock, resp).await?;
     Ok(())
 }
 
-async fn write_one_shot(
-    sock: &mut TcpStream,
-    (status_line, content_type, body): (&'static str, &'static str, String),
-) -> io::Result<()> {
-    let resp = format!(
-        "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    sock.write_all(resp.as_bytes()).await?;
-    let _ = sock.shutdown().await;
-    Ok(())
-}
-
-/// Reads a full HTTP request: headers until `\r\n\r\n`, then `Content-Length`
-/// bytes of body if indicated.
-async fn read_request(sock: &mut TcpStream) -> io::Result<(String, String)> {
-    let mut buf = Vec::with_capacity(2048);
-    let mut read_buf = [0u8; 1024];
-    let header_end;
-    loop {
-        let n = sock.read(&mut read_buf).await?;
-        if n == 0 {
-            return Ok((String::from_utf8_lossy(&buf).into_owned(), String::new()));
-        }
-        buf.extend_from_slice(&read_buf[..n]);
-        if let Some(idx) = find_header_end(&buf) {
-            header_end = idx;
+/// Everything read from `client` up to and past its request line.
+async fn read_request_line(client: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut received = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    while !received.windows(2).any(|pair| pair == b"\r\n")
+        && received.len() < MAX_REQUEST_LINE_BYTES
+    {
+        let read = client.read(&mut chunk).await?;
+        if read == 0 {
             break;
         }
-        if buf.len() > MAX_HEADER_BYTES {
-            header_end = buf.len();
-            break;
-        }
+        received.extend_from_slice(&chunk[..read]);
     }
-    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
-    let content_length = parse_content_length(&head);
-    let already_in_buf = buf.len().saturating_sub(header_end + 4);
-    let mut body_bytes: Vec<u8> = buf[(header_end + 4).min(buf.len())..].to_vec();
-
-    if content_length > already_in_buf {
-        let remaining = content_length - already_in_buf;
-        let mut body_tail = vec![0u8; remaining];
-        sock.read_exact(&mut body_tail).await?;
-        body_bytes.extend_from_slice(&body_tail);
-    } else {
-        body_bytes.truncate(content_length);
-    }
-
-    Ok((head, String::from_utf8_lossy(&body_bytes).into_owned()))
-}
-
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n")
-}
-
-fn parse_content_length(head: &str) -> usize {
-    for line in head.lines() {
-        let Some(colon) = line.find(':') else {
-            continue;
-        };
-        let name = line[..colon].trim();
-        if name.eq_ignore_ascii_case("content-length")
-            && let Ok(n) = line[colon + 1..].trim().parse::<usize>()
-        {
-            return n;
-        }
-    }
-    0
-}
-
-fn parse_request_line(head: &str) -> (String, String) {
-    let first = head.lines().next().unwrap_or("");
-    let mut parts = first.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let path = parts.next().unwrap_or("").to_string();
-    (method, path)
-}
-
-fn unauthorized_response() -> (&'static str, &'static str, String) {
-    (
-        "HTTP/1.1 401 Unauthorized",
-        "application/json",
-        json!({ "error": { "message": "Invalid API Key", "code": 401 } }).to_string(),
-    )
-}
-
-fn health_response(mode: &Mode) -> (&'static str, &'static str, String) {
-    if matches!(mode, Mode::NeverReady) {
-        (
-            "HTTP/1.1 503 Service Unavailable",
-            "application/json",
-            "{\"status\":\"loading\"}".to_string(),
-        )
-    } else {
-        (
-            "HTTP/1.1 200 OK",
-            "application/json",
-            "{\"status\":\"ok\"}".to_string(),
-        )
-    }
-}
-
-async fn load_response(
-    mode: &Mode,
-    state: &Arc<Mutex<ServerState>>,
-    body: &str,
-) -> (&'static str, &'static str, String) {
-    if matches!(mode, Mode::LoadFailure) {
-        return (
-            "HTTP/1.1 500 Internal Server Error",
-            "application/json",
-            "{\"error\":\"load failed\"}".to_string(),
-        );
-    }
-    let model = extract_model_field(body);
-    let mut server = state.lock().await;
-    server.load_count += 1;
-    server.loaded_model = Some(model.clone());
-    (
-        "HTTP/1.1 200 OK",
-        "application/json",
-        json!({ "model": model, "status": "loaded" }).to_string(),
-    )
-}
-
-async fn unload_response(
-    state: &Arc<Mutex<ServerState>>,
-    body: &str,
-) -> (&'static str, &'static str, String) {
-    let model = extract_model_field(body);
-    let mut server = state.lock().await;
-    server.unload_count += 1;
-    server.loaded_model = None;
-    (
-        "HTTP/1.1 200 OK",
-        "application/json",
-        json!({ "model": model, "status": "unloaded" }).to_string(),
-    )
-}
-
-async fn list_models_response(
-    state: &Arc<Mutex<ServerState>>,
-) -> (&'static str, &'static str, String) {
-    let server = state.lock().await;
-    let data: Vec<Value> = server
-        .loaded_model
-        .iter()
-        .map(|name| json!({ "id": name, "status": { "value": "loaded", "args": [] } }))
-        .collect();
-    (
-        "HTTP/1.1 200 OK",
-        "application/json",
-        json!({ "data": data }).to_string(),
-    )
-}
-
-async fn counters_response(
-    state: &Arc<Mutex<ServerState>>,
-) -> (&'static str, &'static str, String) {
-    let server = state.lock().await;
-    let body = json!({
-        "pid": std::process::id(),
-        "load_count": server.load_count,
-        "unload_count": server.unload_count,
-        "saved": server.saved,
-        "restored": server.restored,
-        "loaded_model": server.loaded_model,
-    });
-    ("HTTP/1.1 200 OK", "application/json", body.to_string())
-}
-
-/// Write the slot file a save request names, as a router does only when the
-/// body names the model.
-async fn save_slot_response(
-    state: &Arc<Mutex<ServerState>>,
-    body: &str,
-) -> (&'static str, &'static str, String) {
-    let Some((filename, path)) = slot_file(state, body).await else {
-        return bad_slot_request();
-    };
-    std::fs::write(&path, b"slot").expect("write slot file");
-    state.lock().await.saved.push(filename);
-    (
-        "HTTP/1.1 200 OK",
-        "application/json",
-        json!({ "id_slot": 0, "n_saved": 42, "n_written": 4 }).to_string(),
-    )
-}
-
-/// Read back the slot file a restore request names; 400 when it is missing.
-async fn restore_slot_response(
-    state: &Arc<Mutex<ServerState>>,
-    body: &str,
-) -> (&'static str, &'static str, String) {
-    let Some((filename, path)) = slot_file(state, body)
-        .await
-        .filter(|(_, path)| path.exists())
-    else {
-        return bad_slot_request();
-    };
-    state.lock().await.restored.push(filename);
-    let n_read = std::fs::metadata(path).map_or(0, |meta| meta.len());
-    (
-        "HTTP/1.1 200 OK",
-        "application/json",
-        json!({ "id_slot": 0, "n_restored": 42, "n_read": n_read }).to_string(),
-    )
-}
-
-/// The slot file a request names and its path inside `--slot-save-path`, or
-/// `None` when the request lacks a model or filename or no directory was given.
-async fn slot_file(state: &Arc<Mutex<ServerState>>, body: &str) -> Option<(String, PathBuf)> {
-    let request: Value = serde_json::from_str(body).ok()?;
-    request.get("model")?.as_str().filter(|m| !m.is_empty())?;
-    let filename = request.get("filename")?.as_str()?;
-    let path = state.lock().await.slot_dir.as_ref()?.join(filename);
-    Some((filename.to_string(), path))
-}
-
-fn bad_slot_request() -> (&'static str, &'static str, String) {
-    (
-        "HTTP/1.1 400 Bad Request",
-        "application/json",
-        json!({ "error": { "message": "invalid slot request", "code": 400 } }).to_string(),
-    )
-}
-
-/// Answer `POST /v1/chat/completions` with `"hello"`: a chunked SSE stream
-/// when the request asks to stream, else one JSON body.
-async fn serve_chat_completion(sock: &mut TcpStream, body: &str) -> io::Result<()> {
-    let stream = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|request| request.get("stream")?.as_bool())
-        .unwrap_or(false);
-    if stream {
-        let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
-        sock.write_all(headers).await?;
-        write_chunk(
-            sock,
-            b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
-        )
-        .await?;
-        write_chunk(sock, b"data: [DONE]\n\n").await?;
-        write_final_chunk(sock).await?;
-        let _ = sock.shutdown().await;
-        Ok(())
-    } else {
-        let reply = json!({"choices": [{"message": {"role": "assistant", "content": "hello"}}]});
-        write_one_shot(
-            sock,
-            ("HTTP/1.1 200 OK", "application/json", reply.to_string()),
-        )
-        .await
-    }
-}
-
-async fn write_chunk(sock: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
-    let header = format!("{:x}\r\n", payload.len());
-    sock.write_all(header.as_bytes()).await?;
-    sock.write_all(payload).await?;
-    sock.write_all(b"\r\n").await?;
-    Ok(())
-}
-
-async fn write_final_chunk(sock: &mut TcpStream) -> io::Result<()> {
-    sock.write_all(b"0\r\n\r\n").await
-}
-
-/// The `"model": "..."` string from a flat JSON body, found by text search;
-/// empty when absent.
-fn extract_model_field(body: &str) -> String {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|request| request.get("model")?.as_str().map(str::to_string))
-        .unwrap_or_default()
+    Ok(received)
 }
