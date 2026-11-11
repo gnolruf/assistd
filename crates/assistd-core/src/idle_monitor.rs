@@ -3,10 +3,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
+
+use assistd_config::SleepConfig;
+use assistd_ipc::{Component, PresenceState};
+
+use crate::presence::PresenceManager;
+use crate::recovery::spawn_supervised;
 
 const POLL_INTERVAL_SECS: u64 = 10;
 
@@ -18,7 +23,7 @@ enum Action {
 }
 
 /// Spawn the idle monitor. `None` when both thresholds are 0.
-pub(super) fn spawn_monitor(
+pub fn spawn_monitor(
     cfg: &SleepConfig,
     presence: Arc<PresenceManager>,
     shutdown: watch::Receiver<bool>,
@@ -121,12 +126,13 @@ fn decide(state: PresenceState, idle: Duration, cfg: &SleepConfig) -> Action {
 
 #[cfg(test)]
 mod tests {
-    use assistd_core::PresenceState::{Active, Drowsy, Sleeping};
+    use assistd_config::Config;
+    use assistd_ipc::PresenceState::{Active, Drowsy, Sleeping};
 
     use super::*;
 
     fn cfg(drowsy: u64, sleep: u64) -> SleepConfig {
-        let mut c = assistd_core::Config::default().sleep;
+        let mut c = Config::default().sleep;
         c.idle_to_drowsy_mins = drowsy;
         c.idle_to_sleep_mins = sleep;
         c

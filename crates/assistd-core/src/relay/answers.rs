@@ -1,27 +1,14 @@
-//! Where sub-agents' answers are saved, and the startup sweep of those no stored
-//! relay step names any more.
+//! The startup sweep of saved sub-agent answers no stored relay step names any more.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use tracing::{info, warn};
-
-/// `$XDG_DATA_HOME/assistd/relays`, swept of every answer not in `kept`
-/// when the database could say which answers it names.
-pub(super) fn prepare(kept: Option<HashSet<PathBuf>>) -> Result<PathBuf> {
-    let data_dir = dirs::data_dir().context("no user data directory for relay answers")?;
-    let answers_dir = data_dir.join("assistd").join("relays");
-    if let Some(kept) = kept {
-        sweep(&answers_dir, &kept);
-    }
-    Ok(answers_dir)
-}
 
 /// Delete every answer under `answers_dir` that `kept` does not name, then each
 /// session directory left empty. Must run before any relay saves an answer.
-fn sweep(answers_dir: &Path, kept: &HashSet<PathBuf>) {
+pub fn sweep_relay_answers(answers_dir: &Path, kept: &HashSet<PathBuf>) {
     let sessions = match std::fs::read_dir(answers_dir) {
         Ok(sessions) => sessions,
         Err(error) if error.kind() == ErrorKind::NotFound => return,
@@ -91,7 +78,7 @@ mod tests {
             std::fs::write(answer, "answer").unwrap();
         }
 
-        sweep(answers_dir.path(), &HashSet::from([kept.clone()]));
+        sweep_relay_answers(answers_dir.path(), &HashSet::from([kept.clone()]));
 
         let left: Vec<_> = std::fs::read_dir(&live)
             .unwrap()

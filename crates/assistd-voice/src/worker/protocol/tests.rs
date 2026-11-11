@@ -131,3 +131,21 @@ fn unknown_or_malformed_lines_are_errors() {
     }
     assert!(decode::<FromWorker>(r#"{"type":"heard","heard":{"kind":"shout"}}"#).is_err());
 }
+
+#[test]
+fn an_undecodable_line_is_refused_only_when_it_carries_a_call_id() {
+    let refused = |line: &str| {
+        let error = decode::<ToWorker>(line).unwrap_err();
+        refusal(line, &error)
+    };
+    let unknown_request = r#"{"type":"call","id":7,"request":{"capture":{"op":"self_destruct"}}}"#;
+    assert!(matches!(
+        refused(unknown_request),
+        Some(FromWorker::Reply {
+            id: 7,
+            outcome: Outcome::Failed { .. }
+        })
+    ));
+    assert_eq!(refused(r#"{"type":"teleport"}"#), None);
+    assert_eq!(refused("not json"), None);
+}

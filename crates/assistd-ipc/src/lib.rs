@@ -13,11 +13,13 @@ use serde::{Deserialize, Serialize};
 use assistd_utils::readiness::NotReady;
 
 pub mod attachment;
+#[cfg(feature = "client")]
 pub mod client;
 pub mod mcp;
 pub mod task;
 pub mod wakeword;
 pub use attachment::ImageMime;
+#[cfg(feature = "client")]
 pub use client::{DialogConnection, EventStream, IpcClient, IpcClientError};
 pub use mcp::{McpServerState, McpTransportKind, TokenRevocation};
 pub use task::{

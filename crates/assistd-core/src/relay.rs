@@ -33,8 +33,11 @@ use crate::subagent::{RelayProgress, RelayReport, SubAgentError, SubAgentRunner}
 
 use role::{Reach, Role, Roles};
 
+mod answers;
 mod role;
 mod sizing;
+
+pub use answers::sweep_relay_answers;
 
 /// Ends a relay step cancelled because its task run gave the model to the user.
 const RELAY_YIELDED: &str =

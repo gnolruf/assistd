@@ -16,7 +16,8 @@ use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
     AppState, Config, MemoryStack, PresenceManager, RelayDeps, RuntimeState, SessionContext,
-    SubAgentRunner, Subsystems, VisionRevalidator, VoiceManager,
+    SubAgentRunner, Subsystems, VisionRevalidator, VoiceManager, VramLedger, gpu_monitor,
+    idle_monitor,
 };
 use assistd_llm::{
     HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir,
@@ -35,22 +36,17 @@ use search_init::{SearchService, SearchStartup};
 use shutdown::{DaemonShutdown, IntakeTasks, ShutdownStages, spawn_signal_handler};
 use tools_init::ToolDeps;
 use voice_init::VoiceService;
-use vram::VramLedger;
 use warmup::Warmup;
 
+mod background_start;
 mod embed_init;
-mod gpu_monitor;
-mod idle_monitor;
-mod listen_dispatcher;
 mod mcp_init;
 mod memory_init;
-mod relay_answers;
 mod search_init;
 mod shutdown;
 mod tools_init;
 mod voice_init;
 mod voice_probe;
-mod vram;
 mod warmup;
 mod wm_init;
 
@@ -394,7 +390,7 @@ fn build_relay_deps(
             .max_history_tokens
             .get()
             .min(config.model.context_budget()),
-        answers_dir: relay_answers::prepare(kept_answers)?,
+        answers_dir: prepare_relay_answers_dir(kept_answers)?,
         session: session_ctx.session_updates(),
     })
 }
@@ -423,6 +419,17 @@ fn prepare_relay_dir() -> Result<PathBuf> {
             )
         })?;
     Ok(relay_dir)
+}
+
+/// `$XDG_DATA_HOME/assistd/relays`, swept of every answer not in `kept`
+/// when the database could say which answers it names.
+fn prepare_relay_answers_dir(kept: Option<HashSet<PathBuf>>) -> Result<PathBuf> {
+    let data_dir = dirs::data_dir().context("no user data directory for relay answers")?;
+    let answers_dir = data_dir.join("assistd").join("relays");
+    if let Some(kept) = kept {
+        assistd_core::sweep_relay_answers(&answers_dir, &kept);
+    }
+    Ok(answers_dir)
 }
 
 /// The revalidator that keeps the vision gate in step with the model,

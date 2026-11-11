@@ -25,6 +25,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 croner = { workspace = true }
 notify = { workspace = true }
+nvml-wrapper = { workspace = true }
 futures-util = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
@@ -34,10 +35,12 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+procfs = { workspace = true }
 uuid = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+assistd-ipc = { workspace = true, features = ["client"] }
 chrono-tz = { workspace = true }
 assistd-llm = { workspace = true, features = ["test-support"] }
 assistd-tools = { workspace = true, features = ["test-support"] }

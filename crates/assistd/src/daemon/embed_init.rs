@@ -2,7 +2,6 @@
 //! startup, and the embedding server that comes up behind them afterwards.
 
 use std::net::SocketAddr;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,11 +13,14 @@ use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore};
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
-use futures_util::FutureExt;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::info;
+
+use super::background_start::BackgroundStart;
+
+const SUBSYSTEM: &str = "embedding";
 
 /// Longest the worker gets at shutdown to finish the batch it is embedding.
 const EMBED_DRAIN_BUDGET: Duration = Duration::from_secs(10);
@@ -45,7 +47,7 @@ pub(super) struct EmbeddingStages {
 
 /// The background start, joined at shutdown for what it brought up.
 pub(super) struct EmbeddingService {
-    startup: Option<JoinHandle<Option<RunningEmbedding>>>,
+    startup: BackgroundStart<RunningEmbedding>,
 }
 
 /// The server and, when its client probe passed, the worker embedding
@@ -64,16 +66,27 @@ impl EmbeddingStartup {
         model_settled: watch::Receiver<bool>,
         stages: EmbeddingStages,
     ) -> EmbeddingService {
-        let startup = spawn_startup(self, state, model_settled, stages);
-        EmbeddingService {
-            startup: Some(startup),
-        }
+        let panicked_state = Arc::clone(&state);
+        let startup = BackgroundStart::spawn(
+            SUBSYSTEM,
+            async move { start_and_record(self, &state, model_settled, stages).await },
+            move || {
+                panicked_state
+                    .memory
+                    .embedder
+                    .set(Readiness::Unavailable("startup panicked".into()));
+                publish_readiness(&panicked_state);
+            },
+        );
+        EmbeddingService { startup }
     }
 }
 
 impl EmbeddingService {
     pub(super) fn disabled() -> Self {
-        Self { startup: None }
+        Self {
+            startup: BackgroundStart::disabled(SUBSYSTEM),
+        }
     }
 
     /// Let the worker finish its batch while the server is still up, abandoning
@@ -86,20 +99,10 @@ impl EmbeddingService {
         deadline: Instant,
     ) {
         worker_shutdown.send_replace(true);
-        let Some(startup) = self.startup else {
-            return;
-        };
-        if !startup.is_finished() {
+        if !self.startup.is_finished() {
             server_shutdown.send_replace(true);
         }
-        let running = match startup.await {
-            Ok(running) => running,
-            Err(e) => {
-                tracing::error!("embedding startup task failed: {e}");
-                None
-            }
-        };
-        let Some(RunningEmbedding { server, worker }) = running else {
+        let Some(RunningEmbedding { server, worker }) = self.startup.join().await else {
             return;
         };
         if let Some(worker) = worker {
@@ -161,28 +164,6 @@ fn disabled_handles(reason: &str) -> EmbeddingHandles {
         semantic_store: Arc::new(NoSemanticStore),
         embed_wake: Arc::default(),
     }
-}
-
-fn spawn_startup(
-    startup: EmbeddingStartup,
-    state: Arc<AppState>,
-    model_settled: watch::Receiver<bool>,
-    stages: EmbeddingStages,
-) -> JoinHandle<Option<RunningEmbedding>> {
-    tokio::spawn(async move {
-        let started = AssertUnwindSafe(start_and_record(startup, &state, model_settled, stages))
-            .catch_unwind()
-            .await;
-        started.unwrap_or_else(|_| {
-            tracing::error!("embedding: startup panicked; semantic search disabled this run");
-            state
-                .memory
-                .embedder
-                .set(Readiness::Unavailable("startup panicked".into()));
-            publish_readiness(&state);
-            None
-        })
-    })
 }
 
 async fn start_and_record(

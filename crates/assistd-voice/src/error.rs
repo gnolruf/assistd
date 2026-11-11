@@ -23,10 +23,6 @@ pub enum VoiceInputError {
     #[error("capture task panicked: {0}")]
     ConsumerPanic(#[source] tokio::task::JoinError),
 
-    /// The request to the daemon that owns the microphone failed.
-    #[error("daemon IPC error: {0}")]
-    Ipc(#[from] assistd_ipc::IpcClientError),
-
     #[error(transparent)]
     Worker(#[from] VoiceWorkerError),
 }

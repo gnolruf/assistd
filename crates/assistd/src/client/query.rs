@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use assistd_ipc::attachment::{LoadImageError, LoadedImage, MAX_IMAGE_BYTES, load_image};
 use assistd_ipc::{Event, ImageAttachment, Request, StatusKind};
+use assistd_tools::attachment::{LoadImageError, LoadedImage, MAX_IMAGE_BYTES, load_image};
 use clap::Args;
 use uuid::Uuid;
 

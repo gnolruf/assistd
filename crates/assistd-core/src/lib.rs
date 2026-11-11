@@ -37,6 +37,9 @@ use planner::{PlanModeTool, PlanningTools};
 use relay::{RelayPolicy, RelayTool};
 
 pub mod agent;
+pub mod gpu_monitor;
+pub mod idle_monitor;
+pub mod listen_dispatcher;
 pub mod planner;
 pub mod presence;
 pub mod recovery;
@@ -45,12 +48,13 @@ mod scratch;
 pub mod socket;
 pub mod state;
 pub mod subagent;
+mod vram;
 
 pub use agent::Agent;
 pub use recovery::{
     Component, StatusSeverity, drain_join_set, install_panic_hook, spawn_supervised,
 };
-pub use relay::RelayDeps;
+pub use relay::{RelayDeps, sweep_relay_answers};
 
 pub use assistd_config as config;
 pub use assistd_config::{
@@ -77,6 +81,7 @@ pub use state::{
     RuntimeState, SessionContext, Subsystems, TaskRunner, TurnOrigin, branch_replay,
 };
 pub use subagent::{RelayReport, SubAgentError, SubAgentRunner};
+pub use vram::VramLedger;
 
 /// Mode for the spill and scratch directories and any parents created for
 /// them.

@@ -18,7 +18,7 @@ use assistd_utils::text::panic_message;
 
 use super::protocol::{
     CaptureRequest, Failure, FromWorker, Outcome, ProtocolError, Request, SpeechRequest, Startup,
-    ToWorker, decode, encode,
+    ToWorker, decode, encode, refusal,
 };
 use super::stack::{self, ReportedGpu};
 use crate::listen::{ContinuousListener, ListenError};
@@ -357,7 +357,12 @@ async fn read_calls(
         while calls.try_join_next().is_some() {}
         match decode(&line) {
             Ok(message) => worker.receive(message, calls),
-            Err(e) => warn!("voice worker: {e}; line ignored"),
+            Err(e) => {
+                warn!("voice worker: {e}; line ignored");
+                if let Some(reply) = refusal(&line, &e) {
+                    worker.send(reply);
+                }
+            }
         }
     }
     Ok(())

@@ -17,7 +17,7 @@ fn poll(state: PresenceState, contended: bool, room_to_wake: bool) -> Poll {
 
 #[test]
 fn decide_sleeps_on_contention_and_auto_wakes_only_its_own_sleep_once_it_fits() {
-    let mut cfg = assistd_core::Config::default().sleep;
+    let mut cfg = assistd_config::Config::default().sleep;
     cfg.gpu_auto_wake = true;
     let cases = [
         (

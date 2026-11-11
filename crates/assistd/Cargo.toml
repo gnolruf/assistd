@@ -34,7 +34,7 @@ dirs = { workspace = true }
 assistd-config = { workspace = true }
 assistd-core   = { workspace = true }
 assistd-embed  = { workspace = true }
-assistd-ipc    = { workspace = true }
+assistd-ipc    = { workspace = true, features = ["client"] }
 assistd-llm    = { workspace = true }
 assistd-mcp    = { workspace = true }
 assistd-memory = { workspace = true }
@@ -48,9 +48,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 futures-util = { workspace = true }
-nvml-wrapper = { workspace = true }
 parking_lot = { workspace = true }
-procfs = { workspace = true }
 rustix = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
