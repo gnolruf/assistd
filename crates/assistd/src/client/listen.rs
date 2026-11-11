@@ -8,27 +8,9 @@ use uuid::Uuid;
 
 use super::run_one_shot;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ListenAction {
-    Start,
-    Stop,
-    Toggle,
-    State,
-}
-
-impl ListenAction {
-    fn to_request(self, id: String) -> Request {
-        match self {
-            ListenAction::Start => Request::ListenStart { id },
-            ListenAction::Stop => Request::ListenStop { id },
-            ListenAction::Toggle => Request::ListenToggle { id },
-            ListenAction::State => Request::GetListenState { id },
-        }
-    }
-}
-
-pub(crate) async fn run(action: ListenAction) -> Result<()> {
-    let req = action.to_request(Uuid::new_v4().to_string());
+/// Sends the request `with_id` builds and prints the daemon's answer.
+pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
+    let req = with_id(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
         if let Event::ListenState { phase, .. } = event {
             writeln!(io::stdout(), "listen: {}", phase.as_str())?;

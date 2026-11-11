@@ -13,16 +13,17 @@ use assistd_ipc::{
 
 use super::{
     OutputPane, ToolState, elapsed_text, exit_color, split_body, tool_block_label, tool_outcome,
-    tool_output, tool_result_style,
+    tool_output,
 };
+use crate::chat::text::ellipsize;
 use crate::chat::theme::Theme;
 use crate::chat::ui::compact_count;
 use crate::client::terminal_text::{escape_controls, escape_controls_single_line};
 
 /// Latest calls a running sub-agent shows inline; the rest are counted.
 const TAIL_CALLS: usize = 3;
-/// Characters of a task shown on one row.
-const TASK_PREVIEW_CHARS: usize = 120;
+/// Columns of a task shown on one row.
+const TASK_PREVIEW_COLS: usize = 120;
 /// Columns a task keeps in a block row however narrow the pane.
 const MIN_TASK_COLS: usize = 16;
 const HEADER_BULLET: &str = "● ";
@@ -332,7 +333,7 @@ impl RelayStepTrace {
             "{} {}{position} · {}",
             self.icon(),
             self.agent,
-            preview(&self.task)
+            ellipsize(&escape_controls_single_line(&self.task), TASK_PREVIEW_COLS)
         )
     }
 
@@ -356,16 +357,16 @@ impl RelayStepTrace {
     /// The style its label and status are drawn in.
     pub(in crate::chat) fn style(&self, theme: &Theme) -> Style {
         match &self.state {
-            StepState::Pending => pending_style(theme),
-            StepState::Running { .. } => Style::default().fg(theme.status_text),
+            StepState::Pending => theme.meta_style().add_modifier(Modifier::DIM),
+            StepState::Running { .. } => theme.meta_style(),
             StepState::Finished {
                 outcome: RelayStepEnd::Answered,
                 ..
-            } => Style::default().fg(theme.success),
+            } => theme.success_style(),
             StepState::Finished {
                 outcome: RelayStepEnd::Failed { .. },
                 ..
-            } => failed_style(theme),
+            } => theme.error_style(),
         }
     }
 
@@ -406,7 +407,7 @@ impl RelayStepTrace {
             .map(|entry| entry_row(entry, theme))
             .collect();
         if hidden > 0 && shown > 0 {
-            rows.push((format!("+{hidden} more tool uses"), hint_style(theme)));
+            rows.push((format!("+{hidden} more tool uses"), theme.aside_style()));
         }
         if let StepState::Finished {
             outcome: RelayStepEnd::Failed { message },
@@ -415,7 +416,7 @@ impl RelayStepTrace {
         {
             rows.push((
                 format!("✗ {}", escape_controls_single_line(message)),
-                failed_style(theme),
+                theme.error_style(),
             ));
         }
         rows
@@ -490,7 +491,7 @@ pub(super) fn render_relay_block(
                 header_gutter,
                 bullet_style,
                 &header,
-                header_style(theme),
+                theme.title_style(),
                 width,
             );
             push_rows(
@@ -508,7 +509,7 @@ pub(super) fn render_relay_block(
                 header_gutter,
                 bullet_style,
                 &header,
-                header_style(theme),
+                theme.title_style(),
                 width,
             );
             push_plan_steps(out, steps, !collapsed, width, theme);
@@ -519,7 +520,7 @@ pub(super) fn render_relay_block(
     if let Some(report) = report.filter(|_| !collapsed) {
         let rows: Vec<(String, Style)> = split_body(report)
             .into_iter()
-            .map(|line| (line, tool_result_style(theme)))
+            .map(|line| (line, theme.code_style()))
             .collect();
         let indent = Gutter {
             first: RESULT_REST,
@@ -559,7 +560,7 @@ fn push_plan_steps(
         push_gutter_row(
             out,
             gutter,
-            tree_style(theme),
+            theme.rule_style(),
             &row,
             step.style(theme),
             width,
@@ -586,9 +587,9 @@ fn run_summary(
     let stats = stats(run.tool_uses(), run.tokens(), elapsed);
     let hint = if collapsed { " (Tab to expand)" } else { "" };
     match (finished, run.failure()) {
-        (false, _) => (format!("Running… ({stats})"), running_style(theme)),
-        (true, None) => (format!("Done ({stats}){hint}"), done_style(theme)),
-        (true, Some(_)) => (format!("Failed ({stats}){hint}"), failed_style(theme)),
+        (false, _) => (format!("Running… ({stats})"), theme.aside_style()),
+        (true, None) => (format!("Done ({stats}){hint}"), theme.meta_style()),
+        (true, Some(_)) => (format!("Failed ({stats}){hint}"), theme.error_style()),
     }
 }
 
@@ -625,7 +626,7 @@ fn push_rows(
                 rest: gutter.rest,
             }
         };
-        push_gutter_row(out, row_gutter, tree_style(theme), text, *style, width);
+        push_gutter_row(out, row_gutter, theme.rule_style(), text, *style, width);
     }
 }
 
@@ -674,15 +675,15 @@ fn entry_row(entry: &RelayEntry, theme: &Theme) -> (String, Style) {
         RelayEntry::Call {
             command,
             result: None,
-        } => (format!("$ {command} …"), running_style(theme)),
+        } => (format!("$ {command} …"), theme.aside_style()),
         RelayEntry::Call {
             command,
             result: Some((exit_code, _)),
         } if *exit_code != 0 => (
             format!("$ {command}  [exit:{exit_code}]"),
-            failed_style(theme),
+            theme.error_style(),
         ),
-        RelayEntry::Call { command, .. } => (format!("$ {command}"), tool_result_style(theme)),
+        RelayEntry::Call { command, .. } => (format!("$ {command}"), theme.code_style()),
         RelayEntry::Compaction {
             started_at,
             took: None,
@@ -691,13 +692,13 @@ fn entry_row(entry: &RelayEntry, theme: &Theme) -> (String, Style) {
                 "compacting history… ({})",
                 elapsed_text(started_at.elapsed())
             ),
-            running_style(theme),
+            theme.aside_style(),
         ),
         RelayEntry::Compaction {
             took: Some(took), ..
         } => (
             format!("compacted history in {}", elapsed_text(*took)),
-            hint_style(theme),
+            theme.aside_style(),
         ),
     }
 }
@@ -708,75 +709,13 @@ fn fitted_row(lead: &str, task: &str, tail: &str, cols: usize) -> String {
     let room = cols
         .saturating_sub(display_width(lead) + display_width(tail))
         .max(MIN_TASK_COLS);
-    format!("{lead}{}{tail}", cut_to_width(task, room))
-}
-
-/// `task` on one line in at most `cols` columns, ending in `…` when cut.
-fn cut_to_width(task: &str, cols: usize) -> String {
-    let line = escape_controls_single_line(task);
-    if display_width(&line) <= cols {
-        return line.into_owned();
-    }
-    let mut used = 0;
-    let mut cut = String::new();
-    for c in line.chars() {
-        let char_cols = display_width(c.encode_utf8(&mut [0; 4]));
-        if used + char_cols >= cols {
-            break;
-        }
-        used += char_cols;
-        cut.push(c);
-    }
-    cut.push('…');
-    cut
+    format!(
+        "{lead}{}{tail}",
+        ellipsize(&escape_controls_single_line(task), room)
+    )
 }
 
 /// Columns left for text in a `width`-wide pane behind `gutter`.
 fn block_cols(width: u16, gutter: &str) -> usize {
     usize::from(width).saturating_sub(display_width(gutter))
-}
-
-/// `task` on one line, cut to [`TASK_PREVIEW_CHARS`].
-fn preview(task: &str) -> String {
-    let line = escape_controls_single_line(task);
-    match line.char_indices().nth(TASK_PREVIEW_CHARS) {
-        Some((cut, _)) => format!("{}…", &line[..cut]),
-        None => line.into_owned(),
-    }
-}
-
-fn header_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn tree_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.border)
-}
-
-fn running_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.status_text)
-        .add_modifier(Modifier::ITALIC)
-}
-
-fn done_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
-}
-
-fn failed_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.error)
-}
-
-fn pending_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.status_text)
-        .add_modifier(Modifier::DIM)
-}
-
-fn hint_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.status_text)
-        .add_modifier(Modifier::ITALIC)
 }

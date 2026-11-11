@@ -1,45 +1,40 @@
 //! The settings the panel lists, grouped into sections in display order and
 //! sections into tabs. A feature's section heading is the checkbox that enables it.
 
-use assistd_config::{SettingInfo, setting_info};
-
-const COMPOSITOR_TYPES: &[&str] = &["auto", "i3", "sway", "hyprland"];
-const SANDBOX_MODES: &[&str] = &["auto", "bwrap", "none"];
-const VOICE_FAMILIES: &[&str] = &["vits", "kokoro"];
-const TASK_INTERRUPTIONS: &[&str] = &["interrupt", "after_task", "after_queue"];
+use assistd_config::{SettingInfo, SettingKind, setting_info};
 
 pub(crate) const SECTIONS: &[Section] = &[
     section(
         Tab::Model,
         "Model",
         &[
-            setting("model.name", SettingKind::Text),
-            setting("model.context_length", SettingKind::Integer),
-            setting("model.gpu_layers", SettingKind::Integer),
-            setting("model.server_binary", SettingKind::Text),
-            setting("model.host", SettingKind::Text),
-            setting("model.port", SettingKind::Integer),
-            setting("model.ready_timeout_secs", SettingKind::Integer),
-            setting("model.custom_args", SettingKind::Text),
+            setting("model.name"),
+            setting("model.context_length"),
+            setting("model.gpu_layers"),
+            setting("model.server_binary"),
+            setting("model.host"),
+            setting("model.port"),
+            setting("model.ready_timeout_secs"),
+            setting("model.custom_args"),
         ],
     ),
     section(
         Tab::Model,
         "Chat",
         &[
-            setting("chat.system_prompt", SettingKind::Prose),
-            setting("chat.temperature", SettingKind::Decimal),
-            setting("chat.max_response_tokens", SettingKind::Integer),
-            setting("chat.max_history_tokens", SettingKind::Integer),
-            setting("chat.summary_target_tokens", SettingKind::Integer),
-            setting("chat.max_reasoning_tokens", SettingKind::Integer),
-            setting("chat.reasoning_effort", SettingKind::Text),
-            setting("chat.request_timeout_secs", SettingKind::Integer),
-            setting("chat.summary_temperature", SettingKind::Decimal),
-            setting("chat.top_p", SettingKind::Decimal),
-            setting("chat.top_k", SettingKind::Integer),
-            setting("chat.min_p", SettingKind::Decimal),
-            setting("chat.presence_penalty", SettingKind::Decimal),
+            setting("chat.system_prompt"),
+            setting("chat.temperature"),
+            setting("chat.max_response_tokens"),
+            setting("chat.max_history_tokens"),
+            setting("chat.summary_target_tokens"),
+            setting("chat.max_reasoning_tokens"),
+            setting("chat.reasoning_effort"),
+            setting("chat.request_timeout_secs"),
+            setting("chat.summary_temperature"),
+            setting("chat.top_p"),
+            setting("chat.top_k"),
+            setting("chat.min_p"),
+            setting("chat.presence_penalty"),
         ],
     ),
     feature(
@@ -48,13 +43,13 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("voice.enabled"),
         &[],
         &[
-            setting("voice.mic_device", SettingKind::Text),
-            setting("voice.transcription.model", SettingKind::Text),
-            setting("voice.transcription.prefer_gpu", SettingKind::Toggle),
-            setting("voice.transcription.threads", SettingKind::Integer),
-            setting("voice.transcription.vad_enabled", SettingKind::Toggle),
-            setting("voice.transcription.vad_model", SettingKind::Text),
-            setting("voice.transcription.model_cache_dir", SettingKind::Text),
+            setting("voice.mic_device"),
+            setting("voice.transcription.model"),
+            setting("voice.transcription.prefer_gpu"),
+            setting("voice.transcription.threads"),
+            setting("voice.transcription.vad_enabled"),
+            setting("voice.transcription.vad_model"),
+            setting("voice.transcription.model_cache_dir"),
         ],
     ),
     feature(
@@ -63,14 +58,14 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("voice.wakeword.enabled"),
         &["voice.enabled"],
         &[
-            setting("voice.wakeword.phrase", SettingKind::Text),
-            setting("voice.wakeword.start_on_launch", SettingKind::Toggle),
-            setting("voice.wakeword.barge_in", SettingKind::Toggle),
-            setting("voice.wakeword.follow_up_ms", SettingKind::Integer),
-            setting("voice.wakeword.silence_ms", SettingKind::Integer),
-            setting("voice.wakeword.max_utterance_secs", SettingKind::Integer),
-            setting("voice.wakeword.command_timeout_ms", SettingKind::Integer),
-            setting("voice.wakeword.threshold", SettingKind::Decimal),
+            setting("voice.wakeword.phrase"),
+            setting("voice.wakeword.start_on_launch"),
+            setting("voice.wakeword.barge_in"),
+            setting("voice.wakeword.follow_up_ms"),
+            setting("voice.wakeword.silence_ms"),
+            setting("voice.wakeword.max_utterance_secs"),
+            setting("voice.wakeword.command_timeout_ms"),
+            setting("voice.wakeword.threshold"),
         ],
     ),
     feature(
@@ -79,33 +74,23 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("voice.synthesis.enabled"),
         &[],
         &[
-            setting("voice.synthesis.voice", SettingKind::Text),
-            setting(
-                "voice.synthesis.family",
-                SettingKind::Choice(VOICE_FAMILIES),
-            ),
-            setting("voice.synthesis.speaker_id", SettingKind::Integer),
-            setting("voice.synthesis.output_device", SettingKind::Text),
-            setting("voice.synthesis.length_scale", SettingKind::Decimal),
-            setting("voice.synthesis.model_cache_dir", SettingKind::Text),
-            setting("voice.synthesis.max_sentence_chars", SettingKind::Integer),
-            setting("voice.synthesis.partial_flush_ms", SettingKind::Integer),
+            setting("voice.synthesis.voice"),
+            setting("voice.synthesis.family"),
+            setting("voice.synthesis.speaker_id"),
+            setting("voice.synthesis.output_device"),
+            setting("voice.synthesis.length_scale"),
+            setting("voice.synthesis.model_cache_dir"),
+            setting("voice.synthesis.max_sentence_chars"),
+            setting("voice.synthesis.partial_flush_ms"),
         ],
     ),
-    section(
-        Tab::General,
-        "Compositor",
-        &[setting(
-            "compositor.type",
-            SettingKind::Choice(COMPOSITOR_TYPES),
-        )],
-    ),
+    section(Tab::General, "Compositor", &[setting("compositor.type")]),
     section(
         Tab::General,
         "Sleep",
         &[
-            setting("sleep.idle_to_drowsy_mins", SettingKind::Integer),
-            setting("sleep.idle_to_sleep_mins", SettingKind::Integer),
+            setting("sleep.idle_to_drowsy_mins"),
+            setting("sleep.idle_to_sleep_mins"),
         ],
     ),
     feature(
@@ -114,31 +99,25 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("sleep.gpu_monitor_enabled"),
         &[],
         &[
-            setting("sleep.gpu_poll_secs", SettingKind::Integer),
-            setting("sleep.gpu_headroom_mb", SettingKind::Integer),
-            setting("sleep.gpu_auto_wake", SettingKind::Toggle),
+            setting("sleep.gpu_poll_secs"),
+            setting("sleep.gpu_headroom_mb"),
+            setting("sleep.gpu_auto_wake"),
         ],
     ),
     section(
         Tab::Tools,
         "Tools",
         &[
-            setting("tools.bash.sandbox", SettingKind::Choice(SANDBOX_MODES)),
-            setting("tools.bash.timeout_secs", SettingKind::Integer),
-            setting("tools.allow_auto_mode", SettingKind::Toggle),
-            setting(
-                "tools.write.writable_paths",
-                SettingKind::List(ListItem::Text),
-            ),
-            setting(
-                "tools.bash.bwrap_extra_args",
-                SettingKind::List(ListItem::Text),
-            ),
-            setting("tools.scratch.dir", SettingKind::Text),
-            setting("tools.scratch.retention_days", SettingKind::Integer),
-            setting("tools.output.max_lines", SettingKind::Integer),
-            setting("tools.output.max_kb", SettingKind::Integer),
-            setting("tools.output.overflow_dir", SettingKind::Text),
+            setting("tools.bash.sandbox"),
+            setting("tools.bash.timeout_secs"),
+            setting("tools.allow_auto_mode"),
+            setting("tools.write.writable_paths"),
+            setting("tools.bash.bwrap_extra_args"),
+            setting("tools.scratch.dir"),
+            setting("tools.scratch.retention_days"),
+            setting("tools.output.max_lines"),
+            setting("tools.output.max_kb"),
+            setting("tools.output.overflow_dir"),
         ],
     ),
     feature(
@@ -147,16 +126,16 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("embedding.enabled"),
         &[],
         &[
-            setting("embedding.model", SettingKind::Text),
-            setting("embedding.top_k", SettingKind::Integer),
-            setting("embedding.auto_inject", SettingKind::Toggle),
-            setting("embedding.min_similarity", SettingKind::Decimal),
-            setting("embedding.server_binary", SettingKind::Text),
-            setting("embedding.host", SettingKind::Text),
-            setting("embedding.port", SettingKind::Integer),
-            setting("embedding.gpu_layers", SettingKind::Integer),
-            setting("embedding.ready_timeout_secs", SettingKind::Integer),
-            setting("embedding.custom_args", SettingKind::Text),
+            setting("embedding.model"),
+            setting("embedding.top_k"),
+            setting("embedding.auto_inject"),
+            setting("embedding.min_similarity"),
+            setting("embedding.server_binary"),
+            setting("embedding.host"),
+            setting("embedding.port"),
+            setting("embedding.gpu_layers"),
+            setting("embedding.ready_timeout_secs"),
+            setting("embedding.custom_args"),
         ],
     ),
     feature(
@@ -165,11 +144,11 @@ pub(crate) const SECTIONS: &[Section] = &[
         enable("search.enabled"),
         &[],
         &[
-            setting("search.engines", SettingKind::List(ListItem::SearchEngine)),
-            setting("search.command", SettingKind::Text),
-            setting("search.host", SettingKind::Text),
-            setting("search.port", SettingKind::Integer),
-            setting("search.ready_timeout_secs", SettingKind::Integer),
+            setting("search.engines"),
+            setting("search.command"),
+            setting("search.host"),
+            setting("search.port"),
+            setting("search.ready_timeout_secs"),
         ],
     ),
     feature(
@@ -177,106 +156,64 @@ pub(crate) const SECTIONS: &[Section] = &[
         "MCP",
         enable("mcp.enabled"),
         &[],
-        &[setting("mcp.servers", SettingKind::External)],
+        &[setting("mcp.servers")],
     ),
-    section(
-        Tab::General,
-        "Memory",
-        &[setting("memory.enabled", SettingKind::Toggle)],
-    ),
+    section(Tab::General, "Memory", &[setting("memory.enabled")]),
     feature(
         Tab::General,
         "Notifications",
         enable("notifications.enabled"),
         &[],
         &[
-            setting("notifications.auto_hide_ms", SettingKind::Integer),
-            setting("notifications.brief_when_away", SettingKind::Toggle),
+            setting("notifications.auto_hide_ms"),
+            setting("notifications.brief_when_away"),
         ],
     ),
     section(
         Tab::General,
         "Tasks",
         &[
-            setting(
-                "tasks.interruption",
-                SettingKind::Choice(TASK_INTERRUPTIONS),
-            ),
-            setting("tasks.resume_after_idle_secs", SettingKind::Integer),
-            setting("tasks.kept_runs", SettingKind::Integer),
+            setting("tasks.interruption"),
+            setting("tasks.resume_after_idle_secs"),
+            setting("tasks.kept_runs"),
         ],
     ),
     section(
         Tab::General,
         "Tray icons",
         &[
-            setting("notifications.icons.active", SettingKind::Text),
-            setting("notifications.icons.sleeping", SettingKind::Text),
-            setting("notifications.icons.listening", SettingKind::Text),
-            setting("notifications.icons.generating", SettingKind::Text),
-            setting("notifications.icons.disconnected", SettingKind::Text),
+            setting("notifications.icons.active"),
+            setting("notifications.icons.sleeping"),
+            setting("notifications.icons.listening"),
+            setting("notifications.icons.generating"),
+            setting("notifications.icons.disconnected"),
         ],
     ),
-    section(
-        Tab::Theme,
-        "Themes",
-        &[setting("chat.themes", SettingKind::Themes)],
-    ),
+    section(Tab::Theme, "Themes", &[setting("chat.themes")]),
     section(
         Tab::Theme,
         "Colors",
         &[
-            setting("chat.theme.accent", SettingKind::Color),
-            setting("chat.theme.user_message", SettingKind::Color),
-            setting("chat.theme.assistant_text", SettingKind::Color),
-            setting("chat.theme.status_text", SettingKind::Color),
-            setting("chat.theme.code", SettingKind::Color),
-            setting("chat.theme.border", SettingKind::Color),
-            setting("chat.theme.success", SettingKind::Color),
-            setting("chat.theme.error", SettingKind::Color),
-            setting("chat.theme.warning", SettingKind::Color),
-            setting("chat.theme.link", SettingKind::Color),
-            setting("chat.theme.selection", SettingKind::Color),
+            setting("chat.theme.accent"),
+            setting("chat.theme.user_message"),
+            setting("chat.theme.assistant_text"),
+            setting("chat.theme.status_text"),
+            setting("chat.theme.code"),
+            setting("chat.theme.border"),
+            setting("chat.theme.success"),
+            setting("chat.theme.error"),
+            setting("chat.theme.warning"),
+            setting("chat.theme.link"),
+            setting("chat.theme.selection"),
         ],
     ),
 ];
 
-/// How a setting is edited and shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SettingKind {
-    Toggle,
-    Integer,
-    Decimal,
-    Text,
-    /// Free text long enough to need a wrapped, multi-line box.
-    Prose,
-    /// One of a fixed set of strings, cycled in place.
-    Choice(&'static [&'static str]),
-    /// A TOML array, edited entry by entry.
-    List(ListItem),
-    /// Too structured to edit in a line; shown as an entry count.
-    External,
-    /// A theme color, picked in the color picker and shown in itself.
-    Color,
-    /// The saved themes; opens the list that loads, saves and deletes themes.
-    Themes,
-}
-
-/// What one entry of a [`SettingKind::List`] holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ListItem {
-    Text,
-    /// A SearXNG engine name, with the file holding its API key when it
-    /// needs one.
-    SearchEngine,
-}
-
-/// One config key, by its dotted path. Its label, description and whether
-/// it is advanced are declared on the config field.
+/// One config key, by its dotted path. Its label, description, kind and
+/// whether it is advanced are declared on the config field.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Setting {
     pub key: &'static str,
-    pub kind: SettingKind,
 }
 
 impl Setting {
@@ -294,6 +231,12 @@ impl Setting {
     /// Listed only while its section shows advanced settings.
     pub(crate) fn advanced(&self) -> bool {
         self.info().is_some_and(|info| info.advanced)
+    }
+
+    /// How the key is edited and shown; `External` if no config field has
+    /// its path.
+    pub(crate) fn kind(&self) -> SettingKind {
+        self.info().map_or(SettingKind::External, |info| info.kind)
     }
 
     fn info(&self) -> Option<&'static SettingInfo> {
@@ -379,11 +322,11 @@ const fn feature(
 
 /// A section's checkbox; its heading shows the title in place of a label.
 const fn enable(key: &'static str) -> Setting {
-    setting(key, SettingKind::Toggle)
+    setting(key)
 }
 
-const fn setting(key: &'static str, kind: SettingKind) -> Setting {
-    Setting { key, kind }
+const fn setting(key: &'static str) -> Setting {
+    Setting { key }
 }
 
 #[cfg(test)]

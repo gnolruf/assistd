@@ -60,9 +60,9 @@ fn theme_role(key: &str) -> &str {
 fn title_line(width: u16, theme: &Theme) -> Line<'static> {
     let rest = usize::from(width).saturating_sub(TITLE.len() + 3);
     Line::from(vec![
-        Span::styled(format!("{RULE}{RULE} "), Style::default().fg(theme.border)),
-        Span::styled(TITLE, Style::default().fg(theme.status_text)),
-        Span::styled(RULE.repeat(rest), Style::default().fg(theme.border)),
+        Span::styled(format!("{RULE}{RULE} "), theme.rule_style()),
+        Span::styled(TITLE, theme.meta_style()),
+        Span::styled(RULE.repeat(rest), theme.rule_style()),
     ])
 }
 
@@ -156,8 +156,8 @@ fn push_passed_tool(pane: &mut OutputPane) {
 /// Interface rows outside the transcript drawn in `role`'s color; empty
 /// when none are.
 fn sample_chrome(role: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let accent = Style::default().fg(theme.accent);
-    let muted = Style::default().fg(theme.status_text);
+    let accent = theme.accent_style();
+    let muted = theme.meta_style();
     match role {
         "accent" => vec![
             Line::styled("manual mode on (shift+tab)", accent),
@@ -214,17 +214,14 @@ fn popup_entry(command: &str, hint: &str, style: Style, hint_style: Style) -> Li
 
 fn relay_row(branch: &str, text: &str, style: Style, theme: &Theme) -> Line<'static> {
     Line::from(vec![
-        Span::styled(branch.to_string(), Style::default().fg(theme.border)),
+        Span::styled(branch.to_string(), theme.rule_style()),
         Span::styled(text.to_string(), style),
     ])
 }
 
 /// The input between its rules, a relay's tree and the status line's separators.
 fn border_rows(width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let rule = Line::styled(
-        RULE.repeat(usize::from(width)),
-        Style::default().fg(theme.border),
-    );
+    let rule = Line::styled(RULE.repeat(usize::from(width)), theme.rule_style());
     vec![
         rule.clone(),
         Line::raw("> type a message"),
@@ -250,7 +247,7 @@ fn outcome_rows(color: Color, step: &str, others: &[&str], theme: &Theme) -> Vec
 }
 
 fn warning_rows(theme: &Theme) -> Vec<Line<'static>> {
-    let warning = Style::default().fg(theme.warning);
+    let warning = theme.warning_style();
     vec![
         Line::styled(
             "Confirm bash: rm -rf build/",
@@ -262,10 +259,10 @@ fn warning_rows(theme: &Theme) -> Vec<Line<'static>> {
 }
 
 fn status_row(theme: &Theme) -> Line<'static> {
-    let status = Style::default().fg(theme.status_text);
+    let status = theme.meta_style();
     Line::from(vec![
         Span::styled("Listening…", status),
-        Span::styled(" · ", Style::default().fg(theme.border)),
+        Span::styled(" · ", theme.rule_style()),
         Span::styled("Esc to interrupt", status),
     ])
 }

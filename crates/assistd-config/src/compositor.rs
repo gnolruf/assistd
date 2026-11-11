@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{DescribeSettings, describe_fields};
+use crate::settings::{DescribeSettings, choice_setting, describe_fields};
 
 /// The `compositor.type` values. `Auto` defers to [`detect_from_env`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -13,6 +13,13 @@ pub enum CompositorType {
     Sway,
     Hyprland,
 }
+
+choice_setting!(CompositorType {
+    Auto => "auto",
+    I3 => "i3",
+    Sway => "sway",
+    Hyprland => "hyprland",
+});
 
 /// A supported compositor, once `Auto` is resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

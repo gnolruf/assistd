@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::commands::runs_offline;
 use super::{App, WireStream};
 use crate::chat::input::{InputAction, paste_as_keys};
+use crate::chat::selection::Selection;
 
 const MOUSE_WHEEL_STEP: u16 = 3;
 
@@ -103,12 +104,11 @@ impl App {
                 self.open_tasks_panel();
             }
             KeyCode::Up if slash_active => {
-                self.slash_selected = self.slash_selected.saturating_sub(1);
+                self.slash_selected.previous();
             }
             KeyCode::Down if slash_active => {
-                if self.slash_selected + 1 < self.slash_suggestions().len() {
-                    self.slash_selected += 1;
-                }
+                let count = self.slash_suggestions().len();
+                self.slash_selected.next(count);
             }
             KeyCode::Esc if slash_active => self.slash_dismissed = true,
             KeyCode::Esc if self.generating() => self.interrupt_turn(),
@@ -190,12 +190,12 @@ impl App {
     }
 
     pub(crate) fn slash_selected(&self) -> usize {
-        self.slash_selected
+        self.slash_selected.index()
     }
 
     fn accept_slash_selection(&mut self) {
         let suggestions = self.slash_suggestions();
-        if let Some((cmd, _)) = suggestions.get(self.slash_selected).copied() {
+        if let Some((cmd, _)) = suggestions.get(self.slash_selected.index()).copied() {
             self.input.set_buffer(cmd.to_string());
         }
     }
@@ -203,10 +203,10 @@ impl App {
     fn refresh_slash_state(&mut self) {
         if !self.input.buffer().starts_with('/') {
             self.slash_dismissed = false;
-            self.slash_selected = 0;
+            self.slash_selected = Selection::default();
             return;
         }
         let count = self.slash_suggestions().len();
-        self.slash_selected = self.slash_selected.min(count.saturating_sub(1));
+        self.slash_selected.clamp(count);
     }
 }

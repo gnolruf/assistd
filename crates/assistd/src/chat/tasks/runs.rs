@@ -3,6 +3,8 @@
 use assistd_ipc::{TaskId, TaskRunRecord};
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::chat::selection::Selection;
+
 /// The branch a task run's session holds its turn on.
 const TASK_RUN_BRANCH: &str = "main";
 
@@ -24,7 +26,7 @@ pub(in crate::chat) struct RunsView {
     /// The request id of the listing in flight, and its rows so far.
     listing: Option<(String, Vec<TaskRunRecord>)>,
     loaded: bool,
-    selected: usize,
+    selected: Selection,
 }
 
 impl RunsView {
@@ -42,7 +44,7 @@ impl RunsView {
     }
 
     pub(in crate::chat) fn selected(&self) -> usize {
-        self.selected
+        self.selected.index()
     }
 
     /// Show task `task`'s runs once the listing `request` arrives, clearing them first
@@ -51,7 +53,7 @@ impl RunsView {
         if self.task != Some(task) {
             self.runs.clear();
             self.loaded = false;
-            self.selected = 0;
+            self.selected = Selection::default();
         }
         self.task = Some(task);
         self.listing = Some((request, Vec::new()));
@@ -76,7 +78,7 @@ impl RunsView {
         if let Some((_, rows)) = self.listing.take_if(|(current, _)| current == request) {
             self.runs = rows;
             self.loaded = true;
-            self.selected = self.selected.min(self.runs.len().saturating_sub(1));
+            self.selected.clamp(self.runs.len());
         }
     }
 
@@ -96,16 +98,14 @@ impl RunsView {
     pub(super) fn on_key(&mut self, ev: KeyEvent) -> RunsAction {
         match ev.code {
             KeyCode::Esc => return RunsAction::Close,
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.runs.len().saturating_sub(1));
-            }
+            KeyCode::Up => self.selected.previous(),
+            KeyCode::Down => self.selected.next(self.runs.len()),
             KeyCode::Left => return RunsAction::ShowTask(-1),
             KeyCode::Right => return RunsAction::ShowTask(1),
             KeyCode::Enter => {
                 if let Some(session) = self
                     .runs
-                    .get(self.selected)
+                    .get(self.selected.index())
                     .and_then(|run| run.session_id.as_deref())
                 {
                     return RunsAction::Resume(format!("{session}/{TASK_RUN_BRANCH}"));

@@ -8,10 +8,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use super::super::super::selection::list_window;
 use super::super::super::tasks::QueueView;
 use super::super::super::theme::Theme;
-use super::super::picker_scroll_start;
-use super::{DETAIL_INDENT, NO_POINTER, POINTER, local, meta, pointer_style};
+use super::{DETAIL_INDENT, NO_POINTER, POINTER, local};
 use crate::client::terminal_text::escape_controls_single_line;
 
 /// Rows each queue item takes: what it is, then its state.
@@ -21,7 +21,7 @@ const RESUMES_FORMAT: &str = "%H:%M:%S";
 /// The queue's state line, then its items.
 pub(super) fn render_queue(frame: &mut Frame<'_>, area: Rect, queue: &QueueView, theme: &Theme) {
     let Some(snapshot) = queue.snapshot() else {
-        let waiting = Span::styled("Waiting for the daemon's queue…", meta(theme));
+        let waiting = Span::styled("Waiting for the daemon's queue…", theme.meta_style());
         frame.render_widget(Paragraph::new(waiting), area);
         return;
     };
@@ -33,19 +33,14 @@ pub(super) fn render_queue(frame: &mut Frame<'_>, area: Rect, queue: &QueueView,
     .areas(area);
     frame.render_widget(Paragraph::new(status_line(snapshot, theme)), status_area);
     if snapshot.items.is_empty() {
-        let empty = Line::styled(format!("{NO_POINTER}Nothing queued."), meta(theme));
+        let empty = Line::styled(format!("{NO_POINTER}Nothing queued."), theme.meta_style());
         frame.render_widget(Paragraph::new(empty), items_area);
         return;
     }
     let visible = (usize::from(items_area.height) / ITEM_ROWS).max(1);
-    let start = picker_scroll_start(queue.selected(), snapshot.items.len(), visible);
-    let lines: Vec<Line<'static>> = snapshot
-        .items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .flat_map(|(index, item)| item_rows(item, index == queue.selected(), theme))
+    let selected = queue.selected();
+    let lines: Vec<Line<'static>> = list_window(selected, snapshot.items.len(), visible, 0)
+        .flat_map(|index| item_rows(&snapshot.items[index], index == selected, theme))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), items_area);
 }
@@ -53,7 +48,7 @@ pub(super) fn render_queue(frame: &mut Frame<'_>, area: Rect, queue: &QueueView,
 /// Whether the queue starts runs, why not, and what holds each lane.
 fn status_line(snapshot: &TaskQueueSnapshot, theme: &Theme) -> Line<'static> {
     let state = match (&snapshot.held, snapshot.paused) {
-        (_, true) => Span::styled("paused", Style::default().fg(theme.warning)),
+        (_, true) => Span::styled("paused", theme.warning_style()),
         (Some(hold), false) => {
             let until = hold.resumes_at.map_or_else(
                 || " while you talk".to_string(),
@@ -61,10 +56,10 @@ fn status_line(snapshot: &TaskQueueSnapshot, theme: &Theme) -> Line<'static> {
             );
             Span::styled(
                 format!("held for your conversation{until}"),
-                Style::default().fg(theme.warning),
+                theme.warning_style(),
             )
         }
-        (None, false) => Span::styled("running", Style::default().fg(theme.accent)),
+        (None, false) => Span::styled("running", theme.accent_style()),
     };
     let lanes = snapshot
         .lanes
@@ -79,13 +74,13 @@ fn status_line(snapshot: &TaskQueueSnapshot, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::raw("Queue "),
         state,
-        Span::styled(format!(" · lanes: {lanes}"), meta(theme)),
+        Span::styled(format!(" · lanes: {lanes}"), theme.meta_style()),
     ])
 }
 
 fn item_rows(item: &QueueItem, selected: bool, theme: &Theme) -> [Line<'static>; ITEM_ROWS] {
     let (pointer, style) = if selected {
-        (POINTER, pointer_style(theme))
+        (POINTER, theme.title_style())
     } else {
         (NO_POINTER, Style::default())
     };
@@ -109,16 +104,16 @@ fn item_rows(item: &QueueItem, selected: bool, theme: &Theme) -> [Line<'static>;
                 None => queued_state(state),
             };
             let detail_style = if prompt.is_some() {
-                Style::default().fg(theme.warning)
+                theme.warning_style()
             } else {
-                meta(theme)
+                theme.meta_style()
             };
             (title, detail, detail_style)
         }
         QueueItem::UserTurn { preview, .. } => (
             format!("you: {}", escape_controls_single_line(preview)),
             "waiting its turn".to_string(),
-            meta(theme),
+            theme.meta_style(),
         ),
     };
     [

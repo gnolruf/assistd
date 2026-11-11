@@ -4,12 +4,12 @@
 use std::ops::ControlFlow;
 
 use assistd_config::theme::is_theme_name;
-use assistd_config::{ConfigDocument, ConfigError, ThemeColor, ThemeConfig};
+use assistd_config::{ConfigDocument, ConfigError, SettingKind, ThemeColor, ThemeConfig};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::super::text_editor::{EditAction, EditorShape, TextEditor};
 use super::super::theme::Theme;
-use super::super::ui::{locate_cursor, wrap_input};
-use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
+use super::catalog::{SECTIONS, Setting, Tab};
 use super::color_picker::{ColorPicker, PickerAction};
 use super::list_editor::{ListAction, ListEditor};
 use super::theme_list::{ThemeList, ThemeListAction};
@@ -261,7 +261,7 @@ impl SettingsPanel {
                 self.feedback = None;
             }
             EditAction::Apply => {
-                let text = editor.text.clone();
+                let text = editor.text().to_string();
                 self.apply_text(&text);
             }
         }
@@ -552,7 +552,7 @@ impl SettingsPanel {
                 None => return,
             },
         };
-        match setting.kind {
+        match setting.kind() {
             SettingKind::Toggle | SettingKind::Choice(_) => self.cycle_selected(true),
             SettingKind::External => {
                 self.feedback = Some(Feedback::Note(format!(
@@ -583,9 +583,9 @@ impl SettingsPanel {
             | SettingKind::Prose => {
                 let text = self
                     .current_value(setting.key)
-                    .map(|value| editable_text(setting.kind, value))
+                    .map(|value| editable_text(setting.kind(), value))
                     .unwrap_or_default();
-                let shape = if setting.kind == SettingKind::Prose {
+                let shape = if setting.kind() == SettingKind::Prose {
                     EditorShape::Box { wrap_width: 0 }
                 } else {
                     EditorShape::Line
@@ -603,7 +603,7 @@ impl SettingsPanel {
             return;
         };
         let current = self.current_value(setting.key);
-        let next = match setting.kind {
+        let next = match setting.kind() {
             SettingKind::Toggle => {
                 toml::Value::Boolean(!current.and_then(toml::Value::as_bool).unwrap_or(false))
             }
@@ -627,7 +627,7 @@ impl SettingsPanel {
         let Some(setting) = self.selected_setting() else {
             return;
         };
-        match parse_input(setting.kind, text) {
+        match parse_input(setting.kind(), text) {
             Ok(value) => self.apply(setting, &value),
             Err(reason) => self.feedback = Some(Feedback::Error(reason)),
         }
@@ -706,143 +706,6 @@ impl SettingsPanel {
         if let PanelMode::Edit(editor) = &mut self.mode {
             editor.set_wrap_width(width);
         }
-    }
-}
-
-/// What a [`TextEditor`] key asks of its owner.
-pub(crate) enum EditAction {
-    Pending,
-    Apply,
-    Cancel,
-}
-
-/// How a [`TextEditor`] is laid out.
-#[derive(Clone, Copy)]
-pub(crate) enum EditorShape {
-    /// One row, scrolled sideways to keep the cursor in view.
-    Line,
-    /// A wrapped box that takes line breaks.
-    Box {
-        /// Columns the box last wrapped at; 0 before it is first drawn.
-        wrap_width: u16,
-    },
-}
-
-/// A text field with a cursor.
-pub(crate) struct TextEditor {
-    text: String,
-    /// Byte offset, always on a char boundary.
-    cursor: usize,
-    shape: EditorShape,
-}
-
-impl TextEditor {
-    /// Places the cursor at the end of `text`.
-    pub(crate) fn new(text: String, shape: EditorShape) -> Self {
-        let cursor = text.len();
-        Self {
-            text,
-            cursor,
-            shape,
-        }
-    }
-
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub(crate) fn is_box(&self) -> bool {
-        matches!(self.shape, EditorShape::Box { .. })
-    }
-
-    /// Records the columns a box wraps at, so ↑/↓ move by the rows on screen; a line
-    /// ignores it.
-    pub(crate) fn set_wrap_width(&mut self, width: u16) {
-        if let EditorShape::Box { wrap_width } = &mut self.shape {
-            *wrap_width = width;
-        }
-    }
-
-    /// Characters before the cursor.
-    pub(crate) fn cursor_chars(&self) -> usize {
-        self.text[..self.cursor].chars().count()
-    }
-
-    pub(crate) fn on_key(&mut self, ev: KeyEvent) -> EditAction {
-        let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = ev.modifiers.contains(KeyModifiers::ALT);
-        let line_break = ev
-            .modifiers
-            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
-        match (ev.code, self.shape) {
-            (KeyCode::Enter, EditorShape::Box { .. }) if line_break => self.insert('\n'),
-            (KeyCode::Up, EditorShape::Box { wrap_width }) => self.move_row(wrap_width, false),
-            (KeyCode::Down, EditorShape::Box { wrap_width }) => self.move_row(wrap_width, true),
-            (KeyCode::Enter, _) => return EditAction::Apply,
-            (KeyCode::Esc, _) => return EditAction::Cancel,
-            (KeyCode::Char('u'), _) if ctrl => {
-                self.text.clear();
-                self.cursor = 0;
-            }
-            (KeyCode::Char(c), _) if !ctrl && !alt => self.insert(c),
-            (KeyCode::Backspace, _) => {
-                if let Some(previous) = self.previous_boundary() {
-                    self.text.drain(previous..self.cursor);
-                    self.cursor = previous;
-                }
-            }
-            (KeyCode::Delete, _) => {
-                if let Some(next) = self.next_boundary() {
-                    self.text.drain(self.cursor..next);
-                }
-            }
-            (KeyCode::Left, _) => self.cursor = self.previous_boundary().unwrap_or(self.cursor),
-            (KeyCode::Right, _) => self.cursor = self.next_boundary().unwrap_or(self.cursor),
-            (KeyCode::Home, _) => self.cursor = 0,
-            (KeyCode::End, _) => self.cursor = self.text.len(),
-            _ => {}
-        }
-        EditAction::Pending
-    }
-
-    fn insert(&mut self, c: char) {
-        self.text.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-    }
-
-    /// Moves to the same column of the wrapped row above or below, or to
-    /// that row's end when it is shorter.
-    fn move_row(&mut self, wrap_width: u16, down: bool) {
-        let chars: Vec<char> = self.text.chars().collect();
-        let rows = wrap_input(&chars, 0, wrap_width);
-        let (row, column) = locate_cursor(&rows, self.cursor_chars());
-        let target = if down {
-            row.checked_add(1)
-        } else {
-            row.checked_sub(1)
-        };
-        if let Some(&(start, end)) = target.and_then(|target| rows.get(target)) {
-            let char_offset = start + column.min(end - start);
-            self.cursor = self
-                .text
-                .char_indices()
-                .nth(char_offset)
-                .map_or(self.text.len(), |(index, _)| index);
-        }
-    }
-
-    fn previous_boundary(&self) -> Option<usize> {
-        self.text[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map(|(index, _)| index)
-    }
-
-    fn next_boundary(&self) -> Option<usize> {
-        self.text[self.cursor..]
-            .chars()
-            .next()
-            .map(|c| self.cursor + c.len_utf8())
     }
 }
 

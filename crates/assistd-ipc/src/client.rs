@@ -1,5 +1,6 @@
-//! Unix-socket client for the IPC protocol: [`IpcClient::one_shot`] for request/stream
-//! calls, [`IpcClient::open_dialog`] when the client must answer mid-stream prompts.
+//! Unix-socket client for the IPC protocol: [`IpcClient::request`] to run one request to
+//! its end, [`IpcClient::one_shot`] to read its events as a stream, and
+//! [`IpcClient::open_dialog`] when the client must answer mid-stream prompts.
 
 use std::fmt;
 use std::io;
@@ -32,6 +33,9 @@ pub enum IpcClientError {
     /// Daemon closed the connection before emitting `Done` or `Error`.
     #[error("daemon closed connection mid-stream")]
     DaemonClosed,
+    /// The daemon ended the request with [`Event::Error`]; holds its message.
+    #[error("daemon error: {0}")]
+    Daemon(String),
 }
 
 /// Result of an IPC client operation.
@@ -71,6 +75,38 @@ impl IpcClient {
             write.shutdown().await?;
         }
         Ok(EventStream::new(read))
+    }
+
+    /// Send one request and hand every event, the terminal one included, to `on_event`
+    /// until `Done`. Fails with [`IpcClientError::Daemon`] on `Error`, with
+    /// [`IpcClientError::DaemonClosed`] when the stream closes first, and with the first
+    /// error `on_event` returns.
+    pub async fn request<E>(
+        &self,
+        req: Request,
+        mut on_event: impl FnMut(&Event) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E>
+    where
+        E: From<IpcClientError>,
+    {
+        let mut stream = self.one_shot(req).await?;
+        loop {
+            let event = stream
+                .next_event()
+                .await?
+                .ok_or(IpcClientError::DaemonClosed)?;
+            on_event(&event)?;
+            match event {
+                Event::Done { .. } => return Ok(()),
+                Event::Error { message, .. } => return Err(IpcClientError::Daemon(message).into()),
+                _ => {}
+            }
+        }
+    }
+
+    /// [`request`](Self::request) for a caller with no use for the events.
+    pub async fn send(&self, req: Request) -> Result<()> {
+        self.request(req, |_| Ok(())).await
     }
 
     /// Send `initial` but keep the write half open for further requests, such as a
@@ -290,6 +326,43 @@ mod tests {
         let err = stream.collect().await.expect_err("expected DaemonClosed");
         assert!(matches!(err, IpcClientError::DaemonClosed), "{err:?}");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_ends_on_done_error_or_early_close() {
+        let delta = Event::Delta {
+            id: "r".into(),
+            text: "hi".into(),
+        };
+        let done = Event::Done { id: "r".into() };
+        let error = Event::Error {
+            id: "r".into(),
+            message: "boom".into(),
+        };
+        let run = async |events: &[Event]| {
+            let (_dir, path, server) = mock_server(events);
+            let mut seen = 0;
+            let outcome = IpcClient::with_path(path)
+                .request(Request::query("r", "x"), |_| {
+                    seen += 1;
+                    Ok::<(), IpcClientError>(())
+                })
+                .await;
+            server.await.unwrap();
+            (seen, outcome)
+        };
+        assert!(matches!(run(&[delta.clone(), done]).await, (2, Ok(()))));
+        let (seen, outcome) = run(&[delta.clone(), error]).await;
+        assert!(
+            matches!(&outcome, Err(IpcClientError::Daemon(message)) if message == "boom"),
+            "{outcome:?}"
+        );
+        assert_eq!(seen, 2);
+        let (_, outcome) = run(&[delta]).await;
+        assert!(
+            matches!(outcome, Err(IpcClientError::DaemonClosed)),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use assistd_ipc::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{Outbox, PendingOp};
-use crate::chat::settings::{EditAction, EditorShape, TextEditor};
+use crate::chat::text_editor::{EditAction, EditorShape, TextEditor};
 
 /// Animation ticks each step of the refining status's dots lasts.
 const TICKS_PER_DOT: usize = 3;

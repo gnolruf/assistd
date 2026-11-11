@@ -9,8 +9,9 @@ use ratatui::widgets::Paragraph;
 
 use super::super::app::{AgentPanel, App};
 use super::super::output::RelayStepTrace;
+use super::super::selection::list_window;
 use super::super::theme::Theme;
-use super::{picker_scroll_start, render_rule, render_transcript};
+use super::{render_rule, render_transcript};
 
 /// Rows each listed sub-agent takes: its label and its status.
 const AGENT_ENTRY_ROWS: usize = 2;
@@ -58,17 +59,12 @@ fn render_agent_list(
     .areas(area);
     let title = Line::from(vec![
         Span::styled("Sub-agents", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" ({})", agents.len()), hint_style(theme)),
+        Span::styled(format!(" ({})", agents.len()), theme.meta_style()),
     ]);
     frame.render_widget(Paragraph::new(title), title_area);
     let visible = (usize::from(list_area.height) / AGENT_ENTRY_ROWS).max(1);
-    let start = picker_scroll_start(selected, agents.len(), visible);
-    let lines: Vec<Line<'static>> = agents
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .flat_map(|(index, agent)| agent_entry_rows(agent, index == selected, theme))
+    let lines: Vec<Line<'static>> = list_window(selected, agents.len(), visible, 0)
+        .flat_map(|index| agent_entry_rows(agents[index], index == selected, theme))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
 }
@@ -83,7 +79,7 @@ fn agent_entry_rows(agent: &RelayStepTrace, selected: bool, theme: &Theme) -> [L
         Line::from(Span::styled(format!("{pointer}{}", agent.label()), style)),
         Line::from(Span::styled(
             format!("{STATUS_INDENT}{}", agent.status()),
-            hint_style(theme),
+            theme.meta_style(),
         )),
     ]
 }
@@ -121,8 +117,4 @@ fn render_agent_transcript(
     if transcript_area.width > 0 && transcript_area.height > 0 {
         render_transcript(frame, transcript_area, transcript, theme);
     }
-}
-
-fn hint_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
 }

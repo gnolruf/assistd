@@ -9,7 +9,7 @@ use assistd_ipc::{
 use chrono::{Local, NaiveDateTime, TimeDelta, Timelike};
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::chat::settings::{EditorShape, TextEditor};
+use crate::chat::text_editor::{EditorShape, TextEditor};
 
 /// How an `At` time is typed and shown.
 pub(in crate::chat) const AT_FORMAT: &str = "%Y-%m-%d %H:%M";

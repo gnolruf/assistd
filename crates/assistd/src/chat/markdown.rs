@@ -6,6 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use textwrap::core::display_width;
 
+use super::text::char_width;
 use super::theme::Theme;
 
 const BULLET: &str = "• ";
@@ -87,7 +88,7 @@ impl TableBuilder {
                 .map(|&w| "─".repeat(w))
                 .collect::<Vec<_>>()
                 .join(COLUMN_RULE_JOINT),
-            rule_style(theme),
+            theme.rule_style(),
         )];
         let header = (!self.header.is_empty())
             .then_some((&self.header, Style::default().add_modifier(Modifier::BOLD)));
@@ -191,7 +192,7 @@ impl<'a> Renderer<'a> {
             Tag::BlockQuote(_) => {
                 self.flush_inline();
                 self.prefixes
-                    .push(Prefix::bar(QUOTE_BAR, quote_bar_style(self.theme)));
+                    .push(Prefix::bar(QUOTE_BAR, self.theme.meta_style()));
                 self.push_style(quote_text_style());
             }
             Tag::CodeBlock(_) => {
@@ -310,7 +311,7 @@ impl<'a> Renderer<'a> {
             Some(None) | None => BULLET.to_string(),
         };
         self.prefixes
-            .push(Prefix::marker(marker, list_marker_style(self.theme)));
+            .push(Prefix::marker(marker, self.theme.accent_style()));
     }
 
     fn finish_link(&mut self) {
@@ -326,7 +327,7 @@ impl<'a> Renderer<'a> {
             .map(|span| span.content.as_ref())
             .collect();
         if label != url {
-            self.push_inline(format!(" ({url})"), link_url_style(self.theme));
+            self.push_inline(format!(" ({url})"), self.theme.meta_style());
         }
     }
 
@@ -342,7 +343,7 @@ impl<'a> Renderer<'a> {
             }
             let word = Word {
                 width: display_width(line),
-                fragments: vec![Span::styled(line.to_string(), code_block_style(self.theme))],
+                fragments: vec![Span::styled(line.to_string(), self.theme.code_style())],
             };
             for piece in break_long_word(word, width) {
                 self.push_line(piece.fragments);
@@ -364,7 +365,7 @@ impl<'a> Renderer<'a> {
     fn push_rule(&mut self) {
         self.flush_inline();
         let rule = "─".repeat(self.inner_width());
-        self.push_line(vec![Span::styled(rule, rule_style(self.theme))]);
+        self.push_line(vec![Span::styled(rule, self.theme.rule_style())]);
         self.push_gap();
     }
 
@@ -431,7 +432,7 @@ impl<'a> Renderer<'a> {
         if self.in_heading {
             self.current_style()
         } else {
-            Style::default().fg(self.theme.code)
+            self.theme.code_style()
         }
     }
 
@@ -578,7 +579,7 @@ fn render_table_row(
             let mut line = Vec::new();
             for (column, &width) in widths.iter().enumerate() {
                 if column > 0 {
-                    line.push(Span::styled(COLUMN_SEPARATOR, rule_style(theme)));
+                    line.push(Span::styled(COLUMN_SEPARATOR, theme.rule_style()));
                 }
                 let content = wrapped[column].get(row).cloned().unwrap_or_default();
                 let alignment = alignments.get(column).copied().unwrap_or(Alignment::None);
@@ -684,7 +685,7 @@ fn break_long_word(word: Word, width: usize) -> Vec<Word> {
     for fragment in word.fragments {
         let mut text = String::new();
         for ch in fragment.content.chars() {
-            let ch_width = display_width(ch.encode_utf8(&mut [0; 4]));
+            let ch_width = char_width(ch);
             if piece.width > 0 && piece.width + ch_width > width {
                 push_fragment(&mut piece, &mut text, fragment.style);
                 pieces.push(std::mem::take(&mut piece));
@@ -709,43 +710,21 @@ fn push_fragment(piece: &mut Word, text: &mut String, style: Style) {
 }
 
 fn heading_style(level: HeadingLevel, theme: &Theme) -> Style {
-    let style = Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD);
+    let style = theme.title_style();
     match level {
         HeadingLevel::H1 | HeadingLevel::H2 => style.add_modifier(Modifier::UNDERLINED),
         _ => style,
     }
 }
 
-fn code_block_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.code)
-}
-
-fn quote_bar_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
-}
-
 fn quote_text_style() -> Style {
     Style::default().add_modifier(Modifier::ITALIC)
-}
-
-fn list_marker_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.accent)
 }
 
 fn link_style(theme: &Theme) -> Style {
     Style::default()
         .fg(theme.link)
         .add_modifier(Modifier::UNDERLINED)
-}
-
-fn link_url_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
-}
-
-fn rule_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.border)
 }
 
 #[cfg(test)]

@@ -125,18 +125,17 @@ async fn forward_capabilities(
     let req = Request::GetCapabilities {
         id: Uuid::new_v4().to_string(),
     };
-    let mut events = ipc.one_shot(req).await?;
-    while let Some(event) = events.next_event().await? {
+    let mut capabilities = None;
+    ipc.request(req, |event| {
         if matches!(event, Event::Capabilities { .. }) {
-            let _ = chat_tx
-                .send(ChatEvent::Wire {
-                    stream: WireStream::Status,
-                    event,
-                })
-                .await;
-        } else if event.is_terminal() {
-            break;
+            capabilities = Some(event.clone());
         }
+        Ok::<(), IpcClientError>(())
+    })
+    .await?;
+    if let Some(event) = capabilities {
+        let stream = WireStream::Status;
+        let _ = chat_tx.send(ChatEvent::Wire { stream, event }).await;
     }
     Ok(())
 }

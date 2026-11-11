@@ -6,6 +6,8 @@ use assistd_ipc::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::chat::selection::Selection;
+
 /// What a key on the Queue tab asks for.
 pub(super) enum QueueAction {
     Stay,
@@ -35,7 +37,7 @@ impl ItemKey {
 #[derive(Default)]
 pub(in crate::chat) struct QueueView {
     snapshot: Option<TaskQueueSnapshot>,
-    selected: usize,
+    selected: Selection,
 }
 
 impl QueueView {
@@ -45,7 +47,7 @@ impl QueueView {
     }
 
     pub(in crate::chat) fn selected(&self) -> usize {
-        self.selected
+        self.selected.index()
     }
 
     /// Show `snapshot`, keeping the selected item selected when it is still queued.
@@ -56,9 +58,10 @@ impl QueueView {
                 .iter()
                 .position(|item| ItemKey::of(item) == key)
         });
-        self.selected = kept
-            .unwrap_or(self.selected)
-            .min(snapshot.items.len().saturating_sub(1));
+        if let Some(kept) = kept {
+            self.selected = Selection::at(kept);
+        }
+        self.selected.clamp(snapshot.items.len());
         self.snapshot = Some(snapshot);
     }
 
@@ -70,10 +73,8 @@ impl QueueView {
             KeyCode::Esc => return QueueAction::Close,
             KeyCode::Up if shift => return self.move_selected(-1),
             KeyCode::Down if shift => return self.move_selected(1),
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.items().len().saturating_sub(1));
-            }
+            KeyCode::Up => self.selected.previous(),
+            KeyCode::Down => self.selected.next(self.items().len()),
             KeyCode::Enter => return self.answer_selected(),
             KeyCode::Char('x') | KeyCode::Delete => return self.cancel_selected(),
             KeyCode::Char('p') => return self.toggle_paused(),
@@ -89,7 +90,7 @@ impl QueueView {
     }
 
     fn selected_item(&self) -> Option<&QueueItem> {
-        self.items().get(self.selected)
+        self.items().get(self.selected.index())
     }
 
     /// Index of the first waiting item: the running runs come first.
@@ -115,14 +116,14 @@ impl QueueView {
         };
         let run = *run;
         let waiting_start = self.waiting_start();
-        let Some(from) = self.selected.checked_sub(waiting_start) else {
+        let Some(from) = self.selected.index().checked_sub(waiting_start) else {
             return QueueAction::Stay;
         };
         let last = self.items().len() - waiting_start - 1;
         let Some(to) = from.checked_add_signed(by).filter(|to| *to <= last) else {
             return QueueAction::Stay;
         };
-        self.selected = waiting_start + to;
+        self.selected = Selection::at(waiting_start + to);
         QueueAction::Change(TaskQueueOp::Move {
             run,
             to: u32::try_from(to).unwrap_or(u32::MAX),
