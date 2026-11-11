@@ -18,8 +18,10 @@ use assistd_config::{
 use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent};
 use assistd_utils::time::saturating_millis;
 use assistd_voice::{
-    NoVoiceOutput, SentenceBuffer, SherpaTranscriber, SherpaVoiceOutput, Transcriber, VoiceOutput,
+    SentenceBuffer, SherpaTranscriber, SherpaVoiceOutput, Transcriber, VoiceOutput,
+    VoiceOutputError,
 };
+use async_trait::async_trait;
 use clap::Parser;
 use num_traits::ToPrimitive;
 use parking_lot::Mutex;
@@ -89,7 +91,7 @@ struct Args {
     /// `llm_first_token` and every later stage never fire.
     #[arg(long, default_value = "1024")]
     max_response_tokens: NonZeroU32,
-    /// Substitute the silent `NoVoiceOutput` for sherpa-onnx TTS, for
+    /// Substitute a silent output for sherpa-onnx TTS, for
     /// transcription and LLM timings only. TTS stages and end-to-end timing are
     /// omitted.
     #[arg(long)]
@@ -304,6 +306,17 @@ impl serde::Serialize for Summary {
     }
 }
 
+/// A [`VoiceOutput`] that drops every sentence.
+#[derive(Debug)]
+struct SilentOutput;
+
+#[async_trait]
+impl VoiceOutput for SilentOutput {
+    async fn speak(&self, _text: String) -> Result<(), VoiceOutputError> {
+        Ok(())
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -377,7 +390,7 @@ async fn build_stt(args: &Args) -> Result<Arc<dyn Transcriber>> {
     Ok(Arc::new(transcriber))
 }
 
-/// Falls back to `NoVoiceOutput` when the voice cannot load, so
+/// Falls back to [`SilentOutput`] when the voice cannot load, so
 /// transcription and LLM timings stay comparable.
 async fn start_speech(args: &Args) -> Result<Arc<dyn VoiceOutput>> {
     if args.no_tts {
@@ -385,7 +398,7 @@ async fn start_speech(args: &Args) -> Result<Arc<dyn VoiceOutput>> {
             io::stderr(),
             "TTS disabled (--no-tts); end-to-end timing will be omitted"
         )?;
-        return Ok(Arc::new(NoVoiceOutput));
+        return Ok(Arc::new(SilentOutput));
     }
     let family: VoiceFamily = serde_json::from_value(json!(args.family))
         .with_context(|| format!("--family {:?} is not vits or kokoro", args.family))?;
@@ -402,10 +415,10 @@ async fn start_speech(args: &Args) -> Result<Arc<dyn VoiceOutput>> {
         Err(err) => {
             writeln!(
                 io::stderr(),
-                "speech unavailable ({err:#}); falling back to NoVoiceOutput. \
+                "speech unavailable ({err:#}); falling back to silence. \
                  End-to-end timing will be omitted. Pass --no-tts to silence this warning."
             )?;
-            Arc::new(NoVoiceOutput)
+            Arc::new(SilentOutput)
         }
     })
 }

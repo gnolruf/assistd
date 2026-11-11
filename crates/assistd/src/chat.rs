@@ -213,7 +213,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let config = Config::load_from_file(&config_path)?;
     config.validate()?;
 
-    info!("assistd chat v{}", assistd_core::version());
+    info!("assistd chat v{}", crate::VERSION);
     info!("loaded config from {}", config_path.display());
 
     let (shutdown_tx, _) = watch::channel(false);

@@ -20,6 +20,9 @@ mod wm_backend;
 /// load abandoned by a shutdown during startup) before leaving it behind.
 const BLOCKING_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// The workspace version, shared by every crate.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser)]
 #[command(
     name = "assistd",

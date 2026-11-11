@@ -43,8 +43,7 @@ use crate::state::context::{format_memory_line, format_window_context_block};
 
 mod interruption;
 
-/// Inputs for an [`AppState`] with no-op memory; every field defaults to
-/// the stub the daemon uses when the subsystem is disabled.
+/// Inputs for an [`AppState`] with no-op memory; every field defaults to an inert stub.
 struct StateParts {
     config: Config,
     backend: Arc<dyn LlmBackend>,
@@ -62,9 +61,9 @@ impl Default for StateParts {
             backend: Arc::new(EchoBackend::new()),
             presence: PresenceTarget::Active,
             tools: Arc::new(ToolRegistry::default()),
-            voice: Arc::new(assistd_voice::NoVoiceInput::new()),
+            voice: MockVoice::new(Ok(()), Ok(String::new())),
             listener: Arc::new(assistd_voice::NoContinuousListener::new()),
-            speech: Arc::new(assistd_voice::NoVoiceOutput),
+            speech: MockSpeechRecorder::new(),
         }
     }
 }

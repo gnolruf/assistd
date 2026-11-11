@@ -869,7 +869,7 @@ pub(super) fn banner_lines(model_name: &str, width: u16, theme: &Theme) -> Vec<L
 /// The logo with the version and model right-aligned beside it, closed by a
 /// rule spanning `width`.
 fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16, theme: &Theme) {
-    let version = format!("v{}", assistd_core::version());
+    let version = format!("v{}", crate::VERSION);
     let beside_logo = [None, None, None, Some(version.as_str()), Some(model_name)];
     out.push(Line::from(""));
     out.extend(LOGO.into_iter().zip(beside_logo).map(|(row, value)| {
@@ -1207,16 +1207,7 @@ fn split_body(output: &str) -> Vec<String> {
 }
 
 fn starts_expanded(output: &str) -> bool {
-    body_line_count(output) <= COLLAPSE_THRESHOLD
-}
-
-fn body_line_count(output: &str) -> usize {
-    let n = output.lines().count();
-    if output.contains("[exit:") {
-        n.saturating_sub(1)
-    } else {
-        n
-    }
+    split_body(output).len() <= COLLAPSE_THRESHOLD
 }
 
 /// A tool block's header: the `command` argument when the call has one,

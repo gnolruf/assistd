@@ -467,10 +467,5 @@ impl WindowManager for NoWindowManager {
     }
 }
 
-/// The crate version.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 #[cfg(test)]
 mod tests;

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-pub(super) const DEFAULT_HISTORY_CAP: usize = 500;
+const HISTORY_CAP: usize = 500;
 
 #[derive(Debug)]
 pub(super) struct InputLine {
@@ -14,7 +14,6 @@ pub(super) struct InputLine {
     history: VecDeque<String>,
     history_idx: Option<usize>,
     draft: Option<String>,
-    history_cap: usize,
 }
 
 /// Action returned by [`InputLine::on_key`].
@@ -41,7 +40,6 @@ impl InputLine {
             history: VecDeque::new(),
             history_idx: None,
             draft: None,
-            history_cap: DEFAULT_HISTORY_CAP,
         }
     }
 
@@ -263,7 +261,7 @@ impl InputLine {
         }
         if self.history.back().map(String::as_str) != Some(text.as_str()) {
             self.history.push_back(text.clone());
-            while self.history.len() > self.history_cap {
+            while self.history.len() > HISTORY_CAP {
                 self.history.pop_front();
             }
         }

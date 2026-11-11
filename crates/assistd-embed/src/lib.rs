@@ -128,22 +128,5 @@ pub async fn embed_rows(
     embedded
 }
 
-/// Fallback when embedding is disabled: `embed` errors, `model` is empty, `dim` is zero.
-#[derive(Debug)]
-pub struct NoEmbedder;
-
-#[async_trait]
-impl Embedder for NoEmbedder {
-    async fn embed(&self, _text: String) -> Result<Vec<f32>, EmbedError> {
-        Err(EmbedError::Disabled)
-    }
-    fn model(&self) -> &'static str {
-        ""
-    }
-    fn dim(&self) -> usize {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests;

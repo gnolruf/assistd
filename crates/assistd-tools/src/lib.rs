@@ -214,11 +214,6 @@ impl Tool for CappedTool {
     }
 }
 
-/// Crate version.
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
 /// Test fixtures shared across the crate's unit tests.
 #[cfg(test)]
 pub(crate) mod fixtures {

@@ -88,6 +88,17 @@ pub(super) struct AttachLoadedPayload {
     pub protocol: Option<StatefulProtocol>,
 }
 
+impl std::fmt::Debug for AttachLoadedPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachLoadedPayload")
+            .field("name", &self.name)
+            .field("mime", &self.mime)
+            .field("size", &self.size)
+            .field("has_thumbnail", &self.protocol.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Which concurrent daemon connection an event arrived on, and so which
 /// slice of `App` state its terminal event may retire.
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +116,7 @@ pub(super) enum WireStream {
     Tasks,
 }
 
+#[derive(Debug)]
 pub(super) enum ChatEvent {
     Wire {
         stream: WireStream,
@@ -130,40 +142,6 @@ pub(super) enum ChatEvent {
         path: String,
         message: String,
     },
-}
-
-impl std::fmt::Debug for ChatEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ChatEvent::Wire { stream, event } => f
-                .debug_struct("Wire")
-                .field("stream", stream)
-                .field("event", event)
-                .finish(),
-            ChatEvent::WireError { stream, message } => f
-                .debug_struct("WireError")
-                .field("stream", stream)
-                .field("message", message)
-                .finish(),
-            ChatEvent::Bus(event) => f.debug_tuple("Bus").field(event).finish(),
-            ChatEvent::BusLost => f.write_str("BusLost"),
-            ChatEvent::BusRestored => f.write_str("BusRestored"),
-            ChatEvent::DaemonReachable => f.write_str("DaemonReachable"),
-            ChatEvent::DaemonUnreachable => f.write_str("DaemonUnreachable"),
-            ChatEvent::AttachLoaded(p) => f
-                .debug_struct("AttachLoaded")
-                .field("name", &p.name)
-                .field("mime", &p.mime)
-                .field("size", &p.size)
-                .field("has_thumbnail", &p.protocol.is_some())
-                .finish(),
-            ChatEvent::AttachFailed { path, message } => f
-                .debug_struct("AttachFailed")
-                .field("path", path)
-                .field("message", message)
-                .finish(),
-        }
-    }
 }
 
 /// An answer the confirmation prompt offers.
