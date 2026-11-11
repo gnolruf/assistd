@@ -1,4 +1,5 @@
-//! SQLite-backed [`SemanticStore`] over `chunk_embeddings` and `memory_embeddings`.
+//! SQLite-backed [`SemanticStore`] over one embeddings table each for message
+//! chunks, document chunks and memories.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -9,6 +10,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use num_traits::ToPrimitive;
 use rusqlite::types::FromSql;
 use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
@@ -25,8 +27,8 @@ use super::timestamp::{now_millis, timestamp_at};
 /// Every message chunk vector, grouped by its message.
 const MESSAGE_CHUNK_VECTORS: &str = "
     SELECT cc.message_id, e.chunk_id, e.vector
-    FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
-    WHERE cc.message_id IS NOT NULL AND e.vector IS NOT NULL";
+    FROM message_chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
+    WHERE e.vector IS NOT NULL";
 
 /// Restricts [`MESSAGE_CHUNK_VECTORS`] to the messages of session `?1`.
 const IN_SESSION: &str = "
@@ -52,15 +54,27 @@ const OUTSIDE_SESSION_CONTEXT: &str = "
               JOIN branch_summaries bs ON bs.branch_id = bm.branch_id
               WHERE bm.branch_id = s.current_branch_id AND bm.seq < bs.kept_from_seq))";
 
-/// Every document chunk vector, grouped by its document.
+/// Every document chunk's quantised vector, grouped by its document.
 const DOCUMENT_CHUNK_VECTORS: &str = "
     SELECT cc.document_id, e.chunk_id, e.vector
-    FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
-    WHERE cc.document_id IS NOT NULL AND e.vector IS NOT NULL";
+    FROM document_chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
+    WHERE e.vector IS NOT NULL";
 
 /// Every memory vector, each its own group.
 const ALL_MEMORY_VECTORS: &str =
     "SELECT memory_id, memory_id, vector FROM memory_embeddings WHERE vector IS NOT NULL";
+
+/// Every table holding vectors.
+const EMBEDDING_TABLES: [&str; 3] = [
+    "message_chunk_embeddings",
+    "document_chunk_embeddings",
+    "memory_embeddings",
+];
+
+/// Holds for a chunk `cc` that is embedded or marked unembeddable.
+const CHUNK_HAS_EMBEDDING: &str = "(
+    EXISTS (SELECT 1 FROM message_chunk_embeddings e WHERE e.chunk_id = cc.id)
+    OR EXISTS (SELECT 1 FROM document_chunk_embeddings e WHERE e.chunk_id = cc.id))";
 
 /// A message chunk row's columns, read by [`message_context_chunk`]: chunk id, message
 /// id, session uuid, message time, role, session title, the session's opening user text,
@@ -85,8 +99,15 @@ const SESSION_LABEL_CHARS: usize = 60;
 /// Independent partial sums in the dot product, so the compiler can vectorise it.
 const SCORE_LANES: usize = 8;
 
-/// SQLite-backed [`SemanticStore`]: a linear scan into a bounded top-K, then one
-/// batched lookup of the winners.
+/// The largest count of steps a quantised vector component holds, either side of zero.
+const QUANTISED_STEPS: f32 = 127.0;
+
+/// Scores the stored vector BLOB against the query; `None` for a BLOB to skip.
+type ScoreBlob = fn(&[f32], &[u8]) -> Option<f32>;
+
+/// SQLite-backed [`SemanticStore`]: a linear scan of one source kind's vectors into a
+/// bounded top-K, then one batched lookup of the winners. Document vectors are stored
+/// quantised to one byte per dimension, so their similarities are approximate.
 #[derive(Debug, Clone)]
 pub struct SqliteSemanticStore {
     handle: SqliteHandle,
@@ -127,16 +148,21 @@ impl SemanticStore for SqliteSemanticStore {
         if top_k == 0 || query_vector.is_empty() {
             return Ok(Vec::new());
         }
-        self.handle
-            .search_reader()
-            .call(move |c| match scope {
-                ChunkScope::Chats(sessions) => {
-                    nearest_message_chunks(c, &query_vector, top_k, sessions)
-                }
-                ChunkScope::Documents => nearest_document_chunks(c, &query_vector, top_k),
-            })
-            .await
-            .map_err(MemoryError::sqlite("nearest_chunks"))
+        let ranked = match scope {
+            ChunkScope::Chats(sessions) => {
+                self.handle
+                    .search_reader()
+                    .call(move |c| nearest_message_chunks(c, &query_vector, top_k, sessions))
+                    .await
+            }
+            ChunkScope::Documents => {
+                self.handle
+                    .document_search_reader()
+                    .call(move |c| nearest_document_chunks(c, &query_vector, top_k))
+                    .await
+            }
+        };
+        ranked.map_err(MemoryError::sqlite("nearest_chunks"))
     }
 
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks> {
@@ -169,6 +195,7 @@ impl SemanticStore for SqliteSemanticStore {
                     ALL_MEMORY_VECTORS,
                     [],
                     &query_vector,
+                    score_against,
                     top_k,
                 )?;
                 hydrate_in_rank_order(
@@ -189,13 +216,15 @@ impl SemanticStore for SqliteSemanticStore {
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
-                let dropped = tx.execute(
-                    "DELETE FROM chunk_embeddings WHERE model != ?1",
-                    rusqlite::params![model],
-                )? + tx.execute(
-                    "DELETE FROM memory_embeddings WHERE model != ?1",
-                    rusqlite::params![model],
-                )?;
+                let dropped = EMBEDDING_TABLES
+                    .iter()
+                    .map(|table| {
+                        tx.execute(
+                            &format!("DELETE FROM {table} WHERE model != ?1"),
+                            rusqlite::params![model],
+                        )
+                    })
+                    .sum::<rusqlite::Result<usize>>()?;
                 tx.commit()?;
                 Ok(u64::try_from(dropped).unwrap_or(u64::MAX))
             })
@@ -208,9 +237,7 @@ impl SemanticStore for SqliteSemanticStore {
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
                 let chunks = c.query_row(
-                    "SELECT count(*)
-                     FROM chunks cc
-                     WHERE NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = cc.id)",
+                    &format!("SELECT count(*) FROM chunks cc WHERE NOT {CHUNK_HAS_EMBEDDING}"),
                     [],
                     |r| r.get(0),
                 )?;
@@ -265,19 +292,17 @@ impl SemanticStore for SqliteSemanticStore {
         self.handle
             .reader()
             .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare_cached(
+                let mut stmt = c.prepare_cached(&format!(
                     "SELECT cc.id,
                             CAST(substr(CAST(coalesce(msg.content, doc.content) AS BLOB),
                                         cc.byte_start + 1, cc.byte_end - cc.byte_start) AS TEXT)
                      FROM chunks cc
                      LEFT JOIN messages msg ON msg.id = cc.message_id
                      LEFT JOIN documents doc ON doc.id = cc.document_id
-                     WHERE cc.id > ifnull(?1, 0) AND NOT EXISTS (
-                         SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id = cc.id
-                     )
+                     WHERE cc.id > ifnull(?1, 0) AND NOT {CHUNK_HAS_EMBEDDING}
                      ORDER BY cc.id
-                     LIMIT ?2",
-                )?;
+                     LIMIT ?2"
+                ))?;
                 let rows = stmt
                     .query_map(rusqlite::params![after, limit], |r| {
                         Ok((r.get(0)?, r.get(1)?))
@@ -312,9 +337,12 @@ impl SemanticStore for SqliteSemanticStore {
             .writer()
             .call(move |c| -> rusqlite::Result<_> {
                 let tx = c.transaction()?;
-                let cleared = tx
-                    .execute("DELETE FROM chunk_embeddings WHERE vector IS NULL", [])?
-                    + tx.execute("DELETE FROM memory_embeddings WHERE vector IS NULL", [])?;
+                let cleared = EMBEDDING_TABLES
+                    .iter()
+                    .map(|table| {
+                        tx.execute(&format!("DELETE FROM {table} WHERE vector IS NULL"), [])
+                    })
+                    .sum::<rusqlite::Result<usize>>()?;
                 tx.commit()?;
                 Ok(u64::try_from(cleared).unwrap_or(u64::MAX))
             })
@@ -417,13 +445,14 @@ impl<Group: PartialEq, Id> TopK<Group, Id> {
     }
 }
 
-/// The `top_k` best `(group, id, vector)` rows of `sql` bound to `params` against
-/// `query`, one per group, best first.
+/// The `top_k` best `(group, id, vector)` rows of `sql` bound to `params`, their
+/// vectors scored against `query` by `score`, one per group, best first.
 fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     conn: &rusqlite::Connection,
     sql: &str,
     params: impl Params,
     query: &[f32],
+    score: ScoreBlob,
     top_k: usize,
 ) -> rusqlite::Result<Vec<(Id, f32)>> {
     let mut stmt = conn.prepare_cached(sql)?;
@@ -431,7 +460,7 @@ fn scan_top_k<Group: FromSql + Eq + Hash, Id: FromSql>(
     let mut rows = stmt.query(params)?;
     while let Some(row) = rows.next()? {
         let bytes = row.get_ref(2)?.as_blob()?;
-        if let Some(similarity) = score_against(query, bytes) {
+        if let Some(similarity) = score(query, bytes) {
             best.offer(row.get::<_, Group>(0)?, row.get(1)?, similarity);
         }
     }
@@ -446,12 +475,20 @@ fn nearest_message_chunks(
     sessions: SessionScope,
 ) -> rusqlite::Result<Vec<EmbeddingHit>> {
     let ranked = match scope_clause(sessions) {
-        None => scan_top_k::<MessageId, ChunkId>(conn, MESSAGE_CHUNK_VECTORS, [], query, top_k)?,
+        None => scan_top_k::<MessageId, ChunkId>(
+            conn,
+            MESSAGE_CHUNK_VECTORS,
+            [],
+            query,
+            score_against,
+            top_k,
+        )?,
         Some((clause, session)) => scan_top_k::<MessageId, ChunkId>(
             conn,
             &format!("{MESSAGE_CHUNK_VECTORS}{clause}"),
             [session],
             query,
+            score_against,
             top_k,
         )?,
     };
@@ -471,7 +508,14 @@ fn nearest_document_chunks(
     query: &[f32],
     top_k: usize,
 ) -> rusqlite::Result<Vec<EmbeddingHit>> {
-    let ranked = scan_top_k::<DocumentId, ChunkId>(conn, DOCUMENT_CHUNK_VECTORS, [], query, top_k)?;
+    let ranked = scan_top_k::<DocumentId, ChunkId>(
+        conn,
+        DOCUMENT_CHUNK_VECTORS,
+        [],
+        query,
+        score_against_quantised,
+        top_k,
+    )?;
     let select = format!(
         "SELECT {DOCUMENT_CHUNK_COLUMNS}
          FROM chunks cc
@@ -678,24 +722,38 @@ fn score_against(query: &[f32], bytes: &[u8]) -> Option<f32> {
     if !trailing.is_empty() || words.len() != query.len() {
         return None;
     }
-    let (word_blocks, word_tail) = words.as_chunks::<SCORE_LANES>();
-    let (query_blocks, query_tail) = query.as_chunks::<SCORE_LANES>();
-    let mut lanes = [0.0f32; SCORE_LANES];
-    for (word_block, query_block) in word_blocks.iter().zip(query_blocks) {
-        for ((lane, word), q) in lanes.iter_mut().zip(word_block).zip(query_block) {
-            *lane += f32::from_le_bytes(*word) * q;
-        }
-    }
-    let similarity = lanes.iter().sum::<f32>() + dot_le_words(word_tail, query_tail);
+    let similarity = dot(query, words, |word| f32::from_le_bytes(*word));
     similarity.is_finite().then_some(similarity)
 }
 
-fn dot_le_words(words: &[[u8; 4]], query: &[f32]) -> f32 {
-    words
+/// Approximate dot product of `query` against the quantised BLOB `bytes`, or `None`
+/// when the BLOB is malformed, its dimension differs, or the product is not finite.
+fn score_against_quantised(query: &[f32], bytes: &[u8]) -> Option<f32> {
+    let (step, steps) = bytes.split_first_chunk::<4>()?;
+    if steps.len() != query.len() {
+        return None;
+    }
+    let similarity =
+        f32::from_le_bytes(*step) * dot(query, steps, |byte| f32::from(i8::from_le_bytes([*byte])));
+    similarity.is_finite().then_some(similarity)
+}
+
+/// Dot product of `query` against `stored`, each stored component decoded by `component`.
+fn dot<T>(query: &[f32], stored: &[T], component: impl Fn(&T) -> f32) -> f32 {
+    let (stored_blocks, stored_tail) = stored.as_chunks::<SCORE_LANES>();
+    let (query_blocks, query_tail) = query.as_chunks::<SCORE_LANES>();
+    let mut lanes = [0.0f32; SCORE_LANES];
+    for (stored_block, query_block) in stored_blocks.iter().zip(query_blocks) {
+        for ((lane, value), q) in lanes.iter_mut().zip(stored_block).zip(query_block) {
+            *lane += component(value) * q;
+        }
+    }
+    let tail: f32 = stored_tail
         .iter()
-        .zip(query)
-        .map(|(word, q)| f32::from_le_bytes(*word) * q)
-        .sum()
+        .zip(query_tail)
+        .map(|(value, q)| component(value) * q)
+        .sum();
+    lanes.iter().sum::<f32>() + tail
 }
 
 /// Upsert `embedding` into its target's table, with a `NULL` vector when it has
@@ -707,16 +765,9 @@ fn upsert_embedding(
     model: &str,
     embedding: &Embedding,
 ) -> rusqlite::Result<usize> {
-    let blob = embedding.vector.as_deref().map(vector_to_blob);
+    let vector = embedding.vector.as_deref();
     match embedding.target {
-        EmbeddingTarget::Chunk(id) => tx
-            .prepare_cached(
-                "INSERT INTO chunk_embeddings (chunk_id, model, vector)
-                 SELECT id, ?2, ?3 FROM chunks WHERE id = ?1
-                 ON CONFLICT(chunk_id) DO UPDATE
-                 SET model = excluded.model, vector = excluded.vector",
-            )?
-            .execute(rusqlite::params![id, model, blob]),
+        EmbeddingTarget::Chunk(id) => upsert_chunk_embedding(tx, model, id, vector),
         EmbeddingTarget::Memory(id) => tx
             .prepare_cached(
                 "INSERT INTO memory_embeddings (memory_id, model, vector)
@@ -724,8 +775,41 @@ fn upsert_embedding(
                  ON CONFLICT(memory_id) DO UPDATE
                  SET model = excluded.model, vector = excluded.vector",
             )?
-            .execute(rusqlite::params![id, model, blob, embedding.text]),
+            .execute(rusqlite::params![
+                id,
+                model,
+                vector.map(vector_to_blob),
+                embedding.text
+            ]),
     }
+}
+
+/// Upsert `vector` for `chunk` into the table of its owner's kind: exact for a
+/// message chunk, quantised for a document chunk.
+fn upsert_chunk_embedding(
+    tx: &Transaction<'_>,
+    model: &str,
+    chunk: ChunkId,
+    vector: Option<&[f32]>,
+) -> rusqlite::Result<usize> {
+    let stored_for_message = tx
+        .prepare_cached(
+            "INSERT INTO message_chunk_embeddings (chunk_id, model, vector)
+             SELECT id, ?2, ?3 FROM chunks WHERE id = ?1 AND message_id IS NOT NULL
+             ON CONFLICT(chunk_id) DO UPDATE
+             SET model = excluded.model, vector = excluded.vector",
+        )?
+        .execute(rusqlite::params![chunk, model, vector.map(vector_to_blob)])?;
+    if stored_for_message > 0 {
+        return Ok(stored_for_message);
+    }
+    tx.prepare_cached(
+        "INSERT INTO document_chunk_embeddings (chunk_id, model, vector)
+         SELECT id, ?2, ?3 FROM chunks WHERE id = ?1 AND document_id IS NOT NULL
+         ON CONFLICT(chunk_id) DO UPDATE
+         SET model = excluded.model, vector = excluded.vector",
+    )?
+    .execute(rusqlite::params![chunk, model, vector.map(quantised_blob)])
 }
 
 /// Store `content` as the document at `path` and cut it into `ranges`, returning the
@@ -769,13 +853,37 @@ fn replace_document(
         .collect()
 }
 
-/// Encode `vector` as the little-endian `f32` BLOB the embedding tables store.
+/// Encode `vector` as the little-endian `f32` BLOB the message chunk and memory
+/// embedding tables store.
 fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
     let mut blob = Vec::with_capacity(vector.len() * 4);
     for value in vector {
         blob.extend_from_slice(&value.to_le_bytes());
     }
     blob
+}
+
+/// Encode `vector` as the BLOB `document_chunk_embeddings` stores: a little-endian
+/// `f32` step sized so the largest component is [`QUANTISED_STEPS`] steps, then each
+/// component as an `i8` count of steps.
+fn quantised_blob(vector: &[f32]) -> Vec<u8> {
+    let largest = vector
+        .iter()
+        .fold(0.0f32, |largest, value| largest.max(value.abs()));
+    let step = largest / QUANTISED_STEPS;
+    let mut blob = Vec::with_capacity(4 + vector.len());
+    blob.extend_from_slice(&step.to_le_bytes());
+    blob.extend(
+        vector
+            .iter()
+            .flat_map(|value| steps_in(*value, step).to_le_bytes()),
+    );
+    blob
+}
+
+/// `value` as a whole count of `step`s; zero when the count is not a number.
+fn steps_in(value: f32, step: f32) -> i8 {
+    (value / step).round().to_i8().unwrap_or(0)
 }
 
 #[cfg(test)]

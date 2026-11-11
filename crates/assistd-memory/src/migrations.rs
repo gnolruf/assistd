@@ -405,6 +405,30 @@ const V16_SQL: &str = r"
 ALTER TABLE turns ADD COLUMN incomplete INTEGER NOT NULL DEFAULT 0 CHECK (incomplete IN (0, 1));
 ";
 
+/// V17: message chunk and document chunk vectors live in separate tables, so a search
+/// of one kind never reads the other's. A document vector is a little-endian `f32`
+/// step then one `i8` count of steps per dimension; those stored so far are dropped
+/// for re-embedding.
+const V17_SQL: &str = r"
+CREATE TABLE message_chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    vector   BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+INSERT INTO message_chunk_embeddings (chunk_id, model, vector)
+    SELECT e.chunk_id, e.model, e.vector
+    FROM chunk_embeddings e JOIN chunks cc ON cc.id = e.chunk_id
+    WHERE cc.message_id IS NOT NULL;
+
+CREATE TABLE document_chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    vector   BLOB CHECK (length(vector) > 4)
+) STRICT;
+
+DROP TABLE chunk_embeddings;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -424,6 +448,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V14_SQL),
         M::up(V15_SQL),
         M::up(V16_SQL),
+        M::up(V17_SQL),
     ])
 }
 
@@ -450,6 +475,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 }

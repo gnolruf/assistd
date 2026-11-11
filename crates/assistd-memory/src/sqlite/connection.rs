@@ -32,13 +32,14 @@ const PRIVATE_FILE_MODE: u32 = 0o600;
 /// Suffixes SQLite appends to the database path for its sidecar files.
 const SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
-/// Cheaply cloneable handle shared by every store: vector scans and other reads go
-/// to separate read-only connections and writes to the only writable one, each run
-/// in submission order on its connection's own thread.
+/// Cheaply cloneable handle shared by every store: document vector scans, other
+/// vector scans and other reads each go to their own read-only connection and writes
+/// to the only writable one, each run in submission order on its connection's own thread.
 #[derive(Debug, Clone)]
 pub struct SqliteHandle {
     reader: Connection,
     search_reader: Connection,
+    document_search_reader: Connection,
     writer: Connection,
 }
 
@@ -50,9 +51,11 @@ impl SqliteHandle {
         let writer = open_writer(path).await?;
         let reader = open_reader(path).await?;
         let search_reader = open_reader(path).await?;
+        let document_search_reader = open_reader(path).await?;
         Ok(Self {
             reader,
             search_reader,
+            document_search_reader,
             writer,
         })
     }
@@ -80,6 +83,12 @@ impl SqliteHandle {
             .close()
             .await
             .map_err(MemoryError::sqlite("close search reader connection"))?;
+        self.document_search_reader
+            .close()
+            .await
+            .map_err(MemoryError::sqlite(
+                "close document search reader connection",
+            ))?;
         self.writer
             .close()
             .await
@@ -90,9 +99,14 @@ impl SqliteHandle {
         &self.reader
     }
 
-    /// The read-only connection reserved for full vector scans.
+    /// The read-only connection reserved for full scans of message chunk and memory vectors.
     pub(super) fn search_reader(&self) -> &Connection {
         &self.search_reader
+    }
+
+    /// The read-only connection reserved for full scans of document chunk vectors.
+    pub(super) fn document_search_reader(&self) -> &Connection {
+        &self.document_search_reader
     }
 
     pub(super) fn writer(&self) -> &Connection {

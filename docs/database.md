@@ -23,7 +23,8 @@ erDiagram
     documents ||--o{ chunks : "split into"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
-    chunks ||--o| chunk_embeddings : "embedded as"
+    chunks ||--o| message_chunk_embeddings : "embedded as"
+    chunks ||--o| document_chunk_embeddings : "embedded as"
     memories ||--o| memory_embeddings : "embedded as"
     tasks ||--o{ task_runs : "ran as"
 
@@ -121,10 +122,15 @@ erDiagram
         int byte_start
         int byte_end
     }
-    chunk_embeddings {
+    message_chunk_embeddings {
         int chunk_id PK, FK
         text model
         blob vector "NULL when the model cannot embed the row"
+    }
+    document_chunk_embeddings {
+        int chunk_id PK, FK
+        text model
+        blob vector "quantised; NULL when the model cannot embed the row"
     }
     memory_embeddings {
         int memory_id PK, FK
@@ -238,10 +244,16 @@ Deleting a task deletes its runs; their transcript sessions stay.
   changed replaces its chunks, and with them their vectors; unchanged
   text keeps both. The rows are a rebuildable cache of files on disk,
   so a reset of `memory.db` costs only a re-index.
-- **`chunk_embeddings`** / **`memory_embeddings`**: at most one vector
-  per chunk or memory, stored as a BLOB of little-endian `f32`s,
+- **`message_chunk_embeddings`** / **`document_chunk_embeddings`** /
+  **`memory_embeddings`**: at most one vector per chunk or memory,
   L2-normalised by the embedder so a dot product is cosine similarity,
-  and tagged with the `embedding.model` that produced it. When the
+  and tagged with the `embedding.model` that produced it. A chunk's
+  vector goes in the table for its owner's kind, so a chat search never
+  reads document vectors. Message chunk and memory vectors are BLOBs of
+  little-endian `f32`s. A document chunk vector is quantised to a
+  quarter of that: a little-endian `f32` step, sized so the vector's
+  largest component is 127 steps, then one `i8` count of steps per
+  dimension. When the
   embedder comes up, vectors from any other model are deleted before
   anything can search or write, so vectors from two models are never
   compared.
@@ -252,15 +264,27 @@ Deleting a task deletes its runs; their transcript sessions stay.
   retry it; `assistd memory reindex` clears those marks and tries again.
 
 Search (`recall`, `reminisce`) scans every vector of one source kind,
-chats or documents, on a dedicated read-only connection and keeps the
-top matches; there is no vector index. `reminisce` leaves out the
+chats or documents, on that kind's own read-only connection and keeps
+the top matches; there is no vector index. `reminisce` leaves out the
 current session's messages.
+
+One scan of 768-dimension vectors, measured on a Ryzen 7 9800X3D
+with the file in the page cache:
+
+| Chunks of the kind | `f32` (chats) | quantised (documents) |
+|--------------------|---------------|-----------------------|
+| 10,000             | 33 MB, 2 ms   | 8 MB, 1 ms            |
+| 100,000            | 328 MB, 35 ms | 82 MB, 14 ms          |
+| 1,000,000          | 3.3 GB, 330 ms | 820 MB, 200 ms       |
+
+Quantising moved no top-8 result in these runs and changed a
+similarity by at most 0.0005.
 
 ## Storage
 
-- One read-write connection runs every write in order; two read-only
-  connections serve history loads and vector scans, so neither blocks
-  the other.
+- One read-write connection runs every write in order; three
+  read-only connections serve history loads, chat and memory vector
+  scans, and document vector scans, so none blocks another.
 - The database runs in WAL mode with foreign keys and `secure_delete`
   on. After a delete or overwrite the WAL is checkpointed and truncated
   so removed text doesn't linger in the sidecar files.
