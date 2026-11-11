@@ -315,3 +315,11 @@ similarity by at most 0.0005.
 - The schema version lives in `PRAGMA user_version` and migrations run
   through `rusqlite_migration` when the database opens. A schema change
   is a new migration appended after the existing ones.
+- The daemon refuses to start when the database cannot be opened or
+  migrated, including one written by a newer `assistd` (a `user_version`
+  above the binary's). It never runs without persistence and never
+  replaces the file itself.
+- Resetting is manual: stop the daemon and move `memory.db` and its
+  `-wal` and `-shm` files aside; the next start creates an empty
+  database. A schema change may require a reset instead of shipping a
+  migration.

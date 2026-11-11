@@ -131,6 +131,7 @@ async fn start(
     config_path: &Path,
     stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
+    let mut memory = memory_init::init().await?;
     let api_key = ApiKey::generate().context("failed to write the model servers' API key")?;
     let slot_dir = prepare_slot_dir()?;
     let presence = PresenceManager::new_sleeping(
@@ -156,9 +157,7 @@ async fn start(
     let idle_monitor_handle =
         idle_monitor::spawn_monitor(&config.sleep, presence.clone(), stages.intake.subscribe());
 
-    let mut memory = memory_init::init().await;
-    let (embed, embed_startup) =
-        embed_init::prepare(&config, &api_key, memory.sqlite_handle.as_ref());
+    let (embed, embed_startup) = embed_init::prepare(&config, &api_key, &memory.sqlite_handle);
     let (web_search, search_startup) = search_init::prepare(&config);
     let window = wm_init::init(&config, &stages.tools).await;
 

@@ -284,4 +284,24 @@ mod tests {
 
         handle.close().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn open_refuses_database_newer_than_the_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("memory.db");
+        SqliteHandle::open(&path)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 9999)
+            .unwrap();
+
+        let error = SqliteHandle::open(&path).await.unwrap_err();
+
+        assert!(matches!(error, MemoryError::Migration(_)), "{error}");
+    }
 }

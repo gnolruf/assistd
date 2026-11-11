@@ -127,23 +127,18 @@ async fn join_worker_within_budget(mut worker: JoinHandle<()>, deadline: Instant
     }
 }
 
-/// The handles requests use from startup and, when embedding is enabled and
-/// the memory database is open, what starting its server needs.
+/// The handles requests use from startup and, when embedding is enabled,
+/// what starting its server needs.
 pub(super) fn prepare(
     config: &Config,
     api_key: &ApiKey,
-    sqlite_handle: Option<&SqliteHandle>,
+    sqlite_handle: &SqliteHandle,
 ) -> (EmbeddingHandles, Option<EmbeddingStartup>) {
     if !config.embedding.enabled {
         const REASON: &str = "disabled in config (embedding.enabled = false)";
         info!("embedding: {REASON}");
         return (disabled_handles(REASON), None);
     }
-    let Some(sqlite_handle) = sqlite_handle else {
-        const REASON: &str = "disabled because the memory database is unavailable";
-        info!("embedding: {REASON}");
-        return (disabled_handles(REASON), None);
-    };
     let semantic_store: Arc<dyn SemanticStore> =
         Arc::new(SqliteSemanticStore::new(sqlite_handle.clone()));
     let embed_wake = Arc::new(Notify::new());

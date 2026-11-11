@@ -5,12 +5,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use assistd_core::branch_replay;
 use assistd_llm::HistoryReplay;
 use assistd_memory::{
-    BranchHistory, BranchId, HistoryScope, MemoryError, MemoryStore, NoMemoryStore, NoTaskStore,
-    NoTranscriptStore, SessionId, SqliteHandle, SqliteMemoryStore, SqliteTaskStore,
-    SqliteTranscriptStore, TaskStore, TranscriptStore,
+    BranchHistory, BranchId, HistoryScope, MemoryError, MemoryStore, SessionId, SqliteHandle,
+    SqliteMemoryStore, SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
 };
 use tracing::info;
 
@@ -23,25 +23,12 @@ pub(super) struct MemorySubsystem {
     pub branch_id: Option<BranchId>,
     /// History of the resumed branch, to replay into the LLM.
     pub resumed_history: HistoryReplay,
-    pub sqlite_handle: Option<SqliteHandle>,
+    pub sqlite_handle: SqliteHandle,
     /// Every saved relay answer the database names; `None` when it cannot say.
     pub relay_answer_files: Option<HashSet<PathBuf>>,
 }
 
 impl MemorySubsystem {
-    fn disabled() -> Self {
-        Self {
-            memory_store: Arc::new(NoMemoryStore),
-            transcript_store: Arc::new(NoTranscriptStore),
-            task_store: Arc::new(NoTaskStore),
-            session_id: SessionId::new(),
-            branch_id: None,
-            resumed_history: HistoryReplay::default(),
-            sqlite_handle: None,
-            relay_answer_files: None,
-        }
-    }
-
     /// End the session row, if it was ever saved, then close the database once its
     /// queued writes have run. Must run after every other database client has stopped.
     pub(super) async fn shutdown(self) {
@@ -49,30 +36,22 @@ impl MemorySubsystem {
             Ok(()) | Err(MemoryError::SessionNotFound(_)) => {}
             Err(e) => tracing::warn!("memory: end_session failed at shutdown: {e:#}"),
         }
-        if let Some(handle) = self.sqlite_handle
-            && let Err(e) = handle.close().await
-        {
+        if let Err(e) = self.sqlite_handle.close().await {
             tracing::warn!("memory: closing the database failed at shutdown: {e:#}");
         }
     }
 }
 
-/// Degrades to a no-op subsystem when the database cannot be opened.
-pub(super) async fn init() -> MemorySubsystem {
-    let Some(db_path) = db_path() else {
-        tracing::warn!("memory: no data directory (is $HOME set?); persistence disabled this run");
-        return MemorySubsystem::disabled();
-    };
-    let handle = match SqliteHandle::open(&db_path).await {
-        Ok(handle) => handle,
-        Err(e) => {
-            tracing::warn!(
-                "memory: failed to open {} ({e:#}); persistence disabled this run",
-                db_path.display()
-            );
-            return MemorySubsystem::disabled();
-        }
-    };
+/// Open the memory database and pick the session to continue. Fails when there
+/// is no data directory or the database cannot be opened or migrated.
+pub(super) async fn init() -> Result<MemorySubsystem> {
+    let db_path = db_path().context("no data directory for memory.db (is $HOME set?)")?;
+    let handle = SqliteHandle::open(&db_path).await.with_context(|| {
+        format!(
+            "cannot open the memory database; to start with an empty one, move {} aside",
+            db_path.display()
+        )
+    })?;
 
     let transcripts = Arc::new(SqliteTranscriptStore::new(handle.clone()));
     let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
@@ -85,16 +64,16 @@ pub(super) async fn init() -> MemorySubsystem {
         .ok()
         .map(HashSet::from_iter);
 
-    MemorySubsystem {
+    Ok(MemorySubsystem {
         memory_store: mem_store,
         transcript_store: transcripts,
         task_store: Arc::new(SqliteTaskStore::new(handle.clone())),
         session_id,
         branch_id,
         resumed_history,
-        sqlite_handle: Some(handle),
+        sqlite_handle: handle,
         relay_answer_files,
-    }
+    })
 }
 
 /// Resume the most recent unended session, else start an unsaved session
