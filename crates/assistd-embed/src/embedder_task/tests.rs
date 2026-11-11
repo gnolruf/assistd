@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -6,8 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use assistd_memory::{
-    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit, MemoryHit,
-    MemoryId, Result as MemoryResult, UnindexedRows,
+    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit, FileStamp,
+    IndexPass, MemoryHit, MemoryId, NoSemanticStore, Result as MemoryResult, UnindexedRows,
 };
 
 use super::*;
@@ -134,6 +135,37 @@ impl SemanticStore for PendingStore {
     }
     async fn clear_unembeddable(&self) -> MemoryResult<u64> {
         Ok(0)
+    }
+    async fn begin_index_pass(&self, root: &Path) -> MemoryResult<IndexPass> {
+        NoSemanticStore.begin_index_pass(root).await
+    }
+    async fn document_unchanged(
+        &self,
+        pass: IndexPass,
+        path: &Path,
+        stamp: FileStamp,
+    ) -> MemoryResult<bool> {
+        NoSemanticStore.document_unchanged(pass, path, stamp).await
+    }
+    async fn index_document(
+        &self,
+        pass: IndexPass,
+        path: PathBuf,
+        stamp: FileStamp,
+        content: String,
+    ) -> MemoryResult<Vec<ChunkId>> {
+        NoSemanticStore
+            .index_document(pass, path, stamp, content)
+            .await
+    }
+    async fn finish_index_pass(&self, pass: IndexPass) -> MemoryResult<u64> {
+        NoSemanticStore.finish_index_pass(pass).await
+    }
+    async fn remove_document(&self, path: &Path) -> MemoryResult<bool> {
+        NoSemanticStore.remove_document(path).await
+    }
+    async fn remove_index_root(&self, root: &Path) -> MemoryResult<u64> {
+        NoSemanticStore.remove_index_root(root).await
     }
 }
 

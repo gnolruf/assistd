@@ -1,8 +1,10 @@
 //! Vector retrieval over embedded transcript and document chunks and saved memories.
 
 use std::fmt;
+use std::fs::Metadata;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -197,7 +199,39 @@ pub struct UnindexedRows {
     pub memories: u64,
 }
 
-/// Top-K vector retrieval over embedded chunks and memories.
+/// A file's modification time and size; a document whose stored stamp still
+/// matches is taken as unchanged without being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    /// Modification time in nanoseconds since the Unix epoch.
+    pub mtime_ns: i64,
+    /// Size in bytes.
+    pub size: u64,
+}
+
+impl FileStamp {
+    /// The stamp of the file `metadata` describes.
+    pub fn of(metadata: &Metadata) -> Self {
+        Self {
+            mtime_ns: metadata
+                .mtime()
+                .saturating_mul(1_000_000_000)
+                .saturating_add(metadata.mtime_nsec()),
+            size: metadata.len(),
+        }
+    }
+}
+
+/// One walk over an index root's files, from [`SemanticStore::begin_index_pass`] to
+/// [`SemanticStore::finish_index_pass`]. At most one pass per root runs at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexPass {
+    pub(crate) root: i64,
+    pub(crate) pass: i64,
+}
+
+/// Top-K vector retrieval over embedded chunks and memories, and the index of
+/// local documents behind it.
 #[async_trait]
 pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
     /// Top-K messages or documents in `scope` by their best chunk's cosine to the
@@ -253,6 +287,42 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
 
     /// Clear every unembeddable mark, returning how many, so those rows are missing again.
     async fn clear_unembeddable(&self) -> Result<u64>;
+
+    /// Start a pass over the files under index root `root`, registering the root
+    /// when it is new.
+    async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass>;
+
+    /// Whether the document at `path` is stored with `stamp` and the current chunking,
+    /// in which case `pass` has seen it; otherwise it must be read and indexed.
+    async fn document_unchanged(
+        &self,
+        pass: IndexPass,
+        path: &Path,
+        stamp: FileStamp,
+    ) -> Result<bool>;
+
+    /// Store `content` as the text of the document at `path`, seen by `pass`. Chunks
+    /// whose bytes and position are unchanged keep their vectors; the rest are replaced.
+    /// Returns the new chunks, which are missing embeddings.
+    async fn index_document(
+        &self,
+        pass: IndexPass,
+        path: PathBuf,
+        stamp: FileStamp,
+        content: String,
+    ) -> Result<Vec<ChunkId>>;
+
+    /// Remove every document of `pass`'s root that the pass did not see, returning
+    /// how many.
+    async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64>;
+
+    /// Remove the document at `path` with its chunks and vectors; `false` when
+    /// none was indexed.
+    async fn remove_document(&self, path: &Path) -> Result<bool>;
+
+    /// Forget index root `root`, removing every document found under it and
+    /// returning how many.
+    async fn remove_index_root(&self, root: &Path) -> Result<u64>;
 }
 
 /// No-op store: writes are discarded and searches find nothing.
@@ -303,6 +373,35 @@ impl SemanticStore for NoSemanticStore {
         Ok(())
     }
     async fn clear_unembeddable(&self) -> Result<u64> {
+        Ok(0)
+    }
+    async fn begin_index_pass(&self, _root: &Path) -> Result<IndexPass> {
+        Ok(IndexPass { root: 0, pass: 0 })
+    }
+    async fn document_unchanged(
+        &self,
+        _pass: IndexPass,
+        _path: &Path,
+        _stamp: FileStamp,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    async fn index_document(
+        &self,
+        _pass: IndexPass,
+        _path: PathBuf,
+        _stamp: FileStamp,
+        _content: String,
+    ) -> Result<Vec<ChunkId>> {
+        Ok(Vec::new())
+    }
+    async fn finish_index_pass(&self, _pass: IndexPass) -> Result<u64> {
+        Ok(0)
+    }
+    async fn remove_document(&self, _path: &Path) -> Result<bool> {
+        Ok(false)
+    }
+    async fn remove_index_root(&self, _root: &Path) -> Result<u64> {
         Ok(0)
     }
 }
