@@ -429,6 +429,35 @@ CREATE TABLE document_chunk_embeddings (
 DROP TABLE chunk_embeddings;
 ";
 
+/// V18: a document records the index root it was found under, the file's stamp and
+/// content hash, the chunking it was cut with, and the root's pass that last saw it.
+/// Recreates `documents`, dropping any indexed so far.
+const V18_SQL: &str = r"
+DELETE FROM chunks WHERE document_id IS NOT NULL;
+DROP TABLE documents;
+
+CREATE TABLE index_roots (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    path BLOB NOT NULL UNIQUE CHECK (length(path) > 0),
+    pass INTEGER NOT NULL CHECK (pass >= 1)
+) STRICT;
+
+CREATE TABLE documents (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_id       INTEGER NOT NULL REFERENCES index_roots(id) ON DELETE CASCADE,
+    path          BLOB NOT NULL UNIQUE CHECK (length(path) > 0),
+    content       TEXT NOT NULL,
+    content_hash  BLOB NOT NULL CHECK (length(content_hash) = 32),
+    mtime_ns      INTEGER NOT NULL,
+    size          INTEGER NOT NULL CHECK (size >= 0),
+    chunk_chars   INTEGER NOT NULL CHECK (chunk_chars > 0),
+    overlap_chars INTEGER NOT NULL CHECK (overlap_chars >= 0 AND overlap_chars < chunk_chars),
+    seen_pass     INTEGER NOT NULL,
+    indexed_at    INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_documents_root ON documents(root_id);
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -449,6 +478,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V15_SQL),
         M::up(V16_SQL),
         M::up(V17_SQL),
+        M::up(V18_SQL),
     ])
 }
 
@@ -475,6 +505,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 17);
+        assert_eq!(version, 18);
     }
 }

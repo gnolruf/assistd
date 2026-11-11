@@ -29,42 +29,41 @@ impl ChunkingConfig {
             overlap_chars,
         }
     }
+
+    pub(crate) const fn chunk_chars(self) -> usize {
+        self.chunk_chars
+    }
+
+    pub(crate) const fn overlap_chars(self) -> usize {
+        self.overlap_chars
+    }
 }
 
 /// Byte ranges of `content`'s windows of `chunk_chars` characters, advancing by
 /// `chunk_chars - overlap_chars` and dropping whitespace-only windows. Short inputs
 /// yield the whole input as one range.
-pub(crate) fn chunk_ranges(content: &str, cfg: &ChunkingConfig) -> Vec<Range<usize>> {
-    if content.trim().is_empty() {
-        return Vec::new();
-    }
-    let whole_message = 0..content.len();
-
-    let boundaries: Vec<usize> = content
-        .char_indices()
-        .map(|(byte_idx, _)| byte_idx)
-        .chain(std::iter::once(content.len()))
-        .collect();
-    let total_chars = boundaries.len() - 1;
-    if total_chars <= cfg.chunk_chars {
-        return vec![whole_message];
-    }
-
+pub(crate) fn chunk_ranges(
+    content: &str,
+    cfg: ChunkingConfig,
+) -> impl Iterator<Item = Range<usize>> + '_ {
     let step = cfg.chunk_chars - cfg.overlap_chars;
-    let mut chunks = Vec::new();
-    let mut start = 0usize;
-    while start < total_chars {
-        let end = (start + cfg.chunk_chars).min(total_chars);
-        let bytes = boundaries[start]..boundaries[end];
-        if !content[bytes.clone()].trim().is_empty() {
-            chunks.push(bytes);
-        }
-        if end == total_chars {
-            break;
-        }
-        start += step;
-    }
-    chunks
+    let mut next_start = Some(0);
+    std::iter::from_fn(move || {
+        let start = next_start?;
+        let rest = &content[start..];
+        let window_len = char_offset(rest, cfg.chunk_chars);
+        next_start = window_len
+            .and_then(|_| char_offset(rest, step))
+            .map(|advance| start + advance);
+        Some(start..start + window_len.unwrap_or(rest.len()))
+    })
+    .filter(|bytes| !content[bytes.clone()].trim().is_empty())
+}
+
+/// The byte offset of `text`'s character number `chars`; `None` when it has no more
+/// than `chars` characters.
+fn char_offset(text: &str, chars: usize) -> Option<usize> {
+    text.char_indices().nth(chars).map(|(offset, _)| offset)
 }
 
 #[cfg(test)]
@@ -80,8 +79,7 @@ mod tests {
     }
 
     fn chunks_of<'a>(content: &'a str, cfg: &ChunkingConfig) -> Vec<&'a str> {
-        chunk_ranges(content, cfg)
-            .into_iter()
+        chunk_ranges(content, *cfg)
             .map(|bytes| &content[bytes])
             .collect()
     }

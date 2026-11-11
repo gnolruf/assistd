@@ -553,7 +553,7 @@ impl MessageRow {
         let role = msg.role();
         let chunk_bytes = match role {
             PersistedRole::User | PersistedRole::Assistant => {
-                chunk_ranges(&msg.content, &ChunkingConfig::MESSAGES)
+                chunk_ranges(&msg.content, ChunkingConfig::MESSAGES).collect()
             }
             PersistedRole::Tool => Vec::new(),
         };

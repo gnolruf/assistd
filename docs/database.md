@@ -20,6 +20,7 @@ erDiagram
     messages ||--|{ branch_messages : "appears in"
     branches ||--o| branch_summaries : "compacted by"
     messages ||--o{ chunks : "split into"
+    index_roots ||--o{ documents : "found under"
     documents ||--o{ chunks : "split into"
     messages ||--o{ relay_steps : "relayed by"
     relay_steps ||--o{ relay_entries : "did"
@@ -109,10 +110,22 @@ erDiagram
         int created_at
         int updated_at
     }
-    documents {
+    index_roots {
         int id PK
         blob path UK
+        int pass "counts the walks over the root"
+    }
+    documents {
+        int id PK
+        int root_id FK
+        blob path UK
         text content "the text as indexed"
+        blob content_hash "SHA-256 of content"
+        int mtime_ns "the file's stamp when read"
+        int size
+        int chunk_chars "the chunking it was cut with"
+        int overlap_chars
+        int seen_pass "the root's pass that last saw it"
         int indexed_at
     }
     chunks {
@@ -239,10 +252,17 @@ Deleting a task deletes its runs; their transcript sessions stay.
   and assistant messages are cut into overlapping windows of 512
   characters (64 shared) in the same transaction that saves the
   message; tool results are not chunked.
+- **`index_roots`**: the folders indexed for document search. Each
+  walk over a root is a pass and bumps `pass`; deleting a root deletes
+  its documents.
 - **`documents`**: local files indexed for search, one row per path,
-  holding the text as it was indexed. Re-indexing a path whose text
-  changed replaces its chunks, and with them their vectors; unchanged
-  text keeps both. The rows are a rebuildable cache of files on disk,
+  holding the text as it was indexed. A file whose `mtime_ns`, `size`
+  and chunking match its row is not read again. One that is read and
+  hashes to the stored `content_hash` only has its stamp refreshed.
+  Otherwise the chunks whose position and bytes are unchanged keep
+  their vectors and the rest are replaced. Each row records the pass
+  that last saw it, and finishing a pass deletes the root's documents
+  it did not see. The rows are a rebuildable cache of files on disk,
   so a reset of `memory.db` costs only a re-index.
 - **`message_chunk_embeddings`** / **`document_chunk_embeddings`** /
   **`memory_embeddings`**: at most one vector per chunk or memory,

@@ -5,6 +5,12 @@ use crate::{BranchId, MemoryStore, MessageId, PersistedMessage, PersistedRole, T
 /// The model every helper stores vectors under.
 const MODEL: &str = "m";
 
+/// The stamp of a file no test has touched since it was indexed.
+const STAMP: FileStamp = FileStamp {
+    mtime_ns: 1,
+    size: 1,
+};
+
 /// The returned temp dir must outlive the stores.
 async fn fresh() -> (SqliteHandle, SqliteSemanticStore, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
@@ -235,19 +241,20 @@ async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks(
         .embedded_chunk(&store, "chat", &unit_vec(0.0))
         .await;
     let path = PathBuf::from("/notes/plan.md");
+    let pass = store.begin_index_pass(Path::new("/notes")).await.unwrap();
     let stale = store
-        .index_document(path.clone(), "draft".into())
+        .index_document(pass, path.clone(), STAMP, "draft".into())
         .await
         .unwrap();
     embed_chunk(&store, stale[0], &unit_vec(0.1)).await;
     let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
     let fresh_chunks = store
-        .index_document(path.clone(), section.clone())
+        .index_document(pass, path.clone(), STAMP, section.clone())
         .await
         .unwrap();
     assert!(
         store
-            .index_document(path.clone(), section.clone())
+            .index_document(pass, path.clone(), STAMP, section.clone())
             .await
             .unwrap()
             .is_empty(),
@@ -294,6 +301,87 @@ async fn documents_and_chats_rank_apart_and_reindexing_replaces_document_chunks(
             memories: 0
         }
     );
+}
+
+#[tokio::test]
+async fn a_pass_skips_unchanged_files_keeps_untouched_chunks_and_drops_unseen_documents() {
+    let (_handle, store, _temp) = fresh().await;
+    let root = Path::new("/notes");
+    let (plan, gone) = (root.join("plan.md"), root.join("gone.md"));
+    let touched = FileStamp {
+        mtime_ns: 2,
+        ..STAMP
+    };
+    let section = format!("{}{}", "intro ".repeat(90), "detail ".repeat(60));
+
+    let first = store.begin_index_pass(root).await.unwrap();
+    let indexed = store
+        .index_document(first, plan.clone(), STAMP, section.clone())
+        .await
+        .unwrap();
+    let [intro, detail] = indexed[..] else {
+        panic!("expected two chunks, got {indexed:?}");
+    };
+    store
+        .index_document(
+            first,
+            gone.clone(),
+            STAMP,
+            "deleted before the next pass".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.finish_index_pass(first).await.unwrap(), 0);
+    embed_chunk(&store, intro, &unit_vec(0.0)).await;
+    embed_chunk(&store, detail, &unit_vec(0.1)).await;
+
+    let second = store.begin_index_pass(root).await.unwrap();
+    assert!(
+        store
+            .document_unchanged(second, &plan, STAMP)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .document_unchanged(second, &plan, touched)
+            .await
+            .unwrap()
+    );
+    let rewritten = store
+        .index_document(second, plan.clone(), touched, section.clone())
+        .await
+        .unwrap();
+    assert!(rewritten.is_empty(), "the same text must keep its chunks");
+    assert!(
+        store
+            .document_unchanged(second, &plan, touched)
+            .await
+            .unwrap()
+    );
+    let edited = store
+        .index_document(second, plan.clone(), touched, format!("{section}!"))
+        .await
+        .unwrap();
+    assert_eq!(
+        edited.len(),
+        1,
+        "only the chunk the edit reached is replaced"
+    );
+    assert_eq!(store.finish_index_pass(second).await.unwrap(), 1);
+    assert!(!store.remove_document(&gone).await.unwrap());
+
+    let hits = store
+        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Documents)
+        .await
+        .unwrap();
+    let hit_ids: Vec<ChunkId> = hits.iter().map(|hit| hit.chunk_id).collect();
+    assert_eq!(hit_ids, [intro], "the untouched chunk keeps its vector");
+    assert_eq!(store.count_missing().await.unwrap().chunks, 1);
+
+    assert_eq!(store.remove_index_root(root).await.unwrap(), 1);
+    assert_eq!(store.count_missing().await.unwrap().chunks, 0);
+    assert!(store.begin_index_pass(root).await.unwrap() != second);
 }
 
 #[tokio::test]

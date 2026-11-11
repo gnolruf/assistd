@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -18,9 +19,9 @@ use assistd_llm::{
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
-    HistoryRow, HistoryScope, MemoryHit, MemoryId, MessageId, MessageKind, NoSemanticStore,
-    PersistedMessage, PersistedRole, PersistedToolCall, SemanticStore, SessionId, SessionScope,
-    SqliteHandle, SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
+    FileStamp, HistoryRow, HistoryScope, IndexPass, MemoryHit, MemoryId, MessageId, MessageKind,
+    NoSemanticStore, PersistedMessage, PersistedRole, PersistedToolCall, SemanticStore, SessionId,
+    SessionScope, SqliteHandle, SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
     UnindexedRows,
 };
 use assistd_tools::{
@@ -2027,6 +2028,37 @@ impl SemanticStore for FixedHits {
     }
     async fn clear_unembeddable(&self) -> assistd_memory::Result<u64> {
         NoSemanticStore.clear_unembeddable().await
+    }
+    async fn begin_index_pass(&self, root: &Path) -> assistd_memory::Result<IndexPass> {
+        NoSemanticStore.begin_index_pass(root).await
+    }
+    async fn document_unchanged(
+        &self,
+        pass: IndexPass,
+        path: &Path,
+        stamp: FileStamp,
+    ) -> assistd_memory::Result<bool> {
+        NoSemanticStore.document_unchanged(pass, path, stamp).await
+    }
+    async fn index_document(
+        &self,
+        pass: IndexPass,
+        path: PathBuf,
+        stamp: FileStamp,
+        content: String,
+    ) -> assistd_memory::Result<Vec<ChunkId>> {
+        NoSemanticStore
+            .index_document(pass, path, stamp, content)
+            .await
+    }
+    async fn finish_index_pass(&self, pass: IndexPass) -> assistd_memory::Result<u64> {
+        NoSemanticStore.finish_index_pass(pass).await
+    }
+    async fn remove_document(&self, path: &Path) -> assistd_memory::Result<bool> {
+        NoSemanticStore.remove_document(path).await
+    }
+    async fn remove_index_root(&self, root: &Path) -> assistd_memory::Result<u64> {
+        NoSemanticStore.remove_index_root(root).await
     }
 }
 

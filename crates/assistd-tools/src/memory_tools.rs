@@ -527,12 +527,14 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, ChunkId, Embedding, EmbeddingTarget, MemoryError,
-        MemoryId, MemoryStore, NoMemoryStore, NoSemanticStore, NoTranscriptStore, PersistedMessage,
-        Seq, SqliteHandle, SqliteMemoryStore, SqliteSemanticStore, SqliteTranscriptStore,
-        UnindexedRows,
+        AdjacentChunks, BranchId, BranchSummary, ChunkId, Embedding, EmbeddingTarget, FileStamp,
+        IndexPass, MemoryError, MemoryId, MemoryStore, NoMemoryStore, NoSemanticStore,
+        NoTranscriptStore, PersistedMessage, Seq, SqliteHandle, SqliteMemoryStore,
+        SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
     use tempfile::TempDir;
@@ -628,6 +630,37 @@ mod tests {
         }
         async fn clear_unembeddable(&self) -> Result<u64, MemoryError> {
             Ok(0)
+        }
+        async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass, MemoryError> {
+            NoSemanticStore.begin_index_pass(root).await
+        }
+        async fn document_unchanged(
+            &self,
+            pass: IndexPass,
+            path: &Path,
+            stamp: FileStamp,
+        ) -> Result<bool, MemoryError> {
+            NoSemanticStore.document_unchanged(pass, path, stamp).await
+        }
+        async fn index_document(
+            &self,
+            pass: IndexPass,
+            path: PathBuf,
+            stamp: FileStamp,
+            content: String,
+        ) -> Result<Vec<ChunkId>, MemoryError> {
+            NoSemanticStore
+                .index_document(pass, path, stamp, content)
+                .await
+        }
+        async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64, MemoryError> {
+            NoSemanticStore.finish_index_pass(pass).await
+        }
+        async fn remove_document(&self, path: &Path) -> Result<bool, MemoryError> {
+            NoSemanticStore.remove_document(path).await
+        }
+        async fn remove_index_root(&self, root: &Path) -> Result<u64, MemoryError> {
+            NoSemanticStore.remove_index_root(root).await
         }
     }
 

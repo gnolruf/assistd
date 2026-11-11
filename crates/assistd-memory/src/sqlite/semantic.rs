@@ -5,8 +5,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::hash::Hash;
-use std::ops::Range;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -14,15 +13,16 @@ use num_traits::ToPrimitive;
 use rusqlite::types::FromSql;
 use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
-use crate::chunking::{ChunkingConfig, chunk_ranges};
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ContextChunk, DocumentId, Embedding,
-    EmbeddingHit, EmbeddingTarget, MemoryError, MemoryHit, MemoryId, MessageId, Result,
-    SemanticStore, SessionId, SessionScope, UnindexedRows,
+    EmbeddingHit, EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryHit, MemoryId,
+    MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
-use super::timestamp::{now_millis, timestamp_at};
+use super::timestamp::timestamp_at;
+
+mod documents;
 
 /// Every message chunk vector, grouped by its message.
 const MESSAGE_CHUNK_VECTORS: &str = "
@@ -117,23 +117,6 @@ impl SqliteSemanticStore {
     /// Store over the shared database handle.
     pub fn new(handle: SqliteHandle) -> Self {
         Self { handle }
-    }
-
-    /// Index `content` as the text of the document at `path`, replacing its chunks
-    /// and their vectors when the text changed. Returns the new chunks, left
-    /// for embedding; empty when the text is unchanged.
-    pub async fn index_document(&self, path: PathBuf, content: String) -> Result<Vec<ChunkId>> {
-        let ranges = chunk_ranges(&content, &ChunkingConfig::DOCUMENTS);
-        self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let chunks = replace_document(&tx, &path, &content, &ranges)?;
-                tx.commit()?;
-                Ok(chunks)
-            })
-            .await
-            .map_err(MemoryError::sqlite("index_document"))
     }
 }
 
@@ -348,6 +331,79 @@ impl SemanticStore for SqliteSemanticStore {
             })
             .await
             .map_err(MemoryError::sqlite("clear_unembeddable"))
+    }
+
+    async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass> {
+        let root = root.to_path_buf();
+        self.handle
+            .writer()
+            .call(move |c| documents::begin_pass(c, &root))
+            .await
+            .map_err(MemoryError::sqlite("begin_index_pass"))
+    }
+
+    async fn document_unchanged(
+        &self,
+        pass: IndexPass,
+        path: &Path,
+        stamp: FileStamp,
+    ) -> Result<bool> {
+        let path = path.to_path_buf();
+        self.handle
+            .writer()
+            .call(move |c| documents::mark_seen_if_unchanged(c, pass, &path, stamp))
+            .await
+            .map_err(MemoryError::sqlite("document_unchanged"))
+    }
+
+    async fn index_document(
+        &self,
+        pass: IndexPass,
+        path: PathBuf,
+        stamp: FileStamp,
+        content: String,
+    ) -> Result<Vec<ChunkId>> {
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let chunks = documents::store_document(&tx, pass, &path, stamp, &content)?;
+                tx.commit()?;
+                Ok(chunks)
+            })
+            .await
+            .map_err(MemoryError::sqlite("index_document"))
+    }
+
+    async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64> {
+        self.handle
+            .writer()
+            .call(move |c| documents::remove_unseen(c, pass))
+            .await
+            .map_err(MemoryError::sqlite("finish_index_pass"))
+    }
+
+    async fn remove_document(&self, path: &Path) -> Result<bool> {
+        let path = path.to_path_buf();
+        self.handle
+            .writer()
+            .call(move |c| documents::remove_document(c, &path))
+            .await
+            .map_err(MemoryError::sqlite("remove_document"))
+    }
+
+    async fn remove_index_root(&self, root: &Path) -> Result<u64> {
+        let root = root.to_path_buf();
+        self.handle
+            .writer()
+            .call(move |c| -> rusqlite::Result<_> {
+                let tx = c.transaction()?;
+                let removed = documents::remove_root(&tx, &root)?;
+                tx.commit()?;
+                Ok(removed)
+            })
+            .await
+            .map_err(MemoryError::sqlite("remove_index_root"))
     }
 }
 
@@ -810,47 +866,6 @@ fn upsert_chunk_embedding(
          SET model = excluded.model, vector = excluded.vector",
     )?
     .execute(rusqlite::params![chunk, model, vector.map(quantised_blob)])
-}
-
-/// Store `content` as the document at `path` and cut it into `ranges`, returning the
-/// new chunks; nothing changes when the stored text already matches.
-fn replace_document(
-    tx: &Transaction<'_>,
-    path: &Path,
-    content: &str,
-    ranges: &[Range<usize>],
-) -> rusqlite::Result<Vec<ChunkId>> {
-    let changed: Option<DocumentId> = tx
-        .prepare_cached(
-            "INSERT INTO documents (path, content, indexed_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(path) DO UPDATE
-             SET content = excluded.content, indexed_at = excluded.indexed_at
-             WHERE content IS NOT excluded.content
-             RETURNING id",
-        )?
-        .query_row(
-            rusqlite::params![path.as_os_str().as_bytes(), content, now_millis()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(document) = changed else {
-        return Ok(Vec::new());
-    };
-    tx.prepare_cached("DELETE FROM chunks WHERE document_id = ?1")?
-        .execute(rusqlite::params![document])?;
-    let mut insert = tx.prepare_cached(
-        "INSERT INTO chunks (document_id, byte_start, byte_end)
-         VALUES (?1, ?2, ?3)
-         RETURNING id",
-    )?;
-    ranges
-        .iter()
-        .map(|bytes| {
-            insert.query_row(rusqlite::params![document, bytes.start, bytes.end], |r| {
-                r.get(0)
-            })
-        })
-        .collect()
 }
 
 /// Encode `vector` as the little-endian `f32` BLOB the message chunk and memory
