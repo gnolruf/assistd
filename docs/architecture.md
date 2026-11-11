@@ -610,9 +610,10 @@ holds four schemas: a key/value `MemoryStore` for durable facts, a
 `TranscriptStore` for full per-session transcripts (with branching
 and undo), a `SemanticStore` for embedding-indexed chunks, and a
 `TaskStore` for saved tasks and their runs. Every
-write runs in order on the only read-write connection. Vector scans
-and other reads each get their own read-only connection, so a long
-scan holds up neither a write nor a history load. Shutdown closes the
+write runs in order on the only read-write connection. Document vector
+scans, other vector scans and other reads each get their own read-only
+connection, so a long scan holds up neither a write, a history load
+nor a scan of the other kind. Shutdown closes the
 database once queued writes have run. [database.md](database.md) maps
 the tables.
 
@@ -635,8 +636,9 @@ content is marked and skipped until `assistd memory reindex` retries
 it. A `remember` search embeds its query and ranks saved memories by
 cosine similarity; the `reminisce` tool runs the same kind of search
 over transcript chunks from earlier sessions. Indexed local documents
-own chunks in the same table, so one ranked search serves both,
-filtered by source; chat recall never ranks document chunks. Like chat requests,
+own chunks in the same table, but their vectors are kept in a table
+of their own, quantised to a byte per dimension, so chat recall never
+reads or ranks document chunks. Like chat requests,
 embedding requests are sent only while the embedding server's
 supervisor is `Ready` with a live child; a row refused in the
 meantime stays pending and is embedded by a later pass.

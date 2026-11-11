@@ -568,3 +568,27 @@ fn score_against_rejects_malformed_blobs() {
     assert_eq!(score_against(&q, &vector_to_blob(&[1.0, 0.0, 0.0])), None);
     assert_eq!(score_against(&q, &[0u8; 7]), None);
 }
+
+#[test]
+fn quantised_score_tracks_the_exact_dot_product() {
+    let stored: Vec<f32> = (0..768u16)
+        .map(|i| (f32::from(i) * 0.37).sin() / 20.0)
+        .collect();
+    let query: Vec<f32> = (0..768u16)
+        .map(|i| (f32::from(i) * 0.11).cos() / 20.0)
+        .collect();
+    let exact = score_against(&query, &vector_to_blob(&stored)).unwrap();
+    let blob = quantised_blob(&stored);
+
+    assert_eq!(blob.len(), 4 + stored.len());
+    let approximate = score_against_quantised(&query, &blob).unwrap();
+    assert!(
+        (approximate - exact).abs() < 2e-3,
+        "quantised {approximate} strays from exact {exact}"
+    );
+    assert_eq!(
+        score_against_quantised(&query, &blob[..blob.len() - 1]),
+        None
+    );
+    assert_eq!(score_against_quantised(&query, &[0u8; 3]), None);
+}

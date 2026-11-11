@@ -14,6 +14,7 @@ rusqlite = { workspace = true }
 tokio-rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
 chrono = { workspace = true }
+num-traits = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
