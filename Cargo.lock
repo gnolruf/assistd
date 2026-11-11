@@ -465,6 +465,7 @@ dependencies = [
 name = "assistd-wm"
 version = "0.6.0"
 dependencies = [
+ "assistd-config",
  "assistd-utils",
  "async-trait",
  "futures-util",

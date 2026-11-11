@@ -1,30 +1,29 @@
-//! Window manager integration: the [`WindowManager`] trait, and the i3 and
-//! Sway backends that implement it over their IPC sockets.
+//! Window manager integration: the [`WindowManager`] trait, and [`start`],
+//! which runs the i3 or Sway backend that implements it over IPC.
 
 use std::convert::Infallible;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::str::FromStr;
+use std::sync::Arc;
 
+use assistd_config::Compositor;
 use async_trait::async_trait;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 pub mod criteria;
 pub mod error;
 #[cfg(feature = "i3")]
-pub mod i3;
+mod i3;
 #[cfg(any(feature = "i3", feature = "sway"))]
 mod ipc_backend;
 #[cfg(any(feature = "i3", feature = "sway"))]
 pub(crate) mod snapshot;
 #[cfg(feature = "sway")]
-pub mod sway;
+mod sway;
 
 pub use error::{TransportError, WmError, WmResult};
-#[cfg(feature = "i3")]
-pub use i3::{I3Backend, I3Handle};
-#[cfg(feature = "sway")]
-pub use sway::{SwayBackend, SwayHandle};
 
 /// Per-call IPC timeout, so a wedged compositor cannot block a request
 /// indefinitely.
@@ -54,30 +53,17 @@ const TERMINAL_CLASSES: &[&str] = &[
     "Termite",
 ];
 
-/// Shutdown handle for whichever backend was started. Each variant
-/// wraps that backend's supervisor task.
+/// The supervisor task of a backend [`start`] connected.
 #[derive(Debug)]
-pub enum WmHandle {
-    #[cfg(feature = "i3")]
-    I3(I3Handle),
-    #[cfg(feature = "sway")]
-    Sway(SwayHandle),
+pub struct WmHandle {
+    supervisor_task: JoinHandle<()>,
 }
 
 impl WmHandle {
     /// Awaits the supervisor task. Flip the shutdown watch first or
     /// this blocks until the compositor connection drops.
     pub async fn shutdown(self) {
-        let _ = self.into_supervisor_task().await;
-    }
-
-    fn into_supervisor_task(self) -> JoinHandle<()> {
-        match self {
-            #[cfg(feature = "i3")]
-            Self::I3(handle) => handle.supervisor_task,
-            #[cfg(feature = "sway")]
-            Self::Sway(handle) => handle.supervisor_task,
-        }
+        let _ = self.supervisor_task.await;
     }
 }
 
@@ -253,8 +239,10 @@ pub struct OutputInfo {
     pub active: bool,
     /// X11 primary output; always `false` on Sway.
     pub primary: bool,
-    /// `(width, height, refresh_mHz)`; `None` for disabled outputs.
+    /// `(width, height, refresh_mHz)`; `None` for disabled outputs and
+    /// on i3, which reports no mode.
     pub current_mode: Option<(u32, u32, u32)>,
+    /// `None` on i3, which reports no scale.
     pub scale: Option<f64>,
     /// Workspace visible on this output; `None` for disabled outputs.
     pub focused_workspace: Option<String>,
@@ -388,10 +376,8 @@ pub trait WindowManager: fmt::Debug + Send + Sync + 'static {
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>>;
 
     /// Snapshot of the focused window and active workspace. `Ok(None)`
-    /// when nothing is focused or the backend keeps no snapshot.
-    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
-        Ok(None)
-    }
+    /// when nothing is focused.
+    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>>;
 
     /// Resize the window's width by `pixels`.
     async fn resize_width(
@@ -408,16 +394,11 @@ pub trait WindowManager: fmt::Debug + Send + Sync + 'static {
     /// process, after switching to `workspace` when given.
     async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()>;
 
-    /// Enumerate outputs; [`WmError::Unsupported`] when the backend
-    /// cannot.
-    async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
-        Err(WmError::Unsupported("output enumeration"))
-    }
+    /// Enumerate every output the compositor knows about.
+    async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>>;
 
     /// Whether the backend is connected to a compositor.
-    fn is_connected(&self) -> bool {
-        true
-    }
+    fn is_connected(&self) -> bool;
 }
 
 /// Placeholder [`WindowManager`] that refuses every operation.
@@ -445,6 +426,9 @@ impl WindowManager for NoWindowManager {
     async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
         Err(WmError::Disconnected)
     }
+    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
+        Ok(None)
+    }
     async fn resize_width(
         &self,
         _window: &WindowId,
@@ -465,6 +449,56 @@ impl WindowManager for NoWindowManager {
     fn is_connected(&self) -> bool {
         false
     }
+}
+
+/// Start the backend for `compositor` with its reconnecting supervisor.
+/// A compositor with no backend in this build, or one refusing the first
+/// connect, yields [`NoWindowManager`] and no handle.
+pub async fn start(
+    compositor: Compositor,
+    shutdown: watch::Receiver<bool>,
+) -> (Arc<dyn WindowManager>, Option<WmHandle>) {
+    connect(compositor, shutdown).await
+}
+
+#[cfg(any(feature = "i3", feature = "sway"))]
+async fn connect(
+    compositor: Compositor,
+    shutdown: watch::Receiver<bool>,
+) -> (Arc<dyn WindowManager>, Option<WmHandle>) {
+    match compositor {
+        #[cfg(feature = "i3")]
+        Compositor::I3 => ipc_backend::start_or_disconnected(i3::I3Ipc, shutdown).await,
+        #[cfg(feature = "sway")]
+        Compositor::Sway => ipc_backend::start_or_disconnected(sway::SwayIpc, shutdown).await,
+        other => without_backend(other),
+    }
+}
+
+#[cfg(not(any(feature = "i3", feature = "sway")))]
+fn connect(
+    compositor: Compositor,
+    _shutdown: watch::Receiver<bool>,
+) -> std::future::Ready<(Arc<dyn WindowManager>, Option<WmHandle>)> {
+    std::future::ready(without_backend(compositor))
+}
+
+fn without_backend(compositor: Compositor) -> (Arc<dyn WindowManager>, Option<WmHandle>) {
+    match compositor {
+        Compositor::I3 => tracing::warn!(
+            target: "assistd::wm",
+            "i3 backend not compiled into this build (feature `i3`); window operations disabled"
+        ),
+        Compositor::Sway => tracing::warn!(
+            target: "assistd::wm",
+            "sway backend not compiled into this build (feature `sway`); window operations disabled"
+        ),
+        Compositor::Hyprland => tracing::info!(
+            target: "assistd::wm",
+            "no hyprland backend; window operations disabled"
+        ),
+    }
+    (Arc::new(NoWindowManager), None)
 }
 
 #[cfg(test)]

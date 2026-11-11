@@ -6,10 +6,9 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_wm::{SwayBackend, WindowManager};
+use assistd_config::Compositor;
 use tokio::sync::watch;
 
 #[tokio::test]
@@ -17,11 +16,8 @@ use tokio::sync::watch;
 async fn connects_and_passes_shared_assertions() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let handle = SwayBackend::start(shutdown_rx)
-        .await
-        .expect("SwayBackend::start failed; is sway running and $SWAYSOCK set?");
-
-    let wm: Arc<dyn WindowManager> = handle.backend.clone();
+    let (wm, handle) = assistd_wm::start(Compositor::Sway, shutdown_rx).await;
+    let handle = handle.expect("sway backend did not start; is sway running and $SWAYSOCK set?");
 
     common::assert_is_connected(&wm);
     common::assert_focused_window_present(&wm).await;

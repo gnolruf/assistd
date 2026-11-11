@@ -14,7 +14,6 @@ mod daemon;
 #[cfg(feature = "tray")]
 mod tray;
 mod voice_worker;
-mod wm_backend;
 
 /// How long exit waits on `spawn_blocking` work (e.g. a speech model
 /// load abandoned by a shutdown during startup) before leaving it behind.

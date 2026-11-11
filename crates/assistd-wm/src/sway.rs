@@ -1,141 +1,17 @@
-//! Sway backend for [`crate::WindowManager`], over `swayipc-async`. A
+//! Sway IPC protocol over `swayipc-async`. A
 //! view's app is its `app_id`, or its XWayland `class` when it has none.
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
 use futures_util::StreamExt;
 use swayipc_async::{
-    Connection, Event, EventStream, EventType, Node, NodeType, Output, WindowChange, WindowEvent,
+    Connection, Event, EventStream, EventType, Node, NodeType, WindowChange, WindowEvent,
     WorkspaceChange,
 };
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
-use crate::criteria::{
-    format_exec, format_focus, format_layout, format_move_to_workspace, format_resize_width,
-};
-use crate::ipc_backend::{IpcBackend, IpcEvent, IpcProtocol, NodeIdentity, OpLabels};
+use crate::ipc_backend::{IpcEvent, IpcProtocol, NodeIdentity, OpLabels};
 use crate::snapshot::WindowChangeKind;
-use crate::{
-    ExecCommand, FocusedWindowContext, Layout, OutputInfo, ResizeDir, TransportError, Window,
-    WindowId, WindowManager, WmError, WmResult, WorkspaceId, WorkspaceInfo,
-};
+use crate::{OutputInfo, TransportError, Window, WindowId, WmError, WmResult, WorkspaceInfo};
 
-/// [`WindowManager`] over a single Sway IPC command socket.
-#[derive(Debug)]
-pub struct SwayBackend {
-    ipc: Arc<IpcBackend<SwayIpc>>,
-}
-
-/// The backend plus its supervisor task, returned by [`SwayBackend::start`].
-#[derive(Debug)]
-pub struct SwayHandle {
-    pub backend: Arc<SwayBackend>,
-    pub(crate) supervisor_task: JoinHandle<()>,
-}
-
-impl SwayHandle {
-    /// Awaits the supervisor task. Flip the shutdown watch first or
-    /// this blocks until the socket drops.
-    pub async fn shutdown(self) {
-        let _ = self.supervisor_task.await;
-    }
-}
-
-impl SwayBackend {
-    /// Connect to Sway and spawn the reconnecting supervisor. Errors when the initial
-    /// connect fails; a compositor that never answers starts disconnected.
-    pub async fn start(shutdown: watch::Receiver<bool>) -> WmResult<SwayHandle> {
-        let (ipc, supervisor_task) = IpcBackend::start(SwayIpc, shutdown).await?;
-        Ok(SwayHandle {
-            backend: Arc::new(Self { ipc }),
-            supervisor_task,
-        })
-    }
-
-    async fn outputs(&self, op_label: &'static str) -> WmResult<Vec<Output>> {
-        self.ipc
-            .with_conn(op_label, async |conn| conn.get_outputs().await)
-            .await
-    }
-}
-
-#[async_trait]
-impl WindowManager for SwayBackend {
-    async fn focus(&self, window: &WindowId) -> WmResult<()> {
-        self.ipc.run_command(&format_focus(window)).await
-    }
-
-    async fn move_to_workspace(&self, window: &WindowId, workspace: &WorkspaceId) -> WmResult<()> {
-        self.ipc
-            .run_command(&format_move_to_workspace(window, workspace))
-            .await
-    }
-
-    async fn focused_window(&self) -> WmResult<Option<WindowId>> {
-        Ok(self.ipc.focused_window().await)
-    }
-
-    async fn focused_context(&self) -> WmResult<Option<FocusedWindowContext>> {
-        Ok(self.ipc.focused_context().await)
-    }
-
-    async fn list_windows(&self) -> WmResult<Vec<Window>> {
-        self.ipc.list_windows().await
-    }
-
-    async fn list_workspaces(&self) -> WmResult<Vec<WorkspaceInfo>> {
-        self.ipc.list_workspaces().await
-    }
-
-    async fn resize_width(
-        &self,
-        window: &WindowId,
-        direction: ResizeDir,
-        pixels: u32,
-    ) -> WmResult<()> {
-        self.ipc
-            .run_command(&format_resize_width(window, direction, pixels))
-            .await
-    }
-
-    async fn set_layout(&self, layout: Layout) -> WmResult<()> {
-        self.ipc.run_command(&format_layout(layout)).await
-    }
-
-    async fn exec(&self, workspace: Option<&WorkspaceId>, command: &ExecCommand) -> WmResult<()> {
-        self.ipc.run_command(&format_exec(workspace, command)).await
-    }
-
-    async fn list_outputs(&self) -> WmResult<Vec<OutputInfo>> {
-        Ok(self
-            .outputs("sway GET_OUTPUTS")
-            .await?
-            .into_iter()
-            .map(|output| OutputInfo {
-                name: output.name,
-                active: output.active,
-                primary: output.primary,
-                current_mode: output.current_mode.map(|mode| {
-                    (
-                        u32::try_from(mode.width).unwrap_or(0),
-                        u32::try_from(mode.height).unwrap_or(0),
-                        u32::try_from(mode.refresh).unwrap_or(0),
-                    )
-                }),
-                scale: output.scale,
-                focused_workspace: output.current_workspace,
-            })
-            .collect())
-    }
-
-    fn is_connected(&self) -> bool {
-        self.ipc.is_connected()
-    }
-}
-
-struct SwayIpc;
+pub(crate) struct SwayIpc;
 
 impl IpcProtocol for SwayIpc {
     type Cmd = Connection;
@@ -147,6 +23,7 @@ impl IpcProtocol for SwayIpc {
         run_command: "sway RUN_COMMAND",
         get_tree: "sway GET_TREE",
         get_workspaces: "sway GET_WORKSPACES",
+        get_outputs: "sway GET_OUTPUTS",
     };
 
     async fn connect(&self) -> WmResult<(Connection, EventStream)> {
@@ -192,6 +69,28 @@ impl IpcProtocol for SwayIpc {
                 name: workspace.name,
                 focused: workspace.focused,
                 output: workspace.output,
+            })
+            .collect())
+    }
+
+    async fn get_outputs(cmd: &mut Connection) -> Result<Vec<OutputInfo>, TransportError> {
+        Ok(cmd
+            .get_outputs()
+            .await?
+            .into_iter()
+            .map(|output| OutputInfo {
+                name: output.name,
+                active: output.active,
+                primary: output.primary,
+                current_mode: output.current_mode.map(|mode| {
+                    (
+                        u32::try_from(mode.width).unwrap_or(0),
+                        u32::try_from(mode.height).unwrap_or(0),
+                        u32::try_from(mode.refresh).unwrap_or(0),
+                    )
+                }),
+                scale: output.scale,
+                focused_workspace: output.current_workspace,
             })
             .collect())
     }

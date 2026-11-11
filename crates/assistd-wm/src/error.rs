@@ -18,10 +18,6 @@ pub enum WmError {
     #[error("IPC timed out after {0:?}")]
     Timeout(Duration),
 
-    /// The string names the unsupported operation.
-    #[error("backend does not support {0}")]
-    Unsupported(&'static str),
-
     /// The IPC exchange named by `op` failed in transport.
     #[error("{op}: {source}")]
     Ipc {
