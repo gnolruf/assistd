@@ -23,7 +23,6 @@ use assistd_llm::{
     SlotStash,
 };
 use assistd_utils::child_server::ApiKey;
-use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -508,6 +507,6 @@ async fn replay_history(chat: &dyn LlmBackend, replay: HistoryReplay) {
 
 fn init_tracing() {
     tracing_subscriber::fmt()
-        .with_env_filter(env_filter_or(DEFAULT_LOG_DIRECTIVES))
+        .with_env_filter(crate::env_filter_or(DEFAULT_LOG_DIRECTIVES))
         .init();
 }

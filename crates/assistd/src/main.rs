@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
 
 use client::{listen, mcp, memory, presence, ptt, query, task, voice_ctl};
 
@@ -113,6 +114,11 @@ enum Commands {
     /// spawns this itself.
     #[command(hide = true)]
     VoiceWorker,
+}
+
+/// The `RUST_LOG` filter when it is set and parses, else `default_directives`.
+fn env_filter_or(default_directives: &str) -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_directives))
 }
 
 fn main() -> Result<()> {

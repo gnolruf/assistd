@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use tracing_subscriber::EnvFilter;
+
 use assistd_config::TranscriptionConfig;
 use assistd_voice::{SherpaTranscriber, Transcriber};
 
@@ -19,7 +21,12 @@ const SPEECH_URL: &str =
     "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav";
 
 fn init_tracing() {
-    assistd_utils::tracing_init::init_test_tracing("info");
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_test_writer()
+        .try_init();
 }
 
 async fn fetch_to(path: &Path, url: &str) {

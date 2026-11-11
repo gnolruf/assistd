@@ -6,7 +6,6 @@ use std::time::Duration;
 use assistd_utils::child_server::{ApiKey, ChildServerStatus};
 use assistd_utils::http::{local_client_builder, read_capped};
 use async_trait::async_trait;
-use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::{EmbedError, Embedder};
@@ -198,17 +197,19 @@ fn order_by_index(data: Vec<EmbedDatum>, expected: usize) -> Result<Vec<Vec<f32>
 
 /// Scale finite `vector` to unit length, leaving a zero vector as it is.
 fn l2_normalize(mut vector: Vec<f32>) -> Vec<f32> {
-    let norm = vector
+    let largest = vector
         .iter()
-        .map(|&x| f64::from(x) * f64::from(x))
-        .sum::<f64>()
-        .sqrt();
-    if norm == 0.0 {
+        .fold(0.0_f32, |largest, value| largest.max(value.abs()));
+    if largest == 0.0 {
         return vector;
     }
-    let inverse_norm = (1.0 / norm).to_f32().unwrap_or(f32::MAX);
+    let norm_over_largest = vector
+        .iter()
+        .map(|value| (value / largest).powi(2))
+        .sum::<f32>()
+        .sqrt();
     for value in &mut vector {
-        *value *= inverse_norm;
+        *value = *value / largest / norm_over_largest;
     }
     vector
 }

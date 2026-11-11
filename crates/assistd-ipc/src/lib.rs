@@ -1,6 +1,7 @@
 //! Wire types for the daemon's Unix-socket protocol: line-delimited JSON,
 //! with [`Request`] lines from the client and [`Event`] lines back.
 
+use std::env;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -1410,7 +1411,10 @@ impl Event {
 /// The per-user daemon socket: `$XDG_RUNTIME_DIR/assistd.sock`, else
 /// `/tmp/assistd-<euid>/assistd.sock`, whose directory the daemon creates owner-only.
 pub fn socket_path() -> PathBuf {
-    socket_path_for(dirs::runtime_dir(), rustix::process::geteuid().as_raw())
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute());
+    socket_path_for(runtime_dir, rustix::process::geteuid().as_raw())
 }
 
 fn socket_path_for(runtime_dir: Option<PathBuf>, euid: u32) -> PathBuf {

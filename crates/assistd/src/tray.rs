@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use assistd_config::{Config, ConfigError};
 use assistd_ipc::IpcClient;
-use assistd_utils::tracing_init::env_filter_or;
 use clap::Args;
 use ksni::TrayMethods;
 use tokio::signal::unix::{SignalKind, signal};
@@ -133,6 +132,6 @@ async fn wait_for_shutdown(action_task: JoinHandle<Result<()>>) {
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter_or("info"))
+        .with_env_filter(crate::env_filter_or("info"))
         .try_init();
 }
