@@ -593,7 +593,9 @@ pub enum Request {
     /// `Readiness` per subsystem, then `Done`.
     GetReadiness { id: String },
     /// Forward broadcast events matching `filter`, tagged with their turn's `id`, until the
-    /// client disconnects; no `Done`, and `ToolResult` attachments are stripped.
+    /// client disconnects; no `Done`, and `ToolResult` attachments are stripped. Opens with the
+    /// current `TaskQueue`, `Presence`, `ListenState` and `VoiceState`, then sends every
+    /// presence change, each tagged with this request's `id`.
     Subscribe {
         id: String,
         #[serde(default)]

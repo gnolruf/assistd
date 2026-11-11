@@ -13,7 +13,7 @@ use textwrap::core::display_width;
 
 use assistd_ipc::{RelayEvent, RelayStepPlan, RelayStepRecord};
 
-use super::markdown::render_markdown;
+use super::markdown::{last_block_boundary, render_markdown};
 use super::theme::Theme;
 use super::ui::compact_duration;
 use crate::client::terminal_text::escape_bidi_controls;
@@ -264,7 +264,7 @@ impl OutputPane {
         self.open_assistant = Some(self.items.len() - 1);
     }
 
-    /// Extend the open reply's markdown; the block re-renders on the next
+    /// Extend the open reply's markdown; its unsettled blocks re-render on the next
     /// wrap so formatting settles as the closing delimiters arrive.
     pub(super) fn append_assistant(&mut self, delta: &str) {
         let idx = match self.open_assistant {
@@ -276,15 +276,15 @@ impl OutputPane {
         };
         if let Some(OutputItem::Assistant(text)) = self.items.get_mut(idx) {
             text.push_str(&escape_bidi_controls(delta));
-            self.wrap.invalidate(idx);
+            self.wrap.invalidate_tail(idx);
         }
     }
 
     pub(super) fn finish_assistant(&mut self) {
-        if self.open_assistant.is_none() {
+        let Some(idx) = self.open_assistant.take() else {
             return;
-        }
-        self.open_assistant = None;
+        };
+        self.wrap.finish_streaming(idx);
         self.items.push(OutputItem::gap());
     }
 
@@ -676,6 +676,7 @@ impl OutputPane {
                 self.items.pop();
                 self.wrap.truncate(idx);
             } else {
+                self.wrap.finish_streaming(idx);
                 self.items.push(OutputItem::gap());
             }
         }
@@ -727,9 +728,20 @@ pub(super) struct ThumbnailSlot {
     pub height: usize,
 }
 
+/// The reply being streamed into item `idx`, whose first `settled_rows` rows render the
+/// first `settled_bytes` of its text and are kept while later text arrives.
+struct StreamingReply {
+    idx: usize,
+    settled_bytes: usize,
+    settled_rows: usize,
+    /// Text arrived since the rows after the settled ones were rendered.
+    stale: bool,
+}
+
 /// Wrapped rows of the leading `starts.len()` items, valid for one `(width, verbose, theme)` key.
-/// Items mutated in place must go through [`Self::invalidate`] and removals through
-/// [`Self::truncate`]; appended items are picked up by [`Self::sync`].
+/// Items mutated in place must go through [`Self::invalidate`], or [`Self::invalidate_tail`]
+/// when text was only appended to a reply, and removals through [`Self::truncate`]; appended
+/// items are picked up by [`Self::sync`].
 #[derive(Default)]
 struct WrapCache {
     key: Option<(u16, bool, Theme)>,
@@ -740,11 +752,49 @@ struct WrapCache {
     thumbnails: Vec<usize>,
     /// Cached items whose rows must be re-rendered.
     stale: Vec<usize>,
+    streaming: Option<StreamingReply>,
 }
 
 impl WrapCache {
     fn invalidate(&mut self, idx: usize) {
         if idx < self.starts.len() {
+            self.stale.push(idx);
+            self.streaming.take_if(|reply| reply.idx == idx);
+        }
+    }
+
+    /// Mark the reply at `idx` as extended, so only the rows after its settled ones
+    /// are re-rendered.
+    fn invalidate_tail(&mut self, idx: usize) {
+        if idx >= self.starts.len() {
+            return;
+        }
+        match &mut self.streaming {
+            Some(reply) if reply.idx == idx => reply.stale = true,
+            _ => {
+                let reply = StreamingReply {
+                    idx,
+                    settled_bytes: 0,
+                    settled_rows: 0,
+                    stale: true,
+                };
+                if let Some(previous) = self.streaming.replace(reply)
+                    && previous.stale
+                {
+                    self.stale.push(previous.idx);
+                }
+            }
+        }
+    }
+
+    /// Stop streaming into the reply at `idx`, re-rendering it whole when its settled rows
+    /// were rendered apart from the rest.
+    fn finish_streaming(&mut self, idx: usize) {
+        if self
+            .streaming
+            .take_if(|reply| reply.idx == idx)
+            .is_some_and(|reply| reply.stale || reply.settled_bytes > 0)
+        {
             self.stale.push(idx);
         }
     }
@@ -755,6 +805,7 @@ impl WrapCache {
             self.starts.truncate(len);
             self.thumbnails.retain(|&i| i < len);
             self.stale.retain(|&i| i < len);
+            self.streaming.take_if(|reply| reply.idx >= len);
         }
     }
 
@@ -773,26 +824,65 @@ impl WrapCache {
             self.key = key;
             self.truncate(0);
         }
+        if width == 0
+            && let Some(reply) = self.streaming.take()
+        {
+            self.stale.push(reply.idx);
+        }
         self.stale.sort_unstable();
         self.stale.dedup();
-        let mut fresh = Vec::new();
         for idx in std::mem::take(&mut self.stale) {
+            let mut fresh = Vec::new();
             render_item(&mut fresh, &items[idx], width, verbose, theme);
-            let rows = self.rows(idx);
-            let (old_len, new_len) = (rows.len(), fresh.len());
-            self.lines.splice(rows, fresh.drain(..));
-            if new_len != old_len {
-                for start in &mut self.starts[idx + 1..] {
-                    *start = *start - old_len + new_len;
-                }
-            }
+            self.replace_rows(idx, 0, fresh);
         }
+        self.sync_streaming_tail(items, usize::from(width), theme);
         for (idx, item) in items.iter().enumerate().skip(self.starts.len()) {
             self.starts.push(self.lines.len());
             if matches!(item, OutputItem::Thumbnail(_)) {
                 self.thumbnails.push(idx);
             }
             render_item(&mut self.lines, item, width, verbose, theme);
+        }
+    }
+}
+
+impl WrapCache {
+    /// Re-render the streaming reply's rows after its settled ones, first settling every
+    /// block of the new text that later text can no longer change.
+    fn sync_streaming_tail(&mut self, items: &[OutputItem], width: usize, theme: &Theme) {
+        let Some(reply) = self.streaming.as_mut().filter(|reply| reply.stale) else {
+            return;
+        };
+        let OutputItem::Assistant(text) = &items[reply.idx] else {
+            return;
+        };
+        let tail = &text[reply.settled_bytes..];
+        let boundary = last_block_boundary(tail).unwrap_or(0);
+        let mut fresh = Vec::new();
+        if boundary > 0 {
+            fresh.extend(render_markdown(&tail[..boundary], width, theme));
+            fresh.push(Line::default());
+        }
+        let newly_settled = fresh.len();
+        fresh.extend(render_markdown(&tail[boundary..], width, theme));
+        let (idx, kept) = (reply.idx, reply.settled_rows);
+        reply.settled_bytes += boundary;
+        reply.settled_rows += newly_settled;
+        reply.stale = false;
+        self.replace_rows(idx, kept, fresh);
+    }
+
+    /// Replace the rows of item `idx` after its first `kept` with `fresh`.
+    fn replace_rows(&mut self, idx: usize, kept: usize, fresh: Vec<Line<'static>>) {
+        let rows = self.rows(idx);
+        let replaced = rows.start + kept..rows.end;
+        let (old_len, new_len) = (replaced.len(), fresh.len());
+        self.lines.splice(replaced, fresh);
+        if new_len != old_len {
+            for start in &mut self.starts[idx + 1..] {
+                *start = *start - old_len + new_len;
+            }
         }
     }
 }

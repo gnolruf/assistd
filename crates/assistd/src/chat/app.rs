@@ -108,7 +108,7 @@ pub(super) enum WireStream {
     Reply,
     /// A branch command; owns the in-flight branch op and its rows.
     Branch,
-    /// Polls; indicator state only.
+    /// A request whose reply only updates indicator state.
     Status,
     /// A `/wakeword` request; owns the wake-word dock.
     WakeWord(WakeWordStream),
@@ -133,10 +133,6 @@ pub(super) enum ChatEvent {
     BusLost,
     /// The bus subscription is back after [`ChatEvent::BusLost`].
     BusRestored,
-    /// A status poll got its answers.
-    DaemonReachable,
-    /// A status poll could not reach the daemon.
-    DaemonUnreachable,
     AttachLoaded(Box<AttachLoadedPayload>),
     AttachFailed {
         path: String,
@@ -250,9 +246,9 @@ pub(super) struct App {
     /// Transient message shown in the input rule and when it was set.
     pub notice: Option<(String, Instant)>,
     pub last_output_height: u16,
-    /// `None` until the first poll response.
+    /// `None` until the bus reports it.
     pub presence_state: Option<PresenceState>,
-    /// Whether the last status poll or bus subscribe reached the daemon.
+    /// Whether the bus subscription is up.
     pub daemon_reachable: bool,
     pub vision_enabled: bool,
     pub confirmation: Option<ConfirmationPrompt>,
@@ -621,9 +617,9 @@ impl App {
         self.last_output_height = h;
     }
 
-    /// Advance timers and reap finished tasks. Fails when a task panicked,
-    /// since the panic hook has already restored the terminal.
-    pub(super) fn on_tick(&mut self) -> Result<(), JoinError> {
+    /// Advance timers and reap finished tasks, returning whether the screen shows any of
+    /// them. Fails when a task panicked, since the panic hook has already restored the terminal.
+    pub(super) fn on_tick(&mut self) -> Result<bool, JoinError> {
         while let Some(res) = self.tasks.try_join_next() {
             match res {
                 Err(e) if e.is_panic() => return Err(e),
@@ -631,6 +627,7 @@ impl App {
                 Ok(()) => {}
             }
         }
+        let timed = self.shows_time();
         self.spinner = self.spinner.wrapping_add(1);
         if let Some((_, at)) = &self.notice
             && at.elapsed() > NOTICE_HOLD
@@ -647,7 +644,18 @@ impl App {
                 self.output.refresh_live_block();
             }
         }
-        Ok(())
+        Ok(timed)
+    }
+
+    /// Whether anything on screen moves with the clock: a spinner, a timer, a notice
+    /// about to expire, or a panel, which may show either.
+    fn shows_time(&self) -> bool {
+        self.generating()
+            || self.listening != VoiceCaptureState::Idle
+            || self.wake_word_heard
+            || self.notice.is_some()
+            || self.output.live_block_seconds().is_some()
+            || self.panel_shown()
     }
 
     fn reset_transcript(&mut self) {

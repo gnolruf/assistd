@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{debug, warn};
 
-use assistd_ipc::{Event, EventKind, SubscribeFilter};
+use assistd_ipc::{Event, EventKind, SubscribeFilter, VoiceCaptureState};
 
 use super::AppState;
 
@@ -34,10 +34,10 @@ impl AppState {
             kinds = ?filter.kinds,
             "subscriber attached"
         );
-        let wants_queue = filter.matches(EventKind::TaskQueue);
-        let wants_runs = filter.matches(EventKind::TaskRun);
-        let mut rx = self.runtime.subscribe_events(filter);
-        if wants_queue && self.send_task_queue(&id, &tx).await.is_err() {
+        let wants_presence = filter.matches(EventKind::Presence);
+        let mut presence = self.subsystems.presence.subscribe();
+        let mut rx = self.runtime.subscribe_events(filter.clone());
+        if self.send_current_state(&id, &filter, &tx).await.is_err() {
             return;
         }
         loop {
@@ -50,6 +50,12 @@ impl AppState {
                     );
                     return;
                 }
+                Ok(()) = presence.changed(), if wants_presence => {
+                    let state = *presence.borrow_and_update();
+                    if tx.send(Event::Presence { id: id.clone(), state }).await.is_err() {
+                        return;
+                    }
+                }
                 recv = rx.recv() => match recv {
                     Ok(event) => {
                         if tx.send(event).await.is_err() {
@@ -61,9 +67,9 @@ impl AppState {
                             target: "assistd::subscribe",
                             id = %id,
                             skipped,
-                            "subscriber lagged; resyncing the task queue and paused prompts"
+                            "subscriber lagged; resyncing current state and paused prompts"
                         );
-                        if self.resync_lagged(&id, wants_queue, wants_runs, &tx).await.is_err() {
+                        if self.resync_lagged(&id, &filter, &tx).await.is_err() {
                             return;
                         }
                     }
@@ -74,18 +80,15 @@ impl AppState {
     }
 
     /// Resend what the skipped events may have carried that a subscriber cannot recover
-    /// from later ones: the task queue, and the prompts of runs paused for input.
+    /// from later ones: the current state, and the prompts of runs paused for input.
     async fn resync_lagged(
         &self,
         id: &str,
-        wants_queue: bool,
-        wants_runs: bool,
+        filter: &SubscribeFilter,
         tx: &mpsc::Sender<Event>,
     ) -> Result<(), SubscriberGone> {
-        if wants_queue {
-            self.send_task_queue(id, tx).await?;
-        }
-        if wants_runs {
+        self.send_current_state(id, filter, tx).await?;
+        if filter.matches(EventKind::TaskRun) {
             for prompt in self.paused_prompt_events() {
                 tx.send(prompt).await?;
             }
@@ -93,17 +96,41 @@ impl AppState {
         Ok(())
     }
 
-    async fn send_task_queue(
+    /// Send the task queue, presence, listen phase and capture state as they stand, each
+    /// when `filter` wants its kind.
+    async fn send_current_state(
         &self,
         id: &str,
+        filter: &SubscribeFilter,
         tx: &mpsc::Sender<Event>,
     ) -> Result<(), SubscriberGone> {
-        let snapshot = self.task_queue_snapshot();
-        tx.send(Event::TaskQueue {
-            id: id.to_string(),
-            snapshot,
-        })
-        .await?;
+        let id = || id.to_string();
+        let voice = &self.subsystems.voice;
+        let current = [
+            Event::TaskQueue {
+                id: id(),
+                snapshot: self.task_queue_snapshot(),
+            },
+            Event::Presence {
+                id: id(),
+                state: self.subsystems.presence.state(),
+            },
+            Event::ListenState {
+                id: id(),
+                phase: voice.listen_phase(),
+            },
+            Event::VoiceState {
+                id: id(),
+                state: voice
+                    .capture()
+                    .map_or(VoiceCaptureState::Idle, |capture| capture.input.state()),
+            },
+        ];
+        for event in current {
+            if event.kind().is_some_and(|kind| filter.matches(kind)) {
+                tx.send(event).await?;
+            }
+        }
         Ok(())
     }
 }

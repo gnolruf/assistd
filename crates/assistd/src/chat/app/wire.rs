@@ -33,8 +33,6 @@ impl App {
             ChatEvent::Bus(event) => self.on_bus_event(event),
             ChatEvent::BusLost => self.on_bus_lost(),
             ChatEvent::BusRestored => self.on_bus_restored(),
-            ChatEvent::DaemonReachable => self.on_daemon_reachable(),
-            ChatEvent::DaemonUnreachable => self.on_daemon_unreachable(),
             ChatEvent::AttachLoaded(payload) => self.on_attach_loaded(*payload),
             ChatEvent::AttachFailed { path, message } => self.on_attach_failed(&path, &message),
         }

@@ -617,12 +617,24 @@ async fn subscribe_filter_rejects_unmatched_kinds() {
         .await;
 
         let a_events = drain_subscribe(&mut read_a, Duration::from_millis(200)).await;
+        let presence = |id: &str, state| Event::Presence {
+            id: id.into(),
+            state,
+        };
         assert_eq!(
-            a_events,
-            [Event::Presence {
-                id: "sp-1".into(),
-                state: PresenceState::Sleeping
-            }]
+            a_events.first(),
+            Some(&presence("sub-2", PresenceState::Active)),
+            "a subscription opens with the current state: {a_events:?}"
+        );
+        assert!(
+            a_events[1..].contains(&presence("sub-2", PresenceState::Sleeping)),
+            "subscriber missed the presence change: {a_events:?}"
+        );
+        assert!(
+            a_events
+                .iter()
+                .all(|ev| matches!(ev, Event::Presence { .. })),
+            "{a_events:?}"
         );
     })
     .await;
@@ -668,10 +680,10 @@ async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
         .await
         .expect("server held by idle subscriber past drain");
 
-    let next = tokio::time::timeout(Duration::from_secs(1), read_event(&mut reader))
+    let greeting_then_eof = async { while read_event(&mut reader).await.is_some() {} };
+    tokio::time::timeout(Duration::from_secs(1), greeting_then_eof)
         .await
         .expect("subscriber not released on shutdown");
-    assert_eq!(next, None);
 }
 
 /// Backend whose first step asks for the `gated` tool and whose second

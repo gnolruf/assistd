@@ -6,12 +6,10 @@ use std::time::Duration;
 
 use assistd_ipc::{IpcClient, Request};
 use crossterm::event::Event as TermEvent;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-/// How often the current focus is re-sent, so a restarted daemon learns it.
-const RESEND_INTERVAL: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Update `focus` from a terminal event. A keypress or paste counts as focus,
@@ -25,11 +23,12 @@ pub(super) fn track(focus: &watch::Sender<bool>, ev: &TermEvent) {
     focus.send_if_modified(|current| std::mem::replace(current, focused) != focused);
 }
 
-/// Send the focus to the daemon now, on every change, and every
-/// [`RESEND_INTERVAL`] until `shutdown` flips.
+/// Send the focus to the daemon now, on every change, and whenever `daemon_attached` is
+/// notified, so a restarted daemon learns it, until `shutdown` flips.
 pub(super) fn spawn_reporter(
     ipc: Arc<IpcClient>,
     mut focus: watch::Receiver<bool>,
+    daemon_attached: Arc<Notify>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -50,7 +49,7 @@ pub(super) fn spawn_reporter(
                         break;
                     }
                 }
-                () = tokio::time::sleep(RESEND_INTERVAL) => {}
+                () = daemon_attached.notified() => {}
             }
         }
     })

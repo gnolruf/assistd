@@ -54,7 +54,7 @@ impl App {
         }
     }
 
-    fn panel_shown(&self) -> bool {
+    pub(super) fn panel_shown(&self) -> bool {
         self.shown_resume_picker().is_some()
             || self.shown_wake_word_panel().is_some()
             || self.shown_settings_panel().is_some()

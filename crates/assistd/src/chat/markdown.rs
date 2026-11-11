@@ -465,6 +465,56 @@ pub(super) fn render_markdown(text: &str, width: usize, theme: &Theme) -> Vec<Li
     renderer.finish()
 }
 
+/// Byte offset of the last complete line of `text` that starts a block which renders the
+/// same without the text before it: one at column 0 after a blank line, outside a code
+/// fence, that is not a list item. `None` when no line qualifies.
+pub(super) fn last_block_boundary(text: &str) -> Option<usize> {
+    let mut boundary = None;
+    let mut fence = None;
+    let mut after_blank = false;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end();
+        match fence {
+            Some(open) if closes_fence(content, open) => fence = None,
+            Some(_) => {}
+            None => {
+                if after_blank && line.ends_with('\n') && starts_standalone_block(content) {
+                    boundary = Some(offset);
+                }
+                fence = fence_opening(content);
+            }
+        }
+        after_blank = fence.is_none() && content.is_empty();
+        offset += line.len();
+    }
+    boundary
+}
+
+/// Whether `line` begins at column 0 with something other than a list item, whose
+/// numbering and spacing depend on the items before it.
+fn starts_standalone_block(line: &str) -> bool {
+    let marker = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    let ordered = marker.len() < line.len() && marker.starts_with(['.', ')']);
+    let bullet = line.starts_with(['-', '*', '+']);
+    let item = (ordered || bullet) && marker[1..].chars().next().is_none_or(char::is_whitespace);
+    !item && line.chars().next().is_some_and(|c| !c.is_whitespace())
+}
+
+/// The fence character and run length when `line` opens a fenced code block.
+fn fence_opening(line: &str) -> Option<(char, usize)> {
+    let line = line.trim_start();
+    let fence = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let run = line.chars().take_while(|&c| c == fence).count();
+    (run >= 3).then_some((fence, run))
+}
+
+/// Whether `line` is only a run of the `open` fence's character at least as long as it.
+fn closes_fence(line: &str, (fence, run): (char, usize)) -> bool {
+    let line = line.trim_start();
+    line.len() >= run && line.chars().all(|c| c == fence)
+}
+
 fn parser_options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
@@ -473,21 +523,31 @@ fn parser_options() -> Options {
 /// table fits, otherwise shrink the widest columns first, down to
 /// [`MIN_COLUMN_WIDTH`].
 fn fit_column_widths(natural: &[usize], available: usize) -> Vec<usize> {
-    let mut widths: Vec<usize> = natural.iter().map(|&w| w.max(1)).collect();
-    loop {
-        let total: usize = widths.iter().sum();
-        if total <= available {
-            return widths;
-        }
-        let Some(widest) = widths
-            .iter_mut()
-            .filter(|w| **w > MIN_COLUMN_WIDTH)
-            .max_by_key(|w| **w)
-        else {
-            return widths;
-        };
-        *widest -= 1;
+    let natural: Vec<usize> = natural.iter().map(|&w| w.max(1)).collect();
+    let capped_total = |cap: usize| natural.iter().map(|&w| w.min(cap)).sum::<usize>();
+    let widest = natural.iter().copied().max().unwrap_or(0);
+    if capped_total(widest) <= available {
+        return natural;
     }
+    let mut cap = MIN_COLUMN_WIDTH;
+    let mut too_wide = widest.max(cap + 1);
+    while too_wide - cap > 1 {
+        let middle = cap + (too_wide - cap) / 2;
+        if capped_total(middle) <= available {
+            cap = middle;
+        } else {
+            too_wide = middle;
+        }
+    }
+    let mut spare = available.saturating_sub(capped_total(cap));
+    natural
+        .iter()
+        .map(|&w| {
+            let widened = w > cap && spare > 0;
+            spare -= usize::from(widened);
+            w.min(cap) + usize::from(widened)
+        })
+        .collect()
 }
 
 /// The physical lines of one table row: cells wrapped to their column
