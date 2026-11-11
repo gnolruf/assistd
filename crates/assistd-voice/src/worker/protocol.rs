@@ -108,6 +108,12 @@ pub(super) enum FromWorker {
     Reply { id: u64, outcome: Outcome },
 }
 
+/// The one field read from a line that is not a [`ToWorker`] this build knows.
+#[derive(Deserialize)]
+struct UndecodedCall {
+    id: u64,
+}
+
 /// How a component's startup in the worker ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -177,6 +183,18 @@ pub(super) fn encode(message: &impl Serialize) -> String {
 
 pub(super) fn decode<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
     Ok(serde_json::from_str(line)?)
+}
+
+/// The reply failing a line that did not decode for `error`, when the line
+/// still carries a call id for the daemon to match it to.
+pub(super) fn refusal(line: &str, error: &ProtocolError) -> Option<FromWorker> {
+    let UndecodedCall { id } = serde_json::from_str(line).ok()?;
+    Some(FromWorker::Reply {
+        id,
+        outcome: Outcome::Failed {
+            failure: Failure::other(error),
+        },
+    })
 }
 
 #[cfg(test)]

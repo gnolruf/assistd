@@ -4,12 +4,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
-use assistd_core::{PresenceState, SleepConfig, VramShortfall, WakeRoom};
+use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::{Nvml, enums::device::UsedGpuMemory};
 use parking_lot::Mutex;
 use procfs::process::Process;
 use tracing::{info, warn};
+
+use assistd_config::SleepConfig;
+use assistd_ipc::PresenceState;
+
+use crate::presence::{VramShortfall, WakeRoom};
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
 const MAX_ANCESTOR_DEPTH: usize = 64;
@@ -21,30 +25,30 @@ const FOREIGN_GROWTH_FLOOR_MB: u64 = 100;
 /// VRAM across every GPU, in MiB. The daemon's own allocations and its
 /// other children's, such as the voice worker's, count toward neither holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct VramSnapshot {
-    pub(super) free_mb: u64,
+pub(crate) struct VramSnapshot {
+    pub(crate) free_mb: u64,
     /// Held by the llama-server router and its model children.
-    pub(super) model_mb: u64,
+    pub(crate) model_mb: u64,
     /// Held by every process outside assistd.
-    pub(super) foreign_mb: u64,
+    pub(crate) foreign_mb: u64,
 }
 
 /// What the polls have taught about the model and the other processes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Learned {
+pub(crate) struct Learned {
     /// Most VRAM the model has held while `Active`; `None` until measured.
-    pub(super) model_footprint_mb: Option<u64>,
+    pub(crate) model_footprint_mb: Option<u64>,
     /// Least foreign VRAM seen since the model was last up; `None` while
     /// it is down.
-    pub(super) foreign_baseline_mb: Option<u64>,
+    pub(crate) foreign_baseline_mb: Option<u64>,
     /// Whether the last poll found another process crowding the model.
-    pub(super) contended: bool,
+    pub(crate) contended: bool,
 }
 
 impl Learned {
     /// Fold in a poll taken in `state` and record whether another process
     /// has grown into the headroom since the model came up.
-    pub(super) fn observe(
+    pub(crate) fn observe(
         &mut self,
         snapshot: VramSnapshot,
         state: PresenceState,
@@ -69,7 +73,7 @@ impl Learned {
 
     /// Whether the model, at its measured footprint, fits beside the
     /// headroom; an unmeasured model is let through to try.
-    pub(super) fn room_to_wake(
+    pub(crate) fn room_to_wake(
         &self,
         snapshot: VramSnapshot,
         headroom_mb: u64,
@@ -91,7 +95,7 @@ impl Learned {
 
 /// NVML plus what the monitor has learned from it.
 #[derive(Debug)]
-pub(super) struct VramLedger {
+pub struct VramLedger {
     nvml: Nvml,
     self_pid: u32,
     headroom_mb: u64,
@@ -101,7 +105,7 @@ pub(super) struct VramLedger {
 impl VramLedger {
     /// `None` when the monitor is off in config or there is no NVIDIA
     /// driver or GPU.
-    pub(super) fn open(cfg: &SleepConfig) -> Option<Arc<Self>> {
+    pub fn open(cfg: &SleepConfig) -> Option<Arc<Self>> {
         if !cfg.gpu_monitor_enabled {
             info!(
                 target: "assistd::gpu_monitor",
@@ -127,13 +131,13 @@ impl VramLedger {
         }
     }
 
-    pub(super) fn headroom_mb(&self) -> u64 {
+    pub(crate) fn headroom_mb(&self) -> u64 {
         self.headroom_mb
     }
 
     /// VRAM now, with `llama_pid` and its descendants counted as the model
     /// and the daemon's other descendants not counted.
-    pub(super) fn snapshot(&self, llama_pid: Option<u32>) -> Result<VramSnapshot> {
+    pub(crate) fn snapshot(&self, llama_pid: Option<u32>) -> Result<VramSnapshot, NvmlError> {
         let mut snapshot = VramSnapshot {
             free_mb: 0,
             model_mb: 0,
@@ -167,18 +171,18 @@ impl VramLedger {
 
     /// Fold in a poll taken in `state`; true when another process now
     /// crowds the model.
-    pub(super) fn observe(&self, snapshot: VramSnapshot, state: PresenceState) -> bool {
+    pub(crate) fn observe(&self, snapshot: VramSnapshot, state: PresenceState) -> bool {
         let mut learned = self.learned.lock();
         learned.observe(snapshot, state, self.headroom_mb);
         learned.contended
     }
 
     /// Whether the last poll found another process crowding the model.
-    pub(super) fn contended(&self) -> bool {
+    pub fn contended(&self) -> bool {
         self.learned.lock().contended
     }
 
-    pub(super) fn room_to_wake(&self, snapshot: VramSnapshot) -> Result<(), VramShortfall> {
+    pub(crate) fn room_to_wake(&self, snapshot: VramSnapshot) -> Result<(), VramShortfall> {
         self.learned.lock().room_to_wake(snapshot, self.headroom_mb)
     }
 }

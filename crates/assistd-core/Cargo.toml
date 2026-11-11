@@ -8,6 +8,7 @@ rust-version.workspace = true
 [features]
 i3 = ["assistd-wm/i3"]
 sway = ["assistd-wm/sway"]
+test-support = []
 
 [dependencies]
 assistd-config = { workspace = true }
@@ -25,6 +26,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 croner = { workspace = true }
 notify = { workspace = true }
+nvml-wrapper = { workspace = true }
 futures-util = { workspace = true }
 rustix = { workspace = true }
 serde = { workspace = true }
@@ -34,16 +36,26 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+procfs = { workspace = true }
 uuid = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+assistd-ipc = { workspace = true, features = ["client"] }
 chrono-tz = { workspace = true }
 assistd-llm = { workspace = true, features = ["test-support"] }
 assistd-tools = { workspace = true, features = ["test-support"] }
 assistd-utils = { workspace = true, features = ["test-support"] }
+reqwest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "core_fake_llama_server"
+path = "../assistd-llm/src/bin/fake_llama_server.rs"
+doc = false
+required-features = ["test-support"]
 
 [lints]
 workspace = true

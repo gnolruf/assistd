@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use assistd_core::{AppState, Component, spawn_supervised};
+use assistd_core::{AppState, Component, VramLedger, spawn_supervised};
 use assistd_utils::readiness::Readiness;
 use assistd_voice::worker::{VoiceWorkerSpec, supervise};
 use tokio::sync::watch;
@@ -14,7 +14,6 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use super::voice_probe::PresenceGpuProbe;
-use super::vram::VramLedger;
 
 /// The running daemon's own image, which stays this build even after the
 /// file on disk is replaced.

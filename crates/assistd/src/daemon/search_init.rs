@@ -1,7 +1,6 @@
 //! Web search wiring for the daemon: the SearXNG instance starts in the
 //! background as soon as the socket opens, since it needs no GPU.
 
-use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,10 +11,12 @@ use assistd_search::SearxngServerSpec;
 use assistd_utils::child_server::{ChildServer, ChildServerStatus};
 use assistd_utils::program::find_program;
 use assistd_utils::readiness::{Readiness, ReadinessCell};
-use futures_util::FutureExt;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use tracing::info;
+
+use super::background_start::BackgroundStart;
+
+const SUBSYSTEM: &str = "web search";
 
 /// What starting the SearXNG instance in the background needs.
 pub(super) struct SearchStartup {
@@ -24,7 +25,7 @@ pub(super) struct SearchStartup {
 
 /// The background start, joined at shutdown for the instance it brought up.
 pub(super) struct SearchService {
-    startup: Option<JoinHandle<Option<ChildServer>>>,
+    startup: BackgroundStart<ChildServer>,
 }
 
 impl SearchStartup {
@@ -35,30 +36,32 @@ impl SearchStartup {
         state: Arc<AppState>,
         shutdown: watch::Receiver<bool>,
     ) -> SearchService {
-        SearchService {
-            startup: Some(tokio::spawn(start_and_record_unless_panicked(
-                self, state, shutdown,
-            ))),
-        }
+        let panicked_state = Arc::clone(&state);
+        let startup = BackgroundStart::spawn(
+            SUBSYSTEM,
+            async move { start_and_record(self, &state, shutdown).await },
+            move || {
+                record_readiness(
+                    &panicked_state,
+                    Readiness::Unavailable("startup panicked".into()),
+                );
+            },
+        );
+        SearchService { startup }
     }
 }
 
 impl SearchService {
     pub(super) fn disabled() -> Self {
-        Self { startup: None }
+        Self {
+            startup: BackgroundStart::disabled(SUBSYSTEM),
+        }
     }
 
     /// Wait for the background start to stop, then stop the instance. The
     /// `search` shutdown stage must already have flipped.
     pub(super) async fn shutdown(self) {
-        let Some(startup) = self.startup else {
-            return;
-        };
-        let server = startup.await.unwrap_or_else(|e| {
-            tracing::error!("web search startup task failed: {e}");
-            None
-        });
-        if let Some(server) = server
+        if let Some(server) = self.startup.join().await
             && let Err(e) = server.shutdown().await
         {
             tracing::warn!("search-server shutdown error: {e:#}");
@@ -83,23 +86,6 @@ pub(super) fn prepare(
         config: config.search.clone(),
     };
     (Arc::new(ReadinessCell::starting()), Some(startup))
-}
-
-/// Like [`start_and_record`], but a panic marks web search unavailable
-/// instead of leaving it starting.
-async fn start_and_record_unless_panicked(
-    startup: SearchStartup,
-    state: Arc<AppState>,
-    shutdown: watch::Receiver<bool>,
-) -> Option<ChildServer> {
-    let started = AssertUnwindSafe(start_and_record(startup, &state, shutdown))
-        .catch_unwind()
-        .await;
-    started.unwrap_or_else(|_| {
-        tracing::error!("web search: startup panicked; web search disabled this run");
-        record_readiness(&state, Readiness::Unavailable("startup panicked".into()));
-        None
-    })
 }
 
 async fn start_and_record(

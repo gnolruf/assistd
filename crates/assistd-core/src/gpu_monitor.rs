@@ -4,12 +4,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::{Component, PresenceManager, PresenceState, SleepConfig, spawn_supervised};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use super::vram::{VramLedger, VramSnapshot};
+use assistd_config::SleepConfig;
+use assistd_ipc::{Component, PresenceState};
+
+use crate::presence::PresenceManager;
+use crate::recovery::spawn_supervised;
+use crate::vram::{VramLedger, VramSnapshot};
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
@@ -38,8 +42,8 @@ struct Poll {
     room_to_wake: bool,
 }
 
-/// `None` when disabled in config or when NVML is unavailable.
-pub(super) fn spawn_monitor(
+/// Spawn the contention monitor over `ledger`; `None` when there is no ledger.
+pub fn spawn_monitor(
     cfg: &SleepConfig,
     ledger: Option<Arc<VramLedger>>,
     presence: Arc<PresenceManager>,

@@ -179,9 +179,7 @@ dependencies = [
  "futures-util",
  "image",
  "ksni",
- "nvml-wrapper",
  "parking_lot 0.13.0",
- "procfs",
  "pulldown-cmark",
  "ratatui",
  "ratatui-image",
@@ -238,7 +236,10 @@ dependencies = [
  "croner",
  "futures-util",
  "notify",
+ "nvml-wrapper",
  "parking_lot 0.13.0",
+ "procfs",
+ "reqwest",
  "rustix 1.1.6",
  "serde",
  "serde_json",
@@ -247,6 +248,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zbus",
 ]
@@ -271,10 +273,10 @@ dependencies = [
 name = "assistd-ipc"
 version = "0.6.0"
 dependencies = [
+ "assistd-ipc",
  "assistd-utils",
  "base64 0.23.1",
  "chrono",
- "infer",
  "rustix 1.1.6",
  "serde",
  "serde_json",
@@ -289,7 +291,6 @@ name = "assistd-llm"
 version = "0.6.0"
 dependencies = [
  "assistd-config",
- "assistd-core",
  "assistd-ipc",
  "assistd-tools",
  "assistd-utils",
@@ -304,7 +305,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -2,11 +2,10 @@
 
 use thiserror::Error;
 
-use assistd_ipc::attachment::{
-    ImageFormatError, MAX_IMAGE_BYTES, MAX_QUERY_IMAGE_BYTES, sniff_image,
-};
+use assistd_ipc::attachment::{MAX_IMAGE_BYTES, MAX_QUERY_IMAGE_BYTES};
 use assistd_ipc::{ImageAttachment, ImageMime};
 use assistd_tools::Attachment;
+use assistd_tools::attachment::{ImageFormatError, sniff_image};
 
 /// Why an image attachment from an IPC client was refused.
 #[derive(Debug, Error)]

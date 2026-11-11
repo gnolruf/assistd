@@ -5,17 +5,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use assistd_core::{
-    AppState, Component, ContinuousListener, Heard, ListenPhase, TurnOrigin, drain_join_set,
-    spawn_supervised,
-};
-use assistd_ipc::{Event, PlanMode};
-use assistd_utils::time::saturating_millis;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{Instrument, debug, error, info, warn};
+
+use assistd_ipc::{Component, Event, ListenPhase, PlanMode};
+use assistd_utils::time::saturating_millis;
+use assistd_voice::{ContinuousListener, Heard};
+
+use crate::recovery::{drain_join_set, spawn_supervised};
+use crate::state::{AppState, TurnOrigin};
 
 /// Id of the `ListenState` events published when the listener changes phase.
 const LISTEN_PHASE_EVENT_ID: &str = "listen";
@@ -88,7 +89,8 @@ impl ListenTurns {
     }
 }
 
-pub(super) fn spawn_dispatcher(
+/// Spawn the dispatcher over `listener`, starting it listening first when `start_on_launch`.
+pub fn spawn_dispatcher(
     state: Arc<AppState>,
     listener: Arc<dyn ContinuousListener>,
     start_on_launch: bool,

@@ -2,10 +2,8 @@
 
 use std::sync::Arc;
 
-use assistd_core::{PresenceManager, PresenceState};
+use assistd_core::{PresenceManager, PresenceState, VramLedger};
 use assistd_voice::BusyProbe;
-
-use super::vram::VramLedger;
 
 /// Reports the GPU unavailable while presence is not `Active` or the GPU
 /// monitor last found another process crowding the model. Without NVML,

@@ -6,14 +6,12 @@ use std::sync::Arc;
 
 use assistd_core::{
     AppState, CaptureUnavailable, Component, ContinuousListener, PresenceManager,
-    VisionRevalidator, VoiceCapture, VoiceManager, spawn_supervised,
+    VisionRevalidator, VoiceCapture, VoiceManager, listen_dispatcher, spawn_supervised,
 };
 use assistd_utils::readiness::NotReady;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-
-use super::listen_dispatcher;
 
 /// What warmup brings up behind the managers `state` already serves.
 pub(super) struct Warmup {
