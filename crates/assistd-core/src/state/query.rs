@@ -29,7 +29,7 @@ use super::transcript_writer::PersistTarget;
 use super::turn_admission::{MainLaneTurn, TurnAdmission};
 use super::turn_driver::{SpeechPipeline, TurnDriver};
 use super::wire::decode_wire_attachments;
-use super::{DispatchError, send_error};
+use super::{DispatchError, FailedStep};
 use crate::Agent;
 use crate::bus::{EventBus, EventSink};
 use crate::planner::Planner;
@@ -155,7 +155,7 @@ impl TurnService {
             plan,
         } = query;
         let _cancel_on_return = cancel.clone().drop_guard();
-        let attachments = self.prepare_attachments(&id, wire_attachments, &tx).await?;
+        let attachments = decode_wire_attachments(wire_attachments)?;
         let Some((_request_guard, main_lane)) = self.admit_turn(&id, &text, &tx, &cancel).await?
         else {
             return finish_interrupted_before_start(&tx, id).await;
@@ -168,7 +168,7 @@ impl TurnService {
         if !self.revalidate_vision(&cancel).await {
             return finish_interrupted_before_start(&tx, id).await;
         }
-        self.require_vision_for(&id, &attachments, &tx).await?;
+        self.require_vision_for(&attachments)?;
 
         let (current_session, persist) = self.open_persistence_turn(&text).await;
         let chat_focused = self.refresh_chat_focus(&id);
@@ -209,36 +209,17 @@ impl TurnService {
             .await
     }
 
-    async fn prepare_attachments(
-        &self,
-        id: &str,
-        wire: Vec<ImageAttachment>,
-        tx: &EventSink,
-    ) -> Result<Vec<Attachment>, DispatchError> {
-        let decoded = decode_wire_attachments(wire).map_err(DispatchError::from);
-        if let Err(e) = &decoded {
-            send_error(tx, id.to_string(), e.to_string()).await;
-        }
-        decoded
-    }
-
-    async fn require_vision_for(
-        &self,
-        id: &str,
-        attachments: &[Attachment],
-        tx: &EventSink,
-    ) -> Result<(), DispatchError> {
+    fn require_vision_for(&self, attachments: &[Attachment]) -> Result<(), DispatchError> {
         let supported = self
             .deps
             .vision_revalidator
             .as_ref()
             .is_some_and(|revalidator| revalidator.gate().supported());
         if attachments.is_empty() || supported {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(DispatchError::VisionUnsupported)
         }
-        let error = DispatchError::VisionUnsupported;
-        send_error(tx, id.to_string(), error.to_string()).await;
-        Err(error)
     }
 
     /// The main lane and the daemon awake for query `id`'s turn; `None` when `cancel`
@@ -281,18 +262,11 @@ impl TurnService {
         id: &str,
         tx: &EventSink,
     ) -> Result<RequestGuard, DispatchError> {
-        match self
-            .deps
+        self.deps
             .presence
             .acquire_request_guard_with_progress(id.to_string(), tx.clone())
             .await
-        {
-            Ok(guard) => Ok(guard),
-            Err(e) => {
-                send_error(tx, id.to_string(), format!("wake failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+            .context("wake failed")
     }
 
     /// Save the session if needed and queue the write opening the turn with
@@ -441,17 +415,8 @@ impl TurnService {
                 }
                 Ok(())
             }
-            Ok(Err(e)) => {
-                let message = format!("llm backend error: {e}");
-                let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
-                Err(e.into())
-            }
-            Err(join_err) => {
-                let e = DispatchError::AgentPanicked(join_err);
-                let message = e.to_string();
-                let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
-                Err(e)
-            }
+            Ok(Err(e)) => Err(DispatchError::from(e).context("llm backend error")),
+            Err(join_err) => Err(DispatchError::AgentPanicked(join_err)),
         }
     }
 }

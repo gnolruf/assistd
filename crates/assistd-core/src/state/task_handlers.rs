@@ -14,7 +14,7 @@ use assistd_memory::TaskRecord;
 use super::event_triggers::{check_chain, resolve_watched_paths};
 use super::fire_times::{check_triggers, next_fire, upcoming_fires};
 use super::task_service::TaskService;
-use super::{DispatchError, send_error};
+use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;
 
 /// Fire times a `TaskCheckTrigger` reports.
@@ -36,10 +36,8 @@ impl TaskService {
                 self.handle_task_set_enabled(id, task, enabled, tx).await
             }
             TaskRequest::Run { task } => self.handle_task_run(id, task, tx).await,
-            TaskRequest::Cancel { run } => {
-                super::replied(self.handle_task_cancel(id, run, tx)).await
-            }
-            TaskRequest::Queue { op } => super::replied(self.handle_task_queue(id, op, tx)).await,
+            TaskRequest::Cancel { run } => self.handle_task_cancel(id, run, tx).await,
+            TaskRequest::Queue { op } => self.handle_task_queue(id, op, tx).await,
             TaskRequest::Confirm {
                 run,
                 confirm_id,
@@ -76,8 +74,9 @@ impl TaskService {
         id: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let tasks = self.deps.store.list().await.map_err(Into::into);
-        self.send_tasks(id, "task list", tasks, &tx).await
+        let tasks = self.deps.store.list().await.context("task list failed")?;
+        self.send_tasks(id, tasks, &tx).await;
+        Ok(())
     }
 
     pub(super) async fn handle_task_runs(
@@ -86,13 +85,12 @@ impl TaskService {
         task: TaskId,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let records = match self.deps.store.runs(task, MAX_LISTED_RUNS).await {
-            Ok(records) => records,
-            Err(e) => {
-                send_error(&tx, id, format!("task runs failed: {e}")).await;
-                return Err(e.into());
-            }
-        };
+        let records = self
+            .deps
+            .store
+            .runs(task, MAX_LISTED_RUNS)
+            .await
+            .context("task runs failed")?;
         for record in records {
             let _ = tx
                 .send(Event::new(id.clone(), EventBody::TaskRunRecord { record }))
@@ -115,8 +113,9 @@ impl TaskService {
         };
         self.scheduler.reschedule();
         self.events.rewatch();
-        self.send_tasks(id, "task save", record.map(|r| vec![r]), &tx)
-            .await
+        let record = record.context("task save failed")?;
+        self.send_tasks(id, vec![record], &tx).await;
+        Ok(())
     }
 
     pub(super) async fn handle_task_delete(
@@ -133,8 +132,9 @@ impl TaskService {
             self.deps.admission.task_queue.forget_task(task);
             self.events.rewatch();
         }
-        let deleted = deleted.map(|()| Vec::new()).map_err(Into::into);
-        self.send_tasks(id, "task delete", deleted, &tx).await
+        deleted.context("task delete failed")?;
+        self.send_tasks(id, Vec::new(), &tx).await;
+        Ok(())
     }
 
     pub(super) async fn handle_task_set_enabled(
@@ -150,8 +150,9 @@ impl TaskService {
         };
         self.scheduler.reschedule();
         self.events.rewatch();
-        let record = record.map(|r| vec![r]).map_err(Into::into);
-        self.send_tasks(id, "task set_enabled", record, &tx).await
+        let record = record.context("task set_enabled failed")?;
+        self.send_tasks(id, vec![record], &tx).await;
+        Ok(())
     }
 
     pub(super) async fn handle_task_check_trigger(
@@ -161,19 +162,12 @@ impl TaskService {
         trigger: TaskTrigger,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.check_trigger(task, trigger).await {
-            Ok(fires) => {
-                let _ = tx
-                    .send(Event::new(id.clone(), EventBody::TriggerFires { fires }))
-                    .await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, e.to_string()).await;
-                Err(e)
-            }
-        }
+        let fires = self.check_trigger(task, trigger).await?;
+        let _ = tx
+            .send(Event::new(id.clone(), EventBody::TriggerFires { fires }))
+            .await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Run the checks [`Self::save_task`] makes on one trigger of task `task`, returning its
@@ -195,22 +189,8 @@ impl TaskService {
         Ok(upcoming_fires(&triggers[0], &now, CHECKED_FIRES))
     }
 
-    /// Send each record as an `EventBody::Task`, with its last finished run, then `Done`, or
-    /// the failure as `Error`.
-    pub(super) async fn send_tasks(
-        &self,
-        id: String,
-        op: &str,
-        records: Result<Vec<TaskRecord>, DispatchError>,
-        tx: &EventSink,
-    ) -> Result<(), DispatchError> {
-        let records = match records {
-            Ok(records) => records,
-            Err(e) => {
-                send_error(tx, id, format!("{op} failed: {e}")).await;
-                return Err(e);
-            }
-        };
+    /// Send each record as an `EventBody::Task`, with its last finished run, then `Done`.
+    pub(super) async fn send_tasks(&self, id: String, records: Vec<TaskRecord>, tx: &EventSink) {
         let mut last_runs = self
             .deps
             .store
@@ -236,7 +216,6 @@ impl TaskService {
                 .await;
         }
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
-        Ok(())
     }
 
     /// Save `spec` as task `task`, or as a new task, once its mode is one the daemon allows and

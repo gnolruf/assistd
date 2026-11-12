@@ -24,7 +24,7 @@ use super::persistence::TranscriptLog;
 use super::relay_trace::wire_relay_steps;
 use super::session::SessionContext;
 use super::turn_admission::TurnAdmission;
-use super::{send_error, wire_role, wire_timestamp};
+use super::{DispatchError, FailedStep, wire_role, wire_timestamp};
 use crate::bus::EventBus;
 use crate::bus::EventSink;
 use crate::presence::PresenceManager;
@@ -60,32 +60,24 @@ impl BranchService {
     /// switch to it. The new branch shares message rows with its
     /// parent; only the branch membership is copied.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, branch = %name))]
-    pub(super) async fn handle_fork(&self, id: String, name: String, tx: EventSink) {
+    pub(super) async fn handle_fork(
+        &self,
+        id: String,
+        name: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         if name.trim().is_empty() {
-            send_error(&tx, id, "/fork: name must not be empty".into()).await;
-            return;
+            return Err(DispatchError::EmptyBranchName);
         }
         let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
         self.transcript.drain_inflight().await;
 
-        let (session, current_branch) = match self.transcript.saved_session().await {
-            Ok(pair) => pair,
-            Err(e) => {
-                send_error(&tx, id, format!("/fork: {e}")).await;
-                return;
-            }
-        };
-        let new_branch = match self
+        let (session, current_branch) = self.transcript.saved_session().await.context("/fork")?;
+        let new_branch = self
             .transcripts
             .fork_and_switch(current_branch, &name)
             .await
-        {
-            Ok(branch) => branch,
-            Err(e) => {
-                send_error(&tx, id, format!("/fork: {e}")).await;
-                return;
-            }
-        };
+            .context("/fork")?;
         self.session_ctx.replace(session, Some(new_branch)).await;
 
         let (_, parent_name, fork_point_seq) = self.lookup_branch_meta(new_branch).await;
@@ -104,18 +96,17 @@ impl BranchService {
             ))
             .await;
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Enumerate every branch across every session, active session first.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
-    pub(super) async fn handle_branches(&self, id: String, tx: EventSink) {
-        let branches = match self.transcripts.list_branches().await {
-            Ok(branches) => branches,
-            Err(e) => {
-                send_error(&tx, id, format!("/resume: {e}")).await;
-                return;
-            }
-        };
+    pub(super) async fn handle_branches(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
+        let branches = self.transcripts.list_branches().await.context("/resume")?;
         let (active_session, _) = self.session_ctx.current().await;
         let (active, other): (Vec<_>, Vec<_>) = branches
             .into_iter()
@@ -145,6 +136,7 @@ impl BranchService {
                 .await;
         }
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Broadcast `session`'s title as [`EventBody::SessionTitle`] for turn `id`,
@@ -246,64 +238,49 @@ impl BranchService {
     /// Make the `target` branch active, replay its
     /// history into the LLM backend, and stream it to the client.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, target = %target))]
-    pub(super) async fn handle_switch(&self, id: String, target: String, tx: EventSink) {
+    pub(super) async fn handle_switch(
+        &self,
+        id: String,
+        target: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
         self.transcript.drain_inflight().await;
 
         let (active_session, _active_branch) = self.session_ctx.current().await;
-        let (target_session, target_branch) = match self
+        let (target_session, target_branch) = self
             .transcripts
             .resolve_branch(&target, Some(active_session))
             .await
-        {
-            Ok(Some(pair)) => pair,
-            Ok(None) => {
-                send_error(&tx, id, format!("/resume: no branch named {target:?}")).await;
-                return;
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("/resume: {e}")).await;
-                return;
-            }
-        };
+            .context("/resume")?
+            .ok_or(DispatchError::UnknownBranch(target))?;
 
-        if let Err(e) = self
-            .transcripts
+        self.transcripts
             .set_current_branch(target_session, target_branch)
             .await
-        {
-            send_error(
-                &tx,
-                id,
-                format!("/resume: failed to update current branch: {e}"),
-            )
-            .await;
-            return;
-        }
+            .context("/resume: failed to update current branch")?;
         self.session_ctx
             .replace(target_session, Some(target_branch))
             .await;
 
-        self.replay_branch(id, target_session, target_branch, &tx, "/resume")
-            .await;
+        self.replay_branch(id, target_session, target_branch, &tx)
+            .await
     }
 
     /// `/undo`: drop the latest user prompt and the assistant reply that
     /// followed it from the current branch.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
-    pub(super) async fn handle_undo(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_undo(&self, id: String, tx: EventSink) -> Result<(), DispatchError> {
         let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
         self.transcript.drain_inflight().await;
         let (_, branch) = self.session_ctx.current().await;
         let outcome = match branch {
             None => UndoOutcome::default(),
-            Some(branch) => match self.transcripts.undo_last_turn(branch).await {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    send_error(&tx, id, format!("/undo: {e}")).await;
-                    return;
-                }
-            },
+            Some(branch) => self
+                .transcripts
+                .undo_last_turn(branch)
+                .await
+                .context("/undo")?,
         };
         if outcome.removed_messages > 0 {
             self.transcript.user_ledger.forget_last_turn();
@@ -326,20 +303,26 @@ impl BranchService {
             ))
             .await;
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Keep the current branch and stream its history if its latest
     /// message landed within `recency_secs`; otherwise begin a fresh
     /// session. An unsaved session is kept as is.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, recency_secs = recency_secs))]
-    pub(super) async fn handle_resume_or_new(&self, id: String, recency_secs: u64, tx: EventSink) {
+    pub(super) async fn handle_resume_or_new(
+        &self,
+        id: String,
+        recency_secs: u64,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
         self.transcript.drain_inflight().await;
 
         let (session, branch) = self.session_ctx.current().await;
         let Some(branch) = branch else {
             announce_unsaved_session(id, session, &tx).await;
-            return;
+            return Ok(());
         };
         let latest = self
             .transcripts
@@ -348,16 +331,20 @@ impl BranchService {
             .ok()
             .flatten();
         if is_within_recency(latest, recency_secs) {
-            self.replay_branch(id, session, branch, &tx, "/resume")
-                .await;
+            self.replay_branch(id, session, branch, &tx).await
         } else {
             self.begin_unsaved_session(id, &tx, "/resume").await;
+            Ok(())
         }
     }
 
     /// `/new`: begin a fresh session, saved with its first message.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
-    pub(super) async fn handle_new_session(&self, id: String, tx: EventSink) {
+    pub(super) async fn handle_new_session(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         self.admission.conversation.end();
         let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
         self.transcript.drain_inflight().await;
@@ -365,6 +352,7 @@ impl BranchService {
             stash.end(ConversationKey::Main).await;
         }
         self.begin_unsaved_session(id, &tx, "/new").await;
+        Ok(())
     }
 
     /// Load `branch`, replace the LLM history with it, and stream it to
@@ -375,19 +363,12 @@ impl BranchService {
         session: SessionId,
         branch: BranchId,
         tx: &EventSink,
-        label: &str,
-    ) {
-        let loaded = self
+    ) -> Result<(), DispatchError> {
+        let BranchHistory { summary, rows } = self
             .transcripts
             .load_branch(branch, HistoryScope::Whole)
-            .await;
-        let BranchHistory { summary, rows } = match loaded {
-            Ok(history) => history,
-            Err(e) => {
-                send_error(tx, id, format!("{label}: load_branch: {e}")).await;
-                return;
-            }
-        };
+            .await
+            .context("/resume: load_branch")?;
         let compaction = summary
             .as_ref()
             .and_then(|s| Some((compaction_marker(&rows, s)?, s.duration_ms)));
@@ -397,7 +378,7 @@ impl BranchService {
             warn!(
                 target: "assistd::state",
                 error = %e,
-                "replace_history failed during {label} (non-fatal)"
+                "replace_history failed during /resume (non-fatal)"
             );
         }
 
@@ -462,6 +443,7 @@ impl BranchService {
                 .await;
         }
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// The relay traces stored on `branch`'s rows; none when they cannot be read.

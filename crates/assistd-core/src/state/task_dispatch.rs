@@ -12,9 +12,9 @@ use tracing::{debug, warn};
 use assistd_ipc::{Event, EventBody, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId};
 use assistd_memory::{TaskRunEnd, WaitingRun};
 
+use super::DispatchError;
 use super::conversation::ConversationState;
 use super::lanes::{LaneLease, ModelLanes, changed_or_pending};
-use super::send_error;
 use super::task_queue::{Cancelled, NextStart, QueueOpError, TurnStart};
 use super::task_runs::DAEMON_STOPPED;
 use super::task_service::TaskService;
@@ -51,13 +51,15 @@ impl TaskService {
             .spawn_service(move |stopping| startup.fire_on_daemon_started(stopping));
     }
 
-    pub(super) async fn handle_task_queue(&self, id: String, op: TaskQueueOp, tx: EventSink) {
-        match self.apply_task_queue_op(op).await {
-            Ok(()) => {
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-            }
-            Err(e) => send_error(&tx, id, e.to_string()).await,
-        }
+    pub(super) async fn handle_task_queue(
+        &self,
+        id: String,
+        op: TaskQueueOp,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
+        self.apply_task_queue_op(op).await?;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Drop waiting run `run`, recording it as cancelled, or stop it if it is running.

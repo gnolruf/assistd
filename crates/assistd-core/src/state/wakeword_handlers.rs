@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use parking_lot::Mutex as StdMutex;
+use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::warn;
@@ -12,7 +13,7 @@ use assistd_ipc::{Event, EventBody, VoiceCaptureState, WakeWordOp};
 use assistd_voice::{ListenError, VoiceCapture, WakeTest};
 
 use super::voice_handlers::VoiceService;
-use super::{DispatchError, send_error};
+use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;
 
 /// A session with no utterance for this long is cancelled.
@@ -24,8 +25,36 @@ const AUDIO_BACKLOG: usize = 12;
 
 const STOP_BACKLOG: usize = 1;
 
-/// Why another request cannot use the mic while a test runs.
-pub(in crate::state) const TEST_IN_PROGRESS: &str = "wake-word test in progress";
+/// Why a request could not have the mic, or a wake-word test ended early.
+#[derive(Debug, Error)]
+pub enum MicError {
+    #[error("wake-word test in progress")]
+    TestInProgress,
+
+    #[error("wake-word test in progress; finish it first")]
+    TestAlreadyOpen,
+
+    #[error("no wake-word test in progress")]
+    NoTest,
+
+    #[error("push-to-talk is recording; release it first")]
+    PushToTalkRecording,
+
+    #[error("cannot start continuous listening while PTT is recording")]
+    ListenDuringPushToTalk,
+
+    #[error("wake-word test cancelled after 2 minutes idle")]
+    TestIdle,
+
+    #[error("wake-word listening is off or failed to start; see the daemon log")]
+    ListeningOff,
+
+    #[error("audio capture stopped")]
+    CaptureStopped,
+
+    #[error("audio capture stopped: {0}")]
+    CaptureFailed(#[source] ListenError),
+}
 
 /// The open test session, reachable from the request that stops it.
 #[derive(Debug)]
@@ -47,7 +76,7 @@ impl Drop for MicSessionClaim<'_> {
 /// How a session ended, before its terminal event is sent.
 enum SessionEnd {
     Done,
-    Failed(String),
+    Idle,
     CaptureStopped,
     Disconnected,
 }
@@ -72,9 +101,7 @@ impl SessionIo {
                 () = self.tx.closed() => Err(SessionEnd::Disconnected),
                 _ = self.stop.recv() => Err(SessionEnd::Done),
                 audio = self.audio.recv() => audio.ok_or(SessionEnd::CaptureStopped),
-                () = tokio::time::sleep_until(self.idle_deadline) => Err(SessionEnd::Failed(
-                    "wake-word test cancelled after 2 minutes idle".into(),
-                )),
+                () = tokio::time::sleep_until(self.idle_deadline) => Err(SessionEnd::Idle),
             }?;
             self.idle_deadline = Instant::now() + SESSION_IDLE_TIMEOUT;
             match audio {
@@ -105,10 +132,7 @@ impl VoiceService {
         match op {
             WakeWordOp::Status => self.handle_wake_word_status(id, tx).await,
             WakeWordOp::TestStart => self.handle_wake_word_test(id, tx).await,
-            WakeWordOp::TestStop => {
-                self.stop_mic_session(id, tx).await;
-                Ok(())
-            }
+            WakeWordOp::TestStop => self.stop_mic_session(id, tx).await,
         }
     }
 
@@ -122,7 +146,7 @@ impl VoiceService {
         id: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let capture = self.ready_capture(&id, "wake-word status", &tx).await?;
+        let capture = self.voice.capture().context("wake-word status failed")?;
         let _ = tx
             .send(Event::new(
                 id.clone(),
@@ -137,11 +161,11 @@ impl VoiceService {
     }
 
     async fn handle_wake_word_test(&self, id: String, tx: EventSink) -> Result<(), DispatchError> {
-        let capture = self.ready_capture(&id, "wake-word test", &tx).await?;
+        let capture = self.voice.capture().context("wake-word test failed")?;
         self.run_mic_session(id, tx, &capture, drive_test).await
     }
 
-    async fn stop_mic_session(&self, id: String, tx: EventSink) {
+    async fn stop_mic_session(&self, id: String, tx: EventSink) -> Result<(), DispatchError> {
         let stop = self
             .mic_session
             .lock()
@@ -151,11 +175,11 @@ impl VoiceService {
             Some(stop) => stop.send(()).await.is_ok(),
             None => false,
         };
-        if stopped {
-            let _ = tx.send(Event::new(id, EventBody::Done)).await;
-        } else {
-            send_error(&tx, id, "no wake-word test in progress".into()).await;
+        if !stopped {
+            return Err(MicError::NoTest.into());
         }
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Claim the mic, pause listening, and run `drive` against the test's
@@ -172,23 +196,17 @@ impl VoiceService {
         F: FnOnce(SessionIo) -> Fut,
         Fut: Future<Output = SessionEnd>,
     {
-        let Some((claim, stop)) = self.claim_mic_session() else {
-            send_error(&tx, id, format!("{TEST_IN_PROGRESS}; finish it first")).await;
-            return Ok(());
-        };
+        let (claim, stop) = self.claim_mic_session().ok_or(MicError::TestAlreadyOpen)?;
         if self.ptt_busy(capture).await {
-            send_error(
-                &tx,
-                id,
-                "push-to-talk is recording; release it first".into(),
-            )
-            .await;
-            return Ok(());
+            return Err(MicError::PushToTalkRecording.into());
         }
         let resume_listening = capture.listener.is_active();
-        if resume_listening && let Err(e) = capture.listener.stop().await {
-            send_error(&tx, id, format!("failed to pause listening: {e}")).await;
-            return Err(e.into());
+        if resume_listening {
+            capture
+                .listener
+                .stop()
+                .await
+                .context("failed to pause listening")?;
         }
         let (audio_tx, audio) = mpsc::channel(AUDIO_BACKLOG);
         let io = SessionIo {
@@ -203,8 +221,15 @@ impl VoiceService {
         if resume_listening && let Err(e) = capture.listener.start().await {
             warn!(target: "assistd::wakeword", "failed to resume listening: {e}");
         }
-        send_session_end(&tx, id, end, captured).await;
-        Ok(())
+        match end {
+            SessionEnd::Done => {
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
+                Ok(())
+            }
+            SessionEnd::Disconnected => Ok(()),
+            SessionEnd::Idle => Err(MicError::TestIdle.into()),
+            SessionEnd::CaptureStopped => Err(capture_stop(captured).into()),
+        }
     }
 
     fn claim_mic_session(&self) -> Option<(MicSessionClaim<'_>, mpsc::Receiver<()>)> {
@@ -244,27 +269,11 @@ async fn drive_test(mut io: SessionIo) -> SessionEnd {
     }
 }
 
-async fn send_session_end(
-    tx: &EventSink,
-    id: String,
-    end: SessionEnd,
-    captured: Result<(), ListenError>,
-) {
-    match end {
-        SessionEnd::Done => {
-            let _ = tx.send(Event::new(id, EventBody::Done)).await;
-        }
-        SessionEnd::Failed(message) => send_error(tx, id, message).await,
-        SessionEnd::CaptureStopped => {
-            let message = match captured {
-                Err(ListenError::Disabled) => {
-                    "wake-word listening is off or failed to start; see the daemon log".to_string()
-                }
-                Err(e) => format!("audio capture stopped: {e}"),
-                Ok(()) => "audio capture stopped".to_string(),
-            };
-            send_error(tx, id, message).await;
-        }
-        SessionEnd::Disconnected => {}
+/// Why the capture behind a test stopped, from how its listener returned.
+fn capture_stop(captured: Result<(), ListenError>) -> MicError {
+    match captured {
+        Err(ListenError::Disabled) => MicError::ListeningOff,
+        Err(e) => MicError::CaptureFailed(e),
+        Ok(()) => MicError::CaptureStopped,
     }
 }

@@ -14,8 +14,8 @@ use assistd_voice::{VoiceCapture, VoiceManager};
 
 use super::query::{Query, TurnOrigin, finish_interrupted_before_start};
 use super::turn_admission::TurnAdmission;
-use super::wakeword_handlers::{MicSession, TEST_IN_PROGRESS};
-use super::{DispatchError, send_error};
+use super::wakeword_handlers::{MicError, MicSession};
+use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;
 use crate::presence::PresenceManager;
 use crate::recovery::{Component, spawn_supervised};
@@ -79,10 +79,7 @@ impl VoiceService {
     ) -> Result<(), DispatchError> {
         let mut ptt_capture = self.ptt_capture.lock().await;
         if ptt_capture.is_none() {
-            match self.open_ptt_capture(&id, &tx).await? {
-                Some(capture) => *ptt_capture = Some(capture),
-                None => return Ok(()),
-            }
+            *ptt_capture = Some(self.open_ptt_capture().await?);
         }
         drop(ptt_capture);
         let _ = tx
@@ -97,29 +94,24 @@ impl VoiceService {
         Ok(())
     }
 
-    /// Stop speech and open the mic for a press; `None`, already reported,
-    /// when a wake-word test holds the mic.
-    async fn open_ptt_capture(
-        &self,
-        id: &str,
-        tx: &EventSink,
-    ) -> Result<Option<PttCapture>, DispatchError> {
+    /// Stop speech and open the mic for a press, unless a wake-word test holds the mic.
+    async fn open_ptt_capture(&self) -> Result<PttCapture, DispatchError> {
         self.voice.speech().interrupt().await;
-        let capture = self.ready_capture(id, "ptt_start", tx).await?;
+        let capture = self.voice.capture().context("ptt_start failed")?;
         if self.mic_session_busy() {
-            send_error(tx, id.to_string(), TEST_IN_PROGRESS.into()).await;
-            return Ok(None);
+            return Err(MicError::TestInProgress.into());
         }
-        if let Err(e) = capture.input.start_recording().await {
-            send_error(tx, id.to_string(), format!("ptt_start failed: {e}")).await;
-            return Err(e.into());
-        }
+        capture
+            .input
+            .start_recording()
+            .await
+            .context("ptt_start failed")?;
         let resume_listening = take_mic_from_listening(&capture).await;
-        Ok(Some(PttCapture {
+        Ok(PttCapture {
             warmup: self.spawn_presence_warmup(),
             cancel: self.admission.turn_cancellation(),
             resume_listening,
-        }))
+        })
     }
 
     /// Transcribe the press being released; `None`, with the request already answered,
@@ -172,8 +164,7 @@ impl VoiceService {
                         },
                     ))
                     .await;
-                send_error(tx, id, format!("ptt_stop failed: {e}")).await;
-                return Err(e);
+                return Err(e.context("ptt_stop failed"));
             }
         };
 
@@ -276,38 +267,28 @@ impl VoiceService {
         id: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let capture = self.ready_capture(&id, "listen_start", &tx).await?;
+        let capture = self.voice.capture().context("listen_start failed")?;
         if self.mic_session_busy() {
-            send_error(&tx, id, TEST_IN_PROGRESS.into()).await;
-            return Ok(());
+            return Err(MicError::TestInProgress.into());
         }
         if capture.input.state() != VoiceCaptureState::Idle {
-            send_error(
-                &tx,
-                id,
-                "cannot start continuous listening while PTT is recording".into(),
-            )
+            return Err(MicError::ListenDuringPushToTalk.into());
+        }
+        capture
+            .listener
+            .start()
+            .await
+            .context("listen_start failed")?;
+        let _ = tx
+            .send(Event::new(
+                id.clone(),
+                EventBody::ListenState {
+                    phase: self.voice.listen_phase(),
+                },
+            ))
             .await;
-            return Ok(());
-        }
-        match capture.listener.start().await {
-            Ok(()) => {
-                let _ = tx
-                    .send(Event::new(
-                        id.clone(),
-                        EventBody::ListenState {
-                            phase: self.voice.listen_phase(),
-                        },
-                    ))
-                    .await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("listen_start failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_listen_stop(
@@ -322,24 +303,17 @@ impl VoiceService {
             Ok(capture) => capture.listener.stop().await,
             Err(_) => Ok(()),
         };
-        match stopped {
-            Ok(()) => {
-                let _ = tx
-                    .send(Event::new(
-                        id.clone(),
-                        EventBody::ListenState {
-                            phase: ListenPhase::Off,
-                        },
-                    ))
-                    .await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("listen_stop failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+        stopped.context("listen_stop failed")?;
+        let _ = tx
+            .send(Event::new(
+                id.clone(),
+                EventBody::ListenState {
+                    phase: ListenPhase::Off,
+                },
+            ))
+            .await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_listen_toggle(
@@ -420,23 +394,6 @@ impl VoiceService {
                 .await;
         }
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
-    }
-
-    /// The capture handles, or an error event on `tx` saying why `request`
-    /// cannot use them.
-    pub(super) async fn ready_capture(
-        &self,
-        id: &str,
-        request: &str,
-        tx: &EventSink,
-    ) -> Result<VoiceCapture, DispatchError> {
-        match self.voice.capture() {
-            Ok(capture) => Ok(capture),
-            Err(e) => {
-                send_error(tx, id.to_string(), format!("{request} failed: {e}")).await;
-                Err(e.into())
-            }
-        }
     }
 }
 

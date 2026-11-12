@@ -79,21 +79,61 @@ pub use self::query::{Query, TurnOrigin, TurnService};
 pub use self::session::SessionContext;
 pub use self::status_service::StatusService;
 pub use self::subsystems::{McpServerStatus, Subsystems};
+pub use self::task_confirms::TaskConfirmError;
 pub use self::task_plans::TaskPlanError;
+pub use self::task_queue::QueueOpError;
 pub use self::task_runner::TaskRunner;
 pub use self::task_service::TaskService;
 pub use self::voice_handlers::VoiceService;
+pub use self::wakeword_handlers::MicError;
 pub use self::wire::AttachmentError;
 
-/// Why a `SetPermissionMode` sent on its own connection is refused.
-const PERMISSION_MODE_OFF_QUERY: &str = "SetPermissionMode is honored only on a Query connection";
-
-/// Why a `PlanVerdict` sent as a connection's first request is refused.
-const PLAN_VERDICT_OFF_QUERY: &str = "PlanVerdict answers a plan review on its Query connection";
-
-/// Why a request handler failed.
+/// Why a request handler failed. Its text is the message of the request's `Error` event.
 #[derive(Debug, Error)]
 pub enum DispatchError {
+    /// Another failure, prefixed with the step of the request it happened in.
+    #[error("{context}: {source}")]
+    Context {
+        context: &'static str,
+        source: Box<DispatchError>,
+    },
+
+    #[error("request exceeded {0}s envelope timeout")]
+    EnvelopeTimeout(u64),
+
+    #[error(
+        "ConfirmResponse(confirm_id={0}) received with no matching ConfirmRequest in flight on \
+         this connection"
+    )]
+    UnmatchedConfirmResponse(String),
+
+    #[error("SetPermissionMode is honored only on a Query connection")]
+    PermissionModeOffQuery,
+
+    #[error("PlanVerdict answers a plan review on its Query connection")]
+    PlanVerdictOffQuery,
+
+    #[error("/fork: name must not be empty")]
+    EmptyBranchName,
+
+    #[error("/resume: no branch named {0:?}")]
+    UnknownBranch(String),
+
+    #[error("MCP is disabled (mcp.enabled = false) or has no sandbox to run in")]
+    McpDisabled,
+
+    #[error(transparent)]
+    McpAccount(#[from] McpAccountError),
+
+    #[error(transparent)]
+    Mic(#[from] MicError),
+
+    #[error(transparent)]
+    QueueOp(#[from] QueueOpError),
+
+    #[error(transparent)]
+    TaskConfirm(#[from] TaskConfirmError),
+
     #[error(transparent)]
     Presence(#[from] PresenceError),
 
@@ -135,6 +175,27 @@ pub enum DispatchError {
 
     #[error(transparent)]
     Plan(#[from] PlanError),
+}
+
+impl DispatchError {
+    /// This failure with `context` in front of its message.
+    pub(crate) fn context(self, context: &'static str) -> Self {
+        Self::Context {
+            context,
+            source: Box::new(self),
+        }
+    }
+}
+
+/// Names the step of a request a failure happened in.
+trait FailedStep<T> {
+    fn context(self, context: &'static str) -> Result<T, DispatchError>;
+}
+
+impl<T, E: Into<DispatchError>> FailedStep<T> for Result<T, E> {
+    fn context(self, context: &'static str) -> Result<T, DispatchError> {
+        self.map_err(|e| e.into().context(context))
+    }
 }
 
 /// The client behind a request. The default is no client at all: no process, and
@@ -313,8 +374,8 @@ impl AppState {
 
     /// Route one request from `requester` to its handler, streaming events on `tx` and none
     /// after returning; every event but a subscriber's is published on the bus as it is
-    /// produced. Requests other than the long-lived ones are bounded by the dispatch
-    /// envelope timeout.
+    /// produced. A failure is sent as the request's one `Error` event and returned. Requests
+    /// other than the long-lived ones are bounded by the dispatch envelope timeout.
     pub async fn dispatch(
         self: Arc<Self>,
         req: Request,
@@ -322,36 +383,42 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         let tx = self.events_of(&req, tx);
+        let id = req.id.clone();
+        let result = self
+            .dispatch_within_envelope(req, requester, tx.clone())
+            .await;
+        if let Err(e) = &result {
+            let message = e.to_string();
+            let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
+        }
+        result
+    }
+
+    async fn dispatch_within_envelope(
+        self: Arc<Self>,
+        req: Request,
+        requester: Requester,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
         if Self::outlives_dispatch_envelope(&req) {
             return self.dispatch_inner(req, requester, tx).await;
         }
-        let envelope = Duration::from_secs(self.config.timeouts.dispatch_envelope_secs);
+        let timeout_secs = self.config.timeouts.dispatch_envelope_secs;
         let req_id = req.id.clone();
         let req_kind = req.kind();
-        let tx_for_timeout = tx.clone();
-        let inner = self.clone().dispatch_inner(req, requester, tx);
-        match tokio::time::timeout(envelope, inner).await {
-            Ok(result) => result,
-            Err(_) => {
+        let inner = self.dispatch_inner(req, requester, tx);
+        tokio::time::timeout(Duration::from_secs(timeout_secs), inner)
+            .await
+            .unwrap_or_else(|_| {
                 warn!(
                     target: "assistd::state",
                     id = %req_id,
                     kind = req_kind,
-                    timeout_secs = self.config.timeouts.dispatch_envelope_secs,
+                    timeout_secs,
                     "dispatch envelope timeout exceeded; aborting request"
                 );
-                send_error(
-                    &tx_for_timeout,
-                    req_id,
-                    format!(
-                        "request exceeded {}s envelope timeout",
-                        self.config.timeouts.dispatch_envelope_secs
-                    ),
-                )
-                .await;
-                Ok(())
-            }
-        }
+                Err(DispatchError::EnvelopeTimeout(timeout_secs))
+            })
     }
 
     /// Requests the envelope timeout leaves alone: a subscription lives as
@@ -437,16 +504,16 @@ impl AppState {
             RequestBody::GetCapabilities => {
                 replied(self.status.handle_get_capabilities(id, tx)).await
             }
-            RequestBody::Fork { name } => replied(self.branches.handle_fork(id, name, tx)).await,
-            RequestBody::Branches => replied(self.branches.handle_branches(id, tx)).await,
-            RequestBody::Switch { target } => {
-                replied(self.branches.handle_switch(id, target, tx)).await
-            }
-            RequestBody::Undo => replied(self.branches.handle_undo(id, tx)).await,
+            RequestBody::Fork { name } => self.branches.handle_fork(id, name, tx).await,
+            RequestBody::Branches => self.branches.handle_branches(id, tx).await,
+            RequestBody::Switch { target } => self.branches.handle_switch(id, target, tx).await,
+            RequestBody::Undo => self.branches.handle_undo(id, tx).await,
             RequestBody::ResumeOrNew { recency_secs } => {
-                replied(self.branches.handle_resume_or_new(id, recency_secs, tx)).await
+                self.branches
+                    .handle_resume_or_new(id, recency_secs, tx)
+                    .await
             }
-            RequestBody::NewSession => replied(self.branches.handle_new_session(id, tx)).await,
+            RequestBody::NewSession => self.branches.handle_new_session(id, tx).await,
             RequestBody::ChatState { focused } => {
                 replied(self.turns.handle_chat_state(id, focused, peer_pid, tx)).await
             }
@@ -458,23 +525,15 @@ impl AppState {
             RequestBody::Subscribe { filter } => {
                 replied(self.status.handle_subscribe(id, filter, tx)).await
             }
-            RequestBody::McpLogin { server } => {
-                replied(self.mcp.handle_mcp_login(id, server, tx)).await
-            }
-            RequestBody::McpLogout { server } => {
-                replied(self.mcp.handle_mcp_logout(id, server, tx)).await
-            }
+            RequestBody::McpLogin { server } => self.mcp.handle_mcp_login(id, server, tx).await,
+            RequestBody::McpLogout { server } => self.mcp.handle_mcp_logout(id, server, tx).await,
             RequestBody::McpStatus => replied(self.mcp.handle_mcp_status(id, tx)).await,
             RequestBody::Task(task) => self.tasks.dispatch(id, task, tx).await,
             RequestBody::ConfirmResponse { confirm_id, .. } => {
-                replied(send_error(&tx, id, unmatched_confirm_response(&confirm_id))).await
+                Err(DispatchError::UnmatchedConfirmResponse(confirm_id))
             }
-            RequestBody::SetPermissionMode { .. } => {
-                replied(send_error(&tx, id, PERMISSION_MODE_OFF_QUERY.into())).await
-            }
-            RequestBody::PlanVerdict { .. } => {
-                replied(send_error(&tx, id, PLAN_VERDICT_OFF_QUERY.into())).await
-            }
+            RequestBody::SetPermissionMode { .. } => Err(DispatchError::PermissionModeOffQuery),
+            RequestBody::PlanVerdict { .. } => Err(DispatchError::PlanVerdictOffQuery),
         }
     }
 }
@@ -501,20 +560,9 @@ fn safety_judge(config: &Config, llm: &Arc<dyn LlmBackend>) -> Option<SafetyJudg
     })
 }
 
-fn unmatched_confirm_response(confirm_id: &str) -> String {
-    format!(
-        "ConfirmResponse(confirm_id={confirm_id}) received with no matching ConfirmRequest in \
-         flight on this connection"
-    )
-}
-
 async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {
     reply.await;
     Ok(())
-}
-
-async fn send_error(tx: &EventSink, id: String, message: String) {
-    let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
 }
 
 fn wire_role(role: PersistedRole) -> Role {

@@ -3,7 +3,7 @@
 use assistd_ipc::{Event, EventBody, PresenceTarget};
 
 use super::status_service::StatusService;
-use super::{DispatchError, send_error};
+use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;
 
 impl StatusService {
@@ -13,24 +13,20 @@ impl StatusService {
         target: PresenceTarget,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.presence.set_presence(target).await {
-            Ok(()) => {
-                let _ = tx
-                    .send(Event::new(
-                        id.clone(),
-                        EventBody::Presence {
-                            state: self.presence.state(),
-                        },
-                    ))
-                    .await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("set_presence failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+        self.presence
+            .set_presence(target)
+            .await
+            .context("set_presence failed")?;
+        let _ = tx
+            .send(Event::new(
+                id.clone(),
+                EventBody::Presence {
+                    state: self.presence.state(),
+                },
+            ))
+            .await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_get_presence(&self, id: String, tx: EventSink) {

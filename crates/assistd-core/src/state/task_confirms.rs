@@ -18,12 +18,12 @@ use assistd_tools::{Approval, ConfirmationRequest, PromptParking, Unattended};
 
 use super::run_lane::RunLane;
 use super::task_service::TaskService;
-use super::{DispatchError, send_error};
+use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;
 
 /// Why a `TaskConfirm` was refused.
 #[derive(Debug, Error)]
-pub(in crate::state) enum TaskConfirmError {
+pub enum TaskConfirmError {
     #[error("task run {0} is not waiting on confirmation {1}")]
     NotWaiting(TaskRunId, String),
 
@@ -224,22 +224,15 @@ impl TaskService {
         approval: Approval,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.confirms.answer(run, &confirm_id, approval) {
-            Ok(None) => {
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Ok(Some(allowed)) => {
-                let record = self.allow_task_host(allowed).await.map(|r| vec![r]);
-                self.scheduler.reschedule();
-                self.send_tasks(id, "allowing the host for the task", record, &tx)
-                    .await
-            }
-            Err(e) => {
-                send_error(&tx, id, e.to_string()).await;
-                Ok(())
-            }
-        }
+        let Some(allowed) = self.confirms.answer(run, &confirm_id, approval)? else {
+            let _ = tx.send(Event::new(id, EventBody::Done)).await;
+            return Ok(());
+        };
+        let record = self.allow_task_host(allowed).await;
+        self.scheduler.reschedule();
+        let record = record.context("allowing the host for the task failed")?;
+        self.send_tasks(id, vec![record], &tx).await;
+        Ok(())
     }
 
     /// The prompt of each paused task run, wrapped as the run's events reach subscribers.
