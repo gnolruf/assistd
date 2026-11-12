@@ -190,7 +190,10 @@ impl Harness {
         let state = Arc::clone(&self.state);
         let request = query(text, text);
         let handle = tokio::spawn(async move {
-            state.dispatch(request, None, tx).await.unwrap();
+            state
+                .dispatch(request, Requester::default(), tx)
+                .await
+                .unwrap();
         });
         (handle, rx)
     }
@@ -209,7 +212,7 @@ impl Harness {
     }
 
     fn held(&self) -> Option<ConversationHold> {
-        self.state.task_queue_snapshot().held
+        self.state.turns.deps.admission.queue_snapshot().held
     }
 
     /// Wait for every run to succeed.

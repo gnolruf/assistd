@@ -12,9 +12,9 @@ use tracing::{debug, info, warn};
 use assistd_ipc::TaskId;
 use assistd_memory::TaskRecord;
 
-use super::AppState;
 use super::fire_times::{fired_trigger, next_fire};
 use super::task_dispatch::unrequested_run_id;
+use super::task_service::TaskService;
 
 /// Longest the scheduler sleeps before checking the wall clock again, which tokio's
 /// clock does not follow through a suspend or a clock change.
@@ -40,7 +40,7 @@ impl TaskScheduler {
     }
 }
 
-impl AppState {
+impl TaskService {
     /// Fire due tasks, then sleep until the next fire time, a task change, or
     /// [`MAX_SLEEP`], until `stopping` fires.
     pub(super) async fn schedule_task_fires(self: Arc<Self>, stopping: CancellationToken) {
@@ -56,7 +56,7 @@ impl AppState {
             tokio::select! {
                 biased;
                 () = stopping.cancelled() => return,
-                () = self.runtime.task_scheduler.changed.notified() => {}
+                () = self.scheduler.changed.notified() => {}
                 () = tokio::time::sleep(sleep) => {}
             }
         }
@@ -65,8 +65,8 @@ impl AppState {
     /// Fire every enabled task whose recorded fire time has passed at `now` and record
     /// fire times not yet computed; returns the earliest one still ahead.
     async fn fire_due_tasks(&self, now: &DateTime<Local>) -> Option<DateTime<Utc>> {
-        let _pass = self.runtime.task_scheduler.hold().await;
-        let tasks = match self.memory.tasks.list().await {
+        let _pass = self.scheduler.hold().await;
+        let tasks = match self.deps.store.list().await {
             Ok(tasks) => tasks,
             Err(e) => {
                 warn!(target: "assistd::tasks", error = %e, "listing tasks to schedule failed");
@@ -118,10 +118,11 @@ impl AppState {
             self.record_next_fire(record.id, next).await;
             return next;
         };
-        match self.memory.tasks.fire(record.id, trigger, next).await {
+        match self.deps.store.fire(record.id, trigger, next).await {
             Ok(Some(run)) => {
                 info!(target: "assistd::tasks", task = %record.id, %run, "trigger fired");
-                self.runtime
+                self.deps
+                    .admission
                     .task_queue
                     .push(run, record, unrequested_run_id(run));
             }
@@ -141,7 +142,7 @@ impl AppState {
     }
 
     async fn record_next_fire(&self, task: TaskId, next: Option<DateTime<Utc>>) {
-        if let Err(e) = self.memory.tasks.set_next_fire(task, next).await {
+        if let Err(e) = self.deps.store.set_next_fire(task, next).await {
             warn!(
                 target: "assistd::tasks",
                 %task,

@@ -1,461 +1,159 @@
 //! `handle_query`: per-turn agent loop driver.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{
-    Event, EventBody, EventKind, ImageAttachment, PlanMode, RelayEvent, StatusKind, TaskRunId,
-};
-use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
-use assistd_memory::{
-    PersistedMessage, PersistedRelayStep, PersistedToolCall, Reasoning, SessionId, ToolOutcome,
-    TurnStats,
-};
-use assistd_tools::{
-    Attachment, CONFIRM_ROUTER, ConfirmRouter, ToolOutput, inherit_confirm_router,
-};
-use assistd_utils::time::saturating_millis;
-use assistd_utils::token_counter::TokenCounter;
+use assistd_config::{Config, EmbeddingConfig};
+use assistd_embed::EmbedderHandle;
+use assistd_ipc::{Event, EventBody, ImageAttachment, PlanMode};
+use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
+use assistd_memory::{PersistedMessage, SemanticStore, SessionId};
+use assistd_tools::{Attachment, ConfirmRouter, ToolCatalog, TurnContext};
 use assistd_voice::{
-    SentenceBuffer, SpeakDecision, SpeakingGuard, VoiceOutput, VoiceOutputController,
+    SpeakDecision, SpeakingGuard, VoiceManager, VoiceOutput, VoiceOutputController,
 };
+use assistd_wm::WindowManager;
 
+use super::branches::BranchService;
+use super::chat_focus::ChatFocusSlot;
 use super::context::{combine_context_blocks, voice_approvals_note};
-use super::relay_trace::RelayTraceBuilder;
+use super::persistence::TranscriptLog;
+use super::session::SessionContext;
 use super::transcript_writer::PersistTarget;
-use super::turn_admission::MainLaneTurn;
+use super::turn_admission::{MainLaneTurn, TurnAdmission};
+use super::turn_driver::{SpeechPipeline, TurnDriver};
 use super::wire::decode_wire_attachments;
-use super::{AppState, DispatchError, RuntimeState, send_error};
+use super::{DispatchError, send_error};
 use crate::Agent;
-use crate::presence::{PresenceLlmHealthProbe, RequestGuard};
+use crate::bus::{EventBus, EventSink};
+use crate::planner::Planner;
+use crate::presence::{PresenceLlmHealthProbe, PresenceManager, RequestGuard};
 use crate::recovery::{Component, spawn_supervised};
+use crate::vision::VisionRevalidator;
 
-const LAST_DELTA_DEBOUNCE: Duration = Duration::from_millis(100);
 const SENTENCE_PREVIEW_CHARS: usize = 60;
 
+/// One prompt to run as a turn of the user's conversation.
+#[derive(Debug)]
+pub struct Query {
+    /// Tags every event of the turn.
+    pub id: String,
+    pub text: String,
+    pub attachments: Vec<ImageAttachment>,
+    pub origin: TurnOrigin,
+    pub plan: PlanMode,
+}
+
+impl Query {
+    /// A prompt typed by the client that answers `turn`'s prompts.
+    pub(super) fn typed(
+        id: String,
+        text: String,
+        attachments: Vec<ImageAttachment>,
+        plan: PlanMode,
+        turn: TurnContext,
+    ) -> Self {
+        Self {
+            id,
+            text,
+            attachments,
+            origin: TurnOrigin::Typed(turn),
+            plan,
+        }
+    }
+}
+
 /// How a turn's prompt reached the daemon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum TurnOrigin {
-    /// Text from a client: the chat, `assistd query`, or another tool.
-    Typed,
-    /// A push-to-talk or continuous-listening transcription.
+    /// Text from a client: the chat, `assistd query`, or another tool. The client answers
+    /// the turn's prompts through this context.
+    Typed(TurnContext),
+    /// A push-to-talk or continuous-listening transcription, which nobody can answer
+    /// prompts for.
     Voice,
 }
 
-/// Sentence splitter and the channel to the speech worker.
-struct SpeechPipeline {
-    tx: mpsc::Sender<String>,
-    sentences: SentenceBuffer,
-    partial_flush: Option<Duration>,
-    first_sentence_emitted: bool,
-}
-
-impl SpeechPipeline {
-    async fn flush_idle(&mut self) {
-        if let Some(partial) = self.sentences.flush_idle()
-            && self.tx.send(partial).await.is_err()
-        {
-            debug!(
-                target: "assistd::voice",
-                "speech worker channel closed; dropping idle flush"
-            );
-        }
+impl TurnOrigin {
+    pub(super) fn is_voice(&self) -> bool {
+        matches!(self, Self::Voice)
     }
 
-    async fn speak(&mut self, sentences: Vec<String>) {
-        for sentence in sentences {
-            if !self.first_sentence_emitted {
-                debug!(
-                    target: "assistd::voice::latency",
-                    stage = "first_sentence_emitted",
-                    "voice latency stage"
-                );
-                self.first_sentence_emitted = true;
-            }
-            if self.tx.send(sentence).await.is_err() {
-                debug!(
-                    target: "assistd::voice",
-                    "speech worker channel closed; dropping sentence"
-                );
-                break;
-            }
-        }
-    }
-}
-
-/// Reasoning streamed so far for the current step.
-struct ReasoningTrace {
-    text: String,
-    started_at: Instant,
-    last_delta_at: Instant,
-}
-
-impl ReasoningTrace {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            text: String::new(),
-            started_at: now,
-            last_delta_at: now,
-        }
-    }
-
-    fn push(&mut self, delta: &str) {
-        self.text.push_str(delta);
-        self.last_delta_at = Instant::now();
-    }
-
-    fn into_reasoning(self) -> Reasoning {
-        let elapsed = self.last_delta_at.duration_since(self.started_at);
-        Reasoning {
-            text: self.text,
-            duration_ms: saturating_millis(elapsed),
-        }
-    }
-}
-
-/// Whose conversation a turn belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TurnScope {
-    /// The user's conversation.
-    Main,
-    /// A task run's conversation, whose events reach subscribers wrapped in
-    /// [`EventBody::TaskRun`].
-    TaskRun(TaskRunId),
-}
-
-impl TurnScope {
-    /// `event` as subscribers of this scope receive it.
-    pub(super) fn wrap(self, event: Event) -> Event {
+    /// The context turn `id` runs in.
+    fn into_turn_context(self, id: &str) -> TurnContext {
         match self {
-            TurnScope::Main => event,
-            TurnScope::TaskRun(run) => Event::new(
-                event.id.clone(),
-                EventBody::TaskRun {
-                    run,
-                    event: Box::new(event),
-                },
-            ),
-        }
-    }
-
-    fn bus_kind(self, kind: EventKind) -> EventKind {
-        match self {
-            TurnScope::Main => kind,
-            TurnScope::TaskRun(_) => EventKind::TaskRun,
+            Self::Typed(turn) => turn,
+            Self::Voice => TurnContext::answered_by(ConfirmRouter::for_voice_turn(id.to_string())),
         }
     }
 }
 
-/// Translates one turn's agent events into wire events, persisting the
-/// transcript as it goes.
-pub(super) struct TurnTranslator {
-    id: String,
-    scope: TurnScope,
-    /// `None` when the session could not be saved, so nothing is persisted.
-    persist: Option<PersistTarget>,
-    assistant_accum: String,
-    reasoning: Option<ReasoningTrace>,
-    awaiting_tool_result: bool,
-    /// What the relay in the running tool call has done, once it announced its plan.
-    relay: Option<RelayTraceBuilder>,
-    /// Backdated at start so the first `Delta` publishes `LastDelta` at once.
-    last_emit_at: Instant,
-    done_emitted: bool,
-    /// The text of the step that ended a task run's turn, once it has.
-    reply: Option<String>,
-    started_at: Instant,
-    tokens: TokenCounter,
+/// What the turn service borrows from the rest of the daemon.
+#[derive(Debug)]
+pub(super) struct TurnDeps {
+    pub(super) config: Arc<Config>,
+    pub(super) llm: Arc<dyn LlmBackend>,
+    pub(super) presence: Arc<PresenceManager>,
+    pub(super) tools: Arc<ToolCatalog>,
+    pub(super) planner: Arc<Planner>,
+    pub(super) vision_revalidator: Option<Arc<VisionRevalidator>>,
+    pub(super) voice: Arc<VoiceManager>,
+    pub(super) window_manager: Arc<dyn WindowManager>,
+    pub(super) embedder: Arc<EmbedderHandle>,
+    pub(super) semantic: Arc<dyn SemanticStore>,
+    pub(super) embedding_cfg: EmbeddingConfig,
+    pub(super) session_ctx: Arc<SessionContext>,
+    pub(super) admission: Arc<TurnAdmission>,
+    pub(super) transcript: Arc<TranscriptLog>,
+    pub(super) branches: Arc<BranchService>,
+    pub(super) bus: EventBus,
 }
 
-impl TurnTranslator {
-    pub(super) fn new(id: String, scope: TurnScope, persist: Option<PersistTarget>) -> Self {
+/// Runs the turns of the user's conversation and handles the chat's focus reports,
+/// which shape how a turn replies.
+#[derive(Debug)]
+pub struct TurnService {
+    pub(super) deps: TurnDeps,
+    /// The chat's last focus report.
+    pub(super) chat_focus: ChatFocusSlot,
+}
+
+impl TurnService {
+    pub(super) fn new(deps: TurnDeps) -> Self {
         Self {
-            id,
-            scope,
-            persist,
-            assistant_accum: String::new(),
-            reasoning: None,
-            awaiting_tool_result: false,
-            relay: None,
-            last_emit_at: Instant::now()
-                .checked_sub(LAST_DELTA_DEBOUNCE)
-                .unwrap_or_else(Instant::now),
-            done_emitted: false,
-            reply: None,
-            started_at: Instant::now(),
-            tokens: TokenCounter::new(),
+            deps,
+            chat_focus: ChatFocusSlot::default(),
         }
     }
 
-    /// A task run's final reply, once its turn emitted `Done`.
-    pub(super) fn take_reply(&mut self) -> Option<String> {
-        self.reply.take()
-    }
-
-    /// The wire event and sentences to speak for `event`, or `None` when
-    /// it has no wire form.
-    pub(super) async fn translate(
-        &mut self,
-        state: &AppState,
-        event: LlmEvent,
-        sentence_buf: &mut SentenceBuffer,
-    ) -> Option<(Event, Vec<String>)> {
-        let (body, sentences) = match event {
-            LlmEvent::Delta { text } => {
-                self.tokens.on_delta();
-                let sentences = sentence_buf.push(&text);
-                self.accumulate_delta(&state.runtime, &text);
-                (EventBody::Delta { text }, sentences)
-            }
-            LlmEvent::ReasoningDelta { text } => {
-                self.tokens.on_delta();
-                self.reasoning
-                    .get_or_insert_with(ReasoningTrace::new)
-                    .push(&text);
-                (EventBody::ReasoningDelta { text }, Vec::new())
-            }
-            LlmEvent::ToolCallsRequested { calls } => {
-                self.persist_tool_calls(state, &calls).await;
-                return None;
-            }
-            LlmEvent::ToolCall {
-                name, arguments, ..
-            } => {
-                self.awaiting_tool_result = true;
-                (
-                    EventBody::ToolCall {
-                        name,
-                        args: arguments,
-                    },
-                    Vec::new(),
-                )
-            }
-            LlmEvent::ToolResult {
-                id: call_id,
-                name,
-                result,
-            } => {
-                self.persist_tool_result(state, call_id, &name, &result)
-                    .await;
-                let result = result.report();
-                (EventBody::ToolResult { name, result }, Vec::new())
-            }
-            LlmEvent::Relay(event) => {
-                self.record_relay(&event);
-                (EventBody::Relay { event }, Vec::new())
-            }
-            LlmEvent::ContextSize { tokens, total } => {
-                self.tokens.on_context_size(tokens, total);
-                (EventBody::ContextSize { tokens, total }, Vec::new())
-            }
-            LlmEvent::Status {
-                severity,
-                component,
-                event,
-                message,
-            } => {
-                if matches!(
-                    event,
-                    StatusKind::Restarting
-                        | StatusKind::OutputTruncated
-                        | StatusKind::YieldedToUser
-                ) {
-                    self.discard_partial_response(sentence_buf);
-                }
-                (
-                    EventBody::Status {
-                        severity,
-                        component,
-                        event,
-                        message,
-                    },
-                    Vec::new(),
-                )
-            }
-            LlmEvent::HistoryCompacted {
-                summary,
-                cut,
-                elapsed,
-            } => {
-                self.persist_summary(state, summary, cut, elapsed).await;
-                return None;
-            }
-            LlmEvent::Done => {
-                let sentences = sentence_buf.finish().into_iter().collect();
-                if let TurnScope::TaskRun(_) = self.scope {
-                    self.reply = Some(self.assistant_accum.clone());
-                }
-                self.persist_final_text(state).await;
-                self.done_emitted = true;
-                (EventBody::Done, sentences)
-            }
-        };
-        Some((Event::new(self.id.clone(), body), sentences))
-    }
-
-    fn accumulate_delta(&mut self, runtime: &RuntimeState, text: &str) {
-        self.assistant_accum.push_str(text);
-        if self.last_emit_at.elapsed() >= LAST_DELTA_DEBOUNCE {
-            self.publish_last_delta(runtime, &self.assistant_accum);
-            self.last_emit_at = Instant::now();
-        }
-    }
-
-    /// `LastDelta` carries the whole reply so far, so building one costs a
-    /// copy of it; skip that when no subscriber would receive it.
-    fn publish_last_delta(&self, runtime: &RuntimeState, text: &str) {
-        if runtime.bus_wants(self.scope.bus_kind(EventKind::LastDelta)) {
-            let _ = runtime.events_bus().send(self.scope.wrap(Event::new(
-                self.id.clone(),
-                EventBody::LastDelta {
-                    text: text.to_string(),
-                },
-            )));
-        }
-    }
-
-    async fn persist_tool_calls(&mut self, state: &AppState, calls: &[ToolCall]) {
-        let narration = std::mem::take(&mut self.assistant_accum);
-        if !narration.is_empty() {
-            self.publish_last_delta(&state.runtime, &narration);
-        }
-        let reasoning = self.take_reasoning();
-        let msg = tool_calls_message(narration, calls, reasoning);
-        self.persist_message(state, msg, None).await;
-    }
-
-    async fn persist_tool_result(
-        &mut self,
-        state: &AppState,
-        call_id: String,
-        name: &str,
-        result: &ToolOutput,
-    ) {
-        self.awaiting_tool_result = false;
-        let outcome = ToolOutcome {
-            exit_code: result.exit_code.into(),
-            duration_ms: result.duration_ms(),
-        };
-        let msg =
-            PersistedMessage::tool_result(result.output.clone(), call_id, name.to_owned(), outcome);
-        let relay_steps = self.relay.take().map(RelayTraceBuilder::finish);
-        self.persist_message(state, msg, relay_steps).await;
-    }
-
-    /// Record `event` into the running relay's trace, starting one at its plan.
-    fn record_relay(&mut self, event: &RelayEvent) {
-        match (&mut self.relay, event) {
-            (Some(trace), event) => trace.record(event),
-            (None, RelayEvent::Planned { steps }) => {
-                self.relay = Some(RelayTraceBuilder::planned(steps));
-            }
-            (None, _) => {}
-        }
-    }
-
-    fn discard_partial_response(&mut self, sentence_buf: &mut SentenceBuffer) {
-        self.assistant_accum.clear();
-        self.reasoning = None;
-        let _ = sentence_buf.finish();
-    }
-
-    async fn persist_summary(
-        &self,
-        state: &AppState,
-        summary: String,
-        cut: CompactionCut,
-        elapsed: Duration,
-    ) {
-        if let Some(target) = &self.persist {
-            state
-                .persist_summary(target.clone(), summary, cut, elapsed)
-                .await;
-        }
-    }
-
-    async fn persist_final_text(&mut self, state: &AppState) {
-        let reasoning = self.take_reasoning();
-        if self.assistant_accum.is_empty() {
-            return;
-        }
-        let final_text = std::mem::take(&mut self.assistant_accum);
-        self.publish_last_delta(&state.runtime, &final_text);
-        let msg = PersistedMessage::assistant_text(final_text, reasoning);
-        self.persist_message(state, msg, None).await;
-    }
-
-    /// Record how long the turn ran and the tokens it produced.
-    pub(super) async fn persist_turn_stats(&self, state: &AppState) {
-        let Some(target) = &self.persist else {
-            return;
-        };
-        let elapsed = self.started_at.elapsed();
-        let stats = TurnStats {
-            duration_ms: saturating_millis(elapsed),
-            generated_tokens: self.tokens.tokens(),
-        };
-        state.persist_turn_stats(target.clone(), stats).await;
-    }
-
-    fn take_reasoning(&mut self) -> Option<Reasoning> {
-        self.reasoning.take().map(ReasoningTrace::into_reasoning)
-    }
-
-    async fn persist_message(
-        &self,
-        state: &AppState,
-        msg: PersistedMessage,
-        relay_steps: Option<Vec<PersistedRelayStep>>,
-    ) {
-        if let Some(target) = &self.persist {
-            state
-                .persist_message(target.clone(), msg, relay_steps)
-                .await;
-        }
-    }
-}
-
-enum NextLlmEvent {
-    Event(LlmEvent),
-    Idle,
-    Closed,
-}
-
-impl AppState {
-    /// Handle a single user query: wake the daemon if needed, run the
-    /// agent loop under `plan`, stream events through `tx`, and persist the turn.
-    pub async fn handle_query(
-        self: Arc<Self>,
-        id: String,
-        text: String,
-        wire_attachments: Vec<ImageAttachment>,
-        (origin, plan): (TurnOrigin, PlanMode),
-        tx: mpsc::Sender<Event>,
-    ) -> Result<(), DispatchError> {
-        let cancel = self.runtime.turn_cancellation();
-        self.run_query(id, text, wire_attachments, (origin, plan), tx, cancel)
-            .await
+    /// Handle a single user query: wake the daemon if needed, run the agent loop under
+    /// its plan mode, stream events through `tx`, and persist the turn.
+    pub async fn handle_query(&self, query: Query, tx: EventSink) -> Result<(), DispatchError> {
+        let cancel = self.deps.admission.turn_cancellation();
+        self.run_query(query, tx, cancel).await
     }
 
     /// [`Self::handle_query`] for a turn whose cancellation token was
     /// taken earlier; the prompt is dropped if `cancel` has already fired.
     pub(super) async fn run_query(
-        self: Arc<Self>,
-        id: String,
-        text: String,
-        wire_attachments: Vec<ImageAttachment>,
-        (origin, plan): (TurnOrigin, PlanMode),
-        tx: mpsc::Sender<Event>,
+        &self,
+        query: Query,
+        tx: EventSink,
         cancel: CancellationToken,
     ) -> Result<(), DispatchError> {
+        let Query {
+            id,
+            text,
+            attachments: wire_attachments,
+            origin,
+            plan,
+        } = query;
         let _cancel_on_return = cancel.clone().drop_guard();
         let attachments = self.prepare_attachments(&id, wire_attachments, &tx).await?;
         let Some((_request_guard, main_lane)) = self.admit_turn(&id, &text, &tx, &cancel).await?
@@ -474,34 +172,33 @@ impl AppState {
 
         let (current_session, persist) = self.open_persistence_turn(&text).await;
         let chat_focused = self.refresh_chat_focus(&id);
-        self.assemble_transient_context(&text, origin, chat_focused)
+        self.assemble_transient_context(&text, &origin, chat_focused)
             .await;
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
-        let spawn_agent = || self.spawn_agent_task(text, attachments, plan, llm_tx, cancel.clone());
-        let agent_task = match origin {
-            TurnOrigin::Typed => spawn_agent(),
-            TurnOrigin::Voice => {
-                CONFIRM_ROUTER.sync_scope(ConfirmRouter::for_voice_turn(id.clone()), spawn_agent)
-            }
-        };
+        let turn = origin.into_turn_context(&id);
+        let agent_task =
+            self.spawn_agent_task(turn, (text, attachments), plan, llm_tx, cancel.clone());
 
-        let (speech, speech_rx) = self.speech_pipeline();
-        let voice_output = self.subsystems.voice.speech();
+        let (speech, speech_rx) = SpeechPipeline::new(&self.deps.config.voice.synthesis);
+        let voice_output = self.deps.voice.speech();
         voice_output.skip().await;
         let start_epoch = voice_output.current_epoch();
         let speech_handle = self.spawn_speech_worker(id.clone(), start_epoch, speech_rx);
 
-        let done_emitted = self
-            .drive_event_loop(id.clone(), llm_rx, &tx, speech, persist, &cancel)
-            .await;
+        let transcript = Arc::clone(&self.deps.transcript);
+        let done_emitted = TurnDriver::new(id.clone(), transcript, persist, tx.clone())
+            .speaking(speech)
+            .drive(llm_rx, &cancel)
+            .await
+            .is_some();
 
         let agent_result = agent_task.await;
         drop((agent_guard, user_turn));
 
         if done_emitted && matches!(&agent_result, Ok(Ok(()))) {
-            self.clone().spawn_session_title_broadcast(
+            self.deps.branches.spawn_session_title_broadcast(
                 id.clone(),
                 current_session,
                 &title_user_text,
@@ -516,7 +213,7 @@ impl AppState {
         &self,
         id: &str,
         wire: Vec<ImageAttachment>,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
     ) -> Result<Vec<Attachment>, DispatchError> {
         let decoded = decode_wire_attachments(wire).map_err(DispatchError::from);
         if let Err(e) = &decoded {
@@ -529,10 +226,10 @@ impl AppState {
         &self,
         id: &str,
         attachments: &[Attachment],
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
     ) -> Result<(), DispatchError> {
         let supported = self
-            .subsystems
+            .deps
             .vision_revalidator
             .as_ref()
             .is_some_and(|revalidator| revalidator.gate().supported());
@@ -550,11 +247,11 @@ impl AppState {
         &self,
         id: &str,
         text: &str,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
         cancel: &CancellationToken,
     ) -> Result<Option<(RequestGuard, MainLaneTurn)>, DispatchError> {
         let admission = async {
-            let Some(main_lane) = self.take_main_lane(id, text, tx).await else {
+            let Some(main_lane) = self.deps.admission.take_main_lane(id, text, tx).await else {
                 return Ok(None);
             };
             let request_guard = self.acquire_request_guard(id, tx).await?;
@@ -569,23 +266,23 @@ impl AppState {
 
     /// Re-probe vision support if stale; `false` when `cancel` fired first.
     async fn revalidate_vision(&self, cancel: &CancellationToken) -> bool {
-        let Some(revalidator) = &self.subsystems.vision_revalidator else {
+        let Some(revalidator) = &self.deps.vision_revalidator else {
             return !cancel.is_cancelled();
         };
         tokio::select! {
             biased;
             () = cancel.cancelled() => false,
-            () = revalidator.revalidate_if_stale(&self.subsystems.presence) => true,
+            () = revalidator.revalidate_if_stale(&self.deps.presence) => true,
         }
     }
 
     async fn acquire_request_guard(
         &self,
         id: &str,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
     ) -> Result<RequestGuard, DispatchError> {
         match self
-            .subsystems
+            .deps
             .presence
             .acquire_request_guard_with_progress(id.to_string(), tx.clone())
             .await
@@ -601,9 +298,11 @@ impl AppState {
     /// Save the session if needed and queue the write opening the turn with
     /// the user's prompt; the target is `None` when the session could not be saved.
     async fn open_persistence_turn(&self, text: &str) -> (SessionId, Option<PersistTarget>) {
-        match self.saved_session().await {
+        match self.deps.transcript.saved_session().await {
             Ok((session, branch)) => {
                 let target = self
+                    .deps
+                    .transcript
                     .open_user_turn(branch, PersistedMessage::user(text))
                     .await;
                 (session, Some(target))
@@ -614,13 +313,18 @@ impl AppState {
                     error = %e,
                     "saving the session failed; turn will not be persisted"
                 );
-                let (session, _branch) = self.runtime.session_ctx.current().await;
+                let (session, _branch) = self.deps.session_ctx.current().await;
                 (session, None)
             }
         }
     }
 
-    async fn assemble_transient_context(&self, text: &str, origin: TurnOrigin, chat_focused: bool) {
+    async fn assemble_transient_context(
+        &self,
+        text: &str,
+        origin: &TurnOrigin,
+        chat_focused: bool,
+    ) {
         let semantic = if self.recalls_past_context() {
             match self.build_semantic_context(text).await {
                 Ok(block) => block,
@@ -640,7 +344,7 @@ impl AppState {
         let approvals = voice_approvals_note(origin);
         let brief = self.brief_reply_note(origin, chat_focused);
         if let Some(block) = combine_context_blocks([semantic, window, approvals, brief])
-            && let Err(e) = self.subsystems.llm.set_transient_context(block).await
+            && let Err(e) = self.deps.llm.set_transient_context(block).await
         {
             debug!(
                 target: "assistd::context",
@@ -651,64 +355,50 @@ impl AppState {
     }
 
     fn recalls_past_context(&self) -> bool {
-        let embedding = &self.memory.embedding_cfg;
-        self.config.memory.enabled && embedding.enabled && embedding.auto_inject
+        let embedding = &self.deps.embedding_cfg;
+        self.deps.config.memory.enabled && embedding.enabled && embedding.auto_inject
     }
 
-    fn speech_pipeline(&self) -> (SpeechPipeline, mpsc::Receiver<String>) {
-        let synthesis = &self.config.voice.synthesis;
-        let sentences = SentenceBuffer::new(synthesis.max_sentence_chars.get() as usize);
-        let partial_flush = (synthesis.partial_flush_ms > 0)
-            .then(|| Duration::from_millis(u64::from(synthesis.partial_flush_ms)));
-        let (tx, rx) = mpsc::channel::<String>(32);
-        (
-            SpeechPipeline {
-                tx,
-                sentences,
-                partial_flush,
-                first_sentence_emitted: false,
-            },
-            rx,
-        )
-    }
-
-    /// Run the turn's agent under `plan` and the confirm router in scope, starting it
-    /// planning when asked to.
+    /// Run the agent of `turn` on the prompt under `plan`, starting it planning when asked to.
     fn spawn_agent_task(
         &self,
-        text: String,
-        attachments: Vec<Attachment>,
+        turn: TurnContext,
+        (text, attachments): (String, Vec<Attachment>),
         plan: PlanMode,
         llm_tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
-        let agent = self.query_agent(plan);
-        if plan == PlanMode::Planning {
-            let _ = CONFIRM_ROUTER.try_with(|router| router.set_planning(true));
+        let agent = self.query_agent(&turn, plan);
+        if plan == PlanMode::Planning
+            && let Some(router) = turn.router()
+        {
+            router.set_planning(true);
         }
         AbortOnDropHandle::new(tokio::spawn(
-            inherit_confirm_router(async move {
-                agent.run_turn(text, attachments, llm_tx, cancel).await
-            })
+            async move {
+                agent
+                    .run_turn(&turn, text, attachments, llm_tx, cancel)
+                    .await
+            }
             .in_current_span(),
         ))
     }
 
-    /// The agent of a turn under `plan`: one that can move through plan mode unless it is off.
-    fn query_agent(&self, plan: PlanMode) -> Agent {
-        let llm = self.subsystems.llm.clone();
-        let tools = self.subsystems.tools.snapshot();
+    /// The agent of `turn` under `plan`: one that can move through plan mode unless it is off.
+    fn query_agent(&self, turn: &TurnContext, plan: PlanMode) -> Agent {
+        let llm = self.deps.llm.clone();
+        let tools = self.deps.tools.snapshot();
         if !plan.is_off() {
-            return self.planner().chat_agent(llm, &tools);
+            return self.deps.planner.chat_agent(turn, llm, &tools);
         }
         let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
-            self.subsystems.presence.clone(),
+            self.deps.presence.clone(),
         )));
         Agent::new(
             llm,
             tools,
             health,
-            Duration::from_secs(self.config.timeouts.tool_call_secs),
+            Duration::from_secs(self.deps.config.timeouts.tool_call_secs),
         )
     }
 
@@ -722,77 +412,14 @@ impl AppState {
             "speech_worker",
             Component::Voice,
             run_speech_worker(
-                self.subsystems.voice.speech().clone(),
-                self.runtime.events_bus().clone(),
+                self.deps.voice.speech().clone(),
+                self.deps.bus.sender().clone(),
                 id,
                 start_epoch,
                 speech_rx,
             )
             .in_current_span(),
         )
-    }
-
-    /// Forward the turn's events to `tx` and the speech worker until the agent finishes; a
-    /// client that leaves cancels the turn, whose wind-down events are still persisted and
-    /// published. Returns whether `Done` was emitted.
-    async fn drive_event_loop(
-        &self,
-        id: String,
-        mut llm_rx: mpsc::Receiver<LlmEvent>,
-        tx: &mpsc::Sender<Event>,
-        mut speech: SpeechPipeline,
-        persist: Option<PersistTarget>,
-        cancel: &CancellationToken,
-    ) -> bool {
-        let mut translator = TurnTranslator::new(id, TurnScope::Main, persist);
-        let mut client_connected = true;
-        loop {
-            let idle_timeout = speech
-                .partial_flush
-                .filter(|_| !translator.awaiting_tool_result);
-            let next = tokio::select! {
-                biased;
-                () = tx.closed(), if client_connected => {
-                    client_connected = false;
-                    cancel_for_departed_client(cancel, &translator.id);
-                    continue;
-                }
-                next = next_llm_event(&mut llm_rx, idle_timeout) => next,
-            };
-            let llm_event = match next {
-                NextLlmEvent::Event(event) => event,
-                NextLlmEvent::Closed => break,
-                NextLlmEvent::Idle => {
-                    speech.flush_idle().await;
-                    continue;
-                }
-            };
-            let Some((wire_event, sentences)) = translator
-                .translate(self, llm_event, &mut speech.sentences)
-                .await
-            else {
-                continue;
-            };
-            if !self.send_or_publish(tx, wire_event).await && client_connected {
-                client_connected = false;
-                cancel_for_departed_client(cancel, &translator.id);
-            }
-            speech.speak(sentences).await;
-        }
-        translator.persist_turn_stats(self).await;
-        translator.done_emitted
-    }
-
-    /// Send `event` to the requester, or publish it straight to the bus
-    /// once the requester has gone. Returns whether the requester got it.
-    async fn send_or_publish(&self, tx: &mpsc::Sender<Event>, event: Event) -> bool {
-        match tx.send(event).await {
-            Ok(()) => true,
-            Err(SendError(event)) => {
-                self.runtime.publish(&event);
-                false
-            }
-        }
     }
 
     /// Wait for speech and report the agent's outcome. Sends `Done` if the
@@ -802,7 +429,7 @@ impl AppState {
         id: String,
         agent_result: Result<Result<(), LlmError>, JoinError>,
         speech_handle: JoinHandle<()>,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
         done_emitted: bool,
     ) -> Result<(), DispatchError> {
         let _ = speech_handle.await;
@@ -810,22 +437,19 @@ impl AppState {
         match agent_result {
             Ok(Ok(())) => {
                 if !done_emitted {
-                    self.send_or_publish(tx, Event::new(id, EventBody::Done))
-                        .await;
+                    let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 }
                 Ok(())
             }
             Ok(Err(e)) => {
                 let message = format!("llm backend error: {e}");
-                self.send_or_publish(tx, Event::new(id, EventBody::Error { message }))
-                    .await;
+                let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
                 Err(e.into())
             }
             Err(join_err) => {
                 let e = DispatchError::AgentPanicked(join_err);
                 let message = e.to_string();
-                self.send_or_publish(tx, Event::new(id, EventBody::Error { message }))
-                    .await;
+                let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
                 Err(e)
             }
         }
@@ -833,7 +457,7 @@ impl AppState {
 }
 
 pub(super) async fn finish_interrupted_before_start(
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSink,
     id: String,
 ) -> Result<(), DispatchError> {
     debug!(
@@ -843,29 +467,6 @@ pub(super) async fn finish_interrupted_before_start(
     );
     let _ = tx.send(Event::new(id, EventBody::Done)).await;
     Ok(())
-}
-
-fn cancel_for_departed_client(cancel: &CancellationToken, id: &str) {
-    debug!(
-        target: "assistd::state",
-        id = %id,
-        "client left mid-turn; cancelling the agent turn"
-    );
-    cancel.cancel();
-}
-
-async fn next_llm_event(
-    llm_rx: &mut mpsc::Receiver<LlmEvent>,
-    idle_timeout: Option<Duration>,
-) -> NextLlmEvent {
-    let received = match idle_timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, llm_rx.recv()).await {
-            Ok(received) => received,
-            Err(_) => return NextLlmEvent::Idle,
-        },
-        None => llm_rx.recv().await,
-    };
-    received.map_or(NextLlmEvent::Closed, NextLlmEvent::Event)
 }
 
 pub(super) async fn run_speech_worker(
@@ -932,25 +533,4 @@ async fn speak_sentence(
     ) {
         output.cancel().await;
     }
-}
-
-fn tool_calls_message(
-    narration: String,
-    calls: &[ToolCall],
-    reasoning: Option<Reasoning>,
-) -> PersistedMessage {
-    let content = if narration.trim().is_empty() {
-        String::new()
-    } else {
-        narration
-    };
-    let persisted = calls
-        .iter()
-        .map(|call| PersistedToolCall {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-        })
-        .collect();
-    PersistedMessage::assistant_tool_calls(content, persisted, reasoning)
 }

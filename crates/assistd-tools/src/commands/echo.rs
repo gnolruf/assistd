@@ -110,6 +110,7 @@ fn unescape(text: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TurnContext;
 
     async fn run_echo(args: &[&str]) -> CommandOutput {
         EchoCommand
@@ -117,6 +118,7 @@ mod tests {
                 args: args.iter().map(ToString::to_string).collect(),
                 stdin: None,
                 scope: crate::FileScope::Host,
+                turn: TurnContext::default(),
             })
             .await
     }

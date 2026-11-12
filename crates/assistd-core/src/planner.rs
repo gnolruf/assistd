@@ -19,11 +19,11 @@ use assistd_llm::{
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
-    ActionCheck, Attachment, CONFIRM_ROUTER, ConfirmRouter, SearchPath, Tool, ToolCatalog,
-    ToolError, ToolOutput, ToolRegistry,
+    ActionCheck, Attachment, ConfirmRouter, SearchPath, Tool, ToolCatalog, ToolError, ToolOutput,
+    ToolRegistry, TurnContext,
 };
 
-use crate::agent::{Agent, planning_in_scope};
+use crate::agent::Agent;
 
 mod draft;
 mod recommend;
@@ -164,17 +164,22 @@ impl Planner {
         }
     }
 
-    /// An agent for chat turns over `conversation`. It acts with `acting` and a tool that asks
-    /// the user to plan first; while the confirm router in scope plans, it is offered the
-    /// planning tools and one that hands the plan to the user, with the plan-mode note at the
-    /// conversation's tail.
-    pub fn chat_agent(&self, conversation: Arc<dyn LlmBackend>, acting: &ToolRegistry) -> Agent {
+    /// An agent for the chat turn `turn` over `conversation`. It acts with `acting` and a tool
+    /// that asks the user to plan first; while the turn plans, it is offered the planning tools
+    /// and one that hands the plan to the user, with the plan-mode note at the conversation's
+    /// tail.
+    pub fn chat_agent(
+        &self,
+        turn: &TurnContext,
+        conversation: Arc<dyn LlmBackend>,
+        acting: &ToolRegistry,
+    ) -> Agent {
         let mut acting = acting.clone();
         acting.register(EnterPlanModeTool);
         let mut planning = ToolRegistry::clone(&self.tools.registry);
         planning.register(ExitPlanModeTool);
         Agent::new(
-            PlanModeConversation::new(conversation, CHAT_PLAN_ENDING),
+            PlanModeConversation::new(conversation, CHAT_PLAN_ENDING, turn.clone()),
             Arc::new(acting),
             self.health.clone(),
             self.tool_deadline,
@@ -234,17 +239,18 @@ impl Planner {
         tx: mpsc::Sender<LlmEvent>,
         cancel: &CancellationToken,
     ) -> Result<Arc<dyn LlmBackend>, PlanError> {
+        let turn = TurnContext::answered_by(ConfirmRouter::for_planning(request_id));
         let conversation: Arc<dyn LlmBackend> =
-            PlanModeConversation::new(conversation, FINDINGS_ENDING);
+            PlanModeConversation::new(conversation, FINDINGS_ENDING, turn.clone());
         let agent = Agent::new(
             Arc::clone(&conversation),
             Arc::clone(&self.tools.registry),
             self.health.clone(),
             self.tool_deadline,
         );
-        let router = ConfirmRouter::for_planning(request_id);
-        let turn = agent.run_turn(ask.into_text(), Vec::new(), tx, cancel.clone());
-        CONFIRM_ROUTER.scope(router, turn).await?;
+        agent
+            .run_turn(&turn, ask.into_text(), Vec::new(), tx, cancel.clone())
+            .await?;
         if cancel.is_cancelled() {
             return Err(PlanError::Cancelled);
         }
@@ -278,21 +284,23 @@ async fn draft_of<T: DeserializeOwned>(
     serde_json::from_str(&reply).map_err(PlanError::Unreadable)
 }
 
-/// A conversation whose every step, while the confirm router in scope plans, ends with the
-/// plan-mode note, ahead of any one-shot note the agent loop adds.
+/// A conversation whose every step, while its turn plans, ends with the plan-mode note,
+/// ahead of any one-shot note the agent loop adds.
 #[derive(Debug)]
 struct PlanModeConversation {
     inner: Arc<dyn LlmBackend>,
+    turn: TurnContext,
     /// [`PLAN_MODE_RULES`] and how the turn should end.
     preamble: String,
     note: Mutex<Option<String>>,
 }
 
 impl PlanModeConversation {
-    /// `inner` with the plan-mode rules and then `ending` at its tail.
-    fn new(inner: Arc<dyn LlmBackend>, ending: &str) -> Arc<Self> {
+    /// `inner` with the plan-mode rules and then `ending` at its tail while `turn` plans.
+    fn new(inner: Arc<dyn LlmBackend>, ending: &str, turn: TurnContext) -> Arc<Self> {
         Arc::new(Self {
             inner,
+            turn,
             preamble: format!("{PLAN_MODE_RULES} {ending}"),
             note: Mutex::new(None),
         })
@@ -315,7 +323,7 @@ impl LlmBackend for PlanModeConversation {
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
         let extra = self.note.lock().take();
-        let note = match (planning_in_scope(), extra) {
+        let note = match (self.turn.planning(), extra) {
             (true, Some(extra)) => Some(format!("{}\n\n{extra}", self.preamble)),
             (true, None) => Some(self.preamble.clone()),
             (false, extra) => extra,
@@ -375,21 +383,14 @@ impl<T: Tool> Tool for PlanModeTool<T> {
         self.inner.bounded_by_tool_deadline()
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
-        let before = refused_while_planning();
-        let mut output = self.inner.invoke(args).await?;
-        if refused_while_planning() > before {
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let before = turn.refused_while_planning();
+        let mut output = self.inner.invoke(turn, args).await?;
+        if turn.refused_while_planning() > before {
             output.output.push_str(REFUSED_NOTE);
         }
         Ok(output)
     }
-}
-
-/// How many asks the planning router in scope has refused; 0 outside a planning turn.
-fn refused_while_planning() -> usize {
-    CONFIRM_ROUTER
-        .try_with(|router| router.refused_while_planning())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

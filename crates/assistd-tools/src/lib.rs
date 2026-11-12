@@ -21,6 +21,7 @@ pub mod presentation;
 pub mod quarantine;
 pub mod run;
 mod tool_output;
+mod turn;
 pub mod vision;
 
 pub use assistd_ipc::{ConfirmSource, ImageMime};
@@ -31,12 +32,12 @@ pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RememberTool, ReminisceTool};
 pub use policy::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ActionCheck,
-    Allowlist, AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, CONFIRM_TIMEOUT,
-    ConfirmRouter, ConfirmationGate, ConfirmationRequest, FileScope, IpcConfirmationGate,
-    JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm,
-    NoPendingReview, PromptParking, Protected, Risk, SafetyJudge, SandboxError, SandboxInfo,
-    SandboxPrograms, SandboxRequest, ScopeError, SearchPath, SharedDirs, StandingApprovals,
-    ToolSandbox, ToolsDisabled, Unattended, Verdict, inherit_confirm_router, probe_sandbox,
+    Allowlist, AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_TIMEOUT, ConfirmRouter,
+    ConfirmationGate, ConfirmationRequest, FileScope, IpcConfirmationGate, JUDGE_TIMEOUT,
+    JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm, NoPendingReview,
+    PromptParking, Protected, Risk, SafetyJudge, SandboxError, SandboxInfo, SandboxPrograms,
+    SandboxRequest, ScopeError, SearchPath, SharedDirs, StandingApprovals, ToolSandbox,
+    ToolsDisabled, Unattended, Verdict, probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};
@@ -44,6 +45,7 @@ pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};
 pub use run::RunTool;
 pub use tool_output::{RawStreams, ToolOutput};
+pub use turn::{RelayObserver, TurnContext, YieldableLane};
 pub use vision::VisionGate;
 
 /// Prefix of every MCP-adapted tool's name (`mcp__<server>__<tool>`).
@@ -81,8 +83,8 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
         true
     }
 
-    /// Execute the tool with JSON arguments.
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError>;
+    /// Execute the tool with JSON arguments as part of `turn`.
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError>;
 }
 
 /// Lookup table of registered tools; cloning shares the tools. Every
@@ -200,8 +202,8 @@ impl Tool for CappedTool {
         self.inner.bounded_by_tool_deadline()
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
-        let mut result = self.inner.invoke(args).await?;
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let mut result = self.inner.invoke(turn, args).await?;
         let cut = self
             .output_cap
             .cap(self.inner.name(), std::mem::take(&mut result.output));
@@ -247,7 +249,7 @@ mod tests {
         fn parameters_schema(&self) -> Value {
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
-        async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+        async fn invoke(&self, _turn: &TurnContext, _args: Value) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::default())
         }
     }
@@ -266,7 +268,7 @@ mod tests {
         fn parameters_schema(&self) -> Value {
             json!({})
         }
-        async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+        async fn invoke(&self, _turn: &TurnContext, _args: Value) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::text("x".repeat(10_000), Duration::ZERO))
         }
     }
@@ -282,7 +284,12 @@ mod tests {
         let mut reg = ToolRegistry::with_output_cap(Arc::new(OutputCap::new(spec)));
         reg.register(Verbose);
 
-        let result = reg.get("verbose").unwrap().invoke(json!({})).await.unwrap();
+        let result = reg
+            .get("verbose")
+            .unwrap()
+            .invoke(&TurnContext::default(), json!({}))
+            .await
+            .unwrap();
 
         assert!(result.output.len() <= max_bytes);
         assert!(result.truncated);

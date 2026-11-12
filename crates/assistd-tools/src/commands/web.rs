@@ -17,6 +17,7 @@ use assistd_search::SearxngClient;
 use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
 use assistd_utils::net::{FilteredResolver, NonPublic, is_non_public, is_public};
 
+use crate::TurnContext;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
@@ -129,11 +130,11 @@ impl WebCommand {
         }
     }
 
-    async fn host_confirmed(&self, url: &Url) -> bool {
+    async fn host_confirmed(&self, turn: &TurnContext, url: &Url) -> bool {
         let host = url.host_str().unwrap_or_default();
         self.egress
             .hosts
-            .confirm(host, || ConfirmationRequest {
+            .confirm(turn, host, || ConfirmationRequest {
                 tool: NAME.to_string(),
                 script: format!("web fetch {url}"),
                 matched_pattern: format!("fetches from {host}, which is not yet approved"),
@@ -145,26 +146,29 @@ impl WebCommand {
             .await
     }
 
-    async fn plaintext_confirmed(&self, url: &Url, https_error: &str) -> bool {
+    async fn plaintext_confirmed(&self, turn: &TurnContext, url: &Url, https_error: &str) -> bool {
         let host = url.host_str().unwrap_or_default();
         self.egress
             .hosts
-            .confirm_once(ConfirmationRequest {
-                tool: NAME.to_string(),
-                script: format!("web fetch {url}"),
-                matched_pattern: format!(
-                    "fetches from {host} over unencrypted HTTP, which anything on the network \
+            .confirm_once(
+                turn,
+                ConfirmationRequest {
+                    tool: NAME.to_string(),
+                    script: format!("web fetch {url}"),
+                    matched_pattern: format!(
+                        "fetches from {host} over unencrypted HTTP, which anything on the network \
                      path can read or rewrite, because HTTPS failed: {https_error}"
-                ),
-                always_allow: Vec::new(),
-                risk: Risk::Elevated,
-                unattended: Unattended::Never,
-                source: ConfirmSource::Main,
-            })
+                    ),
+                    always_allow: Vec::new(),
+                    risk: Risk::Elevated,
+                    unattended: Unattended::Never,
+                    source: ConfirmSource::Main,
+                },
+            )
             .await
     }
 
-    async fn fetch_command(&self, args: &[String]) -> CommandOutput {
+    async fn fetch_command(&self, turn: &TurnContext, args: &[String]) -> CommandOutput {
         let (rendering, raw) = match fetch_args(args) {
             Ok(parsed) => parsed,
             Err(usage) => return usage,
@@ -193,11 +197,11 @@ impl WebCommand {
                 .into_bytes(),
             );
         }
-        if !self.host_confirmed(&url).await {
+        if !self.host_confirmed(turn, &url).await {
             return declined(format_args!("fetch cancelled by user: {url}"));
         }
         match plaintext {
-            Some(plain) => self.fetch_upgraded(url, plain, rendering).await,
+            Some(plain) => self.fetch_upgraded(turn, url, plain, rendering).await,
             None => self.fetch(url, rendering).await,
         }
     }
@@ -211,14 +215,20 @@ impl WebCommand {
 
     /// Fetches `secure`, the HTTPS form of `plain`, falling back to `plain`
     /// only when HTTPS cannot connect and the user allows it for this fetch.
-    async fn fetch_upgraded(&self, secure: Url, plain: Url, rendering: Rendering) -> CommandOutput {
+    async fn fetch_upgraded(
+        &self,
+        turn: &TurnContext,
+        secure: Url,
+        plain: Url,
+        rendering: Rendering,
+    ) -> CommandOutput {
         match self.client.get(secure.clone()).send().await {
             Ok(response) => {
                 let output = read_response(response, &secure, rendering).await;
                 with_note(format_args!("fetched {secure} instead of {plain}"), output)
             }
             Err(e) if e.is_connect() && !is_non_public(&e) => {
-                self.fetch_plaintext(plain, &error_chain(&e), rendering)
+                self.fetch_plaintext(turn, plain, &error_chain(&e), rendering)
                     .await
             }
             Err(e) => transport_failed(&secure, &e),
@@ -227,11 +237,12 @@ impl WebCommand {
 
     async fn fetch_plaintext(
         &self,
+        turn: &TurnContext,
         url: Url,
         https_error: &str,
         rendering: Rendering,
     ) -> CommandOutput {
-        if !self.plaintext_confirmed(&url, https_error).await {
+        if !self.plaintext_confirmed(turn, &url, https_error).await {
             return declined(format_args!(
                 "HTTPS failed ({https_error}) and the user declined plain HTTP: {url}"
             ));
@@ -282,9 +293,9 @@ impl Command for WebCommand {
         };
         match subcommand.as_str() {
             "search" => search::run(self.search.as_ref(), rest).await,
-            "fetch" => self.fetch_command(rest).await,
+            "fetch" => self.fetch_command(&input.turn, rest).await,
             bare if rest.is_empty() && web_url(bare).is_some() => {
-                self.fetch_command(&input.args).await
+                self.fetch_command(&input.turn, &input.args).await
             }
             other => CommandOutput::usage_error(
                 NAME,

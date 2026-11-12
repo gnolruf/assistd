@@ -8,18 +8,19 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use futures_util::FutureExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use assistd_ipc::StatusKind;
+use assistd_ipc::{RelayEvent, StatusKind};
 use assistd_llm::{
     HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
     ToolResultPayload,
 };
-use assistd_tools::{Attachment, CONFIRM_ROUTER, ToolOutput, ToolRegistry};
+use assistd_tools::{Attachment, RelayObserver, ToolOutput, ToolRegistry, TurnContext};
 use assistd_utils::text::panic_message;
 
 use crate::recovery::{Component, StatusSeverity};
@@ -45,11 +46,6 @@ const TRUNCATION_NOTE: &str = "Your previous response reached the output-token l
      it finished, so it was discarded and none of its tool calls ran. Keep your reasoning \
      brief and your tool calls small: split a long script into several shorter calls.";
 
-tokio::task_local! {
-    /// The event channel of the turn whose tool call is being dispatched.
-    pub(crate) static TOOL_CALL_EVENTS: mpsc::Sender<LlmEvent>;
-}
-
 /// Long-lived agent dependencies, reused across turns. With a `health` probe the loop
 /// replays a step once after a llama-server crash; without one, a crash ends the turn.
 /// A tool still running after `tool_deadline` is reported to the model as failed.
@@ -57,7 +53,7 @@ tokio::task_local! {
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     tools: Arc<ToolRegistry>,
-    /// Offered in place of `tools` while the confirm router in scope plans.
+    /// Offered in place of `tools` while the turn plans.
     planning_tools: Option<Arc<ToolRegistry>>,
     health: Option<Arc<dyn LlmHealthProbe>>,
     tool_deadline: Duration,
@@ -81,27 +77,31 @@ impl Agent {
         }
     }
 
-    /// Offer `planning` instead of the acting tools whenever the confirm router in scope
-    /// plans; the choice is made before each step.
+    /// Offer `planning` instead of the acting tools whenever the turn plans; the choice is
+    /// made before each step.
     pub fn with_planning_tools(mut self, planning: Arc<ToolRegistry>) -> Self {
         self.planning_tools = Some(planning);
         self
     }
 
-    /// Run one turn, streaming events on `tx` until the model answers or `tx` closes or
-    /// `cancel` fires. Turns must not run concurrently on one agent. Errors when the
+    /// Run one turn in `context`, streaming events on `tx` until the model answers or `tx`
+    /// closes or `cancel` fires. Turns must not run concurrently on one agent. Errors when the
     /// backend fails; an incomplete restart surfaces as [`LlmError::ServerRestarting`].
     #[instrument(skip_all, name = "agent_turn")]
     pub async fn run_turn(
         &self,
+        context: &TurnContext,
         user_text: String,
         user_attachments: Vec<Attachment>,
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> Result<(), LlmError> {
         self.backend.push_user(user_text, user_attachments).await?;
-        let tools = Arc::clone(self.tools_in_scope());
+        let tools = Arc::clone(self.tools_for(context));
         let mut turn = Turn {
+            context: context
+                .clone()
+                .observed_by(Arc::new(TurnRelayObserver(tx.clone()))),
             tx,
             cancel,
             schemas: tools.openai_schemas(),
@@ -140,7 +140,7 @@ impl Agent {
                     turn.truncated_steps = 0;
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
                     self.backend.push_tool_results(results).await?;
-                    turn.offer(self.tools_in_scope());
+                    turn.offer(self.tools_for(&turn.context));
                     turn.iteration += 1;
                     if let Some(why) = ToolBudgetExhausted::check(stuck, turn.iteration) {
                         self.withdraw_tools(&mut turn, why).await;
@@ -150,10 +150,10 @@ impl Agent {
         }
     }
 
-    /// The planning tools while the confirm router in scope plans, else the acting ones.
-    fn tools_in_scope(&self) -> &Arc<ToolRegistry> {
+    /// The planning tools while `context`'s turn plans, else the acting ones.
+    fn tools_for(&self, context: &TurnContext) -> &Arc<ToolRegistry> {
         match &self.planning_tools {
-            Some(planning) if planning_in_scope() => planning,
+            Some(planning) if context.planning() => planning,
             _ => &self.tools,
         }
     }
@@ -202,6 +202,7 @@ impl Agent {
             retry = turn.truncated_steps,
             "response hit the output-token limit; retrying the step"
         );
+        let _ = turn.tx.send(LlmEvent::StepDiscarded).await;
         let _ = turn
             .tx
             .send(status_event(
@@ -235,6 +236,7 @@ impl Agent {
         let mut restart_attempted = false;
         loop {
             let replay_probe = self.health.as_ref().filter(|_| !restart_attempted);
+            let _ = turn.tx.send(LlmEvent::StepStarted).await;
             let step_result = tokio::select! {
                 biased;
                 () = turn.cancel.cancelled() => {
@@ -326,10 +328,7 @@ impl Agent {
         let dispatched = tokio::select! {
             biased;
             () = turn.cancel.cancelled() => None,
-            r = TOOL_CALL_EVENTS.scope(
-                turn.tx.clone(),
-                dispatch_tool_call(&turn.tools, call, turn.iteration, self.tool_deadline),
-            ) => Some(r),
+            r = dispatch_tool_call(turn, call, self.tool_deadline) => Some(r),
         };
         let result = dispatched.unwrap_or_else(|| {
             warn!(
@@ -380,6 +379,8 @@ impl Agent {
 }
 
 struct Turn {
+    /// The caller's context, with the turn's own events observing its relays.
+    context: TurnContext,
     tx: mpsc::Sender<LlmEvent>,
     cancel: CancellationToken,
     tools: Arc<ToolRegistry>,
@@ -409,6 +410,17 @@ impl Turn {
             Some(why) => format!("{TRUNCATION_NOTE} {}", why.model_note()),
             None => TRUNCATION_NOTE.to_string(),
         }
+    }
+}
+
+/// Shows a turn the relays its tool calls run, as [`LlmEvent::Relay`].
+#[derive(Debug)]
+struct TurnRelayObserver(mpsc::Sender<LlmEvent>);
+
+#[async_trait]
+impl RelayObserver for TurnRelayObserver {
+    async fn report(&self, event: RelayEvent) {
+        let _ = self.0.send(LlmEvent::Relay(event)).await;
     }
 }
 
@@ -482,13 +494,6 @@ impl CallStreak {
     }
 }
 
-/// Whether the confirm router in scope is planning; `false` outside any.
-pub(crate) fn planning_in_scope() -> bool {
-    CONFIRM_ROUTER
-        .try_with(|router| router.planning())
-        .unwrap_or(false)
-}
-
 fn llm_error_label(error: &LlmError) -> &'static str {
     match error {
         LlmError::Chat(_) => "chat backend",
@@ -535,6 +540,7 @@ async fn announce_crash(turn: &Turn, reason: &str) {
         reason = %reason,
         "llama-server died mid-step; waiting for supervisor restart and replaying"
     );
+    let _ = turn.tx.send(LlmEvent::StepDiscarded).await;
     let _ = turn
         .tx
         .send(status_event(
@@ -683,10 +689,14 @@ fn panicked_tool_result(
     )
 }
 
-/// `fut`'s output, or `None` once it has run `deadline` without one; the clock stops while the
-/// confirm router in scope has a prompt parked.
-async fn within_deadline<F: Future>(deadline: Duration, fut: F) -> Option<F::Output> {
-    let Ok(mut parked) = CONFIRM_ROUTER.try_with(|router| router.parked()) else {
+/// `fut`'s output, or `None` once it has run `deadline` without one; the clock stops while
+/// `context`'s turn has a prompt parked.
+async fn within_deadline<F: Future>(
+    context: &TurnContext,
+    deadline: Duration,
+    fut: F,
+) -> Option<F::Output> {
+    let Some(mut parked) = context.parked() else {
         return tokio::time::timeout(deadline, fut).await.ok();
     };
     let mut fut = pin!(fut);
@@ -716,21 +726,18 @@ async fn within_deadline<F: Future>(deadline: Duration, fut: F) -> Option<F::Out
     }
 }
 
-async fn dispatch_tool_call(
-    tools: &ToolRegistry,
-    call: &ToolCall,
-    iteration: u32,
-    deadline: Duration,
-) -> ToolOutput {
+async fn dispatch_tool_call(turn: &Turn, call: &ToolCall, deadline: Duration) -> ToolOutput {
     let start = Instant::now();
+    let (tools, iteration) = (turn.tools.as_ref(), turn.iteration);
 
     let Some(tool) = tools.get(&call.name) else {
         return unknown_tool_result(tools, call, iteration, start.elapsed());
     };
 
-    let invocation = AssertUnwindSafe(tool.invoke(call.arguments.clone())).catch_unwind();
+    let invocation =
+        AssertUnwindSafe(tool.invoke(&turn.context, call.arguments.clone())).catch_unwind();
     let finished = if tool.bounded_by_tool_deadline() {
-        within_deadline(deadline, invocation).await
+        within_deadline(&turn.context, deadline, invocation).await
     } else {
         Some(invocation.await)
     };

@@ -9,10 +9,10 @@ use tokio::task::JoinHandle;
 use assistd_ipc::PermissionMode;
 
 use super::*;
+use crate::TurnContext;
 use crate::commands::test_support::{RecordingGate, router_in};
 use crate::policy::{
-    AlwaysAllowGate, Approval, ApprovalGate, Approvals, CONFIRM_ROUTER, DenyAllGate,
-    IpcConfirmationGate,
+    AlwaysAllowGate, Approval, ApprovalGate, Approvals, DenyAllGate, IpcConfirmationGate,
 };
 
 /// First byte of a TLS handshake record, which opens every HTTPS connection.
@@ -95,6 +95,7 @@ async fn fetch(cmd: &WebCommand, url: &str) -> CommandOutput {
         args: vec!["fetch".to_string(), url.to_string()],
         stdin: None,
         scope: crate::FileScope::Host,
+        turn: TurnContext::default(),
     })
     .await
 }
@@ -136,8 +137,13 @@ async fn fetch_from_a_new_host_asks_even_in_auto_mode() {
         Arc::new(Approvals::unsaved()),
     ));
     let (router, mut rx) = router_in(PermissionMode::Auto);
-    let out = CONFIRM_ROUTER
-        .scope(router, fetch(&cmd, "https://127.0.0.1:9/"))
+    let out = cmd
+        .run(CommandInput {
+            args: vec!["fetch".to_string(), "https://127.0.0.1:9/".to_string()],
+            stdin: None,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::answered_by(router),
+        })
         .await;
     assert!(
         rx.try_recv().is_ok(),
@@ -373,6 +379,7 @@ async fn fetch_page(content_type: &str, page: &[u8], flag_sets: &[&[&str]]) -> V
                 args,
                 stdin: None,
                 scope: crate::FileScope::Host,
+                turn: TurnContext::default(),
             })
             .await;
         assert_eq!(out.exit_code, 0, "{}", stderr(&out));

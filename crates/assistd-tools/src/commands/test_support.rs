@@ -18,6 +18,7 @@ use super::{
     BashCommand, BashPolicyCfg, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WebCommand,
     WmCommand, WriteCommand, WritePolicyCfg, register_readers,
 };
+use crate::TurnContext;
 use crate::command::CommandRegistry;
 use crate::policy::{
     AlwaysAllowGate, Approval, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate,
@@ -147,7 +148,7 @@ impl RecordingGate {
 
 #[async_trait]
 impl ConfirmationGate for RecordingGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
+    async fn confirm(&self, _turn: &TurnContext, req: ConfirmationRequest) -> Approval {
         self.requests.lock().push(req);
         self.answer
     }

@@ -15,6 +15,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
+use crate::TurnContext;
 use crate::memory::MemoryOps;
 use crate::{Tool, ToolError, ToolOutput};
 
@@ -186,7 +187,7 @@ impl Tool for RememberTool {
     }
 
     #[tracing::instrument(skip(self, args))]
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let output = match RememberRequest::parse(&args)? {
             RememberRequest::Save { key, value } => self.save(&key, value).await?,
@@ -390,7 +391,7 @@ impl Tool for ReminisceTool {
     }
 
     #[tracing::instrument(skip(self, args), fields(limit = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let request = ReminisceRequest::parse(&args)?;
         tracing::Span::current().record("limit", request.limit);
@@ -677,7 +678,9 @@ mod tests {
         );
         let query = json!({"query": "the rust daemon", "limit": 3, "session": null});
 
-        tool.invoke(query.clone()).await.unwrap();
+        tool.invoke(&TurnContext::default(), query.clone())
+            .await
+            .unwrap();
         assert_eq!(
             *spy.scope.lock(),
             Some(ChunkScope::Chats(SessionScope::AllExceptInContext(first)))
@@ -685,7 +688,7 @@ mod tests {
 
         let second = SessionId::new();
         session_tx.send_replace(second);
-        tool.invoke(query).await.unwrap();
+        tool.invoke(&TurnContext::default(), query).await.unwrap();
         assert_eq!(
             *spy.scope.lock(),
             Some(ChunkScope::Chats(SessionScope::AllExceptInContext(second))),
@@ -788,7 +791,10 @@ mod tests {
         );
 
         let scoped = tool
-            .invoke(json!({"query": "tuning", "limit": 5, "session": past.short_id()}))
+            .invoke(
+                &TurnContext::default(),
+                json!({"query": "tuning", "limit": 5, "session": past.short_id()}),
+            )
             .await
             .unwrap()
             .output;
@@ -825,7 +831,10 @@ mod tests {
         }
 
         let err = tool
-            .invoke(json!({"query": "live", "limit": 5, "session": live.short_id()}))
+            .invoke(
+                &TurnContext::default(),
+                json!({"query": "live", "limit": 5, "session": live.short_id()}),
+            )
             .await
             .unwrap_err();
         assert!(invalid_args(err).contains("in progress"));
@@ -860,7 +869,10 @@ mod tests {
         );
 
         let found = tool
-            .invoke(json!({"query": "port", "limit": 5, "session": null}))
+            .invoke(
+                &TurnContext::default(),
+                json!({"query": "port", "limit": 5, "session": null}),
+            )
             .await
             .unwrap()
             .output;
@@ -902,12 +914,18 @@ mod tests {
     async fn remember_dedups_by_key() {
         let (ops, _dir) = fresh_ops().await;
         let tool = remember_tool(ops.clone());
-        tool.invoke(json!({"action": "save", "key": "editor_preference", "text": "vim"}))
-            .await
-            .unwrap();
-        tool.invoke(json!({"action": "save", "key": "editor_preference", "text": "neovim"}))
-            .await
-            .unwrap();
+        tool.invoke(
+            &TurnContext::default(),
+            json!({"action": "save", "key": "editor_preference", "text": "vim"}),
+        )
+        .await
+        .unwrap();
+        tool.invoke(
+            &TurnContext::default(),
+            json!({"action": "save", "key": "editor_preference", "text": "neovim"}),
+        )
+        .await
+        .unwrap();
         let rows = ops.list_full("").await.unwrap();
         let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
         assert_eq!(keys, ["editor_preference"]);
@@ -922,7 +940,10 @@ mod tests {
         let tool = remember_tool(no_ops());
         for bad in ["has spaces", "Editor_Pref", "trailing!", "slash/ed", ""] {
             let err = tool
-                .invoke(json!({"action": "save", "key": bad, "text": "x"}))
+                .invoke(
+                    &TurnContext::default(),
+                    json!({"action": "save", "key": bad, "text": "x"}),
+                )
                 .await
                 .unwrap_err();
             let msg = invalid_args(err);
@@ -937,12 +958,18 @@ mod tests {
     async fn remember_save_needs_a_key_but_search_does_not() {
         let tool = remember_tool(no_ops());
         let err = tool
-            .invoke(json!({"action": "save", "key": null, "text": "vim"}))
+            .invoke(
+                &TurnContext::default(),
+                json!({"action": "save", "key": null, "text": "vim"}),
+            )
             .await
             .unwrap_err();
         assert!(invalid_args(err).starts_with("`key` (string) is required"));
         let found = tool
-            .invoke(json!({"action": "search", "key": null, "text": "my editor?"}))
+            .invoke(
+                &TurnContext::default(),
+                json!({"action": "search", "key": null, "text": "my editor?"}),
+            )
             .await
             .unwrap();
         assert!(

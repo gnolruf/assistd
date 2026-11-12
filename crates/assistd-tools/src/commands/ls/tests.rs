@@ -1,6 +1,7 @@
 use tempfile::tempdir;
 
 use super::*;
+use crate::TurnContext;
 
 async fn run_ls(args: &[&str]) -> CommandOutput {
     LsCommand
@@ -8,6 +9,7 @@ async fn run_ls(args: &[&str]) -> CommandOutput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
             scope: FileScope::Host,
+            turn: TurnContext::default(),
         })
         .await
 }

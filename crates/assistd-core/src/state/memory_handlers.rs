@@ -1,9 +1,7 @@
 //! Handlers for the `Memory*` variants of `Request`.
 
 use std::future::Future;
-use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use tracing::warn;
 
 use assistd_embed::{BATCH_SIZE, Embedder, embed_rows};
@@ -14,17 +12,19 @@ use assistd_memory::{
 };
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
-use super::{AppState, DispatchError, send_error, wire_role, wire_timestamp};
+use super::memory_stack::MemoryStack;
+use super::{DispatchError, send_error, wire_role, wire_timestamp};
+use crate::bus::EventSink;
 
-impl AppState {
+impl MemoryStack {
     pub(super) async fn handle_semantic_search(
-        self: Arc<Self>,
+        &self,
         id: String,
         query: String,
         limit: u32,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let embedder = match self.memory.embedder.get() {
+        let embedder = match self.embedder.get() {
             Ok(embedder) => embedder,
             Err(e) => {
                 send_error(&tx, id, format!("semantic search failed: {e}")).await;
@@ -44,7 +44,6 @@ impl AppState {
             }
         };
         match self
-            .memory
             .semantic
             .nearest_chunks(embedding, limit, ChunkScope::Chats(SessionScope::All))
             .await
@@ -87,13 +86,13 @@ impl AppState {
     }
 
     pub(super) async fn handle_memory_save(
-        self: Arc<Self>,
+        &self,
         id: String,
         key: String,
         value: String,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory.memory_ops.save(&key, value).await {
+        match self.memory_ops.save(&key, value).await {
             Ok(_id) => {
                 let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
@@ -106,12 +105,12 @@ impl AppState {
     }
 
     pub(super) async fn handle_memory_load(
-        self: Arc<Self>,
+        &self,
         id: String,
         key: String,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory.memory_ops.load(&key).await {
+        match self.memory_ops.load(&key).await {
             Ok(value) => {
                 let _ = tx
                     .send(Event::new(
@@ -130,12 +129,12 @@ impl AppState {
     }
 
     pub(super) async fn handle_memory_delete(
-        self: Arc<Self>,
+        &self,
         id: String,
         key: String,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory.memory_ops.delete(&key).await {
+        match self.memory_ops.delete(&key).await {
             Ok(()) => {
                 let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
@@ -148,13 +147,13 @@ impl AppState {
     }
 
     pub(super) async fn handle_memory_list_all(
-        self: Arc<Self>,
+        &self,
         id: String,
         prefix: String,
         limit: u32,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory.memory_ops.list_full(&prefix).await {
+        match self.memory_ops.list_full(&prefix).await {
             Ok(rows) => {
                 let cap = if limit == 0 {
                     rows.len()
@@ -184,12 +183,12 @@ impl AppState {
     }
 
     pub(super) async fn handle_memory_forget(
-        self: Arc<Self>,
+        &self,
         id: String,
         memory_id: i64,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory.memory_ops.forget(MemoryId(memory_id)).await {
+        match self.memory_ops.forget(MemoryId(memory_id)).await {
             Ok(removed) => {
                 let _ = tx
                     .send(Event::new(
@@ -214,11 +213,11 @@ impl AppState {
     /// model, rows marked unembeddable included, streaming `ReindexProgress`.
     /// Per-item failures are logged and counted as done.
     pub(super) async fn handle_memory_reindex(
-        self: Arc<Self>,
+        &self,
         id: String,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let embedder = match self.memory.embedder.get() {
+        let embedder = match self.embedder.get() {
             Ok(embedder) => embedder,
             Err(e) => {
                 send_error(&tx, id, format!("reindex failed: {e}")).await;
@@ -256,7 +255,7 @@ impl AppState {
             ))
             .await;
 
-        let semantic = self.memory.semantic.as_ref();
+        let semantic = self.semantic.as_ref();
         let embedder = embedder.as_ref();
         let chunks = reindex_items(
             embedder,
@@ -288,8 +287,8 @@ impl AppState {
     }
 
     async fn unindexed_rows_with_marks_cleared(&self) -> Result<UnindexedRows, MemoryError> {
-        self.memory.semantic.clear_unembeddable().await?;
-        self.memory.semantic.count_missing().await
+        self.semantic.clear_unembeddable().await?;
+        self.semantic.count_missing().await
     }
 }
 
@@ -297,14 +296,14 @@ impl AppState {
 /// to `tx` as `ReindexProgress` events.
 struct KindProgress<'a> {
     id: &'a str,
-    tx: &'a mpsc::Sender<Event>,
+    tx: &'a EventSink,
     kind: ReindexKind,
     total: u32,
     done: u32,
 }
 
 impl<'a> KindProgress<'a> {
-    fn new(id: &'a str, tx: &'a mpsc::Sender<Event>, kind: ReindexKind, total: u32) -> Self {
+    fn new(id: &'a str, tx: &'a EventSink, kind: ReindexKind, total: u32) -> Self {
         Self {
             id,
             tx,

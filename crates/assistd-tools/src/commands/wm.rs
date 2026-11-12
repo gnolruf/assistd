@@ -8,6 +8,7 @@ use assistd_ipc::ConfirmSource;
 use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError, WorkspaceId};
 use async_trait::async_trait;
 
+use crate::TurnContext;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
@@ -88,7 +89,7 @@ impl WmCommand {
         Self { wm, gate, apps }
     }
 
-    async fn open(&self, args: &[String]) -> CommandOutput {
+    async fn open(&self, turn: &TurnContext, args: &[String]) -> CommandOutput {
         if args.is_empty() {
             return CommandOutput::usage(OPEN_HELP.to_string());
         }
@@ -111,7 +112,7 @@ impl WmCommand {
             Ok(launch) => launch,
             Err(e) => return open_failed(&e),
         };
-        if !self.confirmed(&args, &launch).await {
+        if !self.confirmed(turn, &args, &launch).await {
             return open_cancelled();
         }
         match self.wm.exec(args.workspace.as_ref(), &launch.command).await {
@@ -122,7 +123,12 @@ impl WmCommand {
 
     /// Whether the user, or in auto mode the safety judge, lets `launch` run. Approvals cover a
     /// launch with no files, URLs, or `--cwd`; one with any of them is never approved for good.
-    async fn confirmed(&self, args: &OpenArgs, launch: &PreparedLaunch) -> bool {
+    async fn confirmed(
+        &self,
+        turn: &TurnContext,
+        args: &OpenArgs,
+        launch: &PreparedLaunch,
+    ) -> bool {
         let entry = &launch.entry;
         let key = entry.path.to_string_lossy().into_owned();
         let has_targets = args.has_targets_or_cwd();
@@ -156,9 +162,9 @@ impl WmCommand {
             source: ConfirmSource::Main,
         };
         if has_targets {
-            self.gate.confirm(request()).await != Approval::Deny
+            self.gate.confirm(turn, request()).await != Approval::Deny
         } else {
-            self.apps.confirm(&key, request).await
+            self.apps.confirm(turn, &key, request).await
         }
     }
 }
@@ -234,7 +240,7 @@ impl Command for WmCommand {
         match sub {
             "focus" => focus(self.wm.as_ref(), rest).await,
             "move" => move_window(self.wm.as_ref(), rest).await,
-            "open" => self.open(rest).await,
+            "open" => self.open(&input.turn, rest).await,
             "active" => active(self.wm.as_ref()).await,
             "resize" => resize(self.wm.as_ref(), rest).await,
             "list" => list(self.wm.as_ref()).await,

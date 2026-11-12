@@ -12,7 +12,7 @@ use assistd_tools::commands::BashPolicyCfg;
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     AlwaysAllowGate, ApprovalGate, Approvals, DenyAllGate, Egress, OutputCap, PresentSpec,
-    Protected, Quarantine, RunTool, SandboxInfo, SandboxRequest, SharedDirs, Tool,
+    Protected, Quarantine, RunTool, SandboxInfo, SandboxRequest, SharedDirs, Tool, TurnContext,
 };
 
 const HOST_ONLY: &str = "host-home-only";
@@ -42,7 +42,7 @@ fn run_tool(quarantine: &Quarantine) -> RunTool {
 
 async fn run(tool: &RunTool, command: &str) -> (i32, String) {
     let out = tool
-        .invoke(json!({ "command": command }))
+        .invoke(&TurnContext::default(), json!({ "command": command }))
         .await
         .expect("run accepts a command");
     (out.exit_code, out.output)

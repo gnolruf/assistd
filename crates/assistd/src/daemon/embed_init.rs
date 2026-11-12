@@ -207,7 +207,7 @@ async fn start_and_record(
 }
 
 fn publish_readiness(state: &AppState) {
-    state.publish_readiness(
+    state.status.publish_readiness(
         StartupComponent::Embedding,
         ComponentReadiness::from(state.memory.embedder.readiness()),
     );

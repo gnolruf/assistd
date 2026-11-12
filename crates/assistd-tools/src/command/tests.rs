@@ -38,6 +38,7 @@ async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
         args,
         stdin: None,
         scope: FileScope::Host,
+        turn: TurnContext::default(),
     })
     .await
 }

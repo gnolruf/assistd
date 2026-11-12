@@ -1,4 +1,5 @@
 use super::*;
+use crate::TurnContext;
 use crate::chain::{execute, parse_chain};
 use crate::command::CommandRegistry;
 use crate::commands::{RecordingGate, register_readers};
@@ -16,7 +17,13 @@ fn registry_asking(gate: &Arc<RecordingGate>) -> CommandRegistry {
 }
 
 async fn run(registry: &CommandRegistry, line: &str) -> CommandOutput {
-    execute(&parse_chain(line).expect("parses"), registry, None).await
+    execute(
+        &parse_chain(line).expect("parses"),
+        registry,
+        &TurnContext::default(),
+        None,
+    )
+    .await
 }
 
 #[tokio::test]

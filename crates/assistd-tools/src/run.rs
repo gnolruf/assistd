@@ -10,6 +10,7 @@ use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::TurnContext;
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
 use crate::command::{CommandOutput, CommandRegistry, Hint, error_line};
 use crate::presentation::{OutputCap, PresentResult, PresentSpec, present};
@@ -136,8 +137,8 @@ impl Tool for RunTool {
         })
     }
 
-    #[tracing::instrument(skip(self, args), fields(cmd = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
+    #[tracing::instrument(skip(self, turn, args), fields(cmd = tracing::field::Empty))]
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -147,7 +148,7 @@ impl Tool for RunTool {
 
         let start = Instant::now();
         let out = match parse_chain(command) {
-            Ok(chain) => execute(&chain, &self.registry, None).await,
+            Ok(chain) => execute(&chain, &self.registry, turn, None).await,
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
         let duration = start.elapsed();

@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 
 use tracing::warn;
 
-use crate::{BuildToolsError, OVERFLOW_DIR_MODE, ToolsScratchConfig};
+use assistd_config::ToolsScratchConfig;
+
+use crate::build_tools::{BuildToolsError, OVERFLOW_DIR_MODE};
 
 const SECS_PER_DAY: u64 = 24 * 60 * 60;
 

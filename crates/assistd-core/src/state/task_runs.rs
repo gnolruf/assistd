@@ -15,21 +15,22 @@ use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProb
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
-use assistd_tools::{CONFIRM_ROUTER, ConfirmRouter};
-use assistd_voice::SentenceBuffer;
+use assistd_tools::{ConfirmRouter, TurnContext};
 
 use super::branches::delete_answer_files;
 use super::event_triggers::Occurrence;
 use super::lanes::LaneLease;
-use super::query::{TurnScope, TurnTranslator};
-use super::run_lane::{LaneHold, RUN_LANE, RunLane, YieldingBackend};
+use super::run_lane::{LaneHold, RunLane, YieldingBackend};
 use super::task_announce::TaskReply;
 use super::task_confirms::TaskRunParking;
 use super::task_queue::QueuedRun;
 use super::task_runner::RegisteredRun;
+use super::task_service::TaskService;
 use super::transcript_writer::PersistTarget;
-use super::{AppState, DispatchError, send_error};
+use super::turn_driver::TurnDriver;
+use super::{DispatchError, safety_judge, send_error};
 use crate::Agent;
+use crate::bus::EventSink;
 use crate::presence::{PresenceLlmHealthProbe, RequestGuard};
 
 const EVENT_BUFFER: usize = 32;
@@ -50,12 +51,12 @@ struct TaskRunTurn {
     run: TaskRunId,
 }
 
-impl AppState {
+impl TaskService {
     pub(super) async fn handle_task_run(
-        self: Arc<Self>,
+        &self,
         id: String,
         task: TaskId,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
         let (record, run) = match self.queue_task_run(task).await {
             Ok(queued) => queued,
@@ -64,7 +65,7 @@ impl AppState {
                 return Err(e.into());
             }
         };
-        self.runtime.task_queue.push(run, record, id.clone());
+        self.deps.admission.task_queue.push(run, record, id.clone());
         let _ = tx
             .send(Event::new(
                 id.clone(),
@@ -75,12 +76,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(super) async fn handle_task_cancel(
-        self: Arc<Self>,
-        id: String,
-        run: TaskRunId,
-        tx: mpsc::Sender<Event>,
-    ) {
+    pub(super) async fn handle_task_cancel(&self, id: String, run: TaskRunId, tx: EventSink) {
         match self.cancel_task_run(run).await {
             Ok(()) => {
                 let _ = tx.send(Event::new(id, EventBody::Done)).await;
@@ -90,12 +86,8 @@ impl AppState {
     }
 
     async fn queue_task_run(&self, task: TaskId) -> MemoryResult<(TaskRecord, TaskRunId)> {
-        let record = self.memory.tasks.get(task).await?;
-        let run = self
-            .memory
-            .tasks
-            .queue_run(task, TaskTrigger::Manual)
-            .await?;
+        let record = self.deps.store.get(task).await?;
+        let run = self.deps.store.queue_run(task, TaskTrigger::Manual).await?;
         Ok((record, run))
     }
 
@@ -108,13 +100,13 @@ impl AppState {
             task: queued.task,
             run,
         };
-        let state = Arc::clone(self);
-        self.runtime.task_runner.spawn(run, move |registered| {
-            state.run_task(turn, lease, registered).instrument(span)
+        let tasks = Arc::clone(self);
+        self.runner.spawn(run, move |registered| {
+            tasks.run_task(turn, lease, registered).instrument(span)
         });
     }
 
-    /// Drive the run to its end while publishing its events as `TaskRun`, then give up
+    /// Drive the run to its end, publishing its events as `TaskRun`, then give up
     /// its place in the queue and its lane.
     async fn run_task(
         self: Arc<Self>,
@@ -122,12 +114,11 @@ impl AppState {
         lease: LaneLease,
         registered: RegisteredRun,
     ) {
-        let (tx, rx) = mpsc::channel(EVENT_BUFFER);
-        let (reply, ()) = tokio::join!(
-            self.drive_task_run(&turn, lease, &registered, tx),
-            self.publish_task_run_events(TurnScope::TaskRun(turn.run), rx)
-        );
-        self.runtime.task_queue.finish(turn.run);
+        let events = EventSink::of_task_run(self.deps.bus.clone(), turn.run);
+        let reply = self
+            .drive_task_run(&turn, lease, &registered, &events)
+            .await;
+        self.deps.admission.task_queue.finish(turn.run);
         if let Some(reply) = reply {
             let announce = self.announce_task_reply(TaskReply {
                 id: turn.id,
@@ -142,12 +133,6 @@ impl AppState {
         }
     }
 
-    async fn publish_task_run_events(&self, scope: TurnScope, mut rx: mpsc::Receiver<Event>) {
-        while let Some(event) = rx.recv().await {
-            self.runtime.publish(&scope.wrap(event));
-        }
-    }
-
     /// Run the turn, record how it ended, then end its event stream with `Error` for a
     /// failed run and `Done` for a cancelled one, whose turn sent none. Returns the final
     /// reply of a successful run whose task announces it.
@@ -156,10 +141,10 @@ impl AppState {
         turn: &TaskRunTurn,
         lease: LaneLease,
         registered: &RegisteredRun,
-        tx: mpsc::Sender<Event>,
+        tx: &EventSink,
     ) -> Option<String> {
         let outcome = self
-            .task_run_turn(turn, lease, &registered.cancel, &tx)
+            .task_run_turn(turn, lease, &registered.cancel, tx)
             .await;
         let end = run_end(outcome, registered);
         let id = turn.id.clone();
@@ -194,7 +179,7 @@ impl AppState {
             TaskRunEnd::Failed { .. } => Some(false),
             TaskRunEnd::Cancelled => None,
         };
-        if let Err(e) = self.memory.tasks.finish_run(turn.run, end).await {
+        if let Err(e) = self.deps.store.finish_run(turn.run, end).await {
             warn!(target: "assistd::tasks", error = %e, "recording how the task run ended failed");
             return;
         }
@@ -210,14 +195,14 @@ impl AppState {
     /// names its own, with their sessions, sparing
     /// the session the user is in; skipped while a user turn or switch holds it.
     pub(super) async fn prune_task_runs(&self) {
-        let Ok(_user_turn) = self.runtime.user_turn_lock.clone().try_lock_owned() else {
+        let Ok(_user_turn) = self.deps.admission.user_turn_lock.clone().try_lock_owned() else {
             return;
         };
-        let (session, _branch) = self.runtime.session_ctx.current().await;
+        let (session, _branch) = self.deps.session_ctx.current().await;
         match self
-            .memory
-            .tasks
-            .prune_runs(self.config.tasks.kept_runs, session)
+            .deps
+            .store
+            .prune_runs(self.deps.config.tasks.kept_runs, session)
             .await
         {
             Ok(pruned) => {
@@ -236,19 +221,19 @@ impl AppState {
         turn: &TaskRunTurn,
         lease: LaneLease,
         cancel: &CancellationToken,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
     ) -> Result<Option<String>, DispatchError> {
         let Some(awake) = self.wake_for_task_run(&turn.id, tx, cancel).await? else {
             return Ok(None);
         };
-        let system_prompt = task_system_prompt(&self.config.chat.system_prompt);
+        let system_prompt = task_system_prompt(&self.deps.config.chat.system_prompt);
         let key = ConversationKey::TaskRun(turn.run);
         let conversation = self
-            .subsystems
+            .deps
             .llm
             .isolated_conversation(system_prompt, lease.slot(key))?;
         let lane = Arc::new(RunLane {
-            state: Arc::clone(self),
+            tasks: Arc::clone(self),
             task: turn.task.id,
             run: turn.run,
             request_id: turn.id.clone(),
@@ -268,7 +253,7 @@ impl AppState {
     /// Drop the ended run's slot state and, when it held the main lane, restore the main
     /// conversation's while the daemon is still idle.
     async fn end_run_conversation(&self, run: ConversationKey, on_main_lane: bool) {
-        if let Some(stash) = &self.subsystems.slot_stash {
+        if let Some(stash) = &self.deps.slot_stash {
             stash.end(run).await;
             if on_main_lane {
                 stash.switch_to(ConversationKey::Main).await;
@@ -281,19 +266,17 @@ impl AppState {
     pub(super) async fn wake_for_task_run(
         &self,
         id: &str,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
         cancel: &CancellationToken,
     ) -> Result<Option<RequestGuard>, DispatchError> {
         let awake = async {
             let request_guard = self
-                .subsystems
+                .deps
                 .presence
                 .acquire_request_guard_with_progress(id.to_string(), tx.clone())
                 .await?;
-            if let Some(revalidator) = &self.subsystems.vision_revalidator {
-                revalidator
-                    .revalidate_if_stale(&self.subsystems.presence)
-                    .await;
+            if let Some(revalidator) = &self.deps.vision_revalidator {
+                revalidator.revalidate_if_stale(&self.deps.presence).await;
             }
             Ok(request_guard)
         };
@@ -311,17 +294,23 @@ impl AppState {
         let session = SessionId::new();
         let opened = async {
             let branch = self
-                .memory
-                .transcripts
+                .deps
+                .transcript
+                .store()
                 .begin_session_with_main_branch(session)
                 .await?;
-            self.memory.tasks.start_run(turn.run, session).await?;
+            self.deps.store.start_run(turn.run, session).await?;
             Ok::<_, MemoryError>(branch)
         };
         match opened.await {
             Ok(branch) => {
                 let prompt = PersistedMessage::user(turn.task.spec.prompt.as_str());
-                Some(self.open_task_run_turn(branch, prompt).await)
+                Some(
+                    self.deps
+                        .transcript
+                        .open_task_run_turn(branch, prompt)
+                        .await,
+                )
             }
             Err(e) => {
                 warn!(
@@ -335,7 +324,8 @@ impl AppState {
     }
 
     /// Run the task's prompt in `conversation` on `lane`, persisting to `persist` and sending
-    /// its wire events to `tx`; returns the final reply once the turn emitted `Done`.
+    /// its wire events to `tx`, with nothing spoken; returns the final reply once the turn
+    /// emitted `Done`.
     async fn unattended_turn(
         &self,
         turn: &TaskRunTurn,
@@ -343,16 +333,16 @@ impl AppState {
         lane: Arc<RunLane>,
         persist: Option<PersistTarget>,
         cancel: &CancellationToken,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
     ) -> Result<Option<String>, DispatchError> {
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
         let agent_task = self.spawn_task_agent(turn, conversation, lane, llm_tx, cancel.clone());
-        let mut translator =
-            TurnTranslator::new(turn.id.clone(), TurnScope::TaskRun(turn.run), persist);
-        self.forward_task_run_events(&mut translator, llm_rx, tx)
+        let transcript = Arc::clone(&self.deps.transcript);
+        let reply = TurnDriver::new(turn.id.clone(), transcript, persist, tx.clone())
+            .drive(llm_rx, cancel)
             .await;
         match agent_task.await {
-            Ok(Ok(())) => Ok(translator.take_reply()),
+            Ok(Ok(())) => Ok(reply),
             Ok(Err(e)) => Err(e.into()),
             Err(join_err) => Err(DispatchError::AgentPanicked(join_err)),
         }
@@ -370,7 +360,7 @@ impl AppState {
         cancel: CancellationToken,
     ) -> AbortOnDropHandle<Result<(), LlmError>> {
         let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
-            self.subsystems.presence.clone(),
+            self.deps.presence.clone(),
         )));
         let backend = Arc::new(YieldingBackend {
             inner: conversation,
@@ -378,9 +368,9 @@ impl AppState {
         });
         let agent = Agent::new(
             backend,
-            self.subsystems.tools.snapshot(),
+            self.deps.tools.snapshot(),
             health,
-            Duration::from_secs(self.config.timeouts.tool_call_secs),
+            Duration::from_secs(self.deps.config.timeouts.tool_call_secs),
         );
         let source = ConfirmSource::Task {
             task: turn.task.id,
@@ -394,35 +384,18 @@ impl AppState {
             turn.id.clone(),
             source,
             spec.mode,
-            self.safety_judge(),
+            safety_judge(&self.deps.config, &self.deps.llm),
             spec.allowed_hosts.clone(),
             Arc::new(parking),
         );
         let prompt = turn.task.spec.prompt.as_str().to_string();
-        let agent_turn = async move { agent.run_turn(prompt, Vec::new(), llm_tx, cancel).await };
-        AbortOnDropHandle::new(tokio::spawn(
-            RUN_LANE
-                .scope(lane, CONFIRM_ROUTER.scope(router, agent_turn))
-                .in_current_span(),
-        ))
-    }
-
-    /// Translate and persist the run's agent events until the agent finishes; nothing is
-    /// spoken.
-    async fn forward_task_run_events(
-        &self,
-        translator: &mut TurnTranslator,
-        mut llm_rx: mpsc::Receiver<LlmEvent>,
-        tx: &mpsc::Sender<Event>,
-    ) {
-        let max_sentence_chars = self.config.voice.synthesis.max_sentence_chars.get() as usize;
-        let mut unspoken = SentenceBuffer::new(max_sentence_chars);
-        while let Some(event) = llm_rx.recv().await {
-            if let Some((wire, _)) = translator.translate(self, event, &mut unspoken).await {
-                let _ = tx.send(wire).await;
-            }
-        }
-        translator.persist_turn_stats(self).await;
+        let context = TurnContext::answered_by(router).on_lane(lane);
+        let agent_turn = async move {
+            agent
+                .run_turn(&context, prompt, Vec::new(), llm_tx, cancel)
+                .await
+        };
+        AbortOnDropHandle::new(tokio::spawn(agent_turn.in_current_span()))
     }
 }
 

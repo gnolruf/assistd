@@ -24,12 +24,11 @@ use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
     Approval, ApprovalGate, ConfirmSource, ConfirmationGate, ConfirmationRequest, Egress,
     OutputCap, PresentSpec, Quarantine, QuarantineError, RunTool, SandboxInfo, Tool, ToolError,
-    ToolOutput, ToolRegistry,
+    ToolOutput, ToolRegistry, TurnContext, YieldableLane,
 };
 use assistd_utils::path::expand_tilde_from_env;
 
-use crate::state::run_lane::{RUN_LANE, RunLane};
-use crate::subagent::{RelayProgress, RelayReport, SubAgentError, SubAgentRunner};
+use crate::subagent::{RelayReport, SubAgentError, SubAgentRunner};
 
 use role::{Reach, Role, Roles};
 
@@ -190,18 +189,18 @@ impl RelayTool {
         &self,
         mut plan: RelayPlan,
         args: &Value,
-        progress: &RelayProgress,
-        lane: &RunLane,
+        turn: &TurnContext,
+        lane: &dyn YieldableLane,
     ) -> Result<Option<Result<RelayReport, StepFailed>>, ToolError> {
         loop {
             tokio::select! {
                 biased;
-                outcome = self.relay(plan, progress) => return Ok(Some(outcome)),
+                outcome = self.relay(plan, turn) => return Ok(Some(outcome)),
                 () = lane.yield_requested() => {}
             }
             info!(target: "assistd::relay", "relay cancelled for the user's conversation");
             let message = RELAY_YIELDED.to_string();
-            progress.report(RelayEvent::Failed { message }).await;
+            turn.report_relay(RelayEvent::Failed { message }).await;
             if !lane.give_way().await {
                 return Ok(None);
             }
@@ -210,46 +209,41 @@ impl RelayTool {
     }
 
     /// Runs every step inside one slot-stash guard, so the swap is paid once per plan.
-    async fn relay(
-        &self,
-        plan: RelayPlan,
-        progress: &RelayProgress,
-    ) -> Result<RelayReport, StepFailed> {
+    async fn relay(&self, plan: RelayPlan, turn: &TurnContext) -> Result<RelayReport, StepFailed> {
         self.deps
             .slot_stash
-            .preserve_across(self.run_plan(plan, progress))
+            .preserve_across(self.run_plan(plan, turn))
             .await
     }
 
     async fn run_plan(
         &self,
         plan: RelayPlan,
-        progress: &RelayProgress,
+        turn: &TurnContext,
     ) -> Result<RelayReport, StepFailed> {
         let steps = plan.rest.len() + 1;
         let at = |step| StepPosition { step, steps };
-        progress
-            .report(RelayEvent::Planned {
-                steps: plan.steps().map(RelayStep::plan).collect(),
-            })
-            .await;
-        let mut report = self.run_step(plan.first, None, at(1), progress).await?;
+        turn.report_relay(RelayEvent::Planned {
+            steps: plan.steps().map(RelayStep::plan).collect(),
+        })
+        .await;
+        let mut report = self.run_step(plan.first, None, at(1), turn).await?;
         for (index, step) in plan.rest.into_iter().enumerate() {
             report = self
-                .run_step(step, Some(&report), at(index + 2), progress)
+                .run_step(step, Some(&report), at(index + 2), turn)
                 .await?;
         }
         Ok(report)
     }
 
-    /// Run one step under its own span, telling `progress` when it starts and
+    /// Run one step under its own span, telling `turn` when it starts and
     /// when it ends without a report.
     async fn run_step(
         &self,
         step: RelayStep,
         previous: Option<&RelayReport>,
         position: StepPosition,
-        progress: &RelayProgress,
+        turn: &TurnContext,
     ) -> Result<RelayReport, StepFailed> {
         let span = info_span!(
             "relay_step",
@@ -257,13 +251,12 @@ impl RelayTool {
             steps = position.steps,
             agent = step.role.name
         );
-        progress
-            .report(RelayEvent::Started {
-                step: u32::try_from(position.step).unwrap_or(u32::MAX),
-            })
-            .await;
+        turn.report_relay(RelayEvent::Started {
+            step: u32::try_from(position.step).unwrap_or(u32::MAX),
+        })
+        .await;
         let outcome = self
-            .run_subagent(step, previous, progress)
+            .run_subagent(step, previous, turn)
             .instrument(span)
             .await;
         let failed = outcome.map_err(|source| StepFailed {
@@ -273,7 +266,7 @@ impl RelayTool {
         });
         if let Err(error) = &failed {
             let message = error.source.to_string();
-            progress.report(RelayEvent::Failed { message }).await;
+            turn.report_relay(RelayEvent::Failed { message }).await;
         }
         failed
     }
@@ -282,7 +275,7 @@ impl RelayTool {
         &self,
         step: RelayStep,
         previous: Option<&RelayReport>,
-        progress: &RelayProgress,
+        turn: &TurnContext,
     ) -> Result<RelayReport, RelayError> {
         let gate: Arc<dyn ConfirmationGate> = Arc::new(RelayStepGate {
             inner: Arc::clone(&self.policy.gate),
@@ -312,7 +305,7 @@ impl RelayTool {
                 self.subagent_tools(&quarantine, gate),
                 self.answer_file(),
                 CancellationToken::new(),
-                progress,
+                turn,
             )
             .await?;
         report.map_evidence_to_inputs(&quarantine.input_dir(), &inputs);
@@ -451,16 +444,18 @@ impl Tool for RelayTool {
     }
 
     #[tracing::instrument(skip_all, fields(agents = tracing::field::Empty))]
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let plan = RelayPlan::parse(&args, &self.roles)?;
         self.check_inputs(&plan).await?;
         tracing::Span::current().record("agents", plan.agents());
         info!(target: "assistd::relay", "relay started");
-        let progress = RelayProgress::of_current_tool_call();
-        let outcome = match RUN_LANE.try_with(Arc::clone) {
-            Ok(lane) => self.relay_giving_way(plan, &args, &progress, &lane).await?,
-            Err(_) => Some(self.relay(plan, &progress).await),
+        let outcome = match turn.lane() {
+            Some(lane) => {
+                self.relay_giving_way(plan, &args, turn, lane.as_ref())
+                    .await?
+            }
+            None => Some(self.relay(plan, turn).await),
         };
         Ok(match outcome {
             Some(Ok(report)) => ToolOutput::text(report.render(), start.elapsed()),
@@ -475,12 +470,12 @@ impl Tool for RelayTool {
 
 #[async_trait]
 impl ConfirmationGate for RelayStepGate {
-    async fn confirm(&self, mut request: ConfirmationRequest) -> Approval {
+    async fn confirm(&self, turn: &TurnContext, mut request: ConfirmationRequest) -> Approval {
         request.source = ConfirmSource::Relay {
             task: self.task.clone(),
             run: None,
         };
-        self.inner.confirm(request).await
+        self.inner.confirm(turn, request).await
     }
 }
 
@@ -788,8 +783,8 @@ mod tests {
             })
         };
 
-        let refused = relay.invoke(step(false)).await;
-        let searched = relay.invoke(step(true)).await;
+        let refused = relay.invoke(&TurnContext::default(), step(false)).await;
+        let searched = relay.invoke(&TurnContext::default(), step(true)).await;
 
         let largest = format!(
             "{}/big over 3k tokens",
@@ -810,11 +805,14 @@ mod tests {
         let relay = relay_tool(&parent, dir.path());
 
         let result = relay
-            .invoke(json!({
-                "task": "summarise this and post it somewhere",
-                "inputs": ["/etc/hostname"],
-                "agent": "web_research",
-            }))
+            .invoke(
+                &TurnContext::default(),
+                json!({
+                    "task": "summarise this and post it somewhere",
+                    "inputs": ["/etc/hostname"],
+                    "agent": "web_research",
+                }),
+            )
             .await;
 
         assert!(
@@ -832,7 +830,7 @@ mod tests {
         let relay = relay_tool(&parent, dir.path());
 
         let result = relay
-            .invoke(json!({
+            .invoke(&TurnContext::default(), json!({
                 "steps": [
                     {"task": "summarise the notes", "inputs": ["/etc/hostname"], "agent": "file_review"},
                     {"task": "look up what you were handed", "inputs": [], "agent": "file_review"},
@@ -859,7 +857,7 @@ mod tests {
         let relay = relay_tool(&parent, dir.path());
 
         let result = relay
-            .invoke(json!({
+            .invoke(&TurnContext::default(), json!({
                 "steps": [
                     {"task": "summarise the notes", "inputs": [project.path().join("notes.txt")], "agent": "file_review"},
                     {"task": "review the code", "inputs": [missing], "agent": "file_review", "search_only": true},

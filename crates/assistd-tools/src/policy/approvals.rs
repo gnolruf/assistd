@@ -11,6 +11,7 @@ use tracing::warn;
 
 use super::allowlist::AllowlistError;
 use super::confirm::{Approval, ConfirmationGate, ConfirmationRequest};
+use crate::TurnContext;
 
 /// File, beside the config file, that keeps the web hosts `web` may fetch
 /// from without confirmation.
@@ -116,19 +117,30 @@ impl ApprovalGate {
     }
 
     /// Whether a use of `name` may go ahead: it was approved for good, or
-    /// the gate approves the `request` built now. An "always" answer
+    /// `turn`'s gate approves the `request` built now. An "always" answer
     /// approves `name` for good.
-    pub async fn confirm(&self, name: &str, request: impl FnOnce() -> ConfirmationRequest) -> bool {
+    pub async fn confirm(
+        &self,
+        turn: &TurnContext,
+        name: &str,
+        request: impl FnOnce() -> ConfirmationRequest,
+    ) -> bool {
         if self.contains(name) {
             return true;
         }
-        confirm_remembering(self.gate.as_ref(), request(), self.approvals.approve(name)).await
+        confirm_remembering(
+            self.gate.as_ref(),
+            turn,
+            request(),
+            self.approvals.approve(name),
+        )
+        .await
     }
 
     /// Whether the gate approves `request`, asked even about approved names;
     /// an "always" answer counts only for this use.
-    pub async fn confirm_once(&self, request: ConfirmationRequest) -> bool {
-        self.gate.confirm(request).await != Approval::Deny
+    pub async fn confirm_once(&self, turn: &TurnContext, request: ConfirmationRequest) -> bool {
+        self.gate.confirm(turn, request).await != Approval::Deny
     }
 }
 
@@ -143,10 +155,11 @@ struct Stored {
 /// also runs `remember`, whose failure to save is logged.
 pub(super) async fn confirm_remembering(
     gate: &dyn ConfirmationGate,
+    turn: &TurnContext,
     request: ConfirmationRequest,
     remember: impl Future<Output = Result<(), AllowlistError>>,
 ) -> bool {
-    let approval = gate.confirm(request).await;
+    let approval = gate.confirm(turn, request).await;
     if approval == Approval::Always
         && let Err(e) = remember.await
     {

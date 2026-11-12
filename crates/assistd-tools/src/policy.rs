@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use assistd_ipc::ConfirmSource;
 
+use crate::TurnContext;
 use crate::command::{CommandOutput, Hint, error_line};
 use crate::exec::POLICY_DENIED_EXIT;
 
@@ -30,9 +31,9 @@ pub use approvals::{
 #[cfg(any(test, feature = "test-support"))]
 pub use confirm::{AlwaysAllowGate, DenyAllGate};
 pub use confirm::{
-    Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS,
-    NoPendingConfirm, NoPendingReview, PromptParking, Risk, Unattended, inherit_confirm_router,
+    Approval, CONFIRM_TIMEOUT, ConfirmRouter, ConfirmationGate, ConfirmationRequest,
+    IpcConfirmationGate, JudgeContext, JudgedClass, MAX_PENDING_CONFIRMS, NoPendingConfirm,
+    NoPendingReview, PromptParking, Risk, Unattended,
 };
 pub(crate) use egress::EgressPolicy;
 pub use file_scope::{ConfinedRoot, FileScope};
@@ -109,10 +110,11 @@ impl SubprocessPolicy {
         .await
     }
 
-    /// Refuse `script` when `review` refuses it, or asks and the gate declines. `tool` and `op`
+    /// Refuse `script` when `review` refuses it, or asks and `turn`'s gate declines. `tool` and `op`
     /// name the command and operation in the error line.
     pub(crate) async fn authorize(
         &self,
+        turn: &TurnContext,
         tool: &str,
         op: &str,
         script: &str,
@@ -123,7 +125,7 @@ impl SubprocessPolicy {
             Review::Refuse(why) => Err(refused(tool, op, &why)),
             Review::Ask(confirmation, unattended) => {
                 if self
-                    .confirmed(tool, script, &confirmation, unattended)
+                    .confirmed(turn, tool, script, &confirmation, unattended)
                     .await
                 {
                     Ok(())
@@ -138,6 +140,7 @@ impl SubprocessPolicy {
     /// the allowlist.
     async fn confirmed(
         &self,
+        turn: &TurnContext,
         tool: &str,
         script: &str,
         confirmation: &Confirmation,
@@ -155,6 +158,7 @@ impl SubprocessPolicy {
         };
         approvals::confirm_remembering(
             self.gate.as_ref(),
+            turn,
             request,
             self.cfg.allowlist.approve(offered),
         )

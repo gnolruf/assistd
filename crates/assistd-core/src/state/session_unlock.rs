@@ -10,8 +10,8 @@ use zbus::fdo::{PropertiesChanged, PropertiesChangedStream, PropertiesProxy};
 use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, Proxy};
 
-use super::AppState;
 use super::event_triggers::Occurrence;
+use super::task_service::TaskService;
 
 const LOGIN1: &str = "org.freedesktop.login1";
 const OWN_USER_PATH: &str = "/org/freedesktop/login1/user/self";
@@ -29,7 +29,7 @@ enum UnlockWatchError {
     NoGraphicalSession,
 }
 
-impl AppState {
+impl TaskService {
     /// Fire every `SessionUnlocked` trigger each time the user's graphical session's
     /// `LockedHint` turns false, for as long as the future runs.
     pub(in crate::state) async fn watch_session_unlocks(self: Arc<Self>) {

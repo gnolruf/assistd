@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use assistd_ipc::{ConfirmSource, PermissionMode, PlanVerdict};
 use assistd_tools::{
-    Approval, CONFIRM_ROUTER, ConfirmRouter, ConfirmationRequest, Risk, Tool, ToolError,
-    ToolOutput, Unattended,
+    Approval, ConfirmRouter, ConfirmationRequest, Risk, Tool, ToolError, ToolOutput, TurnContext,
+    Unattended,
 };
 
 const ENTER_PLAN_MODE: &str = "enter_plan_mode";
@@ -85,10 +85,10 @@ impl Tool for EnterPlanModeTool {
         false
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let reason = string_arg(&args, "reason")?;
-        let router = router_in_scope()?;
+        let router = router_of(turn)?;
         let reply = match router.ask(enter_request(reason)).await {
             Approval::Deny => ENTER_DECLINED,
             Approval::Once | Approval::Always => {
@@ -124,10 +124,10 @@ impl Tool for ExitPlanModeTool {
         false
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let plan = string_arg(&args, "plan")?;
-        let router = router_in_scope()?;
+        let router = router_of(turn)?;
         let reply = match router.review_plan(plan).await {
             Some(PlanVerdict::Accept { mode }) => {
                 router.set_mode(mode);
@@ -154,10 +154,9 @@ fn string_arg(args: &Value, name: &str) -> Result<String, ToolError> {
         .ok_or_else(|| ToolError::InvalidArgs(format!("`{name}` (non-empty string) is required")))
 }
 
-fn router_in_scope() -> Result<Arc<ConfirmRouter>, ToolError> {
-    CONFIRM_ROUTER
-        .try_with(Arc::clone)
-        .map_err(|_| ToolError::InvalidArgs("plan mode is unavailable on this turn".into()))
+fn router_of(turn: &TurnContext) -> Result<&Arc<ConfirmRouter>, ToolError> {
+    turn.router()
+        .ok_or_else(|| ToolError::InvalidArgs("plan mode is unavailable on this turn".into()))
 }
 
 /// The prompt asking the user to plan first, which every mode asks.

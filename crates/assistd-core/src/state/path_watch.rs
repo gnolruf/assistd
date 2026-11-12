@@ -13,8 +13,8 @@ use tracing::{error, warn};
 use assistd_ipc::{TaskEvent, TaskId, TaskTrigger};
 use assistd_utils::backoff::{RestartDecision, RestartPolicy};
 
-use super::AppState;
 use super::event_triggers::event_trigger;
+use super::task_service::TaskService;
 
 /// Changes held between bursts; more than this inside one window add nothing.
 const CHANGE_BUFFER: usize = 16;
@@ -30,7 +30,7 @@ enum WatchEnd {
     Lost(String),
 }
 
-impl AppState {
+impl TaskService {
     /// Fire `PathChanged` trigger `trigger` of task `task` once per burst of changes
     /// under its path, retrying with backoff whenever the watch fails or is lost, for
     /// as long as the future runs.
@@ -68,7 +68,7 @@ impl AppState {
                 retry_secs = delay.as_secs(),
                 "watching the trigger's path stopped"
             );
-            self.runtime.task_events.record_watch_failure(
+            self.events.record_watch_failure(
                 task,
                 &trigger,
                 format!("watching {} stopped: {reason}", path.display()),
@@ -93,7 +93,7 @@ impl AppState {
                 Ok(watcher) => watcher,
                 Err(e) => return WatchEnd::Failed(e.to_string()),
             };
-        self.runtime.task_events.clear_watch_failure(task, trigger);
+        self.events.clear_watch_failure(task, trigger);
         loop {
             tokio::select! {
                 burst = next_burst(&mut changes, debounce) => {

@@ -1,7 +1,6 @@
 //! Wake-phrase status and testing. A test is a session that holds the mic,
 //! one at a time, for as long as the connection that opened it stays.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex as StdMutex;
@@ -12,7 +11,9 @@ use tracing::warn;
 use assistd_ipc::{Event, EventBody, VoiceCaptureState, WakeWordOp};
 use assistd_voice::{ListenError, VoiceCapture, WakeTest};
 
-use super::{AppState, DispatchError, send_error};
+use super::voice_handlers::VoiceService;
+use super::{DispatchError, send_error};
+use crate::bus::EventSink;
 
 /// A session with no utterance for this long is cancelled.
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -54,7 +55,7 @@ enum SessionEnd {
 /// A session's event stream, stop requests, and mic reports.
 struct SessionIo {
     id: String,
-    tx: mpsc::Sender<Event>,
+    tx: EventSink,
     stop: mpsc::Receiver<()>,
     audio: mpsc::Receiver<WakeTest>,
     idle_deadline: Instant,
@@ -94,12 +95,12 @@ impl SessionIo {
     }
 }
 
-impl AppState {
+impl VoiceService {
     pub(super) async fn handle_wake_word(
-        self: Arc<Self>,
+        &self,
         id: String,
         op: WakeWordOp,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
         match op {
             WakeWordOp::Status => self.handle_wake_word_status(id, tx).await,
@@ -113,13 +114,13 @@ impl AppState {
 
     /// Whether a test session holds the mic.
     pub(in crate::state) fn mic_session_busy(&self) -> bool {
-        self.runtime.mic_session.lock().is_some()
+        self.mic_session.lock().is_some()
     }
 
     async fn handle_wake_word_status(
         &self,
         id: String,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
         let capture = self.ready_capture(&id, "wake-word status", &tx).await?;
         let _ = tx
@@ -135,18 +136,13 @@ impl AppState {
         Ok(())
     }
 
-    async fn handle_wake_word_test(
-        &self,
-        id: String,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<(), DispatchError> {
+    async fn handle_wake_word_test(&self, id: String, tx: EventSink) -> Result<(), DispatchError> {
         let capture = self.ready_capture(&id, "wake-word test", &tx).await?;
         self.run_mic_session(id, tx, &capture, drive_test).await
     }
 
-    async fn stop_mic_session(&self, id: String, tx: mpsc::Sender<Event>) {
+    async fn stop_mic_session(&self, id: String, tx: EventSink) {
         let stop = self
-            .runtime
             .mic_session
             .lock()
             .as_ref()
@@ -168,7 +164,7 @@ impl AppState {
     async fn run_mic_session<F, Fut>(
         &self,
         id: String,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
         capture: &VoiceCapture,
         drive: F,
     ) -> Result<(), DispatchError>
@@ -212,7 +208,7 @@ impl AppState {
     }
 
     fn claim_mic_session(&self) -> Option<(MicSessionClaim<'_>, mpsc::Receiver<()>)> {
-        let mut slot = self.runtime.mic_session.lock();
+        let mut slot = self.mic_session.lock();
         if slot.is_some() {
             return None;
         }
@@ -220,15 +216,14 @@ impl AppState {
         *slot = Some(MicSession { stop: stop_tx });
         Some((
             MicSessionClaim {
-                slot: &self.runtime.mic_session,
+                slot: &self.mic_session,
             },
             stop_rx,
         ))
     }
 
     async fn ptt_busy(&self, capture: &VoiceCapture) -> bool {
-        capture.input.state() != VoiceCaptureState::Idle
-            || self.runtime.ptt_capture.lock().await.is_some()
+        capture.input.state() != VoiceCaptureState::Idle || self.ptt_capture.lock().await.is_some()
     }
 }
 
@@ -250,7 +245,7 @@ async fn drive_test(mut io: SessionIo) -> SessionEnd {
 }
 
 async fn send_session_end(
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSink,
     id: String,
     end: SessionEnd,
     captured: Result<(), ListenError>,

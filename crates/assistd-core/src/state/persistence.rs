@@ -1,40 +1,77 @@
 //! Queueing transcript writes for the transcript writer, and its drain.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::{Notify, mpsc, oneshot};
+use tokio_util::task::TaskTracker;
 use tracing::warn;
 
 use assistd_ipc::Component;
 use assistd_llm::CompactionCut;
-use assistd_memory::{BranchId, PersistedMessage, PersistedRelayStep, SessionId, TurnStats};
+use assistd_memory::{
+    BranchId, PersistedMessage, PersistedRelayStep, SessionId, TranscriptStore, TurnStats,
+};
 use assistd_utils::time::saturating_millis;
 
-use super::AppState;
 use super::seq_ledger::SharedLedger;
+use super::session::SessionContext;
 use super::transcript_writer::{
     PersistTarget, TranscriptWriter, WRITE_QUEUE_CAPACITY, WriteCommand,
 };
 use crate::recovery::spawn_supervised;
 
-impl AppState {
+/// The transcript of every conversation: queues writes for the single writer task and
+/// tracks the background work that follows a turn.
+#[derive(Debug)]
+pub(super) struct TranscriptLog {
+    transcripts: Arc<dyn TranscriptStore>,
+    /// The embedding worker's wake signal, when embedding is enabled.
+    embed_wake: Option<Arc<Notify>>,
+    session_ctx: Arc<SessionContext>,
+    /// The transcript writer's queue, once its first write started the writer.
+    writes: OnceLock<mpsc::Sender<WriteCommand>>,
+    /// Seqs of the rows behind the user's conversation.
+    pub(super) user_ledger: SharedLedger,
+    /// Background session-title tasks, drained at daemon shutdown.
+    pub(super) tracker: TaskTracker,
+}
+
+impl TranscriptLog {
+    /// A log over `transcripts` for the conversation `session_ctx` points at, waking
+    /// the embedding worker through `embed_wake` after each write.
+    pub(super) fn new(
+        transcripts: Arc<dyn TranscriptStore>,
+        embed_wake: Option<Arc<Notify>>,
+        session_ctx: Arc<SessionContext>,
+    ) -> Self {
+        Self {
+            transcripts,
+            embed_wake,
+            session_ctx,
+            writes: OnceLock::new(),
+            user_ledger: SharedLedger::default(),
+            tracker: TaskTracker::new(),
+        }
+    }
+
+    /// The store the log writes to.
+    pub(super) fn store(&self) -> &Arc<dyn TranscriptStore> {
+        &self.transcripts
+    }
+
     /// The active session and branch, inserting the session and its `main`
     /// branch first when the session is still unsaved.
     pub(super) async fn saved_session(&self) -> assistd_memory::Result<(SessionId, BranchId)> {
-        let (session, branch) = self.runtime.session_ctx.current().await;
+        let (session, branch) = self.session_ctx.current().await;
         if let Some(branch) = branch {
             return Ok((session, branch));
         }
         let branch = self
-            .memory
             .transcripts
             .begin_session_with_main_branch(session)
             .await?;
-        self.runtime
-            .session_ctx
-            .replace(session, Some(branch))
-            .await;
+        self.session_ctx.replace(session, Some(branch)).await;
         Ok((session, branch))
     }
 
@@ -45,7 +82,7 @@ impl AppState {
         branch: BranchId,
         prompt: PersistedMessage,
     ) -> PersistTarget {
-        let ledger = self.runtime.user_ledger.clone();
+        let ledger = self.user_ledger.clone();
         self.open_turn(PersistTarget::new(branch, ledger), prompt)
             .await
     }
@@ -110,10 +147,10 @@ impl AppState {
         self.queue_write(command).await;
     }
 
-    /// Wait for every queued transcript write to land. Hold `user_turn_lock`
+    /// Wait for every queued transcript write to land. Hold the user-turn lock
     /// across the call so no new user-turn writes queue during the wait.
-    pub(super) async fn drain_persistence_inflight(&self) {
-        let Some(writes) = self.runtime.transcript_writes.get() else {
+    pub(super) async fn drain_inflight(&self) {
+        let Some(writes) = self.writes.get() else {
             return;
         };
         let (landed_tx, landed_rx) = oneshot::channel();
@@ -124,10 +161,10 @@ impl AppState {
 
     /// Wait for every queued transcript write and every background
     /// persistence task; none may be started afterwards.
-    pub async fn finish_persistence(&self) {
-        self.runtime.persistence_tracker.close();
-        self.drain_persistence_inflight().await;
-        self.runtime.persistence_tracker.wait().await;
+    pub(super) async fn finish(&self) {
+        self.tracker.close();
+        self.drain_inflight().await;
+        self.tracker.wait().await;
     }
 
     /// Hand `command` to the transcript writer, waiting while its queue is full.
@@ -142,9 +179,9 @@ impl AppState {
 
     /// The transcript writer's queue, starting the writer on first use.
     fn transcript_writes(&self) -> &mpsc::Sender<WriteCommand> {
-        self.runtime.transcript_writes.get_or_init(|| {
+        self.writes.get_or_init(|| {
             let (writes_tx, writes_rx) = mpsc::channel(WRITE_QUEUE_CAPACITY);
-            let writer = TranscriptWriter::new(self.memory.transcripts.clone(), self.embed_wake());
+            let writer = TranscriptWriter::new(self.transcripts.clone(), self.embed_wake.clone());
             spawn_supervised(
                 "transcript_writer",
                 Component::Memory,
@@ -152,14 +189,6 @@ impl AppState {
             );
             writes_tx
         })
-    }
-
-    /// The embedding worker's wake signal, when embedding is enabled.
-    fn embed_wake(&self) -> Option<Arc<Notify>> {
-        self.memory
-            .embedding_cfg
-            .enabled
-            .then(|| Arc::clone(&self.memory.embed_wake))
     }
 }
 

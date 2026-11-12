@@ -9,13 +9,15 @@ use assistd_ipc::{
 };
 use assistd_tools::commands::BashPolicyCfg;
 use assistd_tools::{
-    ActionCheck, ApprovalGate, Approvals, CONFIRM_ROUTER, ConfirmRouter, ConfirmationGate,
-    IpcConfirmationGate, OutputCap, PresentSpec, SandboxInfo, SearchPath, ToolOutput, ToolRegistry,
+    ActionCheck, ApprovalGate, Approvals, ConfirmRouter, ConfirmationGate, IpcConfirmationGate,
+    OutputCap, PresentSpec, SandboxInfo, SearchPath, ToolOutput, ToolRegistry, TurnContext,
 };
 
 use super::REFUSED_NOTE;
 use super::recommend::recommended_mode;
-use crate::{PlanningCommandDeps, PlanningToolDeps, planning_commands, planning_tools};
+use crate::build_tools::{
+    PlanningCommandDeps, PlanningToolDeps, planning_commands, planning_tools,
+};
 
 fn planning_registry() -> Arc<ToolRegistry> {
     let gate: Arc<dyn ConfirmationGate> = Arc::new(IpcConfirmationGate);
@@ -37,11 +39,11 @@ fn planning_registry() -> Arc<ToolRegistry> {
     .registry
 }
 
-async fn run(tools: &ToolRegistry, line: &str) -> ToolOutput {
+async fn run(tools: &ToolRegistry, turn: &TurnContext, line: &str) -> ToolOutput {
     tools
         .get("run")
         .expect("planning offers run")
-        .invoke(json!({ "command": line }))
+        .invoke(turn, json!({ "command": line }))
         .await
         .expect("run answers")
 }
@@ -50,7 +52,7 @@ async fn run(tools: &ToolRegistry, line: &str) -> ToolOutput {
 async fn gate_prompts(tools: &ToolRegistry, line: &str) -> bool {
     let (wire, mut prompts) = mpsc::channel(8);
     let router = ConfirmRouter::new("r".into(), wire, Duration::from_millis(1), None);
-    CONFIRM_ROUTER.scope(router, run(tools, line)).await;
+    run(tools, &TurnContext::answered_by(router), line).await;
     matches!(
         prompts.try_recv(),
         Ok(Event {
@@ -83,9 +85,8 @@ async fn planning_refuses_everything_the_gate_would_prompt_for() {
     for line in &lines {
         let prompted = gate_prompts(&tools, line).await;
         let router = ConfirmRouter::for_planning("p".into());
-        let output = CONFIRM_ROUTER
-            .scope(Arc::clone(&router), run(&tools, line))
-            .await;
+        let planning = TurnContext::answered_by(Arc::clone(&router));
+        let output = run(&tools, &planning, line).await;
         assert_eq!(router.refused_while_planning() > 0, prompted, "{line}");
         assert_eq!(
             output.output.contains(REFUSED_NOTE),

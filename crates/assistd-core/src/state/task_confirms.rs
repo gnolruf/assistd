@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use assistd_ipc::{Event, EventBody, HostName, PausedPrompt, TaskId, TaskRunId};
@@ -17,7 +17,9 @@ use assistd_memory::TaskRecord;
 use assistd_tools::{Approval, ConfirmationRequest, PromptParking, Unattended};
 
 use super::run_lane::RunLane;
-use super::{AppState, DispatchError, send_error};
+use super::task_service::TaskService;
+use super::{DispatchError, send_error};
+use crate::bus::EventSink;
 
 /// Why a `TaskConfirm` was refused.
 #[derive(Debug, Error)]
@@ -129,7 +131,7 @@ impl PromptParking for TaskRunParking {
             _ => None,
         };
         let lane = &self.lane;
-        let _registered = lane.state.runtime.task_confirms.register(
+        let _registered = lane.tasks.confirms.register(
             lane.run,
             PendingConfirm {
                 confirm_id: confirm_id.clone(),
@@ -175,15 +177,16 @@ impl TaskRunParking {
 
     async fn pause(&self, prompt: PausedPrompt) {
         let lane = &self.lane;
-        lane.state
-            .runtime
+        lane.tasks
+            .deps
+            .admission
             .task_queue
             .mark_needs_input(lane.run, prompt);
         lane.release();
         if let Err(e) = lane
-            .state
-            .memory
             .tasks
+            .deps
+            .store
             .set_run_needs_input(lane.run, true)
             .await
         {
@@ -199,9 +202,9 @@ impl TaskRunParking {
             return false;
         }
         if let Err(e) = lane
-            .state
-            .memory
             .tasks
+            .deps
+            .store
             .set_run_needs_input(lane.run, false)
             .await
         {
@@ -212,27 +215,23 @@ impl TaskRunParking {
     }
 }
 
-impl AppState {
+impl TaskService {
     pub(super) async fn handle_task_confirm(
-        self: Arc<Self>,
+        &self,
         id: String,
         run: TaskRunId,
         confirm_id: String,
         approval: Approval,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self
-            .runtime
-            .task_confirms
-            .answer(run, &confirm_id, approval)
-        {
+        match self.confirms.answer(run, &confirm_id, approval) {
             Ok(None) => {
                 let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Ok(Some(allowed)) => {
                 let record = self.allow_task_host(allowed).await.map(|r| vec![r]);
-                self.runtime.task_scheduler.reschedule();
+                self.scheduler.reschedule();
                 self.send_tasks(id, "allowing the host for the task", record, &tx)
                     .await
             }
@@ -245,7 +244,8 @@ impl AppState {
 
     /// The prompt of each paused task run, wrapped as the run's events reach subscribers.
     pub(super) fn paused_prompt_events(&self) -> Vec<Event> {
-        self.runtime
+        self.deps
+            .admission
             .task_queue
             .paused_runs()
             .into_iter()
@@ -263,13 +263,13 @@ impl AppState {
 
     /// Add `allowed.host` to its task's allowed hosts, unless already there.
     async fn allow_task_host(&self, allowed: AllowedHost) -> Result<TaskRecord, DispatchError> {
-        let _pass = self.runtime.task_scheduler.hold().await;
-        let mut record = self.memory.tasks.get(allowed.task).await?;
+        let _pass = self.scheduler.hold().await;
+        let mut record = self.deps.store.get(allowed.task).await?;
         if record.spec.allowed_hosts.contains(&allowed.host) {
             return Ok(record);
         }
         record.spec.allowed_hosts.push(allowed.host);
-        Ok(self.memory.tasks.save(Some(record.id), record.spec).await?)
+        Ok(self.deps.store.save(Some(record.id), record.spec).await?)
     }
 }
 

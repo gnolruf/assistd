@@ -202,10 +202,16 @@ async fn adapter_follows_the_vision_gate_on_every_call() {
     )
     .await
     .unwrap();
-    let without = tools[0].invoke(json!({})).await.unwrap();
+    let without = tools[0]
+        .invoke(&TurnContext::default(), json!({}))
+        .await
+        .unwrap();
     assert!(without.attachments.is_empty());
     vision.set(true);
-    let with = tools[0].invoke(json!({})).await.unwrap();
+    let with = tools[0]
+        .invoke(&TurnContext::default(), json!({}))
+        .await
+        .unwrap();
     assert_eq!(
         image_bytes(&with.attachments),
         [(ImageMime::Png, [0, 0, 0].as_slice())]
@@ -219,7 +225,10 @@ async fn adapter_turns_client_errors_into_error_envelopes() {
         message: "missing field 'query'".into(),
     };
     let tool = failing_tool(err()).await;
-    let out = tool.invoke(json!({})).await.unwrap();
+    let out = tool
+        .invoke(&TurnContext::default(), json!({}))
+        .await
+        .unwrap();
     assert_eq!(out.output, mcp_error_line("mcp__web__search", &err()));
     assert_eq!(out.exit_code, -1);
 }
@@ -251,7 +260,7 @@ struct AnsweringGate {
 
 #[async_trait]
 impl ConfirmationGate for AnsweringGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
+    async fn confirm(&self, _turn: &TurnContext, req: ConfirmationRequest) -> Approval {
         self.asked.lock().push(req);
         self.answer
     }
@@ -276,7 +285,10 @@ async fn gated_tool(
 #[tokio::test]
 async fn declined_call_never_reaches_the_server() {
     let (tool, client) = gated_tool(Arc::new(DenyAllGate), Arc::new(Approvals::unsaved())).await;
-    let out = tool.invoke(json!({"path": "/x"})).await.unwrap();
+    let out = tool
+        .invoke(&TurnContext::default(), json!({"path": "/x"}))
+        .await
+        .unwrap();
     assert_eq!(client.calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         out.output,
@@ -294,8 +306,12 @@ async fn call_asks_with_its_arguments_and_always_approves_the_tool() {
     let approvals = Arc::new(Approvals::unsaved());
     let (tool, client) = gated_tool(gate.clone(), Arc::clone(&approvals)).await;
 
-    tool.invoke(json!({"path": "/x"})).await.unwrap();
-    tool.invoke(json!({"path": "/y"})).await.unwrap();
+    tool.invoke(&TurnContext::default(), json!({"path": "/x"}))
+        .await
+        .unwrap();
+    tool.invoke(&TurnContext::default(), json!({"path": "/y"}))
+        .await
+        .unwrap();
 
     assert_eq!(client.calls.load(Ordering::SeqCst), 2);
     assert!(approvals.contains("mcp__files__delete"));
@@ -316,7 +332,9 @@ async fn approved_tool_runs_without_asking() {
         .await
         .expect("unsaved approve");
     let (tool, client) = gated_tool(Arc::new(DenyAllGate), approvals).await;
-    tool.invoke(json!({})).await.unwrap();
+    tool.invoke(&TurnContext::default(), json!({}))
+        .await
+        .unwrap();
     assert_eq!(client.calls.load(Ordering::SeqCst), 1);
 }
 

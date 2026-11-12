@@ -16,11 +16,11 @@ use tracing::warn;
 
 use assistd_ipc::{RelayEvent, StatusKind};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe, SlotAssignment};
-use assistd_tools::ToolRegistry;
 use assistd_tools::policy::on_blocking_pool;
+use assistd_tools::{ToolRegistry, TurnContext};
 use assistd_utils::time::saturating_millis;
 
-use crate::agent::{Agent, TOOL_CALL_EVENTS};
+use crate::agent::Agent;
 
 mod report;
 
@@ -59,13 +59,6 @@ pub enum SubAgentError {
     },
 }
 
-/// Where a relay reports its progress: the turn whose tool call started it,
-/// or nowhere outside a turn.
-#[derive(Debug, Clone, Default)]
-pub struct RelayProgress {
-    turn: Option<mpsc::Sender<LlmEvent>>,
-}
-
 /// What a sub-agent run streamed: its last step's text, `None` when it never
 /// finished, and how many tool-calling steps it took.
 struct FinalAnswer {
@@ -98,8 +91,9 @@ impl SubAgentRunner {
 
     /// Run `task` in an empty conversation with `system_prompt` and `tools` until the model
     /// answers, save that answer whole to the new file `answer_file`, then ask for its
-    /// contract. Only the report reaches the model; `progress` is shown its tool calls, and
-    /// the conversation is dropped when the run ends or `cancel` fires.
+    /// contract. Only the report reaches the model; `turn`, the calling turn, answers the
+    /// run's prompts and is shown its tool calls, and the conversation is dropped when the
+    /// run ends or `cancel` fires.
     pub async fn run(
         &self,
         system_prompt: String,
@@ -107,7 +101,7 @@ impl SubAgentRunner {
         tools: Arc<ToolRegistry>,
         answer_file: PathBuf,
         cancel: CancellationToken,
-        progress: &RelayProgress,
+        turn: &TurnContext,
     ) -> Result<RelayReport, SubAgentError> {
         let backend = self
             .parent
@@ -120,38 +114,21 @@ impl SubAgentRunner {
         );
         let (tx, rx) = mpsc::channel(EVENT_BUFFER);
         let (outcome, finished) = tokio::join!(
-            agent.run_turn(task, Vec::new(), tx, cancel.clone()),
-            final_answer(rx, progress)
+            agent.run_turn(turn, task, Vec::new(), tx, cancel.clone()),
+            final_answer(rx, turn)
         );
         outcome?;
         let answer = finished.text.ok_or(SubAgentError::Cancelled)?;
         let saved = saved_answer(&answer);
         let answer_file = save_answer(saved.contents, answer_file).await?;
         let contract = contract_of(backend.as_ref(), &cancel).await?;
-        progress
-            .report(RelayEvent::Answered {
-                answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
-                tool_steps: finished.tool_steps,
-                answer_file: answer_file.clone(),
-            })
-            .await;
+        turn.report_relay(RelayEvent::Answered {
+            answer_chars: u32::try_from(saved.chars).unwrap_or(u32::MAX),
+            tool_steps: finished.tool_steps,
+            answer_file: answer_file.clone(),
+        })
+        .await;
         Ok(RelayReport::new(contract, answer_file))
-    }
-}
-
-impl RelayProgress {
-    /// Reports to the turn whose tool call is being dispatched, if any.
-    pub(crate) fn of_current_tool_call() -> Self {
-        Self {
-            turn: TOOL_CALL_EVENTS.try_with(Clone::clone).ok(),
-        }
-    }
-
-    /// Send `event` to the turn; a turn that has ended drops it.
-    pub(crate) async fn report(&self, event: RelayEvent) {
-        if let Some(turn) = &self.turn {
-            let _ = turn.send(LlmEvent::Relay(event)).await;
-        }
     }
 }
 
@@ -200,24 +177,23 @@ async fn contract_of(
     }))
 }
 
-/// Collect the run's answer while showing `progress` what the run streams.
-/// The backend reports its context size as each step starts, so that report
-/// discards text streamed by the steps before it.
-async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, progress: &RelayProgress) -> FinalAnswer {
+/// Collect the run's answer, the text of its last step, while showing `turn`
+/// what the run streams.
+async fn final_answer(mut rx: mpsc::Receiver<LlmEvent>, turn: &TurnContext) -> FinalAnswer {
     let mut text = String::new();
     let mut done = false;
     let mut tool_steps = 0;
     let mut compacting_since = None;
     while let Some(event) = rx.recv().await {
         match &event {
-            LlmEvent::ContextSize { .. } => text.clear(),
+            LlmEvent::StepStarted | LlmEvent::StepDiscarded => text.clear(),
             LlmEvent::Delta { text: delta } => text.push_str(delta),
             LlmEvent::ToolCallsRequested { .. } => tool_steps += 1,
             LlmEvent::Done => done = true,
             _ => {}
         }
         if let Some(shown) = relay_event_of(event, &mut compacting_since) {
-            progress.report(shown).await;
+            turn.report_relay(shown).await;
         }
     }
     FinalAnswer {

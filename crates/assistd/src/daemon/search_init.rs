@@ -111,7 +111,7 @@ async fn start_and_record(
 
 fn record_readiness(state: &AppState, readiness: Readiness<ChildServerStatus>) {
     state.subsystems.web_search.set(readiness);
-    state.publish_readiness(
+    state.status.publish_readiness(
         StartupComponent::WebSearch,
         ComponentReadiness::from(state.subsystems.web_search.get()),
     );

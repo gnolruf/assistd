@@ -6,21 +6,15 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
-use assistd_config::Config;
-use assistd_ipc::PresenceTarget;
-use assistd_llm::{CompactionCut, EchoBackend};
+use assistd_llm::CompactionCut;
 use assistd_memory::{
     AppendedMessage, BranchHistory, BranchId, BranchInfo, BranchSummary, HistoryScope, MemoryError,
     MessageId, OpenedTurn, PersistedMessage, PersistedRelayStep, PersistedToolCall,
     ResumeCandidate, Seq, SessionId, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
-use assistd_tools::ToolRegistry;
 
 use super::*;
-use crate::presence::PresenceManager;
-use crate::state::memory_stack::MemoryStack;
-use crate::state::runtime::{RuntimeState, SessionContext};
-use crate::state::subsystems::Subsystems;
+use crate::state::session::SessionContext;
 
 /// Records what reaches it, makes each write finish faster than the one
 /// before it, and fails any message whose content is `lost`.
@@ -186,23 +180,9 @@ impl TranscriptStore for RecordingStore {
     }
 }
 
-fn state_with_store(store: Arc<dyn TranscriptStore>) -> Arc<AppState> {
-    let config = Config::default();
-    let memory = MemoryStack::disabled(config.embedding.clone()).with_transcripts(store);
-    Arc::new(AppState {
-        subsystems: Subsystems::new(
-            Arc::new(EchoBackend::new()),
-            PresenceManager::stub(PresenceTarget::Active),
-            Arc::new(ToolRegistry::default()),
-            assistd_voice::VoiceManager::new(true),
-        ),
-        memory,
-        runtime: RuntimeState::new().with_session_ctx(Arc::new(SessionContext::new(
-            SessionId::new(),
-            Some(BranchId(1)),
-        ))),
-        config,
-    })
+fn log_over(store: Arc<dyn TranscriptStore>) -> TranscriptLog {
+    let session = Arc::new(SessionContext::new(SessionId::new(), Some(BranchId(1))));
+    TranscriptLog::new(store, None, session)
 }
 
 fn tool_step(content: &str) -> PersistedMessage {
@@ -217,25 +197,22 @@ fn tool_step(content: &str) -> PersistedMessage {
 #[tokio::test(start_paused = true)]
 async fn messages_reach_the_store_in_queue_order_past_an_abandoned_drain() {
     let store = Arc::new(RecordingStore::new(60));
-    let state = state_with_store(store.clone());
+    let log = log_over(store.clone());
 
-    let target = state
+    let target = log
         .open_user_turn(BranchId(1), PersistedMessage::user("first"))
         .await;
     let reply = |text| PersistedMessage::assistant_text(text, None);
-    state
-        .persist_message(target.clone(), reply("second"), None)
+    log.persist_message(target.clone(), reply("second"), None)
         .await;
     let abandoned = Duration::from_millis(10);
-    tokio::time::timeout(abandoned, state.drain_persistence_inflight())
+    tokio::time::timeout(abandoned, log.drain_inflight())
         .await
         .unwrap_err();
     for text in ["third", "fourth"] {
-        state
-            .persist_message(target.clone(), reply(text), None)
-            .await;
+        log.persist_message(target.clone(), reply(text), None).await;
     }
-    state.drain_persistence_inflight().await;
+    log.drain_inflight().await;
 
     assert_eq!(
         *store.arrivals.lock(),
@@ -247,24 +224,22 @@ async fn messages_reach_the_store_in_queue_order_past_an_abandoned_drain() {
 #[tokio::test(start_paused = true)]
 async fn a_failed_write_marks_its_turn_and_still_counts_toward_the_summary_cut() {
     let store = Arc::new(RecordingStore::new(0));
-    let state = state_with_store(store.clone());
+    let log = log_over(store.clone());
 
-    let target = state
+    let target = log
         .open_user_turn(BranchId(1), PersistedMessage::user("question"))
         .await;
     for step in ["step one", "lost", "step three"] {
-        state
-            .persist_message(target.clone(), tool_step(step), None)
+        log.persist_message(target.clone(), tool_step(step), None)
             .await;
     }
     let cut = CompactionCut {
         kept_turns: NonZeroUsize::MIN,
         kept_steps: NonZeroUsize::new(2),
     };
-    state
-        .persist_summary(target, "summary".into(), cut, Duration::ZERO)
+    log.persist_summary(target, "summary".into(), cut, Duration::ZERO)
         .await;
-    state.drain_persistence_inflight().await;
+    log.drain_inflight().await;
 
     assert_eq!(*store.incomplete_turns.lock(), [TurnId(1)]);
     assert_eq!(

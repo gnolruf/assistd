@@ -137,6 +137,7 @@ mod tests {
     use assistd_ipc::ImageMime;
 
     use super::*;
+    use crate::TurnContext;
     use crate::commands::test_see;
     use crate::fixtures::PNG_BYTES;
 
@@ -145,6 +146,7 @@ mod tests {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
             scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
         })
         .await
     }

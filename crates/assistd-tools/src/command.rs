@@ -10,6 +10,7 @@ use async_trait::async_trait;
 
 use assistd_ipc::ImageMime;
 
+use crate::TurnContext;
 use crate::policy::{ConfinedRoot, FileScope};
 
 /// The recovery label on an [`error_line`]: `Use`/`Try` offer an alternative,
@@ -134,6 +135,8 @@ pub struct CommandInput {
     /// Where the paths in `args` resolve; a command that opens files must
     /// open them through it.
     pub scope: FileScope,
+    /// The turn the chain runs in, whose router answers the command's prompts.
+    pub turn: TurnContext,
 }
 
 /// A side-channel payload alongside stdout, carried through pipes untouched

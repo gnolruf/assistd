@@ -172,7 +172,7 @@ fn registry_of(stubs: impl IntoIterator<Item = Stub>) -> CommandRegistry {
 
 async fn run_line(line: &str, registry: &CommandRegistry) -> CommandOutput {
     let chain = parse_chain(line).unwrap();
-    execute(&chain, registry, None).await
+    execute(&chain, registry, &TurnContext::default(), None).await
 }
 
 #[tokio::test]
