@@ -15,8 +15,8 @@ use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ContextChunk, DocumentId, Embedding,
-    EmbeddingHit, EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryHit, MemoryId,
-    MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
+    EmbeddingHit, EmbeddingTarget, FileStamp, IndexPass, MemoryHit, MemoryId, MessageId, Result,
+    SemanticStore, SessionId, SessionScope, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
@@ -131,35 +131,34 @@ impl SemanticStore for SqliteSemanticStore {
         if top_k == 0 || query_vector.is_empty() {
             return Ok(Vec::new());
         }
-        let ranked = match scope {
+        match scope {
             ChunkScope::Chats(sessions) => {
                 self.handle
-                    .search_reader()
-                    .call(move |c| nearest_message_chunks(c, &query_vector, top_k, sessions))
+                    .search("nearest_chunks", move |c| {
+                        nearest_message_chunks(c, &query_vector, top_k, sessions)
+                    })
                     .await
             }
             ChunkScope::Documents => {
                 self.handle
-                    .document_search_reader()
-                    .call(move |c| nearest_document_chunks(c, &query_vector, top_k))
+                    .search_documents("nearest_chunks", move |c| {
+                        nearest_document_chunks(c, &query_vector, top_k)
+                    })
                     .await
             }
-        };
-        ranked.map_err(MemoryError::sqlite("nearest_chunks"))
+        }
     }
 
     async fn adjacent_chunks(&self, locator: &ChunkLocator) -> Result<AdjacentChunks> {
         let locator = locator.clone();
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
+            .read("adjacent_chunks", move |c| {
                 Ok(AdjacentChunks {
                     before: adjacent_chunk(c, &locator, Side::Before)?,
                     after: adjacent_chunk(c, &locator, Side::After)?,
                 })
             })
             .await
-            .map_err(MemoryError::sqlite("adjacent_chunks"))
     }
 
     async fn nearest_memories(
@@ -171,8 +170,7 @@ impl SemanticStore for SqliteSemanticStore {
             return Ok(Vec::new());
         }
         self.handle
-            .search_reader()
-            .call(move |c| {
+            .search("nearest_memories", move |c| {
                 let ranked = scan_top_k::<MemoryId, MemoryId>(
                     c,
                     ALL_MEMORY_VECTORS,
@@ -190,15 +188,12 @@ impl SemanticStore for SqliteSemanticStore {
                 )
             })
             .await
-            .map_err(MemoryError::sqlite("nearest_memories"))
     }
 
     async fn drop_other_models(&self, model: &str) -> Result<u64> {
         let model = model.to_string();
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
+            .write("drop_other_models", move |tx| {
                 let dropped = EMBEDDING_TABLES
                     .iter()
                     .map(|table| {
@@ -208,17 +203,14 @@ impl SemanticStore for SqliteSemanticStore {
                         )
                     })
                     .sum::<rusqlite::Result<usize>>()?;
-                tx.commit()?;
                 Ok(u64::try_from(dropped).unwrap_or(u64::MAX))
             })
             .await
-            .map_err(MemoryError::sqlite("drop_other_models"))
     }
 
     async fn count_missing(&self) -> Result<UnindexedRows> {
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
+            .read("count_missing", |c| {
                 let chunks = c.query_row(
                     &format!("SELECT count(*) FROM chunks cc WHERE NOT {CHUNK_HAS_EMBEDDING}"),
                     [],
@@ -234,7 +226,6 @@ impl SemanticStore for SqliteSemanticStore {
                 Ok(UnindexedRows { chunks, memories })
             })
             .await
-            .map_err(MemoryError::sqlite("count_missing"))
     }
 
     async fn memories_missing_embedding(
@@ -244,9 +235,8 @@ impl SemanticStore for SqliteSemanticStore {
     ) -> Result<Vec<(MemoryId, String)>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare_cached(
+            .read("memories_missing_embedding", move |c| {
+                c.prepare_cached(
                     "SELECT mem.id, mem.value
                      FROM memories mem
                      WHERE mem.id > ifnull(?1, 0) AND NOT EXISTS (
@@ -254,16 +244,13 @@ impl SemanticStore for SqliteSemanticStore {
                      )
                      ORDER BY mem.id
                      LIMIT ?2",
-                )?;
-                let rows = stmt
-                    .query_map(rusqlite::params![after, limit], |r| {
-                        Ok((r.get(0)?, r.get(1)?))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
+                )?
+                .query_map(rusqlite::params![after, limit], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect()
             })
             .await
-            .map_err(MemoryError::sqlite("memories_missing_embedding"))
     }
 
     async fn chunks_missing_embedding(
@@ -273,9 +260,8 @@ impl SemanticStore for SqliteSemanticStore {
     ) -> Result<Vec<(ChunkId, String)>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare_cached(&format!(
+            .read("chunks_missing_embedding", move |c| {
+                c.prepare_cached(&format!(
                     "SELECT cc.id,
                             CAST(substr(CAST(coalesce(msg.content, doc.content) AS BLOB),
                                         cc.byte_start + 1, cc.byte_end - cc.byte_start) AS TEXT)
@@ -285,16 +271,13 @@ impl SemanticStore for SqliteSemanticStore {
                      WHERE cc.id > ifnull(?1, 0) AND NOT {CHUNK_HAS_EMBEDDING}
                      ORDER BY cc.id
                      LIMIT ?2"
-                ))?;
-                let rows = stmt
-                    .query_map(rusqlite::params![after, limit], |r| {
-                        Ok((r.get(0)?, r.get(1)?))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
+                ))?
+                .query_map(rusqlite::params![after, limit], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect()
             })
             .await
-            .map_err(MemoryError::sqlite("chunks_missing_embedding"))
     }
 
     async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()> {
@@ -303,43 +286,35 @@ impl SemanticStore for SqliteSemanticStore {
         }
         let model = model.to_string();
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                for embedding in &embeddings {
-                    upsert_embedding(&tx, &model, embedding)?;
-                }
-                tx.commit()
+            .write("store_embeddings", move |tx| {
+                embeddings
+                    .iter()
+                    .try_for_each(|embedding| upsert_embedding(tx, &model, embedding).map(drop))
             })
             .await
-            .map_err(MemoryError::sqlite("store_embeddings"))
     }
 
     async fn clear_unembeddable(&self) -> Result<u64> {
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
+            .write("clear_unembeddable", |tx| {
                 let cleared = EMBEDDING_TABLES
                     .iter()
                     .map(|table| {
                         tx.execute(&format!("DELETE FROM {table} WHERE vector IS NULL"), [])
                     })
                     .sum::<rusqlite::Result<usize>>()?;
-                tx.commit()?;
                 Ok(u64::try_from(cleared).unwrap_or(u64::MAX))
             })
             .await
-            .map_err(MemoryError::sqlite("clear_unembeddable"))
     }
 
     async fn begin_index_pass(&self, root: &Path) -> Result<IndexPass> {
         let root = root.to_path_buf();
         self.handle
-            .writer()
-            .call(move |c| documents::begin_pass(c, &root))
+            .write("begin_index_pass", move |tx| {
+                documents::begin_pass(tx, &root)
+            })
             .await
-            .map_err(MemoryError::sqlite("begin_index_pass"))
     }
 
     async fn document_unchanged(
@@ -350,10 +325,10 @@ impl SemanticStore for SqliteSemanticStore {
     ) -> Result<bool> {
         let path = path.to_path_buf();
         self.handle
-            .writer()
-            .call(move |c| documents::mark_seen_if_unchanged(c, pass, &path, stamp))
+            .write("document_unchanged", move |tx| {
+                documents::mark_seen_if_unchanged(tx, pass, &path, stamp)
+            })
             .await
-            .map_err(MemoryError::sqlite("document_unchanged"))
     }
 
     async fn index_document(
@@ -364,46 +339,36 @@ impl SemanticStore for SqliteSemanticStore {
         content: String,
     ) -> Result<Vec<ChunkId>> {
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let chunks = documents::store_document(&tx, pass, &path, stamp, &content)?;
-                tx.commit()?;
-                Ok(chunks)
+            .write("index_document", move |tx| {
+                documents::store_document(tx, pass, &path, stamp, &content)
             })
             .await
-            .map_err(MemoryError::sqlite("index_document"))
     }
 
     async fn finish_index_pass(&self, pass: IndexPass) -> Result<u64> {
         self.handle
-            .writer()
-            .call(move |c| documents::remove_unseen(c, pass))
+            .write("finish_index_pass", move |tx| {
+                documents::remove_unseen(tx, pass)
+            })
             .await
-            .map_err(MemoryError::sqlite("finish_index_pass"))
     }
 
     async fn remove_document(&self, path: &Path) -> Result<bool> {
         let path = path.to_path_buf();
         self.handle
-            .writer()
-            .call(move |c| documents::remove_document(c, &path))
+            .write("remove_document", move |tx| {
+                documents::remove_document(tx, &path)
+            })
             .await
-            .map_err(MemoryError::sqlite("remove_document"))
     }
 
     async fn remove_index_root(&self, root: &Path) -> Result<u64> {
         let root = root.to_path_buf();
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let removed = documents::remove_root(&tx, &root)?;
-                tx.commit()?;
-                Ok(removed)
+            .write("remove_index_root", move |tx| {
+                documents::remove_root(tx, &root)
             })
             .await
-            .map_err(MemoryError::sqlite("remove_index_root"))
     }
 }
 

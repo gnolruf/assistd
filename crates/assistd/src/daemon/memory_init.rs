@@ -42,9 +42,10 @@ impl MemorySubsystem {
     }
 }
 
-/// Open the memory database and pick the session to continue. Fails when there
-/// is no data directory or the database cannot be opened or migrated.
-pub(super) async fn init() -> Result<MemorySubsystem> {
+/// Open the memory database and pick the session to continue; messages are cut into
+/// chunks only when `embedding_enabled`. Fails when there is no data directory or the
+/// database cannot be opened or migrated.
+pub(super) async fn init(embedding_enabled: bool) -> Result<MemorySubsystem> {
     let db_path = db_path().context("no data directory for memory.db (is $HOME set?)")?;
     let handle = SqliteHandle::open(&db_path).await.with_context(|| {
         format!(
@@ -53,7 +54,7 @@ pub(super) async fn init() -> Result<MemorySubsystem> {
         )
     })?;
 
-    let transcripts = Arc::new(SqliteTranscriptStore::new(handle.clone()));
+    let transcripts = Arc::new(transcript_store(handle.clone(), embedding_enabled).await);
     let mem_store = Arc::new(SqliteMemoryStore::new(handle.clone()));
     let (session_id, branch_id, resumed_history) =
         resume_or_start_unsaved_session(transcripts.as_ref(), &db_path).await;
@@ -74,6 +75,24 @@ pub(super) async fn init() -> Result<MemorySubsystem> {
         sqlite_handle: handle,
         relay_answer_files,
     })
+}
+
+/// The transcript store: with embedding on it cuts chunks, first for the messages
+/// stored while embedding was off; with it off it cuts none.
+async fn transcript_store(handle: SqliteHandle, embedding_enabled: bool) -> SqliteTranscriptStore {
+    let transcripts = SqliteTranscriptStore::new(handle);
+    if !embedding_enabled {
+        return transcripts.without_message_chunks();
+    }
+    match transcripts.chunk_unchunked_messages().await {
+        Ok(0) => {}
+        Ok(added) => info!("memory: cut {added} chunks from messages stored without embedding"),
+        Err(e) => tracing::warn!(
+            "memory: cannot chunk messages stored without embedding ({e:#}); \
+             they stay out of semantic search"
+        ),
+    }
+    transcripts
 }
 
 /// Resume the most recent unended session, else start an unsaved session

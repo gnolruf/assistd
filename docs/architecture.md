@@ -624,7 +624,9 @@ rows after it, so it sees the same prompt it had before; the client
 still gets every row.
 
 Saving through the `remember` tool inserts the K/V row, and each user
-or assistant message is chunked in the transaction that saves it. The
+or assistant message is chunked in the transaction that saves it. With
+`embedding.enabled = false` no chunks are cut; the next start with
+embedding on cuts them for the messages stored meanwhile. The
 database is the embedding queue: a memory or chunk with no row in its
 embeddings table is pending. Each write wakes a background task, which
 pages through the pending rows, sends batches to the embedding server
