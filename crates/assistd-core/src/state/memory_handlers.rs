@@ -13,7 +13,7 @@ use assistd_memory::{
 use assistd_tools::DEFAULT_SEARCH_LIMIT;
 
 use super::memory_stack::MemoryStack;
-use super::{DispatchError, send_error, wire_role, wire_timestamp};
+use super::{DispatchError, FailedStep, wire_role, wire_timestamp};
 use crate::bus::EventSink;
 
 impl MemoryStack {
@@ -24,65 +24,46 @@ impl MemoryStack {
         limit: u32,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let embedder = match self.embedder.get() {
-            Ok(embedder) => embedder,
-            Err(e) => {
-                send_error(&tx, id, format!("semantic search failed: {e}")).await;
-                return Err(e.into());
-            }
-        };
+        let embedder = self.embedder.get().context("semantic search failed")?;
         let limit = if limit == 0 {
             DEFAULT_SEARCH_LIMIT
         } else {
             limit as usize
         };
-        let embedding = match embedder.embed(query).await {
-            Ok(embedding) => embedding,
-            Err(e) => {
-                send_error(&tx, id, format!("embed failed: {e}")).await;
-                return Err(e.into());
-            }
-        };
-        match self
+        let embedding = embedder.embed(query).await.context("embed failed")?;
+        let hits = self
             .semantic
             .nearest_chunks(embedding, limit, ChunkScope::Chats(SessionScope::All))
             .await
-        {
-            Ok(hits) => {
-                for hit in hits {
-                    let ChunkLocator::Message {
-                        session_id,
-                        message_id,
-                        role,
-                        timestamp,
-                        ..
-                    } = hit.locator
-                    else {
-                        continue;
-                    };
-                    let _ = tx
-                        .send(Event::new(
-                            id.clone(),
-                            EventBody::SemanticHit {
-                                message_id: message_id.0,
-                                chunk_id: hit.chunk_id.0,
-                                session_id: session_id.to_string(),
-                                timestamp: wire_timestamp(timestamp),
-                                role: wire_role(role),
-                                content: hit.text,
-                                similarity: hit.similarity,
-                            },
-                        ))
-                        .await;
-                }
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("semantic search failed: {e}")).await;
-                Err(e.into())
-            }
+            .context("semantic search failed")?;
+        for hit in hits {
+            let ChunkLocator::Message {
+                session_id,
+                message_id,
+                role,
+                timestamp,
+                ..
+            } = hit.locator
+            else {
+                continue;
+            };
+            let _ = tx
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::SemanticHit {
+                        message_id: message_id.0,
+                        chunk_id: hit.chunk_id.0,
+                        session_id: session_id.to_string(),
+                        timestamp: wire_timestamp(timestamp),
+                        role: wire_role(role),
+                        content: hit.text,
+                        similarity: hit.similarity,
+                    },
+                ))
+                .await;
         }
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_memory_save(
@@ -92,16 +73,12 @@ impl MemoryStack {
         value: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory_ops.save(&key, value).await {
-            Ok(_id) => {
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("memory save failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+        self.memory_ops
+            .save(&key, value)
+            .await
+            .context("memory save failed")?;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_memory_load(
@@ -110,22 +87,19 @@ impl MemoryStack {
         key: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory_ops.load(&key).await {
-            Ok(value) => {
-                let _ = tx
-                    .send(Event::new(
-                        id.clone(),
-                        EventBody::MemoryValue { key, value },
-                    ))
-                    .await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("memory load failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+        let value = self
+            .memory_ops
+            .load(&key)
+            .await
+            .context("memory load failed")?;
+        let _ = tx
+            .send(Event::new(
+                id.clone(),
+                EventBody::MemoryValue { key, value },
+            ))
+            .await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_memory_delete(
@@ -134,16 +108,12 @@ impl MemoryStack {
         key: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory_ops.delete(&key).await {
-            Ok(()) => {
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("memory delete failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+        self.memory_ops
+            .delete(&key)
+            .await
+            .context("memory delete failed")?;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_memory_list_all(
@@ -153,33 +123,30 @@ impl MemoryStack {
         limit: u32,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory_ops.list_full(&prefix).await {
-            Ok(rows) => {
-                let cap = if limit == 0 {
-                    rows.len()
-                } else {
-                    rows.len().min(limit as usize)
-                };
-                for row in rows.into_iter().take(cap) {
-                    let _ = tx
-                        .send(Event::new(
-                            id.clone(),
-                            EventBody::MemoryRow {
-                                memory_id: row.id.0,
-                                key: row.key,
-                                value: row.value,
-                            },
-                        ))
-                        .await;
-                }
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("memory list_all failed: {e}")).await;
-                Err(e.into())
-            }
+        let rows = self
+            .memory_ops
+            .list_full(&prefix)
+            .await
+            .context("memory list_all failed")?;
+        let cap = if limit == 0 {
+            rows.len()
+        } else {
+            rows.len().min(limit as usize)
+        };
+        for row in rows.into_iter().take(cap) {
+            let _ = tx
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::MemoryRow {
+                        memory_id: row.id.0,
+                        key: row.key,
+                        value: row.value,
+                    },
+                ))
+                .await;
         }
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_memory_forget(
@@ -188,25 +155,22 @@ impl MemoryStack {
         memory_id: i64,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.memory_ops.forget(MemoryId(memory_id)).await {
-            Ok(removed) => {
-                let _ = tx
-                    .send(Event::new(
-                        id.clone(),
-                        EventBody::MemoryForgetResult {
-                            deleted: removed.is_some(),
-                            key: removed,
-                        },
-                    ))
-                    .await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("memory forget failed: {e}")).await;
-                Err(e.into())
-            }
-        }
+        let removed = self
+            .memory_ops
+            .forget(MemoryId(memory_id))
+            .await
+            .context("memory forget failed")?;
+        let _ = tx
+            .send(Event::new(
+                id.clone(),
+                EventBody::MemoryForgetResult {
+                    deleted: removed.is_some(),
+                    key: removed,
+                },
+            ))
+            .await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Embed every memory and chunk lacking an embedding under the current
@@ -217,20 +181,11 @@ impl MemoryStack {
         id: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let embedder = match self.embedder.get() {
-            Ok(embedder) => embedder,
-            Err(e) => {
-                send_error(&tx, id, format!("reindex failed: {e}")).await;
-                return Err(e.into());
-            }
-        };
-        let unindexed = match self.unindexed_rows_with_marks_cleared().await {
-            Ok(unindexed) => unindexed,
-            Err(e) => {
-                send_error(&tx, id, format!("reindex: count missing rows: {e}")).await;
-                return Err(e.into());
-            }
-        };
+        let embedder = self.embedder.get().context("reindex failed")?;
+        let unindexed = self
+            .unindexed_rows_with_marks_cleared()
+            .await
+            .context("reindex: count missing rows")?;
         let chunks_total = u32::try_from(unindexed.chunks).unwrap_or(u32::MAX);
         let memories_total = u32::try_from(unindexed.memories).unwrap_or(u32::MAX);
 
@@ -257,30 +212,24 @@ impl MemoryStack {
 
         let semantic = self.semantic.as_ref();
         let embedder = embedder.as_ref();
-        let chunks = reindex_items(
+        reindex_items(
             embedder,
             semantic,
             KindProgress::new(&id, &tx, ReindexKind::Chunks, chunks_total),
             |after, limit| semantic.chunks_missing_embedding(after, limit),
             EmbeddingTarget::Chunk,
         )
-        .await;
-        if let Err(e) = chunks {
-            send_error(&tx, id, format!("reindex: list missing chunks: {e}")).await;
-            return Err(e.into());
-        }
-        let memories = reindex_items(
+        .await
+        .context("reindex: list missing chunks")?;
+        reindex_items(
             embedder,
             semantic,
             KindProgress::new(&id, &tx, ReindexKind::Memories, memories_total),
             |after, limit| semantic.memories_missing_embedding(after, limit),
             EmbeddingTarget::Memory,
         )
-        .await;
-        if let Err(e) = memories {
-            send_error(&tx, id, format!("reindex: list missing memories: {e}")).await;
-            return Err(e.into());
-        }
+        .await
+        .context("reindex: list missing memories")?;
 
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())

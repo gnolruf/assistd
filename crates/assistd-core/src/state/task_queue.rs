@@ -19,7 +19,7 @@ use super::lanes::LaneLease;
 
 /// Why a change to the task queue was refused.
 #[derive(Debug, Error)]
-pub(in crate::state) enum QueueOpError {
+pub enum QueueOpError {
     #[error("no task run {0} is queued or running")]
     NotQueued(TaskRunId),
 

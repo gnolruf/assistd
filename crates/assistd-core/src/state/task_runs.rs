@@ -28,7 +28,7 @@ use super::task_runner::RegisteredRun;
 use super::task_service::TaskService;
 use super::transcript_writer::PersistTarget;
 use super::turn_driver::TurnDriver;
-use super::{DispatchError, safety_judge, send_error};
+use super::{DispatchError, FailedStep, safety_judge};
 use crate::Agent;
 use crate::bus::EventSink;
 use crate::presence::{PresenceLlmHealthProbe, RequestGuard};
@@ -58,13 +58,7 @@ impl TaskService {
         task: TaskId,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let (record, run) = match self.queue_task_run(task).await {
-            Ok(queued) => queued,
-            Err(e) => {
-                send_error(&tx, id, format!("task run failed: {e}")).await;
-                return Err(e.into());
-            }
-        };
+        let (record, run) = self.queue_task_run(task).await.context("task run failed")?;
         self.deps.admission.task_queue.push(run, record, id.clone());
         let _ = tx
             .send(Event::new(
@@ -76,13 +70,15 @@ impl TaskService {
         Ok(())
     }
 
-    pub(super) async fn handle_task_cancel(&self, id: String, run: TaskRunId, tx: EventSink) {
-        match self.cancel_task_run(run).await {
-            Ok(()) => {
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-            }
-            Err(e) => send_error(&tx, id, e.to_string()).await,
-        }
+    pub(super) async fn handle_task_cancel(
+        &self,
+        id: String,
+        run: TaskRunId,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
+        self.cancel_task_run(run).await?;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     async fn queue_task_run(&self, task: TaskId) -> MemoryResult<(TaskRecord, TaskRunId)> {

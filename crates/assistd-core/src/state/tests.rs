@@ -233,7 +233,14 @@ async fn assert_request_events(cases: Vec<(PresenceTarget, Request, Vec<Event>, 
         }
         .build();
         let (res, events) = dispatch(&state, req).await;
-        res.unwrap_or_else(|e| panic!("{kind}: {e:#}"));
+        let ends_in_error = matches!(
+            expected.last(),
+            Some(Event {
+                body: EventBody::Error { .. },
+                ..
+            })
+        );
+        assert_eq!(res.is_err(), ends_in_error, "{kind}: {res:?}");
         assert_eq!(events, expected, "{kind}");
         assert_eq!(state.subsystems.presence.state(), presence_after, "{kind}");
     }
@@ -336,7 +343,10 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
         ),
     )
     .await;
-    assert!(matches!(result, Err(DispatchError::Embed(_))), "{result:?}");
+    assert!(
+        matches!(&result, Err(DispatchError::Context { source, .. }) if matches!(**source, DispatchError::Embed(_))),
+        "{result:?}"
+    );
     assert_eq!(
         events,
         [error(
@@ -374,7 +384,7 @@ async fn dispatch_query_failed_step_ends_with_error_only() {
 
     let err = res.unwrap_err();
     assert!(
-        matches!(&err, DispatchError::Llm(LlmError::OutputLimit(_))),
+        matches!(&err, DispatchError::Context { source, .. } if matches!(**source, DispatchError::Llm(LlmError::OutputLimit(_)))),
         "{err:?}"
     );
     assert!(

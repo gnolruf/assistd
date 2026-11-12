@@ -14,7 +14,7 @@ use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, SlotAssignment};
 
 use super::task_runs::task_system_prompt;
 use super::task_service::TaskService;
-use super::{DispatchError, send_error};
+use super::{DispatchError, FailedStep};
 use crate::bus::EventSink;
 use crate::planner::{PlanAsk, PlanError, Refinement, WorkPermissions};
 
@@ -74,29 +74,24 @@ impl TaskService {
     ) -> Result<(), DispatchError> {
         let cancel = self.deps.admission.turn_cancellation();
         let refining = self.refine_prompt(&id, ask, &tx, &cancel);
-        match cancel_when_client_leaves(refining, &id, &tx, &cancel).await {
-            Ok(Refinement {
+        let Refinement {
+            prompt,
+            plan,
+            recommended,
+        } = cancel_when_client_leaves(refining, &id, &tx, &cancel)
+            .await
+            .context("task refine failed")?;
+        let refined = Event::new(
+            id.clone(),
+            EventBody::TaskRefined {
                 prompt,
                 plan,
                 recommended,
-            }) => {
-                let refined = Event::new(
-                    id.clone(),
-                    EventBody::TaskRefined {
-                        prompt,
-                        plan,
-                        recommended,
-                    },
-                );
-                let _ = tx.send(refined).await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("task refine failed: {e}")).await;
-                Err(e)
-            }
-        }
+            },
+        );
+        let _ = tx.send(refined).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     /// Refine the asked prompt, or revise its last rewrite, on the main lane, as a user

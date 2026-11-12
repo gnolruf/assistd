@@ -12,13 +12,10 @@ use thiserror::Error;
 use assistd_ipc::{Event, EventBody, McpServerState, StartupComponent, TokenRevocation};
 use assistd_tools::ToolCatalog;
 
+use super::DispatchError;
 use super::readiness::publish_readiness;
-use super::send_error;
 use super::subsystems::McpServerStatus;
 use crate::bus::{EventBus, EventSink};
-
-/// Why MCP is off, for requests that need a server.
-const MCP_DISABLED: &str = "MCP is disabled (mcp.enabled = false) or has no sandbox to run in";
 
 /// Signs OAuth MCP servers in and out, restarting or stopping each to match.
 #[async_trait]
@@ -116,14 +113,14 @@ impl McpService {
         &self.host
     }
 
-    pub(super) async fn handle_mcp_login(&self, id: String, server: String, tx: EventSink) {
-        let Some(accounts) = self.accounts.clone() else {
-            return send_error(&tx, id, MCP_DISABLED.into()).await;
-        };
-        let login = match accounts.begin_login(self.host.clone(), &server).await {
-            Ok(login) => login,
-            Err(e) => return send_error(&tx, id, e.to_string()).await,
-        };
+    pub(super) async fn handle_mcp_login(
+        &self,
+        id: String,
+        server: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
+        let accounts = self.accounts.clone().ok_or(DispatchError::McpDisabled)?;
+        let login = accounts.begin_login(self.host.clone(), &server).await?;
         let _ = tx
             .send(Event::new(
                 id.clone(),
@@ -133,31 +130,30 @@ impl McpService {
                 },
             ))
             .await;
-        if let Err(e) = login.completion.await {
-            return send_error(&tx, id, e.to_string()).await;
-        }
+        login.completion.await?;
         if let Some(event) = self.mcp_server_event(&id, &server) {
             let _ = tx.send(event).await;
         }
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
-    pub(super) async fn handle_mcp_logout(&self, id: String, server: String, tx: EventSink) {
-        let Some(accounts) = self.accounts.clone() else {
-            return send_error(&tx, id, MCP_DISABLED.into()).await;
-        };
-        match accounts.logout(self.host.clone(), &server).await {
-            Ok(revocation) => {
-                let _ = tx
-                    .send(Event::new(
-                        id.clone(),
-                        EventBody::McpLoggedOut { server, revocation },
-                    ))
-                    .await;
-                let _ = tx.send(Event::new(id, EventBody::Done)).await;
-            }
-            Err(e) => send_error(&tx, id, e.to_string()).await,
-        }
+    pub(super) async fn handle_mcp_logout(
+        &self,
+        id: String,
+        server: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
+        let accounts = self.accounts.clone().ok_or(DispatchError::McpDisabled)?;
+        let revocation = accounts.logout(self.host.clone(), &server).await?;
+        let _ = tx
+            .send(Event::new(
+                id.clone(),
+                EventBody::McpLoggedOut { server, revocation },
+            ))
+            .await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
+        Ok(())
     }
 
     pub(super) async fn handle_mcp_status(&self, id: String, tx: EventSink) {
