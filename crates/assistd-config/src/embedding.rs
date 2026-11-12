@@ -41,7 +41,8 @@ pub struct EmbeddingConfig {
     /// while the model is still downloading or loading.
     pub ready_timeout_secs: NonZeroU64,
     /// Extra server arguments. Flags assistd sets itself, or that expose
-    /// files, tools or state through the server, fail to parse.
+    /// files, tools or state through the server, fail to parse. Any change
+    /// drops the stored vectors, which are then embedded again.
     pub custom_args: CustomArgs<EmbeddingServer>,
     /// Nearest-neighbour matches per search: the most saved memories and
     /// past-chat matches auto-injected, and the `reminisce` default. `1..=20`.

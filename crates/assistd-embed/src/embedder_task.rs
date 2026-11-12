@@ -123,9 +123,7 @@ where
             .map(|(id, text)| (to_target(id), text))
             .collect();
         let embedded = embed_rows(embedder, rows).await;
-        store
-            .store_embeddings(embedder.model(), embedded.embeddings)
-            .await?;
+        store.store_embeddings(embedded.embeddings).await?;
         if let Some(err) = embedded.deferred {
             return Err(err.into());
         }

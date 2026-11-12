@@ -15,8 +15,8 @@ use rusqlite::{OptionalExtension, Params, Row, Transaction};
 
 use crate::{
     AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, ContextChunk, DocumentId, Embedding,
-    EmbeddingHit, EmbeddingTarget, FileStamp, IndexPass, MemoryHit, MemoryId, MessageId, Result,
-    SemanticStore, SessionId, SessionScope, UnindexedRows,
+    EmbeddingHit, EmbeddingSpace, EmbeddingTarget, FileStamp, IndexPass, MemoryHit, MemoryId,
+    MessageId, Result, SemanticStore, SessionId, SessionScope, UnindexedRows,
 };
 
 use super::connection::SqliteHandle;
@@ -190,20 +190,20 @@ impl SemanticStore for SqliteSemanticStore {
             .await
     }
 
-    async fn drop_other_models(&self, model: &str) -> Result<u64> {
-        let model = model.to_string();
+    async fn adopt_embedding_space(
+        &self,
+        space: &EmbeddingSpace,
+    ) -> Result<Option<EmbeddingSpace>> {
+        let space = space.clone();
         self.handle
-            .write("drop_other_models", move |tx| {
-                let dropped = EMBEDDING_TABLES
-                    .iter()
-                    .map(|table| {
-                        tx.execute(
-                            &format!("DELETE FROM {table} WHERE model != ?1"),
-                            rusqlite::params![model],
-                        )
-                    })
-                    .sum::<rusqlite::Result<usize>>()?;
-                Ok(u64::try_from(dropped).unwrap_or(u64::MAX))
+            .write("adopt_embedding_space", move |tx| {
+                let recorded = recorded_space(tx)?;
+                if recorded.as_ref() == Some(&space) {
+                    return Ok(None);
+                }
+                recreate_embedding_tables(tx)?;
+                record_space(tx, &space)?;
+                Ok(recorded)
             })
             .await
     }
@@ -280,16 +280,15 @@ impl SemanticStore for SqliteSemanticStore {
             .await
     }
 
-    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()> {
+    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> Result<()> {
         if embeddings.is_empty() {
             return Ok(());
         }
-        let model = model.to_string();
         self.handle
             .write("store_embeddings", move |tx| {
                 embeddings
                     .iter()
-                    .try_for_each(|embedding| upsert_embedding(tx, &model, embedding).map(drop))
+                    .try_for_each(|embedding| upsert_embedding(tx, embedding).map(drop))
             })
             .await
     }
@@ -777,28 +776,60 @@ fn dot<T>(query: &[f32], stored: &[T], component: impl Fn(&T) -> f32) -> f32 {
     lanes.iter().sum::<f32>() + tail
 }
 
+/// The embedding space the stored vectors are in; `None` before one is adopted.
+fn recorded_space(tx: &Transaction<'_>) -> rusqlite::Result<Option<EmbeddingSpace>> {
+    tx.query_row(
+        "SELECT model, dim, server_args FROM embedding_meta",
+        [],
+        |row| {
+            Ok(EmbeddingSpace {
+                model: row.get(0)?,
+                dim: row.get(1)?,
+                server_args: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
+fn record_space(tx: &Transaction<'_>, space: &EmbeddingSpace) -> rusqlite::Result<usize> {
+    tx.execute(
+        "INSERT INTO embedding_meta (id, model, dim, server_args) VALUES (0, ?1, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE
+         SET model = excluded.model, dim = excluded.dim, server_args = excluded.server_args",
+        rusqlite::params![space.model, space.dim, space.server_args],
+    )
+}
+
+/// Empty every table in [`EMBEDDING_TABLES`] by dropping it and creating it again
+/// from its own definition, which costs nothing per row.
+fn recreate_embedding_tables(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    EMBEDDING_TABLES.iter().try_for_each(|table| {
+        let definition: String = tx.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )?;
+        tx.execute_batch(&format!("DROP TABLE {table}; {definition};"))
+    })
+}
+
 /// Upsert `embedding` into its target's table, with a `NULL` vector when it has
 /// none. The `SELECT` makes a since-deleted
 /// target, or a memory whose value has changed since, a no-op rather than an error
 /// or a vector for the wrong text.
-fn upsert_embedding(
-    tx: &Transaction<'_>,
-    model: &str,
-    embedding: &Embedding,
-) -> rusqlite::Result<usize> {
+fn upsert_embedding(tx: &Transaction<'_>, embedding: &Embedding) -> rusqlite::Result<usize> {
     let vector = embedding.vector.as_deref();
     match embedding.target {
-        EmbeddingTarget::Chunk(id) => upsert_chunk_embedding(tx, model, id, vector),
+        EmbeddingTarget::Chunk(id) => upsert_chunk_embedding(tx, id, vector),
         EmbeddingTarget::Memory(id) => tx
             .prepare_cached(
-                "INSERT INTO memory_embeddings (memory_id, model, vector)
-                 SELECT id, ?2, ?3 FROM memories WHERE id = ?1 AND value = ?4
-                 ON CONFLICT(memory_id) DO UPDATE
-                 SET model = excluded.model, vector = excluded.vector",
+                "INSERT INTO memory_embeddings (memory_id, vector)
+                 SELECT id, ?2 FROM memories WHERE id = ?1 AND value = ?3
+                 ON CONFLICT(memory_id) DO UPDATE SET vector = excluded.vector",
             )?
             .execute(rusqlite::params![
                 id,
-                model,
                 vector.map(vector_to_blob),
                 embedding.text
             ]),
@@ -809,28 +840,25 @@ fn upsert_embedding(
 /// message chunk, quantised for a document chunk.
 fn upsert_chunk_embedding(
     tx: &Transaction<'_>,
-    model: &str,
     chunk: ChunkId,
     vector: Option<&[f32]>,
 ) -> rusqlite::Result<usize> {
     let stored_for_message = tx
         .prepare_cached(
-            "INSERT INTO message_chunk_embeddings (chunk_id, model, vector)
-             SELECT id, ?2, ?3 FROM chunks WHERE id = ?1 AND message_id IS NOT NULL
-             ON CONFLICT(chunk_id) DO UPDATE
-             SET model = excluded.model, vector = excluded.vector",
+            "INSERT INTO message_chunk_embeddings (chunk_id, vector)
+             SELECT id, ?2 FROM chunks WHERE id = ?1 AND message_id IS NOT NULL
+             ON CONFLICT(chunk_id) DO UPDATE SET vector = excluded.vector",
         )?
-        .execute(rusqlite::params![chunk, model, vector.map(vector_to_blob)])?;
+        .execute(rusqlite::params![chunk, vector.map(vector_to_blob)])?;
     if stored_for_message > 0 {
         return Ok(stored_for_message);
     }
     tx.prepare_cached(
-        "INSERT INTO document_chunk_embeddings (chunk_id, model, vector)
-         SELECT id, ?2, ?3 FROM chunks WHERE id = ?1 AND document_id IS NOT NULL
-         ON CONFLICT(chunk_id) DO UPDATE
-         SET model = excluded.model, vector = excluded.vector",
+        "INSERT INTO document_chunk_embeddings (chunk_id, vector)
+         SELECT id, ?2 FROM chunks WHERE id = ?1 AND document_id IS NOT NULL
+         ON CONFLICT(chunk_id) DO UPDATE SET vector = excluded.vector",
     )?
-    .execute(rusqlite::params![chunk, model, vector.map(quantised_blob)])
+    .execute(rusqlite::params![chunk, vector.map(quantised_blob)])
 }
 
 /// Encode `vector` as the little-endian `f32` BLOB the message chunk and memory

@@ -21,10 +21,10 @@ use assistd_llm::{
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
-    FileStamp, HistoryRow, HistoryScope, IndexPass, MemoryHit, MemoryId, MessageId, MessageKind,
-    NoSemanticStore, PersistedMessage, PersistedRole, PersistedToolCall, SemanticStore, SessionId,
-    SessionScope, SqliteHandle, SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
-    UnindexedRows,
+    EmbeddingSpace, FileStamp, HistoryRow, HistoryScope, IndexPass, MemoryHit, MemoryId, MessageId,
+    MessageKind, NoSemanticStore, PersistedMessage, PersistedRole, PersistedToolCall,
+    SemanticStore, SessionId, SessionScope, SqliteHandle, SqliteTaskStore, SqliteTranscriptStore,
+    TaskStore, TranscriptStore, UnindexedRows,
 };
 use assistd_tools::{
     Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
@@ -2125,8 +2125,11 @@ impl SemanticStore for FixedHits {
     ) -> assistd_memory::Result<AdjacentChunks> {
         NoSemanticStore.adjacent_chunks(locator).await
     }
-    async fn drop_other_models(&self, model: &str) -> assistd_memory::Result<u64> {
-        NoSemanticStore.drop_other_models(model).await
+    async fn adopt_embedding_space(
+        &self,
+        space: &EmbeddingSpace,
+    ) -> assistd_memory::Result<Option<EmbeddingSpace>> {
+        NoSemanticStore.adopt_embedding_space(space).await
     }
     async fn count_missing(&self) -> assistd_memory::Result<UnindexedRows> {
         NoSemanticStore.count_missing().await
@@ -2147,12 +2150,8 @@ impl SemanticStore for FixedHits {
     ) -> assistd_memory::Result<Vec<(ChunkId, String)>> {
         NoSemanticStore.chunks_missing_embedding(after, limit).await
     }
-    async fn store_embeddings(
-        &self,
-        model: &str,
-        embeddings: Vec<Embedding>,
-    ) -> assistd_memory::Result<()> {
-        NoSemanticStore.store_embeddings(model, embeddings).await
+    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> assistd_memory::Result<()> {
+        NoSemanticStore.store_embeddings(embeddings).await
     }
     async fn clear_unembeddable(&self) -> assistd_memory::Result<u64> {
         NoSemanticStore.clear_unembeddable().await

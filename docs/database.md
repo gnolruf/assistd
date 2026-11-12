@@ -143,18 +143,21 @@ erDiagram
     }
     message_chunk_embeddings {
         int chunk_id PK, FK
-        text model
         blob vector "NULL when the model cannot embed the row"
     }
     document_chunk_embeddings {
         int chunk_id PK, FK
-        text model
         blob vector "quantised; NULL when the model cannot embed the row"
     }
     memory_embeddings {
         int memory_id PK, FK
-        text model
         blob vector "NULL when the model cannot embed the row"
+    }
+    embedding_meta {
+        int id PK "always 0"
+        text model
+        int dim
+        text server_args
     }
     tasks {
         int id PK
@@ -275,22 +278,25 @@ as an ordinary one.
   so a reset of `memory.db` costs only a re-index.
 - **`message_chunk_embeddings`** / **`document_chunk_embeddings`** /
   **`memory_embeddings`**: at most one vector per chunk or memory,
-  L2-normalised by the embedder so a dot product is cosine similarity,
-  and tagged with the `embedding.model` that produced it. A chunk's
+  L2-normalised by the embedder so a dot product is cosine similarity. A chunk's
   vector goes in the table for its owner's kind, so a chat search never
   reads document vectors. Message chunk and memory vectors are BLOBs of
   little-endian `f32`s. A document chunk vector is quantised to a
   quarter of that: a little-endian `f32` step, sized so the vector's
   largest component is 127 steps, then one `i8` count of steps per
-  dimension. When the
-  embedder comes up, vectors from any other model are deleted before
-  anything can search or write, so vectors from two models are never
-  compared.
+  dimension.
   A chunk or memory with no row here is pending, and the background
   embedding worker fills it in; a memory's vector is only stored if its
   value hasn't changed since it was read for embedding. A row with a
   `NULL` vector marks text the model rejected, so the worker does not
   retry it; `assistd memory reindex` clears those marks and tries again.
+- **`embedding_meta`**: the one row naming what produced every stored
+  vector: `embedding.model`, the vector dimension the server reported,
+  and `embedding.custom_args`. When the embedder comes up and any of the
+  three differs from the row, the three vector tables are dropped and
+  recreated empty before anything can search or write, so vectors from
+  two embedding spaces are never compared, and the worker embeds
+  everything again.
 
 Search (`recall`, `reminisce`) scans every vector of one source kind,
 chats or documents, on that kind's own read-only connection and keeps

@@ -192,6 +192,17 @@ pub struct Embedding {
     pub vector: Option<Vec<f32>>,
 }
 
+/// What produced a set of vectors; only vectors from one space are comparable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingSpace {
+    /// The embedding model, as `<owner>/<repo>:<quant>`.
+    pub model: String,
+    /// Components per vector.
+    pub dim: usize,
+    /// The extra arguments the embedding server was launched with.
+    pub server_args: String,
+}
+
 /// Rows neither embedded nor marked unembeddable, by table.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UnindexedRows {
@@ -256,10 +267,11 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         top_k: usize,
     ) -> Result<Vec<MemoryHit>>;
 
-    /// Delete every vector not embedded by `model`, returning how many. Must complete
-    /// before anything embedded by `model` is searched, so searches never compare
-    /// vectors from two models.
-    async fn drop_other_models(&self, model: &str) -> Result<u64>;
+    /// Record `space` as the one every stored vector is in. When a different space was
+    /// recorded, drop every vector and unembeddable mark and return that space. Must
+    /// complete before anything from `space` is stored or searched.
+    async fn adopt_embedding_space(&self, space: &EmbeddingSpace)
+    -> Result<Option<EmbeddingSpace>>;
 
     /// Rows neither embedded nor marked unembeddable.
     async fn count_missing(&self) -> Result<UnindexedRows>;
@@ -280,10 +292,10 @@ pub trait SemanticStore: fmt::Debug + Send + Sync + 'static {
         limit: usize,
     ) -> Result<Vec<(ChunkId, String)>>;
 
-    /// Upsert `embeddings` from `model` in one transaction, skipping targets deleted
-    /// since they were embedded and memories whose value no longer matches. One with
-    /// no vector marks its target unembeddable by `model`.
-    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> Result<()>;
+    /// Upsert `embeddings` in one transaction, skipping targets deleted since they
+    /// were embedded and memories whose value no longer matches. One with no vector
+    /// marks its target unembeddable.
+    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> Result<()>;
 
     /// Clear every unembeddable mark, returning how many, so those rows are missing again.
     async fn clear_unembeddable(&self) -> Result<u64>;
@@ -349,8 +361,11 @@ impl SemanticStore for NoSemanticStore {
     ) -> Result<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn drop_other_models(&self, _model: &str) -> Result<u64> {
-        Ok(0)
+    async fn adopt_embedding_space(
+        &self,
+        _space: &EmbeddingSpace,
+    ) -> Result<Option<EmbeddingSpace>> {
+        Ok(None)
     }
     async fn count_missing(&self) -> Result<UnindexedRows> {
         Ok(UnindexedRows::default())
@@ -369,7 +384,7 @@ impl SemanticStore for NoSemanticStore {
     ) -> Result<Vec<(ChunkId, String)>> {
         Ok(Vec::new())
     }
-    async fn store_embeddings(&self, _model: &str, _embeddings: Vec<Embedding>) -> Result<()> {
+    async fn store_embeddings(&self, _embeddings: Vec<Embedding>) -> Result<()> {
         Ok(())
     }
     async fn clear_unembeddable(&self) -> Result<u64> {

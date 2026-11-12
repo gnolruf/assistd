@@ -319,10 +319,7 @@ where
                 "reindex: embedding failed; rows stay unindexed"
             );
         }
-        if let Err(e) = semantic
-            .store_embeddings(embedder.model(), embedded.embeddings)
-            .await
-        {
+        if let Err(e) = semantic.store_embeddings(embedded.embeddings).await {
             warn!(
                 target: "assistd::memory",
                 kind = progress.kind.as_str(),

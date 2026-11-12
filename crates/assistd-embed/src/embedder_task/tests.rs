@@ -7,8 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use assistd_memory::{
-    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit, FileStamp,
-    IndexPass, MemoryHit, MemoryId, NoSemanticStore, Result as MemoryResult, UnindexedRows,
+    AdjacentChunks, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit, EmbeddingSpace,
+    FileStamp, IndexPass, MemoryHit, MemoryId, NoSemanticStore, Result as MemoryResult,
+    UnindexedRows,
 };
 
 use super::*;
@@ -62,7 +63,7 @@ impl Embedder for ScriptedEmbedder {
 struct PendingStore {
     missing_chunks: Mutex<BTreeMap<ChunkId, String>>,
     missing_memories: Mutex<BTreeMap<MemoryId, String>>,
-    stored: Mutex<Vec<(String, Embedding)>>,
+    stored: Mutex<Vec<Embedding>>,
 }
 
 fn page_after<Id: Copy + Ord>(
@@ -100,8 +101,11 @@ impl SemanticStore for PendingStore {
     ) -> MemoryResult<Vec<MemoryHit>> {
         Ok(Vec::new())
     }
-    async fn drop_other_models(&self, _model: &str) -> MemoryResult<u64> {
-        Ok(0)
+    async fn adopt_embedding_space(
+        &self,
+        _space: &EmbeddingSpace,
+    ) -> MemoryResult<Option<EmbeddingSpace>> {
+        Ok(None)
     }
     async fn count_missing(&self) -> MemoryResult<UnindexedRows> {
         Ok(UnindexedRows::default())
@@ -120,16 +124,13 @@ impl SemanticStore for PendingStore {
     ) -> MemoryResult<Vec<(ChunkId, String)>> {
         Ok(page_after(&self.missing_chunks, after, limit))
     }
-    async fn store_embeddings(&self, model: &str, embeddings: Vec<Embedding>) -> MemoryResult<()> {
+    async fn store_embeddings(&self, embeddings: Vec<Embedding>) -> MemoryResult<()> {
         for embedding in embeddings {
             match embedding.target {
                 EmbeddingTarget::Chunk(id) => self.missing_chunks.lock().unwrap().remove(&id),
                 EmbeddingTarget::Memory(id) => self.missing_memories.lock().unwrap().remove(&id),
             };
-            self.stored
-                .lock()
-                .unwrap()
-                .push((model.to_owned(), embedding));
+            self.stored.lock().unwrap().push(embedding);
         }
         Ok(())
     }
@@ -218,7 +219,7 @@ impl Harness {
             .lock()
             .unwrap()
             .iter()
-            .map(|(_, embedding)| match embedding.target {
+            .map(|embedding| match embedding.target {
                 EmbeddingTarget::Chunk(id) => (id.0, embedding.vector.clone()),
                 EmbeddingTarget::Memory(id) => panic!("unexpected memory {id}"),
             })
@@ -258,7 +259,7 @@ async fn worker_embeds_rows_already_missing_and_those_it_is_woken_for() {
             .lock()
             .unwrap()
             .iter()
-            .all(|(model, embedding)| model == "scripted" && embedding.vector.is_some())
+            .all(|embedding| embedding.vector.is_some())
     );
 
     harness.add_chunks(&["late"]);
