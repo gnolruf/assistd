@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput, io_error_nav};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Usage};
 use crate::policy::{FileScope, on_blocking_pool};
 
 /// `ls [-al] [PATH]...`: list each PATH (default CWD) as sorted
@@ -24,10 +25,10 @@ impl Command for LsCommand {
         "list directories or files (type, size, name); -a for dot-entries"
     }
 
-    fn help(&self) -> String {
-        "usage: ls [-al] [PATH]...\n\
-         \n\
-         List directory entries alphabetically, one per line, formatted as \
+    fn usage(&self) -> Usage {
+        Usage::new(
+            "[-al] [PATH]...",
+            "List directory entries alphabetically, one per line, formatted as \
          `<type>\\t<size>\\t<name>`. `<type>` is `dir`, `file`, or `symlink`; \
          `<size>` is bytes from the entry's (symlink-preserving) metadata. \
          A PATH that is not a directory prints one row for that path. \
@@ -37,24 +38,25 @@ impl Command for LsCommand {
          \n\
          Flags:\n  \
            -a  include dot-entries (hidden by default)\n  \
-           -l  long format (already the only format; accepted for familiarity)\n"
-            .to_string()
+           -l  long format (already the only format; accepted for familiarity)\n",
+        )
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
-        let (show_hidden, paths) = match parse_flags(&input.args) {
-            Ok(v) => v,
-            Err(msg) => return CommandOutput::usage_error("ls", msg, "ls -al PATH"),
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
+        let (show_hidden, paths) =
+            parse_flags(&input.args).map_err(|what| CommandError::usage(what, "ls -al PATH"))?;
+        let working_dir = [Word::bare(".")];
+        let paths = if paths.is_empty() {
+            &working_dir
+        } else {
+            paths
         };
-        let [path] = paths.as_slice() else {
-            return list_many(&input.scope, &paths, show_hidden).await;
+        let [path] = paths else {
+            return Ok(list_many(&input.scope, paths, show_hidden).await);
         };
-        match list_path(&input.scope, path, show_hidden).await {
-            Ok(Listing::Directory(rows) | Listing::Single(rows)) => {
-                CommandOutput::ok(rows.into_bytes())
-            }
-            Err(msg) => CommandOutput::failed(1, msg),
-        }
+        let (Listing::Directory(rows) | Listing::Single(rows)) =
+            list_path(&input.scope, path, show_hidden).await?;
+        Ok(CommandOutput::ok(rows.into_bytes()))
     }
 }
 
@@ -63,27 +65,24 @@ enum Listing {
     Single(String),
 }
 
-fn parse_flags(argv: &[String]) -> Result<(bool, Vec<&str>), String> {
+/// Whether `-a` is among the leading flag words, and the paths after them.
+fn parse_flags(argv: &[Word]) -> Result<(bool, &[Word]), String> {
     let mut show_hidden = false;
-    let mut paths = Vec::new();
+    let mut flag_words = 0;
     for arg in argv {
-        match arg.strip_prefix('-') {
-            Some(flags) if !flags.is_empty() && paths.is_empty() => {
-                for ch in flags.chars() {
-                    match ch {
-                        'a' => show_hidden = true,
-                        'l' => {}
-                        other => return Err(format!("unknown flag '-{other}'")),
-                    }
-                }
+        let Some(flags) = arg.text.strip_prefix('-').filter(|flags| !flags.is_empty()) else {
+            break;
+        };
+        for ch in flags.chars() {
+            match ch {
+                'a' => show_hidden = true,
+                'l' => {}
+                other => return Err(format!("unknown flag '-{other}'")),
             }
-            _ => paths.push(arg.as_str()),
         }
+        flag_words += 1;
     }
-    if paths.is_empty() {
-        paths.push(".");
-    }
-    Ok((show_hidden, paths))
+    Ok((show_hidden, &argv[flag_words..]))
 }
 
 fn kind_and_size(md: &Metadata) -> (&'static str, u64) {
@@ -98,17 +97,17 @@ fn kind_and_size(md: &Metadata) -> (&'static str, u64) {
     (kind, md.len())
 }
 
-async fn list_many(scope: &FileScope, paths: &[&str], show_hidden: bool) -> CommandOutput {
+async fn list_many(scope: &FileScope, paths: &[Word], show_hidden: bool) -> CommandOutput {
     let mut out = CommandOutput::ok(Vec::new());
     let mut files = Vec::new();
     let mut directories = Vec::new();
-    for &path in paths {
+    for path in paths {
         match list_path(scope, path, show_hidden).await {
-            Ok(Listing::Single(row)) => files.push((path, row)),
-            Ok(Listing::Directory(rows)) => directories.push((path, rows)),
-            Err(msg) => {
-                out.stderr.extend_from_slice(msg.as_bytes());
-                out.exit_code = 1;
+            Ok(Listing::Single(row)) => files.push((path.as_str(), row)),
+            Ok(Listing::Directory(rows)) => directories.push((path.as_str(), rows)),
+            Err(error) => {
+                out.stderr.extend_from_slice(error.line("ls").as_bytes());
+                out.exit_code = error.exit;
             }
         }
     }
@@ -127,12 +126,16 @@ async fn list_many(scope: &FileScope, paths: &[&str], show_hidden: bool) -> Comm
     out
 }
 
-async fn list_path(scope: &FileScope, path: &str, show_hidden: bool) -> Result<Listing, String> {
+async fn list_path(
+    scope: &FileScope,
+    path: &Word,
+    show_hidden: bool,
+) -> Result<Listing, CommandError> {
     let scope = scope.clone();
-    let target = PathBuf::from(path);
+    let target = PathBuf::from(path.as_str());
     on_blocking_pool(move || read_listing(&scope, &target, show_hidden))
         .await
-        .map_err(|e| io_error_nav("ls", path, &e))
+        .map_err(|e| CommandError::io(path, &e))
 }
 
 fn read_listing(scope: &FileScope, path: &Path, show_hidden: bool) -> io::Result<Listing> {

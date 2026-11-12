@@ -10,12 +10,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
+use assistd_tools::chain::Word;
 use assistd_tools::commands::{BashCommand, BashPolicyCfg, WriteCommand, WritePolicyCfg};
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
-    Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
-    ConfirmationRequest, DenyAllGate, FileScope, Protected, SandboxInfo, SandboxRequest,
-    SearchPath, SharedDirs, TurnContext, Unattended,
+    Allowlist, AlwaysAllowGate, Approval, CommandInput, ConfirmationGate, ConfirmationRequest,
+    DenyAllGate, FileScope, Protected, SandboxInfo, SandboxRequest, SearchPath, SharedDirs,
+    TurnContext, Unattended, run_rendered,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
@@ -52,7 +53,7 @@ fn no_sandbox() -> Arc<SandboxInfo> {
 
 fn input(script: &str) -> CommandInput {
     CommandInput {
-        args: vec![script.to_string()],
+        args: vec![Word::quoted(script)],
         stdin: None,
         scope: FileScope::Host,
         turn: TurnContext::default(),
@@ -116,7 +117,7 @@ impl ConfirmationGate for RecordingGate {
 async fn an_unvetted_program_asks_the_gate_and_runs_when_approved() {
     let gate = RecordingGate::answering(Approval::Once);
     let cmd = bash_with(gate.clone(), no_sandbox());
-    let out = cmd.run(input("nproc >/dev/null && echo ran")).await;
+    let out = run_rendered(&cmd, input("nproc >/dev/null && echo ran")).await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"ran\n");
     let asked = gate.asked.lock();
@@ -191,7 +192,7 @@ async fn only_edits_strictly_inside_the_edit_scope_may_run_unasked() {
         ),
         (format!("ln -s ../hook {}/link", scope_dir.display()), false),
     ] {
-        let out = cmd.run(input(&script)).await;
+        let out = run_rendered(&cmd, input(&script)).await;
         assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
         let request = gate.asked.lock().pop().expect("an edit asks the gate");
         let is_scoped = matches!(request.unattended, Unattended::ScopedEdit);
@@ -219,18 +220,19 @@ async fn a_redirect_through_a_symlink_in_scratch_is_an_edit_of_where_it_leads() 
     };
     let cmd = BashCommand::new(Arc::new(cfg), no_sandbox(), gate.clone());
 
-    let out = cmd
-        .run(input(&format!("echo x > {}/plain", scratch_dir.display())))
-        .await;
+    let out = run_rendered(
+        &cmd,
+        input(&format!("echo x > {}/plain", scratch_dir.display())),
+    )
+    .await;
     assert_eq!(out.exit_code, 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(gate.asked.lock().is_empty());
 
-    let out = cmd
-        .run(input(&format!(
-            "echo x > {}/link/hook",
-            scratch_dir.display()
-        )))
-        .await;
+    let out = run_rendered(
+        &cmd,
+        input(&format!("echo x > {}/link/hook", scratch_dir.display())),
+    )
+    .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(gate.asked.lock().len(), 1);
     assert!(!elsewhere.path().join("hook").exists());
@@ -245,7 +247,7 @@ async fn run_time_command_names_ask_the_gate() {
         let script = template.replace("{}", &target.to_string_lossy());
 
         let cmd = bash_with(Arc::new(DenyAllGate), no_sandbox());
-        let out = cmd.run(input(&script)).await;
+        let out = run_rendered(&cmd, input(&script)).await;
         assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -269,7 +271,7 @@ async fn running_a_script_file_asks_the_gate_without_offering_always() {
 
     let gate = RecordingGate::answering(Approval::Deny);
     let cmd = bash_with(gate.clone(), no_sandbox());
-    let out = cmd.run(input(&script)).await;
+    let out = run_rendered(&cmd, input(&script)).await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{script}");
     assert!(target.exists(), "{script}: the script must not have run");
     let asked = gate.asked.lock();
@@ -282,14 +284,16 @@ async fn running_a_script_file_asks_the_gate_without_offering_always() {
 #[tokio::test]
 async fn read_only_programs_run_without_asking() {
     let cmd = bash_with(Arc::new(PanicGate), no_sandbox());
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["tr a-z A-Z".into()],
+    let out = run_rendered(
+        &cmd,
+        CommandInput {
+            args: vec![Word::quoted("tr a-z A-Z")],
             stdin: Some(b"hi".to_vec()),
             scope: FileScope::Host,
             turn: TurnContext::default(),
-        })
-        .await;
+        },
+    )
+    .await;
     assert_eq!(out.exit_code, 0);
     assert_eq!(out.stdout, b"HI");
 }
@@ -301,9 +305,7 @@ async fn always_allow_adds_the_offered_programs_for_good() {
     let script = "nproc --all";
 
     let gate = RecordingGate::answering(Approval::Always);
-    let out = bash_approving(&store, gate.clone())
-        .run(input(script))
-        .await;
+    let out = run_rendered(&bash_approving(&store, gate.clone()), input(script)).await;
     assert_eq!(
         out.exit_code,
         0,
@@ -320,9 +322,7 @@ async fn always_allow_adds_the_offered_programs_for_good() {
     let saved = std::fs::read_to_string(&store).expect("approvals saved");
     assert!(saved.contains("name = \"nproc\""), "{saved}");
 
-    let out = bash_approving(&store, Arc::new(PanicGate))
-        .run(input(script))
-        .await;
+    let out = run_rendered(&bash_approving(&store, Arc::new(PanicGate)), input(script)).await;
     assert_eq!(
         out.exit_code,
         0,
@@ -339,9 +339,11 @@ async fn bwrap_hides_the_host_tmp() {
     };
     let host_file = tempfile::NamedTempFile::new_in("/tmp").expect("host /tmp file");
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd
-        .run(input(&format!("test -e {}", host_file.path().display())))
-        .await;
+    let out = run_rendered(
+        &cmd,
+        input(&format!("test -e {}", host_file.path().display())),
+    )
+    .await;
     assert_eq!(out.exit_code, 1, "host /tmp is visible inside the sandbox");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("its own empty /tmp: "), "{stderr}");
@@ -374,14 +376,16 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
     let cfg = WritePolicyCfg::new(vec![scratch.path().to_path_buf()]).expect("allowlist");
     let write = WriteCommand::new(Arc::new(cfg), Arc::new(PanicGate), sandbox.clone());
     let from_write = scratch.path().join("from-write.txt");
-    let out = write
-        .run(CommandInput {
-            args: vec![from_write.to_string_lossy().into_owned(), "hi".into()],
+    let out = run_rendered(
+        &write,
+        CommandInput {
+            args: vec![Word::bare(from_write.to_string_lossy()), Word::bare("hi")],
             stdin: None,
             scope: FileScope::Host,
             turn: TurnContext::default(),
-        })
-        .await;
+        },
+    )
+    .await;
     assert_eq!(out.exit_code, 0);
     assert!(
         out.stderr.is_empty(),
@@ -398,7 +402,7 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
         from_bash.display(),
         spill.path().join("cmd-2.txt").display(),
     );
-    let out = bash.run(input(&script)).await;
+    let out = run_rendered(&bash, input(&script)).await;
     assert_eq!(out.stdout, b"read-only\n");
     assert!(
         out.stderr.is_empty(),
@@ -415,7 +419,7 @@ async fn bwrap_unshares_network_namespace() {
     };
     let host = std::fs::read_link("/proc/self/ns/net").expect("host net namespace");
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input("readlink /proc/self/ns/net")).await;
+    let out = run_rendered(&cmd, input("readlink /proc/self/ns/net")).await;
     assert_eq!(out.exit_code, 0);
     let inside = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert!(
@@ -434,7 +438,7 @@ async fn bwrap_commands_run_in_a_memory_capped_scope_as_first_oom_victims() {
     let script = "cat /proc/self/oom_score_adj \
                   /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max \
                   /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/pids.max";
-    let out = cmd.run(input(script)).await;
+    let out = run_rendered(&cmd, input(script)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.exit_code, 0, "{stderr}");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -469,7 +473,7 @@ async fn assert_host_socket_unreachable(sandbox: Arc<SandboxInfo>) {
         path.display()
     );
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input(&probe)).await;
+    let out = run_rendered(&cmd, input(&probe)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.stdout.is_empty(), "reached a host Unix socket");
     assert!(stderr.contains("PermissionError"), "{stderr}");
@@ -496,7 +500,7 @@ async fn networked_bwrap_cannot_reach_abstract_sockets() {
          print(\"connected\")'"
     );
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input(&probe)).await;
+    let out = run_rendered(&cmd, input(&probe)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.stdout.is_empty(), "reached the host's abstract socket");
     assert!(stderr.contains("PermissionError"), "{stderr}");
@@ -510,7 +514,7 @@ async fn bwrap_blocks_writes_under_usr_and_etc() {
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     for dir in ["/usr", "/etc"] {
         let unique = format!("{dir}/assistd-sandbox-test-{}", std::process::id());
-        let out = cmd.run(input(&format!("touch {unique}"))).await;
+        let out = run_rendered(&cmd, input(&format!("touch {unique}"))).await;
         let combined = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -533,7 +537,7 @@ async fn bwrap_dev_holds_no_block_devices() {
         return;
     };
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input("find /dev -type b")).await;
+    let out = run_rendered(&cmd, input("find /dev -type b")).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.exit_code, 0, "{stderr}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{stderr}");
@@ -546,7 +550,7 @@ async fn bwrap_proc_shows_only_the_sandbox_processes() {
     };
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let list_commands = "for p in /proc/[0-9]*; do read -r c < \"$p/comm\" && echo \"$c\"; done";
-    let out = cmd.run(input(list_commands)).await;
+    let out = run_rendered(&cmd, input(list_commands)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.exit_code, 0, "{stderr}");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -563,7 +567,7 @@ async fn bwrap_run_holds_no_dbus_socket() {
         return;
     };
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
-    let out = cmd.run(input("find /run -type s")).await;
+    let out = run_rendered(&cmd, input("find /run -type s")).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.exit_code, 0, "{stderr}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{stderr}");
@@ -578,7 +582,7 @@ async fn bwrap_caps_a_renamed_fork_bomb() {
     let cmd = bash_with(Arc::new(AlwaysAllowGate), sandbox);
     let bomb = "f(){ if (( $1 < 8 )); then f $(($1+1)) | f $(($1+1)) & wait; else sleep 1; fi; }; \
                 f 0; echo ended";
-    let out = cmd.run(input(bomb)).await;
+    let out = run_rendered(&cmd, input(bomb)).await;
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.stdout, b"ended\n", "exit {}: {stderr}", out.exit_code);
     assert!(

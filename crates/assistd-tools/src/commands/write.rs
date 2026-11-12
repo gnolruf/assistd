@@ -12,7 +12,8 @@ use rustix::io::Errno;
 use tokio::io::AsyncWriteExt;
 
 use crate::TurnContext;
-use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Action, Analysis, Approval, Class, Confirmation, ConfirmationGate, ConfirmationRequest, Effect,
@@ -117,7 +118,7 @@ impl WriteCommand {
         target: WriteTarget,
         content: &[u8],
         raw_path: &str,
-    ) -> Result<PathBuf, CommandOutput> {
+    ) -> Result<PathBuf, CommandError> {
         if self
             .scratch()
             .is_some_and(|dir| target.path.starts_with(dir))
@@ -157,7 +158,7 @@ impl WriteCommand {
         self.sandbox.shared.scratch.as_deref()
     }
 
-    fn write_cancelled(&self, raw_path: &str) -> CommandOutput {
+    fn write_cancelled(&self, raw_path: &str) -> CommandError {
         let recovery = match self.scratch() {
             Some(scratch) => format!(
                 "a path under {}, or ask the user to make this change",
@@ -165,15 +166,11 @@ impl WriteCommand {
             ),
             None => "asking the user to make this change".to_string(),
         };
-        CommandOutput::failed(
+        CommandError::new(
             POLICY_DENIED_EXIT,
-            error_line(
-                "write",
-                format_args!("{raw_path}: write cancelled by user"),
-                Hint::Try,
-                recovery,
-            )
-            .into_bytes(),
+            format_args!("{raw_path}: write cancelled by user"),
+            Hint::Try,
+            recovery,
         )
     }
 }
@@ -188,12 +185,10 @@ impl Command for WriteCommand {
         "write a file (allowlist-gated) from stdin or inline args"
     }
 
-    fn help(&self) -> String {
+    fn usage(&self) -> Usage {
         let sharing_hint = self.sandbox.sharing_hint();
-        format!(
-            "usage: write PATH [CONTENT...]\n\
-         \n\
-         Write bytes to PATH. Two shapes:\n  \
+        let body = format!(
+            "Write bytes to PATH. Two shapes:\n  \
            `echo \"hi\" | write PATH`   - stdin is the file content (pipeline form)\n  \
            `write PATH hello world`   - args beyond PATH are joined by spaces and written\n\
          \n\
@@ -209,7 +204,8 @@ impl Command for WriteCommand {
          Tilde expansion is supported. Exit 126 on policy denial or a \
          declined confirmation, 1 on write failure (permissions, \
          no-such-dir, etc.).\n"
-        )
+        );
+        Usage::new("PATH [CONTENT...]", body)
     }
 
     /// The path expands its own `~`, and content is written as given, so a glob in either
@@ -218,45 +214,36 @@ impl Command for WriteCommand {
         false
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
-        let content: Vec<u8> = match (input.args.split_first(), input.stdin) {
-            (Some((_, words @ [_, ..])), _) => words.join(" ").into_bytes(),
-            (Some(_), Some(stdin)) => stdin,
-            (None, _) | (Some(_), None) => return CommandOutput::usage(self.help()),
-        };
-        let raw_path = input.args[0].clone();
-
-        let write_target = match self.resolve(raw_path.clone()).await {
-            Ok(path) => path,
-            Err(e) => {
-                return CommandOutput::failed(
-                    POLICY_DENIED_EXIT,
-                    e.error_line(&raw_path, self.scratch()).into_bytes(),
-                );
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
+        let (raw_path, content): (&Word, Vec<u8>) = match (input.args.split_first(), input.stdin) {
+            (Some((path, words @ [_, ..])), _) => {
+                (path, Word::joined_by_spaces(words).into_bytes())
             }
+            (Some((path, [])), Some(stdin)) => (path, stdin),
+            (None, _) | (Some(_), None) => return Ok(CommandOutput::usage(self.help())),
         };
 
-        let path = match self
-            .authorized(&input.turn, write_target, &content, &raw_path)
+        let write_target = self
+            .resolve(raw_path.text.clone())
             .await
-        {
-            Ok(path) => path,
-            Err(refusal) => return refusal,
-        };
+            .map_err(|e| e.refusal(raw_path.as_str(), self.scratch()))?;
+        let path = self
+            .authorized(&input.turn, write_target, &content, raw_path.as_str())
+            .await?;
 
         let hidden_by = self.sandbox.private_dir_hiding(path.clone()).await;
-        match write_without_symlinks(path, content).await {
-            Ok(()) => CommandOutput {
-                stderr: hidden_by
-                    .map(|dir| {
-                        hidden_from_bash_note(&raw_path, &dir, &self.sandbox.sharing_hint())
-                            .into_bytes()
-                    })
-                    .unwrap_or_default(),
-                ..CommandOutput::default()
-            },
-            Err(failure) => failure.output(&raw_path),
-        }
+        write_without_symlinks(path, content)
+            .await
+            .map_err(|failure| failure.error(raw_path))?;
+        Ok(CommandOutput {
+            stderr: hidden_by
+                .map(|dir| {
+                    hidden_from_bash_note(raw_path.as_str(), &dir, &self.sandbox.sharing_hint())
+                        .into_bytes()
+                })
+                .unwrap_or_default(),
+            ..CommandOutput::default()
+        })
     }
 }
 
@@ -279,10 +266,10 @@ enum PathResolveError {
 }
 
 impl PathResolveError {
-    fn error_line(&self, raw_path: &str, scratch: Option<&Path>) -> String {
+    fn refusal(&self, raw_path: &str, scratch: Option<&Path>) -> CommandError {
         if let (Self::NotAllowlisted, Some(scratch)) = (self, scratch) {
-            return error_line(
-                "write",
+            return CommandError::new(
+                POLICY_DENIED_EXIT,
                 format_args!("{raw_path}: path not in writable allowlist"),
                 Hint::Try,
                 format_args!("a path under {}", scratch.display()),
@@ -325,7 +312,7 @@ impl PathResolveError {
                 "asking the user to make this change themselves",
             ),
         };
-        error_line("write", what, hint, recovery)
+        CommandError::new(POLICY_DENIED_EXIT, what, hint, recovery)
     }
 }
 
@@ -336,21 +323,15 @@ enum WriteFailure {
 }
 
 impl WriteFailure {
-    fn output(&self, raw_path: &str) -> CommandOutput {
+    fn error(&self, raw_path: &Word) -> CommandError {
         match self {
-            Self::NotRegularFile => CommandOutput::failed(
+            Self::NotRegularFile => CommandError::new(
                 POLICY_DENIED_EXIT,
-                error_line(
-                    "write",
-                    format_args!("{raw_path}: not a regular file (device, pipe, or socket)"),
-                    Hint::Try,
-                    "a path to a regular file, or to one that does not exist yet",
-                )
-                .into_bytes(),
+                format_args!("{raw_path}: not a regular file (device, pipe, or socket)"),
+                Hint::Try,
+                "a path to a regular file, or to one that does not exist yet",
             ),
-            Self::Io(e) => {
-                CommandOutput::failed(1, io_error_nav("write", raw_path, e).into_bytes())
-            }
+            Self::Io(e) => CommandError::io(raw_path, e),
         }
     }
 }
@@ -510,16 +491,12 @@ fn confirmation_request(
     }
 }
 
-fn write_refused(raw_path: &str, why: &str) -> CommandOutput {
-    CommandOutput::failed(
+fn write_refused(raw_path: &str, why: &str) -> CommandError {
+    CommandError::new(
         POLICY_DENIED_EXIT,
-        error_line(
-            "write",
-            format_args!("{raw_path}: refused in every mode: it {why}"),
-            Hint::Try,
-            "a path inside the folder instead",
-        )
-        .into_bytes(),
+        format_args!("{raw_path}: refused in every mode: it {why}"),
+        Hint::Try,
+        "a path inside the folder instead",
     )
 }
 

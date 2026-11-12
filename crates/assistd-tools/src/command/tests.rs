@@ -14,14 +14,20 @@ use crate::policy::{
 #[test]
 fn unmatched_glob_reads_as_a_glob_not_a_missing_file() {
     let e = io::Error::from(ErrorKind::NotFound);
+    let line = |path: &Word| CommandError::io(path, &e).line("ls");
     assert_eq!(
-        io_error_nav("ls", "/tmp/*.db-shm", &e),
+        line(&Word::bare("/tmp/*.db-shm")),
         "[error] ls: no file matches /tmp/*.db-shm. Try: ls /tmp to see what is there\n"
     );
-    assert_eq!(
-        io_error_nav("ls", "/tmp/notes.txt", &e),
-        "[error] ls: file not found: /tmp/notes.txt. Use: ls /tmp to see what is there\n"
-    );
+    for literal in [
+        Word::bare("/tmp/notes.txt"),
+        Word::quoted("/tmp/[notes].txt"),
+    ] {
+        assert_eq!(
+            line(&literal),
+            format!("[error] ls: file not found: {literal}. Use: ls /tmp to see what is there\n")
+        );
+    }
 }
 
 #[test]
@@ -33,13 +39,16 @@ fn parent_dir_stops_at_the_first_metacharacter() {
     assert_eq!(parent_dir("*.rs"), ".");
 }
 
-async fn run_cmd<C: Command>(cmd: C, args: Vec<String>) -> CommandOutput {
-    cmd.run(CommandInput {
-        args,
-        stdin: None,
-        scope: FileScope::Host,
-        turn: TurnContext::default(),
-    })
+async fn run_cmd<C: Command>(cmd: C, args: &[&str]) -> CommandOutput {
+    run_rendered(
+        &cmd,
+        CommandInput {
+            args: args.iter().copied().map(Word::bare).collect(),
+            stdin: None,
+            scope: FileScope::Host,
+            turn: TurnContext::default(),
+        },
+    )
     .await
 }
 
@@ -62,27 +71,23 @@ fn wm_without_compositor() -> WmCommand {
 /// One failing invocation per command that writes its own error lines (`echo` cannot fail,
 /// and the text programs print GNU's), paired with the command name its line must carry.
 async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
-    let missing = || vec!["/nonexistent/assistd-convention-test".to_string()];
+    let missing = &["/nonexistent/assistd-convention-test"];
     vec![
-        ("cat", run_cmd(CatCommand, missing()).await),
-        ("ls", run_cmd(LsCommand, missing()).await),
+        ("cat", run_cmd(CatCommand, missing).await),
+        ("ls", run_cmd(LsCommand, missing).await),
         (
             "see",
-            run_cmd(
-                test_see(),
-                vec!["/nonexistent/assistd-convention-test.png".into()],
-            )
-            .await,
+            run_cmd(test_see(), &["/nonexistent/assistd-convention-test.png"]).await,
         ),
         (
             "screenshot",
-            run_cmd(test_screenshot(), vec!["--bogus-flag".into()]).await,
+            run_cmd(test_screenshot(), &["--bogus-flag"]).await,
         ),
         (
             "write",
             run_cmd(
                 permissive_write(),
-                vec!["/nonexistent/assistd-convention-test".into(), "x".into()],
+                &["/nonexistent/assistd-convention-test", "x"],
             )
             .await,
         ),
@@ -93,7 +98,7 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
                     ApprovalGate::new(Arc::new(AlwaysAllowGate), Arc::new(Approvals::unsaved())),
                     None,
                 ),
-                vec!["fetch".into(), "file:///etc/passwd".into()],
+                &["fetch", "file:///etc/passwd"],
             )
             .await,
         ),
@@ -101,17 +106,13 @@ async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
             "bash",
             run_cmd(
                 bash_declining_every_confirmation(),
-                vec!["touch /nonexistent/assistd-convention-test".into()],
+                &["touch /nonexistent/assistd-convention-test"],
             )
             .await,
         ),
         (
             "wm",
-            run_cmd(
-                wm_without_compositor(),
-                vec!["focus".into(), "Firefox".into()],
-            )
-            .await,
+            run_cmd(wm_without_compositor(), &["focus", "Firefox"]).await,
         ),
     ]
 }

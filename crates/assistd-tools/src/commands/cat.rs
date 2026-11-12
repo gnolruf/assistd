@@ -4,7 +4,8 @@ use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::chain::OUTPUT_MAX;
-use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::commands::{read_regular_file, read_regular_head};
 use crate::policy::FileScope;
 
@@ -32,92 +33,82 @@ impl Command for CatCommand {
         "read text files or stdin (-n numbers lines); binary rejected"
     }
 
-    fn help(&self) -> String {
-        "usage: cat [-bn] [FILE]...\n\
-         \n\
-         Concatenate files, or echo stdin if no files given. Binary files \
+    fn usage(&self) -> Usage {
+        Usage::new(
+            "[-bn] [FILE]...",
+            "Concatenate files, or echo stdin if no files given. Binary files \
          are rejected so their raw bytes don't pollute the model's context.\n\
          \n\
          Flags:\n  \
            -b  print metadata (mime, size) instead of content (safe for binary files)\n  \
            -n  prefix each output line with its 1-based line number\n\
          \n\
-         For image files, use `see PATH` to attach them as a vision input.\n"
-            .to_string()
+         For image files, use `see PATH` to attach them as a vision input.\n",
+        )
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
-        let (flags, files) = match parse_flags(&input.args) {
-            Ok(v) => v,
-            Err(msg) => {
-                return CommandOutput::usage_error("cat", msg, "cat -b FILE or cat -n FILE");
-            }
-        };
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
+        let (flags, files) = parse_flags(&input.args)
+            .map_err(|what| CommandError::usage(what, "cat -b FILE or cat -n FILE"))?;
 
         if files.is_empty() {
             let Some(stdin) = input.stdin else {
-                return CommandOutput::usage(self.help());
+                return Ok(CommandOutput::usage(self.help()));
             };
             if flags.metadata_only {
-                return CommandOutput::ok(describe(&stdin, stdin.len() as u64, None));
+                return Ok(CommandOutput::ok(describe(
+                    &stdin,
+                    stdin.len() as u64,
+                    None,
+                )));
             }
-            return CommandOutput::ok(number_if(stdin, &flags));
+            return Ok(CommandOutput::ok(number_if(stdin, &flags)));
         }
 
         let mut out = Vec::new();
-        for path in &files {
+        for path in files {
             let chunk = if flags.metadata_only {
-                read_metadata(&input.scope, path).await
+                read_metadata(&input.scope, path).await?
             } else {
-                read_text(&input.scope, path).await
+                read_text(&input.scope, path).await?
             };
-            match chunk {
-                Ok(bytes) => out.extend_from_slice(&bytes),
-                Err(failure) => return failure,
-            }
+            out.extend_from_slice(&chunk);
             if out.len() > OUTPUT_MAX {
                 break;
             }
         }
-        CommandOutput::ok(number_if(out, &flags))
+        Ok(CommandOutput::ok(number_if(out, &flags)))
     }
 }
 
-async fn read_metadata(scope: &FileScope, path: &str) -> Result<Vec<u8>, CommandOutput> {
-    let (head, size) = read_regular_head(scope, path, SNIFF_LEN as u64)
+async fn read_metadata(scope: &FileScope, path: &Word) -> Result<Vec<u8>, CommandError> {
+    let (head, size) = read_regular_head(scope, path.as_str(), SNIFF_LEN as u64)
         .await
-        .map_err(|e| read_failed(path, &e))?;
-    Ok(describe(&head, size, Some(path)))
+        .map_err(|e| CommandError::io(path, &e))?;
+    Ok(describe(&head, size, Some(path.as_str())))
 }
 
-async fn read_text(scope: &FileScope, path: &str) -> Result<Vec<u8>, CommandOutput> {
-    let bytes = read_regular_file(scope, path)
+async fn read_text(scope: &FileScope, path: &Word) -> Result<Vec<u8>, CommandError> {
+    let bytes = read_regular_file(scope, path.as_str())
         .await
-        .map_err(|e| read_failed(path, &e))?;
+        .map_err(|e| CommandError::io(path, &e))?;
     let Some(mime) = sniff_binary(&bytes) else {
         return Ok(bytes);
     };
     let size = human_size(bytes.len() as u64);
-    let msg = if mime.starts_with("image/") {
-        error_line(
-            "cat",
+    Err(if mime.starts_with("image/") {
+        CommandError::failed(
             format_args!("binary image file ({size}): {path}"),
             Hint::Use,
             format_args!("see {path}"),
         )
     } else {
-        error_line(
-            "cat",
+        CommandError::failed(
             format_args!("binary {mime} file ({size}): {path}"),
             Hint::Use,
             format_args!("cat -b {path}"),
         )
-    };
-    Err(CommandOutput::failed(1, msg.into_bytes()))
-}
-
-fn read_failed(path: &str, e: &std::io::Error) -> CommandOutput {
-    CommandOutput::failed(1, io_error_nav("cat", path, e).into_bytes())
+    })
 }
 
 fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
@@ -132,12 +123,12 @@ fn number_if(bytes: Vec<u8>, flags: &Flags) -> Vec<u8> {
     out
 }
 
-fn parse_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
+fn parse_flags(argv: &[Word]) -> Result<(Flags, Vec<&Word>), String> {
     let mut flags = Flags::default();
     let mut files = Vec::with_capacity(argv.len());
     for arg in argv {
-        let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else {
-            files.push(arg.clone());
+        let Some(letters) = arg.text.strip_prefix('-').filter(|l| !l.is_empty()) else {
+            files.push(arg);
             continue;
         };
         for ch in letters.chars() {

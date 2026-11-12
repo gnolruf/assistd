@@ -7,6 +7,7 @@ use assistd_utils::path::expand_tilde_from_env;
 use assistd_wm::{ExecCommand, UnquotableCommand, WorkspaceId};
 
 use super::desktop_entry::{DesktopEntry, EntryError, Targets};
+use crate::chain::Word;
 use crate::command::Hint;
 
 /// Terminal emulators a `Terminal=true` application runs in, by preference,
@@ -36,7 +37,7 @@ pub(super) struct OpenArgs {
 impl OpenArgs {
     /// # Errors
     /// What could not be understood, for a usage error.
-    pub(super) fn parse(args: &[String]) -> Result<Self, String> {
+    pub(super) fn parse(args: &[Word]) -> Result<Self, String> {
         let mut workspace = None;
         let mut cwd = None;
         let mut rest = args;
@@ -47,10 +48,10 @@ impl OpenArgs {
                     rest = tail;
                 }
                 [flag, value, tail @ ..] if flag == "--cwd" => {
-                    cwd = Some(value.clone());
+                    cwd = Some(value.text.clone());
                     rest = tail;
                 }
-                [flag, ..] if flag.starts_with('-') => {
+                [flag, ..] if flag.text.starts_with('-') => {
                     return Err(format!(
                         "'{flag}' is not an option, or is missing its value"
                     ));
@@ -59,8 +60,8 @@ impl OpenArgs {
                     return Ok(Self {
                         workspace,
                         cwd,
-                        app: app.clone(),
-                        targets: targets.to_vec(),
+                        app: app.text.clone(),
+                        targets: targets.iter().map(|target| target.text.clone()).collect(),
                     });
                 }
                 [] => return Err("no application named".to_string()),

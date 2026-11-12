@@ -21,7 +21,6 @@ async fn run(registry: &CommandRegistry, line: &str) -> CommandOutput {
         &parse_chain(line).expect("parses"),
         registry,
         &TurnContext::default(),
-        None,
     )
     .await
 }

@@ -8,6 +8,7 @@ use assistd_ipc::PermissionMode;
 use super::*;
 use crate::TurnContext;
 use crate::command::CommandRegistry;
+use crate::command::run_rendered;
 use crate::commands::test_support::{RecordingGate, router_in};
 use crate::policy::{AlwaysAllowGate, DenyAllGate, GuardRoots, IpcConfirmationGate};
 
@@ -31,7 +32,7 @@ fn scoped_edit(path: &str) -> WriteTarget {
 
 fn args_writing(path: &Path) -> CommandInput {
     CommandInput {
-        args: vec![path.display().to_string(), "hi".into()],
+        args: vec![Word::bare(path.display().to_string()), Word::bare("hi")],
         stdin: None,
         scope: crate::FileScope::Host,
         turn: TurnContext::default(),
@@ -39,17 +40,19 @@ fn args_writing(path: &Path) -> CommandInput {
 }
 
 async fn write_under(allowed: &Path, args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
-    WriteCommand::new(
-        cfg_from(&[allowed]),
-        Arc::new(AlwaysAllowGate),
-        SandboxInfo::none(),
+    run_rendered(
+        &WriteCommand::new(
+            cfg_from(&[allowed]),
+            Arc::new(AlwaysAllowGate),
+            SandboxInfo::none(),
+        ),
+        CommandInput {
+            args: args.iter().copied().map(Word::bare).collect(),
+            stdin: stdin.map(<[u8]>::to_vec),
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        },
     )
-    .run(CommandInput {
-        args: args.iter().map(ToString::to_string).collect(),
-        stdin: stdin.map(<[u8]>::to_vec),
-        scope: crate::FileScope::Host,
-        turn: TurnContext::default(),
-    })
     .await
 }
 
@@ -228,17 +231,19 @@ async fn hidden_directory_listed_as_a_prefix_is_writable() {
     let hidden = dir.path().join(".notes");
     std::fs::create_dir(&hidden).unwrap();
     let target = hidden.join("todo.txt");
-    let out = WriteCommand::new(
-        cfg_from(&[dir.path(), hidden.as_path()]),
-        Arc::new(AlwaysAllowGate),
-        SandboxInfo::none(),
+    let out = run_rendered(
+        &WriteCommand::new(
+            cfg_from(&[dir.path(), hidden.as_path()]),
+            Arc::new(AlwaysAllowGate),
+            SandboxInfo::none(),
+        ),
+        CommandInput {
+            args: vec![Word::bare(target.to_string_lossy()), Word::bare("hi")],
+            stdin: None,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        },
     )
-    .run(CommandInput {
-        args: vec![target.to_string_lossy().into_owned(), "hi".into()],
-        stdin: None,
-        scope: crate::FileScope::Host,
-        turn: TurnContext::default(),
-    })
     .await;
     assert_eq!(
         out.exit_code,
@@ -280,7 +285,6 @@ async fn globs_stay_literal_and_a_missing_content_never_truncates() {
                 &crate::chain::parse_chain(&line).unwrap(),
                 registry,
                 &TurnContext::default(),
-                None,
             )
             .await
         }
@@ -377,17 +381,19 @@ async fn refuses_a_protected_directory_inside_a_writable_one() {
         .expect("non-empty allowlist")
         .protecting(vec![canonical]);
     let target = config.join("config.toml");
-    let out = WriteCommand::new(
-        Arc::new(cfg),
-        Arc::new(AlwaysAllowGate),
-        SandboxInfo::none(),
+    let out = run_rendered(
+        &WriteCommand::new(
+            Arc::new(cfg),
+            Arc::new(AlwaysAllowGate),
+            SandboxInfo::none(),
+        ),
+        CommandInput {
+            args: vec![Word::bare(target.to_string_lossy()), Word::bare("x")],
+            stdin: None,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        },
     )
-    .run(CommandInput {
-        args: vec![target.to_string_lossy().into_owned(), "x".into()],
-        stdin: None,
-        scope: crate::FileScope::Host,
-        turn: TurnContext::default(),
-    })
     .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert!(
@@ -540,7 +546,7 @@ async fn a_fully_shown_write_in_the_edit_scope_asks_only_in_manual_mode() {
             turn: TurnContext::answered_by(router),
             ..args_writing(&target)
         };
-        let out = cmd.run(asking).await;
+        let out = run_rendered(&cmd, asking).await;
         assert_eq!(rx.try_recv().is_ok(), asks, "{mode:?}");
         assert_eq!(target.exists(), !asks, "{mode:?}: {out:?}");
     }
@@ -551,17 +557,19 @@ async fn declined_write_outside_tmp_exits_126_without_writing() {
     let prefix = Path::new(env!("CARGO_MANIFEST_DIR"));
     let target = prefix.join(format!("declined-{}.txt", std::process::id()));
     let target_str = target.to_string_lossy().into_owned();
-    let out = WriteCommand::new(
-        cfg_from(&[prefix]),
-        Arc::new(DenyAllGate),
-        SandboxInfo::none(),
+    let out = run_rendered(
+        &WriteCommand::new(
+            cfg_from(&[prefix]),
+            Arc::new(DenyAllGate),
+            SandboxInfo::none(),
+        ),
+        CommandInput {
+            args: vec![Word::bare(target_str.as_str()), Word::bare("x")],
+            stdin: None,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        },
     )
-    .run(CommandInput {
-        args: vec![target_str.clone(), "x".into()],
-        stdin: None,
-        scope: crate::FileScope::Host,
-        turn: TurnContext::default(),
-    })
     .await;
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT);
     assert_eq!(

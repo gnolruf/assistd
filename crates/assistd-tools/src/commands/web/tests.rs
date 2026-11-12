@@ -10,6 +10,7 @@ use assistd_ipc::PermissionMode;
 
 use super::*;
 use crate::TurnContext;
+use crate::command::run_rendered;
 use crate::commands::test_support::{RecordingGate, router_in};
 use crate::policy::{
     AlwaysAllowGate, Approval, ApprovalGate, Approvals, DenyAllGate, IpcConfirmationGate,
@@ -91,12 +92,15 @@ fn allowing() -> WebCommand {
 }
 
 async fn fetch(cmd: &WebCommand, url: &str) -> CommandOutput {
-    cmd.run(CommandInput {
-        args: vec!["fetch".to_string(), url.to_string()],
-        stdin: None,
-        scope: crate::FileScope::Host,
-        turn: TurnContext::default(),
-    })
+    run_rendered(
+        cmd,
+        CommandInput {
+            args: vec![Word::bare("fetch"), Word::bare(url)],
+            stdin: None,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        },
+    )
     .await
 }
 
@@ -137,14 +141,16 @@ async fn fetch_from_a_new_host_asks_even_in_auto_mode() {
         Arc::new(Approvals::unsaved()),
     ));
     let (router, mut rx) = router_in(PermissionMode::Auto);
-    let out = cmd
-        .run(CommandInput {
-            args: vec!["fetch".to_string(), "https://127.0.0.1:9/".to_string()],
+    let out = run_rendered(
+        &cmd,
+        CommandInput {
+            args: vec![Word::bare("fetch"), Word::bare("https://127.0.0.1:9/")],
             stdin: None,
             scope: crate::FileScope::Host,
             turn: TurnContext::answered_by(router),
-        })
-        .await;
+        },
+    )
+    .await;
     assert!(
         rx.try_recv().is_ok(),
         "the new host was not put to the user"
@@ -371,17 +377,19 @@ async fn fetch_page(content_type: &str, page: &[u8], flag_sets: &[&[&str]]) -> V
     for flags in flag_sets {
         let args = std::iter::once("fetch")
             .chain(flags.iter().copied())
-            .map(String::from)
-            .chain([format!("http://{addr}/blog/post")])
+            .map(Word::bare)
+            .chain([Word::bare(format!("http://{addr}/blog/post"))])
             .collect();
-        let out = allowing()
-            .run(CommandInput {
+        let out = run_rendered(
+            &allowing(),
+            CommandInput {
                 args,
                 stdin: None,
                 scope: crate::FileScope::Host,
                 turn: TurnContext::default(),
-            })
-            .await;
+            },
+        )
+        .await;
         assert_eq!(out.exit_code, 0, "{}", stderr(&out));
         bodies.push(String::from_utf8_lossy(&out.stdout).replace(&addr.to_string(), "HOST"));
     }

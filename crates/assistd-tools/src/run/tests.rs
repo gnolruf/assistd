@@ -6,7 +6,7 @@ use regex::Regex;
 use tempfile::{TempDir, tempdir};
 
 use super::*;
-use crate::command::{Command, CommandInput};
+use crate::command::{Command, CommandError, CommandInput, Usage};
 use crate::commands::{register_test_readers, test_see};
 use crate::fixtures::PNG_BYTES;
 
@@ -21,15 +21,15 @@ impl Command for Lines {
     fn summary(&self) -> &'static str {
         "test: emit N lines"
     }
-    fn help(&self) -> String {
-        "usage: lines".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
+    async fn run(&self, _input: CommandInput) -> Result<CommandOutput, CommandError> {
         let mut stdout = Vec::with_capacity(self.0 * 8);
         for i in 1..=self.0 {
             stdout.extend_from_slice(format!("line {i}\n").as_bytes());
         }
-        CommandOutput::ok(stdout)
+        Ok(CommandOutput::ok(stdout))
     }
 }
 
@@ -44,11 +44,13 @@ impl Command for ByteCount {
     fn summary(&self) -> &'static str {
         "test: count bytes"
     }
-    fn help(&self) -> String {
-        "usage: bytecount".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, input: CommandInput) -> CommandOutput {
-        CommandOutput::ok(format!("{}\n", input.stdin.map_or(0, |s| s.len())).into_bytes())
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
+        Ok(CommandOutput::ok(
+            format!("{}\n", input.stdin.map_or(0, |s| s.len())).into_bytes(),
+        ))
     }
 }
 

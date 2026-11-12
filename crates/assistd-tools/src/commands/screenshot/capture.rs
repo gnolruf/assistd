@@ -11,7 +11,7 @@ use tokio::process::Command as ProcCommand;
 use super::geometry::{find_focused_sway_rect, parse_hyprland_geom, parse_xrandr_monitor_geom};
 use super::{Backend, Target};
 use crate::attachment::MAX_IMAGE_BYTES;
-use crate::command::{CommandOutput, Hint, error_line};
+use crate::command::{CommandError, Hint};
 use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT, WaitOutcome, capture, exit_code};
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -46,11 +46,6 @@ pub(super) enum CaptureError {
 }
 
 impl CaptureError {
-    /// The failed `screenshot` output reporting this error.
-    pub(super) fn to_output(&self) -> CommandOutput {
-        CommandOutput::failed(self.exit_code(), self.error_line().into_bytes())
-    }
-
     fn exit_code(&self) -> i32 {
         match self {
             Self::BinaryMissing { .. } => SPAWN_FAILED_EXIT,
@@ -64,8 +59,8 @@ impl CaptureError {
         }
     }
 
-    fn error_line(&self) -> String {
-        let (what, hint, recovery): (String, Hint, String) = match self {
+    fn recovery(&self) -> (String, Hint, String) {
+        match self {
             Self::BinaryMissing { binary } => (
                 format!("backend binary not found: {binary}"),
                 Hint::Install,
@@ -117,8 +112,19 @@ impl CaptureError {
                 Hint::Try,
                 "screenshot --full".into(),
             ),
-        };
-        error_line("screenshot", what, hint, recovery)
+        }
+    }
+}
+
+impl From<CaptureError> for CommandError {
+    fn from(error: CaptureError) -> Self {
+        let (what, hint, recovery) = error.recovery();
+        Self {
+            exit: error.exit_code(),
+            what,
+            hint,
+            recovery,
+        }
     }
 }
 
@@ -287,10 +293,10 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, CaptureError::BinaryMissing { .. }), "{err:?}");
-        let out = err.to_output();
-        assert_eq!(out.exit_code, 127);
+        let error = CommandError::from(err);
+        assert_eq!(error.exit, 127);
         assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
+            error.line("screenshot"),
             "[error] screenshot: backend binary not found: assistd-screenshot-not-a-real-bin-xyz. \
              Install: the appropriate package for your distro\n"
         );

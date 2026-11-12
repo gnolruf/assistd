@@ -4,18 +4,21 @@ use tempfile::{TempDir, tempdir};
 
 use super::*;
 use crate::TurnContext;
+use crate::command::run_rendered;
 use crate::commands::{FILE_READ_MAX, hold_fifo_open, make_fifo};
 use crate::fixtures::PNG_BYTES;
 
 async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
-    CatCommand
-        .run(CommandInput {
-            args: args.iter().map(ToString::to_string).collect(),
+    run_rendered(
+        &CatCommand,
+        CommandInput {
+            args: args.iter().copied().map(Word::bare).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
             scope: FileScope::Host,
             turn: TurnContext::default(),
-        })
-        .await
+        },
+    )
+    .await
 }
 
 fn write_file(dir: &TempDir, name: &str, bytes: &[u8]) -> String {

@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use super::desktop_entry::DesktopEntry;
 use super::*;
 use crate::TurnContext;
+use crate::command::run_rendered;
 use crate::commands::{RecordingGate, test_wm};
 
 fn id(n: u64) -> WindowId {
@@ -82,14 +83,16 @@ impl WindowManager for StubWm {
 }
 
 async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
-    test_wm(wm)
-        .run(CommandInput {
-            args: args.iter().map(ToString::to_string).collect(),
+    run_rendered(
+        &test_wm(wm),
+        CommandInput {
+            args: args.iter().copied().map(Word::bare).collect(),
             stdin: None,
             scope: crate::FileScope::Host,
             turn: TurnContext::default(),
-        })
-        .await
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -150,7 +153,7 @@ fn viewer(exec: &str) -> DesktopEntry {
 }
 
 fn open_args(args: &[&str]) -> OpenArgs {
-    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+    let args: Vec<Word> = args.iter().copied().map(Word::bare).collect();
     OpenArgs::parse(&args).expect("parsable")
 }
 
@@ -198,7 +201,7 @@ fn open_options_must_precede_the_application() {
         "options after the app are targets"
     );
     for bad in [&["--wrkspace", "2", "nvim"][..], &["--workspace"], &[]] {
-        let bad: Vec<String> = bad.iter().map(ToString::to_string).collect();
+        let bad: Vec<Word> = bad.iter().copied().map(Word::bare).collect();
         assert!(OpenArgs::parse(&bad).is_err(), "{bad:?}");
     }
 }

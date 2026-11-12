@@ -2,16 +2,19 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::TurnContext;
+use crate::command::run_rendered;
 
 async fn run_ls(args: &[&str]) -> CommandOutput {
-    LsCommand
-        .run(CommandInput {
-            args: args.iter().map(ToString::to_string).collect(),
+    run_rendered(
+        &LsCommand,
+        CommandInput {
+            args: args.iter().copied().map(Word::bare).collect(),
             stdin: None,
             scope: FileScope::Host,
             turn: TurnContext::default(),
-        })
-        .await
+        },
+    )
+    .await
 }
 
 #[tokio::test]

@@ -148,7 +148,7 @@ impl Tool for RunTool {
 
         let start = Instant::now();
         let out = match parse_chain(command) {
-            Ok(chain) => execute(&chain, &self.registry, turn, None).await,
+            Ok(chain) => execute(&chain, &self.registry, turn).await,
             Err(e) => CommandOutput::failed(2, parse_error_line(&e).into_bytes()),
         };
         let duration = start.elapsed();

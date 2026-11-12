@@ -6,7 +6,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::bash::{ScriptRun, run_script};
-use crate::command::{Command, CommandInput, CommandOutput, Hint};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::policy::{BashPolicyCfg, ConfirmationGate, SandboxInfo, SubprocessPolicy};
 
 const PROGRAMS: [Program; 6] = [
@@ -85,37 +86,35 @@ impl Command for ProgramCommand {
         self.program.summary
     }
 
-    fn help(&self) -> String {
+    fn usage(&self) -> Usage {
         let Program { name, usage, .. } = self.program;
-        format!(
-            "usage: {name} {usage}\n\
-             \n\
-             The system's GNU {name}: every option it documents works; `bash \"{name} --help\"` \
+        let body = format!(
+            "The system's GNU {name}: every option it documents works; `bash \"{name} --help\"` \
              lists them. With no FILE it reads the piped input.\n\
              \n\
              It runs in the sandbox, where /tmp and /run are empty and private to each call. \
              For a file there, pipe it in: `cat FILE | {name} ...`.\n"
-        )
+        );
+        Usage::new(*usage, body)
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         let name = self.program.name;
-        let words = std::iter::once(name).chain(input.args.iter().map(String::as_str));
-        let Ok(script) = shlex::try_join(words) else {
-            return CommandOutput::usage_error(
-                name,
+        let words = std::iter::once(name).chain(input.args.iter().map(Word::as_str));
+        let script = shlex::try_join(words).map_err(|_| {
+            CommandError::usage(
                 "an argument holds a NUL byte",
                 format_args!("{name} with printable arguments"),
-            );
-        };
+            )
+        })?;
         let stdin = input.stdin.as_deref().unwrap_or_default();
         let ScriptRun { out, private_dirs } =
-            run_script(&self.policy, &input.turn, name, script, stdin).await;
-        if private_dirs.is_empty() {
+            run_script(&self.policy, &input.turn, name, script, stdin).await?;
+        Ok(if private_dirs.is_empty() {
             out
         } else {
             with_private_dir_note(out, name, &private_dirs)
-        }
+        })
     }
 }
 

@@ -8,7 +8,7 @@ use std::time::Duration;
 use assistd_ipc::ConfirmSource;
 
 use crate::TurnContext;
-use crate::command::{CommandOutput, Hint, error_line};
+use crate::command::{CommandError, Hint};
 use crate::exec::POLICY_DENIED_EXIT;
 
 mod actions;
@@ -110,8 +110,8 @@ impl SubprocessPolicy {
         .await
     }
 
-    /// Refuse `script` when `review` refuses it, or asks and `turn`'s gate declines. `tool` and `op`
-    /// name the command and operation in the error line.
+    /// Refuse `script` when `review` refuses it, or asks and `turn`'s gate declines. `tool` names
+    /// the command in the prompt and `op` the operation in the error.
     pub(crate) async fn authorize(
         &self,
         turn: &TurnContext,
@@ -119,10 +119,10 @@ impl SubprocessPolicy {
         op: &str,
         script: &str,
         review: Review,
-    ) -> Result<(), CommandOutput> {
+    ) -> Result<(), CommandError> {
         match review {
             Review::Clear => Ok(()),
-            Review::Refuse(why) => Err(refused(tool, op, &why)),
+            Review::Refuse(why) => Err(refused(op, &why)),
             Review::Ask(confirmation, unattended) => {
                 if self
                     .confirmed(turn, tool, script, &confirmation, unattended)
@@ -130,7 +130,7 @@ impl SubprocessPolicy {
                 {
                     Ok(())
                 } else {
-                    Err(cancelled(tool, op, &confirmation))
+                    Err(cancelled(op, &confirmation))
                 }
             }
         }
@@ -227,34 +227,26 @@ fn judged(class: JudgedClass, guards: &PathGuards, why: String) -> Unattended {
     })
 }
 
-fn cancelled(tool: &str, op: &str, confirmation: &Confirmation) -> CommandOutput {
+fn cancelled(op: &str, confirmation: &Confirmation) -> CommandError {
     let reason = match confirmation {
         Confirmation::Unvetted { why, .. } => format!("It could not be vetted: {why}"),
         Confirmation::Sensitive(why) => format!("It {why}"),
         Confirmation::Edit(_) => format!("It {confirmation}"),
     };
-    CommandOutput::failed(
+    CommandError::new(
         POLICY_DENIED_EXIT,
-        error_line(
-            tool,
-            format_args!("{op} cancelled by user. {reason}"),
-            Hint::Try,
-            "a different approach",
-        )
-        .into_bytes(),
+        format_args!("{op} cancelled by user. {reason}"),
+        Hint::Try,
+        "a different approach",
     )
 }
 
-fn refused(tool: &str, op: &str, why: &str) -> CommandOutput {
-    CommandOutput::failed(
+fn refused(op: &str, why: &str) -> CommandError {
+    CommandError::new(
         POLICY_DENIED_EXIT,
-        error_line(
-            tool,
-            format_args!("{op} refused in every mode: it {why}"),
-            Hint::Try,
-            "deleting a specific subtree instead, such as a build or cache directory",
-        )
-        .into_bytes(),
+        format_args!("{op} refused in every mode: it {why}"),
+        Hint::Try,
+        "deleting a specific subtree instead, such as a build or cache directory",
     )
 }
 

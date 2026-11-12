@@ -6,7 +6,8 @@ use std::num::NonZeroU32;
 
 use assistd_search::{SearchError, SearchQuery, SearchResults, SearxngClient};
 
-use crate::command::{CommandOutput, Hint, error_line};
+use crate::chain::Word;
+use crate::command::{CommandError, CommandOutput, Hint};
 
 use super::NAME;
 
@@ -44,14 +45,14 @@ struct SearchArgs<'a> {
 }
 
 impl<'a> SearchArgs<'a> {
-    fn parse(args: &'a [String]) -> Result<Self, String> {
+    fn parse(args: &'a [Word]) -> Result<Self, String> {
         let mut limit = DEFAULT_HITS;
         let mut language = None;
         let mut rest = args;
         loop {
             match rest {
                 [flag, value, tail @ ..] if flag == "-n" => {
-                    limit = parse_limit(value)?;
+                    limit = parse_limit(value.as_str())?;
                     rest = tail;
                 }
                 [flag, value, tail @ ..] if flag == "--lang" => {
@@ -74,39 +75,38 @@ impl<'a> SearchArgs<'a> {
         Ok(Self {
             limit,
             language,
-            text: rest.join(" "),
+            text: Word::joined_by_spaces(rest),
         })
     }
 }
 
-pub(super) async fn run(client: Option<&SearxngClient>, args: &[String]) -> CommandOutput {
+pub(super) async fn run(
+    client: Option<&SearxngClient>,
+    args: &[Word],
+) -> Result<CommandOutput, CommandError> {
     if args.is_empty() {
-        return CommandOutput::usage(HELP.to_string());
+        return Ok(CommandOutput::usage(HELP.to_string()));
     }
-    let Some(client) = client else {
-        return search_failed("search is disabled ([search] enabled = false)", FETCH_KNOWN);
-    };
-    let args = match SearchArgs::parse(args) {
-        Ok(args) => args,
-        Err(what) => {
-            return CommandOutput::usage_error(NAME, format_args!("search: {what}"), USAGE);
-        }
-    };
+    let client = client.ok_or_else(|| {
+        search_failed("search is disabled ([search] enabled = false)", FETCH_KNOWN)
+    })?;
+    let args = SearchArgs::parse(args)
+        .map_err(|what| CommandError::usage(format_args!("search: {what}"), USAGE))?;
     let query = SearchQuery {
         text: &args.text,
         language: args.language,
         page: NonZeroU32::MIN,
     };
-    match client.search(&query).await {
-        Ok(results) => listed(&results, args.limit),
-        Err(SearchError::NotServing) => {
+    let results = client.search(&query).await.map_err(|error| match error {
+        SearchError::NotServing => {
             search_failed("the search server is not running yet", "again in a moment")
         }
-        Err(SearchError::Unavailable(reason)) => {
+        SearchError::Unavailable(reason) => {
             search_failed(format_args!("search is unavailable: {reason}"), FETCH_KNOWN)
         }
-        Err(e) => search_failed(e, "re-running the search"),
-    }
+        e => search_failed(e, "re-running the search"),
+    })?;
+    Ok(listed(&results, args.limit))
 }
 
 fn parse_limit(raw: &str) -> Result<usize, String> {
@@ -172,8 +172,8 @@ fn unresponsive_engines(results: &SearchResults) -> Option<String> {
     })
 }
 
-fn search_failed(what: impl Display, recovery: &str) -> CommandOutput {
-    CommandOutput::failed(1, error_line(NAME, what, Hint::Try, recovery).into_bytes())
+fn search_failed(what: impl Display, recovery: &str) -> CommandError {
+    CommandError::failed(what, Hint::Try, recovery)
 }
 
 #[cfg(test)]
