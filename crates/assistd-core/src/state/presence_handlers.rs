@@ -1,27 +1,25 @@
 //! Handlers for the presence state-machine variants of `Request`.
 
-use std::sync::Arc;
-
-use tokio::sync::mpsc;
-
 use assistd_ipc::{Event, EventBody, PresenceTarget};
 
-use super::{AppState, DispatchError, send_error};
+use super::status_service::StatusService;
+use super::{DispatchError, send_error};
+use crate::bus::EventSink;
 
-impl AppState {
+impl StatusService {
     pub(super) async fn handle_set_presence(
-        self: Arc<Self>,
+        &self,
         id: String,
         target: PresenceTarget,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        match self.subsystems.presence.set_presence(target).await {
+        match self.presence.set_presence(target).await {
             Ok(()) => {
                 let _ = tx
                     .send(Event::new(
                         id.clone(),
                         EventBody::Presence {
-                            state: self.subsystems.presence.state(),
+                            state: self.presence.state(),
                         },
                     ))
                     .await;
@@ -35,8 +33,8 @@ impl AppState {
         }
     }
 
-    pub(super) async fn handle_get_presence(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        let state = self.subsystems.presence.state();
+    pub(super) async fn handle_get_presence(&self, id: String, tx: EventSink) {
+        let state = self.presence.state();
         let _ = tx
             .send(Event::new(id.clone(), EventBody::Presence { state }))
             .await;

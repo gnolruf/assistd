@@ -1,32 +1,19 @@
 //! `Subscribe` handler: forwards bus events to a passive client.
 
-use std::sync::Arc;
-
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::SendError;
 use tracing::{debug, warn};
 
 use assistd_ipc::{Event, EventBody, EventKind, SubscribeFilter, VoiceCaptureState};
 
-use super::AppState;
+use super::status_service::StatusService;
+use crate::bus::{ClientGone, EventSink};
 
-/// The subscriber's client went away, so nothing more can reach it.
-#[derive(Debug)]
-struct SubscriberGone;
-
-impl From<SendError<Event>> for SubscriberGone {
-    fn from(_: SendError<Event>) -> Self {
-        Self
-    }
-}
-
-impl AppState {
+impl StatusService {
     pub(super) async fn handle_subscribe(
-        self: Arc<Self>,
+        &self,
         id: String,
         filter: SubscribeFilter,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) {
         debug!(
             target: "assistd::subscribe",
@@ -35,8 +22,8 @@ impl AppState {
             "subscriber attached"
         );
         let wants_presence = filter.matches(EventKind::Presence);
-        let mut presence = self.subsystems.presence.subscribe();
-        let mut rx = self.runtime.subscribe_events(filter.clone());
+        let mut presence = self.presence.subscribe();
+        let mut rx = self.bus.subscribe(filter.clone());
         if self.send_current_state(&id, &filter, &tx).await.is_err() {
             return;
         }
@@ -85,11 +72,11 @@ impl AppState {
         &self,
         id: &str,
         filter: &SubscribeFilter,
-        tx: &mpsc::Sender<Event>,
-    ) -> Result<(), SubscriberGone> {
+        tx: &EventSink,
+    ) -> Result<(), ClientGone> {
         self.send_current_state(id, filter, tx).await?;
         if filter.matches(EventKind::TaskRun) {
-            for prompt in self.paused_prompt_events() {
+            for prompt in self.tasks.paused_prompt_events() {
                 tx.send(prompt).await?;
             }
         }
@@ -102,21 +89,21 @@ impl AppState {
         &self,
         id: &str,
         filter: &SubscribeFilter,
-        tx: &mpsc::Sender<Event>,
-    ) -> Result<(), SubscriberGone> {
+        tx: &EventSink,
+    ) -> Result<(), ClientGone> {
         let id = || id.to_string();
-        let voice = &self.subsystems.voice;
+        let voice = &self.voice;
         let current = [
             Event::new(
                 id(),
                 EventBody::TaskQueue {
-                    snapshot: self.task_queue_snapshot(),
+                    snapshot: self.admission.queue_snapshot(),
                 },
             ),
             Event::new(
                 id(),
                 EventBody::Presence {
-                    state: self.subsystems.presence.state(),
+                    state: self.presence.state(),
                 },
             ),
             Event::new(

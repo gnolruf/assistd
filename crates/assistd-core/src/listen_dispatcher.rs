@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{Instrument, debug, error, info, warn};
@@ -15,8 +15,9 @@ use assistd_ipc::{Component, Event, EventBody, ListenPhase, PlanMode};
 use assistd_utils::time::saturating_millis;
 use assistd_voice::{ContinuousListener, Heard};
 
+use crate::bus::EventSink;
 use crate::recovery::{drain_join_set, spawn_supervised};
-use crate::state::{AppState, TurnOrigin};
+use crate::state::{AppState, Query, TurnOrigin};
 
 /// Id of the `ListenState` events published when the listener changes phase.
 const LISTEN_PHASE_EVENT_ID: &str = "listen";
@@ -159,7 +160,7 @@ async fn forward_heard(
 ) -> bool {
     match received {
         Ok(Heard::WakePhrase) => {
-            state.runtime.publish(&Event::new(
+            state.bus.publish(&Event::new(
                 format!("listen-{}", short_id()),
                 EventBody::WakeWordDetected,
             ));
@@ -173,7 +174,7 @@ async fn forward_heard(
                     "barge-in superseded the waiting utterance; dropped it"
                 );
             }
-            state.interrupt_turns().await;
+            state.voice.interrupt_turns().await;
         }
         Ok(Heard::BargeIn) => {}
         Err(RecvError::Lagged(n)) => {
@@ -195,7 +196,7 @@ async fn forward_heard(
 }
 
 fn publish_phase(state: &AppState, phase: ListenPhase) {
-    state.runtime.publish(&Event::new(
+    state.bus.publish(&Event::new(
         LISTEN_PHASE_EVENT_ID.to_string(),
         EventBody::ListenState { phase },
     ));
@@ -214,29 +215,24 @@ fn spawn_listen_query(handlers: &mut JoinSet<()>, state: &Arc<AppState>, text: S
 /// Run one utterance as a query turn, publishing its transcript and
 /// events on the daemon's broadcast bus.
 async fn run_listen_query(state: Arc<AppState>, id: String, text: String) {
-    state.runtime.publish(&Event::new(
+    state.bus.publish(&Event::new(
         id.clone(),
         EventBody::Transcription { text: text.clone() },
     ));
-    let (tx, mut rx) = mpsc::channel::<Event>(32);
-    let forward = async {
-        while let Some(ev) = rx.recv().await {
-            state.runtime.publish(&ev);
-        }
+    let query = Query {
+        id,
+        text,
+        attachments: Vec::new(),
+        origin: TurnOrigin::Voice,
+        plan: PlanMode::Off,
     };
-    let query = async {
-        if let Err(e) = state
-            .clone()
-            .handle_query(id, text, Vec::new(), (TurnOrigin::Voice, PlanMode::Off), tx)
-            .await
-        {
-            warn!(
-                target: "assistd::listen",
-                "listen-triggered query failed: {e:#}"
-            );
-        }
-    };
-    tokio::join!(forward, query);
+    let events = EventSink::to_bus(state.bus.clone());
+    if let Err(e) = state.turns.handle_query(query, events).await {
+        warn!(
+            target: "assistd::listen",
+            "listen-triggered query failed: {e:#}"
+        );
+    }
 }
 
 async fn start_listening(listener: &dyn ContinuousListener) {

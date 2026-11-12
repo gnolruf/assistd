@@ -15,7 +15,7 @@ use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     Allowlist, AlwaysAllowGate, Approval, Command, CommandInput, ConfirmationGate,
     ConfirmationRequest, DenyAllGate, FileScope, Protected, SandboxInfo, SandboxRequest,
-    SearchPath, SharedDirs, Unattended,
+    SearchPath, SharedDirs, TurnContext, Unattended,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
@@ -55,6 +55,7 @@ fn input(script: &str) -> CommandInput {
         args: vec![script.to_string()],
         stdin: None,
         scope: FileScope::Host,
+        turn: TurnContext::default(),
     }
 }
 
@@ -82,7 +83,7 @@ struct PanicGate;
 
 #[async_trait]
 impl ConfirmationGate for PanicGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
+    async fn confirm(&self, _turn: &TurnContext, req: ConfirmationRequest) -> Approval {
         panic!("gate must not be consulted for {:?}", req.script);
     }
 }
@@ -105,7 +106,7 @@ impl RecordingGate {
 
 #[async_trait]
 impl ConfirmationGate for RecordingGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
+    async fn confirm(&self, _turn: &TurnContext, req: ConfirmationRequest) -> Approval {
         self.asked.lock().push(req);
         self.answer
     }
@@ -286,6 +287,7 @@ async fn read_only_programs_run_without_asking() {
             args: vec!["tr a-z A-Z".into()],
             stdin: Some(b"hi".to_vec()),
             scope: FileScope::Host,
+            turn: TurnContext::default(),
         })
         .await;
     assert_eq!(out.exit_code, 0);
@@ -377,6 +379,7 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
             args: vec![from_write.to_string_lossy().into_owned(), "hi".into()],
             stdin: None,
             scope: FileScope::Host,
+            turn: TurnContext::default(),
         })
         .await;
     assert_eq!(out.exit_code, 0);

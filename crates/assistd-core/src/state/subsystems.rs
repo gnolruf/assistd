@@ -72,7 +72,7 @@ pub struct Subsystems {
     pub voice: Arc<VoiceManager>,
     pub window_manager: Arc<dyn WindowManager>,
     pub vision_revalidator: Option<Arc<VisionRevalidator>>,
-    pub mcp_servers: Vec<McpServerStatus>,
+    pub mcp_servers: Arc<[McpServerStatus]>,
     /// Signs OAuth MCP servers in and out; `None` while MCP is off.
     pub mcp_accounts: Option<Arc<dyn McpAccounts>>,
     /// Readiness of the SearXNG instance web search goes through.
@@ -99,7 +99,7 @@ impl Subsystems {
             voice,
             window_manager: Arc::new(NoWindowManager),
             vision_revalidator: None,
-            mcp_servers: Vec::new(),
+            mcp_servers: Arc::default(),
             mcp_accounts: None,
             web_search: Arc::new(ReadinessCell::new(Readiness::Unavailable(
                 "not configured".into(),
@@ -134,7 +134,7 @@ impl Subsystems {
         servers: Vec<McpServerStatus>,
         accounts: Option<Arc<impl McpAccounts + 'static>>,
     ) -> Self {
-        self.mcp_servers = servers;
+        self.mcp_servers = servers.into();
         self.mcp_accounts = accounts.map(|accounts| accounts as Arc<dyn McpAccounts>);
         self
     }

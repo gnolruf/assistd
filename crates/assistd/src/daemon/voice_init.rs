@@ -117,6 +117,6 @@ async fn publish_changes(
 
 fn publish_readiness(state: &AppState) {
     for (component, readiness) in state.subsystems.voice.readiness() {
-        state.publish_readiness(component, readiness);
+        state.status.publish_readiness(component, readiness);
     }
 }

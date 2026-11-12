@@ -9,9 +9,9 @@ use assistd_core::config::{
     McpAuth, McpHttpTransport, McpOAuthClient, McpServerUrl, McpStdioTransport, McpTransport,
 };
 use assistd_core::{
-    AppState, Config, McpAccountError, McpAccounts, McpLogin, McpServerConfig, McpServerStatus,
+    Config, McpAccountError, McpAccounts, McpHost, McpLogin, McpServerConfig, McpServerStatus,
 };
-use assistd_ipc::{McpServerState, McpTransportKind, StartupComponent, TokenRevocation};
+use assistd_ipc::{McpServerState, McpTransportKind, TokenRevocation};
 use assistd_mcp::{
     Connector, HttpAuth, HttpConfig, LaunchTarget, McpError, McpServer, OAuthConfig, Revocation,
     StdioConfig, TokenStore, begin_login, launch, sign_out, withdraw_tools,
@@ -56,32 +56,32 @@ struct Start {
     server: Arc<ManagedServer>,
     connector: Connector,
     target: LaunchTarget,
-    state: Arc<AppState>,
+    host: McpHost,
 }
 
 impl McpFleet {
-    /// Start every server at once, retrying failed ones and recording each one's state as it
-    /// settles.
-    pub(super) fn spawn(self: Arc<Self>, state: &Arc<AppState>) -> McpService {
+    /// Start every server at once, retrying failed ones and recording each one's state on
+    /// `host` as it settles.
+    pub(super) fn spawn(self: Arc<Self>, host: &McpHost) -> McpService {
         for server in &self.servers {
             let Some(connector) = connector(&server.config, self.tokens.clone()) else {
-                record_state(state, server.config.name.as_str(), no_token_store());
+                host.record_state(server.config.name.as_str(), no_token_store());
                 continue;
             };
             let start = Start {
                 server: server.clone(),
                 connector,
-                target: self.target(state),
-                state: state.clone(),
+                target: self.target(host),
+                host: host.clone(),
             };
             *server.starting.lock() = Some(start.spawn(None));
         }
         McpService { fleet: Some(self) }
     }
 
-    fn target(&self, state: &AppState) -> LaunchTarget {
+    fn target(&self, host: &McpHost) -> LaunchTarget {
         LaunchTarget {
-            catalog: state.subsystems.tools.clone(),
+            catalog: Arc::clone(host.catalog()),
             approvals: self.approvals.clone(),
             vision: self.vision.clone(),
         }
@@ -123,11 +123,7 @@ impl McpFleet {
 
 #[async_trait]
 impl McpAccounts for McpFleet {
-    async fn begin_login(
-        &self,
-        state: Arc<AppState>,
-        name: &str,
-    ) -> Result<McpLogin, McpAccountError> {
+    async fn begin_login(&self, host: McpHost, name: &str) -> Result<McpLogin, McpAccountError> {
         let server = self.server(name)?;
         let (url, oauth) = self.oauth_endpoint(server)?;
         let request_timeout = request_timeout(&server.config);
@@ -139,8 +135,8 @@ impl McpAccounts for McpFleet {
         let start = Start {
             server: server.clone(),
             connector,
-            target: self.target(&state),
-            state,
+            target: self.target(&host),
+            host,
         };
         let stopping = self.stopping.clone();
         Ok(McpLogin {
@@ -152,18 +148,13 @@ impl McpAccounts for McpFleet {
         })
     }
 
-    async fn logout(
-        &self,
-        state: Arc<AppState>,
-        name: &str,
-    ) -> Result<TokenRevocation, McpAccountError> {
+    async fn logout(&self, host: McpHost, name: &str) -> Result<TokenRevocation, McpAccountError> {
         let server = self.server(name)?;
         let (url, oauth) = self.oauth_endpoint(server)?;
         let _changing = server.changing.lock().await;
         server.stop().await;
-        withdraw_tools(&state.subsystems.tools, &server.config.name);
-        record_state(
-            &state,
+        withdraw_tools(host.catalog(), &server.config.name);
+        host.record_state(
             name,
             McpServerState::NeedsAuthorization { scopes: Vec::new() },
         );
@@ -212,7 +203,7 @@ impl Start {
     async fn run(self, mut settled: Option<oneshot::Sender<()>>) {
         let name = self.server.config.name.clone();
         let on_retry = |e: &McpError| {
-            record_state(&self.state, name.as_str(), failed_state(e));
+            self.host.record_state(name.as_str(), failed_state(e));
             if let Some(settled) = settled.take() {
                 let _ = settled.send(());
             }
@@ -221,9 +212,9 @@ impl Start {
         match outcome {
             Ok(started) => {
                 *self.server.running.lock() = Some(started);
-                record_state(&self.state, name.as_str(), McpServerState::Ready);
+                self.host.record_state(name.as_str(), McpServerState::Ready);
             }
-            Err(e) => record_state(&self.state, name.as_str(), failed_state(&e)),
+            Err(e) => self.host.record_state(name.as_str(), failed_state(&e)),
         }
         if let Some(settled) = settled {
             let _ = settled.send(());
@@ -243,7 +234,8 @@ impl Start {
             }
             server.stop().await;
             withdraw_tools(&self.target.catalog, &name);
-            record_state(&self.state, name.as_str(), McpServerState::Starting);
+            self.host
+                .record_state(name.as_str(), McpServerState::Starting);
             *server.starting.lock() = Some(self.spawn(Some(settled_tx)));
         }
         let _ = settled_rx.await;
@@ -290,24 +282,6 @@ pub(super) fn prepare(
         stopping: CancellationToken::new(),
     };
     (statuses, Some(Arc::new(fleet)))
-}
-
-fn record_state(state: &AppState, name: &str, server_state: McpServerState) {
-    let Some(status) = state
-        .subsystems
-        .mcp_servers
-        .iter()
-        .find(|s| s.name() == name)
-    else {
-        return;
-    };
-    status.set(server_state);
-    state.publish_readiness(
-        StartupComponent::Mcp {
-            server: name.to_string(),
-        },
-        status.readiness(),
-    );
 }
 
 fn failed_state(error: &McpError) -> McpServerState {

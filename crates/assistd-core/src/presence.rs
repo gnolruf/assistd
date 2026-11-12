@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, OwnedRwLockReadGuard, RwLock, oneshot, watch};
 use tokio::time::timeout;
 use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tracing::{Instrument, debug, info, warn};
+
+use crate::bus::EventSink;
 
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
@@ -335,7 +337,7 @@ impl PresenceManager {
     pub async fn acquire_request_guard_with_progress(
         self: &Arc<Self>,
         request_id: String,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<RequestGuard, PresenceError> {
         self.acquire_request_guard_inner(Some((request_id, tx)))
             .await
@@ -345,7 +347,7 @@ impl PresenceManager {
     /// holds for its lifetime; the retry covers sleep/wake churn.
     async fn acquire_request_guard_inner(
         self: &Arc<Self>,
-        progress: Option<(String, mpsc::Sender<Event>)>,
+        progress: Option<(String, EventSink)>,
     ) -> Result<RequestGuard, PresenceError> {
         self.mark_activity();
         for _ in 0..GUARD_ACQUIRE_RETRIES {
@@ -882,7 +884,7 @@ async fn wait_until_not_ready(rx: &mut watch::Receiver<ReadyState>) {
 fn spawn_load_progress_emitter(
     presence: Arc<PresenceManager>,
     request_id: String,
-    tx: mpsc::Sender<Event>,
+    tx: EventSink,
 ) -> AbortOnDropHandle<()> {
     AbortOnDropHandle::new(tokio::spawn(async move {
         let mut interval = tokio::time::interval(LOAD_PROGRESS_INTERVAL);

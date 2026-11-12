@@ -12,7 +12,8 @@ use assistd_mcp::{
     launch,
 };
 use assistd_tools::{
-    AlwaysAllowGate, ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, VisionGate,
+    AlwaysAllowGate, ApprovalGate, Approvals, Tool, ToolCatalog, ToolRegistry, TurnContext,
+    VisionGate,
 };
 use assistd_utils::backoff::MIN_HEALTHY_SECONDS;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -61,7 +62,10 @@ fn find<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
 async fn echo_answers_again(echo: &dyn Tool) -> bool {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let result = echo.invoke(json!({"msg": "after"})).await.unwrap();
+            let result = echo
+                .invoke(&TurnContext::default(), json!({"msg": "after"}))
+                .await
+                .unwrap();
             if result.output == "echo:after" {
                 return;
             }
@@ -128,7 +132,7 @@ async fn discovers_and_invokes_a_tool_end_to_end() {
     );
 
     let result = find(&tools, "mcp__fake__echo")
-        .invoke(json!({"msg": "hi"}))
+        .invoke(&TurnContext::default(), json!({"msg": "hi"}))
         .await
         .unwrap();
     assert_eq!(result.output, "echo:hi");
@@ -143,12 +147,17 @@ async fn crashed_server_fails_fast_then_restarts_on_a_later_call() {
     let tools = adapt_allowing(&server).await;
     let echo = find(&tools, "mcp__fake__echo");
 
-    let _ = find(&tools, "mcp__fake__crash_me").invoke(json!({})).await;
+    let _ = find(&tools, "mcp__fake__crash_me")
+        .invoke(&TurnContext::default(), json!({}))
+        .await;
 
-    let post = tokio::time::timeout(Duration::from_secs(2), echo.invoke(json!({"msg": "x"})))
-        .await
-        .expect("a call to a dead server must not hang")
-        .unwrap();
+    let post = tokio::time::timeout(
+        Duration::from_secs(2),
+        echo.invoke(&TurnContext::default(), json!({"msg": "x"})),
+    )
+    .await
+    .expect("a call to a dead server must not hang")
+    .unwrap();
     assert_eq!(post.exit_code, -1, "{post:?}");
     assert!(
         echo_answers_again(echo).await,
@@ -165,10 +174,15 @@ async fn first_call_after_a_healthy_server_exits_restarts_it() {
     let echo = find(&tools, "mcp__fake__echo");
 
     tokio::time::sleep(Duration::from_secs(MIN_HEALTHY_SECONDS + 1)).await;
-    let _ = find(&tools, "mcp__fake__crash_me").invoke(json!({})).await;
+    let _ = find(&tools, "mcp__fake__crash_me")
+        .invoke(&TurnContext::default(), json!({}))
+        .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let post = echo.invoke(json!({"msg": "after"})).await.unwrap();
+    let post = echo
+        .invoke(&TurnContext::default(), json!({"msg": "after"}))
+        .await
+        .unwrap();
     assert_eq!(post.output, "echo:after", "{post:?}");
 
     server.shutdown().await;
@@ -211,8 +225,13 @@ async fn server_that_stops_answering_is_killed_and_restarted() {
     let tools = adapt_allowing(&server).await;
     let echo = find(&tools, "mcp__fake__echo");
 
-    let _ = find(&tools, "mcp__fake__wedge").invoke(json!({})).await;
-    let stuck = echo.invoke(json!({"msg": "stuck"})).await.unwrap();
+    let _ = find(&tools, "mcp__fake__wedge")
+        .invoke(&TurnContext::default(), json!({}))
+        .await;
+    let stuck = echo
+        .invoke(&TurnContext::default(), json!({"msg": "stuck"}))
+        .await
+        .unwrap();
     assert_eq!(stuck.exit_code, -1, "{stuck:?}");
 
     assert!(
@@ -229,7 +248,7 @@ async fn closed_stdout_under_a_live_child_is_restarted() {
     let tools = adapt_allowing(&server).await;
 
     let _ = find(&tools, "mcp__fake__close_stdout")
-        .invoke(json!({}))
+        .invoke(&TurnContext::default(), json!({}))
         .await;
 
     assert!(
@@ -246,7 +265,7 @@ async fn crashed_server_takes_its_process_group_with_it() {
     let tools = adapt_allowing(&server).await;
 
     let result = find(&tools, "mcp__fake__spawn_orphan_and_crash")
-        .invoke(json!({}))
+        .invoke(&TurnContext::default(), json!({}))
         .await
         .unwrap();
     let orphan: u32 = result
@@ -320,7 +339,10 @@ async fn server_refused_at_first_start_offers_its_tools_after_a_retry() {
     assert_eq!(retries.len(), 1, "{retries:?}");
     let registry = target.catalog.snapshot();
     let echo = registry.get("mcp__fake__echo").expect("echo offered");
-    let result = echo.invoke(json!({"msg": "hi"})).await.unwrap();
+    let result = echo
+        .invoke(&TurnContext::default(), json!({"msg": "hi"}))
+        .await
+        .unwrap();
     assert_eq!(result.output, "echo:hi");
     server.shutdown().await;
 }

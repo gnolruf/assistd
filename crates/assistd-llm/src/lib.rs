@@ -132,6 +132,12 @@ pub enum OneShotReply {
 /// Events a backend streams during generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmEvent {
+    /// A model step is about to stream; what follows up to the step's tool
+    /// calls or `Done` is that step's output.
+    StepStarted,
+    /// What the step in flight streamed so far is void: the step runs again
+    /// or the turn ends without it.
+    StepDiscarded,
     /// A streamed chunk of model output.
     Delta { text: String },
     /// A streamed chunk of the model's reasoning; never spoken.

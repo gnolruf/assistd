@@ -15,9 +15,8 @@ use anyhow::{Context, Result};
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, Config, MemoryStack, PresenceManager, RelayDeps, RuntimeState, SessionContext,
-    SubAgentRunner, Subsystems, VisionRevalidator, VoiceManager, VramLedger, gpu_monitor,
-    idle_monitor,
+    AppState, Config, MemoryStack, PresenceManager, RelayDeps, SessionContext, SubAgentRunner,
+    Subsystems, VisionRevalidator, VoiceManager, VramLedger, gpu_monitor, idle_monitor,
 };
 use assistd_llm::{
     HistoryReplay, LlamaChatClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir,
@@ -186,14 +185,16 @@ async fn start(
         .with_planning_tools(tools.planning)
         .with_slot_stash(slot_stash);
 
-    let state = Arc::new(AppState {
-        memory: build_memory_stack(&config, &memory, &embed),
+    let memory_stack = build_memory_stack(&config, &memory, &embed);
+    let state = Arc::new(AppState::from_parts(
         config,
         subsystems,
-        runtime: build_runtime(session_ctx, &vision_revalidator),
-    });
-    state.start_task_queue().await;
-    let task_runner = Arc::clone(&state.runtime.task_runner);
+        memory_stack,
+        session_ctx,
+        vision_revalidator.slot_count(),
+    ));
+    state.tasks.start_task_queue().await;
+    let task_runner = Arc::clone(state.tasks.runner());
     let background = spawn_background_starts(
         &state,
         BackgroundStarts {
@@ -285,7 +286,7 @@ fn spawn_background_starts(
         });
     let mcp = starts
         .mcp
-        .map_or_else(McpService::disabled, |fleet| fleet.spawn(state));
+        .map_or_else(McpService::disabled, |fleet| fleet.spawn(state.mcp.host()));
     BackgroundServices {
         warmup,
         voice,
@@ -468,14 +469,6 @@ fn build_chat_backend(
     )?
     .with_slot_stash(slot_stash);
     Ok(Arc::new(chat))
-}
-
-/// Request bookkeeping over the resumed session, with model lanes sized by the
-/// server's slot count.
-fn build_runtime(session_ctx: Arc<SessionContext>, vision: &VisionRevalidator) -> RuntimeState {
-    RuntimeState::new()
-        .with_session_ctx(session_ctx)
-        .with_slot_count(vision.slot_count())
 }
 
 /// The VRAM ledger, checked by `presence` before every wake; `None` when the GPU

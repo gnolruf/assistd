@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::TurnContext;
 use crate::{ToolError, ToolOutput};
 
 #[derive(Debug)]
@@ -20,7 +21,7 @@ impl Tool for Named {
     fn parameters_schema(&self) -> Value {
         json!({})
     }
-    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, _turn: &TurnContext, _args: Value) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::default())
     }
 }

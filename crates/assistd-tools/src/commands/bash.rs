@@ -8,6 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::warn;
 
+use crate::TurnContext;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
 use crate::exec::{SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{BashPolicyCfg, ConfirmationGate, SandboxInfo, SubprocessPolicy};
@@ -80,7 +81,8 @@ impl Command for BashCommand {
         }
         let script = script_words.join(" ");
         let stdin = input.stdin.as_deref().unwrap_or_default();
-        let ScriptRun { out, private_dirs } = run_script(&self.policy, "bash", script, stdin).await;
+        let ScriptRun { out, private_dirs } =
+            run_script(&self.policy, &input.turn, "bash", script, stdin).await;
         if private_dirs.is_empty() {
             return out;
         }
@@ -100,10 +102,11 @@ pub(crate) struct ScriptRun {
     pub(crate) private_dirs: String,
 }
 
-/// Run `script` as `bash -c` under `policy`, reporting as `tool`: reviewed and authorized,
+/// Run `script` as `bash -c` under `policy` within `turn`, reporting as `tool`: reviewed and authorized,
 /// then sandboxed, fed `stdin`, timed and capped.
 pub(crate) async fn run_script(
     policy: &SubprocessPolicy,
+    turn: &TurnContext,
     tool: &str,
     script: String,
     stdin: &[u8],
@@ -113,7 +116,10 @@ pub(crate) async fn run_script(
         private_dirs: String::new(),
     };
     let review = policy.review_script(script.clone()).await;
-    if let Err(denied) = policy.authorize(tool, "command", &script, review).await {
+    if let Err(denied) = policy
+        .authorize(turn, tool, "command", &script, review)
+        .await
+    {
         return failed(denied);
     }
     let cmd = match policy

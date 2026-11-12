@@ -447,8 +447,8 @@ telling the model to describe that step instead. A plan-mode note is set
 as the transient note on every step, so it renders at the conversation's
 tail and the system prompt, and its cache, are unchanged.
 
-Whether a turn plans is a flag on its connection's `ConfirmRouter`, so it can
-change mid-turn. While it is set every ask is refused and counted, and an agent
+Whether a turn plans is a flag on the `ConfirmRouter` in its `TurnContext`, so it
+can change mid-turn. While it is set every ask is refused and counted, and an agent
 built by `Planner::chat_agent` offers, before each step, the planning registry
 plus `exit_plan_mode` in place of the main registry plus `enter_plan_mode`; its
 conversation carries the plan-mode note only while planning. A query's `plan`
@@ -878,13 +878,23 @@ A walk through `assistd query "what files changed this week?"`:
    the write side, and reads `Event` lines until `Done`.
 
 2. **Socket server** ([`crates/assistd-core/src/socket.rs`](../crates/assistd-core/src/socket.rs)).
-   Parses the request and hands it to `AppState::dispatch`, which
-   routes a `Query` to `handle_query`; that takes the per-turn agent
-   lock, so concurrent queries serialize.
+   Parses the request and hands it to `AppState::dispatch` with the
+   connection's `ConfirmRouter` in a `TurnContext`. `dispatch` routes
+   each request family to the service that owns its state (`TurnService`,
+   `TaskService`, `VoiceService`, `BranchService`, `McpService`,
+   `StatusService`, and `MemoryStack` for the memory requests); a `Query`
+   goes to `TurnService::handle_query`, which takes the per-turn agent
+   lock, so concurrent queries serialize. Every event a handler produces goes through an
+   `EventSink`, which publishes it on the events bus before handing it
+   to the client, so a slow client never delays subscribers.
 
 3. **Agent** ([`crates/assistd-core/src/agent.rs`](../crates/assistd-core/src/agent.rs)).
-   The handler builds `Agent::new(...)` from the cached `AppState`
-   and calls `run_turn()`.
+   The handler builds `Agent::new(...)` from the handles it holds
+   and calls `run_turn()` with the turn's `TurnContext`, which every
+   tool call receives: it carries who answers the turn's prompts, who
+   watches its relays, and the lane a task run gives up on request. A
+   `TurnDriver`, the same one a task run uses, persists the agent's
+   events and sends them to the sink.
 
 4. **LLM step** ([`crates/assistd-llm/src/chat/client.rs`](../crates/assistd-llm/src/chat/client.rs)).
    `LlamaChatClient` POSTs `messages + tools` to llama-server with
@@ -947,9 +957,9 @@ A walk through `assistd query "what files changed this week?"`:
    exits 0 on `Done` or non-zero on `Error`.
 
 For push-to-talk, `assistd ptt-stop` sends `RequestBody::PttStop`
-instead; `dispatch` routes it to `handle_ptt_stop`, which transcribes
-the recording, emits `EventBody::Transcription`, and runs the turn from
-step 3 on.
+instead; `dispatch` routes it to `VoiceService::handle_ptt_stop`, which
+transcribes the recording and emits `EventBody::Transcription`, and then
+runs the prompt it returns as a turn from step 3 on.
 
 For `assistd chat`, the TUI is a long-lived client but not a single
 connection: each turn opens its own connection, kept writable so the

@@ -4,38 +4,89 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Local, Utc};
-use tokio::sync::mpsc;
 use tracing::warn;
 
 use assistd_ipc::{
-    Event, EventBody, MAX_LISTED_RUNS, PermissionMode, TaskId, TaskSpec, TaskTrigger,
+    Event, EventBody, MAX_LISTED_RUNS, PermissionMode, TaskId, TaskRequest, TaskSpec, TaskTrigger,
 };
 use assistd_memory::TaskRecord;
 
 use super::event_triggers::{check_chain, resolve_watched_paths};
 use super::fire_times::{check_triggers, next_fire, upcoming_fires};
-use super::{AppState, DispatchError, send_error};
+use super::task_service::TaskService;
+use super::{DispatchError, send_error};
+use crate::bus::EventSink;
 
 /// Fire times a `TaskCheckTrigger` reports.
 const CHECKED_FIRES: usize = 3;
 
-impl AppState {
-    pub(super) async fn handle_task_list(
-        self: Arc<Self>,
+impl TaskService {
+    /// Route one `Task` request to its handler.
+    pub(super) async fn dispatch(
+        self: &Arc<Self>,
         id: String,
-        tx: mpsc::Sender<Event>,
+        req: TaskRequest,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let tasks = self.memory.tasks.list().await.map_err(Into::into);
+        match req {
+            TaskRequest::List => self.handle_task_list(id, tx).await,
+            TaskRequest::Save { task, spec } => self.handle_task_save(id, task, spec, tx).await,
+            TaskRequest::Delete { task } => self.handle_task_delete(id, task, tx).await,
+            TaskRequest::SetEnabled { task, enabled } => {
+                self.handle_task_set_enabled(id, task, enabled, tx).await
+            }
+            TaskRequest::Run { task } => self.handle_task_run(id, task, tx).await,
+            TaskRequest::Cancel { run } => {
+                super::replied(self.handle_task_cancel(id, run, tx)).await
+            }
+            TaskRequest::Queue { op } => super::replied(self.handle_task_queue(id, op, tx)).await,
+            TaskRequest::Confirm {
+                run,
+                confirm_id,
+                allow,
+                always,
+            } => {
+                let approval = super::task_confirms::approval(allow, always);
+                self.handle_task_confirm(id, run, confirm_id, approval, tx)
+                    .await
+            }
+            TaskRequest::Runs { task } => self.handle_task_runs(id, task, tx).await,
+            TaskRequest::Refine {
+                prompt,
+                mode,
+                allowed_hosts,
+                feedback,
+            } => {
+                let ask = super::task_plans::RefineAsk {
+                    prompt,
+                    mode,
+                    allowed_hosts,
+                    feedback,
+                };
+                self.handle_task_refine(id, ask, tx).await
+            }
+            TaskRequest::CheckTrigger { task, trigger } => {
+                self.handle_task_check_trigger(id, task, trigger, tx).await
+            }
+        }
+    }
+
+    pub(super) async fn handle_task_list(
+        &self,
+        id: String,
+        tx: EventSink,
+    ) -> Result<(), DispatchError> {
+        let tasks = self.deps.store.list().await.map_err(Into::into);
         self.send_tasks(id, "task list", tasks, &tx).await
     }
 
     pub(super) async fn handle_task_runs(
-        self: Arc<Self>,
+        &self,
         id: String,
         task: TaskId,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let records = match self.memory.tasks.runs(task, MAX_LISTED_RUNS).await {
+        let records = match self.deps.store.runs(task, MAX_LISTED_RUNS).await {
             Ok(records) => records,
             Err(e) => {
                 send_error(&tx, id, format!("task runs failed: {e}")).await;
@@ -52,63 +103,63 @@ impl AppState {
     }
 
     pub(super) async fn handle_task_save(
-        self: Arc<Self>,
+        &self,
         id: String,
         task: Option<TaskId>,
         spec: TaskSpec,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
         let record = {
-            let _pass = self.runtime.task_scheduler.hold().await;
+            let _pass = self.scheduler.hold().await;
             self.save_task(task, spec).await
         };
-        self.runtime.task_scheduler.reschedule();
-        self.runtime.task_events.rewatch();
+        self.scheduler.reschedule();
+        self.events.rewatch();
         self.send_tasks(id, "task save", record.map(|r| vec![r]), &tx)
             .await
     }
 
     pub(super) async fn handle_task_delete(
-        self: Arc<Self>,
+        &self,
         id: String,
         task: TaskId,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
         let deleted = {
-            let _pass = self.runtime.task_scheduler.hold().await;
-            self.memory.tasks.delete(task).await
+            let _pass = self.scheduler.hold().await;
+            self.deps.store.delete(task).await
         };
         if deleted.is_ok() {
-            self.runtime.task_queue.forget_task(task);
-            self.runtime.task_events.rewatch();
+            self.deps.admission.task_queue.forget_task(task);
+            self.events.rewatch();
         }
         let deleted = deleted.map(|()| Vec::new()).map_err(Into::into);
         self.send_tasks(id, "task delete", deleted, &tx).await
     }
 
     pub(super) async fn handle_task_set_enabled(
-        self: Arc<Self>,
+        &self,
         id: String,
         task: TaskId,
         enabled: bool,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
         let record = {
-            let _pass = self.runtime.task_scheduler.hold().await;
-            self.memory.tasks.set_enabled(task, enabled).await
+            let _pass = self.scheduler.hold().await;
+            self.deps.store.set_enabled(task, enabled).await
         };
-        self.runtime.task_scheduler.reschedule();
-        self.runtime.task_events.rewatch();
+        self.scheduler.reschedule();
+        self.events.rewatch();
         let record = record.map(|r| vec![r]).map_err(Into::into);
         self.send_tasks(id, "task set_enabled", record, &tx).await
     }
 
     pub(super) async fn handle_task_check_trigger(
-        self: Arc<Self>,
+        &self,
         id: String,
         task: Option<TaskId>,
         trigger: TaskTrigger,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
         match self.check_trigger(task, trigger).await {
             Ok(fires) => {
@@ -133,14 +184,14 @@ impl AppState {
         trigger: TaskTrigger,
     ) -> Result<Vec<DateTime<Utc>>, DispatchError> {
         let stored = match task {
-            Some(task) => self.memory.tasks.get(task).await?.spec.triggers,
+            Some(task) => self.deps.store.get(task).await?.spec.triggers,
             None => Vec::new(),
         };
         let now = Local::now();
         let mut triggers = [trigger];
         check_triggers(&triggers, &stored, &now)?;
         resolve_watched_paths(&mut triggers).await?;
-        check_chain(task, &triggers, &self.memory.tasks.list().await?)?;
+        check_chain(task, &triggers, &self.deps.store.list().await?)?;
         Ok(upcoming_fires(&triggers[0], &now, CHECKED_FIRES))
     }
 
@@ -151,7 +202,7 @@ impl AppState {
         id: String,
         op: &str,
         records: Result<Vec<TaskRecord>, DispatchError>,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
     ) -> Result<(), DispatchError> {
         let records = match records {
             Ok(records) => records,
@@ -161,8 +212,8 @@ impl AppState {
             }
         };
         let mut last_runs = self
-            .memory
-            .tasks
+            .deps
+            .store
             .last_finished_runs()
             .await
             .unwrap_or_else(|e| {
@@ -177,7 +228,7 @@ impl AppState {
                     EventBody::Task {
                         task_id: record.id,
                         last_run: last_runs.remove(&record.id),
-                        trigger_failure: self.runtime.task_events.watch_failure(record.id),
+                        trigger_failure: self.events.watch_failure(record.id),
                         spec: record.spec,
                         next_fire,
                     },
@@ -197,17 +248,17 @@ impl AppState {
         task: Option<TaskId>,
         mut spec: TaskSpec,
     ) -> Result<TaskRecord, DispatchError> {
-        if spec.mode == PermissionMode::Auto && !self.config.tools.allow_auto_mode {
+        if spec.mode == PermissionMode::Auto && !self.deps.config.tools.allow_auto_mode {
             return Err(DispatchError::AutoModeOff);
         }
         let stored = match task {
-            Some(task) => self.memory.tasks.get(task).await?.spec.triggers,
+            Some(task) => self.deps.store.get(task).await?.spec.triggers,
             None => Vec::new(),
         };
         check_triggers(&spec.triggers, &stored, &Local::now())?;
         resolve_watched_paths(&mut spec.triggers).await?;
-        check_chain(task, &spec.triggers, &self.memory.tasks.list().await?)?;
-        Ok(self.memory.tasks.save(task, spec).await?)
+        check_chain(task, &spec.triggers, &self.deps.store.list().await?)?;
+        Ok(self.deps.store.save(task, spec).await?)
     }
 }
 

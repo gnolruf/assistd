@@ -132,7 +132,7 @@ async fn send_request_collect_events(path: &Path, body: &str) -> Vec<Event> {
 /// published afterwards are guaranteed to reach them.
 async fn wait_for_subscribers(state: &AppState, n: usize) {
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.runtime.events_bus().receiver_count() < n {
+        while state.bus.sender().receiver_count() < n {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -743,10 +743,12 @@ impl assistd_tools::Tool for GatedTool {
 
     async fn invoke(
         &self,
+        turn: &TurnContext,
         _args: serde_json::Value,
     ) -> Result<assistd_tools::ToolOutput, assistd_tools::ToolError> {
         let approved = assistd_tools::ConfirmationGate::confirm(
             &assistd_tools::IpcConfirmationGate,
+            turn,
             assistd_tools::ConfirmationRequest {
                 tool: "bash".into(),
                 script: "rm -rf /tmp/x".into(),
@@ -1089,6 +1091,7 @@ impl assistd_tools::Tool for SilentHangingTool {
     }
     async fn invoke(
         &self,
+        _turn: &TurnContext,
         _args: serde_json::Value,
     ) -> Result<assistd_tools::ToolOutput, assistd_tools::ToolError> {
         let _flag = DropFlag(self.dropped.clone());

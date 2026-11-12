@@ -32,6 +32,7 @@ async fn run(cmd: &BashCommand, script: &str, stdin: Option<Vec<u8>>) -> Command
         args: vec![script.into()],
         stdin,
         scope: crate::FileScope::Host,
+        turn: TurnContext::default(),
     })
     .await
 }
@@ -45,7 +46,13 @@ async fn glob_matches_reach_bash_as_file_names_not_code() {
     registry.register(test_bash());
     let line = format!("bash echo {}/*.txt", dir.path().display());
 
-    let out = execute(&parse_chain(&line).expect("parses"), &registry, None).await;
+    let out = execute(
+        &parse_chain(&line).expect("parses"),
+        &registry,
+        &TurnContext::default(),
+        None,
+    )
+    .await;
 
     assert_eq!(out.exit_code, 0, "{out:?}");
     assert_eq!(
@@ -60,7 +67,13 @@ async fn leading_dash_c_is_accepted_as_bash_would() {
     registry.register(test_bash());
     let line = "bash -c 'n=$((1+4)); echo RESULT_$n | tr A-Z a-z'";
 
-    let out = execute(&parse_chain(line).expect("parses"), &registry, None).await;
+    let out = execute(
+        &parse_chain(line).expect("parses"),
+        &registry,
+        &TurnContext::default(),
+        None,
+    )
+    .await;
 
     assert_eq!(out.exit_code, 0, "{out:?}");
     assert_eq!(out.stdout, b"result_5\n");

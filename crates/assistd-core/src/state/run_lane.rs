@@ -11,31 +11,26 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use assistd_config::TaskInterruption;
-use assistd_ipc::{Event, StatusKind, TaskId, TaskRunId};
+use assistd_ipc::{StatusKind, TaskId, TaskRunId};
 use assistd_llm::{
     ConversationKey, HistoryReplay, LlmBackend, LlmError, LlmEvent, LlmResult, OneShotReply,
     SlotAssignment, StepOutcome, ToolResultPayload,
 };
-use assistd_tools::Attachment;
+use assistd_tools::{Attachment, YieldableLane};
 
-use super::AppState;
 use super::lanes::LaneLease;
+use super::task_service::TaskService;
+use crate::bus::EventSink;
 use crate::presence::RequestGuard;
 use crate::recovery::{Component, StatusSeverity};
 
 /// Why a yielded run's step ended without running.
 const CANCELLED_WHILE_YIELDED: &str = "the task run was cancelled while it waited for the model";
 
-tokio::task_local! {
-    /// The lane of the task run whose turn is in scope.
-    pub(crate) static RUN_LANE: Arc<RunLane>;
-}
-
 /// A task run's hold on a model lane and on the daemon staying awake.
 #[derive(Debug)]
 pub(crate) struct RunLane {
-    pub(in crate::state) state: Arc<AppState>,
+    pub(in crate::state) tasks: Arc<TaskService>,
     pub(in crate::state) task: TaskId,
     pub(in crate::state) run: TaskRunId,
     /// Tags the run's events.
@@ -43,7 +38,7 @@ pub(crate) struct RunLane {
     pub(in crate::state) held: LaneHold,
     /// The run's conversation, moved to the slot of each lane it regains.
     pub(in crate::state) backend: Arc<dyn LlmBackend>,
-    pub(in crate::state) events: mpsc::Sender<Event>,
+    pub(in crate::state) events: EventSink,
     pub(in crate::state) cancel: CancellationToken,
 }
 
@@ -85,7 +80,7 @@ impl RunLane {
     /// Wait first in the queue for a lane, move the conversation to its slot, and wake the
     /// model; `false` when the run was cancelled first.
     pub(in crate::state) async fn regain(&self) -> bool {
-        let Some(lane) = self.state.runtime.task_queue.resume_first(self.run) else {
+        let Some(lane) = self.tasks.deps.admission.task_queue.resume_first(self.run) else {
             return false;
         };
         let lease = tokio::select! {
@@ -99,7 +94,7 @@ impl RunLane {
         self.backend
             .move_to_slot(lease.slot(ConversationKey::TaskRun(self.run)));
         let awake = match self
-            .state
+            .tasks
             .wake_for_task_run(&self.request_id, &self.events, &self.cancel)
             .await
         {
@@ -117,9 +112,15 @@ impl RunLane {
         true
     }
 
-    /// Wait until the user's conversation wants the main lane this run holds. Cancel-safe.
-    pub(crate) async fn yield_requested(&self) {
-        let mut conversation = self.state.runtime.conversation.subscribe();
+    fn must_yield(&self) -> bool {
+        self.tasks.deps.admission.run_must_yield() && self.on_main_lane()
+    }
+}
+
+#[async_trait]
+impl YieldableLane for RunLane {
+    async fn yield_requested(&self) {
+        let mut conversation = self.tasks.deps.admission.conversation.subscribe();
         let mut held = self.held.0.subscribe();
         while !self.must_yield() {
             tokio::select! {
@@ -133,9 +134,7 @@ impl RunLane {
         }
     }
 
-    /// Give the main lane to the user's conversation if it wants it, then wait for a lane
-    /// again; `false` when the run was cancelled first.
-    pub(crate) async fn give_way(&self) -> bool {
+    async fn give_way(&self) -> bool {
         if !self.must_yield() {
             return true;
         }
@@ -146,12 +145,6 @@ impl RunLane {
             info!(target: "assistd::tasks", run = %self.run, "task run resumed after the conversation");
         }
         regained
-    }
-
-    fn must_yield(&self) -> bool {
-        self.state.config.tasks.interruption == TaskInterruption::Interrupt
-            && self.state.conversation_holds_queue()
-            && self.on_main_lane()
     }
 }
 
@@ -236,6 +229,7 @@ impl LlmBackend for YieldingBackend {
 }
 
 async fn announce_discarded_step(tx: &mpsc::Sender<LlmEvent>) {
+    let _ = tx.send(LlmEvent::StepDiscarded).await;
     let _ = tx
         .send(LlmEvent::Status {
             severity: StatusSeverity::Info,

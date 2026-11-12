@@ -240,6 +240,7 @@ fn parse_target(args: &[String]) -> Result<Target, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TurnContext;
 
     fn args(raw: &[&str]) -> Vec<String> {
         raw.iter().map(ToString::to_string).collect()
@@ -270,6 +271,7 @@ mod tests {
                 args: args(&["--full"]),
                 stdin: None,
                 scope: crate::FileScope::Host,
+                turn: TurnContext::default(),
             })
             .await;
         assert_eq!(out.exit_code, 1);

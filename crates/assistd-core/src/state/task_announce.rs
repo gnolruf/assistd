@@ -6,9 +6,9 @@ use tokio::sync::mpsc;
 use assistd_ipc::{Event, EventBody, TaskName, TaskRunId};
 use assistd_voice::SentenceBuffer;
 
-use super::AppState;
 use super::conversation::ConversationState;
 use super::query::run_speech_worker;
+use super::task_service::TaskService;
 
 /// A finished run's reply to announce, and the request id its events carry.
 pub(super) struct TaskReply {
@@ -18,7 +18,7 @@ pub(super) struct TaskReply {
     pub(super) reply: String,
 }
 
-impl AppState {
+impl TaskService {
     pub(super) async fn announce_task_reply(&self, reply: TaskReply) {
         let TaskReply {
             id,
@@ -27,7 +27,7 @@ impl AppState {
             reply,
         } = reply;
         let sentences = self.reply_sentences(&reply);
-        self.runtime.publish(&Event::new(
+        self.deps.bus.publish(&Event::new(
             id.clone(),
             EventBody::TaskReply {
                 run,
@@ -36,7 +36,7 @@ impl AppState {
             },
         ));
         self.wait_for_quiet_chat().await;
-        let voice_output = self.subsystems.voice.speech().clone();
+        let voice_output = self.deps.voice.speech().clone();
         let start_epoch = voice_output.current_epoch();
         let (speech_tx, speech_rx) = mpsc::channel(sentences.len().max(1));
         for sentence in sentences {
@@ -45,7 +45,7 @@ impl AppState {
         drop(speech_tx);
         run_speech_worker(
             voice_output,
-            self.runtime.events_bus().clone(),
+            self.deps.bus.sender().clone(),
             id,
             start_epoch,
             speech_rx,
@@ -55,8 +55,8 @@ impl AppState {
 
     /// Return once no user turn is in flight and nothing is being spoken.
     async fn wait_for_quiet_chat(&self) {
-        let mut conversation = self.runtime.conversation.subscribe();
-        let mut speaking = self.subsystems.voice.speech().subscribe_speaking();
+        let mut conversation = self.deps.admission.conversation.subscribe();
+        let mut speaking = self.deps.voice.speech().subscribe_speaking();
         loop {
             let talking = matches!(
                 *conversation.borrow_and_update(),
@@ -76,7 +76,7 @@ impl AppState {
     }
 
     fn reply_sentences(&self, reply: &str) -> Vec<String> {
-        let max_chars = self.config.voice.synthesis.max_sentence_chars.get() as usize;
+        let max_chars = self.deps.config.voice.synthesis.max_sentence_chars.get() as usize;
         let mut sentences = SentenceBuffer::new(max_chars);
         let mut split = sentences.push(reply);
         split.extend(sentences.finish());

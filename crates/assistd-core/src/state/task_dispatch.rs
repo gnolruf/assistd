@@ -4,21 +4,21 @@
 use std::future::pending;
 use std::sync::Arc;
 
-use tokio::sync::{OwnedMutexGuard, mpsc};
+use tokio::sync::OwnedMutexGuard;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use assistd_ipc::{
-    ConversationHold, Event, EventBody, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId,
-};
+use assistd_ipc::{Event, EventBody, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId};
 use assistd_memory::{TaskRunEnd, WaitingRun};
 
 use super::conversation::ConversationState;
 use super::lanes::{LaneLease, ModelLanes, changed_or_pending};
+use super::send_error;
 use super::task_queue::{Cancelled, NextStart, QueueOpError, TurnStart};
 use super::task_runs::DAEMON_STOPPED;
-use super::{AppState, send_error};
+use super::task_service::TaskService;
+use crate::bus::EventSink;
 
 /// The `id` broadcast `TaskQueue` events carry.
 const TASK_QUEUE_EVENT_ID: &str = "task_queue";
@@ -30,7 +30,7 @@ enum Admitted {
     Turn(String, OwnedMutexGuard<()>),
 }
 
-impl AppState {
+impl TaskService {
     /// Reload the runs left waiting when the daemon last stopped, failing those it
     /// stopped mid-run, prune old finished runs, then start queued runs as lanes free up and queue runs as time
     /// and event triggers fire, until the task runner stops.
@@ -38,54 +38,20 @@ impl AppState {
         self.reload_task_queue().await;
         self.prune_task_runs().await;
         let dispatcher = Arc::clone(self);
-        self.runtime
-            .task_runner
+        self.runner
             .spawn_service(move |stopping| dispatcher.dispatch_queued_runs(stopping));
         let scheduler = Arc::clone(self);
-        self.runtime
-            .task_runner
+        self.runner
             .spawn_service(move |stopping| scheduler.schedule_task_fires(stopping));
         let watcher = Arc::clone(self);
-        self.runtime
-            .task_runner
+        self.runner
             .spawn_service(move |stopping| watcher.watch_task_events(stopping));
         let startup = Arc::clone(self);
-        self.runtime
-            .task_runner
+        self.runner
             .spawn_service(move |stopping| startup.fire_on_daemon_started(stopping));
     }
 
-    /// The task queue and the model lanes as they stand.
-    pub(super) fn task_queue_snapshot(&self) -> TaskQueueSnapshot {
-        self.runtime
-            .task_queue
-            .snapshot(self.runtime.lanes.holders(), self.conversation_hold())
-    }
-
-    /// Whether the user's conversation keeps task runs off the model's only lane.
-    pub(super) fn conversation_holds_queue(&self) -> bool {
-        self.runtime.lanes.is_single() && self.runtime.conversation.is_open()
-    }
-
-    fn conversation_hold(&self) -> Option<ConversationHold> {
-        if !self.runtime.lanes.is_single() {
-            return None;
-        }
-        match self.runtime.conversation.state() {
-            ConversationState::Idle => None,
-            ConversationState::Talking { .. } => Some(ConversationHold { resumes_at: None }),
-            ConversationState::Quiet { resumes_at, .. } => Some(ConversationHold {
-                resumes_at: Some(resumes_at),
-            }),
-        }
-    }
-
-    pub(super) async fn handle_task_queue(
-        self: Arc<Self>,
-        id: String,
-        op: TaskQueueOp,
-        tx: mpsc::Sender<Event>,
-    ) {
+    pub(super) async fn handle_task_queue(&self, id: String, op: TaskQueueOp, tx: EventSink) {
         match self.apply_task_queue_op(op).await {
             Ok(()) => {
                 let _ = tx.send(Event::new(id, EventBody::Done)).await;
@@ -96,11 +62,16 @@ impl AppState {
 
     /// Drop waiting run `run`, recording it as cancelled, or stop it if it is running.
     pub(super) async fn cancel_task_run(&self, run: TaskRunId) -> Result<(), QueueOpError> {
-        let runner = &self.runtime.task_runner;
-        match self.runtime.task_queue.cancel(run, || runner.cancel(run)) {
+        let runner = &self.runner;
+        match self
+            .deps
+            .admission
+            .task_queue
+            .cancel(run, || runner.cancel(run))
+        {
             Cancelled::Waiting => {
-                self.memory
-                    .tasks
+                self.deps
+                    .store
                     .finish_run(run, TaskRunEnd::Cancelled)
                     .await?;
                 Ok(())
@@ -111,19 +82,19 @@ impl AppState {
     }
 
     async fn apply_task_queue_op(&self, op: TaskQueueOp) -> Result<(), QueueOpError> {
-        let queue = &self.runtime.task_queue;
+        let queue = &self.deps.admission.task_queue;
         match op {
             TaskQueueOp::Move { run, to } => {
                 let _order = queue.lock_order().await;
                 let order = queue.move_to(run, to)?;
-                self.memory.tasks.reorder_queue(order).await?;
+                self.deps.store.reorder_queue(order).await?;
             }
             TaskQueueOp::Cancel { run } => self.cancel_task_run(run).await?,
             TaskQueueOp::CancelTurn { id } => queue.cancel_turn(&id)?,
             TaskQueueOp::Pause => self.set_task_queue_paused(true).await?,
             TaskQueueOp::Resume => {
                 self.set_task_queue_paused(false).await?;
-                self.runtime.conversation.end();
+                self.deps.admission.conversation.end();
             }
         }
         Ok(())
@@ -131,26 +102,28 @@ impl AppState {
 
     /// Record that the queue is paused, or not, then hold or release its runs.
     async fn set_task_queue_paused(&self, paused: bool) -> Result<(), QueueOpError> {
-        self.memory.tasks.set_queue_paused(paused).await?;
-        self.runtime.task_queue.set_paused(paused);
+        self.deps.store.set_queue_paused(paused).await?;
+        self.deps.admission.task_queue.set_paused(paused);
         Ok(())
     }
 
     async fn reload_task_queue(&self) {
-        let recovered = match self.memory.tasks.recover_queue(DAEMON_STOPPED.into()).await {
+        let recovered = match self.deps.store.recover_queue(DAEMON_STOPPED.into()).await {
             Ok(recovered) => recovered,
             Err(e) => {
                 warn!(target: "assistd::tasks", error = %e, "reloading the task queue failed");
                 return;
             }
         };
-        self.runtime.task_queue.set_paused(recovered.paused);
+        self.deps.admission.task_queue.set_paused(recovered.paused);
         for WaitingRun { run, task } in recovered.waiting {
-            match self.memory.tasks.get(task).await {
-                Ok(record) => self
-                    .runtime
-                    .task_queue
-                    .push(run, record, unrequested_run_id(run)),
+            match self.deps.store.get(task).await {
+                Ok(record) => {
+                    self.deps
+                        .admission
+                        .task_queue
+                        .push(run, record, unrequested_run_id(run));
+                }
                 Err(e) => warn!(
                     target: "assistd::tasks",
                     %run,
@@ -165,10 +138,10 @@ impl AppState {
     /// GPU monitor or the user's conversation does, end the conversation once it has been
     /// quiet long enough, and broadcast the queue after every change, until `stopping` fires.
     async fn dispatch_queued_runs(self: Arc<Self>, stopping: CancellationToken) {
-        let mut queue_changes = self.runtime.task_queue.subscribe();
-        let mut lane_changes = self.runtime.lanes.watch();
-        let mut gpu_hold = self.subsystems.presence.gpu_hold();
-        let mut conversation = self.runtime.conversation.subscribe();
+        let mut queue_changes = self.deps.admission.task_queue.subscribe();
+        let mut lane_changes = self.deps.admission.lanes.watch();
+        let mut gpu_hold = self.deps.presence.gpu_hold();
+        let mut conversation = self.deps.admission.conversation.subscribe();
         let mut published = None;
         loop {
             let gpu_held = *gpu_hold.borrow_and_update();
@@ -176,7 +149,7 @@ impl AppState {
             self.suspend_waiting_runs(gpu_held).await;
             queue_changes.mark_unchanged();
             self.publish_task_queue(&mut published);
-            let next = self.runtime.task_queue.next_to_start();
+            let next = self.deps.admission.task_queue.next_to_start();
             tokio::select! {
                 biased;
                 () = stopping.cancelled() => return,
@@ -185,9 +158,9 @@ impl AppState {
                 () = changed_or_pending(&mut gpu_hold) => {}
                 () = changed_or_pending(&mut conversation) => {}
                 () = quiet_ends(conversation_now) => {
-                    self.runtime.conversation.end_if_quiet_by(Instant::now());
+                    self.deps.admission.conversation.end_if_quiet_by(Instant::now());
                 }
-                admitted = admit(&self.runtime.lanes, next) => self.start_admitted(admitted),
+                admitted = admit(&self.deps.admission.lanes, next) => self.start_admitted(admitted),
             }
         }
     }
@@ -196,24 +169,31 @@ impl AppState {
     /// the user's conversation took the main lane first.
     fn start_admitted(self: &Arc<Self>, admitted: Admitted) {
         match admitted {
-            Admitted::Run(_, lease) if lease.on_main_lane() && self.conversation_holds_queue() => {
+            Admitted::Run(_, lease)
+                if lease.on_main_lane() && self.deps.admission.conversation_holds_queue() =>
+            {
                 debug!(target: "assistd::tasks", "the user's conversation took the lane first");
             }
             Admitted::Run(run, lease) => {
-                let started = self.runtime.task_queue.start(run, lease, |queued, lease| {
-                    self.spawn_task_run(queued, lease);
-                });
+                let started = self
+                    .deps
+                    .admission
+                    .task_queue
+                    .start(run, lease, |queued, lease| {
+                        self.spawn_task_run(queued, lease);
+                    });
                 if !started {
                     debug!(target: "assistd::tasks", %run, "admitted run left the queue first");
                 }
             }
             Admitted::Turn(id, lane) => {
                 let turn = self
-                    .runtime
+                    .deps
+                    .admission
                     .conversation
-                    .begin_turn(self.conversation_quiet_time());
+                    .begin_turn(self.deps.admission.conversation_quiet_time());
                 let start = TurnStart { lane, turn };
-                if let Err(unstarted) = self.runtime.task_queue.start_turn(&id, start) {
+                if let Err(unstarted) = self.deps.admission.task_queue.start_turn(&id, start) {
                     debug!(target: "assistd::tasks", %id, "admitted user turn left the queue first");
                     unstarted.turn.abandon();
                 }
@@ -228,11 +208,13 @@ impl AppState {
         let reason = if gpu_held {
             Some(SuspendReason::GpuBusy)
         } else {
-            self.conversation_holds_queue()
+            self.deps
+                .admission
+                .conversation_holds_queue()
                 .then_some(SuspendReason::UserConversation)
         };
-        for run in self.runtime.task_queue.suspend_waiting(reason) {
-            if let Err(e) = self.memory.tasks.set_run_waiting(run, reason).await {
+        for run in self.deps.admission.task_queue.suspend_waiting(reason) {
+            if let Err(e) = self.deps.store.set_run_waiting(run, reason).await {
                 warn!(
                     target: "assistd::tasks",
                     %run,
@@ -245,11 +227,11 @@ impl AppState {
 
     /// Broadcast the queue if it differs from `published`, the last broadcast.
     fn publish_task_queue(&self, published: &mut Option<TaskQueueSnapshot>) {
-        let snapshot = self.task_queue_snapshot();
+        let snapshot = self.deps.admission.queue_snapshot();
         if published.as_ref() == Some(&snapshot) {
             return;
         }
-        self.runtime.publish(&Event::new(
+        self.deps.bus.publish(&Event::new(
             TASK_QUEUE_EVENT_ID.to_string(),
             EventBody::TaskQueue {
                 snapshot: snapshot.clone(),

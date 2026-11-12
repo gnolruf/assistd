@@ -109,7 +109,8 @@ impl Command for ProgramCommand {
             );
         };
         let stdin = input.stdin.as_deref().unwrap_or_default();
-        let ScriptRun { out, private_dirs } = run_script(&self.policy, name, script, stdin).await;
+        let ScriptRun { out, private_dirs } =
+            run_script(&self.policy, &input.turn, name, script, stdin).await;
         if private_dirs.is_empty() {
             out
         } else {

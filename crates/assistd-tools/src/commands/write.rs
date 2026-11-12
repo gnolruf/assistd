@@ -11,6 +11,7 @@ use rustix::fs::{FileType, Mode, OFlags};
 use rustix::io::Errno;
 use tokio::io::AsyncWriteExt;
 
+use crate::TurnContext;
 use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
@@ -112,6 +113,7 @@ impl WriteCommand {
     /// review clears it, or the gate approves. `Err` holds the refusal or cancellation.
     async fn authorized(
         &self,
+        turn: &TurnContext,
         target: WriteTarget,
         content: &[u8],
         raw_path: &str,
@@ -128,7 +130,7 @@ impl WriteCommand {
             Review::Ask(confirmation, unattended) => {
                 let request =
                     confirmation_request(&target.path, content, &confirmation, unattended);
-                if self.gate.confirm(request).await == Approval::Deny {
+                if self.gate.confirm(turn, request).await == Approval::Deny {
                     Err(self.write_cancelled(raw_path))
                 } else {
                     Ok(target.path)
@@ -234,7 +236,10 @@ impl Command for WriteCommand {
             }
         };
 
-        let path = match self.authorized(write_target, &content, &raw_path).await {
+        let path = match self
+            .authorized(&input.turn, write_target, &content, &raw_path)
+            .await
+        {
             Ok(path) => path,
             Err(refusal) => return refusal,
         };

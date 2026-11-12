@@ -573,7 +573,9 @@ async fn forward_sentences(mut llm_rx: mpsc::Receiver<LlmEvent>, speech_tx: mpsc
                 }
                 break;
             }
-            LlmEvent::ToolCallsRequested { .. }
+            LlmEvent::StepStarted
+            | LlmEvent::StepDiscarded
+            | LlmEvent::ToolCallsRequested { .. }
             | LlmEvent::ToolCall { .. }
             | LlmEvent::ToolResult { .. }
             | LlmEvent::Relay(_)

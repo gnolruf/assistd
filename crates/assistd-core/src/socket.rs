@@ -22,11 +22,12 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
 use assistd_ipc::{Event, EventBody, Request, RequestBody};
-use assistd_tools::{Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
+use assistd_tools::{Approval, CONFIRM_TIMEOUT, ConfirmRouter, TurnContext};
 use assistd_utils::time::saturating_millis;
 
-use crate::AppState;
+use crate::bus::EventSink;
 use crate::recovery::drain_join_set;
+use crate::state::{AppState, Requester};
 
 const EVENT_CHANNEL_CAPACITY: usize = 32;
 
@@ -470,25 +471,27 @@ async fn handle_connection(
 
     let (tx, rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     let span = tracing::info_span!("ipc", id = %req.id, req = req.kind());
+    let (prompt_tx, prompt_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     let router = ConfirmRouter::new(
         req.id.clone(),
-        tx.clone(),
+        prompt_tx,
         CONFIRM_TIMEOUT,
         state.safety_judge(),
     );
+    let prompts = forward_prompts(prompt_rx, state.events_of(&req, tx.clone()));
     let is_subscribe = matches!(req.body, RequestBody::Subscribe { .. });
 
-    let dispatch_state = state.clone();
-    let router_for_dispatch = router.clone();
-    let dispatch_fut = async move {
-        CONFIRM_ROUTER
-            .scope(
-                router_for_dispatch,
-                Box::pin(dispatch_state.dispatch(req, peer_pid, tx)),
-            )
-            .await
+    let requester = Requester {
+        pid: peer_pid,
+        turn: TurnContext::answered_by(Arc::clone(&router)),
     };
-    let forward_fut = forward_events(rx, write_half, state, is_subscribe);
+    let dispatch_fut = Box::pin(async move {
+        tokio::select! {
+            res = state.dispatch(req, requester, tx) => res,
+            () = prompts => Ok(()),
+        }
+    });
+    let forward_fut = forward_events(rx, write_half);
     let read_fut = route_confirm_responses(reader, router);
 
     let dispatch_and_read = async {
@@ -611,13 +614,20 @@ async fn read_request_frame(
     })
 }
 
-/// Write every dispatched event to the client, teeing it onto the bus unless this connection
-/// is a bus subscriber. Returns early, dropping the receiver, once the client hangs up.
+/// Send the prompts a connection's router raises to its client through `events`, like
+/// every other event of the request; never returns.
+async fn forward_prompts(mut prompts: mpsc::Receiver<Event>, events: EventSink) {
+    while let Some(prompt) = prompts.recv().await {
+        let _ = events.send(prompt).await;
+    }
+    std::future::pending::<()>().await;
+}
+
+/// Write every dispatched event to the client. Returns early, dropping the receiver, once
+/// the client hangs up.
 async fn forward_events(
     mut rx: mpsc::Receiver<Event>,
     mut write_half: OwnedWriteHalf,
-    state: Arc<AppState>,
-    is_subscribe: bool,
 ) -> Result<ForwardEnd, SocketError> {
     let mut hangup_poll = tokio::time::interval(PEER_HANGUP_POLL_INTERVAL);
     loop {
@@ -626,9 +636,6 @@ async fn forward_events(
                 let Some(event) = received else {
                     return Ok(ForwardEnd::Drained(write_half));
                 };
-                if !is_subscribe {
-                    state.runtime.publish(&event);
-                }
                 match write_event(&mut write_half, &event).await {
                     Err(SocketError::Io(e)) if is_peer_gone(&e) => {
                         return Ok(ForwardEnd::PeerHungUp);

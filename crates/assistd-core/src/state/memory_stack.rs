@@ -1,4 +1,5 @@
-//! `MemoryStack`: persistence and embedding handles owned by `AppState`.
+//! `MemoryStack`: the persistent stores and embedding handles, which also answer the
+//! `Memory*` requests.
 
 use std::sync::Arc;
 

@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -17,6 +16,7 @@ use tracing::{info, warn};
 use assistd_ipc::{ConfirmSource, Event, EventBody, HostName, PermissionMode, PlanVerdict};
 
 use super::judge::{JudgedCommand, SafetyJudge, Verdict};
+use crate::TurnContext;
 
 /// Cap on confirmation prompts and plan reviews in flight on one connection.
 pub const MAX_PENDING_CONFIRMS: usize = 32;
@@ -123,9 +123,9 @@ impl Approval {
 /// Decides whether a command that needs confirmation may run.
 #[async_trait]
 pub trait ConfirmationGate: fmt::Debug + Send + Sync + 'static {
-    /// Ask for confirmation. Every failure mode (channel drop, shutdown,
-    /// timeout) must become [`Approval::Deny`] so a turn never hangs.
-    async fn confirm(&self, req: ConfirmationRequest) -> Approval;
+    /// Ask whoever answers `turn`'s prompts. Every failure mode (channel drop,
+    /// shutdown, timeout) must become [`Approval::Deny`] so a turn never hangs.
+    async fn confirm(&self, turn: &TurnContext, req: ConfirmationRequest) -> Approval;
 }
 
 /// Gate that never approves, logging each denial.
@@ -136,7 +136,7 @@ pub struct DenyAllGate;
 #[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ConfirmationGate for DenyAllGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
+    async fn confirm(&self, _turn: &TurnContext, req: ConfirmationRequest) -> Approval {
         warn!(
             target: "assistd::policy",
             tool = %req.tool,
@@ -155,7 +155,7 @@ pub struct AlwaysAllowGate;
 #[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ConfirmationGate for AlwaysAllowGate {
-    async fn confirm(&self, _req: ConfirmationRequest) -> Approval {
+    async fn confirm(&self, _turn: &TurnContext, _req: ConfirmationRequest) -> Approval {
         Approval::Once
     }
 }
@@ -209,7 +209,7 @@ pub struct NoPendingConfirm;
 pub struct NoPendingReview;
 
 /// Per-connection routing table for in-flight confirmation prompts,
-/// reached through the [`CONFIRM_ROUTER`] task-local. Asks beyond
+/// handed to tool calls in their [`TurnContext`]. Asks beyond
 /// [`MAX_PENDING_CONFIRMS`] in flight are denied rather than queued.
 #[derive(Debug)]
 pub struct ConfirmRouter {
@@ -705,35 +705,17 @@ fn refuse_while_planning(refused: &AtomicUsize, req: &ConfirmationRequest) -> Ap
     Approval::Deny
 }
 
-tokio::task_local! {
-    /// The [`ConfirmRouter`] of the IPC connection whose request is
-    /// being dispatched.
-    pub static CONFIRM_ROUTER: Arc<ConfirmRouter>;
-}
-
-/// Wrap `fut` so it runs under the caller's [`CONFIRM_ROUTER`], if any.
-/// Task-locals do not survive `tokio::spawn`, so call this at the spawn site.
-pub fn inherit_confirm_router<F: Future>(fut: F) -> impl Future<Output = F::Output> {
-    let router = CONFIRM_ROUTER.try_with(Arc::clone).ok();
-    async move {
-        match router {
-            Some(router) => CONFIRM_ROUTER.scope(router, fut).await,
-            None => fut.await,
-        }
-    }
-}
-
-/// Gate that round-trips prompts through the [`CONFIRM_ROUTER`] in scope,
-/// denying when there is none.
+/// Gate that round-trips prompts through the turn's [`ConfirmRouter`],
+/// denying when it has none.
 #[derive(Debug, Default)]
 pub struct IpcConfirmationGate;
 
 #[async_trait]
 impl ConfirmationGate for IpcConfirmationGate {
-    async fn confirm(&self, req: ConfirmationRequest) -> Approval {
-        match CONFIRM_ROUTER.try_with(Arc::clone) {
-            Ok(router) => router.ask(req).await,
-            Err(_) => {
+    async fn confirm(&self, turn: &TurnContext, req: ConfirmationRequest) -> Approval {
+        match turn.router() {
+            Some(router) => router.ask(req).await,
+            None => {
                 warn!(
                     target: "assistd::policy",
                     tool = %req.tool,
@@ -913,29 +895,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inherit_confirm_router_carries_router_across_spawn() {
+    async fn gate_asks_the_turns_router_and_denies_a_turn_without_one() {
         let (tx, mut rx) = mpsc::channel(4);
         let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60), None);
-        let answer = CONFIRM_ROUTER.sync_scope(Arc::clone(&router), || {
-            tokio::spawn(inherit_confirm_router(async {
-                IpcConfirmationGate.confirm(sample_request()).await
-            }))
-        });
+        let turn = TurnContext::answered_by(Arc::clone(&router));
+        let answer =
+            tokio::spawn(async move { IpcConfirmationGate.confirm(&turn, sample_request()).await });
         let confirm_id = recv_confirm_id(&mut rx).await;
         router
             .route_response(&confirm_id, Approval::Always)
             .expect("routed");
         assert_eq!(answer.await.expect("spawned gate"), Approval::Always);
-    }
 
-    #[tokio::test]
-    async fn bare_spawn_loses_router_and_gate_denies() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let router = ConfirmRouter::new("r".into(), tx, Duration::from_secs(60), None);
-        let answer = CONFIRM_ROUTER.sync_scope(router, || {
-            tokio::spawn(async { IpcConfirmationGate.confirm(sample_request()).await })
-        });
-        assert_eq!(answer.await.expect("spawned gate"), Approval::Deny);
+        let unanswered = IpcConfirmationGate
+            .confirm(&TurnContext::default(), sample_request())
+            .await;
+        assert_eq!(unanswered, Approval::Deny);
         rx.try_recv()
             .expect_err("a gate with no router must not reach the wire");
     }

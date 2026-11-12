@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 
 use super::desktop_entry::DesktopEntry;
 use super::*;
+use crate::TurnContext;
 use crate::commands::{RecordingGate, test_wm};
 
 fn id(n: u64) -> WindowId {
@@ -86,6 +87,7 @@ async fn run_wm(wm: Arc<dyn WindowManager>, args: &[&str]) -> CommandOutput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: None,
             scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
         })
         .await
 }
@@ -213,7 +215,7 @@ async fn approved_apps_skip_the_prompt_only_when_launched_without_targets_or_cwd
     let confirmed = async |args: &[&str]| {
         let args = open_args(args);
         let launch = PreparedLaunch::new(viewer("viewer %F"), &args).expect("launchable");
-        cmd.confirmed(&args, &launch).await
+        cmd.confirmed(&TurnContext::default(), &args, &launch).await
     };
     assert!(confirmed(&["viewer"]).await);
     assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());

@@ -1,24 +1,17 @@
 //! `GetCapabilities` handler.
 
-use std::sync::Arc;
-
-use tokio::sync::mpsc;
-
 use assistd_ipc::{Component, ComponentReadiness, Event, EventBody, StatusKind, StatusSeverity};
 use assistd_llm::VisionState;
 
-use super::AppState;
+use super::status_service::StatusService;
+use crate::bus::EventSink;
 
-impl AppState {
+impl StatusService {
     /// Report disabled tools, MCP servers that failed to start, the model
     /// name, and whether llama-server supports vision, probed live rather
     /// than read from the vision gate.
-    pub(super) async fn handle_get_capabilities(
-        self: Arc<Self>,
-        id: String,
-        tx: mpsc::Sender<Event>,
-    ) {
-        if let Some(disabled) = &self.subsystems.tools_disabled {
+    pub(super) async fn handle_get_capabilities(&self, id: String, tx: EventSink) {
+        if let Some(disabled) = &self.tools_disabled {
             let _ = tx
                 .send(Event::new(
                     id.clone(),
@@ -31,7 +24,7 @@ impl AppState {
                 ))
                 .await;
         }
-        for server in &self.subsystems.mcp_servers {
+        for server in self.mcp_servers.iter() {
             let ComponentReadiness::Unavailable { reason } = server.readiness() else {
                 continue;
             };
@@ -51,7 +44,7 @@ impl AppState {
                 .await;
         }
 
-        let probe = match &self.subsystems.vision_revalidator {
+        let probe = match &self.vision_revalidator {
             Some(revalidator) => revalidator.probe().await,
             None => VisionState::default(),
         };

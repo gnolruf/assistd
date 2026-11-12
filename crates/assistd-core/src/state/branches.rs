@@ -7,22 +7,27 @@ use std::sync::Arc;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use assistd_ipc::{Event, EventBody};
 use assistd_llm::{
-    ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, OneShotReply, Thinking,
-    ToolCallRecord,
+    ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, OneShotReply, SlotStash,
+    Thinking, ToolCallRecord,
 };
 use assistd_memory::{
     BranchHistory, BranchId, BranchSummary, HistoryRow, HistoryScope, MessageId, MessageKind,
-    PersistedRelayStep, PersistedToolCall, Seq, SessionId, TurnStats, UndoOutcome,
+    PersistedRelayStep, PersistedToolCall, Seq, SessionId, TranscriptStore, TurnStats, UndoOutcome,
 };
 use assistd_tools::policy::on_blocking_pool;
 
+use super::persistence::TranscriptLog;
 use super::relay_trace::wire_relay_steps;
-use super::{AppState, send_error, wire_role, wire_timestamp};
+use super::session::SessionContext;
+use super::turn_admission::TurnAdmission;
+use super::{send_error, wire_role, wire_timestamp};
+use crate::bus::EventBus;
+use crate::bus::EventSink;
+use crate::presence::PresenceManager;
 
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_TITLE_PROMPT_CHARS: usize = 1024;
@@ -36,44 +41,34 @@ enum ReplayPart {
     Kept,
 }
 
-/// `rows` of a branch, whole or from its summary's cut, as the LLM replays them
-/// under its `summary`.
-pub fn branch_replay(rows: &[HistoryRow], summary: Option<BranchSummary>) -> HistoryReplay {
-    let mut folded_steps = Vec::new();
-    let mut entries = Vec::new();
-    for row in rows {
-        match replay_part(summary.as_ref(), row.seq) {
-            ReplayPart::Summarized => {}
-            ReplayPart::FoldedStep => folded_steps.push(history_entry(row)),
-            ReplayPart::Kept => entries.push(history_entry(row)),
-        }
-    }
-    HistoryReplay {
-        summary: summary.map(|s| s.content),
-        folded_steps,
-        entries,
-    }
+/// Handles the fork, switch, undo and session requests on the user's conversation, and
+/// titles its sessions.
+#[derive(Debug)]
+pub struct BranchService {
+    pub(super) session_ctx: Arc<SessionContext>,
+    pub(super) transcripts: Arc<dyn TranscriptStore>,
+    pub(super) transcript: Arc<TranscriptLog>,
+    pub(super) admission: Arc<TurnAdmission>,
+    pub(super) llm: Arc<dyn LlmBackend>,
+    pub(super) presence: Arc<PresenceManager>,
+    pub(super) slot_stash: Option<Arc<SlotStash>>,
+    pub(super) bus: EventBus,
 }
 
-impl AppState {
+impl BranchService {
     /// `/fork <name>`: snapshot the current branch into a new branch and
     /// switch to it. The new branch shares message rows with its
     /// parent; only the branch membership is copied.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, branch = %name))]
-    pub(super) async fn handle_fork(
-        self: Arc<Self>,
-        id: String,
-        name: String,
-        tx: mpsc::Sender<Event>,
-    ) {
+    pub(super) async fn handle_fork(&self, id: String, name: String, tx: EventSink) {
         if name.trim().is_empty() {
             send_error(&tx, id, "/fork: name must not be empty".into()).await;
             return;
         }
-        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
-        self.drain_persistence_inflight().await;
+        let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
+        self.transcript.drain_inflight().await;
 
-        let (session, current_branch) = match self.saved_session().await {
+        let (session, current_branch) = match self.transcript.saved_session().await {
             Ok(pair) => pair,
             Err(e) => {
                 send_error(&tx, id, format!("/fork: {e}")).await;
@@ -81,7 +76,6 @@ impl AppState {
             }
         };
         let new_branch = match self
-            .memory
             .transcripts
             .fork_and_switch(current_branch, &name)
             .await
@@ -92,19 +86,10 @@ impl AppState {
                 return;
             }
         };
-        self.runtime
-            .session_ctx
-            .replace(session, Some(new_branch))
-            .await;
+        self.session_ctx.replace(session, Some(new_branch)).await;
 
         let (_, parent_name, fork_point_seq) = self.lookup_branch_meta(new_branch).await;
-        let session_title = self
-            .memory
-            .transcripts
-            .session_title(session)
-            .await
-            .ok()
-            .flatten();
+        let session_title = self.transcripts.session_title(session).await.ok().flatten();
         let _ = tx
             .send(Event::new(
                 id.clone(),
@@ -123,15 +108,15 @@ impl AppState {
 
     /// Enumerate every branch across every session, active session first.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
-    pub(super) async fn handle_branches(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        let branches = match self.memory.transcripts.list_branches().await {
+    pub(super) async fn handle_branches(&self, id: String, tx: EventSink) {
+        let branches = match self.transcripts.list_branches().await {
             Ok(branches) => branches,
             Err(e) => {
                 send_error(&tx, id, format!("/resume: {e}")).await;
                 return;
             }
         };
-        let (active_session, _) = self.runtime.session_ctx.current().await;
+        let (active_session, _) = self.session_ctx.current().await;
         let (active, other): (Vec<_>, Vec<_>) = branches
             .into_iter()
             .partition(|branch| branch.session_id == active_session);
@@ -166,17 +151,18 @@ impl AppState {
     /// in the background. An untitled session first gets one from the LLM;
     /// failures are logged and retried on the session's next turn.
     pub(super) fn spawn_session_title_broadcast(
-        self: Arc<Self>,
+        self: &Arc<Self>,
         id: String,
         session: SessionId,
         user_text: &str,
     ) {
         let trimmed: String = user_text.chars().take(MAX_TITLE_PROMPT_CHARS).collect();
-        self.runtime.persistence_tracker.clone().spawn(async move {
-            let Some(title) = self.session_title_for_turn(session, &trimmed).await else {
+        let branches = Arc::clone(self);
+        self.transcript.tracker.spawn(async move {
+            let Some(title) = branches.session_title_for_turn(session, &trimmed).await else {
                 return;
             };
-            let _ = self.runtime.events_bus().send(Event::new(
+            let _ = branches.bus.sender().send(Event::new(
                 id,
                 EventBody::SessionTitle {
                     session_id: session.to_string(),
@@ -189,7 +175,7 @@ impl AppState {
     /// `session`'s stored title, else a newly generated and saved one.
     /// `None` when any step fails.
     async fn session_title_for_turn(&self, session: SessionId, user_text: &str) -> Option<String> {
-        match self.memory.transcripts.session_title(session).await {
+        match self.transcripts.session_title(session).await {
             Ok(Some(title)) => return Some(title),
             Ok(None) => {}
             Err(e) => {
@@ -202,12 +188,7 @@ impl AppState {
             }
         }
         let title = self.generate_title(user_text).await?;
-        if let Err(e) = self
-            .memory
-            .transcripts
-            .set_session_title(session, &title)
-            .await
-        {
+        if let Err(e) = self.transcripts.set_session_title(session, &title).await {
             warn!(
                 target: "assistd::memory",
                 error = %e,
@@ -222,8 +203,8 @@ impl AppState {
     /// only while `Active`. `None` when asleep, or the call fails or yields
     /// no usable text.
     async fn generate_title(&self, user_text: &str) -> Option<String> {
-        let _agent_guard = self.runtime.agent_turn_lock.clone().lock_owned().await;
-        let Some(_request_guard) = self.subsystems.presence.request_guard_if_active().await else {
+        let _agent_guard = self.admission.agent_turn_lock.clone().lock_owned().await;
+        let Some(_request_guard) = self.presence.request_guard_if_active().await else {
             debug!(
                 target: "assistd::chat",
                 "daemon not active; session stays untitled until its next turn"
@@ -236,7 +217,6 @@ impl AppState {
                 like \"chat about\". Conversation:\n\n{user_text}"
         );
         let raw = match self
-            .subsystems
             .llm
             .complete_oneshot(prompt, OneShotReply::Text(Thinking::Disabled))
             .await
@@ -266,18 +246,12 @@ impl AppState {
     /// Make the `target` branch active, replay its
     /// history into the LLM backend, and stream it to the client.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, target = %target))]
-    pub(super) async fn handle_switch(
-        self: Arc<Self>,
-        id: String,
-        target: String,
-        tx: mpsc::Sender<Event>,
-    ) {
-        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
-        self.drain_persistence_inflight().await;
+    pub(super) async fn handle_switch(&self, id: String, target: String, tx: EventSink) {
+        let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
+        self.transcript.drain_inflight().await;
 
-        let (active_session, _active_branch) = self.runtime.session_ctx.current().await;
+        let (active_session, _active_branch) = self.session_ctx.current().await;
         let (target_session, target_branch) = match self
-            .memory
             .transcripts
             .resolve_branch(&target, Some(active_session))
             .await
@@ -294,7 +268,6 @@ impl AppState {
         };
 
         if let Err(e) = self
-            .memory
             .transcripts
             .set_current_branch(target_session, target_branch)
             .await
@@ -307,8 +280,7 @@ impl AppState {
             .await;
             return;
         }
-        self.runtime
-            .session_ctx
+        self.session_ctx
             .replace(target_session, Some(target_branch))
             .await;
 
@@ -319,13 +291,13 @@ impl AppState {
     /// `/undo`: drop the latest user prompt and the assistant reply that
     /// followed it from the current branch.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
-    pub(super) async fn handle_undo(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
-        self.drain_persistence_inflight().await;
-        let (_, branch) = self.runtime.session_ctx.current().await;
+    pub(super) async fn handle_undo(&self, id: String, tx: EventSink) {
+        let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
+        self.transcript.drain_inflight().await;
+        let (_, branch) = self.session_ctx.current().await;
         let outcome = match branch {
             None => UndoOutcome::default(),
-            Some(branch) => match self.memory.transcripts.undo_last_turn(branch).await {
+            Some(branch) => match self.transcripts.undo_last_turn(branch).await {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     send_error(&tx, id, format!("/undo: {e}")).await;
@@ -334,8 +306,8 @@ impl AppState {
             },
         };
         if outcome.removed_messages > 0 {
-            self.runtime.user_ledger.forget_last_turn();
-            if let Err(e) = self.subsystems.llm.truncate_to_last_real_user().await {
+            self.transcript.user_ledger.forget_last_turn();
+            if let Err(e) = self.llm.truncate_to_last_real_user().await {
                 warn!(
                     target: "assistd::state",
                     error = %e,
@@ -360,22 +332,16 @@ impl AppState {
     /// message landed within `recency_secs`; otherwise begin a fresh
     /// session. An unsaved session is kept as is.
     #[tracing::instrument(skip_all, fields(correlation_id = %id, recency_secs = recency_secs))]
-    pub(super) async fn handle_resume_or_new(
-        self: Arc<Self>,
-        id: String,
-        recency_secs: u64,
-        tx: mpsc::Sender<Event>,
-    ) {
-        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
-        self.drain_persistence_inflight().await;
+    pub(super) async fn handle_resume_or_new(&self, id: String, recency_secs: u64, tx: EventSink) {
+        let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
+        self.transcript.drain_inflight().await;
 
-        let (session, branch) = self.runtime.session_ctx.current().await;
+        let (session, branch) = self.session_ctx.current().await;
         let Some(branch) = branch else {
             announce_unsaved_session(id, session, &tx).await;
             return;
         };
         let latest = self
-            .memory
             .transcripts
             .latest_branch_activity(branch)
             .await
@@ -391,11 +357,11 @@ impl AppState {
 
     /// `/new`: begin a fresh session, saved with its first message.
     #[tracing::instrument(skip_all, fields(correlation_id = %id))]
-    pub(super) async fn handle_new_session(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
-        self.runtime.conversation.end();
-        let _user_turn = self.runtime.user_turn_lock.clone().lock_owned().await;
-        self.drain_persistence_inflight().await;
-        if let Some(stash) = &self.subsystems.slot_stash {
+    pub(super) async fn handle_new_session(&self, id: String, tx: EventSink) {
+        self.admission.conversation.end();
+        let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
+        self.transcript.drain_inflight().await;
+        if let Some(stash) = &self.slot_stash {
             stash.end(ConversationKey::Main).await;
         }
         self.begin_unsaved_session(id, &tx, "/new").await;
@@ -408,11 +374,10 @@ impl AppState {
         id: String,
         session: SessionId,
         branch: BranchId,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
         label: &str,
     ) {
         let loaded = self
-            .memory
             .transcripts
             .load_branch(branch, HistoryScope::Whole)
             .await;
@@ -427,8 +392,8 @@ impl AppState {
             .as_ref()
             .and_then(|s| Some((compaction_marker(&rows, s)?, s.duration_ms)));
         let replay = branch_replay(&rows, summary);
-        self.runtime.user_ledger.invalidate();
-        if let Err(e) = self.subsystems.llm.replace_history(replay).await {
+        self.transcript.user_ledger.invalidate();
+        if let Err(e) = self.llm.replace_history(replay).await {
             warn!(
                 target: "assistd::state",
                 error = %e,
@@ -437,13 +402,7 @@ impl AppState {
         }
 
         let (branch_name, parent_name, fork_point_seq) = self.lookup_branch_meta(branch).await;
-        let session_title = self
-            .memory
-            .transcripts
-            .session_title(session)
-            .await
-            .ok()
-            .flatten();
+        let session_title = self.transcripts.session_title(session).await.ok().flatten();
         let _ = tx
             .send(Event::new(
                 id.clone(),
@@ -510,8 +469,7 @@ impl AppState {
         &self,
         branch: BranchId,
     ) -> HashMap<MessageId, Vec<PersistedRelayStep>> {
-        self.memory
-            .transcripts
+        self.transcripts
             .load_relay_traces(branch)
             .await
             .unwrap_or_else(|e| {
@@ -527,12 +485,12 @@ impl AppState {
     /// Make a new, unsaved session active, clear the LLM history, and
     /// report `BranchSwitched` then `Done`. The session and its `main`
     /// branch are inserted with its first message.
-    async fn begin_unsaved_session(&self, id: String, tx: &mpsc::Sender<Event>, label: &str) {
+    async fn begin_unsaved_session(&self, id: String, tx: &EventSink, label: &str) {
         let new_session = SessionId::new();
-        self.runtime.session_ctx.replace(new_session, None).await;
+        self.session_ctx.replace(new_session, None).await;
         let empty = HistoryReplay::default();
-        self.runtime.user_ledger.invalidate();
-        if let Err(e) = self.subsystems.llm.replace_history(empty).await {
+        self.transcript.user_ledger.invalidate();
+        if let Err(e) = self.llm.replace_history(empty).await {
             warn!(
                 target: "assistd::state",
                 error = %e,
@@ -548,7 +506,7 @@ impl AppState {
         &self,
         branch: BranchId,
     ) -> (Option<String>, Option<String>, Option<Seq>) {
-        let Ok(Some(info)) = self.memory.transcripts.branch_info(branch).await else {
+        let Ok(Some(info)) = self.transcripts.branch_info(branch).await else {
             return (None, None, None);
         };
         (
@@ -559,9 +517,28 @@ impl AppState {
     }
 }
 
+/// `rows` of a branch, whole or from its summary's cut, as the LLM replays them
+/// under its `summary`.
+pub fn branch_replay(rows: &[HistoryRow], summary: Option<BranchSummary>) -> HistoryReplay {
+    let mut folded_steps = Vec::new();
+    let mut entries = Vec::new();
+    for row in rows {
+        match replay_part(summary.as_ref(), row.seq) {
+            ReplayPart::Summarized => {}
+            ReplayPart::FoldedStep => folded_steps.push(history_entry(row)),
+            ReplayPart::Kept => entries.push(history_entry(row)),
+        }
+    }
+    HistoryReplay {
+        summary: summary.map(|s| s.content),
+        folded_steps,
+        entries,
+    }
+}
+
 /// Report the unsaved `session` as active on its future `main` branch:
 /// `BranchSwitched` without a branch id, then `Done`.
-async fn announce_unsaved_session(id: String, session: SessionId, tx: &mpsc::Sender<Event>) {
+async fn announce_unsaved_session(id: String, session: SessionId, tx: &EventSink) {
     let _ = tx
         .send(Event::new(
             id.clone(),

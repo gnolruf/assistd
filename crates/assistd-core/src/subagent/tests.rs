@@ -50,7 +50,7 @@ impl AnsweringParent {
             Arc::new(ToolRegistry::new()),
             answer_file,
             CancellationToken::new(),
-            &RelayProgress::default(),
+            &TurnContext::default(),
         )
         .await
     }
@@ -198,14 +198,14 @@ async fn cancelling_the_parent_turn_stops_the_run() {
     let stepping = Arc::clone(&parent.stepping);
     let runner = SubAgentRunner::new(parent, None, Duration::from_secs(60));
     let parent_turn = CancellationToken::new();
-    let progress = RelayProgress::default();
+    let calling_turn = TurnContext::default();
     let run = runner.run(
         "sub".into(),
         "task".into(),
         Arc::new(ToolRegistry::new()),
         PathBuf::from("/nonexistent/answer.txt"),
         parent_turn.child_token(),
-        &progress,
+        &calling_turn,
     );
     let cancel_mid_step = async {
         stepping.notified().await;

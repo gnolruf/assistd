@@ -2,7 +2,6 @@
 //! rewritten as a brief for an unattended run, and revised there on feedback.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex as StdMutex;
 use thiserror::Error;
@@ -11,12 +10,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use assistd_ipc::{Event, EventBody, HostName, PermissionMode, TaskPrompt};
-use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, LlmHealthProbe, SlotAssignment};
+use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, SlotAssignment};
 
 use super::task_runs::task_system_prompt;
-use super::{AppState, DispatchError, send_error};
-use crate::planner::{PlanAsk, PlanError, Planner, Refinement, WorkPermissions};
-use crate::presence::PresenceLlmHealthProbe;
+use super::task_service::TaskService;
+use super::{DispatchError, send_error};
+use crate::bus::EventSink;
+use crate::planner::{PlanAsk, PlanError, Refinement, WorkPermissions};
 
 const EVENT_BUFFER: usize = 32;
 
@@ -65,14 +65,14 @@ impl TaskPlans {
     }
 }
 
-impl AppState {
+impl TaskService {
     pub(super) async fn handle_task_refine(
-        self: Arc<Self>,
+        &self,
         id: String,
         ask: RefineAsk,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) -> Result<(), DispatchError> {
-        let cancel = self.runtime.turn_cancellation();
+        let cancel = self.deps.admission.turn_cancellation();
         let refining = self.refine_prompt(&id, ask, &tx, &cancel);
         match cancel_when_client_leaves(refining, &id, &tx, &cancel).await {
             Ok(Refinement {
@@ -105,16 +105,16 @@ impl AppState {
         &self,
         id: &str,
         ask: RefineAsk,
-        tx: &mpsc::Sender<Event>,
+        tx: &EventSink,
         cancel: &CancellationToken,
     ) -> Result<Refinement, DispatchError> {
-        if ask.mode == PermissionMode::Auto && !self.config.tools.allow_auto_mode {
+        if ask.mode == PermissionMode::Auto && !self.deps.config.tools.allow_auto_mode {
             return Err(DispatchError::AutoModeOff);
         }
         let lane = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(PlanError::Cancelled.into()),
-            lane = Arc::clone(&self.runtime.agent_turn_lock).lock_owned() => lane,
+            lane = Arc::clone(&self.deps.admission.agent_turn_lock).lock_owned() => lane,
         };
         let Some(_awake) = self.wake_for_task_run(id, tx, cancel).await? else {
             return Err(PlanError::Cancelled.into());
@@ -125,7 +125,7 @@ impl AppState {
             allowed_hosts: ask.allowed_hosts,
         };
         let (llm_tx, llm_rx) = mpsc::channel(EVENT_BUFFER);
-        let planner = self.planner();
+        let planner = &self.deps.planner;
         let planning = planner.refine(
             Arc::clone(&session.conversation),
             plan_ask,
@@ -138,7 +138,7 @@ impl AppState {
         drop(lane);
         let refinement = refinement?;
         info!(target: "assistd::tasks", plan = %refinement.plan.id, "task prompt refined");
-        self.runtime.task_plans.record(PlanningSession {
+        self.plans.record(PlanningSession {
             rewrite: Some(refinement.prompt.clone()),
             ..session
         });
@@ -154,8 +154,7 @@ impl AppState {
     ) -> Result<(PlanningSession, PlanAsk), DispatchError> {
         if let Some(feedback) = feedback {
             let (session, shown) = self
-                .runtime
-                .task_plans
+                .plans
                 .latest()
                 .filter(|session| session.prompt == prompt)
                 .and_then(|session| {
@@ -166,8 +165,8 @@ impl AppState {
             return Ok((session, PlanAsk::Revise { shown, feedback }));
         }
         self.end_planning_conversation().await;
-        let conversation = self.subsystems.llm.isolated_conversation(
-            task_system_prompt(&self.config.chat.system_prompt),
+        let conversation = self.deps.llm.isolated_conversation(
+            task_system_prompt(&self.deps.config.chat.system_prompt),
             SlotAssignment::Shared(ConversationKey::TaskRefine),
         )?;
         let ask = PlanAsk::Work(prompt.as_str().to_string());
@@ -181,24 +180,11 @@ impl AppState {
 
     /// Forget the latest planning conversation and its saved slot state.
     async fn end_planning_conversation(&self) {
-        if self.runtime.task_plans.forget()
-            && let Some(stash) = &self.subsystems.slot_stash
+        if self.plans.forget()
+            && let Some(stash) = &self.deps.slot_stash
         {
             stash.end(ConversationKey::TaskRefine).await;
         }
-    }
-
-    pub(super) fn planner(&self) -> Planner {
-        let health: Arc<dyn LlmHealthProbe> = Arc::new(PresenceLlmHealthProbe::new(
-            self.subsystems.presence.clone(),
-        ));
-        Planner::new(
-            self.subsystems.planning.clone(),
-            Arc::clone(&self.subsystems.tools),
-            Some(health),
-            Duration::from_secs(self.config.timeouts.tool_call_secs),
-            self.config.tools.allow_auto_mode,
-        )
     }
 }
 
@@ -207,7 +193,7 @@ impl AppState {
 async fn cancel_when_client_leaves<T>(
     refining: impl Future<Output = T>,
     id: &str,
-    tx: &mpsc::Sender<Event>,
+    tx: &EventSink,
     cancel: &CancellationToken,
 ) -> T {
     tokio::pin!(refining);
@@ -223,11 +209,7 @@ async fn cancel_when_client_leaves<T>(
 }
 
 /// Send the planning turn's events to `tx`, each wrapped as `TaskPlan`.
-async fn forward_planning_events(
-    id: &str,
-    mut llm_rx: mpsc::Receiver<LlmEvent>,
-    tx: &mpsc::Sender<Event>,
-) {
+async fn forward_planning_events(id: &str, mut llm_rx: mpsc::Receiver<LlmEvent>, tx: &EventSink) {
     while let Some(event) = llm_rx.recv().await {
         if let Some(event) = planning_wire_event(id, event) {
             let wrapped = Event::new(
@@ -281,7 +263,9 @@ fn planning_wire_event(id: &str, event: LlmEvent) -> Option<Event> {
                 message,
             },
         ),
-        LlmEvent::ToolCallsRequested { .. }
+        LlmEvent::StepStarted
+        | LlmEvent::StepDiscarded
+        | LlmEvent::ToolCallsRequested { .. }
         | LlmEvent::HistoryCompacted { .. }
         | LlmEvent::Done => {
             return None;

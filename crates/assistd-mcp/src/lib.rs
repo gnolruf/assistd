@@ -11,7 +11,7 @@ use assistd_config::McpServerName;
 use assistd_tools::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::{
     ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext,
-    JudgedClass, Risk, Tool, ToolError, ToolOutput, Unattended, VisionGate,
+    JudgedClass, Risk, Tool, ToolError, ToolOutput, TurnContext, Unattended, VisionGate,
 };
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
@@ -64,10 +64,10 @@ struct McpToolAdapter {
 impl McpToolAdapter {
     /// Whether the user allows this call with `args`; "always" approves
     /// the tool for good.
-    async fn confirmed(&self, args: &Value) -> bool {
+    async fn confirmed(&self, turn: &TurnContext, args: &Value) -> bool {
         let name = self.registry_name.as_str();
         self.approvals
-            .confirm(name, || ConfirmationRequest {
+            .confirm(turn, name, || ConfirmationRequest {
                 tool: name.to_string(),
                 script: format!("{args:#}"),
                 matched_pattern: "calls an MCP tool that is not yet approved".to_string(),
@@ -102,8 +102,8 @@ impl Tool for McpToolAdapter {
     }
 
     /// Always `Ok`: a declined or failed call becomes a failed [`ToolOutput`].
-    async fn invoke(&self, args: Value) -> Result<ToolOutput, ToolError> {
-        if !self.confirmed(&args).await {
+    async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
+        if !self.confirmed(turn, &args).await {
             return Ok(declined_output(&self.registry_name));
         }
         let start = Instant::now();

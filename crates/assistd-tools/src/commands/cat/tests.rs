@@ -3,6 +3,7 @@ use std::time::Duration;
 use tempfile::{TempDir, tempdir};
 
 use super::*;
+use crate::TurnContext;
 use crate::commands::{FILE_READ_MAX, hold_fifo_open, make_fifo};
 use crate::fixtures::PNG_BYTES;
 
@@ -12,6 +13,7 @@ async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
             args: args.iter().map(ToString::to_string).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
             scope: FileScope::Host,
+            turn: TurnContext::default(),
         })
         .await
 }

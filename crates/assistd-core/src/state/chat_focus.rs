@@ -3,14 +3,13 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
 
 use assistd_ipc::{Event, EventBody};
 
-use super::AppState;
+use super::query::TurnService;
+use crate::bus::EventSink;
 
 /// The single chat's last focus report, plus the value last broadcast.
 #[derive(Debug, Default)]
@@ -90,36 +89,32 @@ impl ChatFocusSlot {
     }
 }
 
-impl AppState {
+impl TurnService {
     pub(super) async fn handle_chat_state(
-        self: Arc<Self>,
+        &self,
         id: String,
         focused: bool,
         peer_pid: Option<u32>,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) {
-        self.runtime.chat_focus.report(peer_pid, focused);
+        self.chat_focus.report(peer_pid, focused);
         self.refresh_chat_focus(&id);
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     pub(super) async fn handle_chat_closed(
-        self: Arc<Self>,
+        &self,
         id: String,
         peer_pid: Option<u32>,
-        tx: mpsc::Sender<Event>,
+        tx: EventSink,
     ) {
-        self.runtime.chat_focus.close(peer_pid);
-        self.runtime.conversation.end();
+        self.chat_focus.close(peer_pid);
+        self.deps.admission.conversation.end();
         self.refresh_chat_focus(&id);
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
-    pub(super) async fn handle_get_chat_focus(
-        self: Arc<Self>,
-        id: String,
-        tx: mpsc::Sender<Event>,
-    ) {
+    pub(super) async fn handle_get_chat_focus(&self, id: String, tx: EventSink) {
         let focused = self.refresh_chat_focus(&id);
         let _ = tx
             .send(Event::new(id.clone(), EventBody::ChatFocus { focused }))
@@ -130,9 +125,9 @@ impl AppState {
     /// Whether a live chat has focus, broadcasting `ChatFocus` tagged with
     /// `id` when that changed since the last broadcast.
     pub(super) fn refresh_chat_focus(&self, id: &str) -> bool {
-        let (focused, changed) = self.runtime.chat_focus.refresh();
+        let (focused, changed) = self.chat_focus.refresh();
         if let Some(focused) = changed {
-            self.runtime.publish(&Event::new(
+            self.deps.bus.publish(&Event::new(
                 id.to_string(),
                 EventBody::ChatFocus { focused },
             ));

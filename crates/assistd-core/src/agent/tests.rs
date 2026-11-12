@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use assistd_llm::{HealthSnapshot, LlmResult};
 use assistd_tools::commands::EchoCommand;
 use assistd_tools::{
-    CommandRegistry, OutputCap, PresentSpec, RunTool, Tool, ToolError, ToolOutput,
+    CommandRegistry, OutputCap, PresentSpec, RunTool, Tool, ToolError, ToolOutput, TurnContext,
 };
 
 use super::*;
@@ -109,7 +109,7 @@ impl Tool for HangingTool {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object"})
     }
-    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, _turn: &TurnContext, _args: Value) -> Result<ToolOutput, ToolError> {
         self.entered.notify_one();
         std::future::pending::<()>().await;
         unreachable!("hanging tool must never resolve")
@@ -136,7 +136,7 @@ impl Tool for SelfBoundedTool {
     fn bounded_by_tool_deadline(&self) -> bool {
         false
     }
-    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, _turn: &TurnContext, _args: Value) -> Result<ToolOutput, ToolError> {
         tokio::time::sleep(self.delay).await;
         Ok(ToolOutput::text("finished", self.delay))
     }
@@ -157,7 +157,7 @@ impl Tool for PanickingTool {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object"})
     }
-    async fn invoke(&self, _args: Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(&self, _turn: &TurnContext, _args: Value) -> Result<ToolOutput, ToolError> {
         panic!("not implemented")
     }
 }
@@ -195,7 +195,14 @@ async fn collect(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
 /// turn never blocks on channel capacity.
 async fn run_turn(agent: Agent, user_text: &str) -> (Result<(), LlmError>, Vec<LlmEvent>) {
     let (tx, mut rx) = mpsc::channel(16);
-    let turn = agent.run_turn(user_text.into(), Vec::new(), tx, CancellationToken::new());
+    let context = TurnContext::default();
+    let turn = agent.run_turn(
+        &context,
+        user_text.into(),
+        Vec::new(),
+        tx,
+        CancellationToken::new(),
+    );
     tokio::join!(turn, collect(&mut rx))
 }
 
@@ -235,9 +242,21 @@ async fn tool_call_result_is_fed_back_before_final_answer() {
     .await;
     res.unwrap();
 
-    let [requested, tool_call, tool_result, rest @ ..] = events.as_slice() else {
+    let [
+        first_step,
+        requested,
+        tool_call,
+        tool_result,
+        second_step,
+        rest @ ..,
+    ] = events.as_slice()
+    else {
         panic!("too few events: {events:?}");
     };
+    assert_eq!(
+        [first_step, second_step],
+        [&LlmEvent::StepStarted, &LlmEvent::StepStarted]
+    );
     assert_eq!(
         *requested,
         LlmEvent::ToolCallsRequested {
@@ -452,7 +471,7 @@ async fn cancellation_during_slow_step_preempts_loop() {
         kicker.cancel();
     });
     Agent::new(backend.clone(), tools_with_echo(), None, TOOL_DEADLINE)
-        .run_turn("go".into(), Vec::new(), tx, token)
+        .run_turn(&TurnContext::default(), "go".into(), Vec::new(), tx, token)
         .await
         .unwrap();
     assert_eq!(backend.step_calls.load(Ordering::SeqCst), 1);
@@ -483,7 +502,8 @@ async fn cancellation_mid_batch_answers_every_remaining_call() {
     });
 
     let agent = Agent::new(backend.clone(), Arc::new(tools), None, TOOL_DEADLINE);
-    let turn = agent.run_turn("go".into(), Vec::new(), tx, token);
+    let context = TurnContext::default();
+    let turn = agent.run_turn(&context, "go".into(), Vec::new(), tx, token);
     tokio::time::timeout(Duration::from_secs(5), turn)
         .await
         .expect("cancellation did not preempt hung tool")

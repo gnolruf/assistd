@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -26,7 +27,7 @@ use assistd_memory::{
     UnindexedRows,
 };
 use assistd_tools::{
-    Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
+    Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
     ConfirmationRequest, IpcConfirmationGate, OutputCap, PresentSpec, Risk, RunTool, ToolError,
     ToolOutput, ToolsDisabled, Unattended, commands::EchoCommand,
 };
@@ -92,6 +93,36 @@ fn default_state() -> Arc<AppState> {
     StateParts::default().build()
 }
 
+fn stub_subsystems() -> Subsystems {
+    let parts = StateParts::default();
+    let capture = VoiceCapture {
+        input: parts.voice,
+        listener: parts.listener,
+    };
+    Subsystems::new(
+        parts.backend,
+        PresenceManager::stub(parts.presence),
+        parts.tools,
+        VoiceManager::ready(capture, parts.speech, true),
+    )
+}
+
+/// An [`AppState`] over `subsystems` and `memory`, on the unsaved `session` with one
+/// model lane.
+fn state_over(subsystems: Subsystems, memory: MemoryStack, session: SessionId) -> Arc<AppState> {
+    Arc::new(AppState::from_parts(
+        Config::default(),
+        subsystems,
+        memory,
+        Arc::new(SessionContext::new(session, None)),
+        watch::channel(NonZeroU32::MIN).1,
+    ))
+}
+
+fn stub_memory() -> MemoryStack {
+    MemoryStack::disabled(Config::default().embedding)
+}
+
 /// Dispatch `req` and collect every event it emits.
 async fn dispatch(state: &Arc<AppState>, req: Request) -> (Result<(), DispatchError>, Vec<Event>) {
     let (tx, mut rx) = mpsc::channel::<Event>(16);
@@ -102,7 +133,10 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> (Result<(), DispatchEr
         }
         out
     };
-    tokio::join!(state.clone().dispatch(req, None, tx), collect)
+    tokio::join!(
+        state.clone().dispatch(req, Requester::default(), tx),
+        collect
+    )
 }
 
 fn query(id: &str, text: &str) -> Request {
@@ -207,13 +241,10 @@ async fn assert_request_events(cases: Vec<(PresenceTarget, Request, Vec<Event>, 
 
 #[tokio::test]
 async fn capabilities_report_disabled_tools_before_the_model() {
-    let mut state = Arc::into_inner(default_state()).expect("sole owner");
-    state.subsystems.tools_disabled = Some(ToolsDisabled::BwrapMissing(ProgramError::NotOnPath));
-    let (result, events) = dispatch(
-        &Arc::new(state),
-        Request::new("c", RequestBody::GetCapabilities),
-    )
-    .await;
+    let no_bwrap = ToolsDisabled::BwrapMissing(ProgramError::NotOnPath);
+    let subsystems = stub_subsystems().with_tools_disabled(Some(no_bwrap));
+    let state = state_over(subsystems, stub_memory(), SessionId::new());
+    let (result, events) = dispatch(&state, Request::new("c", RequestBody::GetCapabilities)).await;
     result.expect("dispatch");
     let [
         status,
@@ -244,17 +275,18 @@ async fn capabilities_report_disabled_tools_before_the_model() {
 }
 
 fn state_mid_startup() -> Arc<AppState> {
-    let mut state = Arc::into_inner(default_state()).expect("sole owner");
-    state.memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Starting));
+    let mut memory = stub_memory();
+    memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Starting));
     let git = McpServerStatus::starting("git".into(), McpTransportKind::Stdio);
     git.set(McpServerState::Unavailable {
         reason: "failed to start: no such file".into(),
     });
-    state.subsystems.mcp_servers = vec![
+    let mut subsystems = stub_subsystems();
+    subsystems.mcp_servers = Arc::new([
         McpServerStatus::starting("fs".into(), McpTransportKind::Stdio),
         git,
-    ];
-    Arc::new(state)
+    ]);
+    state_over(subsystems, memory, SessionId::new())
 }
 
 #[tokio::test]
@@ -321,6 +353,7 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
     );
     assert_eq!(
         state
+            .turns
             .build_semantic_context("what did we say about rust")
             .await
             .unwrap(),
@@ -545,7 +578,7 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
         ..StateParts::default()
     }
     .build();
-    let mut bus = state.runtime.subscribe_events(SubscribeFilter::default());
+    let mut bus = state.bus.subscribe(SubscribeFilter::default());
 
     let (res, _) = dispatch(&state, query("req-title", "tell me about cats")).await;
     res.unwrap();
@@ -1099,7 +1132,11 @@ impl assistd_tools::Tool for SleepTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(
+        &self,
+        _turn: &TurnContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
         let duration = Duration::from_millis(self.ms);
         tokio::time::sleep(duration).await;
         Ok(ToolOutput::text("slept", duration))
@@ -1157,7 +1194,11 @@ impl assistd_tools::Tool for ActTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(
+        &self,
+        _turn: &TurnContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput::text("acted", Duration::ZERO))
     }
@@ -1214,7 +1255,11 @@ async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::
             }
         }
     };
-    let dispatched = CONFIRM_ROUTER.scope(Arc::clone(&router), state.dispatch(request, None, tx));
+    let requester = Requester {
+        pid: None,
+        turn: TurnContext::answered_by(Arc::clone(&router)),
+    };
+    let dispatched = state.dispatch(request, requester, tx);
     let (res, ()) = tokio::join!(dispatched, client);
     res.unwrap();
     runs.load(Ordering::SeqCst)
@@ -1277,7 +1322,11 @@ impl assistd_tools::Tool for HangingTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, _args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(
+        &self,
+        _turn: &TurnContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
         let _flag = DropFlag(self.dropped.clone());
         self.entered.notify_one();
         std::future::pending::<()>().await;
@@ -1339,7 +1388,14 @@ async fn interrupt_turn_preempts_hung_tool() {
 #[tokio::test]
 async fn interrupt_drops_a_turn_still_waiting_to_start() {
     let (state, conv, _session, branch) = fresh_branch_state().await;
-    let earlier_turn = state.runtime.agent_turn_lock.clone().lock_owned().await;
+    let earlier_turn = state
+        .turns
+        .deps
+        .admission
+        .agent_turn_lock
+        .clone()
+        .lock_owned()
+        .await;
     let query_state = state.clone();
     let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "abandoned")).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1357,7 +1413,7 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
     let (res, events) = dispatch(&state, query("q2", "kept")).await;
     res.unwrap();
     assert_eq!(events.last(), Some(&done("q2")), "{events:?}");
-    state.drain_persistence_inflight().await;
+    state.transcript.drain_inflight().await;
     let rows = conv
         .load_branch(branch, HistoryScope::Whole)
         .await
@@ -1374,7 +1430,14 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
 #[tokio::test]
 async fn a_turn_waiting_to_start_does_not_hold_the_daemon_awake() {
     let state = default_state();
-    let earlier_turn = state.runtime.agent_turn_lock.clone().lock_owned().await;
+    let earlier_turn = state
+        .turns
+        .deps
+        .admission
+        .agent_turn_lock
+        .clone()
+        .lock_owned()
+        .await;
     let query_state = state.clone();
     let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "waiting")).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1457,7 +1520,11 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
     let (state, conv, _session, branch) = branch_state_with(backend, Arc::new(tools)).await;
 
     let (tx, rx) = mpsc::channel::<Event>(16);
-    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), None, tx));
+    let turn = tokio::spawn(
+        state
+            .clone()
+            .dispatch(query("q", "go"), Requester::default(), tx),
+    );
     entered.notified().await;
     drop(rx);
 
@@ -1470,7 +1537,7 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
         dropped.load(Ordering::SeqCst),
         "hung tool kept running after the client left"
     );
-    state.drain_persistence_inflight().await;
+    state.transcript.drain_inflight().await;
 
     let rows = conv
         .load_branch(branch, HistoryScope::Whole)
@@ -1526,10 +1593,14 @@ async fn client_departure_still_publishes_done_to_the_bus() {
         dropped: Arc::new(AtomicBool::new(false)),
     });
     let (state, _conv, _session, _branch) = branch_state_with(backend, Arc::new(tools)).await;
-    let mut bus = state.runtime.subscribe_events(SubscribeFilter::default());
+    let mut bus = state.bus.subscribe(SubscribeFilter::default());
 
     let (tx, rx) = mpsc::channel::<Event>(16);
-    let turn = tokio::spawn(state.clone().dispatch(query("q", "go"), None, tx));
+    let turn = tokio::spawn(
+        state
+            .clone()
+            .dispatch(query("q", "go"), Requester::default(), tx),
+    );
     entered.notified().await;
     drop(rx);
 
@@ -1603,13 +1674,10 @@ async fn branch_state_with(
         assistd_voice::VoiceManager::new(true),
     );
     let memory = MemoryStack::disabled(config.embedding.clone()).with_transcripts(conv.clone());
-    let runtime = RuntimeState::new().with_session_ctx(ctx);
-    let state = Arc::new(AppState {
-        config,
-        subsystems,
-        memory,
-        runtime,
-    });
+    let one_slot = watch::channel(NonZeroU32::MIN).1;
+    let state = Arc::new(AppState::from_parts(
+        config, subsystems, memory, ctx, one_slot,
+    ));
     (state, conv, session, branch)
 }
 
@@ -1668,7 +1736,7 @@ async fn fork_creates_branch_and_switches() {
     res.unwrap();
     assert_eq!(events.last(), Some(&done("rq")));
 
-    let (active_session, active_branch) = state.runtime.session_ctx.current().await;
+    let (active_session, active_branch) = state.session_ctx.current().await;
     assert_eq!(active_session, session);
     let active_branch = active_branch.expect("fork lands on a saved branch");
     assert_ne!(active_branch, main_branch);
@@ -1799,7 +1867,14 @@ async fn undo_drops_last_turn_and_emits_count() {
 #[tokio::test]
 async fn branch_operations_do_not_wait_for_the_model_lane() {
     let (state, _conv, _session, _branch) = fresh_branch_state().await;
-    let task_run_lane = state.runtime.agent_turn_lock.clone().lock_owned().await;
+    let task_run_lane = state
+        .turns
+        .deps
+        .admission
+        .agent_turn_lock
+        .clone()
+        .lock_owned()
+        .await;
     for request in [
         Request::new("undo", RequestBody::Undo),
         Request::new("new", RequestBody::NewSession),
@@ -1818,7 +1893,7 @@ async fn new_session_writes_no_rows_until_the_first_message() {
     let (res, events) = dispatch(&state, Request::new("rq", RequestBody::NewSession)).await;
     res.unwrap();
 
-    let (unsaved_session, unsaved_branch) = state.runtime.session_ctx.current().await;
+    let (unsaved_session, unsaved_branch) = state.session_ctx.current().await;
     assert_ne!(unsaved_session, session);
     assert_eq!(unsaved_branch, None);
     assert_eq!(
@@ -1842,9 +1917,9 @@ async fn new_session_writes_no_rows_until_the_first_message() {
 
     let (res, _) = dispatch(&state, query("q", "hello")).await;
     res.unwrap();
-    state.drain_persistence_inflight().await;
+    state.transcript.drain_inflight().await;
 
-    let (saved_session, saved_branch) = state.runtime.session_ctx.current().await;
+    let (saved_session, saved_branch) = state.session_ctx.current().await;
     assert_eq!(saved_session, unsaved_session);
     let saved_branch = saved_branch.expect("the first message saves the session");
     assert_eq!(
@@ -1868,7 +1943,7 @@ async fn resume_or_new_keeps_an_unsaved_session() {
     let (state, conv, _session, _branch) = fresh_branch_state().await;
     let (res, _) = dispatch(&state, Request::new("new", RequestBody::NewSession)).await;
     res.unwrap();
-    let (unsaved_session, _) = state.runtime.session_ctx.current().await;
+    let (unsaved_session, _) = state.session_ctx.current().await;
 
     let (res, events) = dispatch(
         &state,
@@ -1877,7 +1952,7 @@ async fn resume_or_new_keeps_an_unsaved_session() {
     .await;
     res.unwrap();
 
-    let (session, branch) = state.runtime.session_ctx.current().await;
+    let (session, branch) = state.session_ctx.current().await;
     assert_eq!(session, unsaved_session);
     assert_eq!(branch, None);
     assert!(
@@ -1902,7 +1977,7 @@ async fn narration_from_a_truncated_step_is_not_persisted() {
     let (state, conv, _session, branch) = branch_state_with(backend, echo_tools()).await;
     let (res, _) = dispatch(&state, query("rq", "go")).await;
     res.unwrap();
-    state.drain_persistence_inflight().await;
+    state.transcript.drain_inflight().await;
 
     let rows = conv
         .load_branch(branch, HistoryScope::Whole)
@@ -1935,7 +2010,7 @@ async fn step_with_parallel_calls_persists_as_one_assistant_row() {
     let (state, conv, _session, branch) = branch_state_with(backend, echo_tools()).await;
     let (res, _) = dispatch(&state, query("rq", "go")).await;
     res.unwrap();
-    state.drain_persistence_inflight().await;
+    state.transcript.drain_inflight().await;
 
     let rows = conv
         .load_branch(branch, HistoryScope::Whole)
@@ -2131,13 +2206,13 @@ fn memory_hit(id: i64, key: &str, value: &str, similarity: f32) -> MemoryHit {
 
 #[tokio::test]
 async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_pointers() {
-    let mut state = Arc::into_inner(default_state()).expect("sole owner");
-    let (current, _) = state.runtime.session_ctx.current().await;
+    let current = SessionId::new();
     let other = SessionId::new();
-    state.memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Ready(Arc::new(
+    let mut memory = stub_memory();
+    memory.embedder = Arc::new(EmbedderHandle::new(Readiness::Ready(Arc::new(
         ConstantEmbedder,
     ))));
-    state.memory.semantic = Arc::new(FixedHits {
+    memory.semantic = Arc::new(FixedHits {
         chunks: vec![
             recall_hit(current, 1, 0.9, "said in this chat"),
             recall_hit(other, 2, 0.9, "strong past match"),
@@ -2149,9 +2224,11 @@ async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_point
             memory_hit(2, "shell", "fish", 0.1),
         ],
     });
-    let recall =
-        async |state: &AppState, query: &str| state.build_semantic_context(query).await.unwrap();
-    let session_ctx = &state.runtime.session_ctx;
+    let state = state_over(stub_subsystems(), memory, current);
+    let recall = async |state: &AppState, query: &str| {
+        state.turns.build_semantic_context(query).await.unwrap()
+    };
+    let session_ctx = &state.session_ctx;
 
     assert_eq!(recall(&state, "hi").await, None, "too short to search");
     session_ctx.replace(current, Some(BranchId(1))).await;
@@ -2285,15 +2362,12 @@ async fn task_state_with(
     let memory = MemoryStack::disabled(config.embedding.clone())
         .with_transcripts(conv.clone())
         .with_tasks(tasks);
-    let runtime =
-        RuntimeState::new().with_session_ctx(Arc::new(SessionContext::new(session, Some(branch))));
-    let state = Arc::new(AppState {
-        config,
-        subsystems,
-        memory,
-        runtime,
-    });
-    state.start_task_queue().await;
+    let ctx = Arc::new(SessionContext::new(session, Some(branch)));
+    let one_slot = watch::channel(NonZeroU32::MIN).1;
+    let state = Arc::new(AppState::from_parts(
+        config, subsystems, memory, ctx, one_slot,
+    ));
+    state.tasks.start_task_queue().await;
     (state, conv, branch, task)
 }
 
@@ -2322,10 +2396,10 @@ async fn queue_task_run(state: &Arc<AppState>, task: TaskId) -> TaskRunId {
 
 /// Wait for every run to end, then for the writes it queued to land.
 async fn settle_task_runs(state: &Arc<AppState>) {
-    tokio::time::timeout(Duration::from_secs(5), state.runtime.task_runner.stop())
+    tokio::time::timeout(Duration::from_secs(5), state.tasks.runner().stop())
         .await
         .expect("task run did not end");
-    state.drain_persistence_inflight().await;
+    state.transcript.drain_inflight().await;
 }
 
 /// The state of every task run listed beside its session's branch.
@@ -2344,7 +2418,7 @@ async fn a_finished_task_run_leaves_the_main_conversation_untouched() {
     let (state, conv, branch, task) =
         task_state(backend.clone(), Arc::new(ToolRegistry::default())).await;
     let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
-    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+    let mut bus = state.bus.subscribe(SubscribeFilter {
         kinds: vec![EventKind::TaskRun],
     });
 
@@ -2367,7 +2441,7 @@ async fn a_finished_task_run_leaves_the_main_conversation_untouched() {
         conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
         before
     );
-    assert_eq!(state.runtime.session_ctx.current().await.1, Some(branch));
+    assert_eq!(state.session_ctx.current().await.1, Some(branch));
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
 }
 
@@ -2384,7 +2458,7 @@ async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
     let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
     spec.announce = true;
     state.memory.tasks.save(Some(task), spec).await.unwrap();
-    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+    let mut bus = state.bus.subscribe(SubscribeFilter {
         kinds: vec![EventKind::TaskReply],
     });
 
@@ -2467,7 +2541,10 @@ async fn change_task_queue(state: &Arc<AppState>, op: TaskQueueOp) {
 
 fn queued_runs(state: &AppState) -> Vec<(TaskRunId, TaskRunState)> {
     state
-        .task_queue_snapshot()
+        .turns
+        .deps
+        .admission
+        .queue_snapshot()
         .items
         .into_iter()
         .filter_map(|item| match item {
@@ -2497,20 +2574,22 @@ async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
     assert_eq!(queued_runs(&state), expected);
     settle_task_runs(&state).await;
 
-    let reloaded = Arc::new(AppState {
-        memory: MemoryStack::disabled(state.config.embedding.clone())
-            .with_tasks(Arc::clone(&state.memory.tasks)),
-        ..AppState::new(
-            Config::default(),
+    let reloaded = Arc::new(AppState::from_parts(
+        Config::default(),
+        Subsystems::new(
             Arc::new(EchoBackend::new()),
             PresenceManager::stub(PresenceTarget::Active),
             Arc::new(ToolRegistry::default()),
             VoiceManager::new(true),
-        )
-    });
-    reloaded.start_task_queue().await;
+        ),
+        MemoryStack::disabled(state.config.embedding.clone())
+            .with_tasks(Arc::clone(&state.memory.tasks)),
+        Arc::new(SessionContext::new(SessionId::new(), None)),
+        watch::channel(NonZeroU32::MIN).1,
+    ));
+    reloaded.tasks.start_task_queue().await;
     assert_eq!(queued_runs(&reloaded), expected);
-    assert!(reloaded.task_queue_snapshot().paused);
+    assert!(reloaded.turns.deps.admission.queue_snapshot().paused);
     settle_task_runs(&reloaded).await;
 }
 
@@ -2530,7 +2609,11 @@ impl assistd_tools::Tool for FetchTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
     }
-    async fn invoke(&self, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+    async fn invoke(
+        &self,
+        turn: &TurnContext,
+        args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
         let host = args["host"].as_str().unwrap_or_default().to_string();
         let request = ConfirmationRequest {
             tool: "web".into(),
@@ -2541,7 +2624,7 @@ impl assistd_tools::Tool for FetchTool {
             unattended: Unattended::WebHost(host),
             source: assistd_tools::ConfirmSource::Main,
         };
-        let approved = IpcConfirmationGate.confirm(request).await != Approval::Deny;
+        let approved = IpcConfirmationGate.confirm(turn, request).await != Approval::Deny;
         Ok(ToolOutput::text(
             if approved { "fetched" } else { "denied" },
             Duration::ZERO,
@@ -2569,7 +2652,7 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
     spec.allowed_hosts = vec!["allowed.example".to_string().try_into().unwrap()];
     state.memory.tasks.save(Some(task), spec).await.unwrap();
-    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+    let mut bus = state.bus.subscribe(SubscribeFilter {
         kinds: vec![EventKind::TaskRun],
     });
 
@@ -2591,7 +2674,13 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     assert_eq!(results.len(), 1, "the allowed host was fetched unasked");
     assert_eq!(queued_runs(&state), [(run, TaskRunState::NeedsInput)]);
     assert!(
-        state.runtime.agent_turn_lock.try_lock().is_ok(),
+        state
+            .turns
+            .deps
+            .admission
+            .agent_turn_lock
+            .try_lock()
+            .is_ok(),
         "a paused run holds no lane"
     );
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -2647,7 +2736,7 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
     let backend = MainConversation::new(task_conversation);
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
-    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+    let mut bus = state.bus.subscribe(SubscribeFilter {
         kinds: vec![EventKind::TaskRun, EventKind::TaskQueue],
     });
 
@@ -2725,7 +2814,7 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
     let (state, _conv, _branch, task) =
         task_state_with(Config::default(), backend, Arc::new(tools)).await;
     let kinds = vec![EventKind::TaskRun, EventKind::TaskQueue];
-    let mut bus = state.runtime.subscribe_events(SubscribeFilter {
+    let mut bus = state.bus.subscribe(SubscribeFilter {
         kinds: kinds.clone(),
     });
     let run = queue_task_run(&state, task).await;
@@ -2735,11 +2824,14 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
     drop(bus);
 
     let (tx, mut rx) = mpsc::channel(1);
-    let subscriber = tokio::spawn(Arc::clone(&state).handle_subscribe(
-        "sub".into(),
-        SubscribeFilter { kinds },
-        tx,
-    ));
+    let daemon = Arc::clone(&state);
+    let subscriber = tokio::spawn(async move {
+        let unpublished = EventSink::unpublished(tx);
+        daemon
+            .status
+            .handle_subscribe("sub".into(), SubscribeFilter { kinds }, unpublished)
+            .await;
+    });
     assert!(matches!(
         rx.recv().await,
         Some(Event {
@@ -2748,10 +2840,10 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
         })
     ));
     for _ in 0..1024 {
-        state.runtime.publish(&Event::new(
+        state.bus.publish(&Event::new(
             "flood",
             EventBody::TaskQueue {
-                snapshot: state.task_queue_snapshot(),
+                snapshot: state.turns.deps.admission.queue_snapshot(),
             },
         ));
     }

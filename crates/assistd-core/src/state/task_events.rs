@@ -15,9 +15,9 @@ use tracing::{debug, info, warn};
 use assistd_ipc::{PresenceState, TaskEvent, TaskId, TaskTrigger};
 use assistd_memory::TaskRecord;
 
-use super::AppState;
 use super::event_triggers::{Occurrence, event_trigger, fires_on};
 use super::task_dispatch::unrequested_run_id;
+use super::task_service::TaskService;
 
 /// Wakes the event watcher when a task changes, and holds when each task's event
 /// triggers last fired and why each trigger whose watch is retrying last stopped.
@@ -89,7 +89,7 @@ impl TaskEvents {
     }
 }
 
-impl AppState {
+impl TaskService {
     /// Keep a watch running for every enabled trigger that needs one, re-matching them
     /// after each task change, until `stopping` fires.
     pub(super) async fn watch_task_events(self: Arc<Self>, stopping: CancellationToken) {
@@ -99,14 +99,14 @@ impl AppState {
             tokio::select! {
                 biased;
                 () = stopping.cancelled() => return,
-                () = self.runtime.task_events.changed.notified() => {}
+                () = self.events.changed.notified() => {}
             }
         }
     }
 
     /// Fire every `DaemonStarted` trigger once the model first becomes ready.
     pub(super) async fn fire_on_daemon_started(self: Arc<Self>, stopping: CancellationToken) {
-        let mut presence = self.subsystems.presence.subscribe();
+        let mut presence = self.deps.presence.subscribe();
         let ready = tokio::select! {
             biased;
             () = stopping.cancelled() => false,
@@ -136,7 +136,7 @@ impl AppState {
         let Some((_, cooldown)) = event_trigger(trigger) else {
             return;
         };
-        match self.memory.tasks.get(task).await {
+        match self.deps.store.get(task).await {
             Ok(record) if record.spec.enabled && record.spec.triggers.contains(trigger) => {
                 self.queue_event_run(record, trigger.clone(), cooldown)
                     .await;
@@ -193,7 +193,7 @@ impl AppState {
         watches
             .paths
             .retain(|watched, watch| wanted.contains(watched) && !watch.is_finished());
-        self.runtime.task_events.keep_watch_failures(&wanted);
+        self.events.keep_watch_failures(&wanted);
         for watched in wanted {
             if let Entry::Vacant(slot) = watches.paths.entry(watched) {
                 let (task, trigger) = slot.key().clone();
@@ -206,19 +206,20 @@ impl AppState {
     /// Queue a run of `record` that `trigger` started, unless the task fired within
     /// `cooldown` or has an unfinished run.
     async fn queue_event_run(&self, record: TaskRecord, trigger: TaskTrigger, cooldown: Duration) {
-        if !self.runtime.task_events.try_fire(record.id, cooldown) {
+        if !self.events.try_fire(record.id, cooldown) {
             debug!(target: "assistd::tasks", task = %record.id, "event trigger cooling down");
             return;
         }
         match self
-            .memory
-            .tasks
+            .deps
+            .store
             .queue_unless_unfinished(record.id, trigger)
             .await
         {
             Ok(Some(run)) => {
                 info!(target: "assistd::tasks", task = %record.id, %run, "event trigger fired");
-                self.runtime
+                self.deps
+                    .admission
                     .task_queue
                     .push(run, record, unrequested_run_id(run));
             }
@@ -238,7 +239,7 @@ impl AppState {
 
     /// The enabled tasks; `None` when they could not be listed.
     async fn enabled_tasks(&self) -> Option<Vec<TaskRecord>> {
-        match self.memory.tasks.list().await {
+        match self.deps.store.list().await {
             Ok(tasks) => Some(
                 tasks
                     .into_iter()
