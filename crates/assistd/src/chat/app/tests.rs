@@ -660,10 +660,9 @@ fn resume_search_targets_the_selected_match_not_the_unfiltered_row() {
         stream: WireStream::Branch,
         event: done(),
     });
-    let target = |app: &App| {
-        app.resume_picker
-            .as_ref()
-            .and_then(ResumePicker::current_target)
+    let target = |app: &App| match &app.panel {
+        Some(Panel::Resume(picker)) => picker.current_target(),
+        _ => None,
     };
     assert_eq!(target(&app).as_deref(), Some("bbbbbbbb/main"));
     type_str(&mut app, "TAX fi");

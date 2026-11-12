@@ -16,8 +16,8 @@ use ratatui_image::StatefulImage;
 use textwrap::core::display_width;
 
 use super::app::{
-    AnswerTo, App, BranchListEntry, ChatMode, ConfirmChoice, ConfirmationPrompt, ResumePicker,
-    ResumeTab,
+    AnswerTo, App, BranchListEntry, ChatMode, ConfirmChoice, ConfirmationPrompt, Panel,
+    ResumePicker, ResumeTab,
 };
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
 use super::selection::list_window;
@@ -52,34 +52,33 @@ const RULE: &str = "─";
 /// Rows each `/resume` entry takes: its title and its details.
 const RESUME_ENTRY_ROWS: usize = 2;
 const RESUME_DETAIL_INDENT: &str = "    ";
+const RESUME_HINT: &str =
+    "type to search · Tab sessions/tasks · ↑/↓ select · Enter resume · Esc cancel";
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &mut App) {
     let [main_area, status_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
     let theme = app.theme();
-    if let Some(picker) = app.shown_resume_picker() {
-        render_resume_picker(
+    let confirming = app.confirmation.is_some();
+    match app.panel.as_mut().filter(|_| !confirming) {
+        Some(Panel::Resume(picker)) => render_resume_picker(
             frame,
             main_area,
             picker,
             &app.model_name,
             Utc::now(),
             &theme,
-        );
-    } else if let Some(panel) = app.shown_wake_word_panel() {
-        wakeword::render_wake_word_panel(frame, main_area, panel, &theme);
-    } else if let Some(panel) = app.shown_agent_panel() {
-        agents::render_agent_panel(frame, main_area, app, panel, &theme);
-    } else if app.confirmation.is_none()
-        && let Some(panel) = app.tasks_panel.as_mut()
-    {
-        tasks::render_tasks_panel(frame, main_area, panel, &theme);
-    } else if app.confirmation.is_none()
-        && let Some(panel) = app.settings_panel.as_mut()
-    {
-        render_settings(frame, main_area, panel);
-    } else {
-        render_chat(frame, main_area, app, &theme);
+        ),
+        Some(Panel::WakeWord(panel)) => {
+            wakeword::render_wake_word_panel(frame, main_area, panel, &theme);
+        }
+        Some(Panel::Settings(panel)) => render_settings(frame, main_area, panel),
+        Some(Panel::Agents(panel)) => {
+            let panel = *panel;
+            agents::render_agent_panel(frame, main_area, app, panel, &theme);
+        }
+        Some(Panel::Tasks(panel)) => tasks::render_tasks_panel(frame, main_area, panel, &theme),
+        None => render_chat(frame, main_area, app, &theme),
     }
     render_status_line(frame, status_area, app, &theme);
 }
@@ -773,21 +772,22 @@ fn status_segments(app: &App) -> Vec<String> {
 
 fn status_hint(app: &App) -> Option<String> {
     if app.confirmation.is_some() {
-        Some("↑/↓ select · Enter confirm · Esc deny".to_string())
-    } else if app.resume_picker.is_some() {
-        Some(
-            "type to search · Tab sessions/tasks · ↑/↓ select · Enter resume · Esc cancel"
-                .to_string(),
-        )
-    } else if let Some(notice) = app.notice() {
-        Some(notice.to_string())
-    } else if let Some(panel) = app.shown_wake_word_panel() {
-        Some(wakeword::wake_word_hint(&panel.view).to_string())
-    } else if let Some(panel) = app.shown_agent_panel() {
-        Some(agents::agent_panel_hint(panel).to_string())
-    } else if let Some(panel) = app.shown_tasks_panel() {
-        Some(tasks::tasks_panel_hint(panel).to_string())
-    } else if app.output.scroll_offset() > 0 {
+        return Some("↑/↓ select · Enter confirm · Esc deny".to_string());
+    }
+    if let Some(notice) = app.notice() {
+        return Some(notice.to_string());
+    }
+    match app.shown_panel() {
+        Some(Panel::Resume(_)) => Some(RESUME_HINT.to_string()),
+        Some(Panel::WakeWord(panel)) => Some(wakeword::wake_word_hint(&panel.view).to_string()),
+        Some(Panel::Agents(panel)) => Some(agents::agent_panel_hint(*panel).to_string()),
+        Some(Panel::Tasks(panel)) => Some(tasks::tasks_panel_hint(panel).to_string()),
+        Some(Panel::Settings(_)) | None => chat_hint(app),
+    }
+}
+
+fn chat_hint(app: &App) -> Option<String> {
+    if app.output.scroll_offset() > 0 {
         Some(format!("↑{} · PgDn to follow", app.output.scroll_offset()))
     } else if app.generating() {
         Some("Esc to interrupt".to_string())
