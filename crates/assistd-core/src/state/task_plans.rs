@@ -262,6 +262,7 @@ fn planning_wire_event(id: &str, event: LlmEvent) -> Option<Event> {
         | LlmEvent::StepDiscarded
         | LlmEvent::ToolCallsRequested { .. }
         | LlmEvent::HistoryCompacted { .. }
+        | LlmEvent::Interrupted { .. }
         | LlmEvent::Done => {
             return None;
         }

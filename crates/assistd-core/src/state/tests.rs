@@ -1437,6 +1437,91 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
     assert_eq!(user_prompts, ["kept"]);
 }
 
+/// Streams the start of a reply, then never finishes the step; records the
+/// reply it is told to keep for an interrupted turn.
+#[derive(Debug, Default)]
+struct StallingBackend {
+    streamed: Notify,
+    interrupted_replies: StdMutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for StallingBackend {
+    async fn generate(
+        &self,
+        _prompt: String,
+        _tx: mpsc::Sender<LlmEvent>,
+    ) -> assistd_llm::LlmResult<()> {
+        unimplemented!("uses step path")
+    }
+    async fn push_user(
+        &self,
+        _text: String,
+        _attachments: Vec<assistd_tools::Attachment>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+    async fn push_tool_results(
+        &self,
+        _results: Vec<ToolResultPayload>,
+    ) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+    async fn step(
+        &self,
+        _tools: Vec<serde_json::Value>,
+        tx: mpsc::Sender<LlmEvent>,
+    ) -> assistd_llm::LlmResult<StepOutcome> {
+        let text = "The answer is ".to_string();
+        tx.send(LlmEvent::Delta { text }).await.ok();
+        self.streamed.notify_one();
+        std::future::pending().await
+    }
+    async fn push_interrupted_reply(&self, reply: String) -> assistd_llm::LlmResult<()> {
+        self.interrupted_replies.lock().push(reply);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn an_interrupted_reply_is_kept_with_a_marker_in_the_conversation_and_the_transcript() {
+    let backend = Arc::new(StallingBackend::default());
+    let (state, conv, _session, branch) =
+        branch_state_with(backend.clone(), Arc::new(ToolRegistry::default())).await;
+    let query_state = state.clone();
+    let asked = tokio::spawn(async move { dispatch(&query_state, query("q", "why?")).await });
+
+    backend.streamed.notified().await;
+    let (res, _) = dispatch(&state, Request::new("int", RequestBody::InterruptTurn)).await;
+    res.unwrap();
+    let (res, events) = tokio::time::timeout(Duration::from_secs(5), asked)
+        .await
+        .expect("InterruptTurn did not end the turn")
+        .unwrap();
+    res.unwrap();
+    assert_eq!(events.last(), Some(&done("q")), "{events:?}");
+
+    let kept = "The answer is\n\n[interrupted]";
+    assert_eq!(*backend.interrupted_replies.lock(), [kept]);
+    state.transcript.drain_inflight().await;
+    let rows = conv
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
+    let messages: Vec<_> = rows
+        .iter()
+        .map(|r| (r.message.role(), r.message.content.as_str()))
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            (PersistedRole::User, "why?"),
+            (PersistedRole::Assistant, kept)
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_turn_waiting_to_start_does_not_hold_the_daemon_awake() {
     let state = default_state();
@@ -1565,8 +1650,10 @@ async fn client_departure_cancels_the_turn_and_completes_the_batch() {
             (PersistedRole::Assistant, None),
             (PersistedRole::Tool, Some("c1")),
             (PersistedRole::Tool, Some("c2")),
+            (PersistedRole::Assistant, None),
         ]
     );
+    assert_eq!(rows[4].message.content, "[interrupted]");
     assert!(
         rows[2]
             .message

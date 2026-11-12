@@ -183,6 +183,10 @@ impl LlmBackend for YieldingBackend {
         }
     }
 
+    async fn push_interrupted_reply(&self, reply: String) -> LlmResult<()> {
+        self.inner.push_interrupted_reply(reply).await
+    }
+
     async fn set_transient_context(&self, text: String) -> LlmResult<()> {
         self.inner.set_transient_context(text).await
     }

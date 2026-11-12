@@ -41,6 +41,12 @@ const MAX_TOOL_STEPS: u32 = 200;
 /// the turn fails.
 const TRUNCATION_RETRY_LIMIT: u32 = 2;
 
+/// Ends the reply kept for a turn cut off before the model finished.
+const INTERRUPTED_MARKER: &str = "[interrupted]";
+
+/// Events one model step may have waiting for the turn.
+const STEP_EVENT_BUFFER: usize = 32;
+
 /// Tells the model why its last response vanished and how to avoid a repeat.
 const TRUNCATION_NOTE: &str = "Your previous response reached the output-token limit before \
      it finished, so it was discarded and none of its tool calls ran. Keep your reasoning \
@@ -120,11 +126,14 @@ impl Agent {
                     cancelled = turn.cancel.is_cancelled(),
                     "stopping between iterations (client gone or explicit cancel)"
                 );
-                return Ok(());
+                return self.record_interruption(&turn, "").await;
             }
 
-            let Some(outcome) = self.step_with_replay(&turn).await? else {
-                return Ok(());
+            let outcome = match self.step_with_replay(&turn).await? {
+                StepEnd::Outcome(outcome) => outcome,
+                StepEnd::Interrupted { streamed } => {
+                    return self.record_interruption(&turn, &streamed).await;
+                }
             };
 
             match outcome {
@@ -229,33 +238,34 @@ impl Agent {
         Ok(())
     }
 
-    /// One LLM step; `Ok(None)` means the turn was cancelled. A crash is
-    /// replayed once after the server is ready again; any other failure
-    /// ends the turn with an error after telling the client.
-    async fn step_with_replay(&self, turn: &Turn) -> Result<Option<StepOutcome>, LlmError> {
+    /// Keep what the cut-off step streamed as the turn's reply, marked as
+    /// interrupted, in the conversation and for whoever records the turn.
+    async fn record_interruption(&self, turn: &Turn, streamed: &str) -> Result<(), LlmError> {
+        let reply = interrupted_reply(streamed);
+        self.backend.push_interrupted_reply(reply.clone()).await?;
+        let _ = turn.tx.send(LlmEvent::Interrupted { reply }).await;
+        Ok(())
+    }
+
+    /// One LLM step. A crash is replayed once after the server is ready
+    /// again; any other failure ends the turn with an error after telling
+    /// the client.
+    async fn step_with_replay(&self, turn: &Turn) -> Result<StepEnd, LlmError> {
         let mut restart_attempted = false;
         loop {
             let replay_probe = self.health.as_ref().filter(|_| !restart_attempted);
             let _ = turn.tx.send(LlmEvent::StepStarted).await;
-            let step_result = tokio::select! {
-                biased;
-                () = turn.cancel.cancelled() => {
-                    debug!(
-                        target: "assistd::agent",
-                        iteration = turn.iteration,
-                        "cancellation fired during LLM step; stopping"
-                    );
-                    return Ok(None);
-                }
-                r = self.backend.step(turn.schemas.clone(), turn.tx.clone()) => r,
-            };
-            match (step_result, replay_probe) {
-                (Ok(outcome), _) => return Ok(Some(outcome)),
+            match (self.relay_step(turn).await, replay_probe) {
+                (Ok(end), _) => return Ok(end),
                 (Err(LlmError::ServerRestarting(reason)), Some(probe)) => {
                     restart_attempted = true;
                     match await_restart(probe, turn, &reason).await {
                         Replay::Ready => continue,
-                        Replay::Cancelled => return Ok(None),
+                        Replay::Cancelled => {
+                            return Ok(StepEnd::Interrupted {
+                                streamed: String::new(),
+                            });
+                        }
                         Replay::Abandoned(final_msg) => {
                             fail_turn(&turn.tx, &final_msg).await;
                             return Err(LlmError::ServerRestarting(final_msg));
@@ -265,6 +275,35 @@ impl Agent {
                 (Err(e), _) => {
                     fail_turn(&turn.tx, &format!("{}: {e}", llm_error_label(&e))).await;
                     return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Run one backend step, passing its events on to the turn. The step is
+    /// dropped once the turn is cancelled or its consumer leaves.
+    async fn relay_step(&self, turn: &Turn) -> Result<StepEnd, LlmError> {
+        let (step_tx, mut step_rx) = mpsc::channel(STEP_EVENT_BUFFER);
+        let mut step = pin!(self.backend.step(turn.schemas.clone(), step_tx));
+        let mut streamed = String::new();
+        loop {
+            tokio::select! {
+                biased;
+                () = turn.stopped() => {
+                    debug!(
+                        target: "assistd::agent",
+                        iteration = turn.iteration,
+                        cancelled = turn.cancel.is_cancelled(),
+                        "stopping during LLM step (client gone or explicit cancel)"
+                    );
+                    return Ok(StepEnd::Interrupted { streamed });
+                }
+                Some(event) = step_rx.recv() => turn.pass_on(event, &mut streamed).await,
+                result = &mut step => {
+                    while let Ok(event) = step_rx.try_recv() {
+                        turn.pass_on(event, &mut streamed).await;
+                    }
+                    return result.map(StepEnd::Outcome);
                 }
             }
         }
@@ -396,6 +435,25 @@ impl Turn {
         self.tx.is_closed() || self.cancel.is_cancelled()
     }
 
+    /// Resolves once the turn is cancelled or its consumer has left.
+    async fn stopped(&self) {
+        tokio::select! {
+            () = self.cancel.cancelled() => {}
+            () = self.tx.closed() => {}
+        }
+    }
+
+    /// Send a step's `event` to the turn's consumer, keeping `streamed` equal
+    /// to the text the step has shown so far.
+    async fn pass_on(&self, event: LlmEvent, streamed: &mut String) {
+        match &event {
+            LlmEvent::Delta { text } => streamed.push_str(text),
+            LlmEvent::StepDiscarded => streamed.clear(),
+            _ => {}
+        }
+        let _ = self.tx.send(event).await;
+    }
+
     /// Offer `tools` from the next step on.
     fn offer(&mut self, tools: &Arc<ToolRegistry>) {
         if !Arc::ptr_eq(&self.tools, tools) {
@@ -422,6 +480,15 @@ impl RelayObserver for TurnRelayObserver {
     async fn report(&self, event: RelayEvent) {
         let _ = self.0.send(LlmEvent::Relay(event)).await;
     }
+}
+
+/// How a model step that did not fail ended.
+enum StepEnd {
+    Outcome(StepOutcome),
+    /// The turn stopped mid-step, after the step had streamed this text.
+    Interrupted {
+        streamed: String,
+    },
 }
 
 enum Replay {
@@ -491,6 +558,15 @@ impl CallStreak {
             self.count = 1;
         }
         self.count
+    }
+}
+
+/// `streamed` ending in [`INTERRUPTED_MARKER`], or the marker alone when
+/// nothing was streamed.
+fn interrupted_reply(streamed: &str) -> String {
+    match streamed.trim_end() {
+        "" => INTERRUPTED_MARKER.to_string(),
+        shown => format!("{shown}\n\n{INTERRUPTED_MARKER}"),
     }
 }
 

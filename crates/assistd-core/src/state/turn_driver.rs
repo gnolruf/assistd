@@ -216,6 +216,10 @@ impl TurnTranslator {
                 self.persist_summary(summary, cut, elapsed).await;
                 return None;
             }
+            LlmEvent::Interrupted { reply } => {
+                self.persist_interrupted_reply(reply).await;
+                return None;
+            }
             LlmEvent::Done => {
                 self.persist_final_text(events).await;
                 EventBody::Done
@@ -296,6 +300,13 @@ impl TurnTranslator {
         }
         self.publish_last_delta(events, &final_text);
         let msg = PersistedMessage::assistant_text(final_text, reasoning);
+        self.persist_message(msg, None).await;
+    }
+
+    async fn persist_interrupted_reply(&mut self, reply: String) {
+        self.assistant_accum.clear();
+        let reasoning = self.take_reasoning();
+        let msg = PersistedMessage::assistant_text(reply, reasoning);
         self.persist_message(msg, None).await;
     }
 
