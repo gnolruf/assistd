@@ -1,5 +1,5 @@
 //! Wire types for the daemon's Unix-socket protocol: line-delimited JSON,
-//! with [`Request`] lines from the client and [`Event`] lines back.
+//! with [`Request`] lines from the client and, after one [`Hello`], [`Event`] lines back.
 
 use std::env;
 use std::fmt;
@@ -33,6 +33,10 @@ pub use task::{
 };
 pub use tool_report::{ToolAttachment, ToolReport, ToolStreams};
 pub use wakeword::WakeWordOp;
+
+/// The assistd version this build speaks the protocol of; a daemon and its clients must
+/// share it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// An image on a [`RequestBody::Query`]; `data_base64` is standard padded base64.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -455,6 +459,22 @@ impl SubscribeFilter {
     /// True when `kind` should be delivered under this filter.
     pub fn matches(&self, kind: EventKind) -> bool {
         self.kinds.is_empty() || self.kinds.contains(&kind)
+    }
+}
+
+/// The line the daemon writes when it accepts a connection, ahead of every [`Event`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Hello {
+    /// The daemon's [`VERSION`].
+    pub daemon_version: String,
+}
+
+impl Hello {
+    /// The hello of a daemon from this build.
+    pub fn current() -> Self {
+        Self {
+            daemon_version: VERSION.to_owned(),
+        }
     }
 }
 

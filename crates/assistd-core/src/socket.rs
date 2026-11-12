@@ -13,6 +13,7 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::OFlags;
 use rustix::io::Errno;
 use rustix::process::geteuid;
+use serde::Serialize;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -21,7 +22,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
-use assistd_ipc::{Event, EventBody, Request, RequestBody};
+use assistd_ipc::{Event, EventBody, Hello, Request, RequestBody};
 use assistd_tools::{Approval, CONFIRM_TIMEOUT, ConfirmRouter, TurnContext};
 use assistd_utils::time::saturating_millis;
 
@@ -396,11 +397,11 @@ fn peer_is_daemon_user(stream: &UnixStream) -> bool {
 }
 
 /// Tell a client turned away on accept why, without waiting on it; a fresh socket's
-/// send buffer always has room for the one event.
+/// send buffer always has room for the hello and the one event.
 fn refuse_connection(stream: &UnixStream, message: String) {
     let event = Event::new(String::new(), EventBody::Error { message });
-    let frame = match serde_json::to_string(&event) {
-        Ok(json) => json + "\n",
+    let frame = match refusal_frame(&event) {
+        Ok(frame) => frame,
         Err(e) => {
             debug!("could not serialize connection refusal: {e}");
             return;
@@ -409,6 +410,12 @@ fn refuse_connection(stream: &UnixStream, message: String) {
     if let Err(e) = stream.try_write(frame.as_bytes()) {
         debug!("could not tell refused client why: {e}");
     }
+}
+
+fn refusal_frame(event: &Event) -> serde_json::Result<String> {
+    let hello = serde_json::to_string(&Hello::current())?;
+    let refusal = serde_json::to_string(event)?;
+    Ok(format!("{hello}\n{refusal}\n"))
 }
 
 fn peer_pid(stream: &UnixStream) -> Option<u32> {
@@ -463,6 +470,13 @@ async fn handle_connection(
     let peer_pid = peer_pid(&stream);
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
+    match write_frame(&mut write_half, &Hello::current()).await {
+        Err(SocketError::Io(e)) if is_peer_gone(&e) => {
+            debug!("client disconnected before the hello");
+            return Ok(());
+        }
+        result => result?,
+    }
     let Some((req, _large_slot)) =
         read_initial_request(&mut reader, &mut write_half, large_frames).await?
     else {
@@ -573,7 +587,7 @@ async fn read_initial_request(
         }
     };
     let err = Event::new(String::new(), EventBody::Error { message: rejection });
-    write_event(write_half, &err).await?;
+    write_frame(write_half, &err).await?;
     write_half.shutdown().await?;
     Ok(None)
 }
@@ -636,7 +650,7 @@ async fn forward_events(
                 let Some(event) = received else {
                     return Ok(ForwardEnd::Drained(write_half));
                 };
-                match write_event(&mut write_half, &event).await {
+                match write_frame(&mut write_half, &event).await {
                     Err(SocketError::Io(e)) if is_peer_gone(&e) => {
                         return Ok(ForwardEnd::PeerHungUp);
                     }
@@ -747,8 +761,11 @@ fn route_mid_stream_line(line: &str, router: &ConfirmRouter) {
     }
 }
 
-async fn write_event(write_half: &mut OwnedWriteHalf, event: &Event) -> Result<(), SocketError> {
-    let mut out = serde_json::to_string(event)?;
+async fn write_frame(
+    write_half: &mut OwnedWriteHalf,
+    frame: &impl Serialize,
+) -> Result<(), SocketError> {
+    let mut out = serde_json::to_string(frame)?;
     out.push('\n');
     let write = async {
         write_half.write_all(out.as_bytes()).await?;
