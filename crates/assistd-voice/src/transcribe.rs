@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use tokio::sync::{OnceCell, watch};
 
 use crate::VoiceCaptureState;
@@ -16,9 +17,8 @@ pub trait Transcriber: fmt::Debug + Send + Sync + 'static {
     /// an empty string means the input was silence, not an error.
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError>;
 
-    /// State transitions the transcriber drives itself (`Queued`,
-    /// `Transcribing`). `None` when the implementation has no internal
-    /// states to report.
+    /// `Transcribing` while any transcription is in flight, `Idle` otherwise.
+    /// `None` when the implementation does not report it.
     fn subscribe_state(&self) -> Option<watch::Receiver<VoiceCaptureState>> {
         None
     }
@@ -85,14 +85,15 @@ pub type CpuFallbackFactory = Arc<
         + Sync,
 >;
 
-/// Wraps a GPU transcriber with queue-and-fallback: publish `Queued`,
-/// consult the [`BusyProbe`], and route to a lazily built CPU
-/// transcriber when the GPU is unavailable. A CPU-backed primary runs directly.
+/// Wraps a GPU transcriber with a fallback: consult the [`BusyProbe`] and
+/// route to a lazily built CPU transcriber when the GPU is unavailable.
+/// A CPU-backed primary runs directly.
 pub struct QueuedTranscriber {
     primary: Arc<dyn Transcriber>,
     cpu: Arc<OnceCell<Arc<dyn Transcriber>>>,
     cpu_factory: CpuFallbackFactory,
     busy: Arc<dyn BusyProbe>,
+    in_flight: Mutex<usize>,
     state_tx: watch::Sender<VoiceCaptureState>,
 }
 
@@ -119,8 +120,21 @@ impl QueuedTranscriber {
             cpu: Arc::new(OnceCell::new()),
             cpu_factory,
             busy,
+            in_flight: Mutex::new(0),
             state_tx,
         }
+    }
+
+    fn begin_transcription(&self) -> InFlightTranscription<'_> {
+        let mut in_flight = self.in_flight.lock();
+        *in_flight += 1;
+        self.publish(VoiceCaptureState::Transcribing);
+        InFlightTranscription(self)
+    }
+
+    fn publish(&self, state: VoiceCaptureState) {
+        self.state_tx
+            .send_if_modified(|current| std::mem::replace(current, state) != state);
     }
 
     /// Consults the [`BusyProbe`], logging the reason whenever the GPU is ruled out.
@@ -155,17 +169,8 @@ impl QueuedTranscriber {
 #[async_trait]
 impl Transcriber for QueuedTranscriber {
     async fn transcribe(&self, pcm_i16_16k_mono: &[i16]) -> Result<String, TranscriptionError> {
-        let _idle = IdleOnDrop(&self.state_tx);
-        if !self.primary.is_gpu() {
-            let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-            return self.primary.transcribe(pcm_i16_16k_mono).await;
-        }
-
-        let _ = self.state_tx.send(VoiceCaptureState::Queued);
-        let use_cpu = self.should_fall_back_to_cpu();
-        let _ = self.state_tx.send(VoiceCaptureState::Transcribing);
-
-        if use_cpu {
+        let _in_flight = self.begin_transcription();
+        if self.primary.is_gpu() && self.should_fall_back_to_cpu() {
             self.cpu_transcriber()
                 .await?
                 .transcribe(pcm_i16_16k_mono)
@@ -180,13 +185,17 @@ impl Transcriber for QueuedTranscriber {
     }
 }
 
-/// Publishes `Idle` when dropped, so a transcription that fails or is
-/// cancelled still ends its `Transcribing` state.
-struct IdleOnDrop<'a>(&'a watch::Sender<VoiceCaptureState>);
+/// One running transcription. Dropping the last one publishes `Idle`, so a
+/// transcription that fails or is cancelled still ends `Transcribing`.
+struct InFlightTranscription<'a>(&'a QueuedTranscriber);
 
-impl Drop for IdleOnDrop<'_> {
+impl Drop for InFlightTranscription<'_> {
     fn drop(&mut self) {
-        let _ = self.0.send(VoiceCaptureState::Idle);
+        let mut in_flight = self.0.in_flight.lock();
+        *in_flight -= 1;
+        if *in_flight == 0 {
+            self.0.publish(VoiceCaptureState::Idle);
+        }
     }
 }
 

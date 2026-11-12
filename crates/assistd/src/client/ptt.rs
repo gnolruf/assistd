@@ -80,7 +80,6 @@ pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
 fn voice_state_label(state: VoiceCaptureState) -> &'static str {
     match state {
         VoiceCaptureState::Idle => "idle",
-        VoiceCaptureState::Queued => "queued",
         VoiceCaptureState::Recording => "recording",
         VoiceCaptureState::Transcribing => "transcribing",
     }

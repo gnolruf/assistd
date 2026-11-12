@@ -22,15 +22,15 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 enum ReadyState {
     /// Synthesis is operating normally.
     Ready,
-    /// The breaker has tripped; `reason` is the last error.
-    Degraded { reason: String },
+    /// The breaker has tripped; `reason` is the last error, and
+    /// `drop_logged` is set once a dropped request has been logged.
+    Degraded { reason: String, drop_logged: bool },
 }
 
 #[derive(Debug)]
 struct CircuitState {
     ready: ReadyState,
     recent_failures: VecDeque<Instant>,
-    logged_degraded: bool,
 }
 
 impl CircuitState {
@@ -38,12 +38,15 @@ impl CircuitState {
         Self {
             ready: ReadyState::Ready,
             recent_failures: VecDeque::with_capacity(FAILURE_THRESHOLD),
-            logged_degraded: false,
         }
     }
 
     fn admit(&mut self) -> bool {
-        let ReadyState::Degraded { reason } = &self.ready else {
+        let ReadyState::Degraded {
+            reason,
+            drop_logged,
+        } = &mut self.ready
+        else {
             return true;
         };
         let cooled = self
@@ -54,13 +57,13 @@ impl CircuitState {
             self.recent_failures.clear();
             return true;
         }
-        if !self.logged_degraded {
+        if !*drop_logged {
             tracing::warn!(
                 target: "assistd::voice::tts",
                 %reason,
                 "speech degraded; dropping speak() request"
             );
-            self.logged_degraded = true;
+            *drop_logged = true;
         }
         false
     }
@@ -70,7 +73,6 @@ impl CircuitState {
         if matches!(self.ready, ReadyState::Degraded { .. }) {
             tracing::info!(target: "assistd::voice::tts", "speech recovered from degraded");
             self.ready = ReadyState::Ready;
-            self.logged_degraded = false;
         }
     }
 
@@ -95,7 +97,10 @@ impl CircuitState {
                 window_secs = FAILURE_WINDOW.as_secs(),
                 "speech synthesis repeatedly failed; entering degraded state"
             );
-            self.ready = ReadyState::Degraded { reason };
+            self.ready = ReadyState::Degraded {
+                reason,
+                drop_logged: false,
+            };
         }
     }
 }
@@ -282,7 +287,6 @@ mod tests {
 
         state.record_success();
         assert!(matches!(state.ready, ReadyState::Ready));
-        assert!(!state.logged_degraded);
         assert!(state.admit());
     }
 

@@ -463,6 +463,7 @@ dependencies = [
  "assistd-utils",
  "async-trait",
  "futures-util",
+ "parking_lot 0.13.0",
  "serde_json",
  "swayipc-async",
  "thiserror 2.0.21",

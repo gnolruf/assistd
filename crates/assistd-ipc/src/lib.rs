@@ -154,8 +154,6 @@ impl From<PresenceTarget> for PresenceState {
 #[serde(rename_all = "snake_case")]
 pub enum VoiceCaptureState {
     Idle,
-    /// Waiting for the GPU to free up before transcribing.
-    Queued,
     Recording,
     Transcribing,
 }

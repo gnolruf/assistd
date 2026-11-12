@@ -800,7 +800,6 @@ fn voice_indicator(s: VoiceCaptureState) -> Option<&'static str> {
     match s {
         VoiceCaptureState::Idle => None,
         VoiceCaptureState::Recording => Some("Listening…"),
-        VoiceCaptureState::Queued => Some("Processing…"),
         VoiceCaptureState::Transcribing => Some("transcribing…"),
     }
 }

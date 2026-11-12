@@ -85,7 +85,7 @@ impl MicVoiceInput {
         }
     }
 
-    /// Mirror the transcriber's `Queued`/`Transcribing` states until a newer
+    /// Mirror the transcriber's `Transcribing` state until a newer
     /// press starts; `stop_and_transcribe` owns the terminal `Idle`.
     fn spawn_state_forwarder(
         mut transcriber_state: watch::Receiver<VoiceCaptureState>,
@@ -94,10 +94,7 @@ impl MicVoiceInput {
         tokio::spawn(async move {
             while transcriber_state.changed().await.is_ok() {
                 let state = *transcriber_state.borrow_and_update();
-                let forwarded = matches!(
-                    state,
-                    VoiceCaptureState::Queued | VoiceCaptureState::Transcribing
-                );
+                let forwarded = state == VoiceCaptureState::Transcribing;
                 if forwarded && !publisher.publish(state) {
                     return;
                 }
