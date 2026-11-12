@@ -225,7 +225,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let (shutdown_tx, _) = watch::channel(false);
     let _signal_handler = AbortOnDropHandle::new(install_signal_handler(shutdown_tx.clone()));
 
-    let capabilities = resolve_capabilities(&ipc, &config).await;
+    let capabilities = resolve_capabilities(&ipc, &config).await?;
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
 
@@ -269,12 +269,16 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
 }
 
 /// The daemon's capabilities, with the configured model's basename as the display name when
-/// the daemon gives none.
-async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> StartupCapabilities {
-    let mut capabilities = get_capabilities(ipc).await.unwrap_or_else(|e| {
-        info!("get_capabilities failed: {e:#}");
-        StartupCapabilities::default()
-    });
+/// the daemon gives none. Fails only when the daemon is from another version.
+async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> Result<StartupCapabilities> {
+    let mut capabilities = match get_capabilities(ipc).await {
+        Ok(capabilities) => capabilities,
+        Err(e @ IpcClientError::VersionMismatch { .. }) => return Err(e.into()),
+        Err(e) => {
+            info!("get_capabilities failed: {e:#}");
+            StartupCapabilities::default()
+        }
+    };
     capabilities.mcp_unavailable = get_mcp_unavailable(ipc).await.unwrap_or_else(|e| {
         info!("mcp_status failed: {e:#}");
         Vec::new()
@@ -286,7 +290,7 @@ async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> StartupCapabi
             .map_or(configured, |(_, rest)| rest)
             .to_string();
     }
-    capabilities
+    Ok(capabilities)
 }
 
 async fn run_tui(ctx: TuiContext) -> Result<()> {
@@ -475,7 +479,7 @@ async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
     Ok(unavailable)
 }
 
-async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
+async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities, IpcClientError> {
     let req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetCapabilities);
     let mut capabilities = StartupCapabilities::default();
     ipc.request(req, |event| {

@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-use crate::{Event, EventBody, Request, socket_path};
+use crate::{Event, EventBody, Hello, Request, VERSION, socket_path};
 
 /// Errors produced by the IPC client.
 #[derive(Debug, Error)]
@@ -26,6 +26,13 @@ pub enum IpcClientError {
     /// The socket is served by another user's process, so it may be squatted.
     #[error("socket at {path} is served by uid {peer_uid}, not this user; refusing to talk to it")]
     ForeignDaemon { path: PathBuf, peer_uid: u32 },
+    /// The daemon is from another assistd version, so the two may not share a protocol;
+    /// `daemon` is `None` when it is too old to say which.
+    #[error(
+        "the running daemon is {} but this client is assistd {VERSION}; restart the daemon",
+        describe_daemon(.daemon.as_deref())
+    )]
+    VersionMismatch { daemon: Option<String> },
     #[error("ipc i/o error: {0}")]
     Io(#[from] io::Error),
     #[error("ipc json error: {0}")]
@@ -68,13 +75,14 @@ impl IpcClient {
     }
 
     /// Send one request, close the write half, and stream events until `Done` or `Error`.
+    /// Fails with [`IpcClientError::VersionMismatch`] when the daemon is from another version.
     pub async fn one_shot(&self, req: Request) -> Result<EventStream> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
         if write_initial_frame(&mut write, &req).await? {
             write.shutdown().await?;
         }
-        Ok(EventStream::new(read))
+        EventStream::greeted(read).await
     }
 
     /// Send one request and hand every event, the terminal one included, to `on_event`
@@ -112,14 +120,14 @@ impl IpcClient {
     }
 
     /// Send `initial` but keep the write half open for further requests, such as a
-    /// [`crate::RequestBody::ConfirmResponse`].
+    /// [`crate::RequestBody::ConfirmResponse`]. Fails like [`one_shot`](Self::one_shot).
     pub async fn open_dialog(&self, initial: Request) -> Result<DialogConnection> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
         write_initial_frame(&mut write, &initial).await?;
         Ok(DialogConnection {
             write,
-            events: EventStream::new(read),
+            events: EventStream::greeted(read).await?,
         })
     }
 
@@ -164,6 +172,13 @@ async fn write_initial_frame(write: &mut OwnedWriteHalf, req: &Request) -> Resul
     }
 }
 
+fn describe_daemon(version: Option<&str>) -> String {
+    version.map_or_else(
+        || "an older assistd".to_owned(),
+        |version| format!("assistd {version}"),
+    )
+}
+
 async fn write_frame(write: &mut OwnedWriteHalf, req: &Request) -> Result<()> {
     let mut payload = serde_json::to_string(req)?;
     payload.push('\n');
@@ -184,27 +199,28 @@ impl fmt::Debug for EventStream {
 }
 
 impl EventStream {
-    fn new(read: OwnedReadHalf) -> Self {
-        Self {
-            inner: BufReader::new(read).lines(),
+    /// The stream behind the daemon's [`Hello`], which must come first and name this
+    /// client's version.
+    async fn greeted(read: OwnedReadHalf) -> Result<Self> {
+        let mut inner = BufReader::new(read).lines();
+        let greeting = inner
+            .next_line()
+            .await?
+            .ok_or(IpcClientError::DaemonClosed)?;
+        match serde_json::from_str::<Hello>(&greeting) {
+            Ok(hello) if hello.daemon_version == VERSION => Ok(Self { inner }),
+            Ok(hello) => Err(IpcClientError::VersionMismatch {
+                daemon: Some(hello.daemon_version),
+            }),
+            Err(_) => Err(IpcClientError::VersionMismatch { daemon: None }),
         }
     }
 
-    /// The next decodable event, skipping unknown ones; `Ok(None)` when the daemon closed the
-    /// stream.
+    /// The next event; `Ok(None)` when the daemon closed the stream, and
+    /// [`IpcClientError::Json`] for a line that is not an event this client knows.
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
-        while let Some(line) = self.inner.next_line().await? {
-            match serde_json::from_str(&line) {
-                Ok(event) => return Ok(Some(event)),
-                Err(e) if e.is_data() => tracing::warn!(
-                    target: "assistd::ipc",
-                    error = %e,
-                    "skipping event this client cannot decode"
-                ),
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(None)
+        let line = self.inner.next_line().await?;
+        Ok(line.as_deref().map(serde_json::from_str).transpose()?)
     }
 
     /// Collect events through the terminal one; errors with [`IpcClientError::DaemonClosed`] if
@@ -264,11 +280,18 @@ mod tests {
         responses: &[Event],
     ) -> (tempfile::TempDir, PathBuf, tokio::task::JoinHandle<()>) {
         mock_server_raw(
-            responses
-                .iter()
-                .map(|event| serde_json::to_string(event).unwrap())
+            std::iter::once(hello_line())
+                .chain(
+                    responses
+                        .iter()
+                        .map(|event| serde_json::to_string(event).unwrap()),
+                )
                 .collect(),
         )
+    }
+
+    fn hello_line() -> String {
+        serde_json::to_string(&Hello::current()).unwrap()
     }
 
     /// [`mock_server`] that writes each of `lines` verbatim.
@@ -296,26 +319,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_unknown_events_from_daemon() {
+    async fn daemon_of_another_version_is_refused() {
+        let connect = async |first_line: &str| {
+            let (_dir, path, server) = mock_server_raw(vec![
+                first_line.to_owned(),
+                r#"{"type":"done","id":"r"}"#.into(),
+            ]);
+            let outcome = IpcClient::with_path(path)
+                .one_shot(Request::query("r", "x"))
+                .await;
+            server.await.unwrap();
+            outcome.map(|_| ())
+        };
+        let outcome = connect(r#"{"daemon_version":"0.0.1"}"#).await;
+        assert!(
+            matches!(
+                &outcome,
+                Err(IpcClientError::VersionMismatch { daemon: Some(version) }) if version == "0.0.1"
+            ),
+            "{outcome:?}"
+        );
+        let outcome = connect(r#"{"type":"delta","id":"r","text":"hello"}"#).await;
+        assert!(
+            matches!(
+                outcome,
+                Err(IpcClientError::VersionMismatch { daemon: None })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn undecodable_event_is_an_error() {
         let (_dir, path, server) = mock_server_raw(vec![
-            r#"{"type":"future_event","id":"r","payload":1}"#.into(),
-            r#"{"type":"status","id":"r","severity":"info","component":"future_subsystem","event":"restarting","message":"m"}"#.into(),
-            r#"{"type":"delta","id":"r","text":"hello"}"#.into(),
+            hello_line(),
+            r#"{"type":"confirm_request","id":"r","confirm_id":7}"#.into(),
             r#"{"type":"done","id":"r"}"#.into(),
         ]);
         let client = IpcClient::with_path(path);
         let stream = client.one_shot(Request::query("r", "x")).await.unwrap();
-        assert_eq!(
-            stream.collect().await.expect("collect"),
-            vec![
-                Event::new(
-                    "r",
-                    EventBody::Delta {
-                        text: "hello".into()
-                    }
-                ),
-                Event::new("r", EventBody::Done),
-            ]
+        let outcome = stream.collect().await;
+        assert!(
+            matches!(outcome, Err(IpcClientError::Json(_))),
+            "{outcome:?}"
         );
         server.await.unwrap();
     }
@@ -396,7 +442,7 @@ mod tests {
                     source: crate::ConfirmSource::Main,
                 },
             );
-            let mut out = serde_json::to_string(&confirm).unwrap();
+            let mut out = hello_line() + "\n" + &serde_json::to_string(&confirm).unwrap();
             out.push('\n');
             write.write_all(out.as_bytes()).await.unwrap();
             write.flush().await.unwrap();

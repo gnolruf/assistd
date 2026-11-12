@@ -120,7 +120,19 @@ async fn open_connection(
     } else {
         write.flush().await.unwrap();
     }
-    (write, BufReader::new(read))
+    let mut reader = BufReader::new(read);
+    read_hello(&mut reader).await;
+    (write, reader)
+}
+
+async fn read_hello(reader: &mut BufReader<OwnedReadHalf>) {
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Hello>(line.trim()).unwrap(),
+        Hello::current(),
+        "the daemon's first line must be its hello"
+    );
 }
 
 async fn send_request_collect_events(path: &Path, body: &str) -> Vec<Event> {
@@ -213,7 +225,9 @@ async fn frame_past_the_request_cap_is_rejected() {
         let stream = UnixStream::connect(&path).await.unwrap();
         let (read, mut write) = stream.into_split();
         write_past_cap(&mut write, MAX_REQUEST_BYTES).await;
-        read_event(&mut BufReader::new(read)).await
+        let mut reader = BufReader::new(read);
+        read_hello(&mut reader).await;
+        read_event(&mut reader).await
     })
     .await;
     assert_eq!(
@@ -975,6 +989,7 @@ async fn client_closing_mid_stream_is_not_a_connection_error() {
     let connection = tokio::spawn(handle_connection(server, state, large_frames, drain_rx));
 
     let mut reader = BufReader::new(client_read);
+    read_hello(&mut reader).await;
     assert!(read_event(&mut reader).await.is_some());
     drop(reader);
     drop(client_write);
@@ -987,7 +1002,7 @@ async fn client_closing_mid_stream_is_not_a_connection_error() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn write_event_times_out_when_the_client_stops_reading() {
+async fn write_frame_times_out_when_the_client_stops_reading() {
     let (server, _client_never_reads) = UnixStream::pair().unwrap();
     let (_server_read, mut write_half) = server.into_split();
     let event = Event::new(
@@ -999,7 +1014,7 @@ async fn write_event_times_out_when_the_client_stops_reading() {
 
     let err = tokio::time::timeout(EVENT_WRITE_TIMEOUT * 4, async {
         loop {
-            if let Err(e) = write_event(&mut write_half, &event).await {
+            if let Err(e) = write_frame(&mut write_half, &event).await {
                 break e;
             }
         }

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use assistd_ipc::{EventBody, PlanVerdict, RequestBody};
+use assistd_ipc::{EventBody, Hello, PlanVerdict, RequestBody};
 use assistd_tools::{ConfirmSource, Risk, Unattended};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -97,6 +97,8 @@ fn mock_daemon(socket: &Path, events: Vec<Event>) -> JoinHandle<()> {
         let mut reader = tokio::io::BufReader::new(read);
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
+        let hello = serde_json::to_string(&Hello::current()).unwrap();
+        write.write_all((hello + "\n").as_bytes()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         for ev in events {
             let mut out = serde_json::to_string(&ev).unwrap();
