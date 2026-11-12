@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, Row};
 
-use crate::{MemoryError, MemoryId, MemoryRecord, MemoryStore, Result, SavedMemory};
+use crate::{MemoryId, MemoryRecord, MemoryStore, Result, SavedMemory};
 
-use super::connection::{SqliteHandle, truncate_wal};
+use super::connection::{Erasing, SqliteHandle};
 use super::timestamp::{now_millis, timestamp_at};
 
 /// SQLite-backed [`MemoryStore`].
@@ -29,10 +29,8 @@ impl MemoryStore for SqliteMemoryStore {
         let key = key.to_string();
         let now = now_millis();
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let previous_value = value_at(&tx, &key)?;
+            .write_erasing("memory save", move |tx| {
+                let previous_value = value_at(tx, &key)?;
                 let id: MemoryId = tx.query_row(
                     "INSERT INTO memories (key, value, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?3)
@@ -45,96 +43,79 @@ impl MemoryStore for SqliteMemoryStore {
                     rusqlite::params![key, value, now],
                     |r| r.get(0),
                 )?;
-                tx.commit()?;
                 let value_changed = previous_value.as_deref() != Some(value.as_str());
-                if value_changed && previous_value.is_some() {
-                    truncate_wal(c);
-                }
-                Ok(SavedMemory { id, value_changed })
+                Ok(Erasing {
+                    value: SavedMemory { id, value_changed },
+                    erased: value_changed && previous_value.is_some(),
+                })
             })
             .await
-            .map_err(MemoryError::sqlite("memory save"))
     }
 
     async fn load(&self, key: &str) -> Result<Option<String>> {
         let key = key.to_string();
         self.handle
-            .reader()
-            .call(move |c| value_at(c, &key))
+            .read("memory load", move |c| value_at(c, &key))
             .await
-            .map_err(MemoryError::sqlite("memory load"))
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let deleted = c.execute(
+            .write_erasing("memory delete", move |tx| {
+                let deleted = tx.execute(
                     "DELETE FROM memories WHERE key = ?1",
                     rusqlite::params![key],
                 )?;
-                if deleted > 0 {
-                    truncate_wal(c);
-                }
-                Ok(())
+                Ok(Erasing {
+                    value: (),
+                    erased: deleted > 0,
+                })
             })
             .await
-            .map_err(MemoryError::sqlite("memory delete"))
     }
 
     async fn delete_by_id(&self, id: MemoryId) -> Result<Option<String>> {
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let key = c
+            .write_erasing("memory delete_by_id", move |tx| {
+                let key = tx
                     .query_row(
                         "DELETE FROM memories WHERE id = ?1 RETURNING key",
                         rusqlite::params![id],
                         |r| r.get::<_, String>(0),
                     )
                     .optional()?;
-                if key.is_some() {
-                    truncate_wal(c);
-                }
-                Ok(key)
+                Ok(Erasing {
+                    erased: key.is_some(),
+                    value: key,
+                })
             })
             .await
-            .map_err(MemoryError::sqlite("memory delete_by_id"))
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let pattern = glob_prefix_pattern(prefix);
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt =
-                    c.prepare_cached("SELECT key FROM memories WHERE key GLOB ?1 ORDER BY key")?;
-                let rows = stmt
-                    .query_map(rusqlite::params![pattern], |r| r.get::<_, String>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
+            .read("memory list", move |c| {
+                c.prepare_cached("SELECT key FROM memories WHERE key GLOB ?1 ORDER BY key")?
+                    .query_map(rusqlite::params![pattern], |r| r.get(0))?
+                    .collect()
             })
             .await
-            .map_err(MemoryError::sqlite("memory list"))
     }
 
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
         let pattern = glob_prefix_pattern(prefix);
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                let mut stmt = c.prepare_cached(
+            .read("memory list_full", move |c| {
+                c.prepare_cached(
                     "SELECT id, key, value, created_at, updated_at FROM memories \
                      WHERE key GLOB ?1 ORDER BY key",
-                )?;
-                let rows = stmt
-                    .query_map(rusqlite::params![pattern], memory_record)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
+                )?
+                .query_map(rusqlite::params![pattern], memory_record)?
+                .collect()
             })
             .await
-            .map_err(MemoryError::sqlite("memory list_full"))
     }
 }
 

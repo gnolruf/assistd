@@ -75,7 +75,7 @@ encoding_rs = "0.8.42"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-rusqlite = { version = "0.37", features = ["bundled", "blob"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 tokio-rusqlite = "0.7"
 rusqlite_migration = "2.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

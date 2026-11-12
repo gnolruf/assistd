@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::OpenFlags;
+use rusqlite::{OpenFlags, Transaction};
 use tokio_rusqlite::Connection;
 
 use crate::{MemoryError, Result, migrations};
@@ -95,23 +95,114 @@ impl SqliteHandle {
             .map_err(MemoryError::sqlite("close writer connection"))
     }
 
-    pub(super) fn reader(&self) -> &Connection {
-        &self.reader
+    /// Run `query` on the general read-only connection; a failure is reported as `op`.
+    pub(super) async fn read<T, F>(&self, op: &'static str, query: F) -> Result<T>
+    where
+        F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        read_on(&self.reader, op, query).await
     }
 
-    /// The read-only connection reserved for full scans of message chunk and memory vectors.
-    pub(super) fn search_reader(&self) -> &Connection {
-        &self.search_reader
+    /// Like [`Self::read`], with every statement of `query` seeing one snapshot.
+    pub(super) async fn read_snapshot<T, F>(&self, op: &'static str, query: F) -> Result<T>
+    where
+        F: FnOnce(&Transaction<'_>) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.reader
+            .call(move |c| in_transaction(c, query))
+            .await
+            .map_err(MemoryError::sqlite(op))
     }
 
-    /// The read-only connection reserved for full scans of document chunk vectors.
-    pub(super) fn document_search_reader(&self) -> &Connection {
-        &self.document_search_reader
+    /// Like [`Self::read`], on the connection reserved for full scans of message chunk
+    /// and memory vectors.
+    pub(super) async fn search<T, F>(&self, op: &'static str, query: F) -> Result<T>
+    where
+        F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        read_on(&self.search_reader, op, query).await
     }
 
-    pub(super) fn writer(&self) -> &Connection {
-        &self.writer
+    /// Like [`Self::read`], on the connection reserved for full scans of document chunk vectors.
+    pub(super) async fn search_documents<T, F>(&self, op: &'static str, query: F) -> Result<T>
+    where
+        F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        read_on(&self.document_search_reader, op, query).await
     }
+
+    /// Run `statements` in one transaction on the writable connection and commit it;
+    /// a failure is reported as `op`.
+    pub(super) async fn write<T, F>(&self, op: &'static str, statements: F) -> Result<T>
+    where
+        F: FnOnce(&Transaction<'_>) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.try_write(statements)
+            .await
+            .map_err(MemoryError::sqlite(op))
+    }
+
+    /// Like [`Self::write`], leaving the failure for the caller to classify.
+    pub(super) async fn try_write<T, F>(&self, statements: F) -> Result<T, tokio_rusqlite::Error>
+    where
+        F: FnOnce(&Transaction<'_>) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.writer
+            .call(move |c| in_transaction(c, statements))
+            .await
+    }
+
+    /// Like [`Self::write`], then truncate the WAL when the committed write erased rows.
+    pub(super) async fn write_erasing<T, F>(&self, op: &'static str, statements: F) -> Result<T>
+    where
+        F: FnOnce(&Transaction<'_>) -> rusqlite::Result<Erasing<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        self.writer
+            .call(move |c| {
+                let Erasing { value, erased } = in_transaction(c, statements)?;
+                if erased {
+                    truncate_wal(c);
+                }
+                Ok(value)
+            })
+            .await
+            .map_err(MemoryError::sqlite(op))
+    }
+}
+
+/// A write's result, and whether it deleted or overwrote rows whose old contents
+/// must not outlive it in the WAL.
+pub(super) struct Erasing<T> {
+    pub value: T,
+    pub erased: bool,
+}
+
+async fn read_on<T, F>(reader: &Connection, op: &'static str, query: F) -> Result<T>
+where
+    F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    reader
+        .call(move |c| query(c))
+        .await
+        .map_err(MemoryError::sqlite(op))
+}
+
+fn in_transaction<T>(
+    c: &mut rusqlite::Connection,
+    statements: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    let tx = c.transaction()?;
+    let value = statements(&tx)?;
+    tx.commit()?;
+    Ok(value)
 }
 
 /// The writable connection: applies pragmas, migrates, and refreshes planner statistics.
@@ -214,7 +305,7 @@ async fn restrict_if_present(path: &Path) -> io::Result<()> {
 /// Checkpoint and empty the WAL so frames holding deleted or overwritten rows
 /// don't outlive the write. Never waits on readers: a blocked or failed checkpoint
 /// is logged, and the frames go at the next checkpoint or at close.
-pub(super) fn truncate_wal(c: &rusqlite::Connection) {
+fn truncate_wal(c: &rusqlite::Connection) {
     match checkpoint_without_waiting(c) {
         Ok(true) => tracing::warn!(
             target: "assistd::memory",

@@ -296,8 +296,7 @@ async fn prune_keeps_each_tasks_newest_finished_runs_and_the_spared_session() {
         ["/r/2", "/r/4", "/w/2", "/w/3"].map(PathBuf::from)
     );
     let counts: (i64, i64) = handle
-        .reader()
-        .call(|c| {
+        .read("count sessions and messages", |c| {
             c.query_row(
                 "SELECT (SELECT COUNT(*) FROM sessions), (SELECT COUNT(*) FROM messages)",
                 [],

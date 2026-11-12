@@ -19,7 +19,7 @@ use crate::{
     SessionId, ToolOutcome, TranscriptStore, TurnId, TurnStats, UndoOutcome,
 };
 
-use super::connection::{SqliteHandle, truncate_wal};
+use super::connection::{Erasing, SqliteHandle};
 use super::tasks::run_state_at;
 use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
 
@@ -62,21 +62,42 @@ const BRANCH_INFO_SELECT: &str = "
 #[derive(Debug, Clone)]
 pub struct SqliteTranscriptStore {
     handle: SqliteHandle,
+    chunk_messages: bool,
 }
 
 impl SqliteTranscriptStore {
-    /// Store over the shared database handle.
+    /// Store over the shared database handle, cutting each stored message into chunks
+    /// for embedding.
     pub fn new(handle: SqliteHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            chunk_messages: true,
+        }
+    }
+
+    /// Store messages without cutting chunks, for a run that embeds nothing.
+    pub fn without_message_chunks(mut self) -> Self {
+        self.chunk_messages = false;
+        self
+    }
+
+    /// Cut the chunks of every user and assistant message stored without any,
+    /// returning how many chunks were added.
+    pub async fn chunk_unchunked_messages(&self) -> Result<u64> {
+        self.handle
+            .write("chunk_unchunked_messages", cut_missing_chunks)
+            .await
     }
 
     /// Every saved relay answer a stored relay step names.
     pub async fn relay_answer_files(&self) -> Result<Vec<PathBuf>> {
         self.handle
-            .reader()
-            .call(|c| all_answer_files(c))
+            .read("relay_answer_files", all_answer_files)
             .await
-            .map_err(MemoryError::sqlite("relay_answer_files"))
+    }
+
+    fn message_row(&self, msg: PersistedMessage) -> MessageRow {
+        MessageRow::new(msg, now_millis(), self.chunk_messages)
     }
 }
 
@@ -86,30 +107,25 @@ impl TranscriptStore for SqliteTranscriptStore {
         let ended = now_millis();
         let updated = self
             .handle
-            .writer()
-            .call(move |c| {
-                c.execute(
+            .write("end_session", move |tx| {
+                tx.execute(
                     "UPDATE sessions SET ended_at = ?1 WHERE uuid = ?2",
                     rusqlite::params![ended, session],
                 )
             })
-            .await
-            .map_err(MemoryError::sqlite("end_session"))?;
+            .await?;
         session_updated(updated, session)
     }
 
     async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn> {
-        let row = MessageRow::new(prompt, now_millis());
+        let row = self.message_row(prompt);
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let slot = claim_next_seq(&tx, branch)?;
+            .try_write(move |tx| {
+                let slot = claim_next_seq(tx, branch)?;
                 let turn = tx
                     .prepare_cached("INSERT INTO turns (session_id) VALUES (?1) RETURNING id")?
                     .query_row(rusqlite::params![slot.session_rowid], |r| r.get(0))?;
-                let message = store_message(&tx, branch, slot, turn, &row)?;
-                tx.commit()?;
+                let message = store_message(tx, branch, slot, turn, &row)?;
                 Ok(OpenedTurn { turn, message })
             })
             .await
@@ -122,9 +138,7 @@ impl TranscriptStore for SqliteTranscriptStore {
     async fn begin_session_with_main_branch(&self, session: SessionId) -> Result<BranchId> {
         let started = now_millis();
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
+            .write("begin_session_with_main_branch", move |tx| {
                 let session_rowid: i64 = tx.query_row(
                     "INSERT INTO sessions (uuid, started_at) VALUES (?1, ?2) RETURNING id",
                     rusqlite::params![session, started],
@@ -140,19 +154,16 @@ impl TranscriptStore for SqliteTranscriptStore {
                     "UPDATE sessions SET current_branch_id = ?1 WHERE id = ?2",
                     rusqlite::params![branch_id, session_rowid],
                 )?;
-                tx.commit()?;
                 Ok(branch_id)
             })
             .await
-            .map_err(MemoryError::sqlite("begin_session_with_main_branch"))
     }
 
     async fn set_current_branch(&self, session: SessionId, branch: BranchId) -> Result<()> {
         let updated = self
             .handle
-            .writer()
-            .call(move |c| {
-                c.execute(
+            .try_write(move |tx| {
+                tx.execute(
                     "UPDATE sessions SET current_branch_id = ?1 WHERE uuid = ?2",
                     rusqlite::params![branch, session],
                 )
@@ -164,8 +175,7 @@ impl TranscriptStore for SqliteTranscriptStore {
 
     async fn current_branch(&self, session: SessionId) -> Result<Option<BranchId>> {
         self.handle
-            .reader()
-            .call(move |c| {
+            .read("current_branch", move |c| {
                 c.query_row(
                     "SELECT current_branch_id FROM sessions WHERE uuid = ?1",
                     rusqlite::params![session],
@@ -175,7 +185,6 @@ impl TranscriptStore for SqliteTranscriptStore {
                 .map(Option::flatten)
             })
             .await
-            .map_err(MemoryError::sqlite("current_branch"))
     }
 
     async fn append_message_to_branch(
@@ -184,15 +193,11 @@ impl TranscriptStore for SqliteTranscriptStore {
         turn: TurnId,
         msg: PersistedMessage,
     ) -> Result<AppendedMessage> {
-        let row = MessageRow::new(msg, now_millis());
+        let row = self.message_row(msg);
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let slot = claim_next_seq(&tx, branch)?;
-                let appended = store_message(&tx, branch, slot, turn, &row)?;
-                tx.commit()?;
-                Ok(appended)
+            .try_write(move |tx| {
+                let slot = claim_next_seq(tx, branch)?;
+                store_message(tx, branch, slot, turn, &row)
             })
             .await
             .map_err(MemoryError::sqlite_or_missing(
@@ -208,15 +213,12 @@ impl TranscriptStore for SqliteTranscriptStore {
         msg: PersistedMessage,
         steps: Vec<PersistedRelayStep>,
     ) -> Result<AppendedMessage> {
-        let row = MessageRow::new(msg, now_millis());
+        let row = self.message_row(msg);
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let slot = claim_next_seq(&tx, branch)?;
-                let appended = store_message(&tx, branch, slot, turn, &row)?;
-                insert_relay_steps(&tx, appended.id, &steps)?;
-                tx.commit()?;
+            .try_write(move |tx| {
+                let slot = claim_next_seq(tx, branch)?;
+                let appended = store_message(tx, branch, slot, turn, &row)?;
+                insert_relay_steps(tx, appended.id, &steps)?;
                 Ok(appended)
             })
             .await
@@ -231,43 +233,30 @@ impl TranscriptStore for SqliteTranscriptStore {
         branch: BranchId,
     ) -> Result<HashMap<MessageId, Vec<PersistedRelayStep>>> {
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let traces = relay_traces(&tx, branch)?;
-                tx.commit()?;
-                Ok(traces)
-            })
+            .read_snapshot("load_relay_traces", move |tx| relay_traces(tx, branch))
             .await
-            .map_err(MemoryError::sqlite("load_relay_traces"))
     }
 
     async fn list_branches(&self) -> Result<Vec<BranchInfo>> {
         self.handle
-            .reader()
-            .call(|c| -> rusqlite::Result<_> {
+            .read("list_branches", |c| {
                 let sql = format!("{BRANCH_INFO_SELECT} ORDER BY last_active_at DESC, b.id ASC");
-                let mut stmt = c.prepare_cached(&sql)?;
-                let rows: Vec<BranchInfo> = stmt
+                c.prepare_cached(&sql)?
                     .query_map([], branch_info)?
-                    .collect::<std::result::Result<_, _>>()?;
-                Ok(rows)
+                    .collect()
             })
             .await
-            .map_err(MemoryError::sqlite("list_branches"))
     }
 
     async fn branch_info(&self, branch: BranchId) -> Result<Option<BranchInfo>> {
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
+            .read("branch_info", move |c| {
                 let sql = format!("{BRANCH_INFO_SELECT} WHERE b.id = ?1");
                 c.prepare_cached(&sql)?
                     .query_row(rusqlite::params![branch], branch_info)
                     .optional()
             })
             .await
-            .map_err(MemoryError::sqlite("branch_info"))
     }
 
     async fn resolve_branch(
@@ -279,8 +268,7 @@ impl TranscriptStore for SqliteTranscriptStore {
         let (uuid_from, uuid_before) = uuid_prefix_bounds(prefix);
         let name = name.to_string();
         self.handle
-            .reader()
-            .call(move |c| {
+            .read("resolve_branch", move |c| {
                 c.prepare_cached(
                     "SELECT s.uuid, b.id
                      FROM branches b JOIN sessions s ON s.id = b.session_id
@@ -294,14 +282,12 @@ impl TranscriptStore for SqliteTranscriptStore {
                 .optional()
             })
             .await
-            .map_err(MemoryError::sqlite("resolve_branch"))
     }
 
     async fn resolve_session(&self, prefix: &str) -> Result<Option<SessionId>> {
         let (uuid_from, uuid_before) = uuid_prefix_bounds(prefix);
         self.handle
-            .reader()
-            .call(move |c| {
+            .read("resolve_session", move |c| {
                 c.prepare_cached(
                     "SELECT uuid FROM sessions WHERE uuid >= ?1 AND uuid < ?2
                      ORDER BY started_at DESC LIMIT 1",
@@ -310,16 +296,13 @@ impl TranscriptStore for SqliteTranscriptStore {
                 .optional()
             })
             .await
-            .map_err(MemoryError::sqlite("resolve_session"))
     }
 
     async fn fork_and_switch(&self, src: BranchId, new_name: &str) -> Result<BranchId> {
         let name = new_name.to_string();
         let created = now_millis();
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
+            .try_write(move |tx| {
                 let new_branch: BranchId = tx.query_row(
                     "INSERT INTO branches
                         (session_id, name, parent_branch_id, fork_point_seq, next_seq, created_at)
@@ -350,7 +333,6 @@ impl TranscriptStore for SqliteTranscriptStore {
                      WHERE id = (SELECT session_id FROM branches WHERE id = ?1)",
                     rusqlite::params![new_branch],
                 )?;
-                tx.commit()?;
                 Ok(new_branch)
             })
             .await
@@ -359,27 +341,22 @@ impl TranscriptStore for SqliteTranscriptStore {
 
     async fn load_branch(&self, branch: BranchId, scope: HistoryScope) -> Result<BranchHistory> {
         self.handle
-            .reader()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let summary = branch_summary(&tx, branch)?;
+            .read_snapshot("load_branch", move |tx| {
+                let summary = branch_summary(tx, branch)?;
                 let from = match (scope, &summary) {
                     (HistoryScope::Unsummarized, Some(summary)) => summary.kept_from_seq,
                     _ => Seq(0),
                 };
-                let rows = history_rows(&tx, branch, from)?;
-                tx.commit()?;
+                let rows = history_rows(tx, branch, from)?;
                 Ok(BranchHistory { summary, rows })
             })
             .await
-            .map_err(MemoryError::sqlite("load_branch"))
     }
 
     async fn record_branch_summary(&self, branch: BranchId, summary: BranchSummary) -> Result<()> {
         self.handle
-            .writer()
-            .call(move |c| {
-                c.execute(
+            .write("record_branch_summary", move |tx| {
+                tx.execute(
                     "INSERT OR REPLACE INTO branch_summaries
                          (branch_id, kept_from_seq, steps_folded_through, compacted_after_seq,
                           content, duration_ms)
@@ -396,43 +373,37 @@ impl TranscriptStore for SqliteTranscriptStore {
             })
             .await
             .map(drop)
-            .map_err(MemoryError::sqlite("record_branch_summary"))
     }
 
     async fn record_turn_stats(&self, turn: TurnId, stats: TurnStats) -> Result<()> {
         let updated = self
             .handle
-            .writer()
-            .call(move |c| {
-                c.execute(
+            .write("record_turn_stats", move |tx| {
+                tx.execute(
                     "UPDATE turns SET duration_ms = ?2, generated_tokens = ?3 WHERE id = ?1",
                     rusqlite::params![turn, stats.duration_ms, stats.generated_tokens],
                 )
             })
-            .await
-            .map_err(MemoryError::sqlite("record_turn_stats"))?;
+            .await?;
         turn_updated(updated, turn)
     }
 
     async fn mark_turn_incomplete(&self, turn: TurnId) -> Result<()> {
         let updated = self
             .handle
-            .writer()
-            .call(move |c| {
-                c.execute(
+            .write("mark_turn_incomplete", move |tx| {
+                tx.execute(
                     "UPDATE turns SET incomplete = 1 WHERE id = ?1",
                     rusqlite::params![turn],
                 )
             })
-            .await
-            .map_err(MemoryError::sqlite("mark_turn_incomplete"))?;
+            .await?;
         turn_updated(updated, turn)
     }
 
     async fn latest_branch_activity(&self, branch: BranchId) -> Result<Option<DateTime<Utc>>> {
         self.handle
-            .reader()
-            .call(move |c| {
+            .read("latest_branch_activity", move |c| {
                 c.query_row(
                     "SELECT m.created_at
                      FROM branch_messages bm
@@ -445,45 +416,42 @@ impl TranscriptStore for SqliteTranscriptStore {
                 .optional()
             })
             .await
-            .map_err(MemoryError::sqlite("latest_branch_activity"))
     }
 
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome> {
         self.handle
-            .writer()
-            .call(move |c| -> rusqlite::Result<_> {
-                let tx = c.transaction()?;
-                let Some(turn) = latest_turn_on_branch(&tx, branch)? else {
-                    return Ok(UndoOutcome::default());
+            .write_erasing("undo_last_turn", move |tx| {
+                let Some(turn) = latest_turn_on_branch(tx, branch)? else {
+                    return Ok(Erasing {
+                        value: UndoOutcome::default(),
+                        erased: false,
+                    });
                 };
-                let last_user_text = first_user_text_of_turn(&tx, turn)?;
-                let dropped_summaries = drop_summary_covering_turn(&tx, branch, turn)?;
+                let last_user_text = first_user_text_of_turn(tx, turn)?;
+                let dropped_summaries = drop_summary_covering_turn(tx, branch, turn)?;
                 let removed = tx.execute(
                     "DELETE FROM branch_messages
                      WHERE branch_id = ?1
                        AND message_id IN (SELECT id FROM messages WHERE turn_id = ?2)",
                     rusqlite::params![branch, turn],
                 )?;
-                let released_answer_files = unreferenced_answer_files(&tx, turn)?;
-                let deleted_messages = delete_unreferenced_turn(&tx, turn)?;
-                tx.commit()?;
-                if dropped_summaries + deleted_messages > 0 {
-                    truncate_wal(c);
-                }
-                Ok(UndoOutcome {
-                    removed_messages: removed as u64,
-                    last_user_text,
-                    released_answer_files,
+                let released_answer_files = unreferenced_answer_files(tx, turn)?;
+                let deleted_messages = delete_unreferenced_turn(tx, turn)?;
+                Ok(Erasing {
+                    value: UndoOutcome {
+                        removed_messages: removed as u64,
+                        last_user_text,
+                        released_answer_files,
+                    },
+                    erased: dropped_summaries + deleted_messages > 0,
                 })
             })
             .await
-            .map_err(MemoryError::sqlite("undo_last_turn"))
     }
 
     async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
         self.handle
-            .reader()
-            .call(|c| {
+            .read("find_resumable_session", |c| {
                 c.query_row(
                     "SELECT uuid, current_branch_id, started_at
                      FROM sessions s
@@ -502,13 +470,11 @@ impl TranscriptStore for SqliteTranscriptStore {
                 .optional()
             })
             .await
-            .map_err(MemoryError::sqlite("find_resumable_session"))
     }
 
     async fn session_title(&self, session: SessionId) -> Result<Option<String>> {
         self.handle
-            .reader()
-            .call(move |c| {
+            .read("session_title", move |c| {
                 c.query_row(
                     "SELECT title FROM sessions WHERE uuid = ?1",
                     rusqlite::params![session],
@@ -518,28 +484,25 @@ impl TranscriptStore for SqliteTranscriptStore {
                 .map(Option::flatten)
             })
             .await
-            .map_err(MemoryError::sqlite("session_title"))
     }
 
     async fn set_session_title(&self, session: SessionId, title: &str) -> Result<()> {
         let title = title.to_string();
         let updated = self
             .handle
-            .writer()
-            .call(move |c| {
-                c.execute(
+            .write("set_session_title", move |tx| {
+                tx.execute(
                     "UPDATE sessions SET title = ?1 WHERE uuid = ?2",
                     rusqlite::params![title, session],
                 )
             })
-            .await
-            .map_err(MemoryError::sqlite("set_session_title"))?;
+            .await?;
         session_updated(updated, session)
     }
 }
 
 /// One `messages` row ready to insert, with the byte ranges of the chunks
-/// embedded from it; tool results get none.
+/// embedded from it; tool results get none, as does every row of a store that cuts none.
 struct MessageRow {
     created_at: i64,
     role: PersistedRole,
@@ -549,13 +512,13 @@ struct MessageRow {
 }
 
 impl MessageRow {
-    fn new(msg: PersistedMessage, created_at: i64) -> Self {
+    fn new(msg: PersistedMessage, created_at: i64, chunk_messages: bool) -> Self {
         let role = msg.role();
         let chunk_bytes = match role {
-            PersistedRole::User | PersistedRole::Assistant => {
+            PersistedRole::User | PersistedRole::Assistant if chunk_messages => {
                 chunk_ranges(&msg.content, ChunkingConfig::MESSAGES).collect()
             }
-            PersistedRole::Tool => Vec::new(),
+            PersistedRole::User | PersistedRole::Assistant | PersistedRole::Tool => Vec::new(),
         };
         Self {
             created_at,
@@ -645,7 +608,7 @@ fn store_message(
         "INSERT INTO branch_messages (branch_id, seq, message_id) VALUES (?1, ?2, ?3)",
     )?
     .execute(rusqlite::params![branch, slot.seq, id])?;
-    let chunks = insert_chunks(tx, id, row)?;
+    let chunks = insert_chunks(tx, id, &row.chunk_bytes)?;
     Ok(AppendedMessage {
         id,
         seq: slot.seq,
@@ -687,18 +650,18 @@ fn insert_message(
     )
 }
 
-/// Store `row`'s chunks under `message`, returning their ids in order.
+/// Store chunks over `chunk_bytes` of `message`'s content, returning their ids in order.
 fn insert_chunks(
     tx: &Transaction<'_>,
     message: MessageId,
-    row: &MessageRow,
+    chunk_bytes: &[Range<usize>],
 ) -> rusqlite::Result<Vec<ChunkId>> {
     let mut insert = tx.prepare_cached(
         "INSERT INTO chunks (message_id, byte_start, byte_end)
          VALUES (?1, ?2, ?3)
          RETURNING id",
     )?;
-    row.chunk_bytes
+    chunk_bytes
         .iter()
         .map(|bytes| {
             insert.query_row(rusqlite::params![message, bytes.start, bytes.end], |r| {
@@ -706,6 +669,29 @@ fn insert_chunks(
             })
         })
         .collect()
+}
+
+/// Cut and store the chunks of every user and assistant message that has none,
+/// returning how many chunks were added.
+fn cut_missing_chunks(tx: &Transaction<'_>) -> rusqlite::Result<u64> {
+    let unchunked: Vec<(MessageId, String)> = tx
+        .prepare(
+            "SELECT m.id, m.content FROM messages m
+             WHERE m.role IN (?1, ?2) AND m.content != ''
+               AND NOT EXISTS (SELECT 1 FROM chunks cc WHERE cc.message_id = m.id)",
+        )?
+        .query_map(
+            rusqlite::params![PersistedRole::User, PersistedRole::Assistant],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut added = 0;
+    for (message, content) in unchunked {
+        let chunk_bytes: Vec<Range<usize>> =
+            chunk_ranges(&content, ChunkingConfig::MESSAGES).collect();
+        added += insert_chunks(tx, message, &chunk_bytes)?.len() as u64;
+    }
+    Ok(added)
 }
 
 /// `calls` as the `messages.tool_calls` JSON array, or `None` when there are none.

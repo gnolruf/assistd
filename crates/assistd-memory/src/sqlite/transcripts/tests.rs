@@ -1,5 +1,8 @@
 use super::*;
-use crate::{PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, Seq};
+use crate::{
+    PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, SemanticStore, Seq,
+    SqliteSemanticStore,
+};
 
 /// The returned temp dir must outlive the store.
 async fn fresh_store() -> (SqliteTranscriptStore, tempfile::TempDir) {
@@ -509,9 +512,34 @@ async fn relay_trace_round_trips_follows_forks_and_goes_with_undo() {
     assert!(store.relay_answer_files().await.unwrap().is_empty());
     let steps: i64 = store
         .handle
-        .reader()
-        .call(|c| c.query_row("SELECT COUNT(*) FROM relay_steps", [], |r| r.get(0)))
+        .read("count relay_steps", |c| {
+            c.query_row("SELECT COUNT(*) FROM relay_steps", [], |r| r.get(0))
+        })
         .await
         .unwrap();
     assert_eq!(steps, 0, "undo on every branch deletes the trace");
+}
+
+#[tokio::test]
+async fn messages_stored_without_chunks_are_chunked_later() {
+    let (store, _temp) = fresh_store().await;
+    let unchunked = store.clone().without_message_chunks();
+    let branch = unchunked
+        .begin_session_with_main_branch(SessionId::new())
+        .await
+        .unwrap();
+    let opened = unchunked
+        .begin_turn(branch, PersistedMessage::user("where is the spare key"))
+        .await
+        .unwrap();
+    assert!(opened.message.chunks.is_empty());
+
+    assert_eq!(store.chunk_unchunked_messages().await.unwrap(), 1);
+    assert_eq!(store.chunk_unchunked_messages().await.unwrap(), 0);
+    let pending = SqliteSemanticStore::new(store.handle.clone())
+        .chunks_missing_embedding(None, 10)
+        .await
+        .unwrap();
+    let texts: Vec<&str> = pending.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(texts, ["where is the spare key"]);
 }

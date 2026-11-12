@@ -120,7 +120,7 @@ async fn start(
     config_path: &Path,
     stages: &ShutdownStages,
 ) -> Result<(Arc<AppState>, DaemonShutdown)> {
-    let mut memory = memory_init::init().await?;
+    let mut memory = memory_init::init(config.embedding.enabled).await?;
     let api_key = ApiKey::generate().context("failed to write the model servers' API key")?;
     let slot_dir = prepare_slot_dir()?;
     let presence = PresenceManager::new_sleeping(

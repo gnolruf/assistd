@@ -221,7 +221,8 @@ pub struct AppendedMessage {
     pub id: MessageId,
     /// Its position on the branch it was appended to.
     pub seq: Seq,
-    /// The chunks cut from it for embedding; empty for tool results.
+    /// The chunks cut from it for embedding; empty for tool results, and for every
+    /// message of a store that cuts none.
     pub chunks: Vec<ChunkId>,
 }
 
