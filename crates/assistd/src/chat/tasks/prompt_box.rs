@@ -2,7 +2,8 @@
 //! runs while the box waits.
 
 use assistd_ipc::{
-    HostName, ModeRecommendation, PermissionMode, Plan, PlannedAction, Request, TaskPrompt,
+    HostName, ModeRecommendation, PermissionMode, Plan, PlannedAction, Request, RequestBody,
+    TaskPrompt, TaskRequest,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -108,12 +109,16 @@ impl PromptBox {
     ) -> Result<(), String> {
         let prompt =
             TaskPrompt::try_from(self.text.text().to_string()).map_err(|e| e.to_string())?;
-        let request = outbox.send(PendingOp::Refine, |id| Request::TaskRefine {
-            id,
-            prompt,
-            mode: permissions.mode,
-            allowed_hosts: permissions.allowed_hosts.to_vec(),
-            feedback: None,
+        let request = outbox.send(PendingOp::Refine, |id| {
+            Request::new(
+                id,
+                RequestBody::Task(TaskRequest::Refine {
+                    prompt,
+                    mode: permissions.mode,
+                    allowed_hosts: permissions.allowed_hosts.to_vec(),
+                    feedback: None,
+                }),
+            )
         });
         self.refining = Some(Refining { request, ticks: 0 });
         self.note = None;
@@ -124,7 +129,9 @@ impl PromptBox {
     pub(super) fn cancel_refine(&mut self, outbox: &mut Outbox) {
         if let Some(Refining { request, .. }) = self.refining.take() {
             outbox.pending.remove(&request);
-            outbox.send(PendingOp::Interrupt, |id| Request::InterruptTurn { id });
+            outbox.send(PendingOp::Interrupt, |id| {
+                Request::new(id, RequestBody::InterruptTurn)
+            });
         }
     }
 

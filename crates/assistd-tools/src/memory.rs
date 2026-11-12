@@ -36,11 +36,6 @@ impl MemoryOps {
         self.store.load(key).await
     }
 
-    /// List keys with the given `prefix`.
-    pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        self.store.list(prefix).await
-    }
-
     /// Delete the memory at `key`.
     pub async fn delete(&self, key: &str) -> Result<()> {
         self.store.delete(key).await

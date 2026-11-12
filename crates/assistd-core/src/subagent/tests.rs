@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::Notify;
 
 use assistd_llm::{LlmResult, SlotAssignment, StepOutcome, ToolResultPayload};

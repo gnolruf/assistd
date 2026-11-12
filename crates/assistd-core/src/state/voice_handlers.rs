@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, ListenPhase, PlanMode, VoiceCaptureState};
+use assistd_ipc::{Event, EventBody, ListenPhase, PlanMode, VoiceCaptureState};
 use assistd_voice::VoiceCapture;
 
 use super::query::{TurnOrigin, finish_interrupted_before_start};
@@ -34,12 +34,14 @@ impl AppState {
         }
         drop(ptt_capture);
         let _ = tx
-            .send(Event::VoiceState {
-                id: id.clone(),
-                state: VoiceCaptureState::Recording,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::VoiceState {
+                    state: VoiceCaptureState::Recording,
+                },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -80,10 +82,12 @@ impl AppState {
             "voice latency stage"
         );
         let _ = tx
-            .send(Event::VoiceState {
-                id: id.clone(),
-                state: VoiceCaptureState::Transcribing,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::VoiceState {
+                    state: VoiceCaptureState::Transcribing,
+                },
+            ))
             .await;
 
         let (warmup, cancel, resume_listening) = match self.runtime.ptt_capture.lock().await.take()
@@ -108,10 +112,12 @@ impl AppState {
             Ok(text) => text,
             Err(e) => {
                 let _ = tx
-                    .send(Event::VoiceState {
-                        id: id.clone(),
-                        state: VoiceCaptureState::Idle,
-                    })
+                    .send(Event::new(
+                        id.clone(),
+                        EventBody::VoiceState {
+                            state: VoiceCaptureState::Idle,
+                        },
+                    ))
                     .await;
                 send_error(&tx, id, format!("ptt_stop failed: {e}")).await;
                 return Err(e);
@@ -119,23 +125,25 @@ impl AppState {
         };
 
         let _ = tx
-            .send(Event::VoiceState {
-                id: id.clone(),
-                state: VoiceCaptureState::Idle,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::VoiceState {
+                    state: VoiceCaptureState::Idle,
+                },
+            ))
             .await;
         if cancel.is_cancelled() {
             return finish_interrupted_before_start(&tx, id).await;
         }
         let _ = tx
-            .send(Event::Transcription {
-                id: id.clone(),
-                text: text.clone(),
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::Transcription { text: text.clone() },
+            ))
             .await;
 
         if text.trim().is_empty() {
-            let _ = tx.send(Event::Done { id }).await;
+            let _ = tx.send(Event::new(id, EventBody::Done)).await;
             return Ok(());
         }
 
@@ -233,12 +241,14 @@ impl AppState {
         match capture.listener.start().await {
             Ok(()) => {
                 let _ = tx
-                    .send(Event::ListenState {
-                        id: id.clone(),
-                        phase: self.subsystems.voice.listen_phase(),
-                    })
+                    .send(Event::new(
+                        id.clone(),
+                        EventBody::ListenState {
+                            phase: self.subsystems.voice.listen_phase(),
+                        },
+                    ))
                     .await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -263,12 +273,14 @@ impl AppState {
         match stopped {
             Ok(()) => {
                 let _ = tx
-                    .send(Event::ListenState {
-                        id: id.clone(),
-                        phase: ListenPhase::Off,
-                    })
+                    .send(Event::new(
+                        id.clone(),
+                        EventBody::ListenState {
+                            phase: ListenPhase::Off,
+                        },
+                    ))
                     .await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -297,12 +309,9 @@ impl AppState {
     ) {
         let phase = self.subsystems.voice.listen_phase();
         let _ = tx
-            .send(Event::ListenState {
-                id: id.clone(),
-                phase,
-            })
+            .send(Event::new(id.clone(), EventBody::ListenState { phase }))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     pub(super) async fn handle_voice_toggle(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
@@ -310,24 +319,26 @@ impl AppState {
         let new_state = !speech.enabled();
         speech.set_enabled(new_state).await;
         let _ = tx
-            .send(Event::VoiceOutputState {
-                id: id.clone(),
-                enabled: new_state,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::VoiceOutputState { enabled: new_state },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     pub(super) async fn handle_voice_skip(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         let speech = self.subsystems.voice.speech();
         speech.skip().await;
         let _ = tx
-            .send(Event::VoiceOutputState {
-                id: id.clone(),
-                enabled: speech.enabled(),
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::VoiceOutputState {
+                    enabled: speech.enabled(),
+                },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     /// Cancel every agent turn already received, including ones still
@@ -343,7 +354,7 @@ impl AppState {
         tx: mpsc::Sender<Event>,
     ) {
         self.interrupt_turns().await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     pub(super) async fn handle_get_voice_state(
@@ -353,21 +364,22 @@ impl AppState {
     ) {
         let voice = &self.subsystems.voice;
         let _ = tx
-            .send(Event::VoiceOutputState {
-                id: id.clone(),
-                enabled: voice.speech().enabled(),
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::VoiceOutputState {
+                    enabled: voice.speech().enabled(),
+                },
+            ))
             .await;
         for (component, state) in voice.readiness() {
             let _ = tx
-                .send(Event::Readiness {
-                    id: id.clone(),
-                    component,
-                    state,
-                })
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::Readiness { component, state },
+                ))
                 .await;
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     /// The capture handles, or an error event on `tx` saying why `request`

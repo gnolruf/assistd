@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Event, PresenceTarget};
+use assistd_ipc::{Event, EventBody, PresenceTarget};
 
 use super::{AppState, DispatchError, send_error};
 
@@ -18,12 +18,14 @@ impl AppState {
         match self.subsystems.presence.set_presence(target).await {
             Ok(()) => {
                 let _ = tx
-                    .send(Event::Presence {
-                        id: id.clone(),
-                        state: self.subsystems.presence.state(),
-                    })
+                    .send(Event::new(
+                        id.clone(),
+                        EventBody::Presence {
+                            state: self.subsystems.presence.state(),
+                        },
+                    ))
                     .await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -36,11 +38,8 @@ impl AppState {
     pub(super) async fn handle_get_presence(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         let state = self.subsystems.presence.state();
         let _ = tx
-            .send(Event::Presence {
-                id: id.clone(),
-                state,
-            })
+            .send(Event::new(id.clone(), EventBody::Presence { state }))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 }

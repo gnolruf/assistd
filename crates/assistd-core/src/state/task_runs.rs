@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
-use assistd_ipc::{ConfirmSource, Event, TaskId, TaskRunId, TaskTrigger};
+use assistd_ipc::{ConfirmSource, Event, EventBody, TaskId, TaskRunId, TaskTrigger};
 use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
@@ -66,13 +66,12 @@ impl AppState {
         };
         self.runtime.task_queue.push(run, record, id.clone());
         let _ = tx
-            .send(Event::TaskRunQueued {
-                id: id.clone(),
-                task,
-                run,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::TaskRunQueued { task, run },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -84,7 +83,7 @@ impl AppState {
     ) {
         match self.cancel_task_run(run).await {
             Ok(()) => {
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
             }
             Err(e) => send_error(&tx, id, e.to_string()).await,
         }
@@ -169,13 +168,15 @@ impl AppState {
                 (None, turn.task.spec.announce.then(|| reply.clone()))
             }
             TaskRunEnd::Failed { reason } => (
-                Some(Event::Error {
+                Some(Event::new(
                     id,
-                    message: reason.clone(),
-                }),
+                    EventBody::Error {
+                        message: reason.clone(),
+                    },
+                )),
                 None,
             ),
-            TaskRunEnd::Cancelled => (Some(Event::Done { id }), None),
+            TaskRunEnd::Cancelled => (Some(Event::new(id, EventBody::Done)), None),
         };
         self.record_run_end(turn, end).await;
         if let Some(terminal) = terminal {

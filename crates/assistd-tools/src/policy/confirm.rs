@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
-use assistd_ipc::{ConfirmSource, Event, HostName, PermissionMode, PlanVerdict};
+use assistd_ipc::{ConfirmSource, Event, EventBody, HostName, PermissionMode, PlanVerdict};
 
 use super::judge::{JudgedCommand, SafetyJudge, Verdict};
 
@@ -338,9 +338,7 @@ impl ConfirmRouter {
     /// Start planning at the user's request and tell the client the turn now plans.
     pub async fn enter_plan_mode(&self) {
         self.set_planning(true);
-        let event = Event::PlanModeEntered {
-            id: self.request_id.clone(),
-        };
+        let event = Event::new(self.request_id.clone(), EventBody::PlanModeEntered);
         let _ = self.wire.send(event).await;
     }
 
@@ -348,11 +346,13 @@ impl ConfirmRouter {
     /// client can answer, or it leaves first.
     pub async fn review_plan(&self, plan: String) -> Option<PlanVerdict> {
         let (review, verdict) = self.register_review()?;
-        let event = Event::PlanReview {
-            id: self.request_id.clone(),
-            review_id: review.id.clone(),
-            plan,
-        };
+        let event = Event::new(
+            self.request_id.clone(),
+            EventBody::PlanReview {
+                review_id: review.id.clone(),
+                plan,
+            },
+        );
         self.wire.send(event).await.ok()?;
         verdict.await.ok()
     }
@@ -537,15 +537,17 @@ impl ConfirmRouter {
         let Some((prompt, answer)) = self.register(&req) else {
             return Approval::Deny;
         };
-        let event = Event::ConfirmRequest {
-            id: self.request_id.clone(),
-            confirm_id: prompt.id.clone(),
-            tool: req.tool.clone(),
-            script: req.script.clone(),
-            matched_pattern: req.matched_pattern.clone(),
-            always_allow: req.always_allow.clone(),
-            source: req.source.clone(),
-        };
+        let event = Event::new(
+            self.request_id.clone(),
+            EventBody::ConfirmRequest {
+                confirm_id: prompt.id.clone(),
+                tool: req.tool.clone(),
+                script: req.script.clone(),
+                matched_pattern: req.matched_pattern.clone(),
+                always_allow: req.always_allow.clone(),
+                source: req.source.clone(),
+            },
+        );
         if self.wire.send(event).await.is_err() {
             warn!(
                 target: "assistd::policy",
@@ -771,8 +773,8 @@ mod tests {
     }
 
     async fn recv_confirm_id(rx: &mut mpsc::Receiver<Event>) -> String {
-        match rx.recv().await.expect("prompt on the wire") {
-            Event::ConfirmRequest { confirm_id, .. } => confirm_id,
+        match rx.recv().await.expect("prompt on the wire").body {
+            EventBody::ConfirmRequest { confirm_id, .. } => confirm_id,
             other => panic!("expected ConfirmRequest, got {other:?}"),
         }
     }

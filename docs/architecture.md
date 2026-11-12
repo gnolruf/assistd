@@ -81,12 +81,12 @@ Unix-socket IPC: `query`, `chat`, `sleep` / `wake` / `drowse`,
 `ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`, and `tray`. The tray subcommand is a long-lived
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)
 client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
-holds a passive `Request::Subscribe` connection, translates the
+holds a passive `RequestBody::Subscribe` connection, translates the
 broadcast events into icon state (config error → disconnected →
 generating → listening → presence), and provides a Sleep / Wake menu that issues
-`Request::SetPresence` on isolated one-shot connections. It also shows
+`RequestBody::SetPresence` on isolated one-shot connections. It also shows
 each turn as a freedesktop desktop notification over `zbus`, held back
-while the chat reports keyboard focus (`Request::ChatState`). The binary
+while the chat reports keyboard focus (`RequestBody::ChatState`). The binary
 always includes the daemon and the IPC client subcommands; `tray` and
 `chat` are optional features layered on top, never built standalone.
 
@@ -100,8 +100,8 @@ the model has loaded (queries wait for it; requests that need no model
 are served at once). Voice and the embedding server start after the
 model, so neither loads onto the GPU while it does, and the SearXNG
 instance and MCP servers start straight away; none of them holds up the
-socket. `Request::GetReadiness` reports how far each has got as one
-`Event::Readiness` per subsystem, and the daemon broadcasts the same event as each one settles. The chat names
+socket. `RequestBody::GetReadiness` reports how far each has got as one
+`EventBody::Readiness` per subsystem, and the daemon broadcasts the same event as each one settles. The chat names
 whatever is still starting, and the tray tooltip lists every subsystem's
 state. The server takes
 its bind address, context length and GPU layer count from `[model]` in
@@ -145,7 +145,7 @@ If the child crashes mid-stream (CUDA OOM, OOM-killer, segfault), the
 supervisor restarts it with exponential backoff and the in-flight
 agent turn surfaces an `LlmError::ServerRestarting`. The agent
 retries once after the new child reports healthy; further failures
-propagate up to the client as an `Event::Error`.
+propagate up to the client as an `EventBody::Error`.
 
 Vision support is detected dynamically: `probe_capabilities_routed()` calls
 `GET /props` on the running server to learn whether the model has a
@@ -167,12 +167,12 @@ One per-query state machine, single-threaded per turn. The loop:
 2. `backend.step(tools.openai_schemas(), tx)` — send `messages +
    tools` to llama-server, stream tokens.
 3. The response is either text (`StepOutcome::Final` → emit
-   `Event::Delta` per token, then `Event::Done`) or tool calls
+   `EventBody::Delta` per token, then `EventBody::Done`) or tool calls
    (`StepOutcome::ToolCalls` → step 4). A response cut off at the
    output-token limit (`StepOutcome::Truncated`) is retried up to
    twice with a note to the model, then the turn fails.
 4. For each tool call: `tools.get(name).invoke(arguments)`. Emit
-   `Event::ToolCall` before, `Event::ToolResult` after. Push results
+   `EventBody::ToolCall` before, `EventBody::ToolResult` after. Push results
    back via `backend.push_tool_results(...)`, which appends them as
    OpenAI `role: "tool"` messages carrying the id of the call they
    answer. A result carrying an image is the one exception: chat
@@ -201,7 +201,7 @@ call repeated three times in a row, its tools are withdrawn and it is asked to
 answer from what it has, so a long task ends in a partial report rather than
 an error. While a relay runs, its plan, then each sub-agent's text, reasoning,
 context size, tool calls, results and compactions reach the client as
-`Event::Relay` progress, never the model. The TUI draws them as a compact
+`EventBody::Relay` progress, never the model. The TUI draws them as a compact
 block in place of the `relay` tool block, and `/agents` opens any sub-agent's
 full transcript. The conversation is dropped when the run ends, so none of it
 reaches the main history. What the client was shown is stored with the
@@ -328,7 +328,7 @@ emitted them. This keeps the conversation deterministic and the
 `Event` stream readable.
 
 A saved task runs through the same loop with no user present.
-`Request::TaskRun` records a queued run and appends it to the `TaskQueue`,
+`TaskRequest::Run` records a queued run and appends it to the `TaskQueue`,
 returning at once. The queue is FIFO, its order kept in `task_runs.queue_pos`;
 at startup runs still queued are reloaded in that order, while any left
 running are recorded as failed, since their side effects may have happened. A
@@ -340,9 +340,9 @@ run waits out the user's turn and holds the next one off. With more slots, runs
 take lanes 1..N, each pinned to its slot with `id_slot`, and the main
 conversation stays on slot 0. While the GPU monitor holds the daemon asleep for
 another process, waiting runs are `Suspended(GpuBusy)` instead of waking the
-model. `Request::TaskQueue` moves, cancels, pauses and resumes the queue (the pause is
+model. `TaskRequest::Queue` moves, cancels, pauses and resumes the queue (the pause is
 kept in the `task_queue` table, so it outlasts a restart), and
-`Event::TaskQueue` broadcasts the items, lane holders and pause flag after each
+`EventBody::TaskQueue` broadcasts the items, lane holders and pause flag after each
 change and greets every new subscriber.
 
 Time triggers are `TaskTrigger::At` (one local datetime) and
@@ -351,7 +351,7 @@ Time triggers are `TaskTrigger::At` (one local datetime) and
 expressions and `At` times already past. `TaskCheckTrigger` runs the same
 checks on one trigger without saving and returns its next three fire times,
 so a client can show them, or the refusal, as the trigger is written.
-`Event::Task` carries how the task's latest finished run ended. The
+`EventBody::Task` carries how the task's latest finished run ended. The
 `TaskScheduler`, a second service on the `TaskRunner`, sleeps until the
 nearest fire time across enabled tasks, waking early on any task change. Each
 sleep is capped at a minute and compared against the wall clock, since tokio's clock stands still through a
@@ -387,8 +387,8 @@ short preamble saying no user is present, and the main agent's full tool
 registry. On lane 0 it is keyed `TaskRun` in the `SlotStash`, and when the run
 ends its slot file is dropped and the main conversation's slot restored. It is
 saved as a transcript session of its own, linked from its `task_runs` row, and
-its events reach subscribers wrapped in `Event::TaskRun`. The main conversation,
-its branch and the active session are never touched. `Request::TaskCancel`
+its events reach subscribers wrapped in `EventBody::TaskRun`. The main conversation,
+its branch and the active session are never touched. `TaskRequest::Cancel`
 cancels a run the way `InterruptTurn` cancels a turn. A run still going at
 shutdown is recorded as failed. At startup and after each run ends, every task's
 finished runs beyond its `kept_runs` (else `tasks.kept_runs`) are deleted with
@@ -407,10 +407,10 @@ gives up its lane and request guard (on lane 0 its slot state stays in the
 stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`; the
 queue snapshot carries it too, as the run's `PausedPrompt`, so a client that
 subscribes later can still answer it. The tool deadline stops while a prompt is
-parked. `Request::TaskConfirm` answers it for that prompt alone, except that
+parked. `TaskRequest::Confirm` answers it for that prompt alone, except that
 `always` on a host fetch adds the host to the task's `allowed_hosts`, for the
 rest of the run and later ones; the run then waits first in the queue for a lane,
-moving its conversation to that lane's slot. `Request::TaskRuns` lists a task's
+moving its conversation to that lane's slot. `TaskRequest::Runs` lists a task's
 latest runs with their trigger, times, final reply and session. The task's
 prompt is the only instruction a run gets; no plan is stored on the task.
 
@@ -421,7 +421,7 @@ cancelled and announced as `StatusKind::YieldedToUser`, so its partial output is
 dropped. A tool call in flight finishes first. A relay in flight is cancelled and
 rerun from its arguments, since its effects stay in its quarantine. The yielded run
 waits first in the queue as `Suspended(UserConversation)`, its slot state stashed.
-Under `after_task` the turn is told `Event::Queued` and takes the lane once the run
+Under `after_task` the turn is told `EventBody::Queued` and takes the lane once the run
 ends, ahead of the queue. Under `after_queue` it joins the queue as a user-turn item,
 behind any turns already waiting, which the dispatcher hands the main lane in its
 turn; `TaskQueueOp::CancelTurn` drops it. Every user turn opens the
@@ -458,9 +458,9 @@ in plan mode, which start with the flag set.
 
 `enter_plan_mode` is the model's own ask to plan first, for work worth agreeing
 on before it runs. It goes to the user as a `ConfirmRequest` in every mode; a
-yes sets the flag and sends `Event::PlanModeEntered`, a no tells the model to
+yes sets the flag and sends `EventBody::PlanModeEntered`, a no tells the model to
 do the work. `exit_plan_mode` carries the plan to the client as
-`Event::PlanReview` and waits, with no timeout, for `Request::PlanVerdict` on
+`EventBody::PlanReview` and waits, with no timeout, for `RequestBody::PlanVerdict` on
 the same connection. `Accept` sets the router's mode and clears the flag, so the
 same turn carries the plan out under it; `KeepPlanning` keeps planning, revising
 by the user's feedback or, without any, asking what to change.
@@ -486,12 +486,12 @@ or not a directory. It also gives each an `ActionOutlook` under the work's
 mode with the edit scope covers it, `JudgeDecides` for programs and MCP tools
 in Auto, else `Asks`. The result is a `Plan` of the brief with a fresh `PlanId`.
 
-`Request::TaskRefine` refines a task prompt, saved or not, under the permission
+`TaskRequest::Refine` refines a task prompt, saved or not, under the permission
 mode and allowed hosts the request gives, in an isolated conversation with the
 task-run system prompt, keyed `TaskRefine` in the `SlotStash`. Only the latest
 refine's conversation is kept; a new one ends it. It takes the main lane and
 request guard as a query does, and `InterruptTurn` cancels it; its turn reaches
-the client wrapped in `Event::TaskPlan`, and its result as `Event::TaskRefined`
+the client wrapped in `EventBody::TaskPlan`, and its result as `EventBody::TaskRefined`
 with the rewritten `TaskPrompt`, its `Plan` and a `ModeRecommendation`: the
 least permissive mode, Auto only when allowed, under which the fewest of the
 plan's actions would ask, with the actions it covers and those that would still
@@ -510,7 +510,7 @@ text under the editor's mode and hosts without drawing the planning turn; Esc
 cancels it. The rewrite replaces the box's text, unapplied, with the
 recommended mode and a brief reason on a line below. `r` on a task queues a
 manual run. The Queue tab draws the broadcast `TaskQueue` and reorders, cancels
-and pauses it through `Request::TaskQueue`; Enter on a run needing input opens
+and pauses it through `TaskRequest::Queue`; Enter on a run needing input opens
 its prompt in the chat's confirmation dialog, answered with `TaskConfirm`. The
 Runs tab lists the selected task's runs, and Enter switches to a run's session
 as `/resume` does. Outside the panel, the status line counts runs needing input
@@ -518,7 +518,7 @@ as `/resume` does. Outside the panel, the status line counts runs needing input
 running runs with elapsed time, runs needing input and the queued count; its menu
 pauses and resumes the queue, and it notifies on every run newly needing input,
 focused or not. A task with `announce` set broadcasts a successful run's final
-reply as `Event::TaskReply`, which the tray notifies while the chat is unfocused;
+reply as `EventBody::TaskReply`, which the tray notifies while the chat is unfocused;
 the daemon speaks it once no user turn is in flight and nothing is playing, and a
 chat turn starting meanwhile cuts it off.
 
@@ -589,7 +589,7 @@ or the wake word) has nobody to answer either: it runs in accept-edits mode
 and every other prompt is denied at once, without being shown to any client.
 
 A query connection starts in manual mode, where every prompt goes to the
-client. A client can switch modes with a mid-stream `Request::SetPermissionMode`
+client. A client can switch modes with a mid-stream `RequestBody::SetPermissionMode`
 (the TUI's Shift+Tab). Read-only `bash` scripts run in every mode, scripts that
 would destroy the home directory, a personal folder or a work tree are refused
 in every mode, and those touching a sensitive path always ask. Accept-edits mode
@@ -681,7 +681,7 @@ go back to `Starting`, and the supervisor restarts it under `RestartPolicy`
 backoff, resuming listening if it was on; once the policy gives up both are
 `Unavailable`. The `VramLedger` counts the worker's VRAM as the daemon's own.
 
-Push-to-talk: the daemon receives `Request::PttStart` from a client
+Push-to-talk: the daemon receives `RequestBody::PttStart` from a client
 or compositor binding, opens the configured microphone via cpal, and
 streams audio into a ring buffer. On `PttStop` it stops capture and
 hands the buffer to a `Transcriber` (`SherpaTranscriber`: Parakeet, a
@@ -725,7 +725,7 @@ transcriber shares the GPU with the model; the `QueuedTranscriber` routes
 to a lazily built CPU transcriber of the same model while presence is not
 `Active` or the `VramLedger` reports another process crowding the GPU.
 
-A `Request::WakeWord` carries a `WakeWordOp` (`Status`, `TestStart`,
+A `RequestBody::WakeWord` carries a `WakeWordOp` (`Status`, `TestStart`,
 `TestStop`). A test is a
 session owned by the connection that opened it: one at a time, it pauses
 the listener and has it report through `test_wake_word`,
@@ -855,7 +855,7 @@ in the daemon's own environment are removed first, so the instance
 never picks up settings from elsewhere.
 
 Readiness is reported as the `web search` component of
-`Event::Readiness`: `starting`, `ready`, or `unavailable (<reason>)`.
+`EventBody::Readiness`: `starting`, `ready`, or `unavailable (<reason>)`.
 `SearxngClient` checks it before every request, so a search while the
 instance is starting or restarting fails at once with a message the
 model can act on rather than waiting on a dead port. Results come back
@@ -872,8 +872,8 @@ daemon's own client talks to SearXNG.
 
 A walk through `assistd query "what files changed this week?"`:
 
-1. **Client.** `assistd query` constructs `Request::Query { id,
-   text, attachments: [] }`, dials
+1. **Client.** `assistd query` constructs a `Request` with an `id` and a
+   `RequestBody::Query { text, attachments: [] }`, dials
    `$XDG_RUNTIME_DIR/assistd.sock`, writes the JSON line, half-closes
    the write side, and reads `Event` lines until `Done`.
 
@@ -889,11 +889,11 @@ A walk through `assistd query "what files changed this week?"`:
 4. **LLM step** ([`crates/assistd-llm/src/chat/client.rs`](../crates/assistd-llm/src/chat/client.rs)).
    `LlamaChatClient` POSTs `messages + tools` to llama-server with
    `stream: true`. SSE deltas come back; text tokens propagate as
-   `Event::Delta`, tool calls accumulate until the stream closes.
+   `EventBody::Delta`, tool calls accumulate until the stream closes.
 
 5. **Tool dispatch.** llama-server emits a `run` call with arguments
    `{"command":"git log --since='1 week ago' --name-only --pretty="}`.
-   The agent emits `Event::ToolCall`, hands the args to `RunTool`,
+   The agent emits `EventBody::ToolCall`, hands the args to `RunTool`,
    which parses the command line and dispatches to `BashCommand`.
    `git` is on neither the read-only nor the edit list, so the script
    is unvetted and the user confirms it first, unless they have
@@ -937,24 +937,24 @@ A walk through `assistd query "what files changed this week?"`:
    files or 128 MiB kept while it runs); it then base64-encodes any image
    attachments and returns the JSON result.
 
-7. **Loop back.** Result emitted as `Event::ToolResult`, pushed back
+7. **Loop back.** Result emitted as `EventBody::ToolResult`, pushed back
    into the conversation, agent calls `step` again. The model now
    has the file list in context and produces a written summary.
-   Tokens stream out as `Event::Delta`s, the loop closes with
-   `Event::Done`, the socket connection closes.
+   Tokens stream out as `EventBody::Delta`s, the loop closes with
+   `EventBody::Done`, the socket connection closes.
 
 8. **Client output.** `assistd query` prints deltas as they arrive,
    exits 0 on `Done` or non-zero on `Error`.
 
-For push-to-talk, `assistd ptt-stop` sends `Request::PttStop`
+For push-to-talk, `assistd ptt-stop` sends `RequestBody::PttStop`
 instead; `dispatch` routes it to `handle_ptt_stop`, which transcribes
-the recording, emits `Event::Transcription`, and runs the turn from
+the recording, emits `EventBody::Transcription`, and runs the turn from
 step 3 on.
 
 For `assistd chat`, the TUI is a long-lived client but not a single
 connection: each turn opens its own connection, kept writable so the
-TUI can answer confirmation prompts with `Request::ConfirmResponse`,
-while separate long-lived `Request::Subscribe` connections carry
+TUI can answer confirmation prompts with `RequestBody::ConfirmResponse`,
+while separate long-lived `RequestBody::Subscribe` connections carry
 broadcast events such as session titles. A subscription opens with the
 current task queue, presence, listen phase and capture state and is sent
 every presence change after, so the chat's indicators follow the daemon

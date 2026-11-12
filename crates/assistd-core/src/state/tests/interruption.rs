@@ -4,7 +4,7 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 use assistd_config::TaskInterruption;
-use assistd_ipc::{ConversationHold, SuspendReason};
+use assistd_ipc::{ConversationHold, EventBody, SuspendReason};
 
 use super::*;
 
@@ -286,10 +286,7 @@ async fn after_task_waits_for_the_running_task_then_goes_before_the_queue() {
     let (reply, mut events) = harness.start_query("hi");
     assert_eq!(
         first_event(&mut events).await,
-        Event::Queued {
-            id: "hi".into(),
-            behind: 1
-        }
+        Event::new("hi", EventBody::Queued { behind: 1 })
     );
     release.notify_one();
     reply.await.unwrap();
@@ -319,10 +316,7 @@ async fn after_queue_turns_wait_behind_queued_runs_and_hold_the_runs_queued_afte
     queue_task_run(&harness.state, harness.task).await;
 
     let (hi, mut hi_events) = harness.start_query("hi");
-    let queued = |id: &str, behind| Event::Queued {
-        id: id.into(),
-        behind,
-    };
+    let queued = |id: &str, behind| Event::new(id, EventBody::Queued { behind });
     assert_eq!(first_event(&mut hi_events).await, queued("hi", 2));
     let (also, mut also_events) = harness.start_query("also");
     assert_eq!(first_event(&mut also_events).await, queued("also", 3));

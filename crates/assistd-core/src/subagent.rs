@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -17,8 +16,8 @@ use tracing::warn;
 
 use assistd_ipc::{RelayEvent, StatusKind};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe, SlotAssignment};
+use assistd_tools::ToolRegistry;
 use assistd_tools::policy::on_blocking_pool;
-use assistd_tools::{ToolOutput, ToolRegistry};
 use assistd_utils::time::saturating_millis;
 
 use crate::agent::{Agent, TOOL_CALL_EVENTS};
@@ -242,7 +241,7 @@ fn relay_event_of(event: LlmEvent, compacting_since: &mut Option<Instant>) -> Op
         }),
         LlmEvent::ToolResult { name, result, .. } => Some(RelayEvent::ToolResult {
             name,
-            result: shown_result(&result),
+            result: result.report().without_attachments(),
         }),
         LlmEvent::Status {
             event: StatusKind::CompactingHistory,
@@ -259,15 +258,6 @@ fn relay_event_of(event: LlmEvent, compacting_since: &mut Option<Instant>) -> Op
         }),
         _ => None,
     }
-}
-
-/// `result` as the user is shown it, without its attachments.
-fn shown_result(result: &ToolOutput) -> Value {
-    let mut shown = result.to_json();
-    if let Some(fields) = shown.as_object_mut() {
-        fields.remove("attachments");
-    }
-    shown
 }
 
 #[cfg(test)]

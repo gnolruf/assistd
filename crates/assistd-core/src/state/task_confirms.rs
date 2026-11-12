@@ -12,7 +12,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use assistd_ipc::{Event, HostName, PausedPrompt, TaskId, TaskRunId};
+use assistd_ipc::{Event, EventBody, HostName, PausedPrompt, TaskId, TaskRunId};
 use assistd_memory::TaskRecord;
 use assistd_tools::{Approval, ConfirmationRequest, PromptParking, Unattended};
 
@@ -227,7 +227,7 @@ impl AppState {
             .answer(run, &confirm_id, approval)
         {
             Ok(None) => {
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Ok(Some(allowed)) => {
@@ -249,10 +249,14 @@ impl AppState {
             .task_queue
             .paused_runs()
             .into_iter()
-            .map(|paused| Event::TaskRun {
-                id: paused.request_id.clone(),
-                run: paused.run,
-                event: Box::new(confirm_request(paused.request_id, paused.prompt)),
+            .map(|paused| {
+                Event::new(
+                    paused.request_id.clone(),
+                    EventBody::TaskRun {
+                        run: paused.run,
+                        event: Box::new(confirm_request(paused.request_id, paused.prompt)),
+                    },
+                )
             })
             .collect()
     }
@@ -271,15 +275,17 @@ impl AppState {
 
 /// The `ConfirmRequest` asking the user to answer `prompt` for the run `request_id` tags.
 fn confirm_request(request_id: String, prompt: PausedPrompt) -> Event {
-    Event::ConfirmRequest {
-        id: request_id,
-        confirm_id: prompt.confirm_id,
-        tool: prompt.tool,
-        script: prompt.script,
-        matched_pattern: prompt.matched_pattern,
-        always_allow: Vec::new(),
-        source: prompt.source,
-    }
+    Event::new(
+        request_id,
+        EventBody::ConfirmRequest {
+            confirm_id: prompt.confirm_id,
+            tool: prompt.tool,
+            script: prompt.script,
+            matched_pattern: prompt.matched_pattern,
+            always_allow: Vec::new(),
+            source: prompt.source,
+        },
+    )
 }
 
 /// The approval a `TaskConfirm`'s `allow` and `always` give; `always` alone denies.

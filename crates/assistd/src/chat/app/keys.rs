@@ -1,6 +1,6 @@
 //! Keyboard and mouse input: scrolling, toggles and the slash-command popup.
 
-use assistd_ipc::Request;
+use assistd_ipc::{Request, RequestBody};
 use assistd_tools::Approval;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use uuid::Uuid;
@@ -166,9 +166,7 @@ impl App {
 
     fn interrupt_turn(&mut self) {
         self.set_notice("interrupting…");
-        let req = Request::InterruptTurn {
-            id: Uuid::new_v4().to_string(),
-        };
+        let req = Request::new(Uuid::new_v4().to_string(), RequestBody::InterruptTurn);
         self.spawn_one_shot(req, WireStream::Status, "interrupt");
     }
 

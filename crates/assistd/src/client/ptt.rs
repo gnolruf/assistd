@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use assistd_ipc::{Event, Request, StatusKind, VoiceCaptureState};
+use assistd_ipc::{EventBody, Request, StatusKind, VoiceCaptureState};
 use uuid::Uuid;
 
 use super::run_one_shot;
@@ -15,11 +15,11 @@ pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
     let mut stdout = io::stdout().lock();
     let mut wrote_delta = false;
     run_one_shot(req, |event| {
-        match event {
-            Event::VoiceState { state, .. } => {
+        match &event.body {
+            EventBody::VoiceState { state } => {
                 writeln!(io::stderr(), "[voice: {}]", voice_state_label(*state))?;
             }
-            Event::Transcription { text, .. } => {
+            EventBody::Transcription { text } => {
                 if text.trim().is_empty() {
                     writeln!(io::stderr(), "[transcription: (no speech detected)]")?;
                 } else {
@@ -30,12 +30,12 @@ pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
                     )?;
                 }
             }
-            Event::Delta { text, .. } => {
+            EventBody::Delta { text } => {
                 stdout.write_all(escape_controls(text).as_bytes())?;
                 stdout.flush()?;
                 wrote_delta = wrote_delta || !text.is_empty();
             }
-            Event::ToolCall { name, args, .. } => {
+            EventBody::ToolCall { name, args } => {
                 let name = escape_controls_single_line(name);
                 let preview = escape_controls_single_line(
                     args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
@@ -46,19 +46,16 @@ pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
                     writeln!(io::stderr(), "\n[tool call: {name} {preview}]")?;
                 }
             }
-            Event::ToolResult { name, result, .. } => {
+            EventBody::ToolResult { name, result } => {
                 let name = escape_controls_single_line(name);
-                let exit = result
-                    .get("exit_code")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0);
+                let exit = result.exit_code;
                 writeln!(io::stderr(), "[tool result: {name} exit:{exit}]")?;
             }
-            Event::Status {
+            EventBody::Status {
                 event: StatusKind::CompactingSoon,
                 ..
             } => {}
-            Event::Status {
+            EventBody::Status {
                 severity,
                 component,
                 message,
@@ -70,7 +67,7 @@ pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
                     escape_controls_single_line(message)
                 )?;
             }
-            Event::Done { .. } | Event::Error { .. } if wrote_delta => {
+            EventBody::Done | EventBody::Error { .. } if wrote_delta => {
                 writeln!(stdout)?;
             }
             _ => {}

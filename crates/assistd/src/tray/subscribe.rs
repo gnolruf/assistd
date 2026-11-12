@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use assistd_ipc::{
-    Event, EventKind, IpcClient, IpcClientError, Request, SubscribeFilter,
+    Event, EventBody, EventKind, IpcClient, IpcClientError, Request, RequestBody, SubscribeFilter,
     client::EventStream as IpcEventStream,
 };
 use assistd_utils::backoff::backoff_delay;
@@ -56,10 +56,12 @@ async fn try_once(
     ipc: &IpcClient,
     notifications: Option<&NotificationSink>,
 ) -> Result<ExitReason, IpcClientError> {
-    let req = Request::Subscribe {
-        id: Uuid::new_v4().to_string(),
-        filter: subscribe_filter(),
-    };
+    let req = Request::new(
+        Uuid::new_v4().to_string(),
+        RequestBody::Subscribe {
+            filter: subscribe_filter(),
+        },
+    );
     let stream = ipc.one_shot(req).await?;
 
     if push(handle, TrayItem::set_connected).await.is_none() {
@@ -126,18 +128,10 @@ async fn seed_initial_state(
     ipc: &IpcClient,
     notifications: Option<&NotificationSink>,
 ) {
-    let presence_req = Request::GetPresence {
-        id: Uuid::new_v4().to_string(),
-    };
-    let listen_req = Request::GetListenState {
-        id: Uuid::new_v4().to_string(),
-    };
-    let chat_focus_req = Request::GetChatFocus {
-        id: Uuid::new_v4().to_string(),
-    };
-    let readiness_req = Request::GetReadiness {
-        id: Uuid::new_v4().to_string(),
-    };
+    let presence_req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetPresence);
+    let listen_req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetListenState);
+    let chat_focus_req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetChatFocus);
+    let readiness_req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetReadiness);
     let (presence_res, listen_res, chat_focus_res, readiness_res) = tokio::join!(
         ipc.one_shot(presence_req),
         ipc.one_shot(listen_req),
@@ -161,7 +155,7 @@ async fn consume_until_terminal(
     loop {
         match stream.next_event().await {
             Ok(Some(ev)) => {
-                let terminal = matches!(ev, Event::Done { .. } | Event::Error { .. });
+                let terminal = matches!(ev.body, EventBody::Done | EventBody::Error { .. });
                 if push(handle, |item| item.ingest(&ev)).await.is_none() {
                     return;
                 }

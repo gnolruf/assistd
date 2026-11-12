@@ -17,6 +17,7 @@ pub mod attachment;
 pub mod client;
 pub mod mcp;
 pub mod task;
+pub mod tool_report;
 pub mod wakeword;
 pub use attachment::ImageMime;
 #[cfg(feature = "client")]
@@ -27,12 +28,13 @@ pub use task::{
     DEFAULT_PATH_DEBOUNCE_SECS, FinishOutcome, HostName, KeptRuns, LaneHolder, MAX_KEPT_RUNS,
     MAX_LISTED_RUNS, MissedFire, ModeRecommendation, PausedPrompt, Plan, PlanId, PlanStep,
     PlannedAction, QueueItem, SuspendReason, TaskEvent, TaskId, TaskName, TaskPrompt, TaskQueueOp,
-    TaskQueueSnapshot, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary, TaskSpec,
-    TaskSpecError, TaskTrigger,
+    TaskQueueSnapshot, TaskRequest, TaskRunId, TaskRunRecord, TaskRunState, TaskRunSummary,
+    TaskSpec, TaskSpecError, TaskTrigger,
 };
+pub use tool_report::{ToolAttachment, ToolReport, ToolStreams};
 pub use wakeword::WakeWordOp;
 
-/// An image on a [`Request::Query`]; `data_base64` is standard padded base64.
+/// An image on a [`RequestBody::Query`]; `data_base64` is standard padded base64.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageAttachment {
     pub mime: ImageMime,
@@ -115,7 +117,7 @@ impl PlanMode {
     }
 }
 
-/// The user's answer to an [`Event::PlanReview`].
+/// The user's answer to an [`EventBody::PlanReview`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum PlanVerdict {
@@ -280,7 +282,7 @@ impl<T> From<Result<T, NotReady>> for ComponentReadiness {
     }
 }
 
-/// Who raised an [`Event::ConfirmRequest`].
+/// Who raised an [`EventBody::ConfirmRequest`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "agent", rename_all = "snake_case")]
 pub enum ConfirmSource {
@@ -333,12 +335,8 @@ pub enum RelayEvent {
         name: String,
         args: serde_json::Value,
     },
-    /// A sub-agent tool finished; `result` is shaped as on [`Event::ToolResult`],
-    /// without attachments.
-    ToolResult {
-        name: String,
-        result: serde_json::Value,
-    },
+    /// A sub-agent tool finished; `result` carries no attachments.
+    ToolResult { name: String, result: ToolReport },
     /// The sub-agent's history outgrew its budget and is being compacted.
     Compacting,
     /// The compaction `Compacting` announced finished after `duration_ms`.
@@ -448,7 +446,7 @@ pub enum EventKind {
     TaskReply,
 }
 
-/// Event-kind filter for [`Request::Subscribe`]; empty `kinds` matches every kind.
+/// Event-kind filter for [`RequestBody::Subscribe`]; empty `kinds` matches every kind.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubscribeFilter {
     #[serde(default)]
@@ -462,15 +460,100 @@ impl SubscribeFilter {
     }
 }
 
-/// Client-to-daemon request, one JSON line tagged by `"type"`, its `id` echoed on every [`Event`].
-/// A line is capped at 64 KiB unless it opens with exactly `{"type":"query"`, which allows 64 MiB.
-/// A client sends one request and closes its write half unless answering [`Event::ConfirmRequest`].
+/// Client-to-daemon request, one JSON line: `id` beside the fields of `body`.
+/// A client sends one request and closes its write half unless answering
+/// [`EventBody::ConfirmRequest`] or [`EventBody::PlanReview`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Request {
+    /// Correlation id, echoed on every [`Event`] sent in response.
+    pub id: String,
+    #[serde(flatten)]
+    pub body: RequestBody,
+}
+
+impl Request {
+    pub fn new(id: impl Into<String>, body: RequestBody) -> Self {
+        Self {
+            id: id.into(),
+            body,
+        }
+    }
+
+    /// Build a text-only [`RequestBody::Query`].
+    pub fn query(id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::query_with_attachments(id, text, Vec::new())
+    }
+
+    /// Build a [`RequestBody::Query`] with image attachments.
+    pub fn query_with_attachments(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        attachments: Vec<ImageAttachment>,
+    ) -> Self {
+        Self::new(
+            id,
+            RequestBody::Query {
+                text: text.into(),
+                attachments,
+                plan: PlanMode::Off,
+            },
+        )
+    }
+
+    /// The variant's wire `"type"` tag.
+    pub fn kind(&self) -> &'static str {
+        match self.body {
+            RequestBody::Query { .. } => "query",
+            RequestBody::SetPresence { .. } => "set_presence",
+            RequestBody::GetPresence => "get_presence",
+            RequestBody::PttStart => "ptt_start",
+            RequestBody::PttStop => "ptt_stop",
+            RequestBody::ListenStart => "listen_start",
+            RequestBody::ListenStop => "listen_stop",
+            RequestBody::ListenToggle => "listen_toggle",
+            RequestBody::GetListenState => "get_listen_state",
+            RequestBody::VoiceToggle => "voice_toggle",
+            RequestBody::VoiceSkip => "voice_skip",
+            RequestBody::InterruptTurn => "interrupt_turn",
+            RequestBody::GetVoiceState => "get_voice_state",
+            RequestBody::WakeWord { .. } => "wake_word",
+            RequestBody::MemorySave { .. } => "memory_save",
+            RequestBody::MemoryLoad { .. } => "memory_load",
+            RequestBody::MemoryListAll { .. } => "memory_list_all",
+            RequestBody::MemoryDelete { .. } => "memory_delete",
+            RequestBody::MemoryForget { .. } => "memory_forget",
+            RequestBody::MemorySemanticSearch { .. } => "memory_semantic_search",
+            RequestBody::MemoryReindex => "memory_reindex",
+            RequestBody::ConfirmResponse { .. } => "confirm_response",
+            RequestBody::SetPermissionMode { .. } => "set_permission_mode",
+            RequestBody::PlanVerdict { .. } => "plan_verdict",
+            RequestBody::GetCapabilities => "get_capabilities",
+            RequestBody::Fork { .. } => "fork",
+            RequestBody::Branches => "branches",
+            RequestBody::Switch { .. } => "switch",
+            RequestBody::Undo => "undo",
+            RequestBody::ResumeOrNew { .. } => "resume_or_new",
+            RequestBody::NewSession => "new_session",
+            RequestBody::ChatState { .. } => "chat_state",
+            RequestBody::ChatClosed => "chat_closed",
+            RequestBody::GetChatFocus => "get_chat_focus",
+            RequestBody::GetReadiness => "get_readiness",
+            RequestBody::Subscribe { .. } => "subscribe",
+            RequestBody::Task(_) => "task",
+            RequestBody::McpLogin { .. } => "mcp_login",
+            RequestBody::McpLogout { .. } => "mcp_logout",
+            RequestBody::McpStatus => "mcp_status",
+        }
+    }
+}
+
+/// What a [`Request`] asks for, tagged by `"type"`. A line is capped at 64 KiB, except that a
+/// connection's first line may reach 64 MiB when it is a `Query`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Request {
+pub enum RequestBody {
     /// Run an agent turn on `text`. Streams the turn, then `Done`.
     Query {
-        id: String,
         text: String,
         /// Vision inputs for this turn; empty for text-only queries.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -480,74 +563,61 @@ pub enum Request {
         plan: PlanMode,
     },
     /// Drive the daemon to `target`. Emits `Presence`, then `Done`.
-    SetPresence { id: String, target: PresenceTarget },
+    SetPresence { target: PresenceTarget },
     /// Report the presence state. Emits `Presence`, then `Done`.
-    GetPresence { id: String },
+    GetPresence,
     /// Open the mic and buffer audio until `PttStop`. Emits `Done` once the mic is open.
-    PttStart { id: String },
+    PttStart,
     /// Transcribe the recording and run it as a query. Emits `VoiceState`, `Transcription`, the
     /// query's stream, then `Done`.
-    PttStop { id: String },
+    PttStop,
     /// Start continuous VAD listening; errors during a PTT recording. Emits `ListenState`, `Done`.
-    ListenStart { id: String },
+    ListenStart,
     /// Stop continuous listening; idempotent. Emits `ListenState`, then `Done`.
-    ListenStop { id: String },
+    ListenStop,
     /// Toggle continuous listening. Emits `ListenState`, then `Done`.
-    ListenToggle { id: String },
+    ListenToggle,
     /// Report the wake-word listener's phase. Emits `ListenState`, then `Done`.
-    GetListenState { id: String },
+    GetListenState,
     /// Toggle TTS; off cancels in-flight playback. Emits `VoiceOutputState`, then `Done`.
-    VoiceToggle { id: String },
+    VoiceToggle,
     /// Drop the current TTS response, keeping TTS enabled. Emits `VoiceOutputState`, then `Done`.
-    VoiceSkip { id: String },
+    VoiceSkip,
     /// Cancel the in-flight turn and queued TTS audio; idempotent. Emits `Done`.
-    InterruptTurn { id: String },
+    InterruptTurn,
     /// Run one wake-phrase operation; see [`WakeWordOp`] for what each emits.
-    WakeWord { id: String, op: WakeWordOp },
+    WakeWord { op: WakeWordOp },
     /// Report whether TTS is enabled and how far voice startup has got.
     /// Emits `VoiceOutputState`, a `Readiness` for voice input and for
     /// speech, then `Done`.
-    GetVoiceState { id: String },
+    GetVoiceState,
     /// Store `value` under `key`, overwriting. Emits `Done`.
-    MemorySave {
-        id: String,
-        key: String,
-        value: String,
-    },
+    MemorySave { key: String, value: String },
     /// Read `key`. Emits `MemoryValue`, then `Done`.
-    MemoryLoad { id: String, key: String },
-    /// List keys starting with `prefix` (empty lists all). Emits `MemoryKeys`, then `Done`.
-    MemoryList {
-        id: String,
-        #[serde(default)]
-        prefix: String,
-    },
+    MemoryLoad { key: String },
     /// Rows whose key starts with `prefix`; `limit = 0` is uncapped. Emits `MemoryRow`s, `Done`.
     MemoryListAll {
-        id: String,
         #[serde(default)]
         prefix: String,
         #[serde(default)]
         limit: u32,
     },
     /// Remove `key`; no-op when absent. Emits `Done`.
-    MemoryDelete { id: String, key: String },
+    MemoryDelete { key: String },
     /// Remove the row with id `memory_id`. Emits `MemoryForgetResult`, then `Done`.
-    MemoryForget { id: String, memory_id: i64 },
+    MemoryForget { memory_id: i64 },
     /// Rank past messages by similarity to `query`; `limit = 0` uses the daemon default.
     /// Emits `SemanticHit`s best-first, then `Done`.
     MemorySemanticSearch {
-        id: String,
         query: String,
         #[serde(default)]
         limit: u32,
     },
     /// Embed every row lacking an embedding under the current model. Emits `ReindexProgress`es,
     /// then `Done`.
-    MemoryReindex { id: String },
-    /// Answer the [`Event::ConfirmRequest`] with this `confirm_id` on the same connection.
+    MemoryReindex,
+    /// Answer the [`EventBody::ConfirmRequest`] with this `confirm_id` on the same connection.
     ConfirmResponse {
-        id: String,
         confirm_id: String,
         allow: bool,
         /// With `allow`, permanently allowlist the prompt's `always_allow` programs.
@@ -557,275 +627,64 @@ pub enum Request {
     /// Switch how the rest of the turn's prompts on the same connection are answered: under
     /// `mode`, or with `plan` refused while the turn plans; honored only after a `Query`.
     SetPermissionMode {
-        id: String,
         mode: PermissionMode,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         plan: bool,
     },
-    /// Answer the [`Event::PlanReview`] with this `review_id` on the same connection.
+    /// Answer the [`EventBody::PlanReview`] with this `review_id` on the same connection.
     PlanVerdict {
-        id: String,
         review_id: String,
         verdict: PlanVerdict,
     },
     /// Probe runtime capabilities. Emits `Capabilities`, then `Done`.
-    GetCapabilities { id: String },
+    GetCapabilities,
     /// Snapshot into new branch `name` and switch to it; errors if `name` is taken or empty.
     /// Emits `BranchSwitched`, then `Done`.
-    Fork { id: String, name: String },
+    Fork { name: String },
     /// List every branch, active session first. Emits `BranchInfo`s, then `Done`.
-    Branches { id: String },
+    Branches,
     /// Switch to `target`: a branch name, or `<session_prefix>/<name>` across sessions.
     /// Emits `BranchSwitched`, `HistoryEntry`s, then `Done`.
-    Switch { id: String, target: String },
+    Switch { target: String },
     /// Drop the last user message and its reply. Emits `UndoApplied`, then `Done`.
-    Undo { id: String },
+    Undo,
     /// Resume the current branch if written within `recency_secs` (emits `HistoryEntry`s), else
     /// start a new session (emits `BranchSwitched`); then `Done`.
-    ResumeOrNew { id: String, recency_secs: u64 },
+    ResumeOrNew { recency_secs: u64 },
     /// Start a new session, saved with its first message. Emits `BranchSwitched`, then `Done`.
-    NewSession { id: String },
+    NewSession,
     /// Report whether the chat has keyboard focus; the daemon keys the chat by the sender's PID.
     /// Emits `Done`.
-    ChatState { id: String, focused: bool },
+    ChatState { focused: bool },
     /// The chat is exiting. Emits `Done`.
-    ChatClosed { id: String },
+    ChatClosed,
     /// Report whether a live chat has keyboard focus. Emits `ChatFocus`, then `Done`.
-    GetChatFocus { id: String },
+    GetChatFocus,
     /// Report how far every background subsystem has started. Emits one
     /// `Readiness` per subsystem, then `Done`.
-    GetReadiness { id: String },
+    GetReadiness,
     /// Forward broadcast events matching `filter`, tagged with their turn's `id`, until the
     /// client disconnects; no `Done`, and `ToolResult` attachments are stripped. Opens with the
     /// current `TaskQueue`, `Presence`, `ListenState` and `VoiceState`, then sends every
     /// presence change, each tagged with this request's `id`.
     Subscribe {
-        id: String,
         #[serde(default)]
         filter: SubscribeFilter,
     },
-    /// List every saved task by name with its next fire time. Emits `Task`s, then `Done`.
-    TaskList { id: String },
-    /// Read one task. Emits `Task`, then `Done`.
-    TaskGet { id: String, task: TaskId },
-    /// Create a task, or replace task `task`. Errors when the name is taken, or `spec.mode` is
-    /// Auto and the daemon does not allow it. Emits the saved `Task`, then `Done`.
-    TaskSave {
-        id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        task: Option<TaskId>,
-        spec: TaskSpec,
-    },
-    /// Remove a task and its run history. Emits `Done`.
-    TaskDelete { id: String, task: TaskId },
-    /// Turn a task's triggers on or off. Emits the updated `Task`, then `Done`.
-    TaskSetEnabled {
-        id: String,
-        task: TaskId,
-        enabled: bool,
-    },
-    /// Queue a run of `task` in a conversation of its own, whose events are broadcast as
-    /// `TaskRun`. Emits `TaskRunQueued`, then `Done`, without waiting for the run.
-    TaskRun { id: String, task: TaskId },
-    /// Cancel run `run`, dropping its turn; errors when it is not queued or running.
-    /// Emits `Done`.
-    TaskCancel { id: String, run: TaskRunId },
-    /// Change the task queue; errors when `op` names a run that is not queued, or moves a
-    /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
-    TaskQueue { id: String, op: TaskQueueOp },
-    /// List task `task`'s runs, newest first, at most [`MAX_LISTED_RUNS`]. Emits
-    /// `TaskRunRecord`s, then `Done`; errors when there is no such task.
-    TaskRuns { id: String, task: TaskId },
-    /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on, for this once.
-    /// Errors when the run is not waiting on it. Emits `Done`.
-    TaskConfirm {
-        id: String,
-        run: TaskRunId,
-        confirm_id: String,
-        allow: bool,
-        /// With `allow`, also add the prompt's [`PausedPrompt::host`] to the task's allowed
-        /// hosts, emitting the updated `Task` before `Done`; errors when it has none.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        always: bool,
-    },
-    /// Explore task prompt `prompt` in a conversation of its own and rewrite it as a brief for
-    /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last
-    /// rewrite of it; a new refine ends the previous one. Streams the turn wrapped in
-    /// `TaskPlan`, then emits `TaskRefined` and `Done`. Saves nothing. Errors when `mode` is
-    /// Auto and the daemon does not allow it, or `feedback` is given and the last refine was
-    /// not of `prompt`.
-    TaskRefine {
-        id: String,
-        prompt: TaskPrompt,
-        #[serde(default)]
-        mode: PermissionMode,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        allowed_hosts: Vec<HostName>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        feedback: Option<String>,
-    },
-    /// Check `trigger` as `TaskSave` would for task `task`, or for a new task when `None`.
-    /// Emits `TriggerFires`, then `Done`; errors with why a save would refuse it.
-    TaskCheckTrigger {
-        id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        task: Option<TaskId>,
-        trigger: TaskTrigger,
-    },
+    /// Read or change saved tasks, their runs and the task queue.
+    Task(TaskRequest),
     /// Sign OAuth server `server` in through the browser. Emits `McpAuthorizeUrl`, then once
     /// the redirect is redeemed and the server restarted, its `McpServer` and `Done`; errors
     /// when the server is unknown or not OAuth, or the sign-in fails or times out.
-    McpLogin { id: String, server: String },
+    McpLogin { server: String },
     /// Stop OAuth server `server` and delete its token, revoking it where the authorization
     /// server offers that. Emits `McpLoggedOut`, then `Done`.
-    McpLogout { id: String, server: String },
+    McpLogout { server: String },
     /// Report every configured MCP server. Emits one `McpServer` each, then `Done`.
-    McpStatus { id: String },
+    McpStatus,
 }
 
-impl Request {
-    /// Build a text-only [`Request::Query`].
-    pub fn query(id: impl Into<String>, text: impl Into<String>) -> Self {
-        Request::Query {
-            id: id.into(),
-            text: text.into(),
-            attachments: Vec::new(),
-            plan: PlanMode::Off,
-        }
-    }
-
-    /// Build a [`Request::Query`] with one or more image attachments.
-    pub fn query_with_attachments(
-        id: impl Into<String>,
-        text: impl Into<String>,
-        attachments: Vec<ImageAttachment>,
-    ) -> Self {
-        Request::Query {
-            id: id.into(),
-            text: text.into(),
-            attachments,
-            plan: PlanMode::Off,
-        }
-    }
-
-    /// The correlation id echoed on every [`Event`] sent in response.
-    pub fn id(&self) -> &str {
-        match self {
-            Request::Query { id, .. }
-            | Request::SetPresence { id, .. }
-            | Request::GetPresence { id }
-            | Request::PttStart { id }
-            | Request::PttStop { id }
-            | Request::ListenStart { id }
-            | Request::ListenStop { id }
-            | Request::ListenToggle { id }
-            | Request::GetListenState { id }
-            | Request::VoiceToggle { id }
-            | Request::VoiceSkip { id }
-            | Request::InterruptTurn { id }
-            | Request::GetVoiceState { id }
-            | Request::WakeWord { id, .. }
-            | Request::GetReadiness { id }
-            | Request::MemorySave { id, .. }
-            | Request::MemoryLoad { id, .. }
-            | Request::MemoryList { id, .. }
-            | Request::MemoryListAll { id, .. }
-            | Request::MemoryDelete { id, .. }
-            | Request::MemoryForget { id, .. }
-            | Request::MemorySemanticSearch { id, .. }
-            | Request::MemoryReindex { id, .. }
-            | Request::ConfirmResponse { id, .. }
-            | Request::SetPermissionMode { id, .. }
-            | Request::PlanVerdict { id, .. }
-            | Request::GetCapabilities { id, .. }
-            | Request::Fork { id, .. }
-            | Request::Branches { id }
-            | Request::Switch { id, .. }
-            | Request::Undo { id }
-            | Request::ResumeOrNew { id, .. }
-            | Request::NewSession { id }
-            | Request::ChatState { id, .. }
-            | Request::ChatClosed { id }
-            | Request::GetChatFocus { id }
-            | Request::Subscribe { id, .. }
-            | Request::TaskList { id }
-            | Request::TaskGet { id, .. }
-            | Request::TaskSave { id, .. }
-            | Request::TaskDelete { id, .. }
-            | Request::TaskSetEnabled { id, .. }
-            | Request::TaskRun { id, .. }
-            | Request::TaskCancel { id, .. }
-            | Request::TaskRuns { id, .. }
-            | Request::TaskQueue { id, .. }
-            | Request::TaskConfirm { id, .. }
-            | Request::TaskRefine { id, .. }
-            | Request::TaskCheckTrigger { id, .. }
-            | Request::McpLogin { id, .. }
-            | Request::McpLogout { id, .. }
-            | Request::McpStatus { id } => id,
-        }
-    }
-
-    /// The variant's wire `"type"` tag.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Request::Query { .. } => "query",
-            Request::SetPresence { .. } => "set_presence",
-            Request::GetPresence { .. } => "get_presence",
-            Request::PttStart { .. } => "ptt_start",
-            Request::PttStop { .. } => "ptt_stop",
-            Request::ListenStart { .. } => "listen_start",
-            Request::ListenStop { .. } => "listen_stop",
-            Request::ListenToggle { .. } => "listen_toggle",
-            Request::GetListenState { .. } => "get_listen_state",
-            Request::VoiceToggle { .. } => "voice_toggle",
-            Request::VoiceSkip { .. } => "voice_skip",
-            Request::InterruptTurn { .. } => "interrupt_turn",
-            Request::GetVoiceState { .. } => "get_voice_state",
-            Request::WakeWord { .. } => "wake_word",
-            Request::MemorySave { .. } => "memory_save",
-            Request::MemoryLoad { .. } => "memory_load",
-            Request::MemoryList { .. } => "memory_list",
-            Request::MemoryListAll { .. } => "memory_list_all",
-            Request::MemoryDelete { .. } => "memory_delete",
-            Request::MemoryForget { .. } => "memory_forget",
-            Request::MemorySemanticSearch { .. } => "memory_semantic_search",
-            Request::MemoryReindex { .. } => "memory_reindex",
-            Request::ConfirmResponse { .. } => "confirm_response",
-            Request::SetPermissionMode { .. } => "set_permission_mode",
-            Request::PlanVerdict { .. } => "plan_verdict",
-            Request::GetCapabilities { .. } => "get_capabilities",
-            Request::Fork { .. } => "fork",
-            Request::Branches { .. } => "branches",
-            Request::Switch { .. } => "switch",
-            Request::Undo { .. } => "undo",
-            Request::ResumeOrNew { .. } => "resume_or_new",
-            Request::NewSession { .. } => "new_session",
-            Request::ChatState { .. } => "chat_state",
-            Request::ChatClosed { .. } => "chat_closed",
-            Request::GetChatFocus { .. } => "get_chat_focus",
-            Request::GetReadiness { .. } => "get_readiness",
-            Request::Subscribe { .. } => "subscribe",
-            Request::TaskList { .. } => "task_list",
-            Request::TaskGet { .. } => "task_get",
-            Request::TaskSave { .. } => "task_save",
-            Request::TaskDelete { .. } => "task_delete",
-            Request::TaskSetEnabled { .. } => "task_set_enabled",
-            Request::TaskRun { .. } => "task_run",
-            Request::TaskCancel { .. } => "task_cancel",
-            Request::TaskRuns { .. } => "task_runs",
-            Request::TaskQueue { .. } => "task_queue",
-            Request::TaskConfirm { .. } => "task_confirm",
-            Request::TaskRefine { .. } => "task_refine",
-            Request::TaskCheckTrigger { .. } => "task_check_trigger",
-            Request::McpLogin { .. } => "mcp_login",
-            Request::McpLogout { .. } => "mcp_logout",
-            Request::McpStatus { .. } => "mcp_status",
-        }
-    }
-}
-
-/// Severity of an [`Event::Status`] update; maps 1:1 to a `tracing` level.
+/// Severity of an [`EventBody::Status`] update; maps 1:1 to a `tracing` level.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StatusSeverity {
@@ -851,7 +710,7 @@ impl fmt::Display for StatusSeverity {
     }
 }
 
-/// Daemon subsystem an [`Event::Status`] update is attributed to.
+/// Daemon subsystem an [`EventBody::Status`] update is attributed to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Component {
@@ -893,7 +752,7 @@ impl fmt::Display for Component {
     }
 }
 
-/// What an [`Event::Status`] update reports.
+/// What an [`EventBody::Status`] update reports.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusKind {
@@ -960,7 +819,7 @@ pub struct TurnStats {
     pub tokens: u64,
 }
 
-/// Which table a [`Event::ReindexProgress`] item belongs to.
+/// Which table a [`EventBody::ReindexProgress`] item belongs to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReindexKind {
@@ -984,73 +843,135 @@ impl fmt::Display for ReindexKind {
     }
 }
 
-/// Daemon-to-client event, one JSON line tagged by `"type"`. A response stream ends with exactly
-/// one terminal [`Event::Done`] or [`Event::Error`]; a [`Request::Subscribe`] stream never ends.
+/// Daemon-to-client event, one JSON line: `id` beside the fields of `body`. A response stream
+/// ends with exactly one terminal [`EventBody::Done`] or [`EventBody::Error`]; a
+/// [`RequestBody::Subscribe`] stream never ends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Event {
+    /// The id of the request this event responds to.
+    pub id: String,
+    #[serde(flatten)]
+    pub body: EventBody,
+}
+
+impl Event {
+    pub fn new(id: impl Into<String>, body: EventBody) -> Self {
+        Self {
+            id: id.into(),
+            body,
+        }
+    }
+
+    /// Returns true if this event terminates a response stream.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.body, EventBody::Done | EventBody::Error { .. })
+    }
+
+    /// The broadcast kind of this event, or `None` for dialog-local events.
+    pub fn kind(&self) -> Option<EventKind> {
+        Some(match self.body {
+            EventBody::Delta { .. } => EventKind::Delta,
+            EventBody::ReasoningDelta { .. } => EventKind::ReasoningDelta,
+            EventBody::ToolCall { .. } => EventKind::ToolCall,
+            EventBody::ToolResult { .. } => EventKind::ToolResult,
+            EventBody::Presence { .. } => EventKind::Presence,
+            EventBody::VoiceState { .. } => EventKind::VoiceState,
+            EventBody::ListenState { .. } => EventKind::ListenState,
+            EventBody::WakeWordDetected => EventKind::WakeWordDetected,
+            EventBody::SpeakingState { .. } => EventKind::SpeakingState,
+            EventBody::SessionTitle { .. } => EventKind::SessionTitle,
+            EventBody::Done => EventKind::Done,
+            EventBody::Error { .. } => EventKind::Error,
+            EventBody::LastDelta { .. } => EventKind::LastDelta,
+            EventBody::Transcription { .. } => EventKind::Transcription,
+            EventBody::ChatFocus { .. } => EventKind::ChatFocus,
+            EventBody::Readiness { .. } => EventKind::Readiness,
+            EventBody::ContextSize { .. } => EventKind::ContextSize,
+            EventBody::Relay { .. } => EventKind::Relay,
+            EventBody::TaskRun { .. } => EventKind::TaskRun,
+            EventBody::TaskQueue { .. } => EventKind::TaskQueue,
+            EventBody::TaskReply { .. } => EventKind::TaskReply,
+            EventBody::VoiceOutputState { .. }
+            | EventBody::WakeWordStatus { .. }
+            | EventBody::WakeWordTest { .. }
+            | EventBody::WakeWordSpeech { .. }
+            | EventBody::SemanticHit { .. }
+            | EventBody::MemoryValue { .. }
+            | EventBody::MemoryRow { .. }
+            | EventBody::MemoryForgetResult { .. }
+            | EventBody::ReindexProgress { .. }
+            | EventBody::ConfirmRequest { .. }
+            | EventBody::PlanReview { .. }
+            | EventBody::PlanModeEntered
+            | EventBody::Capabilities { .. }
+            | EventBody::Status { .. }
+            | EventBody::BranchInfo { .. }
+            | EventBody::BranchSwitched { .. }
+            | EventBody::HistoryEntry { .. }
+            | EventBody::UndoApplied { .. }
+            | EventBody::Task { .. }
+            | EventBody::TaskRunRecord { .. }
+            | EventBody::TaskRunQueued { .. }
+            | EventBody::Queued { .. }
+            | EventBody::TaskRefined { .. }
+            | EventBody::TaskPlan { .. }
+            | EventBody::TriggerFires { .. }
+            | EventBody::McpAuthorizeUrl { .. }
+            | EventBody::McpServer { .. }
+            | EventBody::McpLoggedOut { .. } => return None,
+        })
+    }
+}
+
+/// What an [`Event`] reports, tagged by `"type"`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Event {
+pub enum EventBody {
     /// Chunk of reply text.
-    Delta { id: String, text: String },
+    Delta { text: String },
     /// Chunk of model reasoning, separate from the reply.
-    ReasoningDelta { id: String, text: String },
+    ReasoningDelta { text: String },
     /// The model invoked a tool.
     ToolCall {
-        id: String,
         name: String,
         args: serde_json::Value,
     },
-    ToolResult {
-        id: String,
-        name: String,
-        result: serde_json::Value,
-    },
+    /// A tool the model invoked finished.
+    ToolResult { name: String, result: ToolReport },
     /// Current presence state.
-    Presence { id: String, state: PresenceState },
+    Presence { state: PresenceState },
     /// Push-to-talk capture state transition.
-    VoiceState {
-        id: String,
-        state: VoiceCaptureState,
-    },
+    VoiceState { state: VoiceCaptureState },
     /// Transcript of a PTT recording; empty means silence, and only `Done` follows.
-    Transcription { id: String, text: String },
+    Transcription { text: String },
     /// The wake-word listener's phase.
-    ListenState { id: String, phase: ListenPhase },
+    ListenState { phase: ListenPhase },
     /// The wake phrase was heard; a command's `Transcription` may follow.
-    WakeWordDetected { id: String },
+    WakeWordDetected,
     /// Whether TTS is enabled.
-    VoiceOutputState { id: String, enabled: bool },
+    VoiceOutputState { enabled: bool },
     /// The configured wake phrase; `listening` is whether the wake-word
     /// listener is running.
-    WakeWordStatus {
-        id: String,
-        phrase: String,
-        listening: bool,
-    },
+    WakeWordStatus { phrase: String, listening: bool },
     /// Whether the wake phrase was spotted in one utterance of a test session.
-    WakeWordTest { id: String, matched: bool },
+    WakeWordTest { matched: bool },
     /// Speech started (`true`) or ended (`false`) on the mic of the
     /// wake-word session opened by this connection.
-    WakeWordSpeech { id: String, speaking: bool },
+    WakeWordSpeech { speaking: bool },
     /// How far one background subsystem has started; broadcast whenever
     /// one finishes starting.
     Readiness {
-        id: String,
         component: StartupComponent,
         state: ComponentReadiness,
     },
     /// Whether a live chat has keyboard focus; broadcast when it changes.
-    ChatFocus { id: String, focused: bool },
+    ChatFocus { focused: bool },
     /// TTS playback for a turn started (`true`) or drained (`false`).
-    SpeakingState { id: String, speaking: bool },
+    SpeakingState { speaking: bool },
     /// The session's display title, sent after each successful turn; may arrive after its `Done`.
-    SessionTitle {
-        id: String,
-        session_id: String,
-        title: String,
-    },
+    SessionTitle { session_id: String, title: String },
     /// One search hit; `content` is the matched chunk of message `message_id`, `similarity` is in `[0.0, 1.0]`.
     SemanticHit {
-        id: String,
         message_id: i64,
         chunk_id: i64,
         session_id: String,
@@ -1060,29 +981,17 @@ pub enum Event {
         similarity: f32,
     },
     /// Result of `MemoryLoad`; `value` is `None` when the key is absent.
-    MemoryValue {
-        id: String,
-        key: String,
-        value: Option<String>,
-    },
-    /// Result of `MemoryList`, lexicographically sorted; emitted even when empty.
-    MemoryKeys { id: String, keys: Vec<String> },
+    MemoryValue { key: String, value: Option<String> },
     /// One `MemoryListAll` row, in key order; `memory_id` is what `MemoryForget` takes.
     MemoryRow {
-        id: String,
         memory_id: i64,
         key: String,
         value: String,
     },
     /// Result of `MemoryForget`; `deleted: false` with no `key` means no row had that id.
-    MemoryForgetResult {
-        id: String,
-        deleted: bool,
-        key: Option<String>,
-    },
+    MemoryForgetResult { deleted: bool, key: Option<String> },
     /// Per-item progress of a `MemoryReindex` run.
     ReindexProgress {
-        id: String,
         kind: ReindexKind,
         done: u32,
         total: u32,
@@ -1090,7 +999,6 @@ pub enum Event {
     /// Asks to authorize a tool action; the turn waits for a matching `ConfirmResponse`. Never
     /// sent to a write-closed client; disconnect or timeout denies.
     ConfirmRequest {
-        id: String,
         confirm_id: String,
         tool: String,
         script: String,
@@ -1105,30 +1013,24 @@ pub enum Event {
     },
     /// Asks the user to review `plan`; the turn waits for a matching `PlanVerdict`, and a
     /// disconnect leaves it unreviewed.
-    PlanReview {
-        id: String,
-        review_id: String,
-        plan: String,
-    },
+    PlanReview { review_id: String, plan: String },
     /// The user agreed to the model's ask to plan first; the turn now plans.
-    PlanModeEntered { id: String },
+    PlanModeEntered,
     /// Runtime capabilities; `model_name` is the basename of the configured `model.name`, and
     /// `auto_mode` whether [`PermissionMode::Auto`] is honored.
     Capabilities {
-        id: String,
         vision: bool,
         model_name: String,
         #[serde(default)]
         auto_mode: bool,
     },
     /// Progress of a relay running inside the turn's `relay` tool call.
-    Relay { id: String, event: RelayEvent },
+    Relay { event: RelayEvent },
     /// Tokens in the conversation as sent with the model request about to stream,
     /// and `total` the conversation has held, counting what compaction removed.
-    ContextSize { id: String, tokens: u32, total: u32 },
+    ContextSize { tokens: u32, total: u32 },
     /// Non-terminal notice of a recoverable condition.
     Status {
-        id: String,
         severity: StatusSeverity,
         component: Component,
         event: StatusKind,
@@ -1136,7 +1038,6 @@ pub enum Event {
     },
     /// One branch listed by `Branches`.
     BranchInfo {
-        id: String,
         branch_id: i64,
         session_id: String,
         session_started_at: String,
@@ -1160,7 +1061,6 @@ pub enum Event {
     /// The active branch changed; `session_id` is the now-active session.
     /// `branch_id` is `None` until the session's first message is saved.
     BranchSwitched {
-        id: String,
         branch_id: Option<i64>,
         session_id: String,
         session_title: Option<String>,
@@ -1172,7 +1072,6 @@ pub enum Event {
     /// `compaction_ms` is set only on the row the branch's latest compaction followed;
     /// `turn_stats` only on the last row of a finished turn; `relay` only on a `relay` tool row.
     HistoryEntry {
-        id: String,
         seq: i64,
         role: Role,
         content: String,
@@ -1196,13 +1095,11 @@ pub enum Event {
     },
     /// Result of `Undo`; `removed_messages == 0` means there was nothing to undo.
     UndoApplied {
-        id: String,
         removed_messages: u32,
         last_user_text: Option<String>,
     },
     /// One saved task.
     Task {
-        id: String,
         task_id: TaskId,
         spec: TaskSpec,
         /// When its triggers next fire; `None` while it is disabled or nothing is due.
@@ -1218,196 +1115,55 @@ pub enum Event {
     },
     /// The next fire times of the trigger a `TaskCheckTrigger` checked, soonest first, at
     /// most three; empty for a trigger that fires on request or on an event.
-    TriggerFires {
-        id: String,
-        fires: Vec<DateTime<Utc>>,
-    },
+    TriggerFires { fires: Vec<DateTime<Utc>> },
     /// One run listed by `TaskRuns`.
-    TaskRunRecord { id: String, record: TaskRunRecord },
+    TaskRunRecord { record: TaskRunRecord },
     /// Run `run` of `task` was queued.
-    TaskRunQueued {
-        id: String,
-        task: TaskId,
-        run: TaskRunId,
-    },
+    TaskRunQueued { task: TaskId, run: TaskRunId },
     /// One event of task run `run`'s turn, which `id` queued; never terminal itself.
-    TaskRun {
-        id: String,
-        run: TaskRunId,
-        event: Box<Event>,
-    },
+    TaskRun { run: TaskRunId, event: Box<Event> },
     /// The final reply of run `run`, which request `id` queued, of a task that announces its
     /// replies; broadcast only.
     TaskReply {
-        id: String,
         run: TaskRunId,
         task_name: TaskName,
         reply: String,
     },
     /// The query `id` waits for the model behind `behind` queue items: a running task, or
     /// the runs and turns ahead of it in the queue.
-    Queued { id: String, behind: u32 },
+    Queued { behind: u32 },
     /// The task queue as it now stands; broadcast on every change and sent first to every
     /// subscriber whose filter takes it.
-    TaskQueue {
-        id: String,
-        snapshot: TaskQueueSnapshot,
-    },
+    TaskQueue { snapshot: TaskQueueSnapshot },
     /// The asked prompt rewritten as a brief for an unattended run, the plan of that brief,
     /// each anticipated action checked against the machine and the asked permissions, and the
     /// mode its runs are best given among those the daemon allows.
     TaskRefined {
-        id: String,
         prompt: TaskPrompt,
         plan: Plan,
         recommended: ModeRecommendation,
     },
     /// One event of the planning turn `id` asked for; never terminal itself.
-    TaskPlan { id: String, event: Box<Event> },
+    TaskPlan { event: Box<Event> },
     /// The URL the user opens to sign MCP server `server` in.
-    McpAuthorizeUrl {
-        id: String,
-        server: String,
-        url: String,
-    },
+    McpAuthorizeUrl { server: String, url: String },
     /// One configured MCP server.
     McpServer {
-        id: String,
         server: String,
         transport: McpTransportKind,
         state: McpServerState,
     },
     /// MCP server `server` was signed out.
     McpLoggedOut {
-        id: String,
         server: String,
         revocation: TokenRevocation,
     },
     /// Terminal failure.
-    Error { id: String, message: String },
+    Error { message: String },
     /// Terminal success.
-    Done { id: String },
+    Done,
     /// The running reply so far; sent only to subscribers.
-    LastDelta { id: String, text: String },
-}
-
-impl Event {
-    /// Returns true if this event terminates a response stream.
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, Event::Done { .. } | Event::Error { .. })
-    }
-
-    /// The id of the request this event responds to.
-    pub fn id(&self) -> &str {
-        match self {
-            Event::Delta { id, .. }
-            | Event::ReasoningDelta { id, .. }
-            | Event::ToolCall { id, .. }
-            | Event::ToolResult { id, .. }
-            | Event::Presence { id, .. }
-            | Event::VoiceState { id, .. }
-            | Event::Transcription { id, .. }
-            | Event::ListenState { id, .. }
-            | Event::WakeWordDetected { id }
-            | Event::VoiceOutputState { id, .. }
-            | Event::WakeWordStatus { id, .. }
-            | Event::WakeWordTest { id, .. }
-            | Event::WakeWordSpeech { id, .. }
-            | Event::Readiness { id, .. }
-            | Event::SpeakingState { id, .. }
-            | Event::ChatFocus { id, .. }
-            | Event::SessionTitle { id, .. }
-            | Event::SemanticHit { id, .. }
-            | Event::MemoryValue { id, .. }
-            | Event::MemoryKeys { id, .. }
-            | Event::MemoryRow { id, .. }
-            | Event::MemoryForgetResult { id, .. }
-            | Event::ReindexProgress { id, .. }
-            | Event::ConfirmRequest { id, .. }
-            | Event::PlanReview { id, .. }
-            | Event::PlanModeEntered { id }
-            | Event::Capabilities { id, .. }
-            | Event::ContextSize { id, .. }
-            | Event::Relay { id, .. }
-            | Event::Status { id, .. }
-            | Event::BranchInfo { id, .. }
-            | Event::BranchSwitched { id, .. }
-            | Event::HistoryEntry { id, .. }
-            | Event::UndoApplied { id, .. }
-            | Event::Task { id, .. }
-            | Event::TaskRunRecord { id, .. }
-            | Event::TaskRunQueued { id, .. }
-            | Event::TaskRun { id, .. }
-            | Event::TaskQueue { id, .. }
-            | Event::TaskReply { id, .. }
-            | Event::Queued { id, .. }
-            | Event::TaskRefined { id, .. }
-            | Event::TaskPlan { id, .. }
-            | Event::TriggerFires { id, .. }
-            | Event::McpAuthorizeUrl { id, .. }
-            | Event::McpServer { id, .. }
-            | Event::McpLoggedOut { id, .. }
-            | Event::Error { id, .. }
-            | Event::Done { id }
-            | Event::LastDelta { id, .. } => id,
-        }
-    }
-
-    /// The broadcast kind of this event, or `None` for dialog-local events.
-    pub fn kind(&self) -> Option<EventKind> {
-        Some(match self {
-            Event::Delta { .. } => EventKind::Delta,
-            Event::ReasoningDelta { .. } => EventKind::ReasoningDelta,
-            Event::ToolCall { .. } => EventKind::ToolCall,
-            Event::ToolResult { .. } => EventKind::ToolResult,
-            Event::Presence { .. } => EventKind::Presence,
-            Event::VoiceState { .. } => EventKind::VoiceState,
-            Event::ListenState { .. } => EventKind::ListenState,
-            Event::WakeWordDetected { .. } => EventKind::WakeWordDetected,
-            Event::SpeakingState { .. } => EventKind::SpeakingState,
-            Event::SessionTitle { .. } => EventKind::SessionTitle,
-            Event::Done { .. } => EventKind::Done,
-            Event::Error { .. } => EventKind::Error,
-            Event::LastDelta { .. } => EventKind::LastDelta,
-            Event::Transcription { .. } => EventKind::Transcription,
-            Event::ChatFocus { .. } => EventKind::ChatFocus,
-            Event::Readiness { .. } => EventKind::Readiness,
-            Event::ContextSize { .. } => EventKind::ContextSize,
-            Event::Relay { .. } => EventKind::Relay,
-            Event::TaskRun { .. } => EventKind::TaskRun,
-            Event::TaskQueue { .. } => EventKind::TaskQueue,
-            Event::TaskReply { .. } => EventKind::TaskReply,
-            Event::VoiceOutputState { .. }
-            | Event::WakeWordStatus { .. }
-            | Event::WakeWordTest { .. }
-            | Event::WakeWordSpeech { .. }
-            | Event::SemanticHit { .. }
-            | Event::MemoryValue { .. }
-            | Event::MemoryKeys { .. }
-            | Event::MemoryRow { .. }
-            | Event::MemoryForgetResult { .. }
-            | Event::ReindexProgress { .. }
-            | Event::ConfirmRequest { .. }
-            | Event::PlanReview { .. }
-            | Event::PlanModeEntered { .. }
-            | Event::Capabilities { .. }
-            | Event::Status { .. }
-            | Event::BranchInfo { .. }
-            | Event::BranchSwitched { .. }
-            | Event::HistoryEntry { .. }
-            | Event::UndoApplied { .. }
-            | Event::Task { .. }
-            | Event::TaskRunRecord { .. }
-            | Event::TaskRunQueued { .. }
-            | Event::Queued { .. }
-            | Event::TaskRefined { .. }
-            | Event::TaskPlan { .. }
-            | Event::TriggerFires { .. }
-            | Event::McpAuthorizeUrl { .. }
-            | Event::McpServer { .. }
-            | Event::McpLoggedOut { .. } => return None,
-        })
-    }
+    LastDelta { text: String },
 }
 
 /// The per-user daemon socket: `$XDG_RUNTIME_DIR/assistd.sock`, else

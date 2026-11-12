@@ -437,7 +437,7 @@ pub struct TaskRunRecord {
 }
 
 /// The confirmation a run that needs input waits on, answered with
-/// [`crate::Request::TaskConfirm`].
+/// [`crate::TaskRequest::Confirm`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PausedPrompt {
     pub confirm_id: String,
@@ -473,7 +473,7 @@ pub enum SuspendReason {
     GpuBusy,
 }
 
-/// A change to the task queue, sent as [`crate::Request::TaskQueue`].
+/// A change to the task queue, sent as [`crate::TaskRequest::Queue`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskQueueOp {
@@ -545,6 +545,70 @@ pub enum LaneHolder {
         run: TaskRunId,
     },
     Idle,
+}
+
+/// A [`crate::RequestBody::Task`] request, tagged by `"action"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum TaskRequest {
+    /// List every saved task by name with its next fire time. Emits `Task`s, then `Done`.
+    List,
+    /// Create a task, or replace task `task`. Errors when the name is taken, or `spec.mode` is
+    /// Auto and the daemon does not allow it. Emits the saved `Task`, then `Done`.
+    Save {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<TaskId>,
+        spec: TaskSpec,
+    },
+    /// Remove a task and its run history. Emits `Done`.
+    Delete { task: TaskId },
+    /// Turn a task's triggers on or off. Emits the updated `Task`, then `Done`.
+    SetEnabled { task: TaskId, enabled: bool },
+    /// Queue a run of `task` in a conversation of its own, whose events are broadcast as
+    /// `TaskRun`. Emits `TaskRunQueued`, then `Done`, without waiting for the run.
+    Run { task: TaskId },
+    /// Cancel run `run`, dropping its turn; errors when it is not queued or running.
+    /// Emits `Done`.
+    Cancel { run: TaskRunId },
+    /// Change the task queue; errors when `op` names a run that is not queued, or moves a
+    /// running one. Emits `Done`; the new queue is broadcast as `TaskQueue`.
+    Queue { op: TaskQueueOp },
+    /// List task `task`'s runs, newest first, at most [`MAX_LISTED_RUNS`]. Emits
+    /// `TaskRunRecord`s, then `Done`; errors when there is no such task.
+    Runs { task: TaskId },
+    /// Answer the `ConfirmRequest` `confirm_id` paused task run `run` waits on, for this once.
+    /// Errors when the run is not waiting on it. Emits `Done`.
+    Confirm {
+        run: TaskRunId,
+        confirm_id: String,
+        allow: bool,
+        /// With `allow`, also add the prompt's [`PausedPrompt::host`] to the task's allowed
+        /// hosts, emitting the updated `Task` before `Done`; errors when it has none.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        always: bool,
+    },
+    /// Explore task prompt `prompt` in a conversation of its own and rewrite it as a brief for
+    /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last
+    /// rewrite of it; a new refine ends the previous one. Streams the turn wrapped in
+    /// `TaskPlan`, then emits `TaskRefined` and `Done`. Saves nothing. Errors when `mode` is
+    /// Auto and the daemon does not allow it, or `feedback` is given and the last refine was
+    /// not of `prompt`.
+    Refine {
+        prompt: TaskPrompt,
+        #[serde(default)]
+        mode: PermissionMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_hosts: Vec<HostName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+    },
+    /// Check `trigger` as `Save` would for task `task`, or for a new task when `None`.
+    /// Emits `TriggerFires`, then `Done`; errors with why a save would refuse it.
+    CheckTrigger {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<TaskId>,
+        trigger: TaskTrigger,
+    },
 }
 
 fn default_cooldown_secs() -> u32 {

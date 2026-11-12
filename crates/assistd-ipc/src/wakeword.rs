@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One wake-word operation, carried by `Request::WakeWord`.
+/// One wake-word operation, carried by `RequestBody::WakeWord`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WakeWordOp {

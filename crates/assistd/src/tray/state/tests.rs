@@ -1,43 +1,43 @@
 use super::*;
 
 fn delta(id: &str) -> Event {
-    Event::Delta {
-        id: id.into(),
-        text: String::new(),
-    }
+    Event::new(
+        id,
+        EventBody::Delta {
+            text: String::new(),
+        },
+    )
 }
 
 fn tool_call(id: &str) -> Event {
-    Event::ToolCall {
-        id: id.into(),
-        name: "x".into(),
-        args: serde_json::Value::Null,
-    }
+    Event::new(
+        id,
+        EventBody::ToolCall {
+            name: "x".into(),
+            args: serde_json::Value::Null,
+        },
+    )
 }
 
 fn done(id: &str) -> Event {
-    Event::Done { id: id.into() }
+    Event::new(id, EventBody::Done)
 }
 
 fn error(id: &str) -> Event {
-    Event::Error {
-        id: id.into(),
-        message: "boom".into(),
-    }
+    Event::new(
+        id,
+        EventBody::Error {
+            message: "boom".into(),
+        },
+    )
 }
 
 fn listen(phase: ListenPhase) -> Event {
-    Event::ListenState {
-        id: "x".into(),
-        phase,
-    }
+    Event::new("x", EventBody::ListenState { phase })
 }
 
 fn ptt(state: VoiceCaptureState) -> Event {
-    Event::VoiceState {
-        id: "p".into(),
-        state,
-    }
+    Event::new("p", EventBody::VoiceState { state })
 }
 
 #[test]

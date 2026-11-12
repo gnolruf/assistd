@@ -7,7 +7,9 @@ use chrono::{DateTime, Local, Utc};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-use assistd_ipc::{Event, MAX_LISTED_RUNS, PermissionMode, TaskId, TaskSpec, TaskTrigger};
+use assistd_ipc::{
+    Event, EventBody, MAX_LISTED_RUNS, PermissionMode, TaskId, TaskSpec, TaskTrigger,
+};
 use assistd_memory::TaskRecord;
 
 use super::event_triggers::{check_chain, resolve_watched_paths};
@@ -27,22 +29,6 @@ impl AppState {
         self.send_tasks(id, "task list", tasks, &tx).await
     }
 
-    pub(super) async fn handle_task_get(
-        self: Arc<Self>,
-        id: String,
-        task: TaskId,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<(), DispatchError> {
-        let record = self.memory.tasks.get(task).await;
-        self.send_tasks(
-            id,
-            "task get",
-            record.map(|r| vec![r]).map_err(Into::into),
-            &tx,
-        )
-        .await
-    }
-
     pub(super) async fn handle_task_runs(
         self: Arc<Self>,
         id: String,
@@ -58,13 +44,10 @@ impl AppState {
         };
         for record in records {
             let _ = tx
-                .send(Event::TaskRunRecord {
-                    id: id.clone(),
-                    record,
-                })
+                .send(Event::new(id.clone(), EventBody::TaskRunRecord { record }))
                 .await;
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -130,12 +113,9 @@ impl AppState {
         match self.check_trigger(task, trigger).await {
             Ok(fires) => {
                 let _ = tx
-                    .send(Event::TriggerFires {
-                        id: id.clone(),
-                        fires,
-                    })
+                    .send(Event::new(id.clone(), EventBody::TriggerFires { fires }))
                     .await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -164,7 +144,7 @@ impl AppState {
         Ok(upcoming_fires(&triggers[0], &now, CHECKED_FIRES))
     }
 
-    /// Send each record as an `Event::Task`, with its last finished run, then `Done`, or
+    /// Send each record as an `EventBody::Task`, with its last finished run, then `Done`, or
     /// the failure as `Error`.
     pub(super) async fn send_tasks(
         &self,
@@ -192,17 +172,19 @@ impl AppState {
         for record in records {
             let next_fire = reported_next_fire(&record);
             let _ = tx
-                .send(Event::Task {
-                    id: id.clone(),
-                    task_id: record.id,
-                    last_run: last_runs.remove(&record.id),
-                    trigger_failure: self.runtime.task_events.watch_failure(record.id),
-                    spec: record.spec,
-                    next_fire,
-                })
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::Task {
+                        task_id: record.id,
+                        last_run: last_runs.remove(&record.id),
+                        trigger_failure: self.runtime.task_events.watch_failure(record.id),
+                        spec: record.spec,
+                        next_fire,
+                    },
+                ))
                 .await;
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 

@@ -1,12 +1,12 @@
-//! The typed result of a [`Tool`](crate::Tool) call and its JSON report form.
+//! The typed result of a [`Tool`](crate::Tool) call and the report clients are sent.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use serde_json::{Value, json};
 
+use assistd_ipc::{ToolAttachment, ToolReport, ToolStreams};
 use assistd_utils::time::saturating_millis;
 
 use crate::command::Attachment;
@@ -63,37 +63,29 @@ impl ToolOutput {
         saturating_millis(self.duration)
     }
 
-    /// The JSON object sent to IPC clients, with attachments base64-encoded.
-    pub fn to_json(&self) -> Value {
-        let mut report = json!({
-            "output":      self.output,
-            "exit_code":   self.exit_code,
-            "truncated":   self.truncated,
-            "duration_ms": self.duration_ms(),
-        });
-        if let Some(path) = &self.overflow_file {
-            report["overflow_file"] = json!(path.to_string_lossy());
+    /// The report sent to IPC clients, with attachments base64-encoded.
+    pub fn report(&self) -> ToolReport {
+        ToolReport {
+            output: self.output.clone(),
+            exit_code: self.exit_code,
+            truncated: self.truncated,
+            duration_ms: self.duration_ms(),
+            overflow_file: self.overflow_file.clone(),
+            streams: self.streams.as_ref().map(|streams| ToolStreams {
+                stdout: streams.stdout.clone(),
+                stderr: streams.stderr.clone(),
+                stderr_overflow_file: streams.stderr_overflow_file.clone(),
+            }),
+            attachments: self.attachments.iter().map(reported_attachment).collect(),
         }
-        if let Some(streams) = &self.streams {
-            report["stdout"] = json!(streams.stdout);
-            report["stderr"] = json!(streams.stderr);
-            if let Some(path) = &streams.stderr_overflow_file {
-                report["stderr_overflow_file"] = json!(path.to_string_lossy());
-            }
-        }
-        if !self.attachments.is_empty() {
-            report["attachments"] = self.attachments.iter().map(attachment_json).collect();
-        }
-        report
     }
 }
 
-fn attachment_json(attachment: &Attachment) -> Value {
+fn reported_attachment(attachment: &Attachment) -> ToolAttachment {
     match attachment {
-        Attachment::Image { mime, bytes } => json!({
-            "type": "image",
-            "mime": mime,
-            "data": B64.encode(bytes),
-        }),
+        Attachment::Image { mime, bytes } => ToolAttachment::Image {
+            mime: *mime,
+            data: B64.encode(bytes),
+        },
     }
 }

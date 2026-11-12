@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use assistd_ipc::{PausedPrompt, Request, TaskRunId};
+use assistd_ipc::{PausedPrompt, Request, RequestBody, TaskRunId};
 use assistd_tools::{Approval, ConfirmationRequest};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
@@ -101,12 +101,14 @@ impl App {
             );
             return;
         };
-        let req = Request::ConfirmResponse {
-            id: Uuid::new_v4().to_string(),
-            confirm_id: confirm_id.to_string(),
-            allow: approval != Approval::Deny,
-            always: approval == Approval::Always,
-        };
+        let req = Request::new(
+            Uuid::new_v4().to_string(),
+            RequestBody::ConfirmResponse {
+                confirm_id: confirm_id.to_string(),
+                allow: approval != Approval::Deny,
+                always: approval == Approval::Always,
+            },
+        );
         self.tasks.spawn(async move {
             if let Err(e) = writer.send(req).await {
                 tracing::warn!("ConfirmResponse send failed: {e}");

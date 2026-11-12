@@ -85,9 +85,8 @@ fn fresh_dir() -> TempDir {
 /// The result as IPC clients receive it.
 fn invoke(tool: &RunTool, cmd: &str) -> Value {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(tool.invoke(json!({ "command": cmd })))
-        .unwrap()
-        .to_json()
+    let output = rt.block_on(tool.invoke(json!({ "command": cmd }))).unwrap();
+    serde_json::to_value(output.report()).unwrap()
 }
 
 fn assert_footer(output: &str, expected_exit: i32) {

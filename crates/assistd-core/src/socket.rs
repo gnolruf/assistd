@@ -21,7 +21,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
-use assistd_ipc::{Event, Request};
+use assistd_ipc::{Event, EventBody, Request, RequestBody};
 use assistd_tools::{Approval, CONFIRM_ROUTER, CONFIRM_TIMEOUT, ConfirmRouter};
 use assistd_utils::time::saturating_millis;
 
@@ -44,10 +44,6 @@ const MAX_REQUEST_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Cap on every other frame, which carries no attachments.
 const MAX_CONTROL_REQUEST_BYTES: u64 = 64 * 1024;
-
-/// Start of a serialized `Request::Query`; only a frame opening with it
-/// may grow past [`MAX_CONTROL_REQUEST_BYTES`].
-const QUERY_FRAME_PREFIX: &[u8] = br#"{"type":"query""#;
 
 /// Connections that may hold a frame past [`MAX_CONTROL_REQUEST_BYTES`] at once; each keeps
 /// its slot until the connection ends, bounding the memory queued image queries pin.
@@ -401,10 +397,7 @@ fn peer_is_daemon_user(stream: &UnixStream) -> bool {
 /// Tell a client turned away on accept why, without waiting on it; a fresh socket's
 /// send buffer always has room for the one event.
 fn refuse_connection(stream: &UnixStream, message: String) {
-    let event = Event::Error {
-        id: String::new(),
-        message,
-    };
+    let event = Event::new(String::new(), EventBody::Error { message });
     let frame = match serde_json::to_string(&event) {
         Ok(json) => json + "\n",
         Err(e) => {
@@ -476,14 +469,14 @@ async fn handle_connection(
     };
 
     let (tx, rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
-    let span = tracing::info_span!("ipc", id = %req.id(), req = req.kind());
+    let span = tracing::info_span!("ipc", id = %req.id, req = req.kind());
     let router = ConfirmRouter::new(
-        req.id().to_string(),
+        req.id.clone(),
         tx.clone(),
         CONFIRM_TIMEOUT,
         state.safety_judge(),
     );
-    let is_subscribe = matches!(req, Request::Subscribe { .. });
+    let is_subscribe = matches!(req.body, RequestBody::Subscribe { .. });
 
     let dispatch_state = state.clone();
     let router_for_dispatch = router.clone();
@@ -568,22 +561,26 @@ async fn read_initial_request(
         }
         FrameRead::Read { large_slot, .. } => {
             match serde_json::from_slice::<Request>(line.trim_ascii()) {
+                Ok(req) if large_slot.is_some() && !is_query(&req) => {
+                    format!("only a query may exceed {MAX_CONTROL_REQUEST_BYTES} bytes")
+                }
                 Ok(req) => return Ok(Some((req, large_slot))),
                 Err(e) => format!("invalid request: {e}"),
             }
         }
     };
-    let err = Event::Error {
-        id: String::new(),
-        message: rejection,
-    };
+    let err = Event::new(String::new(), EventBody::Error { message: rejection });
     write_event(write_half, &err).await?;
     write_half.shutdown().await?;
     Ok(None)
 }
 
-/// Read one frame into `line`, stopping at the cap its prefix allows. A
-/// frame past [`MAX_CONTROL_REQUEST_BYTES`] reads on only with a large-frame slot.
+fn is_query(req: &Request) -> bool {
+    matches!(req.body, RequestBody::Query { .. })
+}
+
+/// Read one frame into `line`. A frame that fills [`MAX_CONTROL_REQUEST_BYTES`]
+/// reads on to [`MAX_REQUEST_BYTES`] only with a large-frame slot.
 async fn read_request_frame(
     reader: &mut BufReader<OwnedReadHalf>,
     line: &mut Vec<u8>,
@@ -593,9 +590,9 @@ async fn read_request_frame(
         .take(MAX_CONTROL_REQUEST_BYTES)
         .read_until(b'\n', line)
         .await?;
-    let may_grow =
-        !line.ends_with(b"\n") && line.trim_ascii_start().starts_with(QUERY_FRAME_PREFIX);
-    if !may_grow {
+    let filled_control_cap =
+        u64::try_from(line.len()).is_ok_and(|read| read >= MAX_CONTROL_REQUEST_BYTES);
+    if line.ends_with(b"\n") || !filled_control_cap {
         return Ok(FrameRead::Read {
             limit: MAX_CONTROL_REQUEST_BYTES,
             large_slot: None,
@@ -704,39 +701,41 @@ async fn route_confirm_responses(mut reader: BufReader<OwnedReadHalf>, router: A
 }
 
 fn route_mid_stream_line(line: &str, router: &ConfirmRouter) {
-    match serde_json::from_str::<Request>(line) {
-        Ok(Request::ConfirmResponse {
+    let request = match serde_json::from_str::<Request>(line) {
+        Ok(request) => request,
+        Err(e) => {
+            warn!(error = %e, "invalid mid-stream JSON; ignoring line");
+            return;
+        }
+    };
+    let kind = request.kind();
+    match request.body {
+        RequestBody::ConfirmResponse {
             confirm_id,
             allow,
             always,
-            ..
-        }) => {
+        } => {
             let approval = Approval::from_answer(allow, always);
             if let Err(e) = router.route_response(&confirm_id, approval) {
                 warn!(confirm_id = %confirm_id, reason = %e, "unmatched ConfirmResponse");
             }
         }
-        Ok(Request::SetPermissionMode { mode, plan, .. }) => {
+        RequestBody::SetPermissionMode { mode, plan } => {
             info!(?mode, plan, "permission mode changed");
             router.set_mode(mode);
             router.set_planning(plan);
         }
-        Ok(Request::PlanVerdict {
-            review_id, verdict, ..
-        }) => {
+        RequestBody::PlanVerdict { review_id, verdict } => {
             if let Err(e) = router.route_verdict(&review_id, verdict) {
                 warn!(review_id = %review_id, reason = %e, "unmatched PlanVerdict");
             }
         }
-        Ok(other) => {
+        _ => {
             warn!(
-                kind = other.kind(),
+                kind,
                 "unexpected mid-stream request; only ConfirmResponse, SetPermissionMode and \
                  PlanVerdict are honored after the initial request"
             );
-        }
-        Err(e) => {
-            warn!(error = %e, "invalid mid-stream JSON; ignoring line");
         }
     }
 }

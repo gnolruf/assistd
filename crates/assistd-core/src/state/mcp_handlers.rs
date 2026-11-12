@@ -10,7 +10,7 @@ use futures_util::future::BoxFuture;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Event, TokenRevocation};
+use assistd_ipc::{Event, EventBody, TokenRevocation};
 
 use super::{AppState, send_error};
 
@@ -80,11 +80,13 @@ impl AppState {
             Err(e) => return send_error(&tx, id, e.to_string()).await,
         };
         let _ = tx
-            .send(Event::McpAuthorizeUrl {
-                id: id.clone(),
-                server: server.clone(),
-                url: login.authorize_url,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::McpAuthorizeUrl {
+                    server: server.clone(),
+                    url: login.authorize_url,
+                },
+            ))
             .await;
         if let Err(e) = login.completion.await {
             return send_error(&tx, id, e.to_string()).await;
@@ -92,7 +94,7 @@ impl AppState {
         if let Some(event) = self.mcp_server_event(&id, &server) {
             let _ = tx.send(event).await;
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     pub(super) async fn handle_mcp_logout(
@@ -107,13 +109,12 @@ impl AppState {
         match accounts.logout(self.clone(), &server).await {
             Ok(revocation) => {
                 let _ = tx
-                    .send(Event::McpLoggedOut {
-                        id: id.clone(),
-                        server,
-                        revocation,
-                    })
+                    .send(Event::new(
+                        id.clone(),
+                        EventBody::McpLoggedOut { server, revocation },
+                    ))
                     .await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
             }
             Err(e) => send_error(&tx, id, e.to_string()).await,
         }
@@ -125,7 +126,7 @@ impl AppState {
                 let _ = tx.send(event).await;
             }
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     fn mcp_server_event(&self, id: &str, name: &str) -> Option<Event> {
@@ -134,11 +135,13 @@ impl AppState {
             .mcp_servers
             .iter()
             .find(|server| server.name() == name)?;
-        Some(Event::McpServer {
-            id: id.to_owned(),
-            server: name.to_owned(),
-            transport: server.transport(),
-            state: server.state(),
-        })
+        Some(Event::new(
+            id.to_owned(),
+            EventBody::McpServer {
+                server: name.to_owned(),
+                transport: server.transport(),
+                state: server.state(),
+            },
+        ))
     }
 }

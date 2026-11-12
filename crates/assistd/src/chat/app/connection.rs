@@ -2,7 +2,8 @@
 //! Each reports a failure as [`ChatEvent::WireError`] before its terminal event.
 
 use assistd_ipc::{
-    Event, ImageAttachment, IpcClient, IpcClientError, PermissionMode, PlanMode, Request,
+    EventBody, ImageAttachment, IpcClient, IpcClientError, PermissionMode, PlanMode, Request,
+    RequestBody,
 };
 use assistd_tools::Attachment;
 use tokio::sync::mpsc;
@@ -43,11 +44,10 @@ impl App {
         let plan = match self.mode {
             ChatMode::Act(PermissionMode::Manual) => PlanMode::Offered,
             ChatMode::Act(mode) => {
-                let _ = writer_tx.try_send(Request::SetPermissionMode {
-                    id: Uuid::new_v4().to_string(),
-                    mode,
-                    plan: false,
-                });
+                let _ = writer_tx.try_send(Request::new(
+                    Uuid::new_v4().to_string(),
+                    RequestBody::SetPermissionMode { mode, plan: false },
+                ));
                 PlanMode::Offered
             }
             ChatMode::Plan => PlanMode::Planning,
@@ -58,12 +58,14 @@ impl App {
             id: id.clone(),
             writer: Some(writer_tx),
         });
-        let req = Request::Query {
+        let req = Request::new(
             id,
-            text,
-            attachments: wire_attachments(attachments),
-            plan,
-        };
+            RequestBody::Query {
+                text,
+                attachments: wire_attachments(attachments),
+                plan,
+            },
+        );
         let ipc = self.ipc.clone();
         let chat_tx = self.chat_tx.clone();
         self.tasks.spawn(async move {
@@ -122,12 +124,10 @@ async fn forward_capabilities(
     ipc: &IpcClient,
     chat_tx: &mpsc::Sender<ChatEvent>,
 ) -> Result<(), IpcClientError> {
-    let req = Request::GetCapabilities {
-        id: Uuid::new_v4().to_string(),
-    };
+    let req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetCapabilities);
     let mut capabilities = None;
     ipc.request(req, |event| {
-        if matches!(event, Event::Capabilities { .. }) {
+        if matches!(&event.body, EventBody::Capabilities { .. }) {
             capabilities = Some(event.clone());
         }
         Ok::<(), IpcClientError>(())

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use assistd_ipc::{Event, QueueItem, TaskQueueSnapshot, TaskRunId};
+use assistd_ipc::{Event, EventBody, QueueItem, TaskQueueSnapshot, TaskRunId};
 
 use super::activity::truncate_chars_from_start;
 
@@ -44,13 +44,12 @@ pub(super) struct TaskNoticeTracker {
 impl TaskNoticeTracker {
     /// The notices `ev` raises.
     pub(super) fn notices_for(&mut self, ev: &Event) -> Vec<TaskNotice> {
-        match ev {
-            Event::TaskQueue { snapshot, .. } => self.newly_paused(snapshot),
-            Event::TaskReply {
+        match &ev.body {
+            EventBody::TaskQueue { snapshot } => self.newly_paused(snapshot),
+            EventBody::TaskReply {
                 run,
                 task_name,
                 reply,
-                ..
             } => vec![TaskNotice {
                 run: *run,
                 task_name: task_name.to_string(),

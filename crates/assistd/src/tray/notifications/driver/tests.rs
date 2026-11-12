@@ -1,4 +1,6 @@
-use assistd_ipc::{PausedPrompt, QueueItem, TaskId, TaskQueueSnapshot, TaskRunId, TaskRunState};
+use assistd_ipc::{
+    EventBody, PausedPrompt, QueueItem, TaskId, TaskQueueSnapshot, TaskRunId, TaskRunState,
+};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -61,56 +63,54 @@ impl Harness {
 }
 
 fn chat_focus(focused: bool) -> Event {
-    Event::ChatFocus {
-        id: "c".into(),
-        focused,
-    }
+    Event::new("c", EventBody::ChatFocus { focused })
 }
 
 fn last_delta(id: &str, text: &str) -> Event {
-    Event::LastDelta {
-        id: id.into(),
-        text: text.into(),
-    }
+    Event::new(id, EventBody::LastDelta { text: text.into() })
 }
 
 fn done(id: &str) -> Event {
-    Event::Done { id: id.into() }
+    Event::new(id, EventBody::Done)
 }
 
 fn queue_with_paused_run(confirm_id: &str) -> Event {
-    Event::TaskQueue {
-        id: "q".into(),
-        snapshot: TaskQueueSnapshot {
-            items: vec![QueueItem::Run {
-                run: TaskRunId(3),
-                task: TaskId(1),
-                task_name: "digest".to_string().try_into().unwrap(),
-                state: TaskRunState::NeedsInput,
-                prompt: Some(PausedPrompt {
-                    confirm_id: confirm_id.into(),
-                    tool: "bash".into(),
-                    script: "rm x".into(),
-                    matched_pattern: "rm".into(),
-                    host: None,
-                    source: assistd_ipc::ConfirmSource::Main,
-                }),
-                started_at: None,
-            }],
-            lanes: Vec::new(),
-            paused: false,
-            held: None,
+    Event::new(
+        "q",
+        EventBody::TaskQueue {
+            snapshot: TaskQueueSnapshot {
+                items: vec![QueueItem::Run {
+                    run: TaskRunId(3),
+                    task: TaskId(1),
+                    task_name: "digest".to_string().try_into().unwrap(),
+                    state: TaskRunState::NeedsInput,
+                    prompt: Some(PausedPrompt {
+                        confirm_id: confirm_id.into(),
+                        tool: "bash".into(),
+                        script: "rm x".into(),
+                        matched_pattern: "rm".into(),
+                        host: None,
+                        source: assistd_ipc::ConfirmSource::Main,
+                    }),
+                    started_at: None,
+                }],
+                lanes: Vec::new(),
+                paused: false,
+                held: None,
+            },
         },
-    }
+    )
 }
 
 fn task_reply(reply: &str) -> Event {
-    Event::TaskReply {
-        id: "t".into(),
-        run: TaskRunId(3),
-        task_name: "digest".to_string().try_into().unwrap(),
-        reply: reply.into(),
-    }
+    Event::new(
+        "t",
+        EventBody::TaskReply {
+            run: TaskRunId(3),
+            task_name: "digest".to_string().try_into().unwrap(),
+            reply: reply.into(),
+        },
+    )
 }
 
 fn expect_announce(h: &mut Harness) -> NoticeKind {
@@ -198,11 +198,13 @@ fn dismissing_a_busy_turn_interrupts_and_keeps_it_hidden() {
     h.apply(DriverInput::Wake);
     h.expect_show();
     assert!(h.apply(DriverInput::Dismissed));
-    h.event(Event::ToolCall {
-        id: "a".into(),
-        name: "bash".into(),
-        args: json!({"command": "ls"}),
-    });
+    h.event(Event::new(
+        "a",
+        EventBody::ToolCall {
+            name: "bash".into(),
+            args: json!({"command": "ls"}),
+        },
+    ));
     h.apply(DriverInput::Wake);
     h.driver.tick();
     h.expect_nothing();

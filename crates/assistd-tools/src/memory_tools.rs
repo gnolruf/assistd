@@ -908,8 +908,9 @@ mod tests {
         tool.invoke(json!({"action": "save", "key": "editor_preference", "text": "neovim"}))
             .await
             .unwrap();
-        let keys = ops.list("").await.unwrap();
-        assert_eq!(keys, vec!["editor_preference"]);
+        let rows = ops.list_full("").await.unwrap();
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, ["editor_preference"]);
         assert_eq!(
             ops.load("editor_preference").await.unwrap().as_deref(),
             Some("neovim")

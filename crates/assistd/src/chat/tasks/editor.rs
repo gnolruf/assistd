@@ -3,8 +3,8 @@
 
 use assistd_config::ListItem;
 use assistd_ipc::{
-    HostName, KeptRuns, ModeRecommendation, PermissionMode, Plan, Request, TaskId, TaskName,
-    TaskPrompt, TaskSpec, TaskTrigger,
+    HostName, KeptRuns, ModeRecommendation, PermissionMode, Plan, Request, RequestBody, TaskId,
+    TaskName, TaskPrompt, TaskRequest, TaskSpec, TaskTrigger,
 };
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -586,7 +586,9 @@ impl TaskEditor {
             Ok(spec) => {
                 self.error = None;
                 let task = self.task;
-                Some(outbox.send(PendingOp::Save, |id| Request::TaskSave { id, task, spec }))
+                Some(outbox.send(PendingOp::Save, |id| {
+                    Request::new(id, RequestBody::Task(TaskRequest::Save { task, spec }))
+                }))
             }
             Err(message) => {
                 self.error = Some(message);
@@ -648,10 +650,14 @@ fn host_values(hosts: &[HostName]) -> Vec<toml::Value> {
 /// A row for `trigger` of task `task`, its check sent through `outbox`.
 fn checked_row(task: Option<TaskId>, trigger: TaskTrigger, outbox: &mut Outbox) -> TriggerRow {
     let check = trigger.clone();
-    let request = outbox.send(PendingOp::CheckTrigger, |id| Request::TaskCheckTrigger {
-        id,
-        task,
-        trigger: check,
+    let request = outbox.send(PendingOp::CheckTrigger, |id| {
+        Request::new(
+            id,
+            RequestBody::Task(TaskRequest::CheckTrigger {
+                task,
+                trigger: check,
+            }),
+        )
     });
     TriggerRow {
         trigger,

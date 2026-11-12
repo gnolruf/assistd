@@ -1,4 +1,4 @@
-//! The image formats and size limits of a [`Request::Query`](crate::Request::Query)'s
+//! The image formats and size limits of a [`RequestBody::Query`](crate::RequestBody::Query)'s
 //! attachments.
 
 use std::fmt;

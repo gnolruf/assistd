@@ -9,10 +9,11 @@ use tokio::sync::{Notify, watch};
 
 use assistd_embed::{EmbedError, EmbedderHandle};
 use assistd_ipc::{
-    Component, ComponentReadiness, EventKind, HostName, ImageAttachment, ImageMime, ListenPhase,
-    McpServerState, McpTransportKind, PermissionMode, PlanMode, PlanVerdict, PresenceState,
-    PresenceTarget, QueueItem, StartupComponent, StatusKind, StatusSeverity, SubscribeFilter,
-    TaskId, TaskQueueOp, TaskRunId, TaskRunState, TaskSpec, VoiceCaptureState,
+    Component, ComponentReadiness, EventBody, EventKind, HostName, ImageAttachment, ImageMime,
+    ListenPhase, McpServerState, McpTransportKind, PermissionMode, PlanMode, PlanVerdict,
+    PresenceState, PresenceTarget, QueueItem, RequestBody, StartupComponent, StatusKind,
+    StatusSeverity, SubscribeFilter, TaskId, TaskQueueOp, TaskRequest, TaskRunId, TaskRunState,
+    TaskSpec, VoiceCaptureState,
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
@@ -105,78 +106,79 @@ async fn dispatch(state: &Arc<AppState>, req: Request) -> (Result<(), DispatchEr
 }
 
 fn query(id: &str, text: &str) -> Request {
-    Request::Query {
-        id: id.into(),
-        text: text.into(),
-        attachments: Vec::new(),
-        plan: PlanMode::Off,
-    }
+    Request::new(
+        id,
+        RequestBody::Query {
+            text: text.into(),
+            attachments: Vec::new(),
+            plan: PlanMode::Off,
+        },
+    )
 }
 
 fn done(id: &str) -> Event {
-    Event::Done { id: id.into() }
+    Event::new(id, EventBody::Done)
 }
 
 fn error(id: &str, message: &str) -> Event {
-    Event::Error {
-        id: id.into(),
-        message: message.into(),
-    }
+    Event::new(
+        id,
+        EventBody::Error {
+            message: message.into(),
+        },
+    )
 }
 
 fn voice_state(id: &str, state: VoiceCaptureState) -> Event {
-    Event::VoiceState {
-        id: id.into(),
-        state,
-    }
+    Event::new(id, EventBody::VoiceState { state })
 }
 
 fn listen_state(id: &str, phase: ListenPhase) -> Event {
-    Event::ListenState {
-        id: id.into(),
-        phase,
-    }
+    Event::new(id, EventBody::ListenState { phase })
 }
 
 #[tokio::test]
 async fn presence_requests_emit_expected_events() {
-    let presence = |id: &str, state| Event::Presence {
-        id: id.into(),
-        state,
-    };
+    let presence = |id: &str, state| Event::new(id, EventBody::Presence { state });
     assert_request_events(vec![
         (
             PresenceTarget::Drowsy,
-            Request::GetPresence { id: "gp".into() },
+            Request::new("gp", RequestBody::GetPresence),
             vec![presence("gp", PresenceState::Drowsy), done("gp")],
             PresenceState::Drowsy,
         ),
         (
             PresenceTarget::Active,
-            Request::SetPresence {
-                id: "sp".into(),
-                target: PresenceTarget::Sleeping,
-            },
+            Request::new(
+                "sp",
+                RequestBody::SetPresence {
+                    target: PresenceTarget::Sleeping,
+                },
+            ),
             vec![presence("sp", PresenceState::Sleeping), done("sp")],
             PresenceState::Sleeping,
         ),
         (
             PresenceTarget::Active,
-            Request::SetPresence {
-                id: "sp".into(),
-                target: PresenceTarget::Active,
-            },
+            Request::new(
+                "sp",
+                RequestBody::SetPresence {
+                    target: PresenceTarget::Active,
+                },
+            ),
             vec![presence("sp", PresenceState::Active), done("sp")],
             PresenceState::Active,
         ),
         (
             PresenceTarget::Active,
-            Request::ConfirmResponse {
-                id: "cr".into(),
-                confirm_id: "x".into(),
-                allow: true,
-                always: false,
-            },
+            Request::new(
+                "cr",
+                RequestBody::ConfirmResponse {
+                    confirm_id: "x".into(),
+                    allow: true,
+                    always: false,
+                },
+            ),
             vec![error(
                 "cr",
                 "ConfirmResponse(confirm_id=x) received with no matching ConfirmRequest in \
@@ -209,22 +211,35 @@ async fn capabilities_report_disabled_tools_before_the_model() {
     state.subsystems.tools_disabled = Some(ToolsDisabled::BwrapMissing(ProgramError::NotOnPath));
     let (result, events) = dispatch(
         &Arc::new(state),
-        Request::GetCapabilities { id: "c".into() },
+        Request::new("c", RequestBody::GetCapabilities),
     )
     .await;
     result.expect("dispatch");
-    let [status, Event::Capabilities { .. }, Event::Done { .. }] = events.as_slice() else {
+    let [
+        status,
+        Event {
+            body: EventBody::Capabilities { .. },
+            ..
+        },
+        Event {
+            body: EventBody::Done,
+            ..
+        },
+    ] = events.as_slice()
+    else {
         panic!("expected status, capabilities, done; got {events:?}");
     };
     assert_eq!(
         *status,
-        Event::Status {
-            id: "c".into(),
-            severity: StatusSeverity::Error,
-            component: Component::Agent,
-            event: StatusKind::StartupFailed,
-            message: ToolsDisabled::BwrapMissing(ProgramError::NotOnPath).to_string(),
-        }
+        Event::new(
+            "c",
+            EventBody::Status {
+                severity: StatusSeverity::Error,
+                component: Component::Agent,
+                event: StatusKind::StartupFailed,
+                message: ToolsDisabled::BwrapMissing(ProgramError::NotOnPath).to_string()
+            }
+        )
     );
 }
 
@@ -245,13 +260,9 @@ fn state_mid_startup() -> Arc<AppState> {
 #[tokio::test]
 async fn readiness_lists_every_background_subsystem() {
     let state = state_mid_startup();
-    let (result, events) = dispatch(&state, Request::GetReadiness { id: "r".into() }).await;
+    let (result, events) = dispatch(&state, Request::new("r", RequestBody::GetReadiness)).await;
     result.expect("dispatch");
-    let readiness = |component, state| Event::Readiness {
-        id: "r".into(),
-        component,
-        state,
-    };
+    let readiness = |component, state| Event::new("r", EventBody::Readiness { component, state });
     let mcp = |server: &str| StartupComponent::Mcp {
         server: server.into(),
     };
@@ -284,11 +295,13 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
     let state = state_mid_startup();
     let (result, events) = dispatch(
         &state,
-        Request::MemorySemanticSearch {
-            id: "s".into(),
-            query: "the rust daemon".into(),
-            limit: 3,
-        },
+        Request::new(
+            "s",
+            RequestBody::MemorySemanticSearch {
+                query: "the rust daemon".into(),
+                limit: 3,
+            },
+        ),
     )
     .await;
     assert!(matches!(result, Err(DispatchError::Embed(_))), "{result:?}");
@@ -300,7 +313,7 @@ async fn semantic_requests_before_embedding_is_up_say_it_is_starting() {
         )]
     );
 
-    let (result, events) = dispatch(&state, Request::MemoryReindex { id: "x".into() }).await;
+    let (result, events) = dispatch(&state, Request::new("x", RequestBody::MemoryReindex)).await;
     assert!(result.is_err());
     assert_eq!(
         events,
@@ -332,26 +345,28 @@ async fn dispatch_query_failed_step_ends_with_error_only() {
         "{err:?}"
     );
     assert!(
-        !events.iter().any(|e| matches!(e, Event::Done { .. })),
+        !events.iter().any(|e| matches!(&e.body, EventBody::Done)),
         "{events:?}"
     );
     assert!(
-        matches!(events.last(), Some(Event::Error { id, .. }) if id == "q-fail"),
+        matches!(events.last(), Some(Event { id, body: EventBody::Error { .. } }) if id == "q-fail"),
         "{events:?}"
     );
 }
 
 #[tokio::test]
 async fn dispatch_query_refuses_images_without_vision() {
-    let request = Request::Query {
-        id: "q-img".into(),
-        text: "what is this?".into(),
-        attachments: vec![ImageAttachment::from_bytes(
-            ImageMime::Png,
-            b"\x89PNG\r\n\x1a\n",
-        )],
-        plan: PlanMode::Off,
-    };
+    let request = Request::new(
+        "q-img",
+        RequestBody::Query {
+            text: "what is this?".into(),
+            attachments: vec![ImageAttachment::from_bytes(
+                ImageMime::Png,
+                b"\x89PNG\r\n\x1a\n",
+            )],
+            plan: PlanMode::Off,
+        },
+    );
     let (res, events) = dispatch(&default_state(), request).await;
 
     let err = res.unwrap_err();
@@ -367,15 +382,17 @@ async fn dispatch_query_refuses_images_without_vision() {
 
 #[tokio::test]
 async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
-    let request = Request::Query {
-        id: "q-html".into(),
-        text: "render this".into(),
-        attachments: vec![ImageAttachment::from_bytes(
-            ImageMime::Jpeg,
-            b"\x89PNG\r\n\x1a\n",
-        )],
-        plan: PlanMode::Off,
-    };
+    let request = Request::new(
+        "q-html",
+        RequestBody::Query {
+            text: "render this".into(),
+            attachments: vec![ImageAttachment::from_bytes(
+                ImageMime::Jpeg,
+                b"\x89PNG\r\n\x1a\n",
+            )],
+            plan: PlanMode::Off,
+        },
+    );
     let (res, events) = dispatch(&default_state(), request).await;
 
     let err = res.unwrap_err();
@@ -387,7 +404,7 @@ async fn dispatch_query_refuses_image_whose_content_does_not_match_its_mime() {
         "{err:?}"
     );
     assert!(
-        matches!(events.as_slice(), [Event::Error { id, .. }] if id == "q-html"),
+        matches!(events.as_slice(), [Event { id, body: EventBody::Error { .. } }] if id == "q-html"),
         "{events:?}"
     );
 }
@@ -434,27 +451,38 @@ async fn dispatch_query_forwards_tool_call_and_result_events() {
 
     let tool_call = events
         .iter()
-        .find(|e| matches!(e, Event::ToolCall { .. }))
-        .expect("expected Event::ToolCall in stream");
+        .find(|e| {
+            matches!(
+                e,
+                Event {
+                    body: EventBody::ToolCall { .. },
+                    ..
+                }
+            )
+        })
+        .expect("expected EventBody::ToolCall in stream");
     assert_eq!(
         *tool_call,
-        Event::ToolCall {
-            id: "req-42".into(),
-            name: "run".into(),
-            args: serde_json::json!({"command": "echo hi"}),
-        },
+        Event::new(
+            "req-42",
+            EventBody::ToolCall {
+                name: "run".into(),
+                args: serde_json::json!({"command": "echo hi"})
+            }
+        ),
         "the IPC id must be the request id, not the model's call id"
     );
 
     let output = events
         .iter()
         .find_map(|e| match e {
-            Event::ToolResult { id, name, result } if id == "req-42" && name == "run" => {
-                result["output"].as_str()
-            }
+            Event {
+                id,
+                body: EventBody::ToolResult { name, result },
+            } if id == "req-42" && name == "run" => Some(result.output.as_str()),
             _ => None,
         })
-        .expect("expected Event::ToolResult in stream");
+        .expect("expected EventBody::ToolResult in stream");
     assert!(output.starts_with("hi\n"), "{output:?}");
     assert!(output.contains("[exit:0"), "{output:?}");
 
@@ -524,7 +552,11 @@ async fn completed_turn_broadcasts_a_generated_session_title() {
 
     let (id, title) = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Event::SessionTitle { id, title, .. } = bus.recv().await.expect("bus open") {
+            if let Event {
+                id,
+                body: EventBody::SessionTitle { title, .. },
+            } = bus.recv().await.expect("bus open")
+            {
                 return (id, title);
             }
         }
@@ -589,21 +621,25 @@ fn state_with_voice(voice: Arc<MockVoice>) -> Arc<AppState> {
 #[tokio::test]
 async fn dispatch_ptt_stop_with_text_runs_query() {
     let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into())));
-    let (res, events) = dispatch(&state, Request::PttStop { id: "p3".into() }).await;
+    let (res, events) = dispatch(&state, Request::new("p3", RequestBody::PttStop)).await;
     res.unwrap();
     assert_eq!(
         events,
         [
             voice_state("p3", VoiceCaptureState::Transcribing),
             voice_state("p3", VoiceCaptureState::Idle),
-            Event::Transcription {
-                id: "p3".into(),
-                text: "hello world".into()
-            },
-            Event::Delta {
-                id: "p3".into(),
-                text: "hello world".into()
-            },
+            Event::new(
+                "p3",
+                EventBody::Transcription {
+                    text: "hello world".into()
+                }
+            ),
+            Event::new(
+                "p3",
+                EventBody::Delta {
+                    text: "hello world".into()
+                }
+            ),
             done("p3"),
         ]
     );
@@ -612,12 +648,12 @@ async fn dispatch_ptt_stop_with_text_runs_query() {
 #[tokio::test]
 async fn interrupt_between_ptt_press_and_release_drops_the_prompt() {
     let state = state_with_voice(MockVoice::new(Ok(()), Ok("hello world".into())));
-    let (res, _) = dispatch(&state, Request::PttStart { id: "p".into() }).await;
+    let (res, _) = dispatch(&state, Request::new("p", RequestBody::PttStart)).await;
     res.unwrap();
-    let (res, _) = dispatch(&state, Request::InterruptTurn { id: "int".into() }).await;
+    let (res, _) = dispatch(&state, Request::new("int", RequestBody::InterruptTurn)).await;
     res.unwrap();
 
-    let (res, events) = dispatch(&state, Request::PttStop { id: "p".into() }).await;
+    let (res, events) = dispatch(&state, Request::new("p", RequestBody::PttStop)).await;
     res.unwrap();
     assert_eq!(
         events,
@@ -666,12 +702,12 @@ async fn ptt_stop_waits_for_a_press_still_opening_the_mic() {
     .build();
     let press = tokio::spawn({
         let state = state.clone();
-        async move { dispatch(&state, Request::PttStart { id: "p".into() }).await }
+        async move { dispatch(&state, Request::new("p", RequestBody::PttStart)).await }
     });
     tokio::task::yield_now().await;
     let release = tokio::spawn({
         let state = state.clone();
-        async move { dispatch(&state, Request::PttStop { id: "s".into() }).await }
+        async move { dispatch(&state, Request::new("s", RequestBody::PttStop)).await }
     });
     tokio::task::yield_now().await;
     voice.open.notify_one();
@@ -750,13 +786,13 @@ async fn listen_requests_drive_the_listener() {
     let cases = [
         (
             false,
-            Request::ListenToggle { id: "l".into() },
+            Request::new("l", RequestBody::ListenToggle),
             vec![listen_state("l", ListenPhase::Armed), done("l")],
             true,
         ),
         (
             true,
-            Request::ListenToggle { id: "l".into() },
+            Request::new("l", RequestBody::ListenToggle),
             vec![listen_state("l", ListenPhase::Off), done("l")],
             false,
         ),
@@ -780,7 +816,7 @@ async fn listen_requests_drive_the_listener() {
 async fn ptt_takes_the_mic_from_listening_and_returns_it_on_release() {
     let cases = [
         (None, true),
-        (Some(Request::ListenToggle { id: "t".into() }), false),
+        (Some(Request::new("t", RequestBody::ListenToggle)), false),
     ];
     for (while_held, listening_after_release) in cases {
         let label = format!("{:?} while held", while_held.as_ref().map(Request::kind));
@@ -792,7 +828,7 @@ async fn ptt_takes_the_mic_from_listening_and_returns_it_on_release() {
         }
         .build();
 
-        let (res, events) = dispatch(&state, Request::PttStart { id: "p".into() }).await;
+        let (res, events) = dispatch(&state, Request::new("p", RequestBody::PttStart)).await;
         res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
         assert_eq!(
             events,
@@ -806,7 +842,7 @@ async fn ptt_takes_the_mic_from_listening_and_returns_it_on_release() {
             let (res, _) = dispatch(&state, request).await;
             res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
         }
-        let (res, _) = dispatch(&state, Request::PttStop { id: "s".into() }).await;
+        let (res, _) = dispatch(&state, Request::new("s", RequestBody::PttStop)).await;
         res.unwrap_or_else(|e| panic!("{label}: {e:#}"));
         assert_eq!(listener.is_active(), listening_after_release, "{label}");
     }
@@ -1151,27 +1187,29 @@ async fn act_runs(plan: PlanMode, answer: Approval, steps: &[(&str, serde_json::
         ..StateParts::default()
     }
     .build();
-    let request = Request::Query {
-        id: "p".into(),
-        text: "tidy up".into(),
-        attachments: Vec::new(),
-        plan,
-    };
+    let request = Request::new(
+        "p",
+        RequestBody::Query {
+            text: "tidy up".into(),
+            attachments: Vec::new(),
+            plan,
+        },
+    );
     let (tx, mut rx) = mpsc::channel::<Event>(16);
-    let router = ConfirmRouter::new(request.id().into(), tx.clone(), CONFIRM_TIMEOUT, None);
+    let router = ConfirmRouter::new(request.id.clone(), tx.clone(), CONFIRM_TIMEOUT, None);
     let client = async {
         while let Some(event) = rx.recv().await {
-            match event {
-                Event::PlanReview { review_id, .. } => {
+            match event.body {
+                EventBody::PlanReview { review_id, .. } => {
                     let accept = PlanVerdict::Accept {
                         mode: PermissionMode::Manual,
                     };
                     router.route_verdict(&review_id, accept).unwrap();
                 }
-                Event::ConfirmRequest { confirm_id, .. } => {
+                EventBody::ConfirmRequest { confirm_id, .. } => {
                     router.route_response(&confirm_id, answer).unwrap();
                 }
-                Event::Done { .. } => break,
+                EventBody::Done => break,
                 _ => {}
             }
         }
@@ -1282,7 +1320,7 @@ async fn interrupt_turn_preempts_hung_tool() {
     let query = tokio::spawn(async move { dispatch(&query_state, query("q", "go")).await });
 
     entered.notified().await;
-    let (res, _) = dispatch(&state, Request::InterruptTurn { id: "int".into() }).await;
+    let (res, _) = dispatch(&state, Request::new("int", RequestBody::InterruptTurn)).await;
     res.unwrap();
 
     let (res, events) = tokio::time::timeout(Duration::from_secs(5), query)
@@ -1306,7 +1344,7 @@ async fn interrupt_drops_a_turn_still_waiting_to_start() {
     let queued = tokio::spawn(async move { dispatch(&query_state, query("q", "abandoned")).await });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (res, _) = dispatch(&state, Request::InterruptTurn { id: "int".into() }).await;
+    let (res, _) = dispatch(&state, Request::new("int", RequestBody::InterruptTurn)).await;
     res.unwrap();
     let (res, events) = tokio::time::timeout(Duration::from_secs(5), queued)
         .await
@@ -1379,11 +1417,13 @@ async fn query_turn_outlives_the_dispatch_envelope() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, Event::ToolResult { id, .. } if id == "q")),
+            .any(|e| matches!(e, Event { id, body: EventBody::ToolResult { .. } } if id == "q")),
         "tool result never reached the client: {events:?}"
     );
     assert!(
-        !events.iter().any(|e| matches!(e, Event::Error { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(&e.body, EventBody::Error { .. })),
         "envelope cut the turn short: {events:?}"
     );
     assert_eq!(events.last(), Some(&done("q")), "{events:?}");
@@ -1605,8 +1645,8 @@ async fn append_turn(
 fn history(events: &[Event]) -> Vec<(Role, &str)> {
     events
         .iter()
-        .filter_map(|e| match e {
-            Event::HistoryEntry { role, content, .. } => Some((*role, content.as_str())),
+        .filter_map(|e| match &e.body {
+            EventBody::HistoryEntry { role, content, .. } => Some((*role, content.as_str())),
             _ => None,
         })
         .collect()
@@ -1617,10 +1657,12 @@ async fn fork_creates_branch_and_switches() {
     let (state, conv, session, main_branch) = fresh_branch_state().await;
     let (res, events) = dispatch(
         &state,
-        Request::Fork {
-            id: "rq".into(),
-            name: "experiment".into(),
-        },
+        Request::new(
+            "rq",
+            RequestBody::Fork {
+                name: "experiment".into(),
+            },
+        ),
     )
     .await;
     res.unwrap();
@@ -1636,8 +1678,8 @@ async fn fork_creates_branch_and_switches() {
     );
     assert!(
         events.iter().any(|e| matches!(
-            e,
-            Event::BranchSwitched { branch_id, name, parent_branch_name, .. }
+            &e.body,
+            EventBody::BranchSwitched { branch_id, name, parent_branch_name, .. }
                 if *branch_id == Some(active_branch.0)
                     && name == "experiment"
                     && parent_branch_name.as_deref() == Some("main")
@@ -1654,12 +1696,12 @@ async fn branches_lists_active_session_first() {
         .await
         .unwrap();
 
-    let (res, events) = dispatch(&state, Request::Branches { id: "rq".into() }).await;
+    let (res, events) = dispatch(&state, Request::new("rq", RequestBody::Branches)).await;
     res.unwrap();
     let infos: Vec<_> = events
         .iter()
-        .filter_map(|e| match e {
-            Event::BranchInfo {
+        .filter_map(|e| match &e.body {
+            EventBody::BranchInfo {
                 name,
                 is_active_session,
                 ..
@@ -1679,15 +1721,17 @@ async fn switch_replays_history_into_event_stream() {
 
     let (res, events) = dispatch(
         &state,
-        Request::Switch {
-            id: "rq".into(),
-            target: "alt".into(),
-        },
+        Request::new(
+            "rq",
+            RequestBody::Switch {
+                target: "alt".into(),
+            },
+        ),
     )
     .await;
     res.unwrap();
     assert!(
-        matches!(events.first(), Some(Event::BranchSwitched { name, .. }) if name == "alt"),
+        matches!(events.first(), Some(Event { body: EventBody::BranchSwitched { name, .. }, .. }) if name == "alt"),
         "{events:?}"
     );
     assert_eq!(
@@ -1704,10 +1748,12 @@ async fn resume_or_new_with_huge_window_resumes_instead_of_panicking() {
 
     let (res, events) = dispatch(
         &state,
-        Request::ResumeOrNew {
-            id: "rq".into(),
-            recency_secs: i64::MAX as u64,
-        },
+        Request::new(
+            "rq",
+            RequestBody::ResumeOrNew {
+                recency_secs: i64::MAX as u64,
+            },
+        ),
     )
     .await;
     res.unwrap();
@@ -1725,15 +1771,14 @@ async fn undo_drops_last_turn_and_emits_count() {
     append_turn(&conv, main_branch, "first", "a").await;
     append_turn(&conv, main_branch, "second", "b").await;
 
-    let (res, events) = dispatch(&state, Request::Undo { id: "rq".into() }).await;
+    let (res, events) = dispatch(&state, Request::new("rq", RequestBody::Undo)).await;
     res.unwrap();
     let applied = events
         .iter()
-        .find_map(|e| match e {
-            Event::UndoApplied {
+        .find_map(|e| match &e.body {
+            EventBody::UndoApplied {
                 removed_messages,
                 last_user_text,
-                ..
             } => Some((*removed_messages, last_user_text.as_deref())),
             _ => None,
         })
@@ -1756,8 +1801,8 @@ async fn branch_operations_do_not_wait_for_the_model_lane() {
     let (state, _conv, _session, _branch) = fresh_branch_state().await;
     let task_run_lane = state.runtime.agent_turn_lock.clone().lock_owned().await;
     for request in [
-        Request::Undo { id: "undo".into() },
-        Request::NewSession { id: "new".into() },
+        Request::new("undo", RequestBody::Undo),
+        Request::new("new", RequestBody::NewSession),
     ] {
         let (res, _) = tokio::time::timeout(Duration::from_secs(5), dispatch(&state, request))
             .await
@@ -1770,7 +1815,7 @@ async fn branch_operations_do_not_wait_for_the_model_lane() {
 #[tokio::test]
 async fn new_session_writes_no_rows_until_the_first_message() {
     let (state, conv, session, _branch) = fresh_branch_state().await;
-    let (res, events) = dispatch(&state, Request::NewSession { id: "rq".into() }).await;
+    let (res, events) = dispatch(&state, Request::new("rq", RequestBody::NewSession)).await;
     res.unwrap();
 
     let (unsaved_session, unsaved_branch) = state.runtime.session_ctx.current().await;
@@ -1779,15 +1824,17 @@ async fn new_session_writes_no_rows_until_the_first_message() {
     assert_eq!(
         events,
         [
-            Event::BranchSwitched {
-                id: "rq".into(),
-                branch_id: None,
-                session_id: unsaved_session.to_string(),
-                session_title: None,
-                name: "main".into(),
-                parent_branch_name: None,
-                fork_point_seq: None,
-            },
+            Event::new(
+                "rq",
+                EventBody::BranchSwitched {
+                    branch_id: None,
+                    session_id: unsaved_session.to_string(),
+                    session_title: None,
+                    name: "main".into(),
+                    parent_branch_name: None,
+                    fork_point_seq: None
+                }
+            ),
             done("rq"),
         ]
     );
@@ -1819,16 +1866,13 @@ async fn new_session_writes_no_rows_until_the_first_message() {
 #[tokio::test]
 async fn resume_or_new_keeps_an_unsaved_session() {
     let (state, conv, _session, _branch) = fresh_branch_state().await;
-    let (res, _) = dispatch(&state, Request::NewSession { id: "new".into() }).await;
+    let (res, _) = dispatch(&state, Request::new("new", RequestBody::NewSession)).await;
     res.unwrap();
     let (unsaved_session, _) = state.runtime.session_ctx.current().await;
 
     let (res, events) = dispatch(
         &state,
-        Request::ResumeOrNew {
-            id: "rq".into(),
-            recency_secs: 0,
-        },
+        Request::new("rq", RequestBody::ResumeOrNew { recency_secs: 0 }),
     )
     .await;
     res.unwrap();
@@ -1839,7 +1883,7 @@ async fn resume_or_new_keeps_an_unsaved_session() {
     assert!(
         matches!(
             events.first(),
-            Some(Event::BranchSwitched { branch_id: None, session_id, .. })
+            Some(Event { body: EventBody::BranchSwitched { branch_id: None, session_id, .. }, .. })
                 if *session_id == unsaved_session.to_string()
         ),
         "{events:?}"
@@ -2257,15 +2301,21 @@ async fn task_state_with(
 async fn queue_task_run(state: &Arc<AppState>, task: TaskId) -> TaskRunId {
     let (res, events) = dispatch(
         state,
-        Request::TaskRun {
-            id: "t".into(),
-            task,
-        },
+        Request::new("t", RequestBody::Task(TaskRequest::Run { task })),
     )
     .await;
     res.unwrap();
     match events.as_slice() {
-        [Event::TaskRunQueued { run, .. }, Event::Done { .. }] => *run,
+        [
+            Event {
+                body: EventBody::TaskRunQueued { run, .. },
+                ..
+            },
+            Event {
+                body: EventBody::Done,
+                ..
+            },
+        ] => *run,
         other => panic!("unexpected events: {other:?}"),
     }
 }
@@ -2300,11 +2350,9 @@ async fn a_finished_task_run_leaves_the_main_conversation_untouched() {
 
     let run = queue_task_run(&state, task).await;
     let replied = loop {
-        match bus.recv().await.unwrap() {
-            Event::TaskRun {
-                run: seen, event, ..
-            } if seen == run => {
-                if let Event::Delta { text, .. } = *event {
+        match bus.recv().await.unwrap().body {
+            EventBody::TaskRun { run: seen, event } if seen == run => {
+                if let EventBody::Delta { text } = event.body {
                     break text;
                 }
             }
@@ -2355,8 +2403,8 @@ async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
     settle_task_runs(&state).await;
 
     assert!(matches!(
-        announced,
-        Event::TaskReply { reply, .. } if reply == "summarize my inbox"
+        announced.body,
+        EventBody::TaskReply { reply, .. } if reply == "summarize my inbox"
     ));
     assert_eq!(recorder.calls(), ["summarize my inbox"]);
 }
@@ -2387,10 +2435,7 @@ async fn a_cancelled_task_run_leaves_the_main_conversation_untouched() {
     entered.notified().await;
     let (res, events) = dispatch(
         &state,
-        Request::TaskCancel {
-            id: "c".into(),
-            run,
-        },
+        Request::new("c", RequestBody::Task(TaskRequest::Cancel { run })),
     )
     .await;
     res.unwrap();
@@ -2411,7 +2456,11 @@ async fn a_cancelled_task_run_leaves_the_main_conversation_untouched() {
 
 async fn change_task_queue(state: &Arc<AppState>, op: TaskQueueOp) {
     let label = format!("{op:?}");
-    let (res, events) = dispatch(state, Request::TaskQueue { id: "q".into(), op }).await;
+    let (res, events) = dispatch(
+        state,
+        Request::new("q", RequestBody::Task(TaskRequest::Queue { op })),
+    )
+    .await;
     res.unwrap();
     assert_eq!(events, [done("q")], "{label}");
 }
@@ -2527,14 +2576,14 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     let run = queue_task_run(&state, task).await;
     let mut results = Vec::new();
     let (confirm_id, script) = loop {
-        let Event::TaskRun { event, .. } = bus.recv().await.unwrap() else {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
             continue;
         };
-        match *event {
-            Event::ConfirmRequest {
+        match event.body {
+            EventBody::ConfirmRequest {
                 confirm_id, script, ..
             } => break (confirm_id, script),
-            Event::ToolResult { result, .. } => results.push(result),
+            EventBody::ToolResult { result, .. } => results.push(result),
             _ => {}
         }
     };
@@ -2549,24 +2598,26 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
 
     let (res, events) = dispatch(
         &state,
-        Request::TaskConfirm {
-            id: "a".into(),
-            run,
-            confirm_id,
-            allow: true,
-            always: false,
-        },
+        Request::new(
+            "a",
+            RequestBody::Task(TaskRequest::Confirm {
+                run,
+                confirm_id,
+                allow: true,
+                always: false,
+            }),
+        ),
     )
     .await;
     res.unwrap();
     assert_eq!(events, [done("a")]);
     while results.len() < 2 {
-        let Event::TaskRun { event, .. } = bus.recv().await.unwrap() else {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
             continue;
         };
-        match *event {
-            Event::ConfirmRequest { script, .. } => panic!("asked again: {script}"),
-            Event::ToolResult { result, .. } => results.push(result),
+        match event.body {
+            EventBody::ConfirmRequest { script, .. } => panic!("asked again: {script}"),
+            EventBody::ToolResult { result, .. } => results.push(result),
             _ => {}
         }
     }
@@ -2575,7 +2626,7 @@ async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others(
     assert!(
         results
             .iter()
-            .all(|result| result.to_string().contains("fetched")),
+            .all(|result| result.output.contains("fetched")),
         "the parked fetch outlived the tool deadline: {results:?}"
     );
     assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
@@ -2602,7 +2653,7 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
 
     let run = queue_task_run(&state, task).await;
     let prompt = loop {
-        if let Event::TaskQueue { snapshot, .. } = bus.recv().await.unwrap()
+        if let EventBody::TaskQueue { snapshot } = bus.recv().await.unwrap().body
             && let Some(prompt) = snapshot.items.into_iter().find_map(|item| match item {
                 QueueItem::Run { prompt, .. } => prompt,
                 QueueItem::UserTurn { .. } => None,
@@ -2618,30 +2669,42 @@ async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_aski
 
     let (res, events) = dispatch(
         &state,
-        Request::TaskConfirm {
-            id: "a".into(),
-            run,
-            confirm_id: prompt.confirm_id.clone(),
-            allow: true,
-            always: true,
-        },
+        Request::new(
+            "a",
+            RequestBody::Task(TaskRequest::Confirm {
+                run,
+                confirm_id: prompt.confirm_id.clone(),
+                allow: true,
+                always: true,
+            }),
+        ),
     )
     .await;
     res.unwrap();
-    let [Event::Task { spec, .. }, Event::Done { .. }] = events.as_slice() else {
+    let [
+        Event {
+            body: EventBody::Task { spec, .. },
+            ..
+        },
+        Event {
+            body: EventBody::Done,
+            ..
+        },
+    ] = events.as_slice()
+    else {
         panic!("unexpected events: {events:?}");
     };
     assert_eq!(spec.allowed_hosts, [prompt.host.clone().unwrap()]);
     let mut fetched = 0;
     while fetched < 2 {
-        let Event::TaskRun { event, .. } = bus.recv().await.unwrap() else {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
             continue;
         };
-        match *event {
-            Event::ConfirmRequest { confirm_id, .. } if confirm_id != prompt.confirm_id => {
+        match event.body {
+            EventBody::ConfirmRequest { confirm_id, .. } if confirm_id != prompt.confirm_id => {
                 panic!("asked again about an allowed host")
             }
-            Event::ToolResult { .. } => fetched += 1,
+            EventBody::ToolResult { .. } => fetched += 1,
             _ => {}
         }
     }
@@ -2666,8 +2729,8 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
         kinds: kinds.clone(),
     });
     let run = queue_task_run(&state, task).await;
-    while !matches!(bus.recv().await.unwrap(), Event::TaskRun { event, .. }
-        if matches!(*event, Event::ConfirmRequest { .. }))
+    while !matches!(bus.recv().await.unwrap().body, EventBody::TaskRun { event, .. }
+        if matches!(event.body, EventBody::ConfirmRequest { .. }))
     {}
     drop(bus);
 
@@ -2677,15 +2740,27 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
         SubscribeFilter { kinds },
         tx,
     ));
-    assert!(matches!(rx.recv().await, Some(Event::TaskQueue { .. })));
+    assert!(matches!(
+        rx.recv().await,
+        Some(Event {
+            body: EventBody::TaskQueue { .. },
+            ..
+        })
+    ));
     for _ in 0..1024 {
-        state.runtime.publish(&Event::TaskQueue {
-            id: "flood".into(),
-            snapshot: state.task_queue_snapshot(),
-        });
+        state.runtime.publish(&Event::new(
+            "flood",
+            EventBody::TaskQueue {
+                snapshot: state.task_queue_snapshot(),
+            },
+        ));
     }
 
-    let Some(Event::TaskQueue { id, snapshot }) = rx.recv().await else {
+    let Some(Event {
+        id,
+        body: EventBody::TaskQueue { snapshot },
+    }) = rx.recv().await
+    else {
         panic!("no queue snapshot after the lag");
     };
     assert_eq!(id, "sub");
@@ -2697,15 +2772,17 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
             QueueItem::UserTurn { .. } => None,
         })
         .expect("the snapshot carries the paused prompt");
-    let Some(Event::TaskRun {
-        run: prompted,
-        event,
+    let Some(Event {
+        body: EventBody::TaskRun {
+            run: prompted,
+            event,
+        },
         ..
     }) = rx.recv().await
     else {
         panic!("the paused prompt was not resent");
     };
-    let Event::ConfirmRequest { confirm_id, .. } = *event else {
+    let EventBody::ConfirmRequest { confirm_id, .. } = event.body else {
         panic!("resent {event:?} instead of the prompt");
     };
     assert_eq!((prompted, confirm_id), (run, prompt.confirm_id.clone()));
@@ -2714,13 +2791,15 @@ async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run(
     subscriber.await.unwrap();
     let (res, _) = dispatch(
         &state,
-        Request::TaskConfirm {
-            id: "a".into(),
-            run,
-            confirm_id: prompt.confirm_id,
-            allow: false,
-            always: false,
-        },
+        Request::new(
+            "a",
+            RequestBody::Task(TaskRequest::Confirm {
+                run,
+                confirm_id: prompt.confirm_id,
+                allow: false,
+                always: false,
+            }),
+        ),
     )
     .await;
     res.unwrap();

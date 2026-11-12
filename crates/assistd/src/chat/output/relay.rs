@@ -11,10 +11,7 @@ use assistd_ipc::{
     RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayTraceEntry,
 };
 
-use super::{
-    OutputPane, ToolState, elapsed_text, exit_color, split_body, tool_block_label, tool_outcome,
-    tool_output,
-};
+use super::{OutputPane, ToolState, elapsed_text, exit_color, split_body, tool_block_label};
 use crate::chat::text::ellipsize;
 use crate::chat::theme::Theme;
 use crate::chat::ui::compact_count;
@@ -248,10 +245,12 @@ impl RelayStepTrace {
                 self.transcript.begin_tool_block(command);
             }
             RelayEvent::ToolResult { result, .. } => {
-                let (exit_code, duration_ms) = tool_outcome(&result);
-                self.finish_call(exit_code, duration_ms);
-                self.transcript
-                    .finish_tool_block(tool_output(&result), exit_code, duration_ms);
+                self.finish_call(result.exit_code, result.duration_ms);
+                self.transcript.finish_tool_block(
+                    result.output,
+                    result.exit_code,
+                    result.duration_ms,
+                );
             }
             RelayEvent::Compacting => {
                 self.calls.push(RelayEntry::Compaction {

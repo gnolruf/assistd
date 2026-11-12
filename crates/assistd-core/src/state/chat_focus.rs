@@ -8,7 +8,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-use assistd_ipc::Event;
+use assistd_ipc::{Event, EventBody};
 
 use super::AppState;
 
@@ -100,7 +100,7 @@ impl AppState {
     ) {
         self.runtime.chat_focus.report(peer_pid, focused);
         self.refresh_chat_focus(&id);
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     pub(super) async fn handle_chat_closed(
@@ -112,7 +112,7 @@ impl AppState {
         self.runtime.chat_focus.close(peer_pid);
         self.runtime.conversation.end();
         self.refresh_chat_focus(&id);
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     pub(super) async fn handle_get_chat_focus(
@@ -122,12 +122,9 @@ impl AppState {
     ) {
         let focused = self.refresh_chat_focus(&id);
         let _ = tx
-            .send(Event::ChatFocus {
-                id: id.clone(),
-                focused,
-            })
+            .send(Event::new(id.clone(), EventBody::ChatFocus { focused }))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     /// Whether a live chat has focus, broadcasting `ChatFocus` tagged with
@@ -135,10 +132,10 @@ impl AppState {
     pub(super) fn refresh_chat_focus(&self, id: &str) -> bool {
         let (focused, changed) = self.runtime.chat_focus.refresh();
         if let Some(focused) = changed {
-            self.runtime.publish(&Event::ChatFocus {
-                id: id.to_string(),
-                focused,
-            });
+            self.runtime.publish(&Event::new(
+                id.to_string(),
+                EventBody::ChatFocus { focused },
+            ));
         }
         focused
     }
