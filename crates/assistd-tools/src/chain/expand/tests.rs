@@ -19,7 +19,11 @@ fn joined(dir: &TempDir, name: &str) -> String {
 }
 
 fn expanded(word: Word) -> Vec<String> {
-    expand_words(&[word], &FileScope::Host).expect("expansion within budget")
+    expand_words(&[word], &FileScope::Host)
+        .expect("expansion within budget")
+        .into_iter()
+        .map(|word| word.text)
+        .collect()
 }
 
 #[test]

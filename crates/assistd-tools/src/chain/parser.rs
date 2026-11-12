@@ -270,7 +270,7 @@ fn push_char(input: &str, i: usize, text: &mut String) -> usize {
     i + ch.len_utf8()
 }
 
-type ParseFn = fn(&mut Parser) -> Result<Chain, ParseError>;
+type ParseFn<T> = fn(&mut Parser) -> Result<T, ParseError>;
 
 struct Parser {
     tokens: Peekable<IntoIter<Token>>,
@@ -312,14 +312,14 @@ impl Parser {
         let mut left = self.parse_cmd()?;
         while self.peek_op() == Some(Op::Pipe) {
             self.tokens.next();
-            let right = self.operand(Op::Pipe, Self::parse_cmd)?;
-            left = Chain::Pipe(Box::new(left), Box::new(right));
+            let right = self.operand(Op::Pipe, Self::parse_argv)?;
+            left = Chain::Pipe(Box::new(left), right);
         }
         Ok(left)
     }
 
     /// Parse the right-hand side of `op`, which must begin with a word.
-    fn operand(&mut self, op: Op, parse: ParseFn) -> Result<Chain, ParseError> {
+    fn operand<T>(&mut self, op: Op, parse: ParseFn<T>) -> Result<T, ParseError> {
         match self.tokens.peek() {
             None => Err(ParseError::TrailingOperator(op.as_str())),
             Some(Token::Op(_)) => Err(ParseError::EmptyCommand),
@@ -328,6 +328,10 @@ impl Parser {
     }
 
     fn parse_cmd(&mut self) -> Result<Chain, ParseError> {
+        self.parse_argv().map(Chain::Command)
+    }
+
+    fn parse_argv(&mut self) -> Result<Vec<Word>, ParseError> {
         let mut argv = Vec::new();
         while let Some(Token::Word(w)) = self.tokens.next_if(|t| matches!(t, Token::Word(_))) {
             argv.push(w);
@@ -338,7 +342,7 @@ impl Parser {
                 None => ParseError::Empty,
             });
         }
-        Ok(Chain::Command(argv))
+        Ok(argv)
     }
 }
 
@@ -346,12 +350,16 @@ impl Parser {
 mod tests {
     use super::*;
 
-    fn cmd(args: &[&str]) -> Chain {
-        Chain::Command(args.iter().copied().map(Word::bare).collect())
+    fn argv(args: &[&str]) -> Vec<Word> {
+        args.iter().copied().map(Word::bare).collect()
     }
 
-    fn pipe(l: Chain, r: Chain) -> Chain {
-        Chain::Pipe(Box::new(l), Box::new(r))
+    fn cmd(args: &[&str]) -> Chain {
+        Chain::Command(argv(args))
+    }
+
+    fn pipe(l: Chain, r: &[&str]) -> Chain {
+        Chain::Pipe(Box::new(l), argv(r))
     }
 
     fn and(l: Chain, r: Chain) -> Chain {
@@ -504,19 +512,10 @@ mod tests {
             ("cat notes.md", cmd(&["cat", "notes.md"])),
             (
                 "cat a | grep b | wc -l",
-                pipe(
-                    pipe(cmd(&["cat", "a"]), cmd(&["grep", "b"])),
-                    cmd(&["wc", "-l"]),
-                ),
+                pipe(pipe(cmd(&["cat", "a"]), &["grep", "b"]), &["wc", "-l"]),
             ),
-            (
-                "a | b && c",
-                and(pipe(cmd(&["a"]), cmd(&["b"])), cmd(&["c"])),
-            ),
-            (
-                "a && b | c",
-                and(cmd(&["a"]), pipe(cmd(&["b"]), cmd(&["c"]))),
-            ),
+            ("a | b && c", and(pipe(cmd(&["a"]), &["b"]), cmd(&["c"]))),
+            ("a && b | c", and(cmd(&["a"]), pipe(cmd(&["b"]), &["c"]))),
             (
                 "a && b && c",
                 and(and(cmd(&["a"]), cmd(&["b"])), cmd(&["c"])),

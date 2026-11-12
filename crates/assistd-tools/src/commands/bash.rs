@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use tracing::warn;
 
 use crate::TurnContext;
-use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::exec::{SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{BashPolicyCfg, ConfirmationGate, SandboxInfo, SubprocessPolicy};
 
@@ -44,13 +45,11 @@ impl Command for BashCommand {
         "escape hatch: sandboxed bash -c <script> (policy-gated, private /tmp)"
     }
 
-    fn help(&self) -> String {
+    fn usage(&self) -> Usage {
         let timeout_secs = self.policy.cfg.timeout.as_secs();
         let sharing_hint = self.policy.sandbox.sharing_hint();
-        format!(
-            "usage: bash [-c] \"<script>\"\n\
-             \n\
-             Spawn a real `bash -c <script>` subprocess; a leading `-c` is \
+        let body = format!(
+            "Spawn a real `bash -c <script>` subprocess; a leading `-c` is \
              accepted and ignored. The escape hatch for \
              anything the other commands can't express: redirections, env \
              expansion, backgrounding, pipes the chain parser doesn't support.\n\
@@ -65,7 +64,8 @@ impl Command for BashCommand {
              `Full output:` spill files) are not visible, and files the \
              script puts there are gone when it exits. For a file both need, \
              use {sharing_hint}.\n"
-        )
+        );
+        Usage::new("[-c] \"<script>\"", body)
     }
 
     /// The words become shell source, so bash expands them itself: a file
@@ -74,24 +74,28 @@ impl Command for BashCommand {
         false
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         let script_words = strip_dash_c(&input.args);
         if script_words.is_empty() {
-            return CommandOutput::usage(self.help());
+            return Ok(CommandOutput::usage(self.help()));
         }
-        let script = script_words.join(" ");
+        let script = Word::joined_by_spaces(script_words);
         let stdin = input.stdin.as_deref().unwrap_or_default();
         let ScriptRun { out, private_dirs } =
-            run_script(&self.policy, &input.turn, "bash", script, stdin).await;
+            run_script(&self.policy, &input.turn, "bash", script, stdin).await?;
         if private_dirs.is_empty() {
-            return out;
+            return Ok(out);
         }
         warn!(
             target: "assistd::policy",
             dirs = %private_dirs,
             "bash script names a directory that is empty and private inside the sandbox"
         );
-        with_private_dir_note(out, &private_dirs, &self.policy.sandbox.sharing_hint())
+        Ok(with_private_dir_note(
+            out,
+            &private_dirs,
+            &self.policy.sandbox.sharing_hint(),
+        ))
     }
 }
 
@@ -110,26 +114,16 @@ pub(crate) async fn run_script(
     tool: &str,
     script: String,
     stdin: &[u8],
-) -> ScriptRun {
-    let failed = |out| ScriptRun {
-        out,
-        private_dirs: String::new(),
-    };
+) -> Result<ScriptRun, CommandError> {
     let review = policy.review_script(script.clone()).await;
-    if let Err(denied) = policy
+    policy
         .authorize(turn, tool, "command", &script, review)
-        .await
-    {
-        return failed(denied);
-    }
-    let cmd = match policy
+        .await?;
+    let cmd = policy
         .sandbox
         .command("bash", vec!["-c".to_string(), script.clone()])
         .await
-    {
-        Ok(cmd) => cmd,
-        Err(error) => return failed(spawn_failed(tool, &error)),
-    };
+        .map_err(|error| spawn_failed(&error))?;
     let private_dirs = display_list(&policy.sandbox.private_dirs_named(&cmd, &script));
     let out = supervise(
         tool,
@@ -139,20 +133,16 @@ pub(crate) async fn run_script(
         policy.cfg.timeout,
     )
     .await
-    .unwrap_or_else(|error| spawn_failed(tool, &error));
-    ScriptRun { out, private_dirs }
+    .map_err(|error| spawn_failed(&error))?;
+    Ok(ScriptRun { out, private_dirs })
 }
 
-fn spawn_failed(tool: &str, error: &io::Error) -> CommandOutput {
-    CommandOutput::failed(
+fn spawn_failed(error: &io::Error) -> CommandError {
+    CommandError::new(
         SPAWN_FAILED_EXIT,
-        error_line(
-            tool,
-            format_args!("spawn failed: {error}"),
-            Hint::Check,
-            "bash and (if configured) bwrap are on PATH",
-        )
-        .into_bytes(),
+        format_args!("spawn failed: {error}"),
+        Hint::Check,
+        "bash and (if configured) bwrap are on PATH",
     )
 }
 
@@ -177,9 +167,9 @@ fn display_list(dirs: &[PathBuf]) -> String {
 
 /// The script words without a leading `-c`, which the model writes out of
 /// habit although this command already runs `bash -c`.
-fn strip_dash_c(args: &[String]) -> &[String] {
+fn strip_dash_c(args: &[Word]) -> &[Word] {
     match args.split_first() {
-        Some((flag, rest)) if flag == "-c" => rest,
+        Some((flag, rest)) if flag.as_str() == "-c" => rest,
         _ => args,
     }
 }

@@ -5,6 +5,7 @@ use std::time::Duration;
 use super::*;
 use crate::chain::{execute, parse_chain};
 use crate::command::CommandRegistry;
+use crate::command::run_rendered;
 use crate::commands::{RecordingGate, test_bash};
 use crate::exec::{OUTPUT_BUF_MAX, OUTPUT_OVERFLOW_EXIT};
 use crate::policy::{AlwaysAllowGate, DenyAllGate};
@@ -28,12 +29,15 @@ fn bash_asking(gate: Arc<dyn ConfirmationGate>) -> BashCommand {
 }
 
 async fn run(cmd: &BashCommand, script: &str, stdin: Option<Vec<u8>>) -> CommandOutput {
-    cmd.run(CommandInput {
-        args: vec![script.into()],
-        stdin,
-        scope: crate::FileScope::Host,
-        turn: TurnContext::default(),
-    })
+    run_rendered(
+        cmd,
+        CommandInput {
+            args: vec![Word::quoted(script)],
+            stdin,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        },
+    )
     .await
 }
 
@@ -50,7 +54,6 @@ async fn glob_matches_reach_bash_as_file_names_not_code() {
         &parse_chain(&line).expect("parses"),
         &registry,
         &TurnContext::default(),
-        None,
     )
     .await;
 
@@ -71,7 +74,6 @@ async fn leading_dash_c_is_accepted_as_bash_would() {
         &parse_chain(line).expect("parses"),
         &registry,
         &TurnContext::default(),
-        None,
     )
     .await;
 

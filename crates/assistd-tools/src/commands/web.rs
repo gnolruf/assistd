@@ -18,7 +18,8 @@ use assistd_utils::http::{BodyError, read_capped, remote_client_builder};
 use assistd_utils::net::{FilteredResolver, NonPublic, is_non_public, is_public};
 
 use crate::TurnContext;
-use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     ApprovalGate, ConfirmationRequest, EgressPolicy, Risk, Unattended, on_blocking_pool,
@@ -168,37 +169,35 @@ impl WebCommand {
             .await
     }
 
-    async fn fetch_command(&self, turn: &TurnContext, args: &[String]) -> CommandOutput {
-        let (rendering, raw) = match fetch_args(args) {
-            Ok(parsed) => parsed,
-            Err(usage) => return usage,
+    async fn fetch_command(
+        &self,
+        turn: &TurnContext,
+        args: &[Word],
+    ) -> Result<CommandOutput, CommandError> {
+        let Some((rendering, raw)) = fetch_args(args)? else {
+            return Ok(CommandOutput::usage(FETCH_HELP.to_string()));
         };
-        let Some(requested) = web_url(raw) else {
-            return CommandOutput::usage_error(
-                NAME,
+        let requested = web_url(raw).ok_or_else(|| {
+            CommandError::usage(
                 format_args!("only http(s):// URLs are allowed: {raw}"),
                 "web fetch https://... or web fetch http://...",
-            );
-        };
+            )
+        })?;
         let (url, plaintext) = if requested.scheme() == "http" && self.egress.allows_plaintext() {
             (https_form(&requested), Some(requested))
         } else {
             (requested, None)
         };
         if let Some(refusal) = refusal_of(&url, &self.egress) {
-            return CommandOutput::failed(
+            return Err(CommandError::new(
                 POLICY_DENIED_EXIT,
-                error_line(
-                    NAME,
-                    format_args!("fetch denied by policy: {refusal}"),
-                    Hint::Try,
-                    refusal.recovery(),
-                )
-                .into_bytes(),
-            );
+                format_args!("fetch denied by policy: {refusal}"),
+                Hint::Try,
+                refusal.recovery(),
+            ));
         }
         if !self.host_confirmed(turn, &url).await {
-            return declined(format_args!("fetch cancelled by user: {url}"));
+            return Err(declined(format_args!("fetch cancelled by user: {url}")));
         }
         match plaintext {
             Some(plain) => self.fetch_upgraded(turn, url, plain, rendering).await,
@@ -206,10 +205,10 @@ impl WebCommand {
         }
     }
 
-    async fn fetch(&self, url: Url, rendering: Rendering) -> CommandOutput {
+    async fn fetch(&self, url: Url, rendering: Rendering) -> Result<CommandOutput, CommandError> {
         match self.client.get(url.clone()).send().await {
             Ok(response) => read_response(response, &url, rendering).await,
-            Err(e) => transport_failed(&url, &e),
+            Err(e) => Err(transport_failed(&url, &e)),
         }
     }
 
@@ -221,17 +220,20 @@ impl WebCommand {
         secure: Url,
         plain: Url,
         rendering: Rendering,
-    ) -> CommandOutput {
+    ) -> Result<CommandOutput, CommandError> {
         match self.client.get(secure.clone()).send().await {
             Ok(response) => {
-                let output = read_response(response, &secure, rendering).await;
-                with_note(format_args!("fetched {secure} instead of {plain}"), output)
+                let fetched = read_response(response, &secure, rendering).await;
+                Ok(with_note(
+                    format_args!("fetched {secure} instead of {plain}"),
+                    fetched,
+                ))
             }
             Err(e) if e.is_connect() && !is_non_public(&e) => {
                 self.fetch_plaintext(turn, plain, &error_chain(&e), rendering)
                     .await
             }
-            Err(e) => transport_failed(&secure, &e),
+            Err(e) => Err(transport_failed(&secure, &e)),
         }
     }
 
@@ -241,14 +243,14 @@ impl WebCommand {
         url: Url,
         https_error: &str,
         rendering: Rendering,
-    ) -> CommandOutput {
+    ) -> Result<CommandOutput, CommandError> {
         if !self.plaintext_confirmed(turn, &url, https_error).await {
-            return declined(format_args!(
+            return Err(declined(format_args!(
                 "HTTPS failed ({https_error}) and the user declined plain HTTP: {url}"
-            ));
+            )));
         }
         let note = format!("HTTPS failed, so {url} was fetched over unencrypted HTTP");
-        with_note(note, self.fetch(url, rendering).await)
+        Ok(with_note(note, self.fetch(url, rendering).await))
     }
 }
 
@@ -262,10 +264,10 @@ impl Command for WebCommand {
         "search the web, or HTTP GET a URL and return the body (http/https only)"
     }
 
-    fn help(&self) -> String {
-        "usage: web <search|fetch> [args...]\n\
-         \n\
-         Subcommands:\n  \
+    fn usage(&self) -> Usage {
+        Usage::new(
+            "search <query...>, or web fetch <URL>",
+            "Subcommands:\n  \
            search [-n N] [--lang <tag>] <query...>\n          \
          search the web; TSV: rank, title, url, snippet\n  \
            fetch [--raw | --full] <URL>\n          \
@@ -274,12 +276,8 @@ impl Command for WebCommand {
          When you do not have a URL, search first, then `web fetch` the most \
          relevant result. Prefer `-n 5` for simple questions.\n\
          \n\
-         Call either subcommand with no arguments to see its parameter help.\n"
-            .to_string()
-    }
-
-    fn synopsis(&self) -> String {
-        "search <query...>, or web fetch <URL>".to_string()
+         Call either subcommand with no arguments to see its parameter help.\n",
+        )
     }
 
     /// URLs and search queries never name files, so `?` and `*` stay literal.
@@ -287,9 +285,9 @@ impl Command for WebCommand {
         false
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         let Some((subcommand, rest)) = input.args.split_first() else {
-            return CommandOutput::usage(self.help());
+            return Ok(CommandOutput::usage(self.help()));
         };
         match subcommand.as_str() {
             "search" => search::run(self.search.as_ref(), rest).await,
@@ -297,11 +295,10 @@ impl Command for WebCommand {
             bare if rest.is_empty() && web_url(bare).is_some() => {
                 self.fetch_command(&input.turn, &input.args).await
             }
-            other => CommandOutput::usage_error(
-                NAME,
+            other => Err(CommandError::usage(
                 format_args!("unknown subcommand '{other}'"),
                 "web search <words...> to search, or web fetch <URL> to read a page",
-            ),
+            )),
         }
     }
 }
@@ -402,13 +399,12 @@ fn is_subtag(part: &str, allowed: fn(&u8) -> bool) -> bool {
     (2..=3).contains(&part.len()) && part.bytes().all(|byte| allowed(&byte))
 }
 
-/// The rendering and URL `args` ask for, or the usage output to return instead.
-fn fetch_args(args: &[String]) -> Result<(Rendering, &str), CommandOutput> {
-    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+/// The rendering and URL `args` ask for, or `None` when they name no URL.
+fn fetch_args(args: &[Word]) -> Result<Option<(Rendering, &str)>, CommandError> {
+    let has = |flag: &str| args.iter().any(|arg| arg.as_str() == flag);
     let rendering = match (has(RAW_FLAG), has(FULL_FLAG)) {
         (true, true) => {
-            return Err(CommandOutput::usage_error(
-                NAME,
+            return Err(CommandError::usage(
                 "--raw and --full cannot be combined",
                 FETCH_USAGE,
             ));
@@ -417,15 +413,15 @@ fn fetch_args(args: &[String]) -> Result<(Rendering, &str), CommandOutput> {
         (false, true) => Rendering::Text(Extent::Whole),
         (false, false) => Rendering::Text(Extent::Article),
     };
-    let targets: Vec<&String> = args
+    let targets: Vec<&str> = args
         .iter()
-        .filter(|arg| ![RAW_FLAG, FULL_FLAG].contains(&arg.as_str()))
+        .map(Word::as_str)
+        .filter(|arg| ![RAW_FLAG, FULL_FLAG].contains(arg))
         .collect();
     match targets.as_slice() {
-        [] => Err(CommandOutput::usage(FETCH_HELP.to_string())),
-        [raw] => Ok((rendering, raw)),
-        _ => Err(CommandOutput::usage_error(
-            NAME,
+        [] => Ok(None),
+        [raw] => Ok(Some((rendering, raw))),
+        _ => Err(CommandError::usage(
             "fetch expects exactly one URL argument",
             FETCH_USAGE,
         )),
@@ -458,36 +454,42 @@ fn refusal_of(url: &Url, egress: &EgressPolicy) -> Option<Refused> {
     (!(egress.reachable)(ip)).then_some(Refused::Address(NonPublic::Address(ip)))
 }
 
-async fn read_response(response: Response, url: &Url, rendering: Rendering) -> CommandOutput {
+async fn read_response(
+    response: Response,
+    url: &Url,
+    rendering: Rendering,
+) -> Result<CommandOutput, CommandError> {
     let status = response.status();
     if !status.is_success() {
-        return fetch_failed(
+        return Err(fetch_failed(
             format_args!(
                 "HTTP {} {}: {url}",
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("")
             ),
             UNREACHABLE,
-        );
+        ));
     }
     let html_page = match rendering {
         Rendering::Text(extent) => HtmlPage::of(&response, extent),
         Rendering::Raw => None,
     };
-    match read_capped(response, BODY_MAX).await {
-        Ok(body) => match html_page {
-            Some(page) => CommandOutput::ok(on_blocking_pool(move || page.render(body)).await),
-            None => CommandOutput::ok(body),
-        },
-        Err(BodyError::TooLarge { .. }) => fetch_failed(
-            format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
-            "a URL path that returns less content",
-        ),
-        Err(BodyError::Read(e)) => fetch_failed(
-            format_args!("body read failed: {url}: {e}"),
-            "re-running or a different URL",
-        ),
-    }
+    let body = read_capped(response, BODY_MAX)
+        .await
+        .map_err(|error| match error {
+            BodyError::TooLarge { .. } => fetch_failed(
+                format_args!("response body exceeded {BODY_MAX} bytes: {url}"),
+                "a URL path that returns less content",
+            ),
+            BodyError::Read(e) => fetch_failed(
+                format_args!("body read failed: {url}: {e}"),
+                "re-running or a different URL",
+            ),
+        })?;
+    Ok(CommandOutput::ok(match html_page {
+        Some(page) => on_blocking_pool(move || page.render(body)).await,
+        None => body,
+    }))
 }
 
 /// `url` with its `http` scheme swapped for `https`, keeping any explicit port.
@@ -515,26 +517,30 @@ fn error_chain(err: &dyn Error) -> String {
         .join(": ")
 }
 
-fn fetch_failed(what: impl Display, recovery: &str) -> CommandOutput {
-    CommandOutput::failed(1, error_line(NAME, what, Hint::Try, recovery).into_bytes())
+fn fetch_failed(what: impl Display, recovery: &str) -> CommandError {
+    CommandError::failed(what, Hint::Try, recovery)
 }
 
-fn transport_failed(url: &Url, err: &reqwest::Error) -> CommandOutput {
+fn transport_failed(url: &Url, err: &reqwest::Error) -> CommandError {
     fetch_failed(
         format_args!("transport error: {url}: {}", error_chain(err)),
         UNREACHABLE,
     )
 }
 
-fn declined(what: impl Display) -> CommandOutput {
-    CommandOutput::failed(
+fn declined(what: impl Display) -> CommandError {
+    CommandError::new(
         POLICY_DENIED_EXIT,
-        error_line(NAME, what, Hint::Try, "answering without this page").into_bytes(),
+        what,
+        Hint::Try,
+        "answering without this page",
     )
 }
 
-/// `output` with `[note] web: <note>` ahead of its stderr.
-fn with_note(note: impl Display, output: CommandOutput) -> CommandOutput {
+/// What a fetch produced, or its failure, with `[note] web: <note>` ahead of its stderr.
+fn with_note(note: impl Display, fetched: Result<CommandOutput, CommandError>) -> CommandOutput {
+    let output = fetched
+        .unwrap_or_else(|error| CommandOutput::failed(error.exit, error.line(NAME).into_bytes()));
     CommandOutput {
         stderr: format!("[note] {NAME}: {note}\n").into_bytes(),
         ..CommandOutput::default()

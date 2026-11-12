@@ -4,7 +4,7 @@ use assistd_ipc::ImageMime;
 
 use super::*;
 use crate::chain::{MAX_OPERATORS, parse_chain};
-use crate::command::{Command, CommandInput, CommandOutput, CommandRegistry};
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, CommandRegistry, Usage};
 
 /// Emits fixed stdout, stderr and exit code, ignoring its input.
 #[derive(Debug)]
@@ -34,16 +34,16 @@ impl Command for Stub {
     fn summary(&self) -> &'static str {
         "test stub"
     }
-    fn help(&self) -> String {
-        "stub help".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
-        CommandOutput {
+    async fn run(&self, _input: CommandInput) -> Result<CommandOutput, CommandError> {
+        Ok(CommandOutput {
             stdout: self.stdout.to_vec(),
             stderr: self.stderr.to_vec(),
             exit_code: self.exit_code,
             attachments: Vec::new(),
-        }
+        })
     }
 }
 
@@ -58,11 +58,11 @@ impl Command for Echo {
     fn summary(&self) -> &'static str {
         "test: echo stdin"
     }
-    fn help(&self) -> String {
-        "usage: echo_stdin".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, input: CommandInput) -> CommandOutput {
-        CommandOutput::ok(input.stdin.unwrap_or_default())
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
+        Ok(CommandOutput::ok(input.stdin.unwrap_or_default()))
     }
 }
 
@@ -77,17 +77,17 @@ impl Command for LineCount {
     fn summary(&self) -> &'static str {
         "test: count lines"
     }
-    fn help(&self) -> String {
-        "usage: lc".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         let n = input
             .stdin
             .unwrap_or_default()
             .iter()
             .filter(|b| **b == b'\n')
             .count();
-        CommandOutput::ok(format!("{n}\n").into_bytes())
+        Ok(CommandOutput::ok(format!("{n}\n").into_bytes()))
     }
 }
 
@@ -102,16 +102,16 @@ impl Command for StdinKind {
     fn summary(&self) -> &'static str {
         "test: report stdin presence"
     }
-    fn help(&self) -> String {
-        "usage: stdin_kind".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         let kind = if input.stdin.is_some() {
             "piped"
         } else {
             "none"
         };
-        CommandOutput::ok(kind.as_bytes().to_vec())
+        Ok(CommandOutput::ok(kind.as_bytes().to_vec()))
     }
 }
 
@@ -126,11 +126,11 @@ impl Command for Flood {
     fn summary(&self) -> &'static str {
         "test: emit N bytes"
     }
-    fn help(&self) -> String {
-        "usage: flood".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
-        CommandOutput::ok(vec![b'x'; self.0])
+    async fn run(&self, _input: CommandInput) -> Result<CommandOutput, CommandError> {
+        Ok(CommandOutput::ok(vec![b'x'; self.0]))
     }
 }
 
@@ -148,17 +148,17 @@ impl Command for Picture {
     fn summary(&self) -> &'static str {
         "test: attach an image"
     }
-    fn help(&self) -> String {
-        "usage: picture".to_string()
+    fn usage(&self) -> Usage {
+        Usage::new("", "")
     }
-    async fn run(&self, _input: CommandInput) -> CommandOutput {
-        CommandOutput {
+    async fn run(&self, _input: CommandInput) -> Result<CommandOutput, CommandError> {
+        Ok(CommandOutput {
             attachments: vec![Attachment::Image {
                 mime: ImageMime::Png,
                 bytes: vec![0; self.size],
             }],
             ..CommandOutput::ok(b"attached\n".to_vec())
-        }
+        })
     }
 }
 
@@ -172,7 +172,7 @@ fn registry_of(stubs: impl IntoIterator<Item = Stub>) -> CommandRegistry {
 
 async fn run_line(line: &str, registry: &CommandRegistry) -> CommandOutput {
     let chain = parse_chain(line).unwrap();
-    execute(&chain, registry, &TurnContext::default(), None).await
+    execute(&chain, registry, &TurnContext::default()).await
 }
 
 #[tokio::test]

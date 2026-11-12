@@ -7,9 +7,8 @@ use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::attachment::{LoadImageError, load_image_attachment};
-use crate::command::{
-    Attachment, Command, CommandInput, CommandOutput, Hint, error_line, io_error_nav,
-};
+use crate::chain::Word;
+use crate::command::{Attachment, Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::vision::VisionGate;
 
 /// `see PATH`: read an image file and attach it as a vision input.
@@ -40,50 +39,44 @@ impl Command for SeeCommand {
         }
     }
 
-    fn help(&self) -> String {
-        "usage: see PATH\n\
-         \n\
-         Read the image file at PATH and attach it to the tool result as a \
+    fn usage(&self) -> Usage {
+        Usage::new(
+            "PATH",
+            "Read the image file at PATH and attach it to the tool result as a \
          vision input. The chat loop surfaces the attachment on the model's \
          next turn. Attachments flow through pipes untouched (e.g. \
          `see img.png | wc` still surfaces the image).\n\
          \n\
-         Exit 1 if the file is missing or not a recognized image format.\n"
-            .to_string()
+         Exit 1 if the file is missing or not a recognized image format.\n",
+        )
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         if !self.gate.supported() {
-            return CommandOutput::failed(
-                1,
-                error_line(
-                    "see",
-                    "vision not available: model does not support images",
-                    Hint::Use,
-                    "a model with mmproj loaded",
-                )
-                .into_bytes(),
-            );
+            return Err(CommandError::failed(
+                "vision not available: model does not support images",
+                Hint::Use,
+                "a model with mmproj loaded",
+            ));
         }
-        if input.args.is_empty() {
-            return CommandOutput::usage(self.help());
-        }
-        if input.args.len() != 1 {
-            return CommandOutput::usage_error(
-                "see",
-                "expects exactly one path argument",
-                "see <PATH>",
-            );
-        }
-        let path = &input.args[0];
-        match load_image_attachment(Path::new(path)).await {
-            Ok((attachment, size)) => attached(attachment, size, path),
-            Err(e) => load_failed(e, path),
-        }
+        let path = match input.args.as_slice() {
+            [] => return Ok(CommandOutput::usage(self.help())),
+            [path] => path,
+            _ => {
+                return Err(CommandError::usage(
+                    "expects exactly one path argument",
+                    "see <PATH>",
+                ));
+            }
+        };
+        let (attachment, size) = load_image_attachment(Path::new(path.as_str()))
+            .await
+            .map_err(|e| load_failed(e, path))?;
+        Ok(attached(attachment, size, path))
     }
 }
 
-fn attached(attachment: Attachment, size: usize, path: &str) -> CommandOutput {
+fn attached(attachment: Attachment, size: usize, path: &Word) -> CommandOutput {
     let mime = match &attachment {
         Attachment::Image { mime, .. } => *mime,
     };
@@ -99,35 +92,30 @@ fn attached(attachment: Attachment, size: usize, path: &str) -> CommandOutput {
     }
 }
 
-fn load_failed(err: LoadImageError, path: &str) -> CommandOutput {
-    let line = match err {
-        LoadImageError::Io { source, .. } => io_error_nav("see", path, &source),
-        e @ LoadImageError::TooLarge { .. } => error_line(
-            "see",
+fn load_failed(err: LoadImageError, path: &Word) -> CommandError {
+    match err {
+        LoadImageError::Io { source, .. } => CommandError::io(path, &source),
+        e @ LoadImageError::TooLarge { .. } => CommandError::failed(
             e.user_message(),
             Hint::Use,
             "a smaller image (resize or crop)",
         ),
-        LoadImageError::Unrecognized { .. } => error_line(
-            "see",
+        LoadImageError::Unrecognized { .. } => CommandError::failed(
             format_args!("not an image file: {path}"),
             Hint::Use,
             format_args!("cat {path}"),
         ),
-        LoadImageError::NotAnImage { detected, .. } => error_line(
-            "see",
+        LoadImageError::NotAnImage { detected, .. } => CommandError::failed(
             format_args!("not an image file: {path} (detected {detected})"),
             Hint::Use,
             format_args!("cat {path}"),
         ),
-        LoadImageError::UnsupportedFormat { mime, .. } => error_line(
-            "see",
+        LoadImageError::UnsupportedFormat { mime, .. } => CommandError::failed(
             format_args!("unsupported image format: {path} ({mime})"),
             Hint::Use,
             "PNG, JPEG, or WebP",
         ),
-    };
-    CommandOutput::failed(1, line.into_bytes())
+    }
 }
 
 #[cfg(test)]
@@ -138,17 +126,18 @@ mod tests {
 
     use super::*;
     use crate::TurnContext;
+    use crate::command::run_rendered;
     use crate::commands::test_see;
     use crate::fixtures::PNG_BYTES;
 
     async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
-        cmd.run(CommandInput {
-            args: args.iter().map(ToString::to_string).collect(),
+        let input = CommandInput {
+            args: args.iter().copied().map(Word::bare).collect(),
             stdin: None,
             scope: crate::FileScope::Host,
             turn: TurnContext::default(),
-        })
-        .await
+        };
+        run_rendered(cmd, input).await
     }
 
     #[tokio::test]

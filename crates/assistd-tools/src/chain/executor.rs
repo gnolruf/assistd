@@ -7,7 +7,9 @@ use std::pin::Pin;
 use super::expand::{ExpandError, expand_args};
 use super::{Chain, Word};
 use crate::TurnContext;
-use crate::command::{Attachment, CommandInput, CommandOutput, CommandRegistry, Hint, error_line};
+use crate::command::{
+    Attachment, CommandInput, CommandOutput, CommandRegistry, Hint, error_line, run_rendered,
+};
 
 /// Most bytes of stdout, or of stderr, that one stage or a whole chain may
 /// hold. Overflow exits 141, the SIGPIPE code, so `||` fallbacks still fire.
@@ -77,55 +79,52 @@ pub async fn execute(
     chain: &Chain,
     registry: &CommandRegistry,
     turn: &TurnContext,
-    stdin: Option<Vec<u8>>,
 ) -> CommandOutput {
     let mut budget = AttachmentBudget::new();
-    execute_within(chain, registry, turn, stdin, &mut budget).await
+    execute_within(chain, registry, turn, &mut budget).await
 }
 
 fn execute_within<'a>(
     chain: &'a Chain,
     registry: &'a CommandRegistry,
     turn: &'a TurnContext,
-    stdin: Option<Vec<u8>>,
     budget: &'a mut AttachmentBudget,
 ) -> Pin<Box<dyn Future<Output = CommandOutput> + Send + 'a>> {
-    Box::pin(async move {
-        within_output_max(execute_uncapped(chain, registry, turn, stdin, budget).await)
-    })
+    Box::pin(
+        async move { within_output_max(execute_uncapped(chain, registry, turn, budget).await) },
+    )
 }
 
 fn execute_uncapped<'a>(
     chain: &'a Chain,
     registry: &'a CommandRegistry,
     turn: &'a TurnContext,
-    stdin: Option<Vec<u8>>,
     budget: &'a mut AttachmentBudget,
 ) -> Pin<Box<dyn Future<Output = CommandOutput> + Send + 'a>> {
     Box::pin(async move {
         match chain {
-            Chain::Command(argv) => budget.admit(run_command(argv, registry, turn, stdin).await),
-            Chain::Pipe(l, r) => {
-                let mut left = execute_uncapped(l, registry, turn, stdin, budget).await;
+            Chain::Command(argv) => budget.admit(run_command(argv, registry, turn, None).await),
+            Chain::Pipe(l, argv) => {
+                let mut left = execute_uncapped(l, registry, turn, budget).await;
                 let piped = std::mem::take(&mut left.stdout);
                 if piped.len() > OUTPUT_MAX {
                     return left.then(pipe_overflow());
                 }
-                let right = execute_uncapped(r, registry, turn, Some(piped), budget).await;
+                let right = budget.admit(run_command(argv, registry, turn, Some(piped)).await);
                 pipe_join(left, right)
             }
             Chain::And(l, r) | Chain::Or(l, r) => {
-                let left = execute_within(l, registry, turn, stdin.clone(), budget).await;
+                let left = execute_within(l, registry, turn, budget).await;
                 let run_right = matches!(chain, Chain::And(..)) == (left.exit_code == 0);
                 if !run_right {
                     return left;
                 }
-                let right = execute_within(r, registry, turn, stdin, budget).await;
+                let right = execute_within(r, registry, turn, budget).await;
                 left.then(right)
             }
             Chain::Seq(l, r) => {
-                let left = execute_within(l, registry, turn, stdin.clone(), budget).await;
-                let right = execute_within(r, registry, turn, stdin, budget).await;
+                let left = execute_within(l, registry, turn, budget).await;
+                let right = execute_within(r, registry, turn, budget).await;
                 left.then(right)
             }
         }
@@ -231,20 +230,19 @@ async fn run_command(
             Err(err) => return glob_failure(name, &err),
         }
     } else {
-        words[1..].iter().map(|word| word.text.clone()).collect()
+        words[1..].to_vec()
     };
-    if args.iter().any(|a| a == "--help") {
+    if args.iter().any(|arg| arg.as_str() == "--help") {
         return CommandOutput::usage(cmd.help());
     }
 
-    let out = cmd
-        .run(CommandInput {
-            args,
-            stdin,
-            scope: registry.scope().clone(),
-            turn: turn.clone(),
-        })
-        .await;
+    let input = CommandInput {
+        args,
+        stdin,
+        scope: registry.scope().clone(),
+        turn: turn.clone(),
+    };
+    let out = run_rendered(cmd, input).await;
 
     let stderr = if out.stderr.is_empty() {
         Vec::new()

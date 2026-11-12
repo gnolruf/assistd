@@ -9,7 +9,8 @@ use assistd_ipc::ImageMime;
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
-use crate::command::{Attachment, Command, CommandInput, CommandOutput, Hint, error_line};
+use crate::chain::Word;
+use crate::command::{Attachment, Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::vision::VisionGate;
 
 use capture::capture_target;
@@ -85,21 +86,12 @@ impl ScreenshotCommand {
         Self { cfg, gate }
     }
 
-    fn resolve_backend(&self) -> Result<Backend, CommandOutput> {
+    fn resolve_backend(&self) -> Result<Backend, CommandError> {
         match self.cfg.compositor {
             Some(Compositor::I3) => Ok(Backend::X11),
             Some(Compositor::Sway | Compositor::Hyprland) => Ok(Backend::Wayland),
-            None => detect_backend().map_err(|msg| {
-                CommandOutput::failed(
-                    2,
-                    error_line(
-                        "screenshot",
-                        msg,
-                        Hint::Try,
-                        "running this from a graphical session",
-                    )
-                    .into_bytes(),
-                )
+            None => detect_backend().map_err(|what| {
+                CommandError::new(2, what, Hint::Try, "running this from a graphical session")
             }),
         }
     }
@@ -119,10 +111,10 @@ impl Command for ScreenshotCommand {
         }
     }
 
-    fn help(&self) -> String {
-        "usage: screenshot [--full|--focused|--monitor=<name>]\n\
-         \n\
-         Capture the screen and attach it as a vision input for the next \
+    fn usage(&self) -> Usage {
+        Usage::new(
+            "[--full|--focused|--monitor=<name>]",
+            "Capture the screen and attach it as a vision input for the next \
          LLM turn (kept in memory; never written to disk by default).\n\
          \n\
          Without arguments, captures the full screen (which on multi-head \
@@ -151,41 +143,24 @@ impl Command for ScreenshotCommand {
          \n\
          Privacy: the captured pixels are sent to the LLM as part of its \
          next turn. Only enable this command in environments where that \
-         is acceptable.\n"
-            .to_string()
+         is acceptable.\n",
+        )
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         if !self.gate.supported() {
-            return CommandOutput::failed(
-                1,
-                error_line(
-                    "screenshot",
-                    "vision not available: model does not support images",
-                    Hint::Use,
-                    "a model with mmproj loaded",
-                )
-                .into_bytes(),
-            );
+            return Err(CommandError::failed(
+                "vision not available: model does not support images",
+                Hint::Use,
+                "a model with mmproj loaded",
+            ));
         }
-        let target = match parse_target(&input.args) {
-            Ok(t) => t,
-            Err(msg) => {
-                return CommandOutput::usage_error(
-                    "screenshot",
-                    msg,
-                    "screenshot --full or screenshot --focused",
-                );
-            }
-        };
-        let backend = match self.resolve_backend() {
-            Ok(backend) => backend,
-            Err(failure) => return failure,
-        };
-        match capture_target(backend, self.cfg.compositor, &target, self.cfg.timeout).await {
-            Ok(png) => attach_png(png, &target, backend),
-            Err(e) => e.to_output(),
-        }
+        let target = parse_target(&input.args).map_err(|what| {
+            CommandError::usage(what, "screenshot --full or screenshot --focused")
+        })?;
+        let backend = self.resolve_backend()?;
+        let png = capture_target(backend, self.cfg.compositor, &target, self.cfg.timeout).await?;
+        Ok(attach_png(png, &target, backend))
     }
 }
 
@@ -207,32 +182,21 @@ fn attach_png(png: Vec<u8>, target: &Target, backend: Backend) -> CommandOutput 
     }
 }
 
-fn parse_target(args: &[String]) -> Result<Target, String> {
-    match args.len() {
-        0 => Ok(Target::Full),
-        1 => match args[0].as_str() {
-            "--full" => Ok(Target::Full),
-            "--focused" => Ok(Target::Focused),
-            s if s.starts_with("--monitor=") => {
-                let name = &s["--monitor=".len()..];
-                if name.is_empty() {
-                    Err("--monitor requires a name (try `xrandr --listmonitors` or `swaymsg -t get_outputs`)".into())
-                } else {
-                    Ok(Target::Monitor(name.to_string()))
-                }
-            }
-            "--monitor" => {
-                Err("--monitor requires a value: --monitor=<name> (e.g. --monitor=DP-1)".into())
-            }
-            other => Err(format!("unknown flag: {other}")),
-        },
-        2 if args[0] == "--monitor" => {
-            if args[1].is_empty() {
-                Err("--monitor requires a non-empty name".into())
-            } else {
-                Ok(Target::Monitor(args[1].clone()))
-            }
+fn parse_target(args: &[Word]) -> Result<Target, String> {
+    let args: Vec<&str> = args.iter().map(Word::as_str).collect();
+    match args.as_slice() {
+        [] | ["--full"] => Ok(Target::Full),
+        ["--focused"] => Ok(Target::Focused),
+        ["--monitor"] => {
+            Err("--monitor requires a value: --monitor=<name> (e.g. --monitor=DP-1)".into())
         }
+        [flag] => match flag.strip_prefix("--monitor=") {
+            Some("") => Err("--monitor requires a name (try `xrandr --listmonitors` or `swaymsg -t get_outputs`)".into()),
+            Some(name) => Ok(Target::Monitor(name.to_string())),
+            None => Err(format!("unknown flag: {flag}")),
+        },
+        ["--monitor", ""] => Err("--monitor requires a non-empty name".into()),
+        ["--monitor", name] => Ok(Target::Monitor((*name).to_string())),
         _ => Err("expects at most one flag (--full, --focused, or --monitor=<name>)".into()),
     }
 }
@@ -241,9 +205,10 @@ fn parse_target(args: &[String]) -> Result<Target, String> {
 mod tests {
     use super::*;
     use crate::TurnContext;
+    use crate::command::run_rendered;
 
-    fn args(raw: &[&str]) -> Vec<String> {
-        raw.iter().map(ToString::to_string).collect()
+    fn args(raw: &[&str]) -> Vec<Word> {
+        raw.iter().copied().map(Word::bare).collect()
     }
 
     #[test]
@@ -266,14 +231,13 @@ mod tests {
             Arc::new(ScreenshotPolicyCfg::default()),
             VisionGate::new(false),
         );
-        let out = cmd
-            .run(CommandInput {
-                args: args(&["--full"]),
-                stdin: None,
-                scope: crate::FileScope::Host,
-                turn: TurnContext::default(),
-            })
-            .await;
+        let input = CommandInput {
+            args: args(&["--full"]),
+            stdin: None,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        };
+        let out = run_rendered(&cmd, input).await;
         assert_eq!(out.exit_code, 1);
         assert!(out.stdout.is_empty());
         assert_eq!(

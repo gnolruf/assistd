@@ -107,13 +107,13 @@ impl GlobWalk<'_> {
 /// Expand `~` and globs in unquoted words into a command's arguments, reading `scope`; an
 /// unmatched glob stays as written. Fails when a glob passes [`MAX_GLOB_MATCHES`] or
 /// [`MAX_GLOB_ENTRIES`].
-pub async fn expand_args(words: &[Word], scope: &FileScope) -> Result<Vec<String>, ExpandError> {
+pub async fn expand_args(words: &[Word], scope: &FileScope) -> Result<Vec<Word>, ExpandError> {
     let words = words.to_vec();
     let scope = scope.clone();
     tokio::task::spawn_blocking(move || expand_words(&words, &scope)).await?
 }
 
-fn expand_words(words: &[Word], scope: &FileScope) -> Result<Vec<String>, ExpandError> {
+fn expand_words(words: &[Word], scope: &FileScope) -> Result<Vec<Word>, ExpandError> {
     let mut args = Vec::with_capacity(words.len());
     for word in words {
         args.extend(expand_word(word, scope)?);
@@ -121,15 +121,16 @@ fn expand_words(words: &[Word], scope: &FileScope) -> Result<Vec<String>, Expand
     Ok(args)
 }
 
-fn expand_word(word: &Word, scope: &FileScope) -> Result<Vec<String>, ExpandError> {
+fn expand_word(word: &Word, scope: &FileScope) -> Result<Vec<Word>, ExpandError> {
     if word.quoted {
-        return Ok(vec![word.text.clone()]);
+        return Ok(vec![word.clone()]);
     }
     let tilde = scope
         .expand_tilde(&word.text)
         .to_string_lossy()
         .into_owned();
-    Ok(expand_glob(&tilde, scope)?.unwrap_or_else(|| vec![tilde]))
+    let expanded = expand_glob(&tilde, scope)?.unwrap_or_else(|| vec![tilde]);
+    Ok(expanded.into_iter().map(Word::bare).collect())
 }
 
 fn expand_glob(pattern: &str, scope: &FileScope) -> Result<Option<Vec<String>>, ExpandError> {

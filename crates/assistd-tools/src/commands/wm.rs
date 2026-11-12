@@ -9,7 +9,8 @@ use assistd_wm::{Layout, OutputInfo, ResizeDir, WindowId, WindowManager, WmError
 use async_trait::async_trait;
 
 use crate::TurnContext;
-use crate::command::{Command, CommandInput, CommandOutput, Hint, error_line};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::exec::POLICY_DENIED_EXIT;
 use crate::policy::{
     Approval, ApprovalGate, Approvals, ConfirmationGate, ConfirmationRequest, JudgeContext,
@@ -89,36 +90,30 @@ impl WmCommand {
         Self { wm, gate, apps }
     }
 
-    async fn open(&self, turn: &TurnContext, args: &[String]) -> CommandOutput {
+    async fn open(&self, turn: &TurnContext, args: &[Word]) -> Result<CommandOutput, CommandError> {
         if args.is_empty() {
-            return CommandOutput::usage(OPEN_HELP.to_string());
+            return Ok(CommandOutput::usage(OPEN_HELP.to_string()));
         }
-        let args = match OpenArgs::parse(args) {
-            Ok(args) => args,
-            Err(what) => {
-                return CommandOutput::usage_error(
-                    NAME,
-                    format_args!("open: {what}"),
-                    "wm open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]",
-                );
-            }
-        };
+        let args = OpenArgs::parse(args).map_err(|what| {
+            CommandError::usage(
+                format_args!("open: {what}"),
+                "wm open [--workspace <ws>] [--cwd <dir>] <app> [file|url...]",
+            )
+        })?;
         let (args, prepared) = on_blocking_pool(move || {
             let prepared = PreparedLaunch::find(&args);
             (args, prepared)
         })
         .await;
-        let launch = match prepared {
-            Ok(launch) => launch,
-            Err(e) => return open_failed(&e),
-        };
+        let launch = prepared.map_err(|e| open_failed(&e))?;
         if !self.confirmed(turn, &args, &launch).await {
-            return open_cancelled();
+            return Err(open_cancelled());
         }
-        match self.wm.exec(args.workspace.as_ref(), &launch.command).await {
-            Ok(()) => opened(&launch, args.workspace.as_ref()),
-            Err(e) => wm_error(format_args!("open {}", launch.entry.name), &e),
-        }
+        self.wm
+            .exec(args.workspace.as_ref(), &launch.command)
+            .await
+            .map_err(|e| wm_error(format_args!("open {}", launch.entry.name), &e))?;
+        Ok(opened(&launch, args.workspace.as_ref()))
     }
 
     /// Whether the user, or in auto mode the safety judge, lets `launch` run. Approvals cover a
@@ -179,10 +174,10 @@ impl Command for WmCommand {
         SUMMARY
     }
 
-    fn help(&self) -> String {
-        "usage: wm <subcommand> [args...]\n\
-         \n\
-         Manage windows and workspaces via the active compositor backend \
+    fn usage(&self) -> Usage {
+        Usage::new(
+            "<focus|move|open|active|resize|list|workspaces|outputs|layout> [args...]",
+            "Manage windows and workspaces via the active compositor backend \
          (i3, sway, or hyprland). Window identifiers are decimal con_ids \
          (e.g. \"94567128432192\"); run `wm list` first to find the id \
          for the window you want to act on; the second column is the \
@@ -205,12 +200,8 @@ impl Command for WmCommand {
          \n\
          Call any subcommand with no arguments to see its parameter \
          help. When no compositor is connected, every subcommand emits \
-         `[error] wm: compositor not connected. …` instead.\n"
-            .to_string()
-    }
-
-    fn synopsis(&self) -> String {
-        "<focus|move|open|active|resize|list|workspaces|outputs|layout> [args...]".to_string()
+         `[error] wm: compositor not connected. …` instead.\n",
+        )
     }
 
     /// URLs and window criteria never name files, and `open` expands its own `~`.
@@ -218,26 +209,19 @@ impl Command for WmCommand {
         false
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
-        if input.args.is_empty() {
-            return CommandOutput::usage(self.help());
-        }
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
+        let Some((subcommand, rest)) = input.args.split_first() else {
+            return Ok(CommandOutput::usage(self.help()));
+        };
         if !self.wm.is_connected() {
-            return CommandOutput::failed(
-                1,
-                error_line(
-                    NAME,
-                    "compositor not connected",
-                    Hint::Check,
-                    "[compositor] in config.toml and that i3/sway/hyprland is running",
-                )
-                .into_bytes(),
-            );
+            return Err(CommandError::failed(
+                "compositor not connected",
+                Hint::Check,
+                "[compositor] in config.toml and that i3/sway/hyprland is running",
+            ));
         }
 
-        let sub = input.args[0].as_str();
-        let rest = &input.args[1..];
-        match sub {
+        match subcommand.as_str() {
             "focus" => focus(self.wm.as_ref(), rest).await,
             "move" => move_window(self.wm.as_ref(), rest).await,
             "open" => self.open(&input.turn, rest).await,
@@ -247,33 +231,25 @@ impl Command for WmCommand {
             "workspaces" => workspaces(self.wm.as_ref()).await,
             "outputs" => outputs(self.wm.as_ref()).await,
             "layout" => layout(self.wm.as_ref(), rest).await,
-            other => CommandOutput::failed(
+            other => Err(CommandError::new(
                 2,
-                error_line(
-                    NAME,
-                    format_args!("unknown subcommand '{other}'"),
-                    Hint::Available,
-                    "focus, move, open, active, resize, list, workspaces, outputs, layout",
-                )
-                .into_bytes(),
-            ),
+                format_args!("unknown subcommand '{other}'"),
+                Hint::Available,
+                "focus, move, open, active, resize, list, workspaces, outputs, layout",
+            )),
         }
     }
 }
 
-async fn focus(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
-    if args.is_empty() {
-        return CommandOutput::usage(FOCUS_HELP.to_string());
-    }
-    let id_arg = &args[0];
-    let id: WindowId = match id_arg.parse() {
-        Ok(id) => id,
-        Err(_) => return parse_id_error("focus", id_arg),
+async fn focus(wm: &dyn WindowManager, args: &[Word]) -> Result<CommandOutput, CommandError> {
+    let [id_arg, ..] = args else {
+        return Ok(CommandOutput::usage(FOCUS_HELP.to_string()));
     };
-    match wm.focus(&id).await {
-        Ok(()) => CommandOutput::ok(Vec::new()),
-        Err(e) => wm_error(format_args!("focus {id_arg}"), &e),
-    }
+    let id = parse_id("focus", id_arg)?;
+    wm.focus(&id)
+        .await
+        .map_err(|e| wm_error(format_args!("focus {id_arg}"), &e))?;
+    Ok(CommandOutput::ok(Vec::new()))
 }
 
 /// Why `wm open` could not launch the app with desktop entry `id`, if it could not. Blocks on
@@ -282,134 +258,106 @@ pub(crate) fn unlaunchable_app(id: &str) -> Option<String> {
     DesktopEntry::find(id).err().map(|e| e.to_string())
 }
 
-fn parse_id_error(op: &'static str, raw: &str) -> CommandOutput {
-    CommandOutput::usage_error(
-        NAME,
-        format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
-        "wm list to see ids (first TSV column)",
-    )
+fn parse_id(op: &'static str, raw: &Word) -> Result<WindowId, CommandError> {
+    raw.as_str().parse().map_err(|_| {
+        CommandError::usage(
+            format_args!("{op}: '{raw}' is not a valid window id (positive decimal con_id)"),
+            "wm list to see ids (first TSV column)",
+        )
+    })
 }
 
-async fn move_window(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
-    if args.len() < 2 {
-        return CommandOutput::usage(MOVE_HELP.to_string());
-    }
-    let id_arg = &args[0];
-    let workspace_arg = &args[1];
-    let id: WindowId = match id_arg.parse() {
-        Ok(id) => id,
-        Err(_) => return parse_id_error("move", id_arg),
+async fn move_window(wm: &dyn WindowManager, args: &[Word]) -> Result<CommandOutput, CommandError> {
+    let [id_arg, workspace_arg, ..] = args else {
+        return Ok(CommandOutput::usage(MOVE_HELP.to_string()));
     };
-    let workspace: WorkspaceId = workspace_arg
-        .parse()
-        .expect("WorkspaceId parser is infallible");
-    match wm.move_to_workspace(&id, &workspace).await {
-        Ok(()) => CommandOutput::ok(Vec::new()),
-        Err(e) => wm_error(format_args!("move {id_arg} to '{workspace_arg}'"), &e),
-    }
+    let id = parse_id("move", id_arg)?;
+    let workspace = WorkspaceId::from(workspace_arg.as_str());
+    wm.move_to_workspace(&id, &workspace)
+        .await
+        .map_err(|e| wm_error(format_args!("move {id_arg} to '{workspace_arg}'"), &e))?;
+    Ok(CommandOutput::ok(Vec::new()))
 }
 
-async fn active(wm: &dyn WindowManager) -> CommandOutput {
-    match wm.focused_context().await {
-        Ok(Some(ctx)) => {
-            let id_str = match ctx.id {
-                Some(id) => id.to_string(),
-                None => "-".into(),
-            };
-            let app = ctx.class.as_deref().unwrap_or("-");
-            CommandOutput::ok(format!("{id_str}\t{app}\n").into_bytes())
-        }
-        Ok(None) => CommandOutput::ok(Vec::new()),
-        Err(e) => wm_error("active", &e),
-    }
+async fn active(wm: &dyn WindowManager) -> Result<CommandOutput, CommandError> {
+    let focused = wm
+        .focused_context()
+        .await
+        .map_err(|e| wm_error("active", &e))?;
+    let Some(ctx) = focused else {
+        return Ok(CommandOutput::ok(Vec::new()));
+    };
+    let id_str = match ctx.id {
+        Some(id) => id.to_string(),
+        None => "-".into(),
+    };
+    let app = ctx.class.as_deref().unwrap_or("-");
+    Ok(CommandOutput::ok(format!("{id_str}\t{app}\n").into_bytes()))
 }
 
-async fn resize(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
-    if args.len() < 3 {
-        return CommandOutput::usage(RESIZE_HELP.to_string());
-    }
-    let id_arg = &args[0];
-    let id: WindowId = match id_arg.parse() {
-        Ok(id) => id,
-        Err(_) => return parse_id_error("resize", id_arg),
+async fn resize(wm: &dyn WindowManager, args: &[Word]) -> Result<CommandOutput, CommandError> {
+    let [id_arg, direction_arg, amount_arg, ..] = args else {
+        return Ok(CommandOutput::usage(RESIZE_HELP.to_string()));
     };
-    let direction: ResizeDir = match args[1].parse() {
-        Ok(direction) => direction,
-        Err(_) => {
-            return CommandOutput::usage_error(
-                NAME,
-                format_args!(
-                    "resize: direction must be 'grow' or 'shrink', got '{}'",
-                    args[1]
-                ),
-                "wm resize <id> <grow|shrink> <px>",
-            );
-        }
-    };
-    let amount: u32 = match args[2].parse() {
-        Ok(amount) => amount,
-        Err(_) => {
-            return CommandOutput::usage_error(
-                NAME,
-                format_args!(
-                    "resize: pixel amount must be a non-negative integer, got '{}'",
-                    args[2]
-                ),
-                "wm resize <id> <grow|shrink> <px>",
-            );
-        }
-    };
-    match wm.resize_width(&id, direction, amount).await {
-        Ok(()) => CommandOutput::ok(Vec::new()),
-        Err(e) => wm_error(format_args!("resize {id_arg}"), &e),
-    }
+    let id = parse_id("resize", id_arg)?;
+    let direction: ResizeDir = direction_arg.as_str().parse().map_err(|_| {
+        CommandError::usage(
+            format_args!("resize: direction must be 'grow' or 'shrink', got '{direction_arg}'"),
+            "wm resize <id> <grow|shrink> <px>",
+        )
+    })?;
+    let amount: u32 = amount_arg.as_str().parse().map_err(|_| {
+        CommandError::usage(
+            format_args!("resize: pixel amount must be a non-negative integer, got '{amount_arg}'"),
+            "wm resize <id> <grow|shrink> <px>",
+        )
+    })?;
+    wm.resize_width(&id, direction, amount)
+        .await
+        .map_err(|e| wm_error(format_args!("resize {id_arg}"), &e))?;
+    Ok(CommandOutput::ok(Vec::new()))
 }
 
-async fn list(wm: &dyn WindowManager) -> CommandOutput {
-    match wm.list_windows().await {
-        Ok(mut windows) => {
-            windows.sort_by(|a, b| {
-                a.workspace
+async fn list(wm: &dyn WindowManager) -> Result<CommandOutput, CommandError> {
+    let mut windows = wm.list_windows().await.map_err(|e| wm_error("list", &e))?;
+    windows.sort_by(|a, b| {
+        a.workspace
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.workspace.as_deref().unwrap_or(""))
+            .then_with(|| {
+                a.app
                     .as_deref()
                     .unwrap_or("")
-                    .cmp(b.workspace.as_deref().unwrap_or(""))
-                    .then_with(|| {
-                        a.app
-                            .as_deref()
-                            .unwrap_or("")
-                            .cmp(b.app.as_deref().unwrap_or(""))
-                    })
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            let mut out = String::new();
-            for window in windows {
-                let _ = write!(&mut out, "{}", window.id);
-                out.push('\t');
-                out.push_str(window.app.as_deref().unwrap_or("-"));
-                out.push('\t');
-                out.push_str(window.workspace.as_deref().unwrap_or("-"));
-                out.push('\t');
-                out.push_str(window.title.as_deref().unwrap_or(""));
-                out.push('\n');
-            }
-            CommandOutput::ok(out.into_bytes())
-        }
-        Err(e) => wm_error("list", &e),
+                    .cmp(b.app.as_deref().unwrap_or(""))
+            })
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut out = String::new();
+    for window in windows {
+        let _ = write!(&mut out, "{}", window.id);
+        out.push('\t');
+        out.push_str(window.app.as_deref().unwrap_or("-"));
+        out.push('\t');
+        out.push_str(window.workspace.as_deref().unwrap_or("-"));
+        out.push('\t');
+        out.push_str(window.title.as_deref().unwrap_or(""));
+        out.push('\n');
     }
+    Ok(CommandOutput::ok(out.into_bytes()))
 }
 
-async fn outputs(wm: &dyn WindowManager) -> CommandOutput {
-    match wm.list_outputs().await {
-        Ok(mut outputs) => {
-            outputs.sort_by(|a, b| a.name.cmp(&b.name));
-            let mut out = String::new();
-            for output in &outputs {
-                push_output_row(&mut out, output);
-            }
-            CommandOutput::ok(out.into_bytes())
-        }
-        Err(e) => wm_error("outputs", &e),
+async fn outputs(wm: &dyn WindowManager) -> Result<CommandOutput, CommandError> {
+    let mut outputs = wm
+        .list_outputs()
+        .await
+        .map_err(|e| wm_error("outputs", &e))?;
+    outputs.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = String::new();
+    for output in &outputs {
+        push_output_row(&mut out, output);
     }
+    Ok(CommandOutput::ok(out.into_bytes()))
 }
 
 fn push_output_row(out: &mut String, output: &OutputInfo) {
@@ -444,46 +392,40 @@ fn format_mode(width: u32, height: u32, millihertz: u32) -> String {
     }
 }
 
-async fn workspaces(wm: &dyn WindowManager) -> CommandOutput {
-    match wm.list_workspaces().await {
-        Ok(mut workspaces) => {
-            workspaces.sort_by_key(|w| w.num);
-            let mut out = String::new();
-            for workspace in workspaces {
-                out.push_str(&workspace.num.to_string());
-                out.push('\t');
-                out.push_str(&workspace.name);
-                out.push('\t');
-                out.push(if workspace.focused { '*' } else { '-' });
-                out.push('\t');
-                out.push_str(&workspace.output);
-                out.push('\n');
-            }
-            CommandOutput::ok(out.into_bytes())
-        }
-        Err(e) => wm_error("workspaces", &e),
+async fn workspaces(wm: &dyn WindowManager) -> Result<CommandOutput, CommandError> {
+    let mut workspaces = wm
+        .list_workspaces()
+        .await
+        .map_err(|e| wm_error("workspaces", &e))?;
+    workspaces.sort_by_key(|w| w.num);
+    let mut out = String::new();
+    for workspace in workspaces {
+        out.push_str(&workspace.num.to_string());
+        out.push('\t');
+        out.push_str(&workspace.name);
+        out.push('\t');
+        out.push(if workspace.focused { '*' } else { '-' });
+        out.push('\t');
+        out.push_str(&workspace.output);
+        out.push('\n');
     }
+    Ok(CommandOutput::ok(out.into_bytes()))
 }
 
-async fn layout(wm: &dyn WindowManager, args: &[String]) -> CommandOutput {
-    if args.is_empty() {
-        return CommandOutput::usage(LAYOUT_HELP.to_string());
-    }
-    let raw = args[0].as_str();
-    let layout: Layout = match raw.parse() {
-        Ok(layout) => layout,
-        Err(_) => {
-            return CommandOutput::usage_error(
-                NAME,
-                format_args!("layout: '{raw}' is not a known layout"),
-                "default | tabbed | stacking | splith | splitv",
-            );
-        }
+async fn layout(wm: &dyn WindowManager, args: &[Word]) -> Result<CommandOutput, CommandError> {
+    let [raw, ..] = args else {
+        return Ok(CommandOutput::usage(LAYOUT_HELP.to_string()));
     };
-    match wm.set_layout(layout).await {
-        Ok(()) => CommandOutput::ok(Vec::new()),
-        Err(e) => wm_error(format_args!("layout '{layout}'"), &e),
-    }
+    let layout: Layout = raw.as_str().parse().map_err(|_| {
+        CommandError::usage(
+            format_args!("layout: '{raw}' is not a known layout"),
+            "default | tabbed | stacking | splith | splitv",
+        )
+    })?;
+    wm.set_layout(layout)
+        .await
+        .map_err(|e| wm_error(format_args!("layout '{layout}'"), &e))?;
+    Ok(CommandOutput::ok(Vec::new()))
 }
 
 fn opened(launch: &PreparedLaunch, workspace: Option<&WorkspaceId>) -> CommandOutput {
@@ -503,35 +445,24 @@ fn workspace_phrase(workspace: Option<&WorkspaceId>) -> String {
     }
 }
 
-fn open_failed(err: &OpenError) -> CommandOutput {
+fn open_failed(err: &OpenError) -> CommandError {
     let (hint, recovery) = err.recovery();
-    CommandOutput::failed(
-        1,
-        error_line(NAME, format_args!("open: {err}"), hint, recovery).into_bytes(),
-    )
+    CommandError::failed(format_args!("open: {err}"), hint, recovery)
 }
 
-fn open_cancelled() -> CommandOutput {
-    CommandOutput::failed(
+fn open_cancelled() -> CommandError {
+    CommandError::new(
         POLICY_DENIED_EXIT,
-        error_line(
-            NAME,
-            "open cancelled by user",
-            Hint::Try,
-            "a different approach",
-        )
-        .into_bytes(),
+        "open cancelled by user",
+        Hint::Try,
+        "a different approach",
     )
 }
 
-/// The `[error] wm: <op> failed: …` line for a backend error, with the
-/// recovery hint chosen by the error variant.
-fn wm_error(op: impl Display, err: &WmError) -> CommandOutput {
+/// `<op> failed: …` for a backend error, with the recovery hint chosen by the error variant.
+fn wm_error(op: impl Display, err: &WmError) -> CommandError {
     let (label, hint) = hint_for(err);
-    CommandOutput::failed(
-        1,
-        error_line(NAME, format_args!("{op} failed: {err}"), label, hint).into_bytes(),
-    )
+    CommandError::failed(format_args!("{op} failed: {err}"), label, hint)
 }
 
 fn hint_for(err: &WmError) -> (Hint, &'static str) {

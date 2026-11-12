@@ -1,6 +1,8 @@
 //! The command-line AST ([`Chain`]) with its parser, word expander, and
 //! executor.
 
+use std::fmt;
+
 pub mod executor;
 pub mod expand;
 pub mod parser;
@@ -33,6 +35,29 @@ impl Word {
             quoted: true,
         }
     }
+
+    /// The texts of `words` joined by single spaces.
+    pub fn joined_by_spaces(words: &[Self]) -> String {
+        let texts: Vec<&str> = words.iter().map(Self::as_str).collect();
+        texts.join(" ")
+    }
+
+    /// The word's text, without the quotes it was written in.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl PartialEq<str> for Word {
+    fn eq(&self, text: &str) -> bool {
+        self.text == text
+    }
+}
+
+impl fmt::Display for Word {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 /// A parsed command line. Precedence, lowest first: `;` < `&&`/`||` < `|`;
@@ -41,7 +66,8 @@ impl Word {
 pub enum Chain {
     /// `argv[0]` is the command name; `argv[1..]` are its positional args.
     Command(Vec<Word>),
-    Pipe(Box<Chain>, Box<Chain>),
+    /// The left side's stdout is the stdin of the command on the right.
+    Pipe(Box<Chain>, Vec<Word>),
     And(Box<Chain>, Box<Chain>),
     Or(Box<Chain>, Box<Chain>),
     Seq(Box<Chain>, Box<Chain>),

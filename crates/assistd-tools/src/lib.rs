@@ -27,7 +27,10 @@ pub mod vision;
 pub use assistd_ipc::{ConfirmSource, ImageMime};
 pub use attachment::{LoadImageError, load_image_attachment};
 pub use catalog::ToolCatalog;
-pub use command::{Attachment, Command, CommandInput, CommandOutput, CommandRegistry};
+pub use command::{
+    Attachment, Command, CommandError, CommandInput, CommandOutput, CommandRegistry, Usage,
+    run_rendered,
+};
 pub use memory::{DEFAULT_SEARCH_LIMIT, MemoryOps};
 pub use memory_tools::{RememberTool, ReminisceTool};
 pub use policy::{

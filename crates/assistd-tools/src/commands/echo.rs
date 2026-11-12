@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 
-use crate::command::{Command, CommandInput, CommandOutput};
+use crate::chain::Word;
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Usage};
 
 /// `echo [-ne] [ARGS...]`: write args joined by spaces, then a newline
 /// unless `-n` is given; `-e` interprets backslash escapes.
@@ -25,10 +26,10 @@ impl Command for EchoCommand {
         "write arguments joined by spaces (-n no newline, -e escapes)"
     }
 
-    fn help(&self) -> String {
-        "usage: echo [-ne] [ARGS...]\n\
-         \n\
-         Write the argument list joined by single spaces, followed by a \
+    fn usage(&self) -> Usage {
+        Usage::new(
+            "[-ne] [ARGS...]",
+            "Write the argument list joined by single spaces, followed by a \
          newline.\n\
          \n\
          Flags:\n  \
@@ -37,16 +38,16 @@ impl Command for EchoCommand {
            -E  disable -e (the default)\n\
          \n\
          Note that a backslash inside double quotes reaches echo intact, \
-         so `echo -e \"a\\nb\"` prints two lines.\n"
-            .to_string()
+         so `echo -e \"a\\nb\"` prints two lines.\n",
+        )
     }
 
-    async fn run(&self, input: CommandInput) -> CommandOutput {
+    async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError> {
         if input.args.is_empty() {
-            return CommandOutput::usage(self.help());
+            return Ok(CommandOutput::usage(self.help()));
         }
         let (flags, words) = parse_flags(&input.args);
-        let joined = words.join(" ");
+        let joined = Word::joined_by_spaces(words);
         let mut out = if flags.escapes {
             unescape(&joined)
         } else {
@@ -55,15 +56,15 @@ impl Command for EchoCommand {
         if !flags.no_newline {
             out.push(b'\n');
         }
-        CommandOutput::ok(out)
+        Ok(CommandOutput::ok(out))
     }
 }
 
-fn parse_flags(argv: &[String]) -> (Flags, &[String]) {
+fn parse_flags(argv: &[Word]) -> (Flags, &[Word]) {
     let mut flags = Flags::default();
     let mut consumed = 0;
     while let Some(arg) = argv.get(consumed) {
-        let Some(letters) = arg.strip_prefix('-').filter(|l| !l.is_empty()) else {
+        let Some(letters) = arg.text.strip_prefix('-').filter(|l| !l.is_empty()) else {
             break;
         };
         if !letters.chars().all(|c| matches!(c, 'n' | 'e' | 'E')) {
@@ -111,16 +112,16 @@ fn unescape(text: &str) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::TurnContext;
+    use crate::command::run_rendered;
 
     async fn run_echo(args: &[&str]) -> CommandOutput {
-        EchoCommand
-            .run(CommandInput {
-                args: args.iter().map(ToString::to_string).collect(),
-                stdin: None,
-                scope: crate::FileScope::Host,
-                turn: TurnContext::default(),
-            })
-            .await
+        let input = CommandInput {
+            args: args.iter().copied().map(Word::bare).collect(),
+            stdin: None,
+            scope: crate::FileScope::Host,
+            turn: TurnContext::default(),
+        };
+        run_rendered(&EchoCommand, input).await
     }
 
     #[tokio::test]
