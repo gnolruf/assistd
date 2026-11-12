@@ -164,7 +164,7 @@ impl Transcriber for GatedTranscriber {
 }
 
 #[tokio::test]
-async fn queued_publishes_transcribing_while_running_and_idle_when_done() {
+async fn queued_publishes_transcribing_until_the_last_transcription_ends() {
     let primary = StubTranscriber::on_gpu("GPU");
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -184,16 +184,26 @@ async fn queued_publishes_transcribing_while_running_and_idle_when_done() {
     let rx = queued.subscribe_state().expect("state is exposed");
     assert_eq!(*rx.borrow(), VoiceCaptureState::Idle);
 
-    let transcription = {
+    let mut transcriptions = Vec::new();
+    for _ in 0..2 {
         let queued = queued.clone();
-        tokio::spawn(async move { queued.transcribe(&[0i16; 16]).await })
-    };
-
-    started.notified().await;
+        transcriptions.push(tokio::spawn(
+            async move { queued.transcribe(&[0i16; 16]).await },
+        ));
+        started.notified().await;
+    }
     assert_eq!(*rx.borrow(), VoiceCaptureState::Transcribing);
 
+    let [first, second] = transcriptions.try_into().unwrap();
     release.notify_one();
-    let text = transcription.await.unwrap().unwrap();
-    assert_eq!(text, "CPU");
+    assert_eq!(first.await.unwrap().unwrap(), "CPU");
+    assert_eq!(
+        *rx.borrow(),
+        VoiceCaptureState::Transcribing,
+        "another transcription is still running"
+    );
+
+    release.notify_one();
+    assert_eq!(second.await.unwrap().unwrap(), "CPU");
     assert_eq!(*rx.borrow(), VoiceCaptureState::Idle);
 }
