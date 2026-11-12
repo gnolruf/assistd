@@ -587,6 +587,7 @@ async fn forward_sentences(mut llm_rx: mpsc::Receiver<LlmEvent>, speech_tx: mpsc
             | LlmEvent::Status { .. }
             | LlmEvent::ContextSize { .. }
             | LlmEvent::HistoryCompacted { .. }
+            | LlmEvent::Interrupted { .. }
             | LlmEvent::ReasoningDelta { .. } => {}
         }
     }

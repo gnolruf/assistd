@@ -176,6 +176,9 @@ pub enum LlmEvent {
         cut: CompactionCut,
         elapsed: Duration,
     },
+    /// The turn was cut off before the model finished; `reply` is what the
+    /// conversation keeps as its answer. No `Done` follows.
+    Interrupted { reply: String },
     /// The model has finished generating.
     Done,
 }
@@ -268,6 +271,12 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
     /// deltas through `tx`. Backends without tool support ignore `tools` and return
     /// [`StepOutcome::Final`].
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome>;
+
+    /// Append `reply` as the assistant's answer to a turn cut off before the
+    /// model finished, dropping any pending transient note.
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        Ok(())
+    }
 
     /// Stash a context block rendered ahead of the next user turn's text.
     async fn set_transient_context(&self, _text: String) -> LlmResult<()> {

@@ -673,6 +673,13 @@ impl LlmBackend for LlamaChatClient {
         }
     }
 
+    async fn push_interrupted_reply(&self, reply: String) -> LlmResult<()> {
+        let mut conv = self.conv.lock().await;
+        conv.consume_transient_note();
+        conv.push_assistant(reply);
+        Ok(())
+    }
+
     async fn set_transient_context(&self, text: String) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         conv.set_transient_context(text);
