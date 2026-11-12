@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use assistd_ipc::{Event, HostName, PermissionMode, TaskPrompt};
+use assistd_ipc::{Event, EventBody, HostName, PermissionMode, TaskPrompt};
 use assistd_llm::{ConversationKey, LlmBackend, LlmEvent, LlmHealthProbe, SlotAssignment};
 
 use super::task_runs::task_system_prompt;
@@ -80,14 +80,16 @@ impl AppState {
                 plan,
                 recommended,
             }) => {
-                let refined = Event::TaskRefined {
-                    id: id.clone(),
-                    prompt,
-                    plan,
-                    recommended,
-                };
+                let refined = Event::new(
+                    id.clone(),
+                    EventBody::TaskRefined {
+                        prompt,
+                        plan,
+                        recommended,
+                    },
+                );
                 let _ = tx.send(refined).await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -228,10 +230,12 @@ async fn forward_planning_events(
 ) {
     while let Some(event) = llm_rx.recv().await {
         if let Some(event) = planning_wire_event(id, event) {
-            let wrapped = Event::TaskPlan {
-                id: id.to_string(),
-                event: Box::new(event),
-            };
+            let wrapped = Event::new(
+                id.to_string(),
+                EventBody::TaskPlan {
+                    event: Box::new(event),
+                },
+            );
             let _ = tx.send(wrapped).await;
         }
     }
@@ -241,34 +245,42 @@ async fn forward_planning_events(
 fn planning_wire_event(id: &str, event: LlmEvent) -> Option<Event> {
     let id = id.to_string();
     Some(match event {
-        LlmEvent::Delta { text } => Event::Delta { id, text },
-        LlmEvent::ReasoningDelta { text } => Event::ReasoningDelta { id, text },
+        LlmEvent::Delta { text } => Event::new(id, EventBody::Delta { text }),
+        LlmEvent::ReasoningDelta { text } => Event::new(id, EventBody::ReasoningDelta { text }),
         LlmEvent::ToolCall {
             name, arguments, ..
-        } => Event::ToolCall {
+        } => Event::new(
             id,
-            name,
-            args: arguments,
-        },
-        LlmEvent::ToolResult { name, result, .. } => Event::ToolResult {
+            EventBody::ToolCall {
+                name,
+                args: arguments,
+            },
+        ),
+        LlmEvent::ToolResult { name, result, .. } => Event::new(
             id,
-            name,
-            result: result.to_json(),
-        },
-        LlmEvent::Relay(event) => Event::Relay { id, event },
-        LlmEvent::ContextSize { tokens, total } => Event::ContextSize { id, tokens, total },
+            EventBody::ToolResult {
+                name,
+                result: result.report(),
+            },
+        ),
+        LlmEvent::Relay(event) => Event::new(id, EventBody::Relay { event }),
+        LlmEvent::ContextSize { tokens, total } => {
+            Event::new(id, EventBody::ContextSize { tokens, total })
+        }
         LlmEvent::Status {
             severity,
             component,
             event,
             message,
-        } => Event::Status {
+        } => Event::new(
             id,
-            severity,
-            component,
-            event,
-            message,
-        },
+            EventBody::Status {
+                severity,
+                component,
+                event,
+                message,
+            },
+        ),
         LlmEvent::ToolCallsRequested { .. }
         | LlmEvent::HistoryCompacted { .. }
         | LlmEvent::Done => {

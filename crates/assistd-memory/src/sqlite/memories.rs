@@ -93,17 +93,6 @@ impl MemoryStore for SqliteMemoryStore {
             .await
     }
 
-    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        let pattern = glob_prefix_pattern(prefix);
-        self.handle
-            .read("memory list", move |c| {
-                c.prepare_cached("SELECT key FROM memories WHERE key GLOB ?1 ORDER BY key")?
-                    .query_map(rusqlite::params![pattern], |r| r.get(0))?
-                    .collect()
-            })
-            .await
-    }
-
     async fn list_full(&self, prefix: &str) -> Result<Vec<MemoryRecord>> {
         let pattern = glob_prefix_pattern(prefix);
         self.handle
@@ -197,18 +186,17 @@ mod tests {
         ] {
             store.save(key, "v".into()).await.unwrap();
         }
-        assert_eq!(store.list("pref:").await.unwrap(), ["pref:a"]);
-        assert_eq!(store.list("a*").await.unwrap(), ["a*b:1"]);
-        assert_eq!(store.list("q?").await.unwrap(), ["q?:1"]);
-        assert_eq!(store.list("[x]").await.unwrap(), ["[x]:1"]);
-        let full: Vec<String> = store
-            .list_full("Pref")
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| r.key)
-            .collect();
-        assert_eq!(full, ["Pref:b"]);
+        for (prefix, key) in [
+            ("pref:", "pref:a"),
+            ("a*", "a*b:1"),
+            ("q?", "q?:1"),
+            ("[x]", "[x]:1"),
+            ("Pref", "Pref:b"),
+        ] {
+            let rows = store.list_full(prefix).await.unwrap();
+            let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+            assert_eq!(keys, [key], "{prefix}");
+        }
     }
 
     #[tokio::test]

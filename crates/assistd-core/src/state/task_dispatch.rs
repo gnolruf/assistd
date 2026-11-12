@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use assistd_ipc::{
-    ConversationHold, Event, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId,
+    ConversationHold, Event, EventBody, SuspendReason, TaskQueueOp, TaskQueueSnapshot, TaskRunId,
 };
 use assistd_memory::{TaskRunEnd, WaitingRun};
 
@@ -88,7 +88,7 @@ impl AppState {
     ) {
         match self.apply_task_queue_op(op).await {
             Ok(()) => {
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
             }
             Err(e) => send_error(&tx, id, e.to_string()).await,
         }
@@ -249,10 +249,12 @@ impl AppState {
         if published.as_ref() == Some(&snapshot) {
             return;
         }
-        self.runtime.publish(&Event::TaskQueue {
-            id: TASK_QUEUE_EVENT_ID.to_string(),
-            snapshot: snapshot.clone(),
-        });
+        self.runtime.publish(&Event::new(
+            TASK_QUEUE_EVENT_ID.to_string(),
+            EventBody::TaskQueue {
+                snapshot: snapshot.clone(),
+            },
+        ));
         *published = Some(snapshot);
     }
 }

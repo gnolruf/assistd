@@ -4,8 +4,18 @@ use serde_json::json;
 
 use crate::task::{MAX_TASK_NAME_CHARS, MAX_TASK_PROMPT_BYTES};
 
-fn id() -> String {
-    "r".into()
+fn request(body: RequestBody) -> Request {
+    Request {
+        id: "r".into(),
+        body,
+    }
+}
+
+fn event(body: EventBody) -> Event {
+    Event {
+        id: "r".into(),
+        body,
+    }
 }
 
 /// One of every [`Request`] variant with its exact wire form.
@@ -26,18 +36,16 @@ fn request_cases() -> Vec<(Request, &'static str)> {
 fn wake_word_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::WakeWord {
-                id: id(),
+            request(RequestBody::WakeWord {
                 op: WakeWordOp::TestStart,
-            },
-            r#"{"type":"wake_word","id":"r","op":{"action":"test_start"}}"#,
+            }),
+            r#"{"id":"r","type":"wake_word","op":{"action":"test_start"}}"#,
         ),
         (
-            Request::WakeWord {
-                id: id(),
+            request(RequestBody::WakeWord {
                 op: WakeWordOp::TestStop,
-            },
-            r#"{"type":"wake_word","id":"r","op":{"action":"test_stop"}}"#,
+            }),
+            r#"{"id":"r","type":"wake_word","op":{"action":"test_stop"}}"#,
         ),
     ]
 }
@@ -46,7 +54,7 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
             Request::query("r", "hi"),
-            r#"{"type":"query","id":"r","text":"hi"}"#,
+            r#"{"id":"r","type":"query","text":"hi"}"#,
         ),
         (
             Request::query_with_attachments(
@@ -57,62 +65,55 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
                     &[0xDE, 0xAD, 0xBE, 0xEF],
                 )],
             ),
-            r#"{"type":"query","id":"r","text":"describe this","attachments":[{"mime":"image/png","data_base64":"3q2+7w=="}]}"#,
+            r#"{"id":"r","type":"query","text":"describe this","attachments":[{"mime":"image/png","data_base64":"3q2+7w=="}]}"#,
         ),
         (
-            Request::Query {
-                id: "r".into(),
+            request(RequestBody::Query {
                 text: "tidy the repo".into(),
                 attachments: Vec::new(),
                 plan: PlanMode::Planning,
-            },
-            r#"{"type":"query","id":"r","text":"tidy the repo","plan":"planning"}"#,
+            }),
+            r#"{"id":"r","type":"query","text":"tidy the repo","plan":"planning"}"#,
         ),
         (
-            Request::PlanVerdict {
-                id: id(),
+            request(RequestBody::PlanVerdict {
                 review_id: "v".into(),
                 verdict: PlanVerdict::Accept {
                     mode: PermissionMode::AcceptEdits,
                 },
-            },
-            r#"{"type":"plan_verdict","id":"r","review_id":"v","verdict":{"verdict":"accept","mode":"accept_edits"}}"#,
+            }),
+            r#"{"id":"r","type":"plan_verdict","review_id":"v","verdict":{"verdict":"accept","mode":"accept_edits"}}"#,
         ),
         (
-            Request::PlanVerdict {
-                id: id(),
+            request(RequestBody::PlanVerdict {
                 review_id: "v".into(),
                 verdict: PlanVerdict::KeepPlanning {
                     feedback: Some("skip the tests".into()),
                 },
-            },
-            r#"{"type":"plan_verdict","id":"r","review_id":"v","verdict":{"verdict":"keep_planning","feedback":"skip the tests"}}"#,
+            }),
+            r#"{"id":"r","type":"plan_verdict","review_id":"v","verdict":{"verdict":"keep_planning","feedback":"skip the tests"}}"#,
         ),
         (
-            Request::SetPresence {
-                id: id(),
+            request(RequestBody::SetPresence {
                 target: PresenceTarget::Drowsy,
-            },
-            r#"{"type":"set_presence","id":"r","target":"drowsy"}"#,
+            }),
+            r#"{"id":"r","type":"set_presence","target":"drowsy"}"#,
         ),
         (
-            Request::ChatState {
-                id: id(),
-                focused: false,
-            },
-            r#"{"type":"chat_state","id":"r","focused":false}"#,
+            request(RequestBody::ChatState { focused: false }),
+            r#"{"id":"r","type":"chat_state","focused":false}"#,
         ),
         (
-            Request::PttStart { id: id() },
-            r#"{"type":"ptt_start","id":"r"}"#,
+            request(RequestBody::PttStart),
+            r#"{"id":"r","type":"ptt_start"}"#,
         ),
         (
-            Request::ListenStart { id: id() },
-            r#"{"type":"listen_start","id":"r"}"#,
+            request(RequestBody::ListenStart),
+            r#"{"id":"r","type":"listen_start"}"#,
         ),
         (
-            Request::VoiceToggle { id: id() },
-            r#"{"type":"voice_toggle","id":"r"}"#,
+            request(RequestBody::VoiceToggle),
+            r#"{"id":"r","type":"voice_toggle"}"#,
         ),
     ]
 }
@@ -120,56 +121,37 @@ fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
 fn memory_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::MemorySave {
-                id: id(),
+            request(RequestBody::MemorySave {
                 key: "k".into(),
                 value: "v".into(),
-            },
-            r#"{"type":"memory_save","id":"r","key":"k","value":"v"}"#,
+            }),
+            r#"{"id":"r","type":"memory_save","key":"k","value":"v"}"#,
         ),
         (
-            Request::MemoryLoad {
-                id: id(),
-                key: "k".into(),
-            },
-            r#"{"type":"memory_load","id":"r","key":"k"}"#,
+            request(RequestBody::MemoryLoad { key: "k".into() }),
+            r#"{"id":"r","type":"memory_load","key":"k"}"#,
         ),
         (
-            Request::MemoryList {
-                id: id(),
-                prefix: "pref:".into(),
-            },
-            r#"{"type":"memory_list","id":"r","prefix":"pref:"}"#,
-        ),
-        (
-            Request::MemoryListAll {
-                id: id(),
+            request(RequestBody::MemoryListAll {
                 prefix: "fact:".into(),
                 limit: 3,
-            },
-            r#"{"type":"memory_list_all","id":"r","prefix":"fact:","limit":3}"#,
+            }),
+            r#"{"id":"r","type":"memory_list_all","prefix":"fact:","limit":3}"#,
         ),
         (
-            Request::MemoryDelete {
-                id: id(),
-                key: "k".into(),
-            },
-            r#"{"type":"memory_delete","id":"r","key":"k"}"#,
+            request(RequestBody::MemoryDelete { key: "k".into() }),
+            r#"{"id":"r","type":"memory_delete","key":"k"}"#,
         ),
         (
-            Request::MemoryForget {
-                id: id(),
-                memory_id: 42,
-            },
-            r#"{"type":"memory_forget","id":"r","memory_id":42}"#,
+            request(RequestBody::MemoryForget { memory_id: 42 }),
+            r#"{"id":"r","type":"memory_forget","memory_id":42}"#,
         ),
         (
-            Request::MemorySemanticSearch {
-                id: id(),
+            request(RequestBody::MemorySemanticSearch {
                 query: "the rust thing".into(),
                 limit: 5,
-            },
-            r#"{"type":"memory_semantic_search","id":"r","query":"the rust thing","limit":5}"#,
+            }),
+            r#"{"id":"r","type":"memory_semantic_search","query":"the rust thing","limit":5}"#,
         ),
     ]
 }
@@ -177,54 +159,45 @@ fn memory_request_cases() -> Vec<(Request, &'static str)> {
 fn session_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::ConfirmResponse {
-                id: id(),
+            request(RequestBody::ConfirmResponse {
                 confirm_id: "c-abc".into(),
                 allow: true,
                 always: false,
-            },
-            r#"{"type":"confirm_response","id":"r","confirm_id":"c-abc","allow":true}"#,
+            }),
+            r#"{"id":"r","type":"confirm_response","confirm_id":"c-abc","allow":true}"#,
         ),
         (
-            Request::ConfirmResponse {
-                id: id(),
+            request(RequestBody::ConfirmResponse {
                 confirm_id: "c-abc".into(),
                 allow: true,
                 always: true,
-            },
-            r#"{"type":"confirm_response","id":"r","confirm_id":"c-abc","allow":true,"always":true}"#,
+            }),
+            r#"{"id":"r","type":"confirm_response","confirm_id":"c-abc","allow":true,"always":true}"#,
         ),
         (
-            Request::Fork {
-                id: id(),
+            request(RequestBody::Fork {
                 name: "experiment".into(),
-            },
-            r#"{"type":"fork","id":"r","name":"experiment"}"#,
+            }),
+            r#"{"id":"r","type":"fork","name":"experiment"}"#,
         ),
         (
-            Request::Switch {
-                id: id(),
+            request(RequestBody::Switch {
                 target: "abc12345/main".into(),
-            },
-            r#"{"type":"switch","id":"r","target":"abc12345/main"}"#,
+            }),
+            r#"{"id":"r","type":"switch","target":"abc12345/main"}"#,
         ),
         (
-            Request::ResumeOrNew {
-                id: id(),
-                recency_secs: 600,
-            },
-            r#"{"type":"resume_or_new","id":"r","recency_secs":600}"#,
+            request(RequestBody::ResumeOrNew { recency_secs: 600 }),
+            r#"{"id":"r","type":"resume_or_new","recency_secs":600}"#,
         ),
         (
-            Request::Subscribe {
-                id: id(),
+            request(RequestBody::Subscribe {
                 filter: SubscribeFilter::default(),
-            },
-            r#"{"type":"subscribe","id":"r","filter":{"kinds":[]}}"#,
+            }),
+            r#"{"id":"r","type":"subscribe","filter":{"kinds":[]}}"#,
         ),
         (
-            Request::Subscribe {
-                id: id(),
+            request(RequestBody::Subscribe {
                 filter: SubscribeFilter {
                     kinds: vec![
                         EventKind::Presence,
@@ -232,8 +205,8 @@ fn session_request_cases() -> Vec<(Request, &'static str)> {
                         EventKind::LastDelta,
                     ],
                 },
-            },
-            r#"{"type":"subscribe","id":"r","filter":{"kinds":["presence","listen_state","last_delta"]}}"#,
+            }),
+            r#"{"id":"r","type":"subscribe","filter":{"kinds":["presence","listen_state","last_delta"]}}"#,
         ),
     ]
 }
@@ -246,7 +219,6 @@ fn requests_match_pinned_wire_format() {
         assert_eq!(parsed, req, "{wire}");
         let tag: serde_json::Value = serde_json::from_str(wire).unwrap();
         assert_eq!(tag["type"], req.kind(), "{wire}");
-        assert_eq!(req.id(), "r", "{wire}");
     }
 }
 
@@ -270,8 +242,7 @@ fn event_cases() -> Vec<(Event, &'static str)> {
 /// A `relay` history row with every kind of stored sub-agent entry.
 fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
     vec![(
-        Event::HistoryEntry {
-            id: id(),
+        event(EventBody::HistoryEntry {
             seq: 5,
             role: Role::Tool,
             content: "report".into(),
@@ -318,34 +289,27 @@ fn relay_history_event_cases() -> Vec<(Event, &'static str)> {
                     run: None,
                 },
             ],
-        },
-        r#"{"type":"history_entry","id":"r","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered"},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
+        }),
+        r#"{"id":"r","type":"history_entry","seq":5,"role":"tool","content":"report","tool_name":"relay","exit_code":0,"duration_ms":9000,"relay":[{"task":"find it","agent":"web_research","run":{"end":{"kind":"answered"},"duration_ms":8000,"tokens":4100,"entries":[{"kind":"reasoning","text":"search","duration_ms":300},{"kind":"tool","name":"run","args":{"command":"web search it"},"output":"hit","outcome":{"exit_code":0,"duration_ms":40}},{"kind":"compaction"},{"kind":"text","text":"Found."}]}},{"task":"read it","agent":"file_review"}]}"#,
     )]
 }
 
 fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::WakeWordStatus {
-                id: id(),
+            event(EventBody::WakeWordStatus {
                 phrase: "hey jarvis".into(),
                 listening: true,
-            },
-            r#"{"type":"wake_word_status","id":"r","phrase":"hey jarvis","listening":true}"#,
+            }),
+            r#"{"id":"r","type":"wake_word_status","phrase":"hey jarvis","listening":true}"#,
         ),
         (
-            Event::WakeWordTest {
-                id: id(),
-                matched: true,
-            },
-            r#"{"type":"wake_word_test","id":"r","matched":true}"#,
+            event(EventBody::WakeWordTest { matched: true }),
+            r#"{"id":"r","type":"wake_word_test","matched":true}"#,
         ),
         (
-            Event::WakeWordSpeech {
-                id: id(),
-                speaking: true,
-            },
-            r#"{"type":"wake_word_speech","id":"r","speaking":true}"#,
+            event(EventBody::WakeWordSpeech { speaking: true }),
+            r#"{"id":"r","type":"wake_word_speech","speaking":true}"#,
         ),
     ]
 }
@@ -353,49 +317,56 @@ fn wake_word_event_cases() -> Vec<(Event, &'static str)> {
 fn turn_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::Delta {
-                id: id(),
+            event(EventBody::Delta {
                 text: "pong".into(),
-            },
-            r#"{"type":"delta","id":"r","text":"pong"}"#,
+            }),
+            r#"{"id":"r","type":"delta","text":"pong"}"#,
         ),
         (
-            Event::ReasoningDelta {
-                id: id(),
-                text: "hmm".into(),
-            },
-            r#"{"type":"reasoning_delta","id":"r","text":"hmm"}"#,
+            event(EventBody::ReasoningDelta { text: "hmm".into() }),
+            r#"{"id":"r","type":"reasoning_delta","text":"hmm"}"#,
         ),
         (
-            Event::ToolCall {
-                id: id(),
+            event(EventBody::ToolCall {
                 name: "echo".into(),
                 args: json!({"text": "hi"}),
-            },
-            r#"{"type":"tool_call","id":"r","name":"echo","args":{"text":"hi"}}"#,
+            }),
+            r#"{"id":"r","type":"tool_call","name":"echo","args":{"text":"hi"}}"#,
         ),
         (
-            Event::ToolResult {
-                id: id(),
+            event(EventBody::ToolResult {
                 name: "echo".into(),
-                result: json!("hi"),
-            },
-            r#"{"type":"tool_result","id":"r","name":"echo","result":"hi"}"#,
+                result: ToolReport {
+                    output: "hi".into(),
+                    exit_code: 1,
+                    truncated: true,
+                    duration_ms: 12,
+                    overflow_file: Some("/tmp/full".into()),
+                    streams: Some(ToolStreams {
+                        stdout: "hi".into(),
+                        stderr: "warn".into(),
+                        stderr_overflow_file: None,
+                    }),
+                    attachments: vec![ToolAttachment::Image {
+                        mime: ImageMime::Png,
+                        data: "3q2+7w==".into(),
+                    }],
+                },
+            }),
+            r#"{"id":"r","type":"tool_result","name":"echo","result":{"output":"hi","exit_code":1,"truncated":true,"duration_ms":12,"overflow_file":"/tmp/full","stdout":"hi","stderr":"warn","attachments":[{"type":"image","mime":"image/png","data":"3q2+7w=="}]}}"#,
         ),
         (
-            Event::Error {
-                id: id(),
+            event(EventBody::Error {
                 message: "boom".into(),
-            },
-            r#"{"type":"error","id":"r","message":"boom"}"#,
+            }),
+            r#"{"id":"r","type":"error","message":"boom"}"#,
         ),
-        (Event::Done { id: id() }, r#"{"type":"done","id":"r"}"#),
+        (event(EventBody::Done), r#"{"id":"r","type":"done"}"#),
         (
-            Event::LastDelta {
-                id: id(),
+            event(EventBody::LastDelta {
                 text: "Hello world".into(),
-            },
-            r#"{"type":"last_delta","id":"r","text":"Hello world"}"#,
+            }),
+            r#"{"id":"r","type":"last_delta","text":"Hello world"}"#,
         ),
     ]
 }
@@ -403,77 +374,62 @@ fn turn_event_cases() -> Vec<(Event, &'static str)> {
 fn voice_and_presence_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::Presence {
-                id: id(),
+            event(EventBody::Presence {
                 state: PresenceState::Sleeping,
-            },
-            r#"{"type":"presence","id":"r","state":"sleeping"}"#,
+            }),
+            r#"{"id":"r","type":"presence","state":"sleeping"}"#,
         ),
         (
-            Event::VoiceState {
-                id: id(),
+            event(EventBody::VoiceState {
                 state: VoiceCaptureState::Recording,
-            },
-            r#"{"type":"voice_state","id":"r","state":"recording"}"#,
+            }),
+            r#"{"id":"r","type":"voice_state","state":"recording"}"#,
         ),
         (
-            Event::Transcription {
-                id: id(),
+            event(EventBody::Transcription {
                 text: "hello world".into(),
-            },
-            r#"{"type":"transcription","id":"r","text":"hello world"}"#,
+            }),
+            r#"{"id":"r","type":"transcription","text":"hello world"}"#,
         ),
         (
-            Event::ListenState {
-                id: id(),
+            event(EventBody::ListenState {
                 phase: ListenPhase::Armed,
-            },
-            r#"{"type":"listen_state","id":"r","phase":"armed"}"#,
+            }),
+            r#"{"id":"r","type":"listen_state","phase":"armed"}"#,
         ),
         (
-            Event::WakeWordDetected { id: id() },
-            r#"{"type":"wake_word_detected","id":"r"}"#,
+            event(EventBody::WakeWordDetected),
+            r#"{"id":"r","type":"wake_word_detected"}"#,
         ),
         (
-            Event::VoiceOutputState {
-                id: id(),
-                enabled: true,
-            },
-            r#"{"type":"voice_output_state","id":"r","enabled":true}"#,
+            event(EventBody::VoiceOutputState { enabled: true }),
+            r#"{"id":"r","type":"voice_output_state","enabled":true}"#,
         ),
         (
-            Event::Readiness {
-                id: id(),
+            event(EventBody::Readiness {
                 component: StartupComponent::Mcp {
                     server: "fs".into(),
                 },
                 state: ComponentReadiness::Unavailable {
                     reason: "no npx".into(),
                 },
-            },
-            r#"{"type":"readiness","id":"r","component":{"kind":"mcp","server":"fs"},"state":{"state":"unavailable","reason":"no npx"}}"#,
+            }),
+            r#"{"id":"r","type":"readiness","component":{"kind":"mcp","server":"fs"},"state":{"state":"unavailable","reason":"no npx"}}"#,
         ),
         (
-            Event::Readiness {
-                id: id(),
+            event(EventBody::Readiness {
                 component: StartupComponent::VoiceInput,
                 state: ComponentReadiness::Starting,
-            },
-            r#"{"type":"readiness","id":"r","component":{"kind":"voice_input"},"state":{"state":"starting"}}"#,
+            }),
+            r#"{"id":"r","type":"readiness","component":{"kind":"voice_input"},"state":{"state":"starting"}}"#,
         ),
         (
-            Event::SpeakingState {
-                id: id(),
-                speaking: true,
-            },
-            r#"{"type":"speaking_state","id":"r","speaking":true}"#,
+            event(EventBody::SpeakingState { speaking: true }),
+            r#"{"id":"r","type":"speaking_state","speaking":true}"#,
         ),
         (
-            Event::ChatFocus {
-                id: id(),
-                focused: true,
-            },
-            r#"{"type":"chat_focus","id":"r","focused":true}"#,
+            event(EventBody::ChatFocus { focused: true }),
+            r#"{"id":"r","type":"chat_focus","focused":true}"#,
         ),
     ]
 }
@@ -481,8 +437,7 @@ fn voice_and_presence_event_cases() -> Vec<(Event, &'static str)> {
 fn memory_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::SemanticHit {
-                id: id(),
+            event(EventBody::SemanticHit {
                 message_id: 42,
                 chunk_id: 7,
                 session_id: "s".into(),
@@ -490,49 +445,38 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
                 role: Role::User,
                 content: "the rust embeddings daemon".into(),
                 similarity: 0.5,
-            },
-            r#"{"type":"semantic_hit","id":"r","message_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5}"#,
+            }),
+            r#"{"id":"r","type":"semantic_hit","message_id":42,"chunk_id":7,"session_id":"s","timestamp":"2026-04-28T00:00:00Z","role":"user","content":"the rust embeddings daemon","similarity":0.5}"#,
         ),
         (
-            Event::MemoryValue {
-                id: id(),
+            event(EventBody::MemoryValue {
                 key: "absent".into(),
                 value: None,
-            },
-            r#"{"type":"memory_value","id":"r","key":"absent","value":null}"#,
+            }),
+            r#"{"id":"r","type":"memory_value","key":"absent","value":null}"#,
         ),
         (
-            Event::MemoryKeys {
-                id: id(),
-                keys: vec!["a".into(), "b".into()],
-            },
-            r#"{"type":"memory_keys","id":"r","keys":["a","b"]}"#,
-        ),
-        (
-            Event::MemoryRow {
-                id: id(),
+            event(EventBody::MemoryRow {
                 memory_id: 17,
                 key: "fact:user.name".into(),
                 value: "Ben".into(),
-            },
-            r#"{"type":"memory_row","id":"r","memory_id":17,"key":"fact:user.name","value":"Ben"}"#,
+            }),
+            r#"{"id":"r","type":"memory_row","memory_id":17,"key":"fact:user.name","value":"Ben"}"#,
         ),
         (
-            Event::MemoryForgetResult {
-                id: id(),
+            event(EventBody::MemoryForgetResult {
                 deleted: true,
                 key: Some("fact:user.name".into()),
-            },
-            r#"{"type":"memory_forget_result","id":"r","deleted":true,"key":"fact:user.name"}"#,
+            }),
+            r#"{"id":"r","type":"memory_forget_result","deleted":true,"key":"fact:user.name"}"#,
         ),
         (
-            Event::ReindexProgress {
-                id: id(),
+            event(EventBody::ReindexProgress {
                 kind: ReindexKind::Chunks,
                 done: 3,
                 total: 10,
-            },
-            r#"{"type":"reindex_progress","id":"r","kind":"chunks","done":3,"total":10}"#,
+            }),
+            r#"{"id":"r","type":"reindex_progress","kind":"chunks","done":3,"total":10}"#,
         ),
     ]
 }
@@ -540,32 +484,29 @@ fn memory_event_cases() -> Vec<(Event, &'static str)> {
 fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::ConfirmRequest {
-                id: id(),
+            event(EventBody::ConfirmRequest {
                 confirm_id: "c-abc".into(),
                 tool: "bash".into(),
                 script: "rm -rf /tmp/foo".into(),
                 matched_pattern: "rm -rf".into(),
                 always_allow: Vec::new(),
                 source: ConfirmSource::Main,
-            },
-            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
+            }),
+            r#"{"id":"r","type":"confirm_request","confirm_id":"c-abc","tool":"bash","script":"rm -rf /tmp/foo","matched_pattern":"rm -rf"}"#,
         ),
         (
-            Event::ConfirmRequest {
-                id: id(),
+            event(EventBody::ConfirmRequest {
                 confirm_id: "c-abc".into(),
                 tool: "bash".into(),
                 script: "cargo build".into(),
                 matched_pattern: "not on the allowlist: cargo".into(),
                 always_allow: vec!["cargo".into()],
                 source: ConfirmSource::Main,
-            },
-            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"cargo build","matched_pattern":"not on the allowlist: cargo","always_allow":["cargo"]}"#,
+            }),
+            r#"{"id":"r","type":"confirm_request","confirm_id":"c-abc","tool":"bash","script":"cargo build","matched_pattern":"not on the allowlist: cargo","always_allow":["cargo"]}"#,
         ),
         (
-            Event::ConfirmRequest {
-                id: id(),
+            event(EventBody::ConfirmRequest {
                 confirm_id: "c-abc".into(),
                 tool: "bash".into(),
                 script: "curl example.com".into(),
@@ -575,12 +516,11 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                     task: "summarise the page".into(),
                     run: None,
                 },
-            },
-            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"bash","script":"curl example.com","matched_pattern":"not on the allowlist: curl","source":{"agent":"relay","task":"summarise the page"}}"#,
+            }),
+            r#"{"id":"r","type":"confirm_request","confirm_id":"c-abc","tool":"bash","script":"curl example.com","matched_pattern":"not on the allowlist: curl","source":{"agent":"relay","task":"summarise the page"}}"#,
         ),
         (
-            Event::ConfirmRequest {
-                id: id(),
+            event(EventBody::ConfirmRequest {
                 confirm_id: "c-abc".into(),
                 tool: "web".into(),
                 script: "web fetch https://example.com".into(),
@@ -590,39 +530,36 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
                     task: "summarise the page".into(),
                     run: Some(TaskRunId(9)),
                 },
-            },
-            r#"{"type":"confirm_request","id":"r","confirm_id":"c-abc","tool":"web","script":"web fetch https://example.com","matched_pattern":"fetches from example.com","always_allow":["example.com"],"source":{"agent":"relay","task":"summarise the page","run":9}}"#,
+            }),
+            r#"{"id":"r","type":"confirm_request","confirm_id":"c-abc","tool":"web","script":"web fetch https://example.com","matched_pattern":"fetches from example.com","always_allow":["example.com"],"source":{"agent":"relay","task":"summarise the page","run":9}}"#,
         ),
         (
-            Event::Relay {
-                id: id(),
+            event(EventBody::Relay {
                 event: RelayEvent::Planned {
                     steps: vec![RelayStepPlan {
                         task: "find the release".into(),
                         agent: "web_research".into(),
                     }],
                 },
-            },
-            r#"{"type":"relay","id":"r","event":{"kind":"planned","steps":[{"task":"find the release","agent":"web_research"}]}}"#,
+            }),
+            r#"{"id":"r","type":"relay","event":{"kind":"planned","steps":[{"task":"find the release","agent":"web_research"}]}}"#,
         ),
         (
-            Event::Capabilities {
-                id: id(),
+            event(EventBody::Capabilities {
                 vision: true,
                 model_name: "Qwen3-14B-GGUF:Q4_K_M".into(),
                 auto_mode: true,
-            },
-            r#"{"type":"capabilities","id":"r","vision":true,"model_name":"Qwen3-14B-GGUF:Q4_K_M","auto_mode":true}"#,
+            }),
+            r#"{"id":"r","type":"capabilities","vision":true,"model_name":"Qwen3-14B-GGUF:Q4_K_M","auto_mode":true}"#,
         ),
         (
-            Event::Status {
-                id: id(),
+            event(EventBody::Status {
                 severity: StatusSeverity::Warning,
                 component: Component::IdleMonitor,
                 event: StatusKind::ToolsWithdrawn,
                 message: "m".into(),
-            },
-            r#"{"type":"status","id":"r","severity":"warning","component":"idle_monitor","event":"tools_withdrawn","message":"m"}"#,
+            }),
+            r#"{"id":"r","type":"status","severity":"warning","component":"idle_monitor","event":"tools_withdrawn","message":"m"}"#,
         ),
     ]
 }
@@ -630,16 +567,14 @@ fn confirmation_and_status_event_cases() -> Vec<(Event, &'static str)> {
 fn session_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::SessionTitle {
-                id: id(),
+            event(EventBody::SessionTitle {
                 session_id: "s".into(),
                 title: "cats".into(),
-            },
-            r#"{"type":"session_title","id":"r","session_id":"s","title":"cats"}"#,
+            }),
+            r#"{"id":"r","type":"session_title","session_id":"s","title":"cats"}"#,
         ),
         (
-            Event::BranchInfo {
-                id: id(),
+            event(EventBody::BranchInfo {
                 branch_id: 7,
                 session_id: "s".into(),
                 session_started_at: "2026-01-01T00:00:00Z".into(),
@@ -661,24 +596,22 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                         reason: "timed out".into(),
                     },
                 }),
-            },
-            r#"{"type":"branch_info","id":"r","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_ended_at":null,"session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false,"last_active_at":"2026-01-02T00:00:00Z","task_run":{"task":4,"run":9,"task_name":"digest","state":{"state":"failed","reason":"timed out"}}}"#,
+            }),
+            r#"{"id":"r","type":"branch_info","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_ended_at":null,"session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false,"last_active_at":"2026-01-02T00:00:00Z","task_run":{"task":4,"run":9,"task_name":"digest","state":{"state":"failed","reason":"timed out"}}}"#,
         ),
         (
-            Event::BranchSwitched {
-                id: id(),
+            event(EventBody::BranchSwitched {
                 branch_id: Some(9),
                 session_id: "s".into(),
                 session_title: None,
                 name: "experiment".into(),
                 parent_branch_name: Some("main".into()),
                 fork_point_seq: Some(5),
-            },
-            r#"{"type":"branch_switched","id":"r","branch_id":9,"session_id":"s","session_title":null,"name":"experiment","parent_branch_name":"main","fork_point_seq":5}"#,
+            }),
+            r#"{"id":"r","type":"branch_switched","branch_id":9,"session_id":"s","session_title":null,"name":"experiment","parent_branch_name":"main","fork_point_seq":5}"#,
         ),
         (
-            Event::HistoryEntry {
-                id: id(),
+            event(EventBody::HistoryEntry {
                 seq: 3,
                 role: Role::Assistant,
                 content: "hello".into(),
@@ -691,12 +624,11 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 compaction_ms: None,
                 turn_stats: None,
                 relay: Vec::new(),
-            },
-            r#"{"type":"history_entry","id":"r","seq":3,"role":"assistant","content":"hello","reasoning":"greet back","reasoning_ms":1500,"tool_name":null}"#,
+            }),
+            r#"{"id":"r","type":"history_entry","seq":3,"role":"assistant","content":"hello","reasoning":"greet back","reasoning_ms":1500,"tool_name":null}"#,
         ),
         (
-            Event::HistoryEntry {
-                id: id(),
+            event(EventBody::HistoryEntry {
                 seq: 4,
                 role: Role::Tool,
                 content: "out".into(),
@@ -712,16 +644,15 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                     tokens: 812,
                 }),
                 relay: Vec::new(),
-            },
-            r#"{"type":"history_entry","id":"r","seq":4,"role":"tool","content":"out","tool_name":"run","tool_args":{"command":"ls"},"exit_code":1,"duration_ms":7,"compaction_ms":4200,"turn_stats":{"duration_ms":5300,"tokens":812}}"#,
+            }),
+            r#"{"id":"r","type":"history_entry","seq":4,"role":"tool","content":"out","tool_name":"run","tool_args":{"command":"ls"},"exit_code":1,"duration_ms":7,"compaction_ms":4200,"turn_stats":{"duration_ms":5300,"tokens":812}}"#,
         ),
         (
-            Event::UndoApplied {
-                id: id(),
+            event(EventBody::UndoApplied {
                 removed_messages: 2,
                 last_user_text: Some("hi".into()),
-            },
-            r#"{"type":"undo_applied","id":"r","removed_messages":2,"last_user_text":"hi"}"#,
+            }),
+            r#"{"id":"r","type":"undo_applied","removed_messages":2,"last_user_text":"hi"}"#,
         ),
     ]
 }
@@ -732,7 +663,6 @@ fn events_match_pinned_wire_format() {
         assert_eq!(serde_json::to_string(&ev).unwrap(), wire);
         let parsed: Event = serde_json::from_str(wire).unwrap();
         assert_eq!(parsed, ev, "{wire}");
-        assert_eq!(ev.id(), "r", "{wire}");
     }
 }
 
@@ -898,31 +828,23 @@ const SAMPLE_PLAN_WIRE: &str = r#"{"id":"p1","summary":"read and summarize","ste
 const SAMPLE_TASK_SPEC_WIRE: &str = r#"{"name":"digest","prompt":"summarize my inbox","triggers":[{"kind":"manual"},{"kind":"at","at":"2026-11-04T23:00:00"},{"kind":"schedule","cron":"0 9 * * 1-5","missed":"skip"},{"kind":"event","event":{"kind":"daemon_started"},"cooldown_secs":0},{"kind":"event","event":{"kind":"path_changed","path":"/home/u/inbox","debounce_secs":5},"cooldown_secs":300},{"kind":"event","event":{"kind":"task_finished","task":3,"outcome":"failed"},"cooldown_secs":60}],"enabled":true,"mode":"accept_edits","allowed_hosts":["example.org"],"announce":true,"kept_runs":200}"#;
 
 fn task_request_cases() -> Vec<(Request, &'static str)> {
-    let save_wire =
-        format!(r#"{{"type":"task_save","id":"r","task":4,"spec":{SAMPLE_TASK_SPEC_WIRE}}}"#);
+    let save_wire = format!(
+        r#"{{"id":"r","type":"task","action":"save","task":4,"spec":{SAMPLE_TASK_SPEC_WIRE}}}"#
+    );
     vec![
         (
-            Request::TaskList { id: id() },
-            r#"{"type":"task_list","id":"r"}"#,
+            request(RequestBody::Task(TaskRequest::List)),
+            r#"{"id":"r","type":"task","action":"list"}"#,
         ),
         (
-            Request::TaskGet {
-                id: id(),
-                task: TaskId(4),
-            },
-            r#"{"type":"task_get","id":"r","task":4}"#,
-        ),
-        (
-            Request::TaskSave {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Save {
                 task: Some(TaskId(4)),
                 spec: sample_task_spec(),
-            },
+            })),
             save_wire.leak(),
         ),
         (
-            Request::TaskSave {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Save {
                 task: None,
                 spec: TaskSpec {
                     mode: PermissionMode::Manual,
@@ -932,61 +854,48 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
                     triggers: Vec::new(),
                     ..sample_task_spec()
                 },
-            },
-            r#"{"type":"task_save","id":"r","spec":{"name":"digest","prompt":"summarize my inbox","triggers":[],"enabled":true,"mode":"manual"}}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"save","spec":{"name":"digest","prompt":"summarize my inbox","triggers":[],"enabled":true,"mode":"manual"}}"#,
         ),
         (
-            Request::TaskDelete {
-                id: id(),
-                task: TaskId(4),
-            },
-            r#"{"type":"task_delete","id":"r","task":4}"#,
+            request(RequestBody::Task(TaskRequest::Delete { task: TaskId(4) })),
+            r#"{"id":"r","type":"task","action":"delete","task":4}"#,
         ),
         (
-            Request::TaskSetEnabled {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::SetEnabled {
                 task: TaskId(4),
                 enabled: false,
-            },
-            r#"{"type":"task_set_enabled","id":"r","task":4,"enabled":false}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"set_enabled","task":4,"enabled":false}"#,
         ),
         (
-            Request::TaskRun {
-                id: id(),
-                task: TaskId(4),
-            },
-            r#"{"type":"task_run","id":"r","task":4}"#,
+            request(RequestBody::Task(TaskRequest::Run { task: TaskId(4) })),
+            r#"{"id":"r","type":"task","action":"run","task":4}"#,
         ),
         (
-            Request::TaskCancel {
-                id: id(),
-                run: TaskRunId(9),
-            },
-            r#"{"type":"task_cancel","id":"r","run":9}"#,
+            request(RequestBody::Task(TaskRequest::Cancel { run: TaskRunId(9) })),
+            r#"{"id":"r","type":"task","action":"cancel","run":9}"#,
         ),
         (
-            Request::TaskQueue {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Queue {
                 op: TaskQueueOp::Move {
                     run: TaskRunId(9),
                     to: 0,
                 },
-            },
-            r#"{"type":"task_queue","id":"r","op":{"kind":"move","run":9,"to":0}}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"queue","op":{"kind":"move","run":9,"to":0}}"#,
         ),
         (
-            Request::TaskQueue {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Queue {
                 op: TaskQueueOp::Pause,
-            },
-            r#"{"type":"task_queue","id":"r","op":{"kind":"pause"}}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"queue","op":{"kind":"pause"}}"#,
         ),
         (
-            Request::TaskQueue {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Queue {
                 op: TaskQueueOp::CancelTurn { id: "q".into() },
-            },
-            r#"{"type":"task_queue","id":"r","op":{"kind":"cancel_turn","id":"q"}}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"queue","op":{"kind":"cancel_turn","id":"q"}}"#,
         ),
     ]
 }
@@ -994,31 +903,26 @@ fn task_request_cases() -> Vec<(Request, &'static str)> {
 fn task_confirm_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::TaskConfirm {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Confirm {
                 run: TaskRunId(9),
                 confirm_id: "c".into(),
                 allow: true,
                 always: false,
-            },
-            r#"{"type":"task_confirm","id":"r","run":9,"confirm_id":"c","allow":true}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"confirm","run":9,"confirm_id":"c","allow":true}"#,
         ),
         (
-            Request::TaskConfirm {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Confirm {
                 run: TaskRunId(9),
                 confirm_id: "c".into(),
                 allow: true,
                 always: true,
-            },
-            r#"{"type":"task_confirm","id":"r","run":9,"confirm_id":"c","allow":true,"always":true}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"confirm","run":9,"confirm_id":"c","allow":true,"always":true}"#,
         ),
         (
-            Request::TaskRuns {
-                id: id(),
-                task: TaskId(4),
-            },
-            r#"{"type":"task_runs","id":"r","task":4}"#,
+            request(RequestBody::Task(TaskRequest::Runs { task: TaskId(4) })),
+            r#"{"id":"r","type":"task","action":"runs","task":4}"#,
         ),
     ]
 }
@@ -1026,32 +930,29 @@ fn task_confirm_request_cases() -> Vec<(Request, &'static str)> {
 fn task_refine_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::TaskRefine {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Refine {
                 prompt: "summarize my inbox".to_string().try_into().unwrap(),
                 mode: PermissionMode::Manual,
                 allowed_hosts: Vec::new(),
                 feedback: None,
-            },
-            r#"{"type":"task_refine","id":"r","prompt":"summarize my inbox","mode":"manual"}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"refine","prompt":"summarize my inbox","mode":"manual"}"#,
         ),
         (
-            Request::TaskRefine {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::Refine {
                 prompt: "summarize my inbox".to_string().try_into().unwrap(),
                 mode: PermissionMode::AcceptEdits,
                 allowed_hosts: vec!["example.org".to_string().try_into().unwrap()],
                 feedback: Some("skip the mail".into()),
-            },
-            r#"{"type":"task_refine","id":"r","prompt":"summarize my inbox","mode":"accept_edits","allowed_hosts":["example.org"],"feedback":"skip the mail"}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"refine","prompt":"summarize my inbox","mode":"accept_edits","allowed_hosts":["example.org"],"feedback":"skip the mail"}"#,
         ),
         (
-            Request::TaskCheckTrigger {
-                id: id(),
+            request(RequestBody::Task(TaskRequest::CheckTrigger {
                 task: None,
                 trigger: TaskTrigger::Manual,
-            },
-            r#"{"type":"task_check_trigger","id":"r","trigger":{"kind":"manual"}}"#,
+            })),
+            r#"{"id":"r","type":"task","action":"check_trigger","trigger":{"kind":"manual"}}"#,
         ),
     ]
 }
@@ -1059,22 +960,20 @@ fn task_refine_request_cases() -> Vec<(Request, &'static str)> {
 fn mcp_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::McpLogin {
-                id: id(),
+            request(RequestBody::McpLogin {
                 server: "drive".into(),
-            },
-            r#"{"type":"mcp_login","id":"r","server":"drive"}"#,
+            }),
+            r#"{"id":"r","type":"mcp_login","server":"drive"}"#,
         ),
         (
-            Request::McpLogout {
-                id: id(),
+            request(RequestBody::McpLogout {
                 server: "drive".into(),
-            },
-            r#"{"type":"mcp_logout","id":"r","server":"drive"}"#,
+            }),
+            r#"{"id":"r","type":"mcp_logout","server":"drive"}"#,
         ),
         (
-            Request::McpStatus { id: id() },
-            r#"{"type":"mcp_status","id":"r"}"#,
+            request(RequestBody::McpStatus),
+            r#"{"id":"r","type":"mcp_status"}"#,
         ),
     ]
 }
@@ -1082,44 +981,40 @@ fn mcp_request_cases() -> Vec<(Request, &'static str)> {
 fn mcp_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::McpAuthorizeUrl {
-                id: id(),
+            event(EventBody::McpAuthorizeUrl {
                 server: "drive".into(),
                 url: "https://auth.example/authorize?state=s".into(),
-            },
-            r#"{"type":"mcp_authorize_url","id":"r","server":"drive","url":"https://auth.example/authorize?state=s"}"#,
+            }),
+            r#"{"id":"r","type":"mcp_authorize_url","server":"drive","url":"https://auth.example/authorize?state=s"}"#,
         ),
         (
-            Event::McpServer {
-                id: id(),
+            event(EventBody::McpServer {
                 server: "drive".into(),
                 transport: McpTransportKind::Http,
                 state: McpServerState::NeedsAuthorization {
                     scopes: vec!["drive.readonly".into()],
                 },
-            },
-            r#"{"type":"mcp_server","id":"r","server":"drive","transport":"http","state":{"state":"needs_authorization","scopes":["drive.readonly"]}}"#,
+            }),
+            r#"{"id":"r","type":"mcp_server","server":"drive","transport":"http","state":{"state":"needs_authorization","scopes":["drive.readonly"]}}"#,
         ),
         (
-            Event::McpServer {
-                id: id(),
+            event(EventBody::McpServer {
                 server: "fs".into(),
                 transport: McpTransportKind::Stdio,
                 state: McpServerState::Unavailable {
                     reason: "missing".into(),
                 },
-            },
-            r#"{"type":"mcp_server","id":"r","server":"fs","transport":"stdio","state":{"state":"unavailable","reason":"missing"}}"#,
+            }),
+            r#"{"id":"r","type":"mcp_server","server":"fs","transport":"stdio","state":{"state":"unavailable","reason":"missing"}}"#,
         ),
         (
-            Event::McpLoggedOut {
-                id: id(),
+            event(EventBody::McpLoggedOut {
                 server: "drive".into(),
                 revocation: TokenRevocation::Failed {
                     reason: "HTTP 503".into(),
                 },
-            },
-            r#"{"type":"mcp_logged_out","id":"r","server":"drive","revocation":{"outcome":"failed","reason":"HTTP 503"}}"#,
+            }),
+            r#"{"id":"r","type":"mcp_logged_out","server":"drive","revocation":{"outcome":"failed","reason":"HTTP 503"}}"#,
         ),
     ]
 }
@@ -1127,8 +1022,7 @@ fn mcp_event_cases() -> Vec<(Event, &'static str)> {
 fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
     vec![
         (
-            Event::TaskQueue {
-                id: id(),
+            event(EventBody::TaskQueue {
                 snapshot: TaskQueueSnapshot {
                     items: vec![
                         QueueItem::Run {
@@ -1180,61 +1074,45 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
                         ),
                     }),
                 },
-            },
-            r#"{"type":"task_queue","id":"r","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"run","run":8,"task":5,"task_name":"fetch","state":{"state":"needs_input"},"prompt":{"confirm_id":"c","tool":"web","script":"web fetch https://example.org/","matched_pattern":"fetches from example.org","host":"example.org","source":{"agent":"task","task":5,"run":8}},"started_at":"2026-11-05T14:00:00Z"},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
+            }),
+            r#"{"id":"r","type":"task_queue","snapshot":{"items":[{"kind":"run","run":9,"task":4,"task_name":"digest","state":{"state":"suspended","reason":"gpu_busy"}},{"kind":"run","run":8,"task":5,"task_name":"fetch","state":{"state":"needs_input"},"prompt":{"confirm_id":"c","tool":"web","script":"web fetch https://example.org/","matched_pattern":"fetches from example.org","host":"example.org","source":{"agent":"task","task":5,"run":8}},"started_at":"2026-11-05T14:00:00Z"},{"kind":"user_turn","id":"q","preview":"hi"}],"lanes":[{"holder":"main"},{"holder":"task","run":8},{"holder":"idle"}],"paused":false,"held":{"resumes_at":"2026-11-05T09:30:00Z"}}}"#,
         ),
         (
-            Event::TaskReply {
-                id: id(),
+            event(EventBody::TaskReply {
                 run: TaskRunId(9),
                 task_name: "inbox".to_string().try_into().unwrap(),
                 reply: "3 new messages".into(),
-            },
-            r#"{"type":"task_reply","id":"r","run":9,"task_name":"inbox","reply":"3 new messages"}"#,
+            }),
+            r#"{"id":"r","type":"task_reply","run":9,"task_name":"inbox","reply":"3 new messages"}"#,
         ),
         (
-            Event::Queued {
-                id: id(),
-                behind: 2,
-            },
-            r#"{"type":"queued","id":"r","behind":2}"#,
+            event(EventBody::Queued { behind: 2 }),
+            r#"{"id":"r","type":"queued","behind":2}"#,
         ),
     ]
 }
 
 fn task_event_cases() -> Vec<(Event, &'static str)> {
     let wire = format!(
-        r#"{{"type":"task","id":"r","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z","last_run":{{"state":"failed","reason":"timed out"}},"trigger_failure":"watching /tmp/in stopped: No such file or directory"}}"#
+        r#"{{"id":"r","type":"task","task_id":4,"spec":{SAMPLE_TASK_SPEC_WIRE},"next_fire":"2026-11-05T14:00:00Z","last_run":{{"state":"failed","reason":"timed out"}},"trigger_failure":"watching /tmp/in stopped: No such file or directory"}}"#
     );
     vec![
         (
-            Event::Task {
-                id: id(),
-                task_id: TaskId(4),
-                spec: sample_task_spec(),
-                next_fire: DateTime::from_timestamp(1_793_887_200, 0),
-                last_run: Some(TaskRunState::Failed {
+            event(EventBody::Task { task_id: TaskId(4), spec: sample_task_spec(), next_fire: DateTime::from_timestamp(1_793_887_200, 0), last_run: Some(TaskRunState::Failed {
                     reason: "timed out".into(),
-                }),
-                trigger_failure: Some(
+                }), trigger_failure: Some(
                     "watching /tmp/in stopped: No such file or directory".into(),
-                ),
-            },
+                ) }),
             wire.leak(),
         ),
         (
-            Event::TriggerFires {
-                id: id(),
-                fires: DateTime::from_timestamp(1_793_887_200, 0)
+            event(EventBody::TriggerFires { fires: DateTime::from_timestamp(1_793_887_200, 0)
                     .into_iter()
-                    .collect(),
-            },
-            r#"{"type":"trigger_fires","id":"r","fires":["2026-11-05T14:00:00Z"]}"#,
+                    .collect() }),
+            r#"{"id":"r","type":"trigger_fires","fires":["2026-11-05T14:00:00Z"]}"#,
         ),
         (
-            Event::TaskRunRecord {
-                id: id(),
-                record: TaskRunRecord {
+            event(EventBody::TaskRunRecord { record: TaskRunRecord {
                     run: TaskRunId(9),
                     trigger: TaskTrigger::Manual,
                     state: TaskRunState::Succeeded,
@@ -1243,43 +1121,22 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                     ended_at: DateTime::from_timestamp(1_793_887_260, 0),
                     reply: Some("done".into()),
                     session_id: Some("s".into()),
-                },
-            },
-            r#"{"type":"task_run_record","id":"r","record":{"run":9,"trigger":{"kind":"manual"},"state":{"state":"succeeded"},"queued_at":"2026-11-05T14:00:00Z","started_at":"2026-11-05T14:00:01Z","ended_at":"2026-11-05T14:01:00Z","reply":"done","session_id":"s"}}"#,
+                } }),
+            r#"{"id":"r","type":"task_run_record","record":{"run":9,"trigger":{"kind":"manual"},"state":{"state":"succeeded"},"queued_at":"2026-11-05T14:00:00Z","started_at":"2026-11-05T14:00:01Z","ended_at":"2026-11-05T14:01:00Z","reply":"done","session_id":"s"}}"#,
         ),
         (
-            Event::TaskRunQueued {
-                id: id(),
-                task: TaskId(4),
-                run: TaskRunId(9),
-            },
-            r#"{"type":"task_run_queued","id":"r","task":4,"run":9}"#,
+            event(EventBody::TaskRunQueued { task: TaskId(4), run: TaskRunId(9) }),
+            r#"{"id":"r","type":"task_run_queued","task":4,"run":9}"#,
         ),
         (
-            Event::TaskRun {
-                id: id(),
-                run: TaskRunId(9),
-                event: Box::new(Event::ConfirmRequest {
-                    id: id(),
-                    confirm_id: "c".into(),
-                    tool: "bash".into(),
-                    script: "rm x".into(),
-                    matched_pattern: "rm".into(),
-                    always_allow: Vec::new(),
-                    source: ConfirmSource::Task {
+            event(EventBody::TaskRun { run: TaskRunId(9), event: Box::new(event(EventBody::ConfirmRequest { confirm_id: "c".into(), tool: "bash".into(), script: "rm x".into(), matched_pattern: "rm".into(), always_allow: Vec::new(), source: ConfirmSource::Task {
                         task: TaskId(4),
                         run: TaskRunId(9),
-                    },
-                }),
-            },
-            r#"{"type":"task_run","id":"r","run":9,"event":{"type":"confirm_request","id":"r","confirm_id":"c","tool":"bash","script":"rm x","matched_pattern":"rm","source":{"agent":"task","task":4,"run":9}}}"#,
+                    } })) }),
+            r#"{"id":"r","type":"task_run","run":9,"event":{"id":"r","type":"confirm_request","confirm_id":"c","tool":"bash","script":"rm x","matched_pattern":"rm","source":{"agent":"task","task":4,"run":9}}}"#,
         ),
         (
-            Event::TaskRefined {
-                id: id(),
-                prompt: "summarize my inbox".to_string().try_into().unwrap(),
-                plan: sample_plan(),
-                recommended: ModeRecommendation {
+            event(EventBody::TaskRefined { prompt: "summarize my inbox".to_string().try_into().unwrap(), plan: sample_plan(), recommended: ModeRecommendation {
                     mode: PermissionMode::AcceptEdits,
                     covers: vec![PlannedAction::Write {
                         under: "/home/u/notes".into(),
@@ -1287,19 +1144,12 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
                     still_asks: vec![PlannedAction::WebHost {
                         host: "example.org".into(),
                     }],
-                },
-            },
-            format!(r#"{{"type":"task_refined","id":"r","prompt":"summarize my inbox","plan":{SAMPLE_PLAN_WIRE},"recommended":{{"mode":"accept_edits","covers":[{{"kind":"write","under":"/home/u/notes"}}],"still_asks":[{{"kind":"web_host","host":"example.org"}}]}}}}"#).leak(),
+                } }),
+            format!(r#"{{"id":"r","type":"task_refined","prompt":"summarize my inbox","plan":{SAMPLE_PLAN_WIRE},"recommended":{{"mode":"accept_edits","covers":[{{"kind":"write","under":"/home/u/notes"}}],"still_asks":[{{"kind":"web_host","host":"example.org"}}]}}}}"#).leak(),
         ),
         (
-            Event::TaskPlan {
-                id: id(),
-                event: Box::new(Event::Delta {
-                    id: id(),
-                    text: "hi".into(),
-                }),
-            },
-            r#"{"type":"task_plan","id":"r","event":{"type":"delta","id":"r","text":"hi"}}"#,
+            event(EventBody::TaskPlan { event: Box::new(event(EventBody::Delta { text: "hi".into() })) }),
+            r#"{"id":"r","type":"task_plan","event":{"id":"r","type":"delta","text":"hi"}}"#,
         ),
     ]
 }
@@ -1341,7 +1191,8 @@ fn task_run_states_match_pinned_wire_format() {
 fn task_save_refuses_blank_names_oversized_prompts_and_kept_runs_out_of_range_at_parse() {
     let save = |name: &str, prompt: &str| {
         serde_json::to_string(&json!({
-            "type": "task_save",
+            "type": "task",
+            "action": "save",
             "id": "r",
             "spec": {"name": name, "prompt": prompt, "enabled": true},
         }))
@@ -1355,15 +1206,18 @@ fn task_save_refuses_blank_names_oversized_prompts_and_kept_runs_out_of_range_at
     assert!(parse(save("digest", &"p".repeat(MAX_TASK_PROMPT_BYTES + 1))).is_err());
     for kept_runs in [0, MAX_KEPT_RUNS + 1] {
         let line = json!({
-            "type": "task_save",
+            "type": "task",
+            "action": "save",
             "id": "r",
             "spec": {"name": "n", "prompt": "p", "enabled": true, "kept_runs": kept_runs},
         });
         assert!(parse(line.to_string()).is_err(), "{kept_runs} was taken");
     }
 
-    let Request::TaskSave { spec, .. } = parse(save("  digest  ", "hi")).unwrap() else {
-        panic!("not a task_save");
+    let RequestBody::Task(TaskRequest::Save { spec, .. }) =
+        parse(save("  digest  ", "hi")).unwrap().body
+    else {
+        panic!("not a task save");
     };
     assert_eq!(spec.name.as_str(), "digest");
 }
@@ -1372,7 +1226,8 @@ fn task_save_refuses_blank_names_oversized_prompts_and_kept_runs_out_of_range_at
 fn task_save_takes_only_exact_host_names_as_allowed_hosts() {
     let save = |host: &str| {
         serde_json::to_string(&json!({
-            "type": "task_save",
+            "type": "task",
+            "action": "save",
             "id": "r",
             "spec": {"name": "n", "prompt": "p", "enabled": true, "allowed_hosts": [host]},
         }))
@@ -1392,8 +1247,10 @@ fn task_save_takes_only_exact_host_names_as_allowed_hosts() {
     ] {
         assert!(parse(save(refused)).is_err(), "{refused:?} was taken");
     }
-    let Request::TaskSave { spec, .. } = parse(save(" API.Example.org ")).unwrap() else {
-        panic!("not a task_save");
+    let RequestBody::Task(TaskRequest::Save { spec, .. }) =
+        parse(save(" API.Example.org ")).unwrap().body
+    else {
+        panic!("not a task save");
     };
     assert_eq!(spec.allowed_hosts[0].as_str(), "api.example.org");
 }

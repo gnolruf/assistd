@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use assistd_ipc::{PermissionMode, PlanVerdict, Request};
+use assistd_ipc::{PermissionMode, PlanVerdict, Request, RequestBody};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
@@ -103,11 +103,10 @@ impl App {
             ChatMode::Act(mode) => (mode, false),
             ChatMode::Plan => (PermissionMode::Manual, true),
         };
-        self.send_on_reply(Request::SetPermissionMode {
-            id: Uuid::new_v4().to_string(),
-            mode,
-            plan,
-        });
+        self.send_on_reply(Request::new(
+            Uuid::new_v4().to_string(),
+            RequestBody::SetPermissionMode { mode, plan },
+        ));
     }
 
     /// Show the plan the turn hands over in the transcript and ask whether to carry it out.
@@ -180,11 +179,13 @@ impl App {
             } => self.output.push_info(&format!("Keep planning: {feedback}")),
             PlanVerdict::KeepPlanning { feedback: None } => {}
         }
-        self.send_on_reply(Request::PlanVerdict {
-            id: Uuid::new_v4().to_string(),
-            review_id: review.review_id,
-            verdict,
-        });
+        self.send_on_reply(Request::new(
+            Uuid::new_v4().to_string(),
+            RequestBody::PlanVerdict {
+                review_id: review.review_id,
+                verdict,
+            },
+        ));
     }
 
     /// Send `req` on the active reply's query connection, if this chat owns it.

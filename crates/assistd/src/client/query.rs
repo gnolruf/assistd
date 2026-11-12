@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use assistd_ipc::{Event, ImageAttachment, Request, StatusKind};
+use assistd_ipc::{Event, EventBody, ImageAttachment, Request, StatusKind};
 use assistd_tools::attachment::{LoadImageError, LoadedImage, MAX_IMAGE_BYTES, load_image};
 use clap::Args;
 use uuid::Uuid;
@@ -65,13 +65,13 @@ async fn load_attachments(paths: &[PathBuf]) -> Result<Vec<ImageAttachment>> {
 /// `wrote_anything` records whether reply text was printed, which owes a
 /// trailing newline on `Done`/`Error`.
 fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -> Result<()> {
-    match event {
-        Event::Delta { text, .. } => {
+    match &event.body {
+        EventBody::Delta { text } => {
             out.write_all(escape_controls(text).as_bytes())?;
             out.flush()?;
             *wrote_anything = *wrote_anything || !text.is_empty();
         }
-        Event::ToolCall { name, args, .. } => {
+        EventBody::ToolCall { name, args } => {
             let name = escape_controls_single_line(name);
             let preview = args
                 .get("command")
@@ -84,21 +84,18 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
                 writeln!(out, "\n[tool call: {name} {preview}]")?;
             }
         }
-        Event::ToolResult { name, result, .. } => {
+        EventBody::ToolResult { name, result } => {
             let name = escape_controls_single_line(name);
-            let exit = result
-                .get("exit_code")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0);
+            let exit = result.exit_code;
             writeln!(out, "[tool result: {name} exit:{exit}]")?;
         }
-        Event::Presence { state, .. } => {
+        EventBody::Presence { state } => {
             writeln!(out, "[presence: {state:?}]")?;
         }
-        Event::VoiceState { state, .. } => {
+        EventBody::VoiceState { state } => {
             writeln!(out, "[voice: {state:?}]")?;
         }
-        Event::Transcription { text, .. } => {
+        EventBody::Transcription { text } => {
             if !text.is_empty() {
                 writeln!(
                     out,
@@ -107,24 +104,24 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
                 )?;
             }
         }
-        Event::ListenState { phase, .. } => {
+        EventBody::ListenState { phase } => {
             writeln!(out, "[listen: {}]", phase.as_str())?;
         }
-        Event::WakeWordDetected { .. } => {
+        EventBody::WakeWordDetected => {
             writeln!(out, "[wake word]")?;
         }
-        Event::VoiceOutputState { enabled, .. } => {
+        EventBody::VoiceOutputState { enabled } => {
             writeln!(
                 out,
                 "[voice-output: {}]",
                 if *enabled { "on" } else { "off" }
             )?;
         }
-        Event::Status {
+        EventBody::Status {
             event: StatusKind::CompactingSoon,
             ..
         } => {}
-        Event::Status {
+        EventBody::Status {
             severity,
             component,
             message,
@@ -136,14 +133,14 @@ fn print_event(out: &mut impl Write, event: &Event, wrote_anything: &mut bool) -
                 escape_controls_single_line(message)
             )?;
         }
-        Event::ConfirmRequest { .. } => {
+        EventBody::ConfirmRequest { .. } => {
             writeln!(
                 io::stderr(),
                 "[daemon asked for confirmation; denying \
                  (non-interactive query)]"
             )?;
         }
-        Event::Done { .. } | Event::Error { .. } if *wrote_anything => {
+        EventBody::Done | EventBody::Error { .. } if *wrote_anything => {
             writeln!(out)?;
         }
         _ => {}

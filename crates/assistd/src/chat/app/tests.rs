@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use assistd_ipc::PlanVerdict;
+use assistd_ipc::{EventBody, PlanVerdict, RequestBody};
 use assistd_tools::{ConfirmSource, Risk, Unattended};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -34,28 +34,19 @@ fn typed(c: char) -> KeyEvent {
 }
 
 fn delta(text: &str) -> Event {
-    Event::Delta {
-        id: "r".into(),
-        text: text.into(),
-    }
+    Event::new("r", EventBody::Delta { text: text.into() })
 }
 
 fn done() -> Event {
-    Event::Done { id: "r".into() }
+    Event::new("r", EventBody::Done)
 }
 
 fn delta_for(id: &str, text: &str) -> Event {
-    Event::Delta {
-        id: id.into(),
-        text: text.into(),
-    }
+    Event::new(id, EventBody::Delta { text: text.into() })
 }
 
 fn transcription_for(id: &str, text: &str) -> Event {
-    Event::Transcription {
-        id: id.into(),
-        text: text.into(),
-    }
+    Event::new(id, EventBody::Transcription { text: text.into() })
 }
 
 fn rendered(app: &mut App) -> Vec<String> {
@@ -152,7 +143,7 @@ fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
         "the transcript must not split the typed block: {lines:#?}",
     );
 
-    app.on_chat_event(reply(Event::Done { id: "typed".into() }));
+    app.on_chat_event(reply(Event::new("typed", EventBody::Done)));
     assert!(!app.generating());
 
     app.on_chat_event(reply(delta_for("voice", "spoken answer")));
@@ -167,7 +158,7 @@ fn voice_turn_spoken_over_a_typed_reply_waits_its_turn() {
     assert!(typed < spoken_q, "transcript must not split the reply");
     assert!(spoken_q < spoken_a);
 
-    app.on_chat_event(reply(Event::Done { id: "voice".into() }));
+    app.on_chat_event(reply(Event::new("voice", EventBody::Done)));
     assert!(!app.generating());
 }
 
@@ -177,12 +168,14 @@ fn another_turns_terminal_events_leave_the_owner_alone() {
     start_typed_turn(&mut app, "typed", "typed question");
     app.on_chat_event(reply(delta_for("typed", "half ")));
 
-    app.on_chat_event(reply(Event::Done { id: "other".into() }));
+    app.on_chat_event(reply(Event::new("other", EventBody::Done)));
     assert!(app.generating(), "a foreign Done must not end the reply");
-    app.on_chat_event(reply(Event::Error {
-        id: "other".into(),
-        message: "voice turn rejected".into(),
-    }));
+    app.on_chat_event(reply(Event::new(
+        "other",
+        EventBody::Error {
+            message: "voice turn rejected".into(),
+        },
+    )));
     assert!(app.generating(), "a foreign Error must not end the reply");
     assert_eq!(app.notice(), Some("voice turn rejected"));
 
@@ -199,11 +192,13 @@ fn a_transcript_is_dropped_when_its_turn_never_runs() {
     let (mut app, _rx) = test_app();
     start_typed_turn(&mut app, "typed", "typed question");
     app.on_chat_event(reply(transcription_for("voice", "spoken question")));
-    app.on_chat_event(reply(Event::Error {
-        id: "voice".into(),
-        message: "no capacity".into(),
-    }));
-    app.on_chat_event(reply(Event::Done { id: "typed".into() }));
+    app.on_chat_event(reply(Event::new(
+        "voice",
+        EventBody::Error {
+            message: "no capacity".into(),
+        },
+    )));
+    app.on_chat_event(reply(Event::new("typed", EventBody::Done)));
 
     app.on_chat_event(reply(delta_for("later", "unrelated")));
     let lines = rendered(&mut app);
@@ -222,7 +217,7 @@ fn bus_turn_from_another_client_renders_with_its_transcript() {
     let lines = rendered(&mut app);
     assert!(line_index(&lines, "spoken question") < line_index(&lines, "spoken answer"));
 
-    app.on_chat_event(ChatEvent::Bus(Event::Done { id: "ptt".into() }));
+    app.on_chat_event(ChatEvent::Bus(Event::new("ptt", EventBody::Done)));
     assert!(!app.generating());
 }
 
@@ -258,7 +253,7 @@ fn bus_copies_of_this_chats_query_are_ignored() {
     start_typed_turn(&mut app, "typed", "typed question");
     app.on_chat_event(reply(delta_for("typed", "answer")));
     app.on_chat_event(ChatEvent::Bus(delta_for("typed", "echo")));
-    app.on_chat_event(ChatEvent::Bus(Event::Done { id: "typed".into() }));
+    app.on_chat_event(ChatEvent::Bus(Event::new("typed", EventBody::Done)));
 
     assert!(
         app.generating(),
@@ -274,11 +269,13 @@ fn bus_copies_of_this_chats_query_are_ignored() {
 #[test]
 fn bus_terminal_events_of_unseen_requests_are_ignored() {
     let (mut app, _rx) = test_app();
-    app.on_chat_event(ChatEvent::Bus(Event::Done { id: "poll".into() }));
-    app.on_chat_event(ChatEvent::Bus(Event::Error {
-        id: "wake".into(),
-        message: "already active".into(),
-    }));
+    app.on_chat_event(ChatEvent::Bus(Event::new("poll", EventBody::Done)));
+    app.on_chat_event(ChatEvent::Bus(Event::new(
+        "wake",
+        EventBody::Error {
+            message: "already active".into(),
+        },
+    )));
     assert!(app.active_reply.is_none());
     assert_eq!(app.notice(), None);
 }
@@ -309,12 +306,7 @@ async fn query_driver_outlives_its_writer_channel() {
 #[tokio::test]
 async fn capabilities_are_refetched_only_when_the_model_comes_up() {
     let (mut app, _rx) = test_app();
-    let presence = |state| {
-        status(Event::Presence {
-            id: "p".into(),
-            state,
-        })
-    };
+    let presence = |state| status(Event::new("p", EventBody::Presence { state }));
     app.on_chat_event(presence(PresenceState::Active));
     assert!(app.tasks.is_empty(), "first report is not a transition");
     app.on_chat_event(presence(PresenceState::Active));
@@ -363,10 +355,13 @@ fn key(code: KeyCode) -> KeyEvent {
 /// The `(allow, always)` of the next answer on the writer.
 async fn confirm_answer(writer_rx: &mut mpsc::Receiver<Request>) -> (bool, bool) {
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
-        Ok(Some(Request::ConfirmResponse {
-            confirm_id,
-            allow,
-            always,
+        Ok(Some(Request {
+            body:
+                RequestBody::ConfirmResponse {
+                    confirm_id,
+                    allow,
+                    always,
+                },
             ..
         })) => {
             assert_eq!(confirm_id, "c1");
@@ -435,11 +430,13 @@ async fn keys_typed_as_a_prompt_opens_go_to_the_input_line_instead_of_answering(
     assert!(app.confirmation.is_none(), "Esc always declines");
     assert_eq!(confirm_answer(&mut writer_rx).await, (false, false));
 
-    app.on_chat_event(reply(Event::PlanReview {
-        id: "r".into(),
-        review_id: "v".into(),
-        plan: "1. tidy".into(),
-    }));
+    app.on_chat_event(reply(Event::new(
+        "r",
+        EventBody::PlanReview {
+            review_id: "v".into(),
+            plan: "1. tidy".into(),
+        },
+    )));
     app.on_key(key(KeyCode::Enter));
     app.on_key(typed('1'));
     assert!(app.plan_review.is_some(), "type-ahead accepted the plan");
@@ -465,7 +462,10 @@ async fn shift_tab_switches_the_open_turn_to_accept_edits_without_answering_its_
     assert_eq!(app.mode, ChatMode::Act(PermissionMode::AcceptEdits));
     assert!(app.confirmation.is_some(), "the shown prompt stays open");
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
-        Ok(Some(Request::SetPermissionMode { mode, .. })) => {
+        Ok(Some(Request {
+            body: RequestBody::SetPermissionMode { mode, .. },
+            ..
+        })) => {
             assert_eq!(mode, PermissionMode::AcceptEdits);
         }
         other => panic!("expected SetPermissionMode, got {other:?}"),
@@ -509,7 +509,10 @@ fn shift_tab_offers_auto_only_when_the_daemon_allows_it_and_ends_in_plan_mode() 
 /// The verdict the open plan review sent on the reply's connection.
 async fn sent_verdict(writer_rx: &mut mpsc::Receiver<Request>) -> PlanVerdict {
     match tokio::time::timeout(Duration::from_secs(5), writer_rx.recv()).await {
-        Ok(Some(Request::PlanVerdict { verdict, .. })) => verdict,
+        Ok(Some(Request {
+            body: RequestBody::PlanVerdict { verdict, .. },
+            ..
+        })) => verdict,
         other => panic!("expected PlanVerdict, got {other:?}"),
     }
 }
@@ -523,11 +526,13 @@ async fn a_plan_is_sent_back_with_typed_feedback_or_accepted_into_its_mode() {
         writer: Some(writer_tx),
     });
     let review = |app: &mut App| {
-        app.on_chat_event(reply(Event::PlanReview {
-            id: "r".into(),
-            review_id: "v".into(),
-            plan: "1. tidy".into(),
-        }));
+        app.on_chat_event(reply(Event::new(
+            "r",
+            EventBody::PlanReview {
+                review_id: "v".into(),
+                plan: "1. tidy".into(),
+            },
+        )));
         app.type_ahead = TypeAheadGuard::default();
     };
     review(&mut app);
@@ -578,27 +583,30 @@ fn prompt_closes_when_the_turn_ends() {
 #[test]
 fn tool_call_then_result_creates_one_block_with_command() {
     let (mut app, _rx) = test_app();
-    app.on_chat_event(reply(Event::ToolCall {
-        id: "c1".into(),
-        name: "run".into(),
-        args: serde_json::json!({"command": "ls /tmp"}),
-    }));
+    app.on_chat_event(reply(Event::new(
+        "c1",
+        EventBody::ToolCall {
+            name: "run".into(),
+            args: serde_json::json!({"command": "ls /tmp"}),
+        },
+    )));
     let running = rendered(&mut app);
     assert!(running.contains(&"▎ $ ls /tmp".to_string()), "{running:#?}");
     assert!(
         running.contains(&"▎ running… (0s)".to_string()),
         "{running:#?}"
     );
-    app.on_chat_event(reply(Event::ToolResult {
-        id: "c1".into(),
-        name: "run".into(),
-        result: serde_json::json!({
-            "output": "a\nb\n[exit:0 | 5ms]",
-            "exit_code": 0,
-            "truncated": false,
-            "duration_ms": 5,
-        }),
-    }));
+    app.on_chat_event(reply(Event::new(
+        "c1",
+        EventBody::ToolResult {
+            name: "run".into(),
+            result: assistd_ipc::ToolReport {
+                output: "a\nb\n[exit:0 | 5ms]".into(),
+                duration_ms: 5,
+                ..assistd_ipc::ToolReport::default()
+            },
+        },
+    )));
     let lines = rendered(&mut app);
     assert!(!lines.iter().any(|l| l.contains("running…")), "{lines:#?}");
     assert_eq!(lines.iter().filter(|l| l.contains("$ ls /tmp")).count(), 1);

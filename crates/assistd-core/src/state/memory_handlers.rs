@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use assistd_embed::{BATCH_SIZE, Embedder, embed_rows};
-use assistd_ipc::{Event, ReindexKind};
+use assistd_ipc::{Event, EventBody, ReindexKind};
 use assistd_memory::{
     ChunkLocator, ChunkScope, EmbeddingTarget, MemoryError, MemoryId, SemanticStore, SessionScope,
     UnindexedRows,
@@ -62,19 +62,21 @@ impl AppState {
                         continue;
                     };
                     let _ = tx
-                        .send(Event::SemanticHit {
-                            id: id.clone(),
-                            message_id: message_id.0,
-                            chunk_id: hit.chunk_id.0,
-                            session_id: session_id.to_string(),
-                            timestamp: wire_timestamp(timestamp),
-                            role: wire_role(role),
-                            content: hit.text,
-                            similarity: hit.similarity,
-                        })
+                        .send(Event::new(
+                            id.clone(),
+                            EventBody::SemanticHit {
+                                message_id: message_id.0,
+                                chunk_id: hit.chunk_id.0,
+                                session_id: session_id.to_string(),
+                                timestamp: wire_timestamp(timestamp),
+                                role: wire_role(role),
+                                content: hit.text,
+                                similarity: hit.similarity,
+                            },
+                        ))
                         .await;
                 }
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -93,7 +95,7 @@ impl AppState {
     ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.save(&key, value).await {
             Ok(_id) => {
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -112,41 +114,16 @@ impl AppState {
         match self.memory.memory_ops.load(&key).await {
             Ok(value) => {
                 let _ = tx
-                    .send(Event::MemoryValue {
-                        id: id.clone(),
-                        key,
-                        value,
-                    })
+                    .send(Event::new(
+                        id.clone(),
+                        EventBody::MemoryValue { key, value },
+                    ))
                     .await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
                 send_error(&tx, id, format!("memory load failed: {e}")).await;
-                Err(e.into())
-            }
-        }
-    }
-
-    pub(super) async fn handle_memory_list(
-        self: Arc<Self>,
-        id: String,
-        prefix: String,
-        tx: mpsc::Sender<Event>,
-    ) -> Result<(), DispatchError> {
-        match self.memory.memory_ops.list(&prefix).await {
-            Ok(keys) => {
-                let _ = tx
-                    .send(Event::MemoryKeys {
-                        id: id.clone(),
-                        keys,
-                    })
-                    .await;
-                let _ = tx.send(Event::Done { id }).await;
-                Ok(())
-            }
-            Err(e) => {
-                send_error(&tx, id, format!("memory list failed: {e}")).await;
                 Err(e.into())
             }
         }
@@ -160,7 +137,7 @@ impl AppState {
     ) -> Result<(), DispatchError> {
         match self.memory.memory_ops.delete(&key).await {
             Ok(()) => {
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -186,15 +163,17 @@ impl AppState {
                 };
                 for row in rows.into_iter().take(cap) {
                     let _ = tx
-                        .send(Event::MemoryRow {
-                            id: id.clone(),
-                            memory_id: row.id.0,
-                            key: row.key,
-                            value: row.value,
-                        })
+                        .send(Event::new(
+                            id.clone(),
+                            EventBody::MemoryRow {
+                                memory_id: row.id.0,
+                                key: row.key,
+                                value: row.value,
+                            },
+                        ))
                         .await;
                 }
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -213,13 +192,15 @@ impl AppState {
         match self.memory.memory_ops.forget(MemoryId(memory_id)).await {
             Ok(removed) => {
                 let _ = tx
-                    .send(Event::MemoryForgetResult {
-                        id: id.clone(),
-                        deleted: removed.is_some(),
-                        key: removed,
-                    })
+                    .send(Event::new(
+                        id.clone(),
+                        EventBody::MemoryForgetResult {
+                            deleted: removed.is_some(),
+                            key: removed,
+                        },
+                    ))
                     .await;
-                let _ = tx.send(Event::Done { id }).await;
+                let _ = tx.send(Event::new(id, EventBody::Done)).await;
                 Ok(())
             }
             Err(e) => {
@@ -255,20 +236,24 @@ impl AppState {
         let memories_total = u32::try_from(unindexed.memories).unwrap_or(u32::MAX);
 
         let _ = tx
-            .send(Event::ReindexProgress {
-                id: id.clone(),
-                kind: ReindexKind::Chunks,
-                done: 0,
-                total: chunks_total,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::ReindexProgress {
+                    kind: ReindexKind::Chunks,
+                    done: 0,
+                    total: chunks_total,
+                },
+            ))
             .await;
         let _ = tx
-            .send(Event::ReindexProgress {
-                id: id.clone(),
-                kind: ReindexKind::Memories,
-                done: 0,
-                total: memories_total,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::ReindexProgress {
+                    kind: ReindexKind::Memories,
+                    done: 0,
+                    total: memories_total,
+                },
+            ))
             .await;
 
         let semantic = self.memory.semantic.as_ref();
@@ -298,7 +283,7 @@ impl AppState {
             return Err(e.into());
         }
 
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -339,12 +324,14 @@ impl<'a> KindProgress<'a> {
             .saturating_add(u32::try_from(rows).unwrap_or(u32::MAX));
         let _ = self
             .tx
-            .send(Event::ReindexProgress {
-                id: self.id.to_string(),
-                kind: self.kind,
-                done: self.done,
-                total: self.total,
-            })
+            .send(Event::new(
+                self.id.to_string(),
+                EventBody::ReindexProgress {
+                    kind: self.kind,
+                    done: self.done,
+                    total: self.total,
+                },
+            ))
             .await;
     }
 }

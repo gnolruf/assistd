@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use assistd_ipc::{Event, Request, WakeWordOp};
+use assistd_ipc::{Event, EventBody, Request, RequestBody, WakeWordOp};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
@@ -124,14 +124,13 @@ impl App {
     /// Route an event answering a `/wakeword` request. Copies of these
     /// events on the bus never reach here.
     pub(super) fn on_wake_word_event(&mut self, stream: WakeWordStream, ev: Event) {
-        match ev {
-            Event::WakeWordStatus {
-                phrase, listening, ..
-            } => {
+        let Event { id, body } = ev;
+        match body {
+            EventBody::WakeWordStatus { phrase, listening } => {
                 let status = WakeWordStatus { phrase, listening };
                 self.set_wake_word_status(StatusState::Loaded(status));
             }
-            Event::WakeWordTest { id, matched } => {
+            EventBody::WakeWordTest { matched } => {
                 if let Some(session) = self.open_session(&id) {
                     session.scene.react(matched);
                     let results = &mut session.progress.results;
@@ -141,13 +140,13 @@ impl App {
                     results.push_back(matched);
                 }
             }
-            Event::WakeWordSpeech { id, speaking } => {
+            EventBody::WakeWordSpeech { speaking } => {
                 if let Some(session) = self.open_session(&id) {
                     session.scene.set_hearing(speaking);
                 }
             }
-            Event::Done { id } => self.on_wake_word_done(stream, &id),
-            Event::Error { id, message } => self.on_wake_word_error(stream, &id, &message),
+            EventBody::Done => self.on_wake_word_done(stream, &id),
+            EventBody::Error { message } => self.on_wake_word_error(stream, &id, &message),
             _ => {}
         }
     }
@@ -188,20 +187,19 @@ impl App {
             progress,
         }));
         self.spawn_one_shot(
-            Request::WakeWord {
+            Request::new(
                 id,
-                op: WakeWordOp::TestStart,
-            },
+                RequestBody::WakeWord {
+                    op: WakeWordOp::TestStart,
+                },
+            ),
             WireStream::WakeWord(WakeWordStream::Session),
             "wakeword",
         );
     }
 
     fn send_wake_word_op(&mut self, op: WakeWordOp, stream: WakeWordStream) {
-        let req = Request::WakeWord {
-            id: Uuid::new_v4().to_string(),
-            op,
-        };
+        let req = Request::new(Uuid::new_v4().to_string(), RequestBody::WakeWord { op });
         self.spawn_one_shot(req, WireStream::WakeWord(stream), "wakeword");
     }
 

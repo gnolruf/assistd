@@ -3,11 +3,9 @@
 
 use std::time::Instant;
 
-use serde_json::Value;
-
 use assistd_ipc::{
     RelayEvent, RelayStepEnd, RelayStepPlan, RelayStepRecord, RelayStepRun, RelayToolOutcome,
-    RelayTraceEntry,
+    RelayTraceEntry, ToolReport,
 };
 use assistd_memory::{
     PersistedRelayEnd, PersistedRelayEntry, PersistedRelayRun, PersistedRelayStep, ToolOutcome,
@@ -150,9 +148,8 @@ impl StepBuilder {
         });
     }
 
-    /// Fill in the latest unfinished tool call from `result`, shaped as
-    /// [`assistd_tools::ToolOutput::to_json`] makes it.
-    fn finish_tool(&mut self, result: &Value) {
+    /// Fill in the latest unfinished tool call from `result`.
+    fn finish_tool(&mut self, result: &ToolReport) {
         let unfinished = self.entries.iter_mut().rev().find_map(|entry| match entry {
             PersistedRelayEntry::Tool {
                 output, outcome, ..
@@ -160,17 +157,10 @@ impl StepBuilder {
             _ => None,
         });
         if let Some((output, outcome)) = unfinished {
-            result
-                .get("output")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .clone_into(output);
+            output.clone_from(&result.output);
             *outcome = Some(ToolOutcome {
-                exit_code: result.get("exit_code").and_then(Value::as_i64).unwrap_or(0),
-                duration_ms: result
-                    .get("duration_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
+                exit_code: i64::from(result.exit_code),
+                duration_ms: result.duration_ms,
             });
         }
     }

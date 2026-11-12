@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 
 use assistd_ipc::{
-    Event, PausedPrompt, Request, TaskId, TaskQueueOp, TaskQueueSnapshot, TaskRunId, TaskRunState,
-    TaskSpec,
+    Event, EventBody, PausedPrompt, Request, RequestBody, TaskId, TaskQueueOp, TaskQueueSnapshot,
+    TaskRequest, TaskRunId, TaskRunState, TaskSpec,
 };
 use assistd_tools::Approval;
 use chrono::{DateTime, Utc};
@@ -163,9 +163,9 @@ impl TasksPanel {
         if let Some(snapshot) = queue {
             panel.queue.set_snapshot(snapshot);
         }
-        panel
-            .outbox
-            .send(PendingOp::List, |id| Request::TaskList { id });
+        panel.outbox.send(PendingOp::List, |id| {
+            Request::new(id, RequestBody::Task(TaskRequest::List))
+        });
         panel
     }
 
@@ -331,14 +331,16 @@ impl TasksPanel {
     fn run_selected(&mut self) {
         if let ListRow::Task(index) = self.selected_row() {
             let task = self.tasks[index].id;
-            self.outbox
-                .send(PendingOp::RunNow, |id| Request::TaskRun { id, task });
+            self.outbox.send(PendingOp::RunNow, |id| {
+                Request::new(id, RequestBody::Task(TaskRequest::Run { task }))
+            });
         }
     }
 
     fn change_queue(&mut self, op: TaskQueueOp) {
-        self.outbox
-            .send(PendingOp::QueueChange, |id| Request::TaskQueue { id, op });
+        self.outbox.send(PendingOp::QueueChange, |id| {
+            Request::new(id, RequestBody::Task(TaskRequest::Queue { op }))
+        });
     }
 
     /// List the runs of the task selected in the task list, or show none when the new-task
@@ -349,9 +351,9 @@ impl TasksPanel {
             return;
         };
         let task = self.tasks[index].id;
-        let request = self
-            .outbox
-            .send(PendingOp::Runs, |id| Request::TaskRuns { id, task });
+        let request = self.outbox.send(PendingOp::Runs, |id| {
+            Request::new(id, RequestBody::Task(TaskRequest::Runs { task }))
+        });
         self.runs.listing(task, request);
     }
 
@@ -383,21 +385,19 @@ impl TasksPanel {
         if let ListRow::Task(index) = self.selected_row() {
             let task = &self.tasks[index];
             let (task, enabled) = (task.id, !task.spec.enabled);
-            self.outbox
-                .send(PendingOp::Update, |id| Request::TaskSetEnabled {
+            self.outbox.send(PendingOp::Update, |id| {
+                Request::new(
                     id,
-                    task,
-                    enabled,
-                });
+                    RequestBody::Task(TaskRequest::SetEnabled { task, enabled }),
+                )
+            });
         }
     }
 
     fn delete(&mut self, task: TaskId) {
-        self.outbox
-            .send(PendingOp::Delete(task), |id| Request::TaskDelete {
-                id,
-                task,
-            });
+        self.outbox.send(PendingOp::Delete(task), |id| {
+            Request::new(id, RequestBody::Task(TaskRequest::Delete { task }))
+        });
     }
 
     fn on_editor_key(&mut self, ev: KeyEvent) {
@@ -417,21 +417,20 @@ impl TasksPanel {
 
     /// Apply an event answering one of the panel's requests; others are ignored.
     pub(super) fn on_event(&mut self, ev: Event) {
-        let id = ev.id().to_string();
+        let id = ev.id.clone();
         let Some(op) = self.outbox.pending.get(&id).copied() else {
             return;
         };
         if ev.is_terminal() {
             self.outbox.pending.remove(&id);
         }
-        match ev {
-            Event::Task {
+        match ev.body {
+            EventBody::Task {
                 task_id,
                 spec,
                 next_fire,
                 last_run,
                 trigger_failure,
-                ..
             } => self.on_task(
                 op,
                 ListedTask {
@@ -442,23 +441,24 @@ impl TasksPanel {
                     trigger_failure,
                 },
             ),
-            Event::TriggerFires { fires, .. } => self.record_check(&id, TriggerCheck::Fires(fires)),
-            Event::TaskRunRecord { record, .. } => self.runs.push(&id, record),
-            Event::TaskRunQueued { run, .. } => {
+            EventBody::TriggerFires { fires } => {
+                self.record_check(&id, TriggerCheck::Fires(fires));
+            }
+            EventBody::TaskRunRecord { record } => self.runs.push(&id, record),
+            EventBody::TaskRunQueued { run, .. } => {
                 self.message = Some(Message::Info(format!("queued run {run}")));
             }
-            Event::TaskRefined {
+            EventBody::TaskRefined {
                 prompt,
                 plan,
                 recommended,
-                ..
             } => {
                 if let Some(editor) = self.editor.as_mut() {
                     editor.on_refined(&id, prompt, &plan, &recommended);
                 }
             }
-            Event::Done { .. } => self.on_done(op, &id),
-            Event::Error { message, .. } => self.on_error(op, &id, message),
+            EventBody::Done => self.on_done(op, &id),
+            EventBody::Error { message } => self.on_error(op, &id, message),
             _ => {}
         }
     }
@@ -584,11 +584,13 @@ pub(super) fn task_confirm(
     confirm_id: String,
     approval: Approval,
 ) -> Request {
-    Request::TaskConfirm {
+    Request::new(
         id,
-        run,
-        confirm_id,
-        allow: approval != Approval::Deny,
-        always: approval == Approval::Always,
-    }
+        RequestBody::Task(TaskRequest::Confirm {
+            run,
+            confirm_id,
+            allow: approval != Approval::Deny,
+            always: approval == Approval::Always,
+        }),
+    )
 }

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use assistd_ipc::Event;
+use assistd_ipc::{Event, EventBody};
 use serde_json::Value;
 
 const TOOL_ARGS_MAX_CHARS: usize = 80;
@@ -154,17 +154,18 @@ impl ActivityTracker {
     /// Apply `ev`. The body comes only from `LastDelta`, which carries
     /// the whole reply; `Delta` never appends.
     pub(super) fn ingest(&mut self, ev: &Event) {
-        match ev {
-            Event::Delta { id, .. } => self.activate_turn(id).start_streaming(),
-            Event::LastDelta { id, text } => {
+        let Event { id, body } = ev;
+        match body {
+            EventBody::Delta { .. } => self.activate_turn(id).start_streaming(),
+            EventBody::LastDelta { text } => {
                 let turn = self.activate_turn(id);
                 turn.start_streaming();
                 turn.body.clone_from(text);
             }
-            Event::ReasoningDelta { id, .. } => {
+            EventBody::ReasoningDelta { .. } => {
                 self.activate_turn(id).activity = Some(TurnActivity::Thinking);
             }
-            Event::ToolCall { id, name, args } => {
+            EventBody::ToolCall { name, args } => {
                 let turn = self.activate_turn(id);
                 if turn.tool_calls.len() == MAX_TOOL_CALLS {
                     turn.tool_calls.pop_front();
@@ -175,20 +176,20 @@ impl ActivityTracker {
                 });
                 turn.activity = Some(TurnActivity::RunningTool(name.clone()));
             }
-            Event::ToolResult { id, .. } => {
+            EventBody::ToolResult { .. } => {
                 self.activate_turn(id).activity = Some(TurnActivity::Thinking);
             }
-            Event::Done { id } => self.finish_turn(id, TurnActivity::Finished, None),
-            Event::Error { id, message } => {
+            EventBody::Done => self.finish_turn(id, TurnActivity::Finished, None),
+            EventBody::Error { message } => {
                 self.finish_turn(id, TurnActivity::Failed, Some(message.clone()));
             }
-            Event::SessionTitle { title, .. } => {
+            EventBody::SessionTitle { title, .. } => {
                 self.session_title = Some(title.clone());
             }
-            Event::ListenState { phase, .. } => {
+            EventBody::ListenState { phase } => {
                 self.listening = phase.is_on();
             }
-            Event::SpeakingState { id, speaking } => {
+            EventBody::SpeakingState { speaking } => {
                 if *speaking {
                     self.speaking.insert(id.clone());
                 } else {
@@ -322,26 +323,22 @@ mod tests {
     use super::*;
 
     fn delta(id: &str, text: &str) -> Event {
-        Event::Delta {
-            id: id.into(),
-            text: text.into(),
-        }
+        Event::new(id, EventBody::Delta { text: text.into() })
     }
     fn last_delta(id: &str, text: &str) -> Event {
-        Event::LastDelta {
-            id: id.into(),
-            text: text.into(),
-        }
+        Event::new(id, EventBody::LastDelta { text: text.into() })
     }
     fn tool_call(id: &str, name: &str, args: Value) -> Event {
-        Event::ToolCall {
-            id: id.into(),
-            name: name.into(),
-            args,
-        }
+        Event::new(
+            id,
+            EventBody::ToolCall {
+                name: name.into(),
+                args,
+            },
+        )
     }
     fn done(id: &str) -> Event {
-        Event::Done { id: id.into() }
+        Event::new(id, EventBody::Done)
     }
 
     #[test]
@@ -375,11 +372,13 @@ mod tests {
         let mut t = ActivityTracker::default();
         t.ingest(&last_delta("a", "let me look"));
         t.ingest(&tool_call("a", "bash", json!({"command": "ls"})));
-        t.ingest(&Event::ToolResult {
-            id: "a".into(),
-            name: "bash".into(),
-            result: json!({}),
-        });
+        t.ingest(&Event::new(
+            "a",
+            EventBody::ToolResult {
+                name: "bash".into(),
+                result: assistd_ipc::ToolReport::default(),
+            },
+        ));
         let before = t.snapshot();
         assert_eq!(before.body, "let me look");
         assert_eq!(before.tool_calls.len(), 1);
@@ -399,11 +398,13 @@ mod tests {
         t.ingest(&last_delta("a", "reply"));
         assert_eq!(t.snapshot().title, None);
         t.ingest(&done("a"));
-        t.ingest(&Event::SessionTitle {
-            id: "a".into(),
-            session_id: "s".into(),
-            title: "Cats And Dogs".into(),
-        });
+        t.ingest(&Event::new(
+            "a",
+            EventBody::SessionTitle {
+                session_id: "s".into(),
+                title: "Cats And Dogs".into(),
+            },
+        ));
         t.ingest(&delta("b", "x"));
         t.ingest(&tool_call("b", "bash", json!({})));
         assert_eq!(t.snapshot().title.as_deref(), Some("Cats And Dogs"));
@@ -417,10 +418,12 @@ mod tests {
         assert!(!t.is_listening());
         assert_eq!(t.snapshot().activity, Activity::Idle);
 
-        t.ingest(&Event::ListenState {
-            id: "x".into(),
-            phase: ListenPhase::Armed,
-        });
+        t.ingest(&Event::new(
+            "x",
+            EventBody::ListenState {
+                phase: ListenPhase::Armed,
+            },
+        ));
         assert!(t.is_listening());
         assert_eq!(t.snapshot().activity, Activity::Listening);
 
@@ -429,10 +432,12 @@ mod tests {
         t.ingest(&done("a"));
         assert_eq!(t.snapshot().activity, Activity::Listening);
 
-        t.ingest(&Event::ListenState {
-            id: "x".into(),
-            phase: ListenPhase::Off,
-        });
+        t.ingest(&Event::new(
+            "x",
+            EventBody::ListenState {
+                phase: ListenPhase::Off,
+            },
+        ));
         assert!(!t.is_listening());
         assert_eq!(t.snapshot().activity, Activity::Done);
     }
@@ -442,28 +447,28 @@ mod tests {
         let mut t = ActivityTracker::default();
         assert!(!t.is_speaking());
 
-        t.ingest(&Event::SpeakingState {
-            id: "a".into(),
-            speaking: true,
-        });
+        t.ingest(&Event::new(
+            "a",
+            EventBody::SpeakingState { speaking: true },
+        ));
         assert!(t.is_speaking());
 
-        t.ingest(&Event::SpeakingState {
-            id: "b".into(),
-            speaking: true,
-        });
+        t.ingest(&Event::new(
+            "b",
+            EventBody::SpeakingState { speaking: true },
+        ));
         assert!(t.is_speaking());
 
-        t.ingest(&Event::SpeakingState {
-            id: "a".into(),
-            speaking: false,
-        });
+        t.ingest(&Event::new(
+            "a",
+            EventBody::SpeakingState { speaking: false },
+        ));
         assert!(t.is_speaking());
 
-        t.ingest(&Event::SpeakingState {
-            id: "b".into(),
-            speaking: false,
-        });
+        t.ingest(&Event::new(
+            "b",
+            EventBody::SpeakingState { speaking: false },
+        ));
         assert!(!t.is_speaking());
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use assistd_config::TrayIconsConfig;
 use assistd_ipc::{
-    Event, ListenPhase, PresenceState, QueueItem, StartupReadiness, TaskQueueSnapshot,
+    Event, EventBody, ListenPhase, PresenceState, QueueItem, StartupReadiness, TaskQueueSnapshot,
     TaskRunState, VoiceCaptureState,
 };
 use chrono::{DateTime, Utc};
@@ -136,30 +136,29 @@ impl TrayTracker {
     /// Returns `true` when the resolved [`TrayState`] changed.
     pub(super) fn ingest(&mut self, event: &Event) -> bool {
         let before = self.current();
-        match event {
-            Event::Delta { id, .. }
-            | Event::ReasoningDelta { id, .. }
-            | Event::ToolCall { id, .. } => {
+        let Event { id, body } = event;
+        match body {
+            EventBody::Delta { .. }
+            | EventBody::ReasoningDelta { .. }
+            | EventBody::ToolCall { .. } => {
                 self.in_flight.insert(id.clone());
             }
-            Event::Done { id, .. } | Event::Error { id, .. } => {
+            EventBody::Done | EventBody::Error { .. } => {
                 self.in_flight.remove(id);
             }
-            Event::Presence { state, .. } => {
+            EventBody::Presence { state } => {
                 self.presence = *state;
             }
-            Event::ListenState { phase, .. } => {
+            EventBody::ListenState { phase } => {
                 self.listen_phase = *phase;
             }
-            Event::VoiceState { state, .. } => {
+            EventBody::VoiceState { state } => {
                 self.ptt_capture = *state;
             }
-            Event::Readiness {
-                component, state, ..
-            } => {
+            EventBody::Readiness { component, state } => {
                 self.startup.record(component.clone(), state.clone());
             }
-            Event::TaskQueue { snapshot, .. } => {
+            EventBody::TaskQueue { snapshot } => {
                 self.task_queue = Some(snapshot.clone());
             }
             _ => {}

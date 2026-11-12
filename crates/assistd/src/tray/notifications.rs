@@ -2,7 +2,7 @@
 //! replies of tasks that announce them, spawned alongside the tray icon.
 
 use assistd_config::Config;
-use assistd_ipc::{Event, IpcClient};
+use assistd_ipc::{Event, EventBody, IpcClient};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 
@@ -85,12 +85,12 @@ pub(crate) fn spawn_notifications(cfg: &Config, ipc: IpcClient) -> Option<Notifi
 
 fn raises_notification(ev: &Event) -> bool {
     matches!(
-        ev,
-        Event::ToolCall { .. }
-            | Event::Delta { .. }
-            | Event::LastDelta { .. }
-            | Event::ReasoningDelta { .. }
-            | Event::Error { .. }
+        &ev.body,
+        EventBody::ToolCall { .. }
+            | EventBody::Delta { .. }
+            | EventBody::LastDelta { .. }
+            | EventBody::ReasoningDelta { .. }
+            | EventBody::Error { .. }
     )
 }
 
@@ -104,14 +104,16 @@ mod tests {
     fn sink_sends_the_event_before_its_wake() {
         let (driver_tx, mut rx) = mpsc::unbounded_channel();
         let s = NotificationSink { driver_tx };
-        s.ingest(&Event::ToolCall {
-            id: "a".into(),
-            name: "x".into(),
-            args: json!({}),
-        });
+        s.ingest(&Event::new(
+            "a",
+            EventBody::ToolCall {
+                name: "x".into(),
+                args: json!({}),
+            },
+        ));
         let first = rx.try_recv().expect("event queued");
         assert!(
-            matches!(&first, DriverInput::Event(ev) if matches!(**ev, Event::ToolCall { .. })),
+            matches!(&first, DriverInput::Event(ev) if matches!(ev.body, EventBody::ToolCall { .. })),
             "{first:?}"
         );
         let second = rx.try_recv().expect("wake queued");

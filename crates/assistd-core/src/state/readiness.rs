@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use assistd_ipc::{ComponentReadiness, Event, StartupComponent};
+use assistd_ipc::{ComponentReadiness, Event, EventBody, StartupComponent};
 
 use super::AppState;
 
@@ -42,23 +42,21 @@ impl AppState {
 
     /// Broadcast `component`'s readiness to bus subscribers.
     pub fn publish_readiness(&self, component: StartupComponent, state: ComponentReadiness) {
-        self.runtime.publish(&Event::Readiness {
-            id: STARTUP_EVENT_ID.to_string(),
-            component,
-            state,
-        });
+        self.runtime.publish(&Event::new(
+            STARTUP_EVENT_ID.to_string(),
+            EventBody::Readiness { component, state },
+        ));
     }
 
     pub(super) async fn handle_get_readiness(self: Arc<Self>, id: String, tx: mpsc::Sender<Event>) {
         for (component, state) in self.startup_readiness() {
             let _ = tx
-                .send(Event::Readiness {
-                    id: id.clone(),
-                    component,
-                    state,
-                })
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::Readiness { component, state },
+                ))
                 .await;
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 }

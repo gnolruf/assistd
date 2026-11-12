@@ -141,14 +141,11 @@ async fn wait_for_subscribers(state: &AppState, n: usize) {
 }
 
 fn delta(id: &str, text: &str) -> Event {
-    Event::Delta {
-        id: id.into(),
-        text: text.into(),
-    }
+    Event::new(id, EventBody::Delta { text: text.into() })
 }
 
 fn done(id: &str) -> Event {
-    Event::Done { id: id.into() }
+    Event::new(id, EventBody::Done)
 }
 
 #[tokio::test]
@@ -187,66 +184,52 @@ async fn concurrent_connections_sharing_a_request_id_stay_isolated() {
 }
 
 #[tokio::test]
-async fn oversize_request_is_rejected_at_its_kind_cap() {
-    let cases: [(&[u8], u64); 2] = [
-        (QUERY_FRAME_PREFIX, MAX_REQUEST_BYTES),
-        (br#"{"type":"memory_save""#, MAX_CONTROL_REQUEST_BYTES),
-    ];
-    for (prefix, cap) in cases {
-        let event = with_server(test_state(), |path| async move {
-            let stream = UnixStream::connect(&path).await.unwrap();
-            let (read, mut write) = stream.into_split();
-            write_past_cap(&mut write, prefix, cap).await;
-            read_event(&mut BufReader::new(read)).await
-        })
-        .await;
+async fn first_frame_may_pass_the_control_cap_only_as_a_query() {
+    let past_control_cap = "a".repeat(usize::try_from(MAX_CONTROL_REQUEST_BYTES).unwrap());
+    with_server(test_state(), |path| async move {
+        let query = format!(r#"{{"text":"{past_control_cap}","type":"query","id":"q"}}"#);
+        let events = send_request_collect_events(&path, &query).await;
+        assert_eq!(events, [delta("q", &past_control_cap), done("q")]);
+
+        let save =
+            format!(r#"{{"id":"m","type":"memory_save","key":"k","value":"{past_control_cap}"}}"#);
+        let events = send_request_collect_events(&path, &save).await;
         assert_eq!(
-            event,
-            Some(Event::Error {
-                id: String::new(),
-                message: format!("request exceeded {cap}-byte limit"),
-            })
+            events,
+            [Event::new(
+                String::new(),
+                EventBody::Error {
+                    message: format!("only a query may exceed {MAX_CONTROL_REQUEST_BYTES} bytes")
+                }
+            )]
         );
-    }
+    })
+    .await;
 }
 
 #[tokio::test]
-async fn client_past_the_connection_limit_is_told_why() {
-    let events = with_server(test_state(), |path| async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut held = Vec::with_capacity(MAX_CONNECTIONS);
-        for _ in 0..MAX_CONNECTIONS {
-            held.push(UnixStream::connect(&path).await.unwrap());
-        }
-        let request = Request::Query {
-            id: "full".to_string(),
-            text: "hi".to_string(),
-            attachments: Vec::new(),
-            plan: assistd_ipc::PlanMode::Off,
-        };
-        let stream = assistd_ipc::client::IpcClient::with_path(&path)
-            .one_shot(request)
-            .await
-            .unwrap();
-        stream.collect().await.unwrap()
+async fn frame_past_the_request_cap_is_rejected() {
+    let event = with_server(test_state(), |path| async move {
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write_past_cap(&mut write, MAX_REQUEST_BYTES).await;
+        read_event(&mut BufReader::new(read)).await
     })
     .await;
     assert_eq!(
-        events,
-        [Event::Error {
-            id: String::new(),
-            message: format!("daemon is serving its limit of {MAX_CONNECTIONS} connections"),
-        }]
+        event,
+        Some(Event::new(
+            String::new(),
+            EventBody::Error {
+                message: format!("request exceeded {MAX_REQUEST_BYTES}-byte limit")
+            }
+        ))
     );
 }
 
-async fn write_past_cap(write: &mut OwnedWriteHalf, prefix: &[u8], cap: u64) {
+async fn write_past_cap(write: &mut OwnedWriteHalf, cap: u64) {
     let chunk = vec![b'a'; 1024 * 1024];
     let mut remaining = usize::try_from(cap).expect("request cap fits usize") + 1;
-    if write.write_all(prefix).await.is_err() {
-        return;
-    }
-    remaining -= prefix.len();
     while remaining > 0 {
         let n = remaining.min(chunk.len());
         if write.write_all(&chunk[..n]).await.is_err() {
@@ -264,7 +247,7 @@ async fn malformed_request_returns_error_event() {
         assert!(
             matches!(
                 events.as_slice(),
-                [Event::Error { id, message }]
+                [Event { id, body: EventBody::Error { message } }]
                     if id.is_empty() && message.starts_with("invalid request: ")
             ),
             "{events:?}"
@@ -587,10 +570,12 @@ async fn subscribe_receives_each_query_event_from_other_client_once() {
         assert_eq!(count(&delta("q-1", "hello")), 1, "{a_events:?}");
         assert_eq!(count(&done("q-1")), 1, "{a_events:?}");
         assert!(
-            a_events.contains(&Event::LastDelta {
-                id: "q-1".into(),
-                text: "hello".into()
-            }),
+            a_events.contains(&Event::new(
+                "q-1",
+                EventBody::LastDelta {
+                    text: "hello".into()
+                }
+            )),
             "subscriber missed LastDelta: {a_events:?}"
         );
     })
@@ -617,10 +602,7 @@ async fn subscribe_filter_rejects_unmatched_kinds() {
         .await;
 
         let a_events = drain_subscribe(&mut read_a, Duration::from_millis(200)).await;
-        let presence = |id: &str, state| Event::Presence {
-            id: id.into(),
-            state,
-        };
+        let presence = |id: &str, state| Event::new(id, EventBody::Presence { state });
         assert_eq!(
             a_events.first(),
             Some(&presence("sub-2", PresenceState::Active)),
@@ -633,7 +615,7 @@ async fn subscribe_filter_rejects_unmatched_kinds() {
         assert!(
             a_events
                 .iter()
-                .all(|ev| matches!(ev, Event::Presence { .. })),
+                .all(|ev| matches!(&ev.body, EventBody::Presence { .. })),
             "{a_events:?}"
         );
     })
@@ -673,7 +655,10 @@ async fn shutdown_closes_idle_subscriber_without_waiting_out_grace() {
     wait_for_subscribers(&state, 1).await;
     assert!(matches!(
         read_event(&mut reader).await,
-        Some(Event::TaskQueue { .. })
+        Some(Event {
+            body: EventBody::TaskQueue { .. },
+            ..
+        })
     ));
 
     tokio::time::timeout(Duration::from_secs(2), server.stop())
@@ -800,8 +785,8 @@ fn gated_tool_state_at(unattended: assistd_tools::Unattended) -> Arc<AppState> {
 }
 
 fn tool_output(ev: &Event) -> Option<&str> {
-    match ev {
-        Event::ToolResult { result, .. } => result.get("output").and_then(|v| v.as_str()),
+    match &ev.body {
+        EventBody::ToolResult { result, .. } => Some(result.output.as_str()),
         _ => None,
     }
 }
@@ -815,7 +800,7 @@ async fn dialog_client_answer_reaches_gate_in_spawned_agent_turn() {
         let mut outputs = Vec::new();
         let run = async {
             while let Some(ev) = read_event(&mut reader).await {
-                if let Event::ConfirmRequest { id, confirm_id, .. } = &ev {
+                if let Event { id, body: EventBody::ConfirmRequest { confirm_id, .. } } = &ev {
                     assert_eq!(id, "q1");
                     let answer = format!(
                         "{{\"type\":\"confirm_response\",\"id\":\"cr\",\"confirm_id\":\"{confirm_id}\",\"allow\":true}}\n"
@@ -859,7 +844,7 @@ async fn accept_edits_frame_approves_a_scoped_edit_without_a_prompt() {
             assert!(
                 !events
                     .iter()
-                    .any(|ev| matches!(ev, Event::ConfirmRequest { .. })),
+                    .any(|ev| matches!(&ev.body, EventBody::ConfirmRequest { .. })),
                 "{events:?}"
             );
             let outputs: Vec<&str> = events.iter().filter_map(tool_output).collect();
@@ -955,7 +940,10 @@ async fn client_disconnect_mid_turn_releases_the_turn_lock() {
         state_with_backend(Arc::new(FloodBackend)),
         |path| async move {
             let (first, reader, write) = open_query_and_read_first_event(&path, "gone").await;
-            assert!(matches!(first, Event::Delta { .. }), "got {first:?}");
+            assert!(
+                matches!(first.body, EventBody::Delta { .. }),
+                "got {first:?}"
+            );
             drop(reader);
             drop(write);
 
@@ -965,7 +953,7 @@ async fn client_disconnect_mid_turn_releases_the_turn_lock() {
             )
             .await
             .expect("second query queued behind a turn whose client had disconnected");
-            assert!(matches!(next, Event::Delta { .. }), "got {next:?}");
+            assert!(matches!(next.body, EventBody::Delta { .. }), "got {next:?}");
         },
     )
     .await;
@@ -1000,10 +988,12 @@ async fn client_closing_mid_stream_is_not_a_connection_error() {
 async fn write_event_times_out_when_the_client_stops_reading() {
     let (server, _client_never_reads) = UnixStream::pair().unwrap();
     let (_server_read, mut write_half) = server.into_split();
-    let event = Event::Delta {
-        id: "stalled".into(),
-        text: "x".repeat(1024),
-    };
+    let event = Event::new(
+        "stalled",
+        EventBody::Delta {
+            text: "x".repeat(1024),
+        },
+    );
 
     let err = tokio::time::timeout(EVENT_WRITE_TIMEOUT * 4, async {
         loop {
@@ -1122,7 +1112,7 @@ async fn client_hangup_during_a_silent_tool_call_cancels_the_turn() {
             let event = read_event(&mut reader)
                 .await
                 .expect("connection closed before the tool call started");
-            if matches!(event, Event::ToolCall { .. }) {
+            if matches!(event.body, EventBody::ToolCall { .. }) {
                 break;
             }
         }

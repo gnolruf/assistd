@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 
 use assistd_config::TaskInterruption;
-use assistd_ipc::Event;
+use assistd_ipc::{Event, EventBody};
 
 use super::AppState;
 use super::conversation::ConversationTurn;
@@ -67,10 +67,7 @@ impl AppState {
                     .begin_turn(self.conversation_quiet_time());
                 if lanes.main_held_by_run() {
                     let _ = tx
-                        .send(Event::Queued {
-                            id: id.to_string(),
-                            behind: 1,
-                        })
+                        .send(Event::new(id.to_string(), EventBody::Queued { behind: 1 }))
                         .await;
                 }
                 let lane = self.runtime.agent_turn_lock.clone().lock_owned().await;
@@ -134,10 +131,7 @@ impl AppState {
             id: id.to_string(),
         };
         let _ = tx
-            .send(Event::Queued {
-                id: id.to_string(),
-                behind,
-            })
+            .send(Event::new(id.to_string(), EventBody::Queued { behind }))
             .await;
         let TurnStart { lane, turn } = started.await.ok()?;
         Some(self.main_lane_turn(lane, turn).await)

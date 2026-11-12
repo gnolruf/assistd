@@ -11,7 +11,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{Instrument, debug, error, info, warn};
 
-use assistd_ipc::{Component, Event, ListenPhase, PlanMode};
+use assistd_ipc::{Component, Event, EventBody, ListenPhase, PlanMode};
 use assistd_utils::time::saturating_millis;
 use assistd_voice::{ContinuousListener, Heard};
 
@@ -159,9 +159,10 @@ async fn forward_heard(
 ) -> bool {
     match received {
         Ok(Heard::WakePhrase) => {
-            state.runtime.publish(&Event::WakeWordDetected {
-                id: format!("listen-{}", short_id()),
-            });
+            state.runtime.publish(&Event::new(
+                format!("listen-{}", short_id()),
+                EventBody::WakeWordDetected,
+            ));
         }
         Ok(Heard::Command(text)) => turns.submit(state, listener, text),
         Ok(Heard::BargeIn) if !turns.running.is_empty() => {
@@ -194,10 +195,10 @@ async fn forward_heard(
 }
 
 fn publish_phase(state: &AppState, phase: ListenPhase) {
-    state.runtime.publish(&Event::ListenState {
-        id: LISTEN_PHASE_EVENT_ID.to_string(),
-        phase,
-    });
+    state.runtime.publish(&Event::new(
+        LISTEN_PHASE_EVENT_ID.to_string(),
+        EventBody::ListenState { phase },
+    ));
 }
 
 fn spawn_listen_query(handlers: &mut JoinSet<()>, state: &Arc<AppState>, text: String) {
@@ -213,10 +214,10 @@ fn spawn_listen_query(handlers: &mut JoinSet<()>, state: &Arc<AppState>, text: S
 /// Run one utterance as a query turn, publishing its transcript and
 /// events on the daemon's broadcast bus.
 async fn run_listen_query(state: Arc<AppState>, id: String, text: String) {
-    state.runtime.publish(&Event::Transcription {
-        id: id.clone(),
-        text: text.clone(),
-    });
+    state.runtime.publish(&Event::new(
+        id.clone(),
+        EventBody::Transcription { text: text.clone() },
+    ));
     let (tx, mut rx) = mpsc::channel::<Event>(32);
     let forward = async {
         while let Some(ev) = rx.recv().await {

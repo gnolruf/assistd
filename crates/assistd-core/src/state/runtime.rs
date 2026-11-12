@@ -4,14 +4,13 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex as StdMutex;
-use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use assistd_ipc::{Event, EventKind, SubscribeFilter};
+use assistd_ipc::{Event, EventBody, EventKind, SubscribeFilter};
 use assistd_memory::{BranchId, SessionId};
 
 use super::chat_focus::ChatFocusSlot;
@@ -272,34 +271,27 @@ impl Drop for BusSubscription {
 }
 
 fn bus_copy(event: &Event) -> Event {
-    match event {
-        Event::ToolResult { id, name, result } => Event::ToolResult {
-            id: id.clone(),
+    let body = match &event.body {
+        EventBody::ToolResult { name, result } => EventBody::ToolResult {
             name: name.clone(),
-            result: match result.as_object() {
-                Some(fields) => Value::Object(
-                    fields
-                        .iter()
-                        .filter(|(key, _)| key.as_str() != "attachments")
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect(),
-                ),
-                None => result.clone(),
-            },
+            result: result.without_attachments(),
         },
-        Event::TaskRun { id, run, event } => Event::TaskRun {
-            id: id.clone(),
+        EventBody::TaskRun { run, event } => EventBody::TaskRun {
             run: *run,
             event: Box::new(bus_copy(event)),
         },
         other => other.clone(),
+    };
+    Event {
+        id: event.id.clone(),
+        body,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use assistd_ipc::{ImageMime, ToolAttachment, ToolReport};
 
     fn only(kind: EventKind) -> SubscribeFilter {
         SubscribeFilter { kinds: vec![kind] }
@@ -327,26 +319,38 @@ mod tests {
     async fn published_tool_results_leave_attachments_to_the_requester() {
         let runtime = RuntimeState::new();
         let mut sub = runtime.subscribe_events(only(EventKind::ToolResult));
-        runtime.publish(&Event::Delta {
-            id: "q".into(),
-            text: "unwanted".into(),
-        });
-        runtime.publish(&Event::ToolResult {
-            id: "q".into(),
-            name: "run".into(),
-            result: json!({
-                "output": "[image]",
-                "exit_code": 0,
-                "attachments": [{"type": "image", "mime": "image/png", "data": "AAAA"}],
-            }),
-        });
+        let shown = ToolReport {
+            output: "[image]".into(),
+            ..ToolReport::default()
+        };
+        runtime.publish(&Event::new(
+            "q",
+            EventBody::Delta {
+                text: "unwanted".into(),
+            },
+        ));
+        runtime.publish(&Event::new(
+            "q",
+            EventBody::ToolResult {
+                name: "run".into(),
+                result: ToolReport {
+                    attachments: vec![ToolAttachment::Image {
+                        mime: ImageMime::Png,
+                        data: "AAAA".into(),
+                    }],
+                    ..shown.clone()
+                },
+            },
+        ));
         assert_eq!(
             sub.recv().await.unwrap(),
-            Event::ToolResult {
-                id: "q".into(),
-                name: "run".into(),
-                result: json!({"output": "[image]", "exit_code": 0}),
-            }
+            Event::new(
+                "q",
+                EventBody::ToolResult {
+                    name: "run".into(),
+                    result: shown,
+                }
+            )
         );
     }
 }

@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 
 use anyhow::Result;
-use assistd_ipc::{Event, ReindexKind, Request};
+use assistd_ipc::{EventBody, ReindexKind, Request, RequestBody};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
@@ -60,18 +60,20 @@ impl MemoryAction {
     fn into_request(self, id: String) -> Request {
         match self {
             MemoryAction::Reminisce { query, limit } => {
-                Request::MemorySemanticSearch { id, query, limit }
+                Request::new(id, RequestBody::MemorySemanticSearch { query, limit })
             }
-            MemoryAction::Save { key, value } => Request::MemorySave { id, key, value },
-            MemoryAction::Load { key } => Request::MemoryLoad { id, key },
-            MemoryAction::List { prefix } => Request::MemoryListAll {
-                id,
-                prefix,
-                limit: 0,
-            },
-            MemoryAction::Forget { id: memory_id } => Request::MemoryForget { id, memory_id },
-            MemoryAction::Delete { key } => Request::MemoryDelete { id, key },
-            MemoryAction::Reindex { .. } => Request::MemoryReindex { id },
+            MemoryAction::Save { key, value } => {
+                Request::new(id, RequestBody::MemorySave { key, value })
+            }
+            MemoryAction::Load { key } => Request::new(id, RequestBody::MemoryLoad { key }),
+            MemoryAction::List { prefix } => {
+                Request::new(id, RequestBody::MemoryListAll { prefix, limit: 0 })
+            }
+            MemoryAction::Forget { id: memory_id } => {
+                Request::new(id, RequestBody::MemoryForget { memory_id })
+            }
+            MemoryAction::Delete { key } => Request::new(id, RequestBody::MemoryDelete { key }),
+            MemoryAction::Reindex { .. } => Request::new(id, RequestBody::MemoryReindex),
         }
     }
 }
@@ -86,16 +88,8 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
     let req = args.action.into_request(Uuid::new_v4().to_string());
     let mut last_reindex_kind: Option<ReindexKind> = None;
     run_one_shot(req, |event| {
-        match event {
-            Event::SemanticHit {
-                message_id,
-                session_id,
-                timestamp,
-                role,
-                content,
-                similarity,
-                ..
-            } => {
+        match &event.body {
+            EventBody::SemanticHit { message_id, session_id, timestamp, role, content, similarity, .. } => {
                 let session_short = session_id.chars().take(8).collect::<String>();
                 let flattened = content.replace('\n', " ");
                 let single_line = escape_controls_single_line(&flattened);
@@ -104,7 +98,7 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                     "{timestamp}  {role:9}  msg={message_id:<6}  sess={session_short}  sim={similarity:.2}  {single_line}"
                 )?;
             }
-            Event::MemoryValue { key, value, .. } => match value {
+            EventBody::MemoryValue { key, value } => match value {
                 Some(v) => writeln!(
                     io::stdout(),
                     "{}\t{}",
@@ -116,23 +110,13 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                     std::process::exit(2);
                 }
             },
-            Event::MemoryKeys { keys, .. } => {
-                for k in keys {
-                    writeln!(io::stdout(), "{}", escape_controls_single_line(k))?;
-                }
-            }
-            Event::MemoryRow {
-                memory_id,
-                key,
-                value,
-                ..
-            } => {
+            EventBody::MemoryRow { memory_id, key, value } => {
                 let key = escape_controls_single_line(key);
                 let flattened = value.replace('\n', " ");
                 let single_line = escape_controls_single_line(&flattened);
                 writeln!(io::stdout(), "{memory_id}\t{key}\t{single_line}")?;
             }
-            Event::MemoryForgetResult { deleted: true, key, .. } => {
+            EventBody::MemoryForgetResult { deleted: true, key } => {
                 let id = forget_target.unwrap_or(0);
                 match key {
                     Some(k) => writeln!(
@@ -143,17 +127,15 @@ pub(crate) async fn run(args: MemoryArgs) -> Result<()> {
                     None => writeln!(io::stdout(), "forgot id={id}")?,
                 }
             }
-            Event::MemoryForgetResult { deleted: false, .. } => {
+            EventBody::MemoryForgetResult { deleted: false, .. } => {
                 let id = forget_target.unwrap_or(0);
                 writeln!(io::stderr(), "no memory with id={id}")?;
                 std::process::exit(2);
             }
-            Event::ReindexProgress {
-                kind, done, total, ..
-            } if !reindex_quiet => {
+            EventBody::ReindexProgress { kind, done, total } if !reindex_quiet => {
                 print_reindex_progress(*kind, *done, *total, &mut last_reindex_kind);
             }
-            Event::Done { .. } if last_reindex_kind.is_some() && !reindex_quiet => {
+            EventBody::Done if last_reindex_kind.is_some() && !reindex_quiet => {
                 writeln!(io::stderr())?;
             }
             _ => {}

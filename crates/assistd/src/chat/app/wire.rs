@@ -4,14 +4,14 @@
 use std::time::{Duration, Instant};
 
 use assistd_ipc::{
-    Event, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role, StartupComponent,
-    StatusKind, StatusSeverity, TurnStats, VoiceCaptureState,
+    Event, EventBody, ListenPhase, PresenceState, RelayEvent, RelayStepRecord, Role,
+    StartupComponent, StatusKind, StatusSeverity, ToolReport, TurnStats, VoiceCaptureState,
 };
 use assistd_tools::{ConfirmationRequest, Risk, Unattended};
 use assistd_utils::time::saturating_millis;
 use serde_json::Value;
 
-use super::super::output::{tool_block_label, tool_outcome, tool_output};
+use super::super::output::tool_block_label;
 use super::super::ui::turn_summary;
 use super::{
     ActiveReply, AnswerTo, App, BranchListEntry, BranchOp, ChatEvent, ChatMode, OWN_TURN_MEMORY,
@@ -88,27 +88,26 @@ impl App {
     /// A `Done` or `Error` counts only when it closes the turn on screen, since every
     /// client's one-shot requests end with one.
     fn on_bus_event(&mut self, ev: Event) {
-        if matches!(ev, Event::Transcription { .. }) {
+        if matches!(ev.body, EventBody::Transcription { .. }) {
             self.wake_word_heard = false;
         }
-        if matches!(ev, Event::SessionTitle { .. }) {
+        if matches!(ev.body, EventBody::SessionTitle { .. }) {
             self.on_wire_event(WireStream::Status, ev);
             return;
         }
-        if let Event::TaskQueue { snapshot, .. } = ev {
+        if let EventBody::TaskQueue { snapshot } = ev.body {
             self.on_task_queue(snapshot);
             return;
         }
-        if let Event::Readiness {
+        if let EventBody::Readiness {
             component: StartupComponent::Mcp { server },
             state,
-            ..
-        } = ev
+        } = ev.body
         {
             self.on_mcp_readiness(server, state);
             return;
         }
-        let id = ev.id();
+        let id = ev.id.as_str();
         if self.own_turn_ids.iter().any(|own| own == id) {
             return;
         }
@@ -117,7 +116,7 @@ impl App {
                 .queued_transcription
                 .as_ref()
                 .is_some_and(|q| q.id == id);
-        if matches!(ev, Event::Done { .. } | Event::Error { .. }) && !closes_shown_turn {
+        if matches!(ev.body, EventBody::Done | EventBody::Error { .. }) && !closes_shown_turn {
             return;
         }
         self.on_wire_event(WireStream::Reply, ev);
@@ -139,86 +138,86 @@ impl App {
             return;
         }
         let now = Instant::now();
-        match ev {
-            Event::Done { .. } => self.finish_stream(stream, now),
-            Event::Error { message, .. } => {
+        match ev.body {
+            EventBody::Done => self.finish_stream(stream, now),
+            EventBody::Error { message } => {
                 self.output.push_error(&message);
                 self.fail_stream(stream);
             }
-            turn @ (Event::Delta { .. }
-            | Event::ReasoningDelta { .. }
-            | Event::ToolCall { .. }
-            | Event::ToolResult { .. }
-            | Event::Relay { .. }
-            | Event::ConfirmRequest { .. }
-            | Event::PlanReview { .. }
-            | Event::PlanModeEntered { .. }
-            | Event::Transcription { .. }) => self.on_turn_event(turn),
-            state @ (Event::Presence { .. }
-            | Event::VoiceState { .. }
-            | Event::ListenState { .. }
-            | Event::WakeWordDetected { .. }
-            | Event::VoiceOutputState { .. }
-            | Event::Capabilities { .. }
-            | Event::Status { .. }) => self.on_state_event(state),
-            Event::ContextSize { tokens, total, .. } => self.tokens.on_context_size(tokens, total),
-            session @ (Event::BranchInfo { .. }
-            | Event::BranchSwitched { .. }
-            | Event::SessionTitle { .. }
-            | Event::HistoryEntry { .. }
-            | Event::UndoApplied { .. }) => self.on_session_event(session),
-            Event::SpeakingState { .. }
-            | Event::Readiness { .. }
-            | Event::ChatFocus { .. }
-            | Event::SemanticHit { .. }
-            | Event::MemoryValue { .. }
-            | Event::MemoryKeys { .. }
-            | Event::MemoryRow { .. }
-            | Event::MemoryForgetResult { .. }
-            | Event::ReindexProgress { .. }
-            | Event::WakeWordStatus { .. }
-            | Event::WakeWordTest { .. }
-            | Event::WakeWordSpeech { .. }
-            | Event::Task { .. }
-            | Event::TaskRunRecord { .. }
-            | Event::TaskRunQueued { .. }
-            | Event::TaskRun { .. }
-            | Event::TaskQueue { .. }
-            | Event::TaskReply { .. }
-            | Event::Queued { .. }
-            | Event::TaskRefined { .. }
-            | Event::TaskPlan { .. }
-            | Event::TriggerFires { .. }
-            | Event::McpAuthorizeUrl { .. }
-            | Event::McpServer { .. }
-            | Event::McpLoggedOut { .. }
-            | Event::LastDelta { .. } => {}
+            turn @ (EventBody::Delta { .. }
+            | EventBody::ReasoningDelta { .. }
+            | EventBody::ToolCall { .. }
+            | EventBody::ToolResult { .. }
+            | EventBody::Relay { .. }
+            | EventBody::ConfirmRequest { .. }
+            | EventBody::PlanReview { .. }
+            | EventBody::PlanModeEntered
+            | EventBody::Transcription { .. }) => self.on_turn_event(turn),
+            state @ (EventBody::Presence { .. }
+            | EventBody::VoiceState { .. }
+            | EventBody::ListenState { .. }
+            | EventBody::WakeWordDetected
+            | EventBody::VoiceOutputState { .. }
+            | EventBody::Capabilities { .. }
+            | EventBody::Status { .. }) => self.on_state_event(state),
+            EventBody::ContextSize { tokens, total } => {
+                self.tokens.on_context_size(tokens, total);
+            }
+            session @ (EventBody::BranchInfo { .. }
+            | EventBody::BranchSwitched { .. }
+            | EventBody::SessionTitle { .. }
+            | EventBody::HistoryEntry { .. }
+            | EventBody::UndoApplied { .. }) => self.on_session_event(session),
+            EventBody::SpeakingState { .. }
+            | EventBody::Readiness { .. }
+            | EventBody::ChatFocus { .. }
+            | EventBody::SemanticHit { .. }
+            | EventBody::MemoryValue { .. }
+            | EventBody::MemoryRow { .. }
+            | EventBody::MemoryForgetResult { .. }
+            | EventBody::ReindexProgress { .. }
+            | EventBody::WakeWordStatus { .. }
+            | EventBody::WakeWordTest { .. }
+            | EventBody::WakeWordSpeech { .. }
+            | EventBody::Task { .. }
+            | EventBody::TaskRunRecord { .. }
+            | EventBody::TaskRunQueued { .. }
+            | EventBody::TaskRun { .. }
+            | EventBody::TaskQueue { .. }
+            | EventBody::TaskReply { .. }
+            | EventBody::Queued { .. }
+            | EventBody::TaskRefined { .. }
+            | EventBody::TaskPlan { .. }
+            | EventBody::TriggerFires { .. }
+            | EventBody::McpAuthorizeUrl { .. }
+            | EventBody::McpServer { .. }
+            | EventBody::McpLoggedOut { .. }
+            | EventBody::LastDelta { .. } => {}
         }
     }
 
     /// Events that build the current reply in the output pane.
-    fn on_turn_event(&mut self, ev: Event) {
-        match ev {
-            Event::Delta { text, .. } => {
+    fn on_turn_event(&mut self, body: EventBody) {
+        match body {
+            EventBody::Delta { text } => {
                 self.output.finish_thinking();
                 self.tokens.on_delta();
                 self.output.append_assistant(&text);
             }
-            Event::ReasoningDelta { text, .. } => {
+            EventBody::ReasoningDelta { text } => {
                 self.tokens.on_delta();
                 self.output.append_thinking(&text);
             }
-            Event::ToolCall { args, name, .. } => self.on_tool_call(name, &args),
-            Event::ToolResult { result, .. } => self.on_tool_result(&result),
-            Event::Relay { event, .. } => self.on_relay_event(event),
-            Event::ConfirmRequest {
+            EventBody::ToolCall { args, name } => self.on_tool_call(name, &args),
+            EventBody::ToolResult { result, .. } => self.on_tool_result(result),
+            EventBody::Relay { event } => self.on_relay_event(event),
+            EventBody::ConfirmRequest {
                 confirm_id,
                 tool,
                 script,
                 matched_pattern,
                 always_allow,
                 source,
-                ..
             } => self.open_confirmation(
                 confirm_id,
                 ConfirmationRequest {
@@ -231,14 +230,12 @@ impl App {
                     source,
                 },
             ),
-            Event::PlanReview {
-                review_id, plan, ..
-            } => self.open_plan_review(review_id, &plan),
-            Event::PlanModeEntered { .. } => self.mode = ChatMode::Plan,
-            Event::Transcription { text, .. } if text.trim().is_empty() => {
+            EventBody::PlanReview { review_id, plan } => self.open_plan_review(review_id, &plan),
+            EventBody::PlanModeEntered => self.mode = ChatMode::Plan,
+            EventBody::Transcription { text } if text.trim().is_empty() => {
                 self.set_notice("no speech detected");
             }
-            Event::Transcription { text, .. } => self.begin_turn(&text, &[]),
+            EventBody::Transcription { text } => self.begin_turn(&text, &[]),
             _ => {}
         }
     }
@@ -249,10 +246,9 @@ impl App {
             .begin_tool_block(tool_block_label(name, Some(args)));
     }
 
-    fn on_tool_result(&mut self, result: &Value) {
-        let (exit_code, duration_ms) = tool_outcome(result);
+    fn on_tool_result(&mut self, result: ToolReport) {
         self.output
-            .finish_tool_block(tool_output(result), exit_code, duration_ms);
+            .finish_tool_block(result.output, result.exit_code, result.duration_ms);
     }
 
     /// Draw a relay's progress inside the running `relay` tool block.
@@ -264,20 +260,19 @@ impl App {
     }
 
     /// Daemon and model state the chat tracks between turns.
-    fn on_state_event(&mut self, ev: Event) {
-        match ev {
-            Event::Presence { state, .. } => self.on_presence(state),
-            Event::VoiceState { state, .. } => self.listening = state,
-            Event::ListenState { phase, .. } => {
+    fn on_state_event(&mut self, body: EventBody) {
+        match body {
+            EventBody::Presence { state } => self.on_presence(state),
+            EventBody::VoiceState { state } => self.listening = state,
+            EventBody::ListenState { phase } => {
                 self.wake_word_heard &= phase == ListenPhase::Capturing;
             }
-            Event::WakeWordDetected { .. } => self.wake_word_heard = true,
-            Event::VoiceOutputState { enabled, .. } => self.voice_output_enabled = enabled,
-            Event::Capabilities {
+            EventBody::WakeWordDetected => self.wake_word_heard = true,
+            EventBody::VoiceOutputState { enabled } => self.voice_output_enabled = enabled,
+            EventBody::Capabilities {
                 vision,
                 model_name,
                 auto_mode,
-                ..
             } => {
                 self.vision_enabled = vision;
                 self.offer_auto_mode(auto_mode);
@@ -286,20 +281,19 @@ impl App {
                     self.model_name = model_name;
                 }
             }
-            Event::Status {
+            EventBody::Status {
                 event: StatusKind::CompactingSoon,
                 ..
             } => self.compacting_soon = true,
-            Event::Status {
+            EventBody::Status {
                 event: StatusKind::HistoryCompacted,
                 ..
             } => self.output.finish_compaction(),
-            Event::Status {
+            EventBody::Status {
                 severity,
                 component,
                 event,
                 message,
-                ..
             } => {
                 self.set_notice(&message);
                 match event {
@@ -346,9 +340,9 @@ impl App {
     }
 
     /// Branch and session responses.
-    fn on_session_event(&mut self, ev: Event) {
-        match ev {
-            Event::BranchInfo {
+    fn on_session_event(&mut self, body: EventBody) {
+        match body {
+            EventBody::BranchInfo {
                 name,
                 parent_branch_name,
                 fork_point_seq,
@@ -372,7 +366,7 @@ impl App {
                 last_active_at: last_active_at.parse().ok(),
                 task_run,
             }),
-            Event::BranchSwitched {
+            EventBody::BranchSwitched {
                 name,
                 parent_branch_name,
                 fork_point_seq,
@@ -384,8 +378,8 @@ impl App {
                 fork_point_seq,
                 session_title.as_deref(),
             ),
-            Event::SessionTitle { title, .. } => self.session_title = Some(title),
-            Event::HistoryEntry {
+            EventBody::SessionTitle { title, .. } => self.session_title = Some(title),
+            EventBody::HistoryEntry {
                 role,
                 content,
                 reasoning,
@@ -416,10 +410,9 @@ impl App {
                     self.output.push_turn_summary(turn_summary(&stats));
                 }
             }
-            Event::UndoApplied {
+            EventBody::UndoApplied {
                 removed_messages,
                 last_user_text,
-                ..
             } => self.on_undo_applied(removed_messages, last_user_text.as_deref()),
             _ => {}
         }
@@ -533,18 +526,18 @@ impl App {
     }
 
     fn defer_reply_event(&mut self, id: &str, ev: &Event) {
-        match ev {
-            Event::Transcription { text, .. } => {
+        match &ev.body {
+            EventBody::Transcription { text } => {
                 self.queued_transcription = Some(QueuedTranscription {
                     id: id.to_string(),
                     text: text.clone(),
                 });
             }
-            Event::Error { message, .. } => {
+            EventBody::Error { message } => {
                 self.set_notice(message);
                 self.drop_queued_transcription(id);
             }
-            Event::Done { .. } => self.drop_queued_transcription(id),
+            EventBody::Done => self.drop_queued_transcription(id),
             _ => {}
         }
     }
@@ -629,17 +622,24 @@ impl App {
 /// events any stream may carry.
 fn turn_scoped_id(ev: &Event) -> Option<&str> {
     match ev {
-        Event::Delta { id, .. }
-        | Event::ReasoningDelta { id, .. }
-        | Event::ToolCall { id, .. }
-        | Event::ToolResult { id, .. }
-        | Event::Relay { id, .. }
-        | Event::ConfirmRequest { id, .. }
-        | Event::PlanReview { id, .. }
-        | Event::PlanModeEntered { id }
-        | Event::Done { id, .. }
-        | Event::Error { id, .. } => Some(id),
-        Event::Transcription { id, text } => (!text.trim().is_empty()).then_some(id.as_str()),
+        Event {
+            id,
+            body:
+                EventBody::Delta { .. }
+                | EventBody::ReasoningDelta { .. }
+                | EventBody::ToolCall { .. }
+                | EventBody::ToolResult { .. }
+                | EventBody::Relay { .. }
+                | EventBody::ConfirmRequest { .. }
+                | EventBody::PlanReview { .. }
+                | EventBody::PlanModeEntered
+                | EventBody::Done
+                | EventBody::Error { .. },
+        } => Some(id),
+        Event {
+            id,
+            body: EventBody::Transcription { text },
+        } => (!text.trim().is_empty()).then_some(id.as_str()),
         _ => None,
     }
 }

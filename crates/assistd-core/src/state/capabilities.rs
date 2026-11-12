@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Component, ComponentReadiness, Event, StatusKind, StatusSeverity};
+use assistd_ipc::{Component, ComponentReadiness, Event, EventBody, StatusKind, StatusSeverity};
 use assistd_llm::VisionState;
 
 use super::AppState;
@@ -20,13 +20,15 @@ impl AppState {
     ) {
         if let Some(disabled) = &self.subsystems.tools_disabled {
             let _ = tx
-                .send(Event::Status {
-                    id: id.clone(),
-                    severity: StatusSeverity::Error,
-                    component: Component::Agent,
-                    event: StatusKind::StartupFailed,
-                    message: disabled.to_string(),
-                })
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::Status {
+                        severity: StatusSeverity::Error,
+                        component: Component::Agent,
+                        event: StatusKind::StartupFailed,
+                        message: disabled.to_string(),
+                    },
+                ))
                 .await;
         }
         for server in &self.subsystems.mcp_servers {
@@ -34,13 +36,18 @@ impl AppState {
                 continue;
             };
             let _ = tx
-                .send(Event::Status {
-                    id: id.clone(),
-                    severity: StatusSeverity::Warning,
-                    component: Component::Mcp,
-                    event: StatusKind::StartupFailed,
-                    message: format!("MCP server '{}' is not available: {reason}", server.name()),
-                })
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::Status {
+                        severity: StatusSeverity::Warning,
+                        component: Component::Mcp,
+                        event: StatusKind::StartupFailed,
+                        message: format!(
+                            "MCP server '{}' is not available: {reason}",
+                            server.name()
+                        ),
+                    },
+                ))
                 .await;
         }
 
@@ -53,13 +60,15 @@ impl AppState {
             |(_, rest)| rest.to_string(),
         );
         let _ = tx
-            .send(Event::Capabilities {
-                id: id.clone(),
-                vision: probe.vision_supported,
-                model_name,
-                auto_mode: self.config.tools.allow_auto_mode,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::Capabilities {
+                    vision: probe.vision_supported,
+                    model_name,
+                    auto_mode: self.config.tools.allow_auto_mode,
+                },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 }

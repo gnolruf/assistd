@@ -10,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, debug, warn};
 
-use assistd_ipc::{Event, EventKind, ImageAttachment, PlanMode, RelayEvent, StatusKind, TaskRunId};
+use assistd_ipc::{
+    Event, EventBody, EventKind, ImageAttachment, PlanMode, RelayEvent, StatusKind, TaskRunId,
+};
 use assistd_llm::{CompactionCut, LlmError, LlmEvent, LlmHealthProbe, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedRelayStep, PersistedToolCall, Reasoning, SessionId, ToolOutcome,
@@ -125,7 +127,7 @@ pub(super) enum TurnScope {
     /// The user's conversation.
     Main,
     /// A task run's conversation, whose events reach subscribers wrapped in
-    /// [`Event::TaskRun`].
+    /// [`EventBody::TaskRun`].
     TaskRun(TaskRunId),
 }
 
@@ -134,11 +136,13 @@ impl TurnScope {
     pub(super) fn wrap(self, event: Event) -> Event {
         match self {
             TurnScope::Main => event,
-            TurnScope::TaskRun(run) => Event::TaskRun {
-                id: event.id().to_string(),
-                run,
-                event: Box::new(event),
-            },
+            TurnScope::TaskRun(run) => Event::new(
+                event.id.clone(),
+                EventBody::TaskRun {
+                    run,
+                    event: Box::new(event),
+                },
+            ),
         }
     }
 
@@ -204,20 +208,19 @@ impl TurnTranslator {
         event: LlmEvent,
         sentence_buf: &mut SentenceBuffer,
     ) -> Option<(Event, Vec<String>)> {
-        let id = self.id.clone();
-        let translated = match event {
+        let (body, sentences) = match event {
             LlmEvent::Delta { text } => {
                 self.tokens.on_delta();
                 let sentences = sentence_buf.push(&text);
                 self.accumulate_delta(&state.runtime, &text);
-                (Event::Delta { id, text }, sentences)
+                (EventBody::Delta { text }, sentences)
             }
             LlmEvent::ReasoningDelta { text } => {
                 self.tokens.on_delta();
                 self.reasoning
                     .get_or_insert_with(ReasoningTrace::new)
                     .push(&text);
-                (Event::ReasoningDelta { id, text }, Vec::new())
+                (EventBody::ReasoningDelta { text }, Vec::new())
             }
             LlmEvent::ToolCallsRequested { calls } => {
                 self.persist_tool_calls(state, &calls).await;
@@ -228,8 +231,7 @@ impl TurnTranslator {
             } => {
                 self.awaiting_tool_result = true;
                 (
-                    Event::ToolCall {
-                        id,
+                    EventBody::ToolCall {
                         name,
                         args: arguments,
                     },
@@ -243,16 +245,16 @@ impl TurnTranslator {
             } => {
                 self.persist_tool_result(state, call_id, &name, &result)
                     .await;
-                let result = result.to_json();
-                (Event::ToolResult { id, name, result }, Vec::new())
+                let result = result.report();
+                (EventBody::ToolResult { name, result }, Vec::new())
             }
             LlmEvent::Relay(event) => {
                 self.record_relay(&event);
-                (Event::Relay { id, event }, Vec::new())
+                (EventBody::Relay { event }, Vec::new())
             }
             LlmEvent::ContextSize { tokens, total } => {
                 self.tokens.on_context_size(tokens, total);
-                (Event::ContextSize { id, tokens, total }, Vec::new())
+                (EventBody::ContextSize { tokens, total }, Vec::new())
             }
             LlmEvent::Status {
                 severity,
@@ -269,8 +271,7 @@ impl TurnTranslator {
                     self.discard_partial_response(sentence_buf);
                 }
                 (
-                    Event::Status {
-                        id,
+                    EventBody::Status {
                         severity,
                         component,
                         event,
@@ -294,10 +295,10 @@ impl TurnTranslator {
                 }
                 self.persist_final_text(state).await;
                 self.done_emitted = true;
-                (Event::Done { id }, sentences)
+                (EventBody::Done, sentences)
             }
         };
-        Some(translated)
+        Some((Event::new(self.id.clone(), body), sentences))
     }
 
     fn accumulate_delta(&mut self, runtime: &RuntimeState, text: &str) {
@@ -312,10 +313,12 @@ impl TurnTranslator {
     /// copy of it; skip that when no subscriber would receive it.
     fn publish_last_delta(&self, runtime: &RuntimeState, text: &str) {
         if runtime.bus_wants(self.scope.bus_kind(EventKind::LastDelta)) {
-            let _ = runtime.events_bus().send(self.scope.wrap(Event::LastDelta {
-                id: self.id.clone(),
-                text: text.to_string(),
-            }));
+            let _ = runtime.events_bus().send(self.scope.wrap(Event::new(
+                self.id.clone(),
+                EventBody::LastDelta {
+                    text: text.to_string(),
+                },
+            )));
         }
     }
 
@@ -807,19 +810,22 @@ impl AppState {
         match agent_result {
             Ok(Ok(())) => {
                 if !done_emitted {
-                    self.send_or_publish(tx, Event::Done { id }).await;
+                    self.send_or_publish(tx, Event::new(id, EventBody::Done))
+                        .await;
                 }
                 Ok(())
             }
             Ok(Err(e)) => {
                 let message = format!("llm backend error: {e}");
-                self.send_or_publish(tx, Event::Error { id, message }).await;
+                self.send_or_publish(tx, Event::new(id, EventBody::Error { message }))
+                    .await;
                 Err(e.into())
             }
             Err(join_err) => {
                 let e = DispatchError::AgentPanicked(join_err);
                 let message = e.to_string();
-                self.send_or_publish(tx, Event::Error { id, message }).await;
+                self.send_or_publish(tx, Event::new(id, EventBody::Error { message }))
+                    .await;
                 Err(e)
             }
         }
@@ -835,7 +841,7 @@ pub(super) async fn finish_interrupted_before_start(
         id = %id,
         "turn interrupted before reaching the model; dropping the prompt"
     );
-    let _ = tx.send(Event::Done { id }).await;
+    let _ = tx.send(Event::new(id, EventBody::Done)).await;
     Ok(())
 }
 
@@ -877,10 +883,10 @@ pub(super) async fn run_speech_worker(
                     continue;
                 };
                 if speaking.is_none() {
-                    let _ = events_bus.send(Event::SpeakingState {
-                        id: id.clone(),
-                        speaking: true,
-                    });
+                    let _ = events_bus.send(Event::new(
+                        id.clone(),
+                        EventBody::SpeakingState { speaking: true },
+                    ));
                     speaking = Some(voice_output.begin_speaking());
                 }
                 voice_output.remember_spoken(&sentence);
@@ -899,10 +905,7 @@ pub(super) async fn run_speech_worker(
         );
     }
     if speaking.take().is_some() {
-        let _ = events_bus.send(Event::SpeakingState {
-            id,
-            speaking: false,
-        });
+        let _ = events_bus.send(Event::new(id, EventBody::SpeakingState { speaking: false }));
     }
 }
 

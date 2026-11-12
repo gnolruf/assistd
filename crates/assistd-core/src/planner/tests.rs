@@ -5,7 +5,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use assistd_ipc::{
-    AnticipatedAction, Event, PermissionMode, Plan, PlanId, PlanStep, PlannedAction,
+    AnticipatedAction, Event, EventBody, PermissionMode, Plan, PlanId, PlanStep, PlannedAction,
 };
 use assistd_tools::commands::BashPolicyCfg;
 use assistd_tools::{
@@ -51,7 +51,13 @@ async fn gate_prompts(tools: &ToolRegistry, line: &str) -> bool {
     let (wire, mut prompts) = mpsc::channel(8);
     let router = ConfirmRouter::new("r".into(), wire, Duration::from_millis(1), None);
     CONFIRM_ROUTER.scope(router, run(tools, line)).await;
-    matches!(prompts.try_recv(), Ok(Event::ConfirmRequest { .. }))
+    matches!(
+        prompts.try_recv(),
+        Ok(Event {
+            body: EventBody::ConfirmRequest { .. },
+            ..
+        })
+    )
 }
 
 #[tokio::test]

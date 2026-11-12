@@ -1300,29 +1300,6 @@ pub(super) fn tool_block_label(name: String, args: Option<&Value>) -> String {
         .map_or(name, str::to_string)
 }
 
-/// A tool result's output text, empty when absent.
-pub(super) fn tool_output(result: &Value) -> String {
-    result
-        .get("output")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// A tool result's exit code and duration in milliseconds, zero when absent.
-pub(super) fn tool_outcome(result: &Value) -> (i32, u64) {
-    let exit_code = result
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or(0);
-    let duration_ms = result
-        .get("duration_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    (exit_code, duration_ms)
-}
-
 fn without_bidi_controls(text: String) -> String {
     match escape_bidi_controls(&text) {
         Cow::Owned(escaped) => escaped,

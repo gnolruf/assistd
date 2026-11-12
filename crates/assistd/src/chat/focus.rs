@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_ipc::{IpcClient, Request};
+use assistd_ipc::{IpcClient, Request, RequestBody};
 use crossterm::event::Event as TermEvent;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -36,10 +36,10 @@ pub(super) fn spawn_reporter(
             let focused = *focus.borrow_and_update();
             send(
                 &ipc,
-                Request::ChatState {
-                    id: Uuid::new_v4().to_string(),
-                    focused,
-                },
+                Request::new(
+                    Uuid::new_v4().to_string(),
+                    RequestBody::ChatState { focused },
+                ),
             )
             .await;
             tokio::select! {
@@ -57,9 +57,7 @@ pub(super) fn spawn_reporter(
 
 /// Tell the daemon the chat is exiting, giving up after [`CLOSE_TIMEOUT`].
 pub(super) async fn report_closed(ipc: &IpcClient) {
-    let req = Request::ChatClosed {
-        id: Uuid::new_v4().to_string(),
-    };
+    let req = Request::new(Uuid::new_v4().to_string(), RequestBody::ChatClosed);
     let _ = tokio::time::timeout(CLOSE_TIMEOUT, send(ipc, req)).await;
 }
 

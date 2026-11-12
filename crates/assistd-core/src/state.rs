@@ -12,7 +12,7 @@ use tokio::task::JoinError;
 use tracing::warn;
 
 use assistd_embed::EmbedError;
-use assistd_ipc::{Event, Request, Role, WakeWordOp};
+use assistd_ipc::{Event, EventBody, Request, RequestBody, Role, TaskRequest, WakeWordOp};
 use assistd_llm::{BackendJudgeModel, LlmBackend, LlmError};
 use assistd_memory::{MemoryError, PersistedRole};
 use assistd_tools::{JUDGE_TIMEOUT, SafetyJudge, ToolRegistry};
@@ -173,7 +173,7 @@ impl AppState {
             return self.dispatch_inner(req, peer_pid, tx).await;
         }
         let envelope = Duration::from_secs(self.config.timeouts.dispatch_envelope_secs);
-        let req_id = req.id().to_string();
+        let req_id = req.id.clone();
         let req_kind = req.kind();
         let tx_for_timeout = tx.clone();
         let inner = self.clone().dispatch_inner(req, peer_pid, tx);
@@ -206,15 +206,14 @@ impl AppState {
     /// a wake-word session by its own idle timeout, and an MCP login by its sign-in timeout.
     fn outlives_dispatch_envelope(req: &Request) -> bool {
         matches!(
-            req,
-            Request::Subscribe { .. }
-                | Request::Query { .. }
-                | Request::TaskRefine { .. }
-                | Request::PttStop { .. }
-                | Request::McpLogin { .. }
-                | Request::WakeWord {
-                    op: WakeWordOp::TestStart,
-                    ..
+            req.body,
+            RequestBody::Subscribe { .. }
+                | RequestBody::Query { .. }
+                | RequestBody::Task(TaskRequest::Refine { .. })
+                | RequestBody::PttStop
+                | RequestBody::McpLogin { .. }
+                | RequestBody::WakeWord {
+                    op: WakeWordOp::TestStart
                 }
         )
     }
@@ -225,9 +224,9 @@ impl AppState {
         peer_pid: Option<u32>,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
-        match req {
-            Request::Query {
-                id,
+        let Request { id, body } = req;
+        match body {
+            RequestBody::Query {
                 text,
                 attachments,
                 plan,
@@ -235,103 +234,89 @@ impl AppState {
                 self.handle_query(id, text, attachments, (TurnOrigin::Typed, plan), tx)
                     .await
             }
-            Request::SetPresence { id, target } => self.handle_set_presence(id, target, tx).await,
-            Request::PttStart { id } => self.handle_ptt_start(id, tx).await,
-            Request::PttStop { id } => self.handle_ptt_stop(id, tx).await,
-            Request::ListenStart { id } => self.handle_listen_start(id, tx).await,
-            Request::ListenStop { id } => self.handle_listen_stop(id, tx).await,
-            Request::ListenToggle { id } => self.handle_listen_toggle(id, tx).await,
-            Request::WakeWord { id, op } => self.handle_wake_word(id, op, tx).await,
-            Request::MemorySave { id, key, value } => {
+            RequestBody::SetPresence { target } => self.handle_set_presence(id, target, tx).await,
+            RequestBody::PttStart => self.handle_ptt_start(id, tx).await,
+            RequestBody::PttStop => self.handle_ptt_stop(id, tx).await,
+            RequestBody::ListenStart => self.handle_listen_start(id, tx).await,
+            RequestBody::ListenStop => self.handle_listen_stop(id, tx).await,
+            RequestBody::ListenToggle => self.handle_listen_toggle(id, tx).await,
+            RequestBody::WakeWord { op } => self.handle_wake_word(id, op, tx).await,
+            RequestBody::MemorySave { key, value } => {
                 self.handle_memory_save(id, key, value, tx).await
             }
-            Request::MemoryLoad { id, key } => self.handle_memory_load(id, key, tx).await,
-            Request::MemoryList { id, prefix } => self.handle_memory_list(id, prefix, tx).await,
-            Request::MemoryListAll { id, prefix, limit } => {
+            RequestBody::MemoryLoad { key } => self.handle_memory_load(id, key, tx).await,
+            RequestBody::MemoryListAll { prefix, limit } => {
                 self.handle_memory_list_all(id, prefix, limit, tx).await
             }
-            Request::MemoryDelete { id, key } => self.handle_memory_delete(id, key, tx).await,
-            Request::MemoryForget { id, memory_id } => {
+            RequestBody::MemoryDelete { key } => self.handle_memory_delete(id, key, tx).await,
+            RequestBody::MemoryForget { memory_id } => {
                 self.handle_memory_forget(id, memory_id, tx).await
             }
-            Request::MemorySemanticSearch { id, query, limit } => {
+            RequestBody::MemorySemanticSearch { query, limit } => {
                 self.handle_semantic_search(id, query, limit, tx).await
             }
-            Request::MemoryReindex { id } => self.handle_memory_reindex(id, tx).await,
-            Request::GetPresence { id } => replied(self.handle_get_presence(id, tx)).await,
-            Request::GetListenState { id } => replied(self.handle_get_listen_state(id, tx)).await,
-            Request::VoiceToggle { id } => replied(self.handle_voice_toggle(id, tx)).await,
-            Request::VoiceSkip { id } => replied(self.handle_voice_skip(id, tx)).await,
-            Request::InterruptTurn { id } => replied(self.handle_interrupt_turn(id, tx)).await,
-            Request::GetVoiceState { id } => replied(self.handle_get_voice_state(id, tx)).await,
-            Request::GetCapabilities { id } => replied(self.handle_get_capabilities(id, tx)).await,
-            Request::Fork { id, name } => replied(self.handle_fork(id, name, tx)).await,
-            Request::Branches { id } => replied(self.handle_branches(id, tx)).await,
-            Request::Switch { id, target } => replied(self.handle_switch(id, target, tx)).await,
-            Request::Undo { id } => replied(self.handle_undo(id, tx)).await,
-            Request::ResumeOrNew { id, recency_secs } => {
+            RequestBody::MemoryReindex => self.handle_memory_reindex(id, tx).await,
+            RequestBody::GetPresence => replied(self.handle_get_presence(id, tx)).await,
+            RequestBody::GetListenState => replied(self.handle_get_listen_state(id, tx)).await,
+            RequestBody::VoiceToggle => replied(self.handle_voice_toggle(id, tx)).await,
+            RequestBody::VoiceSkip => replied(self.handle_voice_skip(id, tx)).await,
+            RequestBody::InterruptTurn => replied(self.handle_interrupt_turn(id, tx)).await,
+            RequestBody::GetVoiceState => replied(self.handle_get_voice_state(id, tx)).await,
+            RequestBody::GetCapabilities => replied(self.handle_get_capabilities(id, tx)).await,
+            RequestBody::Fork { name } => replied(self.handle_fork(id, name, tx)).await,
+            RequestBody::Branches => replied(self.handle_branches(id, tx)).await,
+            RequestBody::Switch { target } => replied(self.handle_switch(id, target, tx)).await,
+            RequestBody::Undo => replied(self.handle_undo(id, tx)).await,
+            RequestBody::ResumeOrNew { recency_secs } => {
                 replied(self.handle_resume_or_new(id, recency_secs, tx)).await
             }
-            Request::NewSession { id } => replied(self.handle_new_session(id, tx)).await,
-            Request::ChatState { id, focused } => {
+            RequestBody::NewSession => replied(self.handle_new_session(id, tx)).await,
+            RequestBody::ChatState { focused } => {
                 replied(self.handle_chat_state(id, focused, peer_pid, tx)).await
             }
-            Request::ChatClosed { id } => replied(self.handle_chat_closed(id, peer_pid, tx)).await,
-            Request::GetChatFocus { id } => replied(self.handle_get_chat_focus(id, tx)).await,
-            Request::GetReadiness { id } => replied(self.handle_get_readiness(id, tx)).await,
-            Request::Subscribe { id, filter } => {
+            RequestBody::ChatClosed => replied(self.handle_chat_closed(id, peer_pid, tx)).await,
+            RequestBody::GetChatFocus => replied(self.handle_get_chat_focus(id, tx)).await,
+            RequestBody::GetReadiness => replied(self.handle_get_readiness(id, tx)).await,
+            RequestBody::Subscribe { filter } => {
                 replied(self.handle_subscribe(id, filter, tx)).await
             }
-            Request::McpLogin { id, server } => {
+            RequestBody::McpLogin { server } => {
                 replied(self.handle_mcp_login(id, server, tx)).await
             }
-            Request::McpLogout { id, server } => {
+            RequestBody::McpLogout { server } => {
                 replied(self.handle_mcp_logout(id, server, tx)).await
             }
-            Request::McpStatus { id } => replied(self.handle_mcp_status(id, tx)).await,
-            task @ (Request::TaskList { .. }
-            | Request::TaskGet { .. }
-            | Request::TaskSave { .. }
-            | Request::TaskDelete { .. }
-            | Request::TaskSetEnabled { .. }
-            | Request::TaskRun { .. }
-            | Request::TaskCancel { .. }
-            | Request::TaskQueue { .. }
-            | Request::TaskConfirm { .. }
-            | Request::TaskRuns { .. }
-            | Request::TaskRefine { .. }
-            | Request::TaskCheckTrigger { .. }) => self.dispatch_task_request(task, tx).await,
-            Request::ConfirmResponse { id, confirm_id, .. } => {
+            RequestBody::McpStatus => replied(self.handle_mcp_status(id, tx)).await,
+            RequestBody::Task(task) => self.dispatch_task_request(id, task, tx).await,
+            RequestBody::ConfirmResponse { confirm_id, .. } => {
                 replied(send_error(&tx, id, unmatched_confirm_response(&confirm_id))).await
             }
-            Request::SetPermissionMode { id, .. } => {
+            RequestBody::SetPermissionMode { .. } => {
                 replied(send_error(&tx, id, PERMISSION_MODE_OFF_QUERY.into())).await
             }
-            Request::PlanVerdict { id, .. } => {
+            RequestBody::PlanVerdict { .. } => {
                 replied(send_error(&tx, id, PLAN_VERDICT_OFF_QUERY.into())).await
             }
         }
     }
 
-    /// Dispatch one of the `Task*` requests.
     async fn dispatch_task_request(
         self: Arc<Self>,
-        req: Request,
+        id: String,
+        req: TaskRequest,
         tx: mpsc::Sender<Event>,
     ) -> Result<(), DispatchError> {
         match req {
-            Request::TaskList { id } => self.handle_task_list(id, tx).await,
-            Request::TaskGet { id, task } => self.handle_task_get(id, task, tx).await,
-            Request::TaskSave { id, task, spec } => self.handle_task_save(id, task, spec, tx).await,
-            Request::TaskDelete { id, task } => self.handle_task_delete(id, task, tx).await,
-            Request::TaskSetEnabled { id, task, enabled } => {
+            TaskRequest::List => self.handle_task_list(id, tx).await,
+            TaskRequest::Save { task, spec } => self.handle_task_save(id, task, spec, tx).await,
+            TaskRequest::Delete { task } => self.handle_task_delete(id, task, tx).await,
+            TaskRequest::SetEnabled { task, enabled } => {
                 self.handle_task_set_enabled(id, task, enabled, tx).await
             }
-            Request::TaskRun { id, task } => self.handle_task_run(id, task, tx).await,
-            Request::TaskCancel { id, run } => replied(self.handle_task_cancel(id, run, tx)).await,
-            Request::TaskQueue { id, op } => replied(self.handle_task_queue(id, op, tx)).await,
-            Request::TaskConfirm {
-                id,
+            TaskRequest::Run { task } => self.handle_task_run(id, task, tx).await,
+            TaskRequest::Cancel { run } => replied(self.handle_task_cancel(id, run, tx)).await,
+            TaskRequest::Queue { op } => replied(self.handle_task_queue(id, op, tx)).await,
+            TaskRequest::Confirm {
                 run,
                 confirm_id,
                 allow,
@@ -341,9 +326,8 @@ impl AppState {
                 self.handle_task_confirm(id, run, confirm_id, approval, tx)
                     .await
             }
-            Request::TaskRuns { id, task } => self.handle_task_runs(id, task, tx).await,
-            Request::TaskRefine {
-                id,
+            TaskRequest::Runs { task } => self.handle_task_runs(id, task, tx).await,
+            TaskRequest::Refine {
                 prompt,
                 mode,
                 allowed_hosts,
@@ -357,10 +341,9 @@ impl AppState {
                 };
                 self.handle_task_refine(id, ask, tx).await
             }
-            Request::TaskCheckTrigger { id, task, trigger } => {
+            TaskRequest::CheckTrigger { task, trigger } => {
                 self.handle_task_check_trigger(id, task, trigger, tx).await
             }
-            other => unreachable!("{} is not a task request", other.kind()),
         }
     }
 }
@@ -378,7 +361,7 @@ async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {
 }
 
 async fn send_error(tx: &mpsc::Sender<Event>, id: String, message: String) {
-    let _ = tx.send(Event::Error { id, message }).await;
+    let _ = tx.send(Event::new(id, EventBody::Error { message })).await;
 }
 
 fn wire_role(role: PersistedRole) -> Role {

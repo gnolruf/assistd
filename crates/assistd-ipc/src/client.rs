@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-use crate::{Event, Request, socket_path};
+use crate::{Event, EventBody, Request, socket_path};
 
 /// Errors produced by the IPC client.
 #[derive(Debug, Error)]
@@ -33,7 +33,7 @@ pub enum IpcClientError {
     /// Daemon closed the connection before emitting `Done` or `Error`.
     #[error("daemon closed connection mid-stream")]
     DaemonClosed,
-    /// The daemon ended the request with [`Event::Error`]; holds its message.
+    /// The daemon ended the request with [`EventBody::Error`]; holds its message.
     #[error("daemon error: {0}")]
     Daemon(String),
 }
@@ -96,9 +96,11 @@ impl IpcClient {
                 .await?
                 .ok_or(IpcClientError::DaemonClosed)?;
             on_event(&event)?;
-            match event {
-                Event::Done { .. } => return Ok(()),
-                Event::Error { message, .. } => return Err(IpcClientError::Daemon(message).into()),
+            match event.body {
+                EventBody::Done => return Ok(()),
+                EventBody::Error { message } => {
+                    return Err(IpcClientError::Daemon(message).into());
+                }
                 _ => {}
             }
         }
@@ -110,7 +112,7 @@ impl IpcClient {
     }
 
     /// Send `initial` but keep the write half open for further requests, such as a
-    /// [`Request::ConfirmResponse`].
+    /// [`crate::RequestBody::ConfirmResponse`].
     pub async fn open_dialog(&self, initial: Request) -> Result<DialogConnection> {
         let stream = self.connect().await?;
         let (read, mut write) = stream.into_split();
@@ -146,7 +148,7 @@ impl Default for IpcClient {
 }
 
 /// Write the opening request; `false` when the daemon had already closed the connection,
-/// leaving any [`Event::Error`] saying why for the event stream to report.
+/// leaving any [`EventBody::Error`] saying why for the event stream to report.
 async fn write_initial_frame(write: &mut OwnedWriteHalf, req: &Request) -> Result<bool> {
     match write_frame(write, req).await {
         Ok(()) => Ok(true),
@@ -237,7 +239,7 @@ impl DialogConnection {
         self.events.next_event().await
     }
 
-    /// Send a further request, such as a [`Request::ConfirmResponse`], on this connection.
+    /// Send a further request, such as a [`crate::RequestBody::ConfirmResponse`], on this connection.
     pub async fn send(&mut self, req: Request) -> Result<()> {
         write_frame(&mut self.write, &req).await
     }
@@ -252,6 +254,7 @@ impl DialogConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RequestBody;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -305,11 +308,13 @@ mod tests {
         assert_eq!(
             stream.collect().await.expect("collect"),
             vec![
-                Event::Delta {
-                    id: "r".into(),
-                    text: "hello".into(),
-                },
-                Event::Done { id: "r".into() },
+                Event::new(
+                    "r",
+                    EventBody::Delta {
+                        text: "hello".into()
+                    }
+                ),
+                Event::new("r", EventBody::Done),
             ]
         );
         server.await.unwrap();
@@ -317,10 +322,12 @@ mod tests {
 
     #[tokio::test]
     async fn collect_errors_on_premature_close() {
-        let (_dir, path, server) = mock_server(&[Event::Delta {
-            id: "r".into(),
-            text: "incomplete".into(),
-        }]);
+        let (_dir, path, server) = mock_server(&[Event::new(
+            "r",
+            EventBody::Delta {
+                text: "incomplete".into(),
+            },
+        )]);
         let client = IpcClient::with_path(path);
         let stream = client.one_shot(Request::query("r", "x")).await.unwrap();
         let err = stream.collect().await.expect_err("expected DaemonClosed");
@@ -330,15 +337,14 @@ mod tests {
 
     #[tokio::test]
     async fn request_ends_on_done_error_or_early_close() {
-        let delta = Event::Delta {
-            id: "r".into(),
-            text: "hi".into(),
-        };
-        let done = Event::Done { id: "r".into() };
-        let error = Event::Error {
-            id: "r".into(),
-            message: "boom".into(),
-        };
+        let delta = Event::new("r", EventBody::Delta { text: "hi".into() });
+        let done = Event::new("r", EventBody::Done);
+        let error = Event::new(
+            "r",
+            EventBody::Error {
+                message: "boom".into(),
+            },
+        );
         let run = async |events: &[Event]| {
             let (_dir, path, server) = mock_server(events);
             let mut seen = 0;
@@ -379,15 +385,17 @@ mod tests {
             reader.read_line(&mut first).await.unwrap();
             let _: Request = serde_json::from_str(first.trim()).unwrap();
 
-            let confirm = Event::ConfirmRequest {
-                id: "r".into(),
-                confirm_id: "c1".into(),
-                tool: "bash".into(),
-                script: "rm -rf /tmp/x".into(),
-                matched_pattern: "rm -rf".into(),
-                always_allow: Vec::new(),
-                source: crate::ConfirmSource::Main,
-            };
+            let confirm = Event::new(
+                "r",
+                EventBody::ConfirmRequest {
+                    confirm_id: "c1".into(),
+                    tool: "bash".into(),
+                    script: "rm -rf /tmp/x".into(),
+                    matched_pattern: "rm -rf".into(),
+                    always_allow: Vec::new(),
+                    source: crate::ConfirmSource::Main,
+                },
+            );
             let mut out = serde_json::to_string(&confirm).unwrap();
             out.push('\n');
             write.write_all(out.as_bytes()).await.unwrap();
@@ -396,9 +404,12 @@ mod tests {
             let mut second = String::new();
             reader.read_line(&mut second).await.unwrap();
             let req: Request = serde_json::from_str(second.trim()).unwrap();
-            assert!(matches!(req, Request::ConfirmResponse { allow: true, .. }));
+            assert!(matches!(
+                req.body,
+                RequestBody::ConfirmResponse { allow: true, .. }
+            ));
 
-            let mut done = serde_json::to_string(&Event::Done { id: "r".into() }).unwrap();
+            let mut done = serde_json::to_string(&Event::new("r", EventBody::Done)).unwrap();
             done.push('\n');
             write.write_all(done.as_bytes()).await.unwrap();
             write.flush().await.unwrap();
@@ -408,14 +419,16 @@ mod tests {
         let mut conn = client.open_dialog(Request::query("r", "go")).await.unwrap();
 
         let event = conn.next_event().await.unwrap().expect("ConfirmRequest");
-        match event {
-            Event::ConfirmRequest { confirm_id, .. } => {
-                conn.send(Request::ConfirmResponse {
-                    id: "r".into(),
-                    confirm_id,
-                    allow: true,
-                    always: false,
-                })
+        match event.body {
+            EventBody::ConfirmRequest { confirm_id, .. } => {
+                conn.send(Request::new(
+                    "r",
+                    RequestBody::ConfirmResponse {
+                        confirm_id,
+                        allow: true,
+                        always: false,
+                    },
+                ))
                 .await
                 .unwrap();
             }
@@ -423,7 +436,7 @@ mod tests {
         }
 
         let done = conn.next_event().await.unwrap().expect("Done");
-        assert_eq!(done, Event::Done { id: "r".into() });
+        assert_eq!(done, Event::new("r", EventBody::Done));
         server.await.unwrap();
     }
 }

@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use assistd_ipc::Event;
+use assistd_ipc::{Event, EventBody};
 use assistd_llm::{
     ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, OneShotReply, Thinking,
     ToolCallRecord,
@@ -106,17 +106,19 @@ impl AppState {
             .ok()
             .flatten();
         let _ = tx
-            .send(Event::BranchSwitched {
-                id: id.clone(),
-                branch_id: Some(new_branch.0),
-                session_id: session.to_string(),
-                session_title,
-                name,
-                parent_branch_name: parent_name,
-                fork_point_seq: fork_point_seq.map(|seq| seq.0),
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::BranchSwitched {
+                    branch_id: Some(new_branch.0),
+                    session_id: session.to_string(),
+                    session_title,
+                    name,
+                    parent_branch_name: parent_name,
+                    fork_point_seq: fork_point_seq.map(|seq| seq.0),
+                },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     /// Enumerate every branch across every session, active session first.
@@ -136,29 +138,31 @@ impl AppState {
         for branch in active.into_iter().chain(other) {
             let is_active_session = branch.session_id == active_session;
             let _ = tx
-                .send(Event::BranchInfo {
-                    id: id.clone(),
-                    branch_id: branch.branch_id.0,
-                    session_id: branch.session_id.to_string(),
-                    session_started_at: wire_timestamp(branch.session_started_at),
-                    session_ended_at: branch.session_ended_at.map(wire_timestamp),
-                    session_title: branch.session_title,
-                    name: branch.name,
-                    parent_branch_name: branch.parent_branch_name,
-                    fork_point_seq: branch.fork_point_seq.map(|seq| seq.0),
-                    created_at: wire_timestamp(branch.created_at),
-                    message_count: branch.message_count,
-                    is_current_in_session: branch.is_current_in_session,
-                    is_active_session,
-                    last_active_at: wire_timestamp(branch.last_active_at),
-                    task_run: branch.task_run,
-                })
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::BranchInfo {
+                        branch_id: branch.branch_id.0,
+                        session_id: branch.session_id.to_string(),
+                        session_started_at: wire_timestamp(branch.session_started_at),
+                        session_ended_at: branch.session_ended_at.map(wire_timestamp),
+                        session_title: branch.session_title,
+                        name: branch.name,
+                        parent_branch_name: branch.parent_branch_name,
+                        fork_point_seq: branch.fork_point_seq.map(|seq| seq.0),
+                        created_at: wire_timestamp(branch.created_at),
+                        message_count: branch.message_count,
+                        is_current_in_session: branch.is_current_in_session,
+                        is_active_session,
+                        last_active_at: wire_timestamp(branch.last_active_at),
+                        task_run: branch.task_run,
+                    },
+                ))
                 .await;
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
-    /// Broadcast `session`'s title as [`Event::SessionTitle`] for turn `id`,
+    /// Broadcast `session`'s title as [`EventBody::SessionTitle`] for turn `id`,
     /// in the background. An untitled session first gets one from the LLM;
     /// failures are logged and retried on the session's next turn.
     pub(super) fn spawn_session_title_broadcast(
@@ -172,11 +176,13 @@ impl AppState {
             let Some(title) = self.session_title_for_turn(session, &trimmed).await else {
                 return;
             };
-            let _ = self.runtime.events_bus().send(Event::SessionTitle {
+            let _ = self.runtime.events_bus().send(Event::new(
                 id,
-                session_id: session.to_string(),
-                title,
-            });
+                EventBody::SessionTitle {
+                    session_id: session.to_string(),
+                    title,
+                },
+            ));
         });
     }
 
@@ -339,13 +345,15 @@ impl AppState {
         }
         delete_answer_files(outcome.released_answer_files).await;
         let _ = tx
-            .send(Event::UndoApplied {
-                id: id.clone(),
-                removed_messages: u32::try_from(outcome.removed_messages).unwrap_or(u32::MAX),
-                last_user_text: outcome.last_user_text,
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::UndoApplied {
+                    removed_messages: u32::try_from(outcome.removed_messages).unwrap_or(u32::MAX),
+                    last_user_text: outcome.last_user_text,
+                },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     /// Keep the current branch and stream its history if its latest
@@ -437,15 +445,17 @@ impl AppState {
             .ok()
             .flatten();
         let _ = tx
-            .send(Event::BranchSwitched {
-                id: id.clone(),
-                branch_id: Some(branch.0),
-                session_id: session.to_string(),
-                session_title,
-                name: branch_name.unwrap_or_default(),
-                parent_branch_name: parent_name,
-                fork_point_seq: fork_point_seq.map(|seq| seq.0),
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::BranchSwitched {
+                    branch_id: Some(branch.0),
+                    session_id: session.to_string(),
+                    session_title,
+                    name: branch_name.unwrap_or_default(),
+                    parent_branch_name: parent_name,
+                    fork_point_seq: fork_point_seq.map(|seq| seq.0),
+                },
+            ))
             .await;
         let mut call_arguments = tool_call_arguments(&rows);
         let mut relay_traces = self.relay_traces_of(branch).await;
@@ -471,26 +481,28 @@ impl AppState {
             };
             let reasoning_ms = reasoning.as_ref().map(|r| r.duration_ms);
             let _ = tx
-                .send(Event::HistoryEntry {
-                    id: id.clone(),
-                    seq: row.seq.0,
-                    role,
-                    content: row.message.content,
-                    reasoning: reasoning.map(|r| r.text).unwrap_or_default(),
-                    reasoning_ms,
-                    tool_name,
-                    tool_args,
-                    exit_code: outcome.map(|o| o.exit_code),
-                    duration_ms: outcome.map(|o| o.duration_ms),
-                    compaction_ms: compaction
-                        .filter(|(marker_seq, _)| *marker_seq == row.seq)
-                        .map(|(_, duration_ms)| duration_ms),
-                    turn_stats: row.turn_stats.map(wire_turn_stats),
-                    relay,
-                })
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::HistoryEntry {
+                        seq: row.seq.0,
+                        role,
+                        content: row.message.content,
+                        reasoning: reasoning.map(|r| r.text).unwrap_or_default(),
+                        reasoning_ms,
+                        tool_name,
+                        tool_args,
+                        exit_code: outcome.map(|o| o.exit_code),
+                        duration_ms: outcome.map(|o| o.duration_ms),
+                        compaction_ms: compaction
+                            .filter(|(marker_seq, _)| *marker_seq == row.seq)
+                            .map(|(_, duration_ms)| duration_ms),
+                        turn_stats: row.turn_stats.map(wire_turn_stats),
+                        relay,
+                    },
+                ))
                 .await;
         }
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }
 
     /// The relay traces stored on `branch`'s rows; none when they cannot be read.
@@ -551,17 +563,19 @@ impl AppState {
 /// `BranchSwitched` without a branch id, then `Done`.
 async fn announce_unsaved_session(id: String, session: SessionId, tx: &mpsc::Sender<Event>) {
     let _ = tx
-        .send(Event::BranchSwitched {
-            id: id.clone(),
-            branch_id: None,
-            session_id: session.to_string(),
-            session_title: None,
-            name: "main".to_string(),
-            parent_branch_name: None,
-            fork_point_seq: None,
-        })
+        .send(Event::new(
+            id.clone(),
+            EventBody::BranchSwitched {
+                branch_id: None,
+                session_id: session.to_string(),
+                session_title: None,
+                name: "main".to_string(),
+                parent_branch_name: None,
+                fork_point_seq: None,
+            },
+        ))
         .await;
-    let _ = tx.send(Event::Done { id }).await;
+    let _ = tx.send(Event::new(id, EventBody::Done)).await;
 }
 
 fn replay_part(summary: Option<&BranchSummary>, seq: Seq) -> ReplayPart {

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use assistd_config::NotificationsConfig;
-use assistd_ipc::{Event, IpcClient, Request};
+use assistd_ipc::{Event, EventBody, IpcClient, Request, RequestBody};
 use assistd_utils::time::saturating_millis;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
@@ -142,12 +142,12 @@ impl Driver {
     /// Any event while shown, or a turn or speech finishing, restarts the
     /// auto-hide timer.
     fn ingest(&mut self, ev: &Event) {
-        match ev {
-            Event::ChatFocus { focused, .. } => {
+        match &ev.body {
+            EventBody::ChatFocus { focused } => {
                 self.set_chat_focus(*focused);
                 return;
             }
-            Event::TaskQueue { .. } | Event::TaskReply { .. } => {
+            EventBody::TaskQueue { .. } | EventBody::TaskReply { .. } => {
                 self.announce_task_notices(ev);
                 return;
             }
@@ -291,9 +291,7 @@ impl Driver {
 }
 
 async fn interrupt_turn(ipc: IpcClient) {
-    let req = Request::InterruptTurn {
-        id: Uuid::new_v4().to_string(),
-    };
+    let req = Request::new(Uuid::new_v4().to_string(), RequestBody::InterruptTurn);
     if let Err(e) = ipc.send(req).await {
         tracing::warn!(target: "tray", "notification dismiss: interrupt_turn failed: {e}");
     }

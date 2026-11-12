@@ -17,7 +17,9 @@ use tracing::{Instrument, debug, info, warn};
 #[cfg(test)]
 use assistd_config::defaults::{nz16, nz32, nz64};
 use assistd_config::{ModelConfig, TimeoutsConfig};
-use assistd_ipc::{Component, Event, PresenceState, PresenceTarget, StatusKind, StatusSeverity};
+use assistd_ipc::{
+    Component, Event, EventBody, PresenceState, PresenceTarget, StatusKind, StatusSeverity,
+};
 use assistd_llm::{
     HealthSnapshot, HealthWaitError, LlamaServerControl, LlamaServerError, LlamaServerSpec,
     LlmHealthProbe, ReadyState, SlotDir,
@@ -892,13 +894,15 @@ fn spawn_load_progress_emitter(
             };
             let elapsed_secs = started.elapsed().as_secs();
             if tx
-                .send(Event::Status {
-                    id: request_id.clone(),
-                    severity: StatusSeverity::Info,
-                    component: Component::Llm,
-                    event: StatusKind::ModelLoading,
-                    message: format!("loading model ({elapsed_secs}s elapsed)"),
-                })
+                .send(Event::new(
+                    request_id.clone(),
+                    EventBody::Status {
+                        severity: StatusSeverity::Info,
+                        component: Component::Llm,
+                        event: StatusKind::ModelLoading,
+                        message: format!("loading model ({elapsed_secs}s elapsed)"),
+                    },
+                ))
                 .await
                 .is_err()
             {

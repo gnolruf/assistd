@@ -3,7 +3,7 @@
 
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Event, TaskName, TaskRunId};
+use assistd_ipc::{Event, EventBody, TaskName, TaskRunId};
 use assistd_voice::SentenceBuffer;
 
 use super::AppState;
@@ -27,12 +27,14 @@ impl AppState {
             reply,
         } = reply;
         let sentences = self.reply_sentences(&reply);
-        self.runtime.publish(&Event::TaskReply {
-            id: id.clone(),
-            run,
-            task_name,
-            reply,
-        });
+        self.runtime.publish(&Event::new(
+            id.clone(),
+            EventBody::TaskReply {
+                run,
+                task_name,
+                reply,
+            },
+        ));
         self.wait_for_quiet_chat().await;
         let voice_output = self.subsystems.voice.speech().clone();
         let start_epoch = voice_output.current_epoch();

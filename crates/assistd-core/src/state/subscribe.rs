@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tracing::{debug, warn};
 
-use assistd_ipc::{Event, EventKind, SubscribeFilter, VoiceCaptureState};
+use assistd_ipc::{Event, EventBody, EventKind, SubscribeFilter, VoiceCaptureState};
 
 use super::AppState;
 
@@ -52,7 +52,7 @@ impl AppState {
                 }
                 Ok(()) = presence.changed(), if wants_presence => {
                     let state = *presence.borrow_and_update();
-                    if tx.send(Event::Presence { id: id.clone(), state }).await.is_err() {
+                    if tx.send(Event::new(id.clone(), EventBody::Presence { state })).await.is_err() {
                         return;
                     }
                 }
@@ -107,24 +107,32 @@ impl AppState {
         let id = || id.to_string();
         let voice = &self.subsystems.voice;
         let current = [
-            Event::TaskQueue {
-                id: id(),
-                snapshot: self.task_queue_snapshot(),
-            },
-            Event::Presence {
-                id: id(),
-                state: self.subsystems.presence.state(),
-            },
-            Event::ListenState {
-                id: id(),
-                phase: voice.listen_phase(),
-            },
-            Event::VoiceState {
-                id: id(),
-                state: voice
-                    .capture()
-                    .map_or(VoiceCaptureState::Idle, |capture| capture.input.state()),
-            },
+            Event::new(
+                id(),
+                EventBody::TaskQueue {
+                    snapshot: self.task_queue_snapshot(),
+                },
+            ),
+            Event::new(
+                id(),
+                EventBody::Presence {
+                    state: self.subsystems.presence.state(),
+                },
+            ),
+            Event::new(
+                id(),
+                EventBody::ListenState {
+                    phase: voice.listen_phase(),
+                },
+            ),
+            Event::new(
+                id(),
+                EventBody::VoiceState {
+                    state: voice
+                        .capture()
+                        .map_or(VoiceCaptureState::Idle, |capture| capture.input.state()),
+                },
+            ),
         ];
         for event in current {
             if event.kind().is_some_and(|kind| filter.matches(kind)) {

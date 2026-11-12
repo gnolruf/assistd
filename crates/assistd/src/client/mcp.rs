@@ -6,7 +6,9 @@ use std::io::{self, Write};
 use std::process::{Child, Command, Stdio};
 
 use anyhow::Result;
-use assistd_ipc::{Event, McpServerState, McpTransportKind, Request, TokenRevocation};
+use assistd_ipc::{
+    EventBody, McpServerState, McpTransportKind, Request, RequestBody, TokenRevocation,
+};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
@@ -39,14 +41,11 @@ pub(crate) async fn run(args: McpArgs) -> Result<()> {
 }
 
 async fn login(server: String) -> Result<()> {
-    let request = Request::McpLogin {
-        id: Uuid::new_v4().to_string(),
-        server,
-    };
+    let request = Request::new(Uuid::new_v4().to_string(), RequestBody::McpLogin { server });
     let mut browser = None;
     let outcome = run_one_shot(request, |event| {
-        match event {
-            Event::McpAuthorizeUrl { server, url, .. } => {
+        match &event.body {
+            EventBody::McpAuthorizeUrl { server, url } => {
                 writeln!(
                     io::stdout(),
                     "Open this URL to sign in to MCP server '{}':\n\n  {}\n\nWaiting for the \
@@ -56,7 +55,7 @@ async fn login(server: String) -> Result<()> {
                 )?;
                 browser = open_browser(url);
             }
-            Event::McpServer { server, state, .. } => writeln!(
+            EventBody::McpServer { server, state, .. } => writeln!(
                 io::stdout(),
                 "Signed in to '{}'; the server is {}.",
                 escape_controls_single_line(server),
@@ -74,15 +73,12 @@ async fn login(server: String) -> Result<()> {
 }
 
 async fn logout(server: String) -> Result<()> {
-    let request = Request::McpLogout {
-        id: Uuid::new_v4().to_string(),
-        server,
-    };
+    let request = Request::new(
+        Uuid::new_v4().to_string(),
+        RequestBody::McpLogout { server },
+    );
     run_one_shot(request, |event| {
-        if let Event::McpLoggedOut {
-            server, revocation, ..
-        } = event
-        {
+        if let EventBody::McpLoggedOut { server, revocation } = &event.body {
             let server = escape_controls_single_line(server);
             let revoked = match revocation {
                 TokenRevocation::Revoked => "revoked its token and deleted it".to_owned(),
@@ -103,16 +99,13 @@ async fn logout(server: String) -> Result<()> {
 }
 
 async fn status() -> Result<()> {
-    let request = Request::McpStatus {
-        id: Uuid::new_v4().to_string(),
-    };
+    let request = Request::new(Uuid::new_v4().to_string(), RequestBody::McpStatus);
     run_one_shot(request, |event| {
-        if let Event::McpServer {
+        if let EventBody::McpServer {
             server,
             transport,
             state,
-            ..
-        } = event
+        } = &event.body
         {
             let transport = match transport {
                 McpTransportKind::Stdio => "stdio",

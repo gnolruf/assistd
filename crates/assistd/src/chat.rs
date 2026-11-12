@@ -14,7 +14,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
-use assistd_ipc::{Event, EventKind, IpcClient, IpcClientError, Request, SubscribeFilter};
+use assistd_ipc::{
+    EventBody, EventKind, IpcClient, IpcClientError, Request, RequestBody, SubscribeFilter,
+};
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream, MouseEventKind};
 use crossterm::{cursor, execute, style, terminal};
@@ -459,12 +461,10 @@ fn apply_terminal_event(
 
 /// Each configured MCP server that is not usable, with why.
 async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
-    let req = Request::McpStatus {
-        id: Uuid::new_v4().to_string(),
-    };
+    let req = Request::new(Uuid::new_v4().to_string(), RequestBody::McpStatus);
     let mut unavailable = Vec::new();
     ipc.request(req, |event| {
-        if let Event::McpServer { server, state, .. } = event
+        if let EventBody::McpServer { server, state, .. } = &event.body
             && let Some(reason) = state.unavailable_reason(server)
         {
             unavailable.push((server.clone(), reason));
@@ -476,17 +476,14 @@ async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
 }
 
 async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
-    let req = Request::GetCapabilities {
-        id: Uuid::new_v4().to_string(),
-    };
+    let req = Request::new(Uuid::new_v4().to_string(), RequestBody::GetCapabilities);
     let mut capabilities = StartupCapabilities::default();
     ipc.request(req, |event| {
-        if let Event::Capabilities {
+        if let EventBody::Capabilities {
             vision,
             model_name,
             auto_mode,
-            ..
-        } = event
+        } = &event.body
         {
             capabilities = StartupCapabilities {
                 vision_enabled: *vision,
@@ -559,29 +556,31 @@ async fn pump_bus(follower: &BusFollower, lost: &mut bool) {
 }
 
 async fn subscribe_bus(ipc: &IpcClient) -> Option<assistd_ipc::EventStream> {
-    let req = Request::Subscribe {
-        id: Uuid::new_v4().to_string(),
-        filter: SubscribeFilter {
-            kinds: vec![
-                EventKind::SessionTitle,
-                EventKind::Transcription,
-                EventKind::Presence,
-                EventKind::VoiceState,
-                EventKind::ListenState,
-                EventKind::WakeWordDetected,
-                EventKind::Delta,
-                EventKind::ReasoningDelta,
-                EventKind::ToolCall,
-                EventKind::ToolResult,
-                EventKind::Relay,
-                EventKind::ContextSize,
-                EventKind::TaskQueue,
-                EventKind::Readiness,
-                EventKind::Done,
-                EventKind::Error,
-            ],
+    let req = Request::new(
+        Uuid::new_v4().to_string(),
+        RequestBody::Subscribe {
+            filter: SubscribeFilter {
+                kinds: vec![
+                    EventKind::SessionTitle,
+                    EventKind::Transcription,
+                    EventKind::Presence,
+                    EventKind::VoiceState,
+                    EventKind::ListenState,
+                    EventKind::WakeWordDetected,
+                    EventKind::Delta,
+                    EventKind::ReasoningDelta,
+                    EventKind::ToolCall,
+                    EventKind::ToolResult,
+                    EventKind::Relay,
+                    EventKind::ContextSize,
+                    EventKind::TaskQueue,
+                    EventKind::Readiness,
+                    EventKind::Done,
+                    EventKind::Error,
+                ],
+            },
         },
-    };
+    );
     ipc.one_shot(req)
         .await
         .inspect_err(|e| tracing::debug!("bus subscribe failed: {e}"))

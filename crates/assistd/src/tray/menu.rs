@@ -3,7 +3,9 @@
 
 use anyhow::Result;
 use assistd_config::TrayIconsConfig;
-use assistd_ipc::{Event, IpcClient, PresenceState, PresenceTarget, Request, TaskQueueOp};
+use assistd_ipc::{
+    Event, IpcClient, PresenceState, PresenceTarget, Request, RequestBody, TaskQueueOp, TaskRequest,
+};
 use chrono::Utc;
 use ksni::{
     Category, Status, ToolTip, Tray,
@@ -179,19 +181,19 @@ pub(super) async fn run_actions(
     while let Some(action) = rx.recv().await {
         match action {
             MenuAction::SetPresence(target) => {
-                let req = Request::SetPresence {
-                    id: Uuid::new_v4().to_string(),
-                    target,
-                };
+                let req = Request::new(
+                    Uuid::new_v4().to_string(),
+                    RequestBody::SetPresence { target },
+                );
                 if let Err(e) = ipc.send(req).await {
                     tracing::warn!(target: "tray", "set_presence({target:?}) failed: {e:#}");
                 }
             }
             MenuAction::ChangeTaskQueue(op) => {
-                let req = Request::TaskQueue {
-                    id: Uuid::new_v4().to_string(),
-                    op: op.clone(),
-                };
+                let req = Request::new(
+                    Uuid::new_v4().to_string(),
+                    RequestBody::Task(TaskRequest::Queue { op: op.clone() }),
+                );
                 if let Err(e) = ipc.send(req).await {
                     tracing::warn!(target: "tray", "task_queue({op:?}) failed: {e:#}");
                 }

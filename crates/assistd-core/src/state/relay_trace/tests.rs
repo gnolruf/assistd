@@ -35,7 +35,12 @@ fn trace_merges_deltas_pairs_results_and_stores_an_unfinished_step_as_stopped() 
         },
         RelayEvent::ToolResult {
             name: "run".into(),
-            result: json!({"output": "none", "exit_code": 1, "duration_ms": 12}),
+            result: ToolReport {
+                output: "none".into(),
+                exit_code: 1,
+                duration_ms: 12,
+                ..ToolReport::default()
+            },
         },
         RelayEvent::Delta {
             text: "Nothing ".into(),

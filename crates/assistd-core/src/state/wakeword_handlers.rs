@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::warn;
 
-use assistd_ipc::{Event, VoiceCaptureState, WakeWordOp};
+use assistd_ipc::{Event, EventBody, VoiceCaptureState, WakeWordOp};
 use assistd_voice::{ListenError, VoiceCapture, WakeTest};
 
 use super::{AppState, DispatchError, send_error};
@@ -86,10 +86,10 @@ impl SessionIo {
     async fn send_speaking(&self, speaking: bool) {
         let _ = self
             .tx
-            .send(Event::WakeWordSpeech {
-                id: self.id.clone(),
-                speaking,
-            })
+            .send(Event::new(
+                self.id.clone(),
+                EventBody::WakeWordSpeech { speaking },
+            ))
             .await;
     }
 }
@@ -123,13 +123,15 @@ impl AppState {
     ) -> Result<(), DispatchError> {
         let capture = self.ready_capture(&id, "wake-word status", &tx).await?;
         let _ = tx
-            .send(Event::WakeWordStatus {
-                id: id.clone(),
-                phrase: self.config.voice.wakeword.phrase.clone(),
-                listening: capture.listener.is_active(),
-            })
+            .send(Event::new(
+                id.clone(),
+                EventBody::WakeWordStatus {
+                    phrase: self.config.voice.wakeword.phrase.clone(),
+                    listening: capture.listener.is_active(),
+                },
+            ))
             .await;
-        let _ = tx.send(Event::Done { id }).await;
+        let _ = tx.send(Event::new(id, EventBody::Done)).await;
         Ok(())
     }
 
@@ -154,7 +156,7 @@ impl AppState {
             None => false,
         };
         if stopped {
-            let _ = tx.send(Event::Done { id }).await;
+            let _ = tx.send(Event::new(id, EventBody::Done)).await;
         } else {
             send_error(&tx, id, "no wake-word test in progress".into()).await;
         }
@@ -239,10 +241,10 @@ async fn drive_test(mut io: SessionIo) -> SessionEnd {
         };
         let _ = io
             .tx
-            .send(Event::WakeWordTest {
-                id: io.id.clone(),
-                matched,
-            })
+            .send(Event::new(
+                io.id.clone(),
+                EventBody::WakeWordTest { matched },
+            ))
             .await;
     }
 }
@@ -255,7 +257,7 @@ async fn send_session_end(
 ) {
     match end {
         SessionEnd::Done => {
-            let _ = tx.send(Event::Done { id }).await;
+            let _ = tx.send(Event::new(id, EventBody::Done)).await;
         }
         SessionEnd::Failed(message) => send_error(tx, id, message).await,
         SessionEnd::CaptureStopped => {

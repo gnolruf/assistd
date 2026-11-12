@@ -1,7 +1,7 @@
 //! Submitted input: slash commands and queries.
 
 use assistd_config::ConfigDocument;
-use assistd_ipc::Request;
+use assistd_ipc::{Request, RequestBody};
 use uuid::Uuid;
 
 use super::{App, BranchOp, PendingAttachment, RESUME_RECENCY_SECS, WireStream};
@@ -88,15 +88,18 @@ impl App {
             SlashCommand::Fork(name) => self.fork_branch(name),
             SlashCommand::Undo => {
                 let id = Uuid::new_v4().to_string();
-                self.spawn_branch_command(BranchOp::Undo, Request::Undo { id });
+                self.spawn_branch_command(BranchOp::Undo, Request::new(id, RequestBody::Undo));
             }
             SlashCommand::New => {
                 let id = Uuid::new_v4().to_string();
-                self.spawn_branch_command(BranchOp::New, Request::NewSession { id });
+                self.spawn_branch_command(BranchOp::New, Request::new(id, RequestBody::NewSession));
             }
             SlashCommand::Resume => {
                 let id = Uuid::new_v4().to_string();
-                self.spawn_branch_command(BranchOp::ResumePicker, Request::Branches { id });
+                self.spawn_branch_command(
+                    BranchOp::ResumePicker,
+                    Request::new(id, RequestBody::Branches),
+                );
             }
             SlashCommand::Settings => self.open_settings_panel(),
             SlashCommand::Tasks => self.open_tasks_panel(),
@@ -135,10 +138,12 @@ impl App {
     }
 
     pub(crate) fn spawn_resume_or_new(&mut self) {
-        let req = Request::ResumeOrNew {
-            id: Uuid::new_v4().to_string(),
-            recency_secs: RESUME_RECENCY_SECS,
-        };
+        let req = Request::new(
+            Uuid::new_v4().to_string(),
+            RequestBody::ResumeOrNew {
+                recency_secs: RESUME_RECENCY_SECS,
+            },
+        );
         self.spawn_branch_command(BranchOp::Resume, req);
     }
 
@@ -149,18 +154,12 @@ impl App {
             self.set_notice("/fork: missing name");
             return;
         }
-        let req = Request::Fork {
-            id: Uuid::new_v4().to_string(),
-            name,
-        };
+        let req = Request::new(Uuid::new_v4().to_string(), RequestBody::Fork { name });
         self.spawn_branch_command(BranchOp::Fork, req);
     }
 
     pub(super) fn switch_branch(&mut self, target: String) {
-        let req = Request::Switch {
-            id: Uuid::new_v4().to_string(),
-            target,
-        };
+        let req = Request::new(Uuid::new_v4().to_string(), RequestBody::Switch { target });
         self.spawn_branch_command(BranchOp::Switch, req);
     }
 

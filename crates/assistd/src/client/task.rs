@@ -4,7 +4,7 @@
 use std::io::{self, Write};
 
 use anyhow::{Result, bail};
-use assistd_ipc::{Event, Request, TaskId, TaskRunId, TaskSpec};
+use assistd_ipc::{EventBody, Request, RequestBody, TaskId, TaskRequest, TaskRunId, TaskSpec};
 use chrono::{DateTime, Local, Utc};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
@@ -74,12 +74,12 @@ async fn run_named_task(name: &str) -> Result<()> {
     else {
         bail!("no task is named {:?}", escape_controls_single_line(name));
     };
-    let request = Request::TaskRun {
-        id: Uuid::new_v4().to_string(),
-        task: task.id,
-    };
+    let request = Request::new(
+        Uuid::new_v4().to_string(),
+        RequestBody::Task(TaskRequest::Run { task: task.id }),
+    );
     run_one_shot(request, |event| {
-        if let Event::TaskRunQueued { run, .. } = event {
+        if let EventBody::TaskRunQueued { run, .. } = &event.body {
             writeln!(io::stdout(), "{run}")?;
         }
         Ok(())
@@ -88,25 +88,26 @@ async fn run_named_task(name: &str) -> Result<()> {
 }
 
 async fn cancel_run(run: TaskRunId) -> Result<()> {
-    let request = Request::TaskCancel {
-        id: Uuid::new_v4().to_string(),
-        run,
-    };
+    let request = Request::new(
+        Uuid::new_v4().to_string(),
+        RequestBody::Task(TaskRequest::Cancel { run }),
+    );
     run_one_shot(request, |_| Ok(())).await
 }
 
 async fn list_tasks() -> Result<Vec<ListedTask>> {
     let mut tasks = Vec::new();
-    let request = Request::TaskList {
-        id: Uuid::new_v4().to_string(),
-    };
+    let request = Request::new(
+        Uuid::new_v4().to_string(),
+        RequestBody::Task(TaskRequest::List),
+    );
     run_one_shot(request, |event| {
-        if let Event::Task {
+        if let EventBody::Task {
             task_id,
             spec,
             next_fire,
             ..
-        } = event
+        } = &event.body
         {
             tasks.push(ListedTask {
                 id: *task_id,

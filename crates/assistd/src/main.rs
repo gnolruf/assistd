@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use assistd_ipc::{PresenceTarget, Request};
+use assistd_ipc::{PresenceTarget, Request, RequestBody};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -138,15 +138,23 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Sleep => presence::run(PresenceTarget::Sleeping).await,
         Commands::Drowse => presence::run(PresenceTarget::Drowsy).await,
         Commands::Wake => presence::run(PresenceTarget::Active).await,
-        Commands::PttStart => ptt::run(|id| Request::PttStart { id }).await,
-        Commands::PttStop => ptt::run(|id| Request::PttStop { id }).await,
-        Commands::ListenStart => listen::run(|id| Request::ListenStart { id }).await,
-        Commands::ListenStop => listen::run(|id| Request::ListenStop { id }).await,
-        Commands::ListenToggle => listen::run(|id| Request::ListenToggle { id }).await,
-        Commands::ListenState => listen::run(|id| Request::GetListenState { id }).await,
-        Commands::VoiceToggle => voice_ctl::run(|id| Request::VoiceToggle { id }).await,
-        Commands::VoiceSkip => voice_ctl::run(|id| Request::VoiceSkip { id }).await,
-        Commands::VoiceState => voice_ctl::run(|id| Request::GetVoiceState { id }).await,
+        Commands::PttStart => ptt::run(|id| Request::new(id, RequestBody::PttStart)).await,
+        Commands::PttStop => ptt::run(|id| Request::new(id, RequestBody::PttStop)).await,
+        Commands::ListenStart => listen::run(|id| Request::new(id, RequestBody::ListenStart)).await,
+        Commands::ListenStop => listen::run(|id| Request::new(id, RequestBody::ListenStop)).await,
+        Commands::ListenToggle => {
+            listen::run(|id| Request::new(id, RequestBody::ListenToggle)).await
+        }
+        Commands::ListenState => {
+            listen::run(|id| Request::new(id, RequestBody::GetListenState)).await
+        }
+        Commands::VoiceToggle => {
+            voice_ctl::run(|id| Request::new(id, RequestBody::VoiceToggle)).await
+        }
+        Commands::VoiceSkip => voice_ctl::run(|id| Request::new(id, RequestBody::VoiceSkip)).await,
+        Commands::VoiceState => {
+            voice_ctl::run(|id| Request::new(id, RequestBody::GetVoiceState)).await
+        }
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
         #[cfg(feature = "chat")]
