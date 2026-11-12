@@ -198,7 +198,7 @@ impl TaskService {
         match self
             .deps
             .store
-            .prune_runs(self.deps.config.tasks.kept_runs, session)
+            .prune_runs(self.deps.config.tasks.kept_runs.get(), session)
             .await
         {
             Ok(pruned) => {

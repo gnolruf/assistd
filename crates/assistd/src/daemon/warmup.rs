@@ -35,7 +35,7 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
         model_settled,
     } = warmup;
     let presence = state.subsystems.presence.clone();
-    let model_addr = SocketAddr::new(state.config.model.host, state.config.model.port.get());
+    let model_addr = SocketAddr::new(state.config.model.host.get(), state.config.model.port.get());
     let model_load = spawn_supervised(
         "initial_wake",
         Component::Llm,

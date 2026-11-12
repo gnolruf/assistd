@@ -23,7 +23,7 @@ fn sample(kind: SettingKind) -> toml::Value {
         SettingKind::Toggle => toml::Value::Boolean(false),
         SettingKind::Integer => toml::Value::Integer(1),
         SettingKind::Decimal => toml::Value::Float(0.5),
-        SettingKind::Text | SettingKind::Prose => toml::Value::from("x"),
+        SettingKind::Text | SettingKind::Prose => toml::Value::from("/x"),
         SettingKind::Color => toml::Value::from("red"),
         SettingKind::Themes => toml::Value::Table(toml::Table::new()),
         SettingKind::Choice(options) => toml::Value::from(options[0]),

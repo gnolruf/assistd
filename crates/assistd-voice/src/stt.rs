@@ -6,8 +6,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use assistd_config::TranscriptionConfig;
-use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id, parse_id};
+use assistd_config::{SttEncoder, TranscriptionConfig};
+use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig, OfflineTransducerModelConfig};
@@ -27,10 +27,6 @@ const VAD_MIN_SPEECH_SECS: f32 = 0.25;
 const SEGMENT_OVERLAP_SECS: f32 = 0.1;
 /// Silence inserted between stitched speech segments.
 const SEGMENT_GAP_SECS: f32 = 0.1;
-
-/// How the configured model file's name starts; its siblings swap this
-/// for `decoder` and `joiner`.
-const ENCODER_PREFIX: &str = "encoder";
 
 /// The files of a Parakeet transducer on disk.
 #[derive(Debug, Clone)]
@@ -99,10 +95,10 @@ impl SherpaTranscriber {
     }
 
     async fn load_on(config: &TranscriptionConfig, gpu: bool) -> Result<Self, TranscriptionError> {
-        let cache_dir = config
-            .model_cache_dir
-            .clone()
-            .map_or_else(|| download::default_cache_dir("stt"), Ok)?;
+        let cache_dir = config.model_cache_dir.as_ref().map_or_else(
+            || download::default_cache_dir("stt"),
+            |dir| Ok(dir.as_path().to_path_buf()),
+        )?;
         let files = ensure_model(&config.model, &cache_dir).await?;
         let vad_model = if config.vad_enabled {
             Some(vad::ensure_model(config).await?)
@@ -226,21 +222,18 @@ fn decode(recognizer: &OfflineRecognizer, speech: &[f32]) -> Result<String, Tran
     Ok(result.text.trim().to_string())
 }
 
-/// Download the encoder `model_id` names and the decoder, joiner and tokens
-/// beside it.
-async fn ensure_model(model_id: &str, cache_dir: &Path) -> Result<ModelFiles, TranscriptionError> {
-    let encoder_id = parse_id(model_id)?;
-    let encoder_name = encoder_id.file().rsplit('/').next().unwrap_or_default();
-    let suffix = encoder_name.strip_prefix(ENCODER_PREFIX).ok_or_else(|| {
-        TranscriptionError::ModelLoad(format!(
-            "{model_id} must name the encoder, a file starting with `{ENCODER_PREFIX}`"
-        ))
-    })?;
+/// Download `encoder` and the decoder, joiner and tokens beside it.
+async fn ensure_model(
+    encoder: &SttEncoder,
+    cache_dir: &Path,
+) -> Result<ModelFiles, TranscriptionError> {
+    let encoder_id = encoder.id();
+    let suffix = encoder.suffix();
     let sibling = async |name: String| {
         let id = encoder_id
             .sibling(&name)
             .map_err(|reason| DownloadError::InvalidId {
-                id: model_id.to_string(),
+                id: encoder.to_string(),
                 reason,
             })?;
         ensure_cached_id(&id, cache_dir).await
@@ -249,7 +242,7 @@ async fn ensure_model(model_id: &str, cache_dir: &Path) -> Result<ModelFiles, Tr
         tokens: sibling("tokens.txt".into()).await?,
         decoder: sibling(format!("decoder{suffix}")).await?,
         joiner: sibling(format!("joiner{suffix}")).await?,
-        encoder: ensure_cached_id(&encoder_id, cache_dir).await?,
+        encoder: ensure_cached_id(encoder_id, cache_dir).await?,
     })
 }
 

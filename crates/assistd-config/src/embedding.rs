@@ -1,9 +1,10 @@
 //! Embedding-server and semantic-search configuration.
 
-use std::net::IpAddr;
-use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
-use std::path::PathBuf;
+use std::fmt;
+use std::num::{NonZeroU16, NonZeroU64};
+use std::str::FromStr;
 
+use assistd_utils::hf::HfFileId;
 use serde::{Deserialize, Serialize};
 
 use crate::custom_args::{CustomArgs, EmbeddingServer};
@@ -13,7 +14,9 @@ use crate::defaults::{
     DEFAULT_EMBEDDING_PORT, DEFAULT_EMBEDDING_READY_TIMEOUT_SECS, DEFAULT_EMBEDDING_SERVER_BINARY,
     DEFAULT_EMBEDDING_TOP_K,
 };
+use crate::errors::EmbeddingModelError;
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::values::{Bounded, HfFile, LoopbackAddr, NonBlankString};
 use crate::voice::UnitInterval;
 
 /// Dedicated embedding server and semantic-recall settings.
@@ -24,14 +27,13 @@ pub struct EmbeddingConfig {
     pub enabled: bool,
     /// `--hf-repo` value, `<owner>/<repo>:<quant>`. The suffix must be a
     /// quant tag; a `.gguf` filename fails with "no GGUF files found".
-    pub model: String,
-    /// Server binary path, or a name on `$PATH`. Must not be empty when
-    /// enabled.
-    pub server_binary: PathBuf,
-    /// Bind host. Must be loopback: the per-launch API key travels over
+    pub model: EmbeddingModel,
+    /// Server binary path, or a name on `$PATH`.
+    pub server_binary: NonBlankString,
+    /// Bind host; loopback because the per-launch API key travels over
     /// plain HTTP.
-    pub host: IpAddr,
-    /// Bind port. Must differ from `model.port`.
+    pub host: LoopbackAddr,
+    /// Bind port. Must differ from `model.port` when enabled.
     pub port: NonZeroU16,
     /// `-ngl` count. `0` keeps it on CPU.
     pub gpu_layers: u32,
@@ -43,7 +45,7 @@ pub struct EmbeddingConfig {
     pub custom_args: CustomArgs<EmbeddingServer>,
     /// Nearest-neighbour matches per search: the most saved memories and
     /// past-chat matches auto-injected, and the `reminisce` default. `1..=20`.
-    pub top_k: NonZeroU32,
+    pub top_k: Bounded<1, 20>,
     /// Prepend matching saved memories, and one pointer per matching past chat, to a
     /// new session's first query of three or more characters; resumed sessions get
     /// none. When `false`, recall is tools-only. Off while `memory.enabled` is `false`.
@@ -101,8 +103,12 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             enabled: DEFAULT_EMBEDDING_ENABLED,
-            model: DEFAULT_EMBEDDING_MODEL.to_string(),
-            server_binary: DEFAULT_EMBEDDING_SERVER_BINARY.into(),
+            model: DEFAULT_EMBEDDING_MODEL
+                .parse()
+                .expect("the default embedding model parses"),
+            server_binary: DEFAULT_EMBEDDING_SERVER_BINARY
+                .parse()
+                .expect("the default server binary is not blank"),
             host: DEFAULT_EMBEDDING_HOST,
             port: DEFAULT_EMBEDDING_PORT,
             gpu_layers: DEFAULT_EMBEDDING_GPU_LAYERS,
@@ -112,5 +118,43 @@ impl Default for EmbeddingConfig {
             auto_inject: DEFAULT_EMBEDDING_AUTO_INJECT,
             min_similarity: DEFAULT_EMBEDDING_MIN_SIMILARITY,
         }
+    }
+}
+
+/// The embedding model as `<owner>/<repo>:<quant>`, with no `@<revision>` pin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct EmbeddingModel(HfFileId);
+
+impl fmt::Display for EmbeddingModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for EmbeddingModel {
+    type Err = EmbeddingModelError;
+
+    fn from_str(model: &str) -> Result<Self, Self::Err> {
+        let file: HfFile = model.parse()?;
+        if file.id().revision().is_some() {
+            Err(EmbeddingModelError::Pinned(model.to_owned()))
+        } else {
+            Ok(Self(file.id().clone()))
+        }
+    }
+}
+
+impl TryFrom<String> for EmbeddingModel {
+    type Error = EmbeddingModelError;
+
+    fn try_from(model: String) -> Result<Self, Self::Error> {
+        model.parse()
+    }
+}
+
+impl From<EmbeddingModel> for String {
+    fn from(model: EmbeddingModel) -> Self {
+        model.to_string()
     }
 }

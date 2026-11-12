@@ -121,7 +121,7 @@ impl SherpaVoiceOutput {
     pub async fn start(config: &SynthesisConfig) -> Result<Self, SpeechError> {
         let voice = ensure_voice(config).await?;
         tracing::info!(target: "assistd::voice::tts", ?voice, "voice resolved");
-        let (speaker_id, length_scale) = (config.speaker_id, config.length_scale);
+        let (speaker_id, length_scale) = (config.speaker_id, config.length_scale.get());
         let engine = tokio::task::spawn_blocking(move || {
             SpeechEngine::load(&voice, speaker_id, length_scale)
         })

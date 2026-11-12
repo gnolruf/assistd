@@ -280,11 +280,11 @@ async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> StartupCapabi
         Vec::new()
     });
     if capabilities.model_name.is_empty() {
-        capabilities.model_name = config
-            .model
-            .name
+        let configured = config.model.name.as_str();
+        capabilities.model_name = configured
             .rsplit_once('/')
-            .map_or_else(|| config.model.name.clone(), |(_, rest)| rest.to_string());
+            .map_or(configured, |(_, rest)| rest)
+            .to_string();
     }
     capabilities
 }

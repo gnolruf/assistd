@@ -28,7 +28,7 @@ impl SearxngServerSpec {
     /// Draw a fresh secret and render the settings file the instance loads.
     pub fn prepare(cfg: SearchConfig) -> Result<Self, SearchServerError> {
         let secret = random_secret().map_err(SearchServerError::Secret)?;
-        let settings = SettingsFile::render(&cfg.engines)?;
+        let settings = SettingsFile::render(cfg.engines.as_slice())?;
         Ok(Self {
             cfg,
             settings,
@@ -76,7 +76,7 @@ impl ChildServerSpec for SearxngServerSpec {
     }
 
     fn listen_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.cfg.host, self.cfg.port.get())
+        SocketAddr::new(self.cfg.host.get(), self.cfg.port.get())
     }
 
     fn health_path(&self) -> &'static str {
@@ -100,7 +100,7 @@ mod tests {
 
     fn spec() -> SearxngServerSpec {
         let cfg = SearchConfig::default();
-        let settings = SettingsFile::render(&cfg.engines).unwrap();
+        let settings = SettingsFile::render(cfg.engines.as_slice()).unwrap();
         SearxngServerSpec {
             cfg,
             settings,

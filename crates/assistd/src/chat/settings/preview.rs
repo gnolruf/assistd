@@ -254,7 +254,10 @@ fn warning_rows(theme: &Theme) -> Vec<Line<'static>> {
             warning.add_modifier(Modifier::BOLD),
         ),
         Line::styled("· unsaved changes", warning),
-        Line::styled("! chat.temperature must be in the range 0.0..=2.0", warning),
+        Line::styled(
+            "! search.port must differ from model.port (the chat server)",
+            warning,
+        ),
     ]
 }
 

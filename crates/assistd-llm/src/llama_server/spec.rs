@@ -41,7 +41,7 @@ impl ChildServerSpec for LlamaServerSpec {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.model.server_binary);
+        let mut cmd = Command::new(self.model.server_binary.as_str());
         cmd.args(self.model.custom_args.as_slice());
         push_managed_args(&mut cmd, &self.model, &self.api_key, &self.slot_dir);
         remove_llama_env(&mut cmd);
@@ -49,7 +49,7 @@ impl ChildServerSpec for LlamaServerSpec {
     }
 
     fn listen_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.model.host, self.model.port.get())
+        SocketAddr::new(self.model.host.get(), self.model.port.get())
     }
 
     fn ready_timeout(&self) -> Duration {

@@ -107,11 +107,11 @@ impl SpeechDetector {
 
 /// Download `config.vad_model` if missing and return its path.
 pub async fn ensure_model(config: &TranscriptionConfig) -> Result<PathBuf, TranscriptionError> {
-    let cache_dir = config
-        .model_cache_dir
-        .clone()
-        .map_or_else(|| download::default_cache_dir("stt"), Ok)?;
-    Ok(download::ensure_cached(&config.vad_model, &cache_dir).await?)
+    let cache_dir = config.model_cache_dir.as_ref().map_or_else(
+        || download::default_cache_dir("stt"),
+        |dir| Ok(dir.as_path().to_path_buf()),
+    )?;
+    Ok(download::ensure_cached_id(config.vad_model.id(), &cache_dir).await?)
 }
 
 /// Whole samples in `secs` of audio, rounded.

@@ -1,9 +1,9 @@
 //! Deadlines on operations that cross a process boundary.
 
 use crate::defaults::{
-    DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS, DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS,
-    DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS, DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS,
-    DEFAULT_TIMEOUT_TOOL_CALL_SECS,
+    CONFIRMATION_PROMPT_SECS, DEFAULT_TIMEOUT_DISPATCH_ENVELOPE_SECS,
+    DEFAULT_TIMEOUT_PRESENCE_DROWSE_SECS, DEFAULT_TIMEOUT_PRESENCE_SLEEP_SECS,
+    DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS, DEFAULT_TIMEOUT_TOOL_CALL_SECS,
 };
 
 /// Safety-valve deadlines, in seconds, on operations that cross a process
@@ -35,5 +35,13 @@ impl Default for TimeoutsConfig {
             stream_inactivity_secs: DEFAULT_TIMEOUT_STREAM_INACTIVITY_SECS,
             tool_call_secs: DEFAULT_TIMEOUT_TOOL_CALL_SECS,
         }
+    }
+}
+
+impl TimeoutsConfig {
+    /// The longest timeout a tool may set for itself, in seconds, and still
+    /// finish under `tool_call_secs` after a confirmation prompt ran out.
+    pub fn max_tool_timeout_secs(&self) -> u64 {
+        self.tool_call_secs.saturating_sub(CONFIRMATION_PROMPT_SECS)
     }
 }

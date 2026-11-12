@@ -21,7 +21,8 @@ const OWNED_MARKER: &str = ".assistd-scratch";
 /// when assistd created the directory, and return its canonical path. Errors with [`BuildToolsError::CreateScratchDir`] when the
 /// directory cannot be created, restricted or resolved; failed removals are only logged.
 pub(crate) fn prepare(scratch: &ToolsScratchConfig) -> Result<PathBuf, BuildToolsError> {
-    let scratch_dir = scratch.dir.as_path();
+    let scratch_dir = scratch.resolved_dir()?;
+    let scratch_dir = scratch_dir.as_path();
     let create_error = |source| BuildToolsError::CreateScratchDir {
         path: scratch_dir.to_path_buf(),
         source,

@@ -54,7 +54,9 @@ fn save_refuses_a_config_that_does_not_validate() {
     let path = root.path().join("config.toml");
     let mut document = ConfigDocument::open(&path).unwrap();
 
-    document.set("model.name", &toml::Value::from("")).unwrap();
+    document
+        .set("chat.max_reasoning_tokens", &toml::Value::from(1_000_000))
+        .unwrap();
 
     assert!(matches!(document.save(), Err(ConfigError::Validation(_))));
     assert!(!path.exists());

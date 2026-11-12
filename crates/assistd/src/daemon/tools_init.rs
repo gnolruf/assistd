@@ -1,7 +1,7 @@
 //! Tool wiring for the daemon: the sandbox probe, then the tool registry
 //! and the MCP servers to start, neither of which exists without a sandbox.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -71,7 +71,7 @@ pub(super) fn init(
     );
     let (mcp_servers, mcp_fleet) =
         mcp_init::prepare(config, mcp_approvals.clone(), deps.vision_gate.clone());
-    let overflow_dir = PathBuf::from(&config.tools.output.overflow_dir);
+    let overflow_dir = config.tools.output.resolved_overflow_dir()?;
     let built = assistd_core::build_tools(BuildToolsDeps {
         config,
         config_path,

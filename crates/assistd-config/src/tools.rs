@@ -2,15 +2,21 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
+use std::str::FromStr;
 
+use assistd_utils::path::tilde_remainder;
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
     DEFAULT_BASH_TIMEOUT_SECS, DEFAULT_TOOLS_MAX_KB, DEFAULT_TOOLS_MAX_LINES,
-    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, default_tools_overflow_dir, default_tools_scratch_dir,
-    default_writable_paths,
+    DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, DEFAULT_WRITABLE_PATHS, default_tools_dir,
 };
+use crate::errors::{NoDefaultDirError, WritablePathError};
 use crate::settings::{DescribeSettings, choice_setting, describe_fields};
+use crate::values::{AbsoluteDir, NonEmpty};
+
+const SCRATCH_DIR_KEY: &str = "tools.scratch.dir";
+const OVERFLOW_DIR_KEY: &str = "tools.output.overflow_dir";
 
 /// Tools subsystem configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -44,12 +50,11 @@ impl DescribeSettings for ToolsConfig {
 #[serde(default)]
 pub struct ToolsScratchConfig {
     /// Bound writable into the sandbox, and writable by `write` without
-    /// asking. Created owner-only on daemon startup. Must be absolute or
-    /// start with `~/`, and must not be `/` or hold `$HOME` or assistd's config
-    /// or data directory. Defaults to `$XDG_RUNTIME_DIR/assistd/scratch`, else
-    /// under the user cache dir.
-    #[serde(deserialize_with = "crate::home_path::deserialize")]
-    pub dir: PathBuf,
+    /// asking. Created owner-only on daemon startup. Absolute or starting
+    /// with `~/`; must not be `/` or hold `$HOME` or assistd's config or data
+    /// directory. `None` uses `$XDG_RUNTIME_DIR/assistd/scratch`, else
+    /// `assistd/scratch` under the user cache dir.
+    pub dir: Option<AbsoluteDir>,
     /// Days an entry in `dir` is kept after it last changed; older ones,
     /// and directories that leaves empty, are removed on daemon startup when
     /// assistd created `dir`. 0 empties the directory at every startup.
@@ -60,7 +65,7 @@ impl DescribeSettings for ToolsScratchConfig {
     describe_fields! {
         dir => (
             "scratch folder",
-            "Folder tools may write to freely; absolute or starting with ~/",
+            "Folder tools may write to freely; unset uses the runtime or cache dir",
             advanced
         ),
         retention_days => (
@@ -74,9 +79,17 @@ impl DescribeSettings for ToolsScratchConfig {
 impl Default for ToolsScratchConfig {
     fn default() -> Self {
         Self {
-            dir: default_tools_scratch_dir(),
+            dir: None,
             retention_days: DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS,
         }
+    }
+}
+
+impl ToolsScratchConfig {
+    /// `dir`, or its default. Errors when it is unset and this machine has
+    /// neither a runtime nor a cache directory to default it under.
+    pub fn resolved_dir(&self) -> Result<PathBuf, NoDefaultDirError> {
+        resolve_tools_dir(self.dir.as_ref(), "scratch", SCRATCH_DIR_KEY)
     }
 }
 
@@ -94,11 +107,11 @@ pub struct ToolsOutputConfig {
     /// `<tool>-<n>.txt` for any other tool); made owner-only on daemon
     /// startup, when earlier spill files are removed and nothing else is.
     /// Each new spill deletes the oldest ones beyond the newest 64 files
-    /// or 128 MiB. Must be absolute or start with `~/`, and must not be `/`
-    /// or hold `$HOME` or assistd's config or data directory. Defaults to
-    /// `$XDG_RUNTIME_DIR/assistd/output`, else under the user cache dir.
-    #[serde(deserialize_with = "crate::home_path::deserialize")]
-    pub overflow_dir: PathBuf,
+    /// or 128 MiB. Absolute or starting with `~/`; must not be `/` or hold
+    /// `$HOME` or assistd's config or data directory. `None` uses
+    /// `$XDG_RUNTIME_DIR/assistd/output`, else `assistd/output` under the
+    /// user cache dir.
+    pub overflow_dir: Option<AbsoluteDir>,
 }
 
 impl DescribeSettings for ToolsOutputConfig {
@@ -109,7 +122,11 @@ impl DescribeSettings for ToolsOutputConfig {
             "Largest tool result; at most a quarter of the history budget",
             advanced
         ),
-        overflow_dir => ("overflow folder", "Where cut-off tool output is saved in full", advanced),
+        overflow_dir => (
+            "overflow folder",
+            "Where cut-off tool output is saved in full; unset uses the runtime or cache dir",
+            advanced
+        ),
     }
 }
 
@@ -118,7 +135,7 @@ impl Default for ToolsOutputConfig {
         Self {
             max_lines: DEFAULT_TOOLS_MAX_LINES,
             max_kb: DEFAULT_TOOLS_MAX_KB,
-            overflow_dir: default_tools_overflow_dir(),
+            overflow_dir: None,
         }
     }
 }
@@ -127,6 +144,12 @@ impl ToolsOutputConfig {
     /// `max_kb` expressed in bytes.
     pub fn max_bytes(&self) -> usize {
         (self.max_kb.get() as usize) * 1024
+    }
+
+    /// `overflow_dir`, or its default. Errors when it is unset and this
+    /// machine has neither a runtime nor a cache directory to default it under.
+    pub fn resolved_overflow_dir(&self) -> Result<PathBuf, NoDefaultDirError> {
+        resolve_tools_dir(self.overflow_dir.as_ref(), "output", OVERFLOW_DIR_KEY)
     }
 }
 
@@ -155,8 +178,9 @@ choice_setting!(BashSandboxMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsBashConfig {
-    /// `bash` timeout in seconds; on expiry the process group is killed
-    /// (exit 137).
+    /// `bash` timeout in seconds, `1..=180`; on expiry the process group is
+    /// killed (exit 137). The cap keeps a run that waited out a confirmation
+    /// prompt under the 300 s tool-call deadline.
     pub timeout_secs: NonZeroU64,
     /// How spawned commands are sandboxed.
     pub sandbox: BashSandboxMode,
@@ -170,7 +194,7 @@ pub struct ToolsBashConfig {
 
 impl DescribeSettings for ToolsBashConfig {
     describe_fields! {
-        timeout_secs => ("command timeout (s)", "Longest a bash command runs before it is killed"),
+        timeout_secs => ("command timeout (s)", "Longest a bash command runs before it is killed, at most 180"),
         sandbox => ("sandbox", "auto uses bubblewrap if installed; tools are disabled unsandboxed"),
         bwrap_extra_args => (
             "extra bubblewrap arguments",
@@ -194,12 +218,11 @@ impl Default for ToolsBashConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ToolsWriteConfig {
-    /// Non-empty path prefixes `write` may create files under; anywhere else
-    /// outside `tools.scratch.dir` is refused. Symlinks and dot entries at any
-    /// depth below a prefix are refused (list one to allow it). Writes here ask
-    /// first; scratch is writable without asking. `~` and `~/` expand to
-    /// `$HOME`; any other relative entry errors, missing ones are dropped.
-    pub writable_paths: Vec<String>,
+    /// Path prefixes `write` may create files under; anywhere else outside
+    /// `tools.scratch.dir` is refused. Symlinks and dot entries at any depth
+    /// below a prefix are refused (list one to allow it). Writes here ask
+    /// first; scratch is writable without asking. Missing ones are dropped.
+    pub writable_paths: NonEmpty<WritablePath>,
 }
 
 impl DescribeSettings for ToolsWriteConfig {
@@ -214,7 +237,59 @@ impl DescribeSettings for ToolsWriteConfig {
 impl Default for ToolsWriteConfig {
     fn default() -> Self {
         Self {
-            writable_paths: default_writable_paths(),
+            writable_paths: DEFAULT_WRITABLE_PATHS
+                .map(|path| WritablePath(path.to_owned()))
+                .to_vec()
+                .try_into()
+                .expect("the default writable paths are not empty"),
         }
     }
+}
+
+/// A path prefix as written: absolute, or `~` or `~/…` for under `$HOME`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct WritablePath(String);
+
+impl WritablePath {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for WritablePath {
+    type Err = WritablePathError;
+
+    fn from_str(path: &str) -> Result<Self, Self::Err> {
+        Self::try_from(path.to_owned())
+    }
+}
+
+impl TryFrom<String> for WritablePath {
+    type Error = WritablePathError;
+
+    fn try_from(path: String) -> Result<Self, Self::Error> {
+        if tilde_remainder(&path).is_some() || PathBuf::from(&path).is_absolute() {
+            Ok(Self(path))
+        } else {
+            Err(WritablePathError(path))
+        }
+    }
+}
+
+impl From<WritablePath> for String {
+    fn from(path: WritablePath) -> Self {
+        path.0
+    }
+}
+
+fn resolve_tools_dir(
+    configured: Option<&AbsoluteDir>,
+    leaf: &str,
+    key: &'static str,
+) -> Result<PathBuf, NoDefaultDirError> {
+    configured
+        .map(|dir| dir.as_path().to_path_buf())
+        .or_else(|| default_tools_dir(leaf))
+        .ok_or(NoDefaultDirError { key })
 }

@@ -261,8 +261,8 @@ impl MicContinuousListener {
             replying_tx: watch::channel(false).0,
             spotter,
             command_timeout: Duration::from_millis(config.wakeword.command_timeout_ms.get().into()),
-            follow_up: (config.wakeword.follow_up_ms > 0)
-                .then(|| Duration::from_millis(config.wakeword.follow_up_ms.into())),
+            follow_up: (config.wakeword.follow_up_ms.get() > 0)
+                .then(|| Duration::from_millis(config.wakeword.follow_up_ms.get().into())),
             conversation_tx: watch::channel(None).0,
             last_push_to_talk: parking_lot::Mutex::new(None),
             phase_tx,

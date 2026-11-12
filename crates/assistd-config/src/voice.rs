@@ -1,8 +1,10 @@
 //! Voice input, wake word and speech output configuration.
 
+use std::fmt;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::str::FromStr;
 
+use assistd_utils::hf::HfFileId;
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{
@@ -13,8 +15,12 @@ use crate::defaults::{
     DEFAULT_WAKEWORD_ENABLED, DEFAULT_WAKEWORD_FOLLOW_UP_MS, DEFAULT_WAKEWORD_MAX_UTTERANCE_SECS,
     DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WAKEWORD_THRESHOLD,
 };
-use crate::errors::UnitIntervalError;
+use crate::errors::{SttEncoderError, UnitIntervalError, WakePhraseError};
 use crate::settings::{DescribeSettings, choice_setting, describe_fields};
+use crate::values::{AbsoluteDir, Bounded, HfFile, LengthScale};
+
+const STT_ENCODER_PREFIX: &str = "encoder";
+const MAX_WAKE_PHRASE_WORDS: usize = 6;
 
 /// Voice input and output settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -48,8 +54,8 @@ pub struct TranscriptionConfig {
     /// whose name starts with `encoder`; the decoder and joiner with the same
     /// suffix and `tokens.txt` are fetched beside it. Downloaded
     /// on first use from `revision` (default `main`; a commit hash pins the
-    /// content). Validated when voice is enabled.
-    pub model: String,
+    /// content).
+    pub model: SttEncoder,
     /// Transcribe on CUDA when an NVIDIA GPU is present and the binary ships
     /// sherpa-onnx's CUDA libraries (`libonnxruntime_providers_cuda.so`);
     /// otherwise, and while the GPU is busy or asleep, on the CPU.
@@ -61,11 +67,10 @@ pub struct TranscriptionConfig {
     /// Silero VAD ONNX model (v4 to v6) as `<owner>/<repo>[@<revision>]:<file>`;
     /// trims audio with `vad_enabled` and always decides where wake-word
     /// listening's utterances start and end.
-    pub vad_model: String,
+    pub vad_model: HfFile,
     /// Model cache directory, absolute or starting with `~/`. `None` uses
     /// `$XDG_CACHE_HOME/assistd/stt/` (or `~/.cache/assistd/stt/`).
-    #[serde(deserialize_with = "crate::home_path::deserialize_option")]
-    pub model_cache_dir: Option<PathBuf>,
+    pub model_cache_dir: Option<AbsoluteDir>,
 }
 
 impl DescribeSettings for TranscriptionConfig {
@@ -105,11 +110,15 @@ impl DescribeSettings for TranscriptionConfig {
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
-            model: DEFAULT_STT_MODEL.to_string(),
+            model: DEFAULT_STT_MODEL
+                .parse()
+                .expect("the default speech-to-text model parses"),
             prefer_gpu: DEFAULT_STT_PREFER_GPU,
             threads: DEFAULT_STT_THREADS,
             vad_enabled: DEFAULT_STT_VAD_ENABLED,
-            vad_model: DEFAULT_SILERO_VAD_MODEL.to_string(),
+            vad_model: DEFAULT_SILERO_VAD_MODEL
+                .parse()
+                .expect("the default VAD model parses"),
             model_cache_dir: None,
         }
     }
@@ -125,7 +134,7 @@ pub struct WakeWordConfig {
     pub enabled: bool,
     /// The wake phrase: one to six words of letters and apostrophes, case
     /// ignored. Refused at startup when the keyword model cannot spell it.
-    pub phrase: String,
+    pub phrase: WakePhrase,
     /// Keyword-spotter acceptance threshold, `0.0..=1.0`: the average token
     /// probability the phrase must reach; lower wakes more easily and more
     /// often by mistake.
@@ -134,21 +143,21 @@ pub struct WakeWordConfig {
     pub start_on_launch: bool,
     /// Trailing silence, in ms, that ends an utterance, `1..=1400`; the
     /// keyword spotter resets itself after 1.5 s without speech.
-    pub silence_ms: NonZeroU32,
+    pub silence_ms: Bounded<1, 1400>,
     /// Seconds after which an utterance is transcribed even mid-speech,
     /// `1..=300`; bounds the audio buffered under constant noise.
-    pub max_utterance_secs: NonZeroU32,
+    pub max_utterance_secs: Bounded<1, 300>,
     /// Let confirmed speech over a reply to a wake-word command interrupt it
     /// and become the next command; bumps, noise and the reply's own echo
     /// are rejected.
     pub barge_in: bool,
     /// After a wake phrase heard on its own, how long in ms to wait for the
     /// command, `500..=15000`.
-    pub command_timeout_ms: NonZeroU32,
+    pub command_timeout_ms: Bounded<500, 15_000>,
     /// After a reply to a wake-word command finishes, including its speech,
     /// how long in ms the next utterance is taken as a command without the
     /// phrase, `0..=30000`; `0` disables follow-ups.
-    pub follow_up_ms: u32,
+    pub follow_up_ms: Bounded<0, 30_000>,
 }
 
 impl DescribeSettings for WakeWordConfig {
@@ -200,7 +209,9 @@ impl Default for WakeWordConfig {
             barge_in: DEFAULT_WAKEWORD_BARGE_IN,
             command_timeout_ms: DEFAULT_WAKEWORD_COMMAND_TIMEOUT_MS,
             follow_up_ms: DEFAULT_WAKEWORD_FOLLOW_UP_MS,
-            phrase: DEFAULT_WAKE_PHRASE.to_string(),
+            phrase: DEFAULT_WAKE_PHRASE
+                .parse()
+                .expect("the default wake phrase parses"),
             threshold: DEFAULT_WAKEWORD_THRESHOLD,
         }
     }
@@ -240,6 +251,106 @@ impl From<UnitInterval> for f32 {
     }
 }
 
+/// A speech-to-text model's encoder: a Hugging Face `.onnx` file whose name
+/// starts with `encoder`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SttEncoder(HfFileId);
+
+impl SttEncoder {
+    pub fn id(&self) -> &HfFileId {
+        &self.0
+    }
+
+    /// What follows `encoder` in the file's name, which the decoder's and
+    /// joiner's names end with too.
+    pub fn suffix(&self) -> &str {
+        file_name(&self.0)
+            .strip_prefix(STT_ENCODER_PREFIX)
+            .unwrap_or_default()
+    }
+}
+
+impl fmt::Display for SttEncoder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for SttEncoder {
+    type Err = SttEncoderError;
+
+    fn from_str(id: &str) -> Result<Self, Self::Err> {
+        let file: HfFile = id.parse()?;
+        if file_name(file.id()).starts_with(STT_ENCODER_PREFIX) {
+            Ok(Self(file.id().clone()))
+        } else {
+            Err(SttEncoderError::NotAnEncoder(id.to_owned()))
+        }
+    }
+}
+
+impl TryFrom<String> for SttEncoder {
+    type Error = SttEncoderError;
+
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        id.parse()
+    }
+}
+
+impl From<SttEncoder> for String {
+    fn from(encoder: SttEncoder) -> Self {
+        encoder.0.to_string()
+    }
+}
+
+/// A wake phrase: one to six words of letters and apostrophes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct WakePhrase(String);
+
+impl WakePhrase {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WakePhrase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for WakePhrase {
+    type Err = WakePhraseError;
+
+    fn from_str(phrase: &str) -> Result<Self, Self::Err> {
+        Self::try_from(phrase.to_owned())
+    }
+}
+
+impl TryFrom<String> for WakePhrase {
+    type Error = WakePhraseError;
+
+    fn try_from(phrase: String) -> Result<Self, Self::Error> {
+        let words = phrase.split_whitespace().count();
+        let letters_only = phrase
+            .chars()
+            .all(|c| c.is_alphabetic() || c.is_whitespace() || c == '\'');
+        if (1..=MAX_WAKE_PHRASE_WORDS).contains(&words) && letters_only {
+            Ok(Self(phrase))
+        } else {
+            Err(WakePhraseError(phrase))
+        }
+    }
+}
+
+impl From<WakePhrase> for String {
+    fn from(phrase: WakePhrase) -> Self {
+        phrase.0
+    }
+}
+
 /// The sherpa-onnx model family a voice belongs to, which fixes the files
 /// fetched beside its `.onnx` and how text becomes phonemes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -268,7 +379,7 @@ pub struct SynthesisConfig {
     /// Voice model as `<owner>/<repo>[@<revision>]:<file>`, `<file>` being
     /// the `.onnx` path in the repo; the files `family` needs are fetched
     /// from the same directory.
-    pub voice: String,
+    pub voice: HfFile,
     /// Model family of `voice`.
     pub family: VoiceFamily,
     /// Speaker index for multi-speaker voices, from `0`; must be below the
@@ -276,14 +387,13 @@ pub struct SynthesisConfig {
     pub speaker_id: u32,
     /// Voice cache directory, absolute or starting with `~/`. `None` uses
     /// `$XDG_CACHE_HOME/assistd/tts/` (or `~/.cache/assistd/tts/`).
-    #[serde(deserialize_with = "crate::home_path::deserialize_option")]
-    pub model_cache_dir: Option<PathBuf>,
-    /// Speaking-rate scale: `1.0` is natural, lower is faster. Must be
-    /// positive and finite.
-    pub length_scale: f32,
+    pub model_cache_dir: Option<AbsoluteDir>,
+    /// Speaking-rate scale: `1.0` is natural, lower is faster. Positive
+    /// and finite.
+    pub length_scale: LengthScale,
     /// Sentence length cap in Unicode chars; longer text flushes at the
     /// last whitespace before it, or is hard-cut without one. `50..=2000`.
-    pub max_sentence_chars: NonZeroU32,
+    pub max_sentence_chars: Bounded<50, 2000>,
     /// Idle gap, in ms, between LLM deltas after which buffered text is
     /// spoken unterminated. `0` disables; suspended during tool calls.
     pub partial_flush_ms: u32,
@@ -329,7 +439,7 @@ impl Default for SynthesisConfig {
     fn default() -> Self {
         Self {
             enabled: DEFAULT_TTS_ENABLED,
-            voice: DEFAULT_TTS_VOICE.to_string(),
+            voice: DEFAULT_TTS_VOICE.parse().expect("the default voice parses"),
             family: VoiceFamily::Vits,
             speaker_id: 0,
             model_cache_dir: None,
@@ -339,6 +449,10 @@ impl Default for SynthesisConfig {
             output_device: None,
         }
     }
+}
+
+fn file_name(id: &HfFileId) -> &str {
+    id.file().rsplit('/').next().unwrap_or_default()
 }
 
 #[cfg(test)]

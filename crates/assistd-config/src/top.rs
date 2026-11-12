@@ -1,47 +1,34 @@
-//! The top-level `Config`: loading, writing and cross-field validation.
+//! The top-level `Config`: loading, writing and cross-key validation.
 
 use std::collections::HashSet;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
-use std::net::IpAddr;
-use std::num::NonZeroU32;
-use std::ops::RangeInclusive;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use assistd_utils::hf::HfFileId;
-use assistd_utils::path::{lexical_clean, tilde_remainder};
+use assistd_utils::path::lexical_clean;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ChatConfig;
 use crate::compositor::CompositorConfig;
+use crate::defaults::CONFIRMATION_PROMPT_SECS;
 use crate::embedding::EmbeddingConfig;
-use crate::errors::ConfigError;
+use crate::errors::{ConfigError, ConfigIssue};
 use crate::mcp::McpConfig;
 use crate::memory::MemoryConfig;
 use crate::model::ModelConfig;
-use crate::notifications::{NotificationsConfig, TrayIconsConfig};
+use crate::notifications::NotificationsConfig;
 use crate::search::SearchConfig;
 use crate::settings::{DescribeSettings, describe_fields};
 use crate::sleep::SleepConfig;
 use crate::tasks::TasksConfig;
-use crate::theme::{ThemeConfig, is_theme_name};
 use crate::timeouts::TimeoutsConfig;
 use crate::tools::{ToolsConfig, ToolsOutputConfig};
-use crate::voice::{SynthesisConfig, TranscriptionConfig, VoiceConfig};
+use crate::voice::VoiceConfig;
 
 const CONFIG_DIR_MODE: u32 = 0o700;
 const CONFIG_FILE_MODE: u32 = 0o600;
 const GROUP_OR_WORLD_READABLE: u32 = 0o044;
-/// How a speech-to-text model's encoder file name starts.
-const STT_ENCODER_PREFIX: &str = "encoder";
-const MAX_UTTERANCE_SECS: u32 = 300;
-const WAKEWORD_COMMAND_TIMEOUT_MS: RangeInclusive<u32> = 500..=15000;
-const MAX_WAKEWORD_FOLLOW_UP_MS: u32 = 30_000;
-const MAX_RESUME_AFTER_IDLE_SECS: u32 = 3600;
-const MAX_TASKS_KEPT_RUNS: u32 = 10_000;
-const MAX_WAKE_PHRASE_WORDS: usize = 6;
-const MAX_WAKEWORD_SILENCE_MS: u32 = 1400;
 /// Keys a config may no longer set, each with what replaced it.
 const REMOVED_KEYS: &[(&str, &str)] = &[
     (
@@ -54,10 +41,6 @@ const REMOVED_KEYS: &[(&str, &str)] = &[
         "the command classifier and path guards now decide which commands ask",
     ),
 ];
-const MIN_SENTENCE_CHARS: u32 = 50;
-const MAX_SENTENCE_CHARS: u32 = 2000;
-/// Matches the largest `limit` the `reminisce` tool accepts.
-const MAX_EMBEDDING_TOP_K: u32 = 20;
 
 /// Top-level assistd configuration, deserialized from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -98,26 +81,29 @@ impl DescribeSettings for Config {
 }
 
 impl Config {
-    /// Validates the cross-field and format constraints that the field
-    /// types can't express. Returns every problem found, not just the first.
+    /// Fails with [`ConfigError::Validation`] listing [`Self::issues`] when
+    /// there are any.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let mut errors = Vec::new();
-        validate_model(&mut errors, &self.model);
-        validate_chat(&mut errors, &self.chat, &self.model);
-        validate_voice(&mut errors, &self.voice);
-        validate_sleep(&mut errors, &self.sleep);
-        validate_tools(&mut errors, &self.tools);
-        validate_tool_output_share(&mut errors, &self.tools.output, &self.chat);
-        validate_embedding(&mut errors, &self.embedding, &self.model);
-        validate_search(&mut errors, &self.search, &self.embedding, &self.model);
-        validate_mcp(&mut errors, &self.mcp);
-        validate_notifications(&mut errors, &self.notifications);
-        validate_tasks(&mut errors, &self.tasks);
-        if errors.is_empty() {
+        let issues = self.issues();
+        if issues.is_empty() {
             Ok(())
         } else {
-            Err(ConfigError::Validation(errors))
+            Err(ConfigError::Validation(issues))
         }
+    }
+
+    /// Every rule between keys, and between a key and this machine, that
+    /// this config breaks; the field types hold each key's own rules.
+    pub fn issues(&self) -> Vec<ConfigIssue> {
+        let mut issues = Vec::new();
+        validate_chat(&mut issues, &self.chat, &self.model);
+        validate_sleep(&mut issues, &self.sleep);
+        validate_tool_dirs(&mut issues, &self.tools);
+        validate_tool_output_share(&mut issues, &self.tools.output, &self.chat);
+        validate_tool_timeouts(&mut issues, self);
+        validate_ports(&mut issues, self);
+        validate_mcp(&mut issues, &self.mcp);
+        issues
     }
 
     /// `$XDG_CONFIG_HOME/assistd/config.toml`, or `~/.config/assistd/config.toml`.
@@ -283,314 +269,145 @@ fn collect_unknown_array_keys(
     }
 }
 
-fn validate_model(errors: &mut Vec<String>, model: &ModelConfig) {
-    if model.name.is_empty() {
-        errors.push("model.name must not be empty".into());
-    }
-    if model.server_binary.as_os_str().is_empty() {
-        errors.push("model.server_binary must not be empty".into());
-    }
-    require_loopback(errors, "model.host", model.host);
-}
-
-fn validate_chat(errors: &mut Vec<String>, chat: &ChatConfig, model: &ModelConfig) {
-    let history_and_response =
+fn validate_chat(issues: &mut Vec<ConfigIssue>, chat: &ChatConfig, model: &ModelConfig) {
+    let total =
         u64::from(chat.max_history_tokens.get()) + u64::from(chat.max_response_tokens.get());
-    if history_and_response > u64::from(model.context_budget()) {
-        errors.push(format!(
-            "chat.max_history_tokens + chat.max_response_tokens ({history_and_response}) must \
-             not exceed 90% of model.context_length ({})",
-            model.context_budget()
-        ));
+    let budget = model.context_budget();
+    if total > u64::from(budget) {
+        issues.push(ConfigIssue::HistoryAndResponseOverBudget { total, budget });
     }
     if chat.max_reasoning_tokens >= chat.max_response_tokens {
-        errors.push(
-            "chat.max_reasoning_tokens must be strictly less than chat.max_response_tokens".into(),
-        );
+        issues.push(ConfigIssue::ReasoningNotBelowResponse);
     }
     if chat.summary_target_tokens >= chat.max_history_tokens {
-        errors.push(
-            "chat.summary_target_tokens must be strictly less than chat.max_history_tokens".into(),
-        );
-    }
-    require_in_range(
-        errors,
-        chat.temperature,
-        0.0..=2.0,
-        "chat.temperature must be in the range 0.0..=2.0",
-    );
-    require_in_range(
-        errors,
-        chat.summary_temperature,
-        0.0..=2.0,
-        "chat.summary_temperature must be in the range 0.0..=2.0",
-    );
-    if let Some(top_p) = chat.top_p {
-        require_in_range(
-            errors,
-            top_p,
-            0.0..=1.0,
-            "chat.top_p must be in the range 0.0..=1.0",
-        );
-    }
-    if let Some(min_p) = chat.min_p {
-        require_in_range(
-            errors,
-            min_p,
-            0.0..=1.0,
-            "chat.min_p must be in the range 0.0..=1.0",
-        );
-    }
-    if let Some(presence_penalty) = chat.presence_penalty {
-        require_in_range(
-            errors,
-            presence_penalty,
-            -2.0..=2.0,
-            "chat.presence_penalty must be in the range -2.0..=2.0",
-        );
-    }
-    if chat.reasoning_effort.as_deref() == Some("") {
-        errors.push("chat.reasoning_effort must not be empty".into());
-    }
-    for name in chat.themes.keys() {
-        if !is_theme_name(name) {
-            errors.push(format!(
-                "chat.themes.{name}: a theme name is ASCII letters, digits, _ and -"
-            ));
-        } else if ThemeConfig::built_in(name).is_some() {
-            errors.push(format!(
-                "chat.themes.{name} has the name of a built-in theme"
-            ));
-        }
+        issues.push(ConfigIssue::SummaryNotBelowHistory);
     }
 }
 
-fn validate_voice(errors: &mut Vec<String>, voice: &VoiceConfig) {
-    if voice.enabled {
-        validate_transcription(errors, &voice.transcription);
-        require_at_most(
-            errors,
-            "voice.wakeword.max_utterance_secs",
-            voice.wakeword.max_utterance_secs,
-            MAX_UTTERANCE_SECS,
-        );
-        validate_wakeword_timeout(errors, voice.wakeword.command_timeout_ms);
-        validate_wake_phrase(errors, &voice.wakeword.phrase);
-        require_at_most(
-            errors,
-            "voice.wakeword.silence_ms",
-            voice.wakeword.silence_ms,
-            MAX_WAKEWORD_SILENCE_MS,
-        );
-        if voice.wakeword.follow_up_ms > MAX_WAKEWORD_FOLLOW_UP_MS {
-            errors.push(format!(
-                "voice.wakeword.follow_up_ms must be at most {MAX_WAKEWORD_FOLLOW_UP_MS}, got {}",
-                voice.wakeword.follow_up_ms
-            ));
-        }
-    }
-    if voice.synthesis.enabled {
-        validate_synthesis(errors, &voice.synthesis);
-    }
-}
-
-fn validate_wake_phrase(errors: &mut Vec<String>, phrase: &str) {
-    let words = phrase.split_whitespace().count();
-    let letters_only = phrase
-        .chars()
-        .all(|c| c.is_alphabetic() || c.is_whitespace() || c == '\'');
-    if words == 0 || words > MAX_WAKE_PHRASE_WORDS || !letters_only {
-        errors.push(format!(
-            "voice.wakeword.phrase must be 1 to {MAX_WAKE_PHRASE_WORDS} words of letters and \
-             apostrophes, got {phrase:?}"
-        ));
-    }
-}
-
-fn validate_wakeword_timeout(errors: &mut Vec<String>, timeout_ms: NonZeroU32) {
-    if !WAKEWORD_COMMAND_TIMEOUT_MS.contains(&timeout_ms.get()) {
-        errors.push(format!(
-            "voice.wakeword.command_timeout_ms must be in the range {}..={}, got {timeout_ms}",
-            WAKEWORD_COMMAND_TIMEOUT_MS.start(),
-            WAKEWORD_COMMAND_TIMEOUT_MS.end()
-        ));
-    }
-}
-
-fn validate_transcription(errors: &mut Vec<String>, transcription: &TranscriptionConfig) {
-    if let Some(model) = require_hf_id(errors, "voice.transcription.model", &transcription.model)
-        && !model
-            .file()
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.starts_with(STT_ENCODER_PREFIX))
-    {
-        errors.push(format!(
-            "voice.transcription.model must name the model's encoder .onnx, a file whose \
-             name starts with `{STT_ENCODER_PREFIX}`, got {:?}",
-            model.file()
-        ));
-    }
-    if transcription.vad_enabled {
-        require_hf_id(
-            errors,
-            "voice.transcription.vad_model",
-            &transcription.vad_model,
-        );
-    }
-    require_absolute_dir(
-        errors,
-        "voice.transcription.model_cache_dir",
-        transcription.model_cache_dir.as_deref(),
-    );
-}
-
-fn validate_synthesis(errors: &mut Vec<String>, synthesis: &SynthesisConfig) {
-    require_hf_id(errors, "voice.synthesis.voice", &synthesis.voice);
-    if !synthesis.length_scale.is_finite() || synthesis.length_scale <= 0.0 {
-        errors.push("voice.synthesis.length_scale must be a positive, finite number".into());
-    }
-    if !(MIN_SENTENCE_CHARS..=MAX_SENTENCE_CHARS).contains(&synthesis.max_sentence_chars.get()) {
-        errors.push(format!(
-            "voice.synthesis.max_sentence_chars must be in the range \
-             {MIN_SENTENCE_CHARS}..={MAX_SENTENCE_CHARS}"
-        ));
-    }
-    require_absolute_dir(
-        errors,
-        "voice.synthesis.model_cache_dir",
-        synthesis.model_cache_dir.as_deref(),
-    );
-}
-
-fn validate_sleep(errors: &mut Vec<String>, sleep: &SleepConfig) {
+fn validate_sleep(issues: &mut Vec<ConfigIssue>, sleep: &SleepConfig) {
     if sleep.idle_to_drowsy_mins > 0
         && sleep.idle_to_sleep_mins > 0
         && sleep.idle_to_sleep_mins <= sleep.idle_to_drowsy_mins
     {
-        errors.push(
-            "sleep.idle_to_sleep_mins must be greater than sleep.idle_to_drowsy_mins \
-             (set either to 0 to disable that transition)"
-                .into(),
-        );
+        issues.push(ConfigIssue::SleepNotAfterDrowsy);
     }
 }
 
-fn validate_tools(errors: &mut Vec<String>, tools: &ToolsConfig) {
+fn validate_tool_dirs(issues: &mut Vec<ConfigIssue>, tools: &ToolsConfig) {
     let owned_by_others = owned_by_others();
     for (key, dir) in [
-        ("tools.scratch.dir", &tools.scratch.dir),
-        ("tools.output.overflow_dir", &tools.output.overflow_dir),
+        ("tools.scratch.dir", tools.scratch.resolved_dir()),
+        (
+            "tools.output.overflow_dir",
+            tools.output.resolved_overflow_dir(),
+        ),
     ] {
-        require_absolute_dir(errors, key, Some(dir));
-        require_dedicated_dir(errors, key, dir, &owned_by_others);
-    }
-    if tools.write.writable_paths.is_empty() {
-        errors.push(
-            "tools.write.writable_paths must not be empty (the write command would be unusable)"
-                .into(),
-        );
-    }
-    for entry in &tools.write.writable_paths {
-        if tilde_remainder(entry).is_none() && !Path::new(entry).is_absolute() {
-            errors.push(format!(
-                "tools.write.writable_paths entry {entry:?} must be absolute or start with `~/`"
-            ));
+        match dir.map(|dir| lexical_clean(&dir)) {
+            Ok(dir) if holds_any(&dir, &owned_by_others) => {
+                issues.push(ConfigIssue::SharedToolDir { key, dir });
+            }
+            Ok(_) => {}
+            Err(no_default) => issues.push(no_default.into()),
         }
     }
 }
 
 /// One tool result's head must leave room for the rest of the history.
 fn validate_tool_output_share(
-    errors: &mut Vec<String>,
+    issues: &mut Vec<ConfigIssue>,
     output: &ToolsOutputConfig,
     chat: &ChatConfig,
 ) {
     let head_tokens = u64::from(output.max_kb.get()) * 1024 / 4;
     let allowed = u64::from(chat.max_history_tokens.get()) / 4;
     if head_tokens > allowed {
-        errors.push(format!(
-            "tools.output.max_kb ({} KB, about {head_tokens} tokens) must not exceed a quarter \
-             of chat.max_history_tokens ({allowed} tokens)",
-            output.max_kb
-        ));
+        issues.push(ConfigIssue::ToolOutputOverShare {
+            max_kb: output.max_kb.get(),
+            head_tokens,
+            allowed,
+        });
     }
 }
 
-fn validate_embedding(errors: &mut Vec<String>, embedding: &EmbeddingConfig, model: &ModelConfig) {
-    if !embedding.enabled {
-        return;
-    }
-    if require_hf_id(errors, "embedding.model", &embedding.model)
-        .is_some_and(|id| id.revision().is_some())
-    {
-        errors.push("embedding.model does not support an '@<revision>' pin".into());
-    }
-    if embedding.server_binary.as_os_str().is_empty() {
-        errors.push("embedding.server_binary must not be empty when embedding is enabled".into());
-    }
-    require_loopback(errors, "embedding.host", embedding.host);
-    if embedding.port == model.port {
-        errors.push("embedding.port must differ from model.port (the chat server)".into());
-    }
-    require_at_most(
-        errors,
-        "embedding.top_k",
-        embedding.top_k,
-        MAX_EMBEDDING_TOP_K,
-    );
-}
-
-fn validate_search(
-    errors: &mut Vec<String>,
-    search: &SearchConfig,
-    embedding: &EmbeddingConfig,
-    model: &ModelConfig,
-) {
-    if !search.enabled {
-        return;
-    }
-    require_loopback(errors, "search.host", search.host);
-    if search.port == model.port {
-        errors.push("search.port must differ from model.port (the chat server)".into());
-    }
-    if embedding.enabled && search.port == embedding.port {
-        errors.push("search.port must differ from embedding.port (the embedding server)".into());
-    }
-    if search.engines.is_empty() {
-        errors.push("search.engines must name at least one SearXNG engine".into());
-    }
-    if search
-        .engines
+/// A tool's own timeout must leave it time to finish before the tool-call
+/// deadline cuts it off.
+fn validate_tool_timeouts(issues: &mut Vec<ConfigIssue>, config: &Config) {
+    let mcp_timeouts = config
+        .mcp
+        .servers
         .iter()
-        .any(|engine| engine.name().trim().is_empty())
-    {
-        errors.push("search.engines must not contain blank names".into());
+        .enumerate()
+        .filter(|_| config.mcp.enabled)
+        .map(|(index, server)| {
+            (
+                format!("mcp.servers[{index}].request_timeout_secs"),
+                server.request_timeout_secs,
+            )
+        });
+    let bash_timeout = (
+        "tools.bash.timeout_secs".to_string(),
+        config.tools.bash.timeout_secs,
+    );
+    let max_secs = config.timeouts.max_tool_timeout_secs();
+    for (key, timeout) in std::iter::once(bash_timeout).chain(mcp_timeouts) {
+        if timeout.get() > max_secs {
+            issues.push(ConfigIssue::ToolTimeoutOverValve {
+                key,
+                timeout_secs: timeout.get(),
+                max_secs,
+                valve_secs: config.timeouts.tool_call_secs,
+                confirmation_secs: CONFIRMATION_PROMPT_SECS,
+            });
+        }
     }
 }
 
-fn require_at_most(errors: &mut Vec<String>, key: &str, value: NonZeroU32, max: u32) {
-    if value.get() > max {
-        errors.push(format!("{key} must be in the range 1..={max}, got {value}"));
+fn validate_ports(issues: &mut Vec<ConfigIssue>, config: &Config) {
+    let Config {
+        model,
+        embedding,
+        search,
+        ..
+    } = config;
+    if embedding.enabled && embedding.port == model.port {
+        issues.push(ConfigIssue::PortClash {
+            key: "embedding.port",
+            other: "model.port (the chat server)",
+        });
+    }
+    if search.enabled && search.port == model.port {
+        issues.push(ConfigIssue::PortClash {
+            key: "search.port",
+            other: "model.port (the chat server)",
+        });
+    }
+    if search.enabled && embedding.enabled && search.port == embedding.port {
+        issues.push(ConfigIssue::PortClash {
+            key: "search.port",
+            other: "embedding.port (the embedding server)",
+        });
     }
 }
 
-fn require_absolute_dir(errors: &mut Vec<String>, key: &str, dir: Option<&Path>) {
-    if dir.is_some_and(|dir| !dir.is_absolute()) {
-        errors.push(format!("{key} must be an absolute path or start with `~/`"));
+fn validate_mcp(issues: &mut Vec<ConfigIssue>, mcp: &McpConfig) {
+    if !mcp.enabled {
+        return;
+    }
+    let mut seen_names = HashSet::new();
+    for (index, server) in mcp.servers.iter().enumerate() {
+        if !seen_names.insert(&server.name) {
+            issues.push(ConfigIssue::DuplicateMcpServer {
+                index,
+                name: server.name.as_str().to_owned(),
+            });
+        }
     }
 }
 
-/// Refuse `dir` when it is `/`, or holds `$HOME` or assistd's config or data: the daemon
-/// restricts it to its owner and removes old files from it at startup.
-fn require_dedicated_dir(errors: &mut Vec<String>, key: &str, dir: &Path, owned: &[PathBuf]) {
-    let dir = lexical_clean(dir);
-    if dir.parent().is_none() || owned.iter().any(|owned| owned.starts_with(&dir)) {
-        errors.push(format!(
-            "{key} must be a directory of its own, not {} (assistd removes old files from it)",
-            dir.display()
-        ));
-    }
+/// Whether `dir` is `/`, or holds one of `owned`: the daemon restricts a tool
+/// directory to its owner and removes old files from it at startup.
+fn holds_any(dir: &Path, owned: &[PathBuf]) -> bool {
+    dir.parent().is_none() || owned.iter().any(|owned| owned.starts_with(dir))
 }
 
 /// `$HOME` and assistd's config and data directories, which no tool directory may hold.
@@ -600,88 +417,6 @@ fn owned_by_others() -> Vec<PathBuf> {
         .flatten()
         .map(|dir| dir.join("assistd"));
     dirs::home_dir().into_iter().chain(assistd_dirs).collect()
-}
-
-fn require_loopback(errors: &mut Vec<String>, key: &str, host: IpAddr) {
-    if !host.is_loopback() {
-        errors.push(format!(
-            "{key} must be a loopback address (127.0.0.0/8 or ::1), got {host}"
-        ));
-    }
-}
-
-fn validate_mcp(errors: &mut Vec<String>, mcp: &McpConfig) {
-    if !mcp.enabled {
-        return;
-    }
-    let mut seen_names = HashSet::new();
-    for (i, server) in mcp.servers.iter().enumerate() {
-        let name = &server.name;
-        if !seen_names.insert(name) {
-            errors.push(format!(
-                "mcp.servers[{i}].name '{name}' is duplicated; names must be unique"
-            ));
-        }
-    }
-}
-
-fn validate_tray_icons(errors: &mut Vec<String>, icons: &TrayIconsConfig) {
-    let named = [
-        ("active", &icons.active),
-        ("sleeping", &icons.sleeping),
-        ("listening", &icons.listening),
-        ("generating", &icons.generating),
-        ("disconnected", &icons.disconnected),
-    ];
-    for (key, name) in named {
-        if name.trim().is_empty() {
-            errors.push(format!("notifications.icons.{key} must not be empty"));
-        }
-    }
-}
-
-fn validate_tasks(errors: &mut Vec<String>, tasks: &TasksConfig) {
-    if tasks.resume_after_idle_secs > MAX_RESUME_AFTER_IDLE_SECS {
-        errors.push(format!(
-            "tasks.resume_after_idle_secs must be at most {MAX_RESUME_AFTER_IDLE_SECS}, got {}",
-            tasks.resume_after_idle_secs
-        ));
-    }
-    if !(1..=MAX_TASKS_KEPT_RUNS).contains(&tasks.kept_runs) {
-        errors.push(format!(
-            "tasks.kept_runs must be in the range 1..={MAX_TASKS_KEPT_RUNS}, got {}",
-            tasks.kept_runs
-        ));
-    }
-}
-
-fn validate_notifications(errors: &mut Vec<String>, notifications: &NotificationsConfig) {
-    if notifications.enabled && !(500..=60_000).contains(&notifications.auto_hide_ms) {
-        errors.push("notifications.auto_hide_ms must be in the range 500..=60000".into());
-    }
-    validate_tray_icons(errors, &notifications.icons);
-}
-
-/// Pushes `message` unless `value` lies in `range`; NaN never does.
-fn require_in_range(
-    errors: &mut Vec<String>,
-    value: f32,
-    range: RangeInclusive<f32>,
-    message: &str,
-) {
-    if !range.contains(&value) {
-        errors.push(message.into());
-    }
-}
-
-fn require_hf_id(errors: &mut Vec<String>, field: &str, value: &str) -> Option<HfFileId> {
-    HfFileId::parse(value)
-        .inspect_err(|reason| {
-            errors.push(format!(
-                "{field} must be of the form '<owner>/<repo>[@<revision>]:<file>': {reason}"
-            ));
-        })
-        .ok()
 }
 
 #[cfg(test)]

@@ -51,7 +51,8 @@ pub struct McpServerConfig {
     pub name: McpServerName,
     #[serde(flatten)]
     pub transport: McpTransport,
-    /// Timeout in seconds for the initialize handshake and each request.
+    /// Timeout in seconds for the initialize handshake and each request,
+    /// `1..=180` while `mcp.enabled`.
     pub request_timeout_secs: NonZeroU64,
 }
 

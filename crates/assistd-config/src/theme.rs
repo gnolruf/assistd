@@ -1,12 +1,13 @@
 //! The chat TUI's color for each thing it draws, under `[chat.theme]`.
 
+use std::borrow::Borrow;
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::DEFAULT_THEME;
-use crate::errors::ThemeColorError;
+use crate::errors::{ThemeColorError, ThemeNameError};
 use crate::settings::{DescribeSettings, describe_fields};
 
 /// Every name a [`ThemeColor`] can be written as, besides `#rrggbb`.
@@ -203,12 +204,60 @@ impl Default for ThemeConfig {
     }
 }
 
-/// Whether `name` can name a saved theme: ASCII letters, digits, `_` and `-`.
-pub fn is_theme_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+/// A saved theme's name: ASCII letters, digits, `_` and `-`, and no
+/// built-in theme's.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ThemeName(String);
+
+impl ThemeName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ThemeName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Borrow<str> for ThemeName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for ThemeName {
+    type Err = ThemeNameError;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::try_from(name.to_owned())
+    }
+}
+
+impl TryFrom<String> for ThemeName {
+    type Error = ThemeNameError;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        let well_formed = !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        if !well_formed {
+            Err(ThemeNameError::Malformed)
+        } else if ThemeConfig::built_in(&name).is_some() {
+            Err(ThemeNameError::BuiltIn(name))
+        } else {
+            Ok(Self(name))
+        }
+    }
+}
+
+impl From<ThemeName> for String {
+    fn from(name: ThemeName) -> Self {
+        name.0
+    }
 }
 
 const fn rgb(red: u8, green: u8, blue: u8) -> ThemeColor {

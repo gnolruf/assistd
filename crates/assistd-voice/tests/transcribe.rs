@@ -66,9 +66,9 @@ fn normalize(text: &str) -> String {
 /// Models download to the user's cache, so only the first run fetches them.
 async fn make_transcriber(vad: bool) -> SherpaTranscriber {
     let config = TranscriptionConfig {
-        model: CPU_MODEL_ID.into(),
+        model: CPU_MODEL_ID.parse().unwrap(),
         vad_enabled: vad,
-        vad_model: VAD_MODEL_ID.into(),
+        vad_model: VAD_MODEL_ID.parse().unwrap(),
         ..TranscriptionConfig::default()
     };
     SherpaTranscriber::load_cpu(&config)

@@ -179,7 +179,7 @@ impl PresenceManager {
         daemon_shutdown: watch::Receiver<bool>,
     ) -> Result<Arc<Self>, PresenceError> {
         let control = LlamaServerControl::new(
-            SocketAddr::new(model.host, model.port.get()),
+            SocketAddr::new(model.host.get(), model.port.get()),
             Some(&api_key),
             None,
         )
@@ -522,16 +522,16 @@ impl PresenceManager {
     async fn unload_model(&self) -> Result<(), PresenceError> {
         if !self.llama_serving() {
             return Err(PresenceError::Unload {
-                model: self.model.name.clone(),
+                model: self.model.name.to_string(),
                 source: LlamaServerError::NotReady,
             });
         }
         let secs = self.timeouts.presence_drowse_secs;
-        let unload = self.control.unload_model(&self.model.name);
+        let unload = self.control.unload_model(self.model.name.as_str());
         match timeout(Duration::from_secs(secs), unload).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(source)) => Err(PresenceError::Unload {
-                model: self.model.name.clone(),
+                model: self.model.name.to_string(),
                 source,
             }),
             Err(_) => {
@@ -649,7 +649,7 @@ impl PresenceManager {
             return Ok(service.subscribe_ready());
         }
         Err(PresenceError::Load {
-            model: self.model.name.clone(),
+            model: self.model.name.to_string(),
             source: LlamaServerError::NotReady,
         })
     }
@@ -659,10 +659,10 @@ impl PresenceManager {
         ready_rx: watch::Receiver<ReadyState>,
     ) -> Result<(), PresenceError> {
         self.control
-            .load_model(&self.model.name)
+            .load_model(self.model.name.as_str())
             .await
             .map_err(|source| PresenceError::Load {
-                model: self.model.name.clone(),
+                model: self.model.name.to_string(),
                 source,
             })?;
 
@@ -678,16 +678,16 @@ impl PresenceManager {
         tokio::select! {
             res = self
                 .control
-                .wait_for_loaded(&self.model.name, backstop, LOAD_POLL_INTERVAL) =>
+                .wait_for_loaded(self.model.name.as_str(), backstop, LOAD_POLL_INTERVAL) =>
             {
                 res.map_err(|source| PresenceError::LoadWait {
-                    model: self.model.name.clone(),
+                    model: self.model.name.to_string(),
                     secs,
                     source,
                 })
             }
             () = wait_until_not_ready(&mut ready_rx) => Err(PresenceError::LeftReady {
-                model: self.model.name.clone(),
+                model: self.model.name.to_string(),
             }),
         }
     }
@@ -707,17 +707,17 @@ impl PresenceManager {
             PresenceTarget::Sleeping => Lifecycle::Sleeping,
         };
         let model = ModelConfig {
-            name: "stub/model".into(),
+            name: "stub/model".parse().expect("stub model name"),
             context_length: nz32(1024),
-            server_binary: "/does/not/exist".into(),
-            host: std::net::Ipv4Addr::LOCALHOST.into(),
+            server_binary: "/does/not/exist".parse().expect("stub server binary"),
+            host: assistd_config::LoopbackAddr::LOCALHOST,
             port: nz16(1),
             gpu_layers: 1,
             ready_timeout_secs: nz64(1),
             ..ModelConfig::default()
         };
         let api_key = ApiKey::generate().expect("stub api key");
-        let control = LlamaServerControl::new(SocketAddr::new(model.host, 1), None, None)
+        let control = LlamaServerControl::new(SocketAddr::new(model.host.get(), 1), None, None)
             .expect("dummy control");
         Arc::new(Self {
             lifecycle: StdMutex::new(lifecycle),

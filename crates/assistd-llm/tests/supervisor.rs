@@ -3,7 +3,6 @@
 
 #![cfg(feature = "test-support")]
 
-use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::time::{Duration, Instant};
 
@@ -12,8 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use assistd_config::ModelConfig;
 use assistd_config::defaults::{nz32, nz64};
+use assistd_config::{LoopbackAddr, ModelConfig};
 use assistd_llm::LlamaServerSpec;
 use assistd_utils::child_server::{ChildServer, ChildServerError};
 
@@ -31,10 +30,10 @@ async fn grab_port() -> u16 {
 
 fn model_spec(fake: &FakeLlama, port: u16) -> ModelConfig {
     ModelConfig {
-        name: "test/fake-model-GGUF:Q4_K_M".to_string(),
+        name: "test/fake-model-GGUF:Q4_K_M".parse().unwrap(),
         context_length: nz32(2048),
-        server_binary: fake.binary_path(),
-        host: Ipv4Addr::LOCALHOST.into(),
+        server_binary: fake.binary_path().to_str().unwrap().parse().unwrap(),
+        host: LoopbackAddr::LOCALHOST,
         port: NonZeroU16::new(port).expect("bound port is never 0"),
         gpu_layers: 0,
         ready_timeout_secs: nz64(60),

@@ -171,11 +171,11 @@ impl TrayTracker {
 pub(super) fn icon_name_for(state: TrayState, icons: &TrayIconsConfig) -> &str {
     match state {
         TrayState::ConfigError => "dialog-error",
-        TrayState::Disconnected => &icons.disconnected,
-        TrayState::Generating => &icons.generating,
-        TrayState::Listening => &icons.listening,
-        TrayState::Active => &icons.active,
-        TrayState::Sleeping => &icons.sleeping,
+        TrayState::Disconnected => icons.disconnected.as_str(),
+        TrayState::Generating => icons.generating.as_str(),
+        TrayState::Listening => icons.listening.as_str(),
+        TrayState::Active => icons.active.as_str(),
+        TrayState::Sleeping => icons.sleeping.as_str(),
     }
 }
 

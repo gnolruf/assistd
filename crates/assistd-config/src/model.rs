@@ -1,8 +1,6 @@
 //! Chat model and llama-server process configuration.
 
-use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,21 +10,21 @@ use crate::defaults::{
     DEFAULT_MODEL_PORT, DEFAULT_MODEL_READY_TIMEOUT_SECS, DEFAULT_MODEL_SERVER_BINARY,
 };
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::values::{LoopbackAddr, NonBlankString};
 
 /// The chat model and the local server process that serves it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// HuggingFace model the server loads, as `owner/repo:quant`. Must
-    /// not be empty.
-    pub name: String,
+    /// HuggingFace model the server loads, as `owner/repo:quant`.
+    pub name: NonBlankString,
     /// Context window length in tokens.
     pub context_length: NonZeroU32,
-    /// Server binary path, or a name on `$PATH`. Must not be empty.
-    pub server_binary: PathBuf,
-    /// Bind host. Must be loopback: the per-launch API key travels over
+    /// Server binary path, or a name on `$PATH`.
+    pub server_binary: NonBlankString,
+    /// Bind host; loopback because the per-launch API key travels over
     /// plain HTTP.
-    pub host: IpAddr,
+    pub host: LoopbackAddr,
     /// Bind port.
     pub port: NonZeroU16,
     /// Layers offloaded to the GPU; values above the model's layer count
@@ -80,9 +78,13 @@ impl ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            name: DEFAULT_MODEL_NAME.to_string(),
+            name: DEFAULT_MODEL_NAME
+                .parse()
+                .expect("the default model name is not blank"),
             context_length: DEFAULT_MODEL_CONTEXT_LENGTH,
-            server_binary: DEFAULT_MODEL_SERVER_BINARY.into(),
+            server_binary: DEFAULT_MODEL_SERVER_BINARY
+                .parse()
+                .expect("the default server binary is not blank"),
             host: DEFAULT_MODEL_HOST,
             port: DEFAULT_MODEL_PORT,
             gpu_layers: DEFAULT_MODEL_GPU_LAYERS,

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use assistd_config::ThemeConfig;
+use assistd_config::{ThemeConfig, ThemeName};
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::super::selection::Selection;
@@ -51,7 +51,7 @@ pub(crate) struct ThemeList {
 
 impl ThemeList {
     /// Lists the built-in themes and `saved`, selecting `active` when it is one.
-    pub(crate) fn new(saved: &BTreeMap<String, ThemeConfig>, active: Option<&str>) -> Self {
+    pub(crate) fn new(saved: &BTreeMap<ThemeName, ThemeConfig>, active: Option<&str>) -> Self {
         let built_in = ThemeConfig::BUILT_IN
             .iter()
             .map(|&(name, theme)| ThemeEntry {
@@ -60,7 +60,7 @@ impl ThemeList {
                 built_in: true,
             });
         let saved = saved.iter().map(|(name, &theme)| ThemeEntry {
-            name: name.clone(),
+            name: name.to_string(),
             theme,
             built_in: false,
         });
