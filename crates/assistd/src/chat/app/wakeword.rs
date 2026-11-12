@@ -7,7 +7,7 @@ use assistd_ipc::{Event, EventBody, Request, RequestBody, WakeWordOp};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
-use super::{App, WireStream};
+use super::{App, Panel, WireStream};
 
 mod scene;
 
@@ -66,24 +66,30 @@ pub(in crate::chat) struct TestProgress {
 impl App {
     /// Open the panel on the configured phrase and ask the daemon for it.
     pub(super) fn open_wake_word_panel(&mut self) {
-        self.wake_word_panel = Some(WakeWordPanel {
+        self.panel = Some(Panel::WakeWord(WakeWordPanel {
             status: StatusState::Loading,
             view: WakeWordView::Status,
-        });
+        }));
         self.send_wake_word_op(WakeWordOp::Status, WakeWordStream::Status);
     }
 
-    /// The panel when it is on screen; an open confirmation prompt hides it.
-    pub(in crate::chat) fn shown_wake_word_panel(&self) -> Option<&WakeWordPanel> {
-        self.wake_word_panel
-            .as_ref()
-            .filter(|_| self.confirmation.is_none())
+    fn wake_word_panel(&self) -> Option<&WakeWordPanel> {
+        match &self.panel {
+            Some(Panel::WakeWord(panel)) => Some(panel),
+            _ => None,
+        }
+    }
+
+    fn wake_word_panel_mut(&mut self) -> Option<&mut WakeWordPanel> {
+        match &mut self.panel {
+            Some(Panel::WakeWord(panel)) => Some(panel),
+            _ => None,
+        }
     }
 
     /// Whether the open session's computer is animating.
     pub(crate) fn wake_word_scene_live(&self) -> bool {
-        self.wake_word_panel
-            .as_ref()
+        self.wake_word_panel()
             .is_some_and(|panel| match &panel.view {
                 WakeWordView::Session(session) => session.scene.is_live(),
                 WakeWordView::Status => false,
@@ -92,7 +98,7 @@ impl App {
 
     pub(crate) fn advance_wake_word_scene(&mut self) {
         if let Some(WakeWordView::Session(session)) =
-            self.wake_word_panel.as_mut().map(|panel| &mut panel.view)
+            self.wake_word_panel_mut().map(|panel| &mut panel.view)
         {
             session.scene.advance();
         }
@@ -101,13 +107,13 @@ impl App {
     /// Esc or Ctrl+C backs out of the test, then closes the panel; Enter or
     /// `t` starts a test.
     pub(super) fn on_wake_word_key(&mut self, ev: KeyEvent) {
-        let Some(panel) = self.wake_word_panel.as_mut() else {
+        let Some(Panel::WakeWord(panel)) = self.panel.as_mut() else {
             return;
         };
         let control = ev.modifiers.contains(KeyModifiers::CONTROL);
         let back = ev.code == KeyCode::Esc || (ev.code == KeyCode::Char('c') && control);
         match &panel.view {
-            WakeWordView::Status if back => self.wake_word_panel = None,
+            WakeWordView::Status if back => self.panel = None,
             WakeWordView::Status => {
                 if matches!(ev.code, KeyCode::Enter | KeyCode::Char('t')) {
                     self.start_wake_word_test();
@@ -157,19 +163,19 @@ impl App {
     }
 
     fn set_wake_word_view(&mut self, view: WakeWordView) {
-        if let Some(panel) = self.wake_word_panel.as_mut() {
+        if let Some(panel) = self.wake_word_panel_mut() {
             panel.view = view;
         }
     }
 
     fn set_wake_word_status(&mut self, status: StatusState) {
-        if let Some(panel) = self.wake_word_panel.as_mut() {
+        if let Some(panel) = self.wake_word_panel_mut() {
             panel.status = status;
         }
     }
 
     fn configured_wake_phrase(&self) -> Option<String> {
-        match &self.wake_word_panel.as_ref()?.status {
+        match &self.wake_word_panel()?.status {
             StatusState::Loaded(status) => Some(status.phrase.clone()),
             StatusState::Loading | StatusState::Failed(_) => None,
         }
@@ -205,7 +211,7 @@ impl App {
 
     /// The panel's session when it is session `id`.
     fn open_session(&mut self, id: &str) -> Option<&mut MicSession> {
-        match &mut self.wake_word_panel.as_mut()?.view {
+        match &mut self.wake_word_panel_mut()?.view {
             WakeWordView::Session(session) if session.id == id => Some(session),
             _ => None,
         }

@@ -235,6 +235,16 @@ impl ConfirmationPrompt {
     }
 }
 
+/// What `/resume`, `/wakeword`, `/settings`, `/agents` or `/tasks` draws in place of the
+/// transcript.
+pub(super) enum Panel {
+    Resume(ResumePicker),
+    WakeWord(WakeWordPanel),
+    Settings(Box<SettingsPanel>),
+    Agents(AgentPanel),
+    Tasks(Box<TasksPanel>),
+}
+
 pub(super) struct App {
     pub output: OutputPane,
     pub input: InputLine,
@@ -283,21 +293,8 @@ pub(super) struct App {
     /// Set by Esc on the slash popup; cleared when the buffer leaves its
     /// `/` prefix.
     slash_dismissed: bool,
-    /// `/resume` session list; `confirmation` takes precedence while
-    /// both are open.
-    pub resume_picker: Option<ResumePicker>,
-    /// `/wakeword` panel, drawn in place of the transcript;
-    /// `confirmation` takes precedence while both are open.
-    pub wake_word_panel: Option<WakeWordPanel>,
-    /// `/settings` panel, drawn in place of the transcript; `confirmation`
-    /// takes precedence while both are open.
-    pub settings_panel: Option<SettingsPanel>,
-    /// `/agents` panel, drawn in place of the transcript; `confirmation`
-    /// takes precedence while both are open.
-    agent_panel: Option<AgentPanel>,
-    /// `/tasks` panel, drawn in place of the transcript; `confirmation`
-    /// takes precedence while both are open.
-    pub tasks_panel: Option<TasksPanel>,
+    /// The open panel; `confirmation` takes precedence while both are open.
+    pub panel: Option<Panel>,
     /// The task queue as last broadcast; `None` until the bus delivers it.
     task_queue: Option<TaskQueueSnapshot>,
     /// The config file `/settings` edits.
@@ -532,11 +529,7 @@ impl App {
             tasks: JoinSet::new(),
             slash_selected: Selection::default(),
             slash_dismissed: false,
-            resume_picker: None,
-            agent_panel: None,
-            wake_word_panel: None,
-            settings_panel: None,
-            tasks_panel: None,
+            panel: None,
             task_queue: None,
             config_path,
             last_live_seconds: None,
@@ -570,9 +563,10 @@ impl App {
     /// The colors to draw with: the open settings panel's, unsaved edits
     /// included, so changes show as they are made.
     pub(super) fn theme(&self) -> Theme {
-        self.settings_panel
-            .as_ref()
-            .map_or(self.theme, SettingsPanel::theme)
+        match &self.panel {
+            Some(Panel::Settings(panel)) => panel.theme(),
+            _ => self.theme,
+        }
     }
 
     pub(super) fn should_quit(&self) -> bool {
@@ -587,20 +581,9 @@ impl App {
         SPINNER_CHARS[self.spinner % SPINNER_CHARS.len()]
     }
 
-    /// The `/resume` list when it is on screen; an open confirmation prompt
-    /// hides it.
-    pub(super) fn shown_resume_picker(&self) -> Option<&ResumePicker> {
-        self.resume_picker
-            .as_ref()
-            .filter(|_| self.confirmation.is_none())
-    }
-
-    /// The `/settings` panel when it is on screen; an open confirmation
-    /// prompt hides it.
-    pub(super) fn shown_settings_panel(&self) -> Option<&SettingsPanel> {
-        self.settings_panel
-            .as_ref()
-            .filter(|_| self.confirmation.is_none())
+    /// The panel on screen; an open confirmation prompt hides it.
+    pub(super) fn shown_panel(&self) -> Option<&Panel> {
+        self.panel.as_ref().filter(|_| self.confirmation.is_none())
     }
 
     pub(super) fn notice(&self) -> Option<&str> {
@@ -653,7 +636,7 @@ impl App {
     }
 
     fn reset_transcript(&mut self) {
-        self.agent_panel = None;
+        self.close_agent_panel();
         self.output.clear();
         self.output.push_banner(self.model_name.clone());
         self.push_mcp_notices();

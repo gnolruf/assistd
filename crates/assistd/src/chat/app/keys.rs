@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use uuid::Uuid;
 
 use super::commands::runs_offline;
-use super::{App, WireStream};
+use super::{App, Panel, WireStream};
 use crate::chat::input::{InputAction, paste_as_keys};
 use crate::chat::selection::Selection;
 
@@ -56,25 +56,24 @@ impl App {
     }
 
     pub(super) fn panel_shown(&self) -> bool {
-        self.shown_resume_picker().is_some()
-            || self.shown_wake_word_panel().is_some()
-            || self.shown_settings_panel().is_some()
-            || self.shown_agent_panel().is_some()
-            || self.shown_tasks_panel().is_some()
+        self.shown_panel().is_some()
     }
 
     pub(crate) fn on_key(&mut self, ev: KeyEvent) {
-        if self.shown_resume_picker().is_some() {
-            self.on_resume_picker_key(ev);
-        } else if self.shown_wake_word_panel().is_some() {
-            self.on_wake_word_key(ev);
-        } else if self.shown_settings_panel().is_some() {
-            self.on_settings_key(ev);
-        } else if self.shown_agent_panel().is_some() {
-            self.on_agent_panel_key(ev);
-        } else if self.shown_tasks_panel().is_some() {
-            self.on_tasks_key(ev);
-        } else if self.plan_review.is_some() && self.confirmation.is_none() {
+        match self.shown_panel() {
+            Some(Panel::Resume(_)) => self.on_resume_picker_key(ev),
+            Some(Panel::WakeWord(_)) => self.on_wake_word_key(ev),
+            Some(Panel::Settings(_)) => self.on_settings_key(ev),
+            Some(Panel::Agents(_)) => self.on_agent_panel_key(ev),
+            Some(Panel::Tasks(_)) => self.on_tasks_key(ev),
+            None => self.on_chat_key(ev),
+        }
+    }
+
+    /// A key pressed with no panel on screen: an open prompt answers first, then
+    /// shortcuts, then the input line.
+    fn on_chat_key(&mut self, ev: KeyEvent) {
+        if self.plan_review.is_some() && self.confirmation.is_none() {
             if !self.held_from_prompt(ev) {
                 self.on_plan_review_key(ev);
             }
@@ -128,13 +127,13 @@ impl App {
 
     /// Closing the panel keeps its theme only when nothing is left unsaved.
     fn on_settings_key(&mut self, ev: KeyEvent) {
-        if let Some(panel) = self.settings_panel.as_mut()
+        if let Some(Panel::Settings(panel)) = self.panel.as_mut()
             && panel.on_key(ev).is_break()
         {
             if !panel.document().is_modified() {
                 self.theme = panel.theme();
             }
-            self.settings_panel = None;
+            self.panel = None;
         }
     }
 

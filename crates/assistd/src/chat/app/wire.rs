@@ -486,7 +486,7 @@ impl App {
             self.set_notice("nothing to undo");
             return;
         }
-        self.agent_panel = None;
+        self.close_agent_panel();
         self.output.pop_last_user_exchange();
         let preview = last_user_text
             .map(|t| t.chars().take(48).collect::<String>())

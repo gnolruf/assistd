@@ -3,9 +3,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::App;
+use super::{App, Panel};
 use crate::chat::output::{OutputPane, RelayStepTrace};
-use crate::chat::tasks::TasksPanel;
 
 /// The `/agents` panel, drawn in place of the transcript.
 #[derive(Debug, Clone, Copy)]
@@ -22,18 +21,26 @@ impl App {
         match self.output.agents().len() {
             0 => self.set_notice("no sub-agents yet"),
             count => {
-                self.agent_panel = Some(AgentPanel {
+                self.panel = Some(Panel::Agents(AgentPanel {
                     selected: count - 1,
                     open: false,
-                });
+                }));
             }
         }
     }
 
-    /// The `/agents` panel when it is on screen; an open confirmation prompt
-    /// hides it.
-    pub(in crate::chat) fn shown_agent_panel(&self) -> Option<AgentPanel> {
-        self.agent_panel.filter(|_| self.confirmation.is_none())
+    /// Close the panel when it is the `/agents` one, whose indices a changed
+    /// transcript no longer matches.
+    pub(super) fn close_agent_panel(&mut self) {
+        self.panel
+            .take_if(|panel| matches!(panel, Panel::Agents(_)));
+    }
+
+    fn shown_agent_panel(&self) -> Option<AgentPanel> {
+        match self.shown_panel() {
+            Some(Panel::Agents(panel)) => Some(*panel),
+            _ => None,
+        }
     }
 
     /// The sub-agent whose transcript is on screen.
@@ -53,7 +60,7 @@ impl App {
             || self
                 .viewed_agent()
                 .is_some_and(|agent| agent.transcript().glyph_live())
-            || self.tasks_panel.as_ref().is_some_and(TasksPanel::refining)
+            || matches!(&self.panel, Some(Panel::Tasks(panel)) if panel.refining())
     }
 
     pub(in crate::chat) fn advance_live_glyphs(&mut self) {
@@ -61,7 +68,7 @@ impl App {
         if let Some(agent) = self.viewed_agent_mut() {
             agent.transcript_mut().advance_live_glyphs();
         }
-        if let Some(panel) = self.tasks_panel.as_mut() {
+        if let Some(Panel::Tasks(panel)) = self.panel.as_mut() {
             panel.advance_refine_dots();
         }
     }
@@ -76,50 +83,31 @@ impl App {
         }
     }
 
-    /// Ctrl+C closes the panel and Ctrl+O toggles verbose mode from either view.
+    /// Ctrl+C closes the panel and Ctrl+O toggles verbose mode from either view. In the
+    /// list, arrows select, Enter opens the transcript and Esc closes; in a transcript,
+    /// Esc or Left returns to the list and the rest scroll or expand it.
     pub(super) fn on_agent_panel_key(&mut self, ev: KeyEvent) {
-        let Some(panel) = self.agent_panel else {
+        let Some(Panel::Agents(panel)) = self.panel.as_mut() else {
             return;
         };
         let control = ev.modifiers.contains(KeyModifiers::CONTROL);
         match ev.code {
-            KeyCode::Char('c') if control => self.agent_panel = None,
+            KeyCode::Char('c') if control => self.panel = None,
             KeyCode::Char('o') if control => self.toggle_verbose(),
+            KeyCode::Esc | KeyCode::Left if panel.open => panel.open = false,
             _ if panel.open => self.on_agent_transcript_key(ev),
-            _ => self.on_agent_list_key(ev, panel),
+            KeyCode::Esc => self.panel = None,
+            KeyCode::Enter => panel.open = true,
+            KeyCode::Up => panel.selected = panel.selected.saturating_sub(1),
+            KeyCode::Down => {
+                let last = self.output.agents().len().saturating_sub(1);
+                panel.selected = (panel.selected + 1).min(last);
+            }
+            _ => {}
         }
     }
 
-    /// Arrows move the selection, Enter opens it, Esc closes the list.
-    fn on_agent_list_key(&mut self, ev: KeyEvent, panel: AgentPanel) {
-        let last = self.output.agents().len().saturating_sub(1);
-        let selected = match ev.code {
-            KeyCode::Esc => {
-                self.agent_panel = None;
-                return;
-            }
-            KeyCode::Enter => {
-                self.agent_panel = Some(AgentPanel {
-                    open: true,
-                    ..panel
-                });
-                return;
-            }
-            KeyCode::Up => panel.selected.saturating_sub(1),
-            KeyCode::Down => (panel.selected + 1).min(last),
-            _ => return,
-        };
-        self.agent_panel = Some(AgentPanel { selected, ..panel });
-    }
-
-    /// Esc or Left returns to the list; the rest scroll or expand the transcript.
     fn on_agent_transcript_key(&mut self, ev: KeyEvent) {
-        if matches!(ev.code, KeyCode::Esc | KeyCode::Left) {
-            if let Some(panel) = self.agent_panel.as_mut() {
-                panel.open = false;
-            }
-            return;
-        }
         let height = self.last_output_height;
         self.scroll_shown_pane(|pane| match ev.code {
             KeyCode::PageUp => pane.scroll_page_up(height),
