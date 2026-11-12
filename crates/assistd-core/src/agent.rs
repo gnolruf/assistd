@@ -660,7 +660,7 @@ async fn abandon_replay(turn: &Turn, wait_err: HealthWaitError) -> String {
     );
     let final_msg = match wait_err {
         HealthWaitError::Timeout => "LLM did not recover before timeout",
-        HealthWaitError::Degraded => "LLM supervisor entered degraded state; restart abandoned",
+        HealthWaitError::Degraded => "LLM server keeps failing; it is retried every few minutes",
         HealthWaitError::NoService => "LLM service is not currently attached",
     };
     let _ = turn

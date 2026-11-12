@@ -203,7 +203,8 @@ impl Session<'_> {
 
 /// Run the voice worker `spec` describes until `shutdown` flips, restarting
 /// it with backoff when it dies. `voice` reports each component `Starting`
-/// until the worker says how it came up, and `Unavailable` once restarts stop.
+/// until the worker says how it came up, and `Unavailable` between the slow
+/// retries of a worker that keeps dying.
 pub async fn supervise(
     spec: VoiceWorkerSpec,
     voice: Arc<VoiceManager>,
@@ -243,43 +244,56 @@ pub async fn supervise(
         if ended == SessionEnd::Shutdown {
             return;
         }
-        voice.set_capture(Readiness::Starting);
-        voice.set_speech(Readiness::Starting);
         if !wait_to_restart(&mut policy, &voice, &mut shutdown).await {
             return;
         }
     }
 }
 
-/// Sleep out the policy's backoff; false when shutdown flips first or the
-/// policy gives up, in which case `voice` is marked unavailable.
+/// Sleep out the policy's delay, with `voice` `Starting` through a backoff
+/// and `Unavailable` through a slow retry; false when shutdown flips first.
 async fn wait_to_restart(
     policy: &mut RestartPolicy,
     voice: &VoiceManager,
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool {
-    let reason = match policy.next_restart(std::time::Instant::now()) {
+    match policy.next_restart(std::time::Instant::now()) {
         RestartDecision::Backoff { delay, failures } => {
             info!(
                 target: "assistd::voice::worker",
                 "restarting the voice worker in {delay:?} ({failures} failed in a row)"
             );
-            return tokio::select! {
-                () = tokio::time::sleep(delay) => true,
-                _ = shutdown.wait_for(|stop| *stop) => false,
-            };
+            mark_starting(voice);
+            sleep_unless_shutdown(delay, shutdown).await
         }
-        RestartDecision::ConsecutiveCapReached { failures } => {
-            format!("the voice worker failed {failures} times in a row")
+        RestartDecision::SlowRetry { delay, cap } => {
+            let reason = format!(
+                "the voice worker {cap}; retrying every {} minutes",
+                delay.as_secs() / 60
+            );
+            warn!(target: "assistd::voice::worker", "{reason}");
+            voice.set_capture(Readiness::Unavailable(reason.as_str().into()));
+            voice.set_speech(Readiness::Unavailable(reason.into()));
+            let slept = sleep_unless_shutdown(delay, shutdown).await;
+            if slept {
+                mark_starting(voice);
+            }
+            slept
         }
-        RestartDecision::WindowCapReached { restarts } => {
-            format!("the voice worker restarted {restarts} times in ten minutes")
-        }
-    };
-    warn!(target: "assistd::voice::worker", "{reason}; voice is off until the daemon restarts");
-    voice.set_capture(Readiness::Unavailable(reason.as_str().into()));
-    voice.set_speech(Readiness::Unavailable(reason.into()));
-    false
+    }
+}
+
+fn mark_starting(voice: &VoiceManager) {
+    voice.set_capture(Readiness::Starting);
+    voice.set_speech(Readiness::Starting);
+}
+
+/// False when `shutdown` flips before `delay` is over.
+async fn sleep_unless_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => true,
+        _ = shutdown.wait_for(|stop| *stop) => false,
+    }
 }
 
 fn readiness_of<T>(startup: Startup, ready: T) -> Readiness<T> {

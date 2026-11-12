@@ -15,9 +15,9 @@ use crate::criteria::{
 };
 use crate::snapshot::{self, Snapshot, WindowChangeKind};
 use crate::{
-    ExecCommand, FocusedWindowContext, Layout, NoWindowManager, OutputInfo, ResizeDir,
-    TransportError, WM_IPC_TIMEOUT, Window, WindowId, WindowManager, WmError, WmHandle, WmResult,
-    WorkspaceId, WorkspaceInfo,
+    ExecCommand, FocusedWindowContext, Layout, OutputInfo, ResizeDir, TransportError,
+    WM_IPC_TIMEOUT, Window, WindowId, WindowManager, WmError, WmHandle, WmResult, WorkspaceId,
+    WorkspaceInfo,
 };
 
 /// Labels for the IPC calls the shared machinery makes, reported as the
@@ -112,27 +112,23 @@ impl<P: IpcProtocol> fmt::Debug for IpcBackend<P> {
 
 impl<P: IpcProtocol> IpcBackend<P> {
     /// Connect, seed the focus snapshot, and spawn the reconnecting
-    /// supervisor. Errors when the initial connect fails; a connect that
-    /// exceeds [`WM_IPC_TIMEOUT`] starts disconnected and the supervisor retries.
-    async fn start(
-        protocol: P,
-        shutdown: watch::Receiver<bool>,
-    ) -> WmResult<(Arc<Self>, JoinHandle<()>)> {
+    /// supervisor. A failed initial connect starts disconnected and the
+    /// supervisor retries.
+    async fn start(protocol: P, shutdown: watch::Receiver<bool>) -> (Arc<Self>, JoinHandle<()>) {
         let (cmd, events, initial) = match connect_and_seed(&protocol).await {
             Ok(Connection {
                 cmd,
                 events,
                 seeded,
             }) => (Some(cmd), Some(events), seeded_or_empty::<P>(seeded)),
-            Err(WmError::Timeout(after)) => {
+            Err(e) => {
                 tracing::warn!(
                     target: "assistd::wm",
-                    "{} did not answer within {after:?}; starting disconnected",
+                    "{} backend unavailable ({e:#}); starting disconnected",
                     P::NAME
                 );
                 (None, None, Snapshot::default())
             }
-            Err(e) => return Err(e),
         };
         let backend = Arc::new(Self {
             protocol,
@@ -141,7 +137,7 @@ impl<P: IpcProtocol> IpcBackend<P> {
             reconnect: Notify::new(),
         });
         let supervisor_task = tokio::spawn(supervise(backend.clone(), events, shutdown));
-        Ok((backend, supervisor_task))
+        (backend, supervisor_task)
     }
 
     fn set_conn(&self, conn: Option<P::Cmd>) {
@@ -313,28 +309,17 @@ struct Connection<P: IpcProtocol> {
     seeded: WmResult<Snapshot>,
 }
 
-/// Start `protocol`'s backend and supervisor; [`NoWindowManager`] and no
-/// handle when the first connect is refused.
+/// Start `protocol`'s backend and supervisor, disconnected when the first
+/// connect fails.
 pub(crate) async fn start_or_disconnected<P: IpcProtocol>(
     protocol: P,
     shutdown: watch::Receiver<bool>,
 ) -> (Arc<dyn WindowManager>, Option<WmHandle>) {
-    match IpcBackend::start(protocol, shutdown).await {
-        Ok((backend, supervisor_task)) => {
-            if backend.is_connected() {
-                tracing::info!(target: "assistd::wm", "{} backend connected", P::NAME);
-            }
-            (backend, Some(WmHandle { supervisor_task }))
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "assistd::wm",
-                "{} backend unavailable ({e:#}); window operations disabled",
-                P::NAME
-            );
-            (Arc::new(NoWindowManager), None)
-        }
+    let (backend, supervisor_task) = IpcBackend::start(protocol, shutdown).await;
+    if backend.is_connected() {
+        tracing::info!(target: "assistd::wm", "{} backend connected", P::NAME);
     }
+    (backend, Some(WmHandle { supervisor_task }))
 }
 
 async fn supervise<P: IpcProtocol>(

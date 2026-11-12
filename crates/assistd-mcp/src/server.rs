@@ -11,14 +11,11 @@ use tokio::sync::{Mutex, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, info, warn};
 
-use assistd_utils::backoff::{MIN_HEALTHY_SECONDS, RESTART_WINDOW, RestartDecision, RestartPolicy};
+use assistd_utils::backoff::{MIN_HEALTHY_SECONDS, RestartDecision, RestartPolicy};
 
 use crate::McpClient;
 use crate::error::McpError;
 use crate::session::{Connector, Lifeline, McpPeer};
-
-/// Wait before the next restart once either restart cap is hit.
-const UNHEALTHY_RETRY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// How long a stopping server gets to exit after SIGTERM.
 const TERM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -344,36 +341,20 @@ async fn end_session(mut lifeline: Lifeline, stop_rx: oneshot::Receiver<()>) {
     lifeline.shutdown(TERM_TIMEOUT).await;
 }
 
-/// Register the next restart of server `name` and pick how long to wait before it, at most
-/// [`UNHEALTHY_RETRY_INTERVAL`].
+/// Register the next restart of server `name` and pick how long to wait before it.
 pub(crate) fn restart_delay(name: &str, policy: &mut RestartPolicy) -> Duration {
     decision_delay(name, policy.next_restart(Instant::now()))
 }
 
 /// How long `decision` says server `name` waits before its restart, logging a hit cap.
 fn decision_delay(name: &str, decision: RestartDecision) -> Duration {
-    match decision {
-        RestartDecision::Backoff { delay, .. } => delay,
-        RestartDecision::ConsecutiveCapReached { failures } => {
-            error!(
-                target: "assistd::mcp",
-                server = %name,
-                failures,
-                retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
-                "MCP server failed {failures} times in a row; slowing restarts",
-            );
-            UNHEALTHY_RETRY_INTERVAL
-        }
-        RestartDecision::WindowCapReached { restarts } => {
-            error!(
-                target: "assistd::mcp",
-                server = %name,
-                restarts,
-                window_secs = RESTART_WINDOW.as_secs(),
-                retry_secs = UNHEALTHY_RETRY_INTERVAL.as_secs(),
-                "MCP server restarted {restarts} times in the rolling window; slowing restarts",
-            );
-            UNHEALTHY_RETRY_INTERVAL
-        }
+    if let RestartDecision::SlowRetry { delay, cap } = decision {
+        error!(
+            target: "assistd::mcp",
+            server = %name,
+            retry_secs = delay.as_secs(),
+            "MCP server {cap}; slowing restarts",
+        );
     }
+    decision.delay()
 }

@@ -37,9 +37,9 @@ pub use llama_server::{
 pub enum HealthWaitError {
     #[error("LLM did not become ready before timeout")]
     Timeout,
-    /// The supervisor gave up after consecutive failures; waiting
-    /// longer will not help.
-    #[error("LLM supervisor entered Degraded; restart abandoned")]
+    /// The server keeps failing and is only retried at the slow cadence,
+    /// so a turn should not wait for it.
+    #[error("LLM server keeps failing; it is retried every few minutes")]
     Degraded,
     /// No managed service is attached, typically because presence is asleep.
     #[error("no llama-server is currently managed (presence asleep?)")]

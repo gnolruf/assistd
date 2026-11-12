@@ -1,6 +1,7 @@
 //! Exponential backoff and rolling-window restart accounting for supervisors.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Consecutive failed restarts before a supervisor stops retrying at the
@@ -20,6 +21,9 @@ pub const RESTART_WINDOW: Duration = Duration::from_secs(600);
 /// Upper bound on [`backoff_delay`], in seconds.
 pub const BACKOFF_CAP_SECS: u64 = 60;
 
+/// Wait before each restart while a restart cap is tripped.
+pub const SLOW_RETRY_INTERVAL: Duration = Duration::from_secs(300);
+
 /// Exponential backoff: `2^attempt` seconds from `attempt` 0, capped at
 /// [`BACKOFF_CAP_SECS`].
 pub fn backoff_delay(attempt: u32) -> Duration {
@@ -36,11 +40,42 @@ pub enum RestartDecision {
     /// Retry after `delay`; `failures` is how many attempts have
     /// failed since the last healthy session.
     Backoff { delay: Duration, failures: u32 },
+    /// `cap` is tripped: the child is unhealthy, and is retried after
+    /// `delay`, [`SLOW_RETRY_INTERVAL`].
+    SlowRetry { delay: Duration, cap: RestartCap },
+}
+
+impl RestartDecision {
+    /// How long to wait before the restart.
+    pub fn delay(self) -> Duration {
+        match self {
+            Self::Backoff { delay, .. } | Self::SlowRetry { delay, .. } => delay,
+        }
+    }
+}
+
+/// The restart limit a child ran into. Displays as a predicate, such as
+/// "failed 5 times in a row".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartCap {
     /// [`MAX_CONSECUTIVE_FAILURES`] attempts in a row failed.
-    ConsecutiveCapReached { failures: u32 },
+    ConsecutiveFailures { failures: u32 },
     /// The rolling window is saturated even though individual sessions
     /// may have been long enough to reset the consecutive counter.
-    WindowCapReached { restarts: usize },
+    RestartWindow { restarts: usize },
+}
+
+impl fmt::Display for RestartCap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConsecutiveFailures { failures } => write!(f, "failed {failures} times in a row"),
+            Self::RestartWindow { restarts } => write!(
+                f,
+                "restarted {restarts} times in {} minutes",
+                RESTART_WINDOW.as_secs() / 60
+            ),
+        }
+    }
 }
 
 /// Restart accounting for one supervised child: consecutive failed
@@ -68,7 +103,8 @@ impl RestartPolicy {
         self.consecutive_failures += 1;
     }
 
-    /// Register the restart about to be made and decide its delay.
+    /// Register the restart about to be made and decide its delay. A
+    /// tripped cap slows restarts down; it never stops them.
     pub fn next_restart(&mut self, now: Instant) -> RestartDecision {
         while let Some(&oldest) = self.restarts.front() {
             if now.duration_since(oldest) > RESTART_WINDOW {
@@ -79,19 +115,29 @@ impl RestartPolicy {
         }
         self.restarts.push_back(now);
 
-        if self.restarts.len() >= MAX_RESTARTS_PER_WINDOW {
-            RestartDecision::WindowCapReached {
-                restarts: self.restarts.len(),
-            }
-        } else if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-            RestartDecision::ConsecutiveCapReached {
-                failures: self.consecutive_failures,
-            }
-        } else {
-            RestartDecision::Backoff {
+        match self.tripped_cap() {
+            Some(cap) => RestartDecision::SlowRetry {
+                delay: SLOW_RETRY_INTERVAL,
+                cap,
+            },
+            None => RestartDecision::Backoff {
                 delay: backoff_delay(self.consecutive_failures.saturating_sub(1)),
                 failures: self.consecutive_failures,
-            }
+            },
+        }
+    }
+
+    fn tripped_cap(&self) -> Option<RestartCap> {
+        if self.restarts.len() >= MAX_RESTARTS_PER_WINDOW {
+            Some(RestartCap::RestartWindow {
+                restarts: self.restarts.len(),
+            })
+        } else if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            Some(RestartCap::ConsecutiveFailures {
+                failures: self.consecutive_failures,
+            })
+        } else {
+            None
         }
     }
 }
@@ -113,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn init_then_immediate_death_backs_off_and_parks() {
+    fn init_then_immediate_death_backs_off_then_retries_slowly() {
         let t0 = Instant::now();
         let mut policy = RestartPolicy::default();
         let mut delays = Vec::new();
@@ -122,7 +168,9 @@ mod tests {
             policy.record_session_end(Duration::from_millis(200));
             match policy.next_restart(t0 + Duration::from_secs(u64::from(i))) {
                 RestartDecision::Backoff { delay, .. } => delays.push(delay),
-                other => panic!("attempt {i}: unexpected {other:?}"),
+                slow @ RestartDecision::SlowRetry { .. } => {
+                    panic!("attempt {i}: unexpected {slow:?}")
+                }
             }
         }
         assert_eq!(
@@ -136,10 +184,19 @@ mod tests {
         policy.record_session_end(Duration::from_millis(200));
         assert_eq!(
             policy.next_restart(t0 + Duration::from_secs(60)),
-            RestartDecision::ConsecutiveCapReached {
-                failures: MAX_CONSECUTIVE_FAILURES
+            RestartDecision::SlowRetry {
+                delay: SLOW_RETRY_INTERVAL,
+                cap: RestartCap::ConsecutiveFailures {
+                    failures: MAX_CONSECUTIVE_FAILURES
+                }
             }
         );
+
+        policy.record_session_end(Duration::from_secs(MIN_HEALTHY_SECONDS));
+        assert!(matches!(
+            policy.next_restart(t0 + Duration::from_secs(60) + SLOW_RETRY_INTERVAL),
+            RestartDecision::Backoff { failures: 0, .. }
+        ));
     }
 
     #[test]
@@ -168,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn rolling_window_parks_a_child_that_crashes_after_each_healthy_session() {
+    fn rolling_window_slows_a_child_that_crashes_after_each_healthy_session() {
         let t0 = Instant::now();
         let mut policy = RestartPolicy::default();
         let healthy = Duration::from_secs(MIN_HEALTHY_SECONDS + 5);
@@ -187,8 +244,11 @@ mod tests {
         let at = t0 + healthy * window;
         assert_eq!(
             policy.next_restart(at),
-            RestartDecision::WindowCapReached {
-                restarts: MAX_RESTARTS_PER_WINDOW
+            RestartDecision::SlowRetry {
+                delay: SLOW_RETRY_INTERVAL,
+                cap: RestartCap::RestartWindow {
+                    restarts: MAX_RESTARTS_PER_WINDOW
+                }
             }
         );
     }

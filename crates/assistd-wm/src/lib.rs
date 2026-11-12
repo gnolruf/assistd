@@ -452,8 +452,8 @@ impl WindowManager for NoWindowManager {
 }
 
 /// Start the backend for `compositor` with its reconnecting supervisor.
-/// A compositor with no backend in this build, or one refusing the first
-/// connect, yields [`NoWindowManager`] and no handle.
+/// A compositor with no backend in this build yields [`NoWindowManager`]
+/// and no handle; one that cannot be reached yet starts disconnected.
 pub async fn start(
     compositor: Compositor,
     shutdown: watch::Receiver<bool>,

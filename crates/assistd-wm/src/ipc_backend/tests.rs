@@ -91,7 +91,7 @@ async fn is_connected_tracks_disconnect_and_reconnect() {
     let protocol = FakeProtocol {
         connections: Mutex::new(connections_rx),
     };
-    let (backend, supervisor) = IpcBackend::start(protocol, shutdown_rx).await.unwrap();
+    let (backend, supervisor) = IpcBackend::start(protocol, shutdown_rx).await;
     assert!(backend.is_connected());
 
     drop(events_tx);
@@ -130,7 +130,7 @@ async fn unanswered_connect_starts_disconnected_and_shutdown_interrupts_reconnec
     let protocol = FakeProtocol {
         connections: Mutex::new(connections_rx),
     };
-    let (backend, supervisor) = IpcBackend::start(protocol, shutdown_rx).await.unwrap();
+    let (backend, supervisor) = IpcBackend::start(protocol, shutdown_rx).await;
     assert!(!backend.is_connected());
 
     let (events_tx, events_rx) = mpsc::unbounded_channel();
