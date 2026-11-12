@@ -69,8 +69,8 @@ impl TranscriptStore for RecordingStore {
         self.arrive(m).await
     }
 
-    async fn end_session(&self, _s: SessionId) -> assistd_memory::Result<()> {
-        Ok(())
+    async fn begin_active_session(&self, _s: SessionId) -> assistd_memory::Result<BranchId> {
+        Ok(BranchId(0))
     }
     async fn begin_turn(
         &self,
@@ -88,7 +88,10 @@ impl TranscriptStore for RecordingStore {
     ) -> assistd_memory::Result<BranchId> {
         Ok(BranchId(0))
     }
-    async fn set_current_branch(&self, _s: SessionId, _b: BranchId) -> assistd_memory::Result<()> {
+    async fn activate_branch(&self, _s: SessionId, _b: BranchId) -> assistd_memory::Result<()> {
+        Ok(())
+    }
+    async fn clear_active_session(&self) -> assistd_memory::Result<()> {
         Ok(())
     }
     async fn current_branch(&self, _s: SessionId) -> assistd_memory::Result<Option<BranchId>> {
@@ -169,7 +172,7 @@ impl TranscriptStore for RecordingStore {
     async fn undo_last_turn(&self, _b: BranchId) -> assistd_memory::Result<UndoOutcome> {
         Ok(UndoOutcome::default())
     }
-    async fn find_resumable_session(&self) -> assistd_memory::Result<Option<ResumeCandidate>> {
+    async fn active_session(&self) -> assistd_memory::Result<Option<ResumeCandidate>> {
         Ok(None)
     }
     async fn session_title(&self, _s: SessionId) -> assistd_memory::Result<Option<String>> {

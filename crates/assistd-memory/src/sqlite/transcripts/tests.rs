@@ -388,20 +388,41 @@ async fn resolve_branch_prefers_given_session_or_qualified_prefix() {
 }
 
 #[tokio::test]
-async fn find_resumable_session_returns_unended() {
+async fn the_active_session_follows_every_switch_not_session_age() {
     let (store, _temp) = fresh_store().await;
-    let s = SessionId::new();
-    let branch = store.begin_session_with_main_branch(s).await.unwrap();
-    let cand = store
-        .find_resumable_session()
-        .await
-        .unwrap()
-        .expect("unended session is resumable");
-    assert_eq!(cand.session_id, s);
-    assert_eq!(cand.current_branch_id, branch);
+    let active = |session_id, current_branch_id| {
+        Some(ResumeCandidate {
+            session_id,
+            current_branch_id,
+        })
+    };
+    assert_eq!(store.active_session().await.unwrap(), None);
 
-    store.end_session(s).await.unwrap();
-    assert_eq!(store.find_resumable_session().await.unwrap(), None);
+    let older = SessionId::new();
+    let older_main = store.begin_active_session(older).await.unwrap();
+    let newer = SessionId::new();
+    let newer_main = store.begin_active_session(newer).await.unwrap();
+    assert_eq!(
+        store.active_session().await.unwrap(),
+        active(newer, newer_main)
+    );
+
+    store.activate_branch(older, older_main).await.unwrap();
+    let background = SessionId::new();
+    store
+        .begin_session_with_main_branch(background)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.active_session().await.unwrap(),
+        active(older, older_main)
+    );
+
+    let fork = store.fork_and_switch(older_main, "alt").await.unwrap();
+    assert_eq!(store.active_session().await.unwrap(), active(older, fork));
+
+    store.clear_active_session().await.unwrap();
+    assert_eq!(store.active_session().await.unwrap(), None);
 }
 
 fn relay_plan() -> Vec<PersistedRelayStep> {

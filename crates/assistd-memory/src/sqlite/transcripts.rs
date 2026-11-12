@@ -21,7 +21,7 @@ use crate::{
 
 use super::connection::{Erasing, SqliteHandle};
 use super::tasks::run_state_at;
-use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
+use super::timestamp::{now_millis, timestamp_at};
 
 mod relays;
 
@@ -34,7 +34,6 @@ const BRANCH_INFO_SELECT: &str = "
     SELECT  b.id,
             s.uuid,
             s.started_at,
-            s.ended_at,
             s.title,
             b.name,
             b.parent_branch_id,
@@ -55,7 +54,7 @@ const BRANCH_INFO_SELECT: &str = "
             r.suspend_reason,
             r.failure
     FROM branches b JOIN sessions s ON s.id = b.session_id
-    LEFT JOIN task_runs r ON r.session_uuid = s.uuid
+    LEFT JOIN task_runs r ON r.id = s.task_run_id
     LEFT JOIN tasks t ON t.id = r.task_id";
 
 /// SQLite-backed [`TranscriptStore`].
@@ -103,18 +102,15 @@ impl SqliteTranscriptStore {
 
 #[async_trait]
 impl TranscriptStore for SqliteTranscriptStore {
-    async fn end_session(&self, session: SessionId) -> Result<()> {
-        let ended = now_millis();
-        let updated = self
-            .handle
-            .write("end_session", move |tx| {
-                tx.execute(
-                    "UPDATE sessions SET ended_at = ?1 WHERE uuid = ?2",
-                    rusqlite::params![ended, session],
-                )
+    async fn begin_active_session(&self, session: SessionId) -> Result<BranchId> {
+        let started = now_millis();
+        self.handle
+            .write("begin_active_session", move |tx| {
+                let branch = insert_session_with_main_branch(tx, session, started)?;
+                mark_session_active(tx, session)?;
+                Ok(branch)
             })
-            .await?;
-        session_updated(updated, session)
+            .await
     }
 
     async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn> {
@@ -139,38 +135,34 @@ impl TranscriptStore for SqliteTranscriptStore {
         let started = now_millis();
         self.handle
             .write("begin_session_with_main_branch", move |tx| {
-                let session_rowid: i64 = tx.query_row(
-                    "INSERT INTO sessions (uuid, started_at) VALUES (?1, ?2) RETURNING id",
-                    rusqlite::params![session, started],
-                    |r| r.get(0),
-                )?;
-                let branch_id: BranchId = tx.query_row(
-                    "INSERT INTO branches (session_id, name, created_at) VALUES (?1, 'main', ?2)
-                     RETURNING id",
-                    rusqlite::params![session_rowid, started],
-                    |r| r.get(0),
-                )?;
-                tx.execute(
-                    "UPDATE sessions SET current_branch_id = ?1 WHERE id = ?2",
-                    rusqlite::params![branch_id, session_rowid],
-                )?;
-                Ok(branch_id)
+                insert_session_with_main_branch(tx, session, started)
             })
             .await
     }
 
-    async fn set_current_branch(&self, session: SessionId, branch: BranchId) -> Result<()> {
+    async fn activate_branch(&self, session: SessionId, branch: BranchId) -> Result<()> {
         let updated = self
             .handle
             .try_write(move |tx| {
-                tx.execute(
+                let updated = tx.execute(
                     "UPDATE sessions SET current_branch_id = ?1 WHERE uuid = ?2",
                     rusqlite::params![branch, session],
-                )
+                )?;
+                mark_session_active(tx, session)?;
+                Ok(updated)
             })
             .await
-            .map_err(|e| set_current_branch_error(e, branch))?;
+            .map_err(|e| activate_branch_error(e, branch))?;
         session_updated(updated, session)
+    }
+
+    async fn clear_active_session(&self) -> Result<()> {
+        self.handle
+            .write("clear_active_session", |tx| {
+                tx.execute("DELETE FROM active_session", [])
+            })
+            .await
+            .map(drop)
     }
 
     async fn current_branch(&self, session: SessionId) -> Result<Option<BranchId>> {
@@ -449,21 +441,18 @@ impl TranscriptStore for SqliteTranscriptStore {
             .await
     }
 
-    async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
+    async fn active_session(&self) -> Result<Option<ResumeCandidate>> {
         self.handle
-            .read("find_resumable_session", |c| {
+            .read("active_session", |c| {
                 c.query_row(
-                    "SELECT uuid, current_branch_id, started_at
-                     FROM sessions s
-                     WHERE ended_at IS NULL AND current_branch_id IS NOT NULL
-                       AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.session_uuid = s.uuid)
-                     ORDER BY started_at DESC LIMIT 1",
+                    "SELECT s.uuid, s.current_branch_id
+                     FROM active_session a JOIN sessions s ON s.id = a.session_id
+                     WHERE s.current_branch_id IS NOT NULL",
                     [],
                     |r| {
                         Ok(ResumeCandidate {
                             session_id: r.get(0)?,
                             current_branch_id: r.get(1)?,
-                            started_at: timestamp_at(r, 2)?,
                         })
                     },
                 )
@@ -579,6 +568,41 @@ impl MessageColumns {
             },
         }
     }
+}
+
+/// Insert `session`, started at `started`, with a `main` branch as its current one.
+fn insert_session_with_main_branch(
+    tx: &Transaction<'_>,
+    session: SessionId,
+    started: i64,
+) -> rusqlite::Result<BranchId> {
+    let session_rowid: i64 = tx.query_row(
+        "INSERT INTO sessions (uuid, started_at) VALUES (?1, ?2) RETURNING id",
+        rusqlite::params![session, started],
+        |r| r.get(0),
+    )?;
+    let branch: BranchId = tx.query_row(
+        "INSERT INTO branches (session_id, name, created_at) VALUES (?1, 'main', ?2)
+         RETURNING id",
+        rusqlite::params![session_rowid, started],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        "UPDATE sessions SET current_branch_id = ?1 WHERE id = ?2",
+        rusqlite::params![branch, session_rowid],
+    )?;
+    Ok(branch)
+}
+
+/// Point `active_session` at `session`; a missing session leaves it as it was.
+fn mark_session_active(tx: &Transaction<'_>, session: SessionId) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO active_session (id, session_id)
+         SELECT 0, id FROM sessions WHERE uuid = ?1
+         ON CONFLICT (id) DO UPDATE SET session_id = excluded.session_id",
+        rusqlite::params![session],
+    )?;
+    Ok(())
 }
 
 /// Take `branch`'s next `seq`.
@@ -738,14 +762,14 @@ fn turn_updated(updated: usize, turn: TurnId) -> Result<()> {
 
 /// Map a failed switch to `branch` to its typed error; the foreign key rejects a
 /// branch outside the session.
-fn set_current_branch_error(error: tokio_rusqlite::Error, branch: BranchId) -> MemoryError {
+fn activate_branch_error(error: tokio_rusqlite::Error, branch: BranchId) -> MemoryError {
     match &error {
         tokio_rusqlite::Error::Error(rusqlite::Error::SqliteFailure(failure, _))
             if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
         {
             MemoryError::BranchNotFound(branch)
         }
-        _ => MemoryError::sqlite("set_current_branch")(error),
+        _ => MemoryError::sqlite("activate_branch")(error),
     }
 }
 
@@ -876,17 +900,16 @@ fn branch_info(row: &Row<'_>) -> rusqlite::Result<BranchInfo> {
         branch_id: row.get(0)?,
         session_id: row.get(1)?,
         session_started_at: timestamp_at(row, 2)?,
-        session_ended_at: optional_timestamp_at(row, 3)?,
-        session_title: row.get(4)?,
-        name: row.get(5)?,
-        parent_branch_id: row.get(6)?,
-        parent_branch_name: row.get(7)?,
-        fork_point_seq: row.get(8)?,
-        created_at: timestamp_at(row, 9)?,
-        message_count: row.get(10)?,
-        is_current_in_session: row.get(11)?,
-        last_active_at: timestamp_at(row, 12)?,
-        task_run: task_run_at(row, 13)?,
+        session_title: row.get(3)?,
+        name: row.get(4)?,
+        parent_branch_id: row.get(5)?,
+        parent_branch_name: row.get(6)?,
+        fork_point_seq: row.get(7)?,
+        created_at: timestamp_at(row, 8)?,
+        message_count: row.get(9)?,
+        is_current_in_session: row.get(10)?,
+        last_active_at: timestamp_at(row, 11)?,
+        task_run: task_run_at(row, 12)?,
     })
 }
 

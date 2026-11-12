@@ -39,8 +39,6 @@ async fn turn_persists_across_store_reopen() {
             .await
             .unwrap();
 
-        convs.end_session(session).await.unwrap();
-
         mems.save("fact:lang", "rust".into()).await.unwrap();
 
         handle.close().await.unwrap();

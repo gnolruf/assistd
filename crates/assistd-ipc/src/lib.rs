@@ -1039,7 +1039,6 @@ pub enum EventBody {
         branch_id: i64,
         session_id: String,
         session_started_at: String,
-        session_ended_at: Option<String>,
         #[serde(default)]
         session_title: Option<String>,
         name: String,

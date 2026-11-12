@@ -150,7 +150,6 @@ pub struct BranchInfo {
     pub branch_id: BranchId,
     pub session_id: SessionId,
     pub session_started_at: DateTime<Utc>,
-    pub session_ended_at: Option<DateTime<Utc>>,
     pub session_title: Option<String>,
     pub name: String,
     pub parent_branch_id: Option<BranchId>,
@@ -245,12 +244,11 @@ pub struct UndoOutcome {
     pub released_answer_files: Vec<PathBuf>,
 }
 
-/// Candidate returned by [`TranscriptStore::find_resumable_session`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The session [`TranscriptStore::active_session`] found, and its current branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResumeCandidate {
     pub session_id: SessionId,
     pub current_branch_id: BranchId,
-    pub started_at: DateTime<Utc>,
 }
 
 /// Persistence for session transcripts.
@@ -259,20 +257,23 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// Atomically insert `session` and create its `main` branch.
     async fn begin_session_with_main_branch(&self, session: SessionId) -> Result<BranchId>;
 
-    /// Mark `session` as ended by stamping `ended_at`. Errors with
-    /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound) when
-    /// `session` was never saved.
-    async fn end_session(&self, session: SessionId) -> Result<()>;
+    /// [`begin_session_with_main_branch`](Self::begin_session_with_main_branch), also
+    /// making `session` the active session, in one transaction.
+    async fn begin_active_session(&self, session: SessionId) -> Result<BranchId>;
 
     /// Open a new turn in `branch`'s session and append `prompt` to `branch` as its
     /// first message, as [`append_message_to_branch`](Self::append_message_to_branch)
     /// does, in one transaction.
     async fn begin_turn(&self, branch: BranchId, prompt: PersistedMessage) -> Result<OpenedTurn>;
 
-    /// Make `branch` the current branch of `session`. Errors with
+    /// Make `branch` the current branch of `session` and `session` the active session, in
+    /// one transaction. Errors with
     /// [`MemoryError::SessionNotFound`](crate::MemoryError::SessionNotFound), or
     /// [`MemoryError::BranchNotFound`](crate::MemoryError::BranchNotFound) for another session's.
-    async fn set_current_branch(&self, session: SessionId, branch: BranchId) -> Result<()>;
+    async fn activate_branch(&self, session: SessionId, branch: BranchId) -> Result<()>;
+
+    /// Record that no saved session is active.
+    async fn clear_active_session(&self) -> Result<()>;
 
     /// Read the current branch pointer for `session`, if any.
     async fn current_branch(&self, session: SessionId) -> Result<Option<BranchId>>;
@@ -347,8 +348,9 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     /// no other branch references them.
     async fn undo_last_turn(&self, branch: BranchId) -> Result<UndoOutcome>;
 
-    /// The newest unended session with a current branch that holds no task run.
-    async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>>;
+    /// The session last made active and its current branch; `None` once it was cleared
+    /// or the session deleted.
+    async fn active_session(&self) -> Result<Option<ResumeCandidate>>;
 
     /// Current `sessions.title`, or `None` when none has been set.
     async fn session_title(&self, session: SessionId) -> Result<Option<String>>;
@@ -370,8 +372,8 @@ impl TranscriptStore for NoTranscriptStore {
         Ok(BranchId(0))
     }
 
-    async fn end_session(&self, _session: SessionId) -> Result<()> {
-        Ok(())
+    async fn begin_active_session(&self, _session: SessionId) -> Result<BranchId> {
+        Ok(BranchId(0))
     }
 
     async fn begin_turn(&self, _branch: BranchId, _prompt: PersistedMessage) -> Result<OpenedTurn> {
@@ -385,7 +387,11 @@ impl TranscriptStore for NoTranscriptStore {
         })
     }
 
-    async fn set_current_branch(&self, _session: SessionId, _branch: BranchId) -> Result<()> {
+    async fn activate_branch(&self, _session: SessionId, _branch: BranchId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn clear_active_session(&self) -> Result<()> {
         Ok(())
     }
 
@@ -475,7 +481,7 @@ impl TranscriptStore for NoTranscriptStore {
         Ok(UndoOutcome::default())
     }
 
-    async fn find_resumable_session(&self) -> Result<Option<ResumeCandidate>> {
+    async fn active_session(&self) -> Result<Option<ResumeCandidate>> {
         Ok(None)
     }
 

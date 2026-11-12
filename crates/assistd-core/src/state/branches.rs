@@ -120,7 +120,6 @@ impl BranchService {
                         branch_id: branch.branch_id.0,
                         session_id: branch.session_id.to_string(),
                         session_started_at: wire_timestamp(branch.session_started_at),
-                        session_ended_at: branch.session_ended_at.map(wire_timestamp),
                         session_title: branch.session_title,
                         name: branch.name,
                         parent_branch_name: branch.parent_branch_name,
@@ -256,7 +255,7 @@ impl BranchService {
             .ok_or(DispatchError::UnknownBranch(target))?;
 
         self.transcripts
-            .set_current_branch(target_session, target_branch)
+            .activate_branch(target_session, target_branch)
             .await
             .context("/resume: failed to update current branch")?;
         self.session_ctx
@@ -469,6 +468,13 @@ impl BranchService {
     /// branch are inserted with its first message.
     async fn begin_unsaved_session(&self, id: String, tx: &EventSink, label: &str) {
         let new_session = SessionId::new();
+        if let Err(e) = self.transcripts.clear_active_session().await {
+            warn!(
+                target: "assistd::memory",
+                error = %e,
+                "clear_active_session failed during {label}; a restart resumes the session left"
+            );
+        }
         self.session_ctx.replace(new_session, None).await;
         let empty = HistoryReplay::default();
         self.transcript.user_ledger.invalidate();

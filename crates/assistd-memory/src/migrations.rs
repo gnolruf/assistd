@@ -458,6 +458,24 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_root ON documents(root_id);
 ";
 
+/// V19: the session the user's conversation is on is the one `active_session` row, in
+/// place of sessions being open or ended, and a task run's session names its run.
+const V19_SQL: &str = r"
+DROP INDEX idx_sessions_resumable;
+ALTER TABLE sessions DROP COLUMN ended_at;
+ALTER TABLE sessions ADD COLUMN task_run_id INTEGER REFERENCES task_runs(id) ON DELETE SET NULL;
+UPDATE sessions
+    SET task_run_id = (SELECT r.id FROM task_runs r WHERE r.session_uuid = sessions.uuid);
+CREATE INDEX idx_sessions_task_run ON sessions(task_run_id);
+DROP INDEX idx_task_runs_session;
+ALTER TABLE task_runs DROP COLUMN session_uuid;
+
+CREATE TABLE active_session (
+    id         INTEGER PRIMARY KEY CHECK (id = 0),
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -479,6 +497,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V16_SQL),
         M::up(V17_SQL),
         M::up(V18_SQL),
+        M::up(V19_SQL),
     ])
 }
 
@@ -505,6 +524,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
     }
 }
