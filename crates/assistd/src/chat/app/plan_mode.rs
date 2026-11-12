@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use super::App;
+use crate::chat::selection::Selection;
 
 /// What this chat's messages do; Shift+Tab cycles it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +32,7 @@ pub(in crate::chat) struct PlanReview {
     review_id: String,
     pub choices: Vec<PlanChoice>,
     /// Index into `choices`.
-    pub selected: usize,
+    pub selected: Selection,
     /// What to change, typed on the keep-planning row.
     pub feedback: String,
 }
@@ -50,13 +51,13 @@ impl PlanReview {
         Self {
             review_id,
             choices,
-            selected: 0,
+            selected: Selection::default(),
             feedback: String::new(),
         }
     }
 
     fn select_feedback_row(&mut self) {
-        self.selected = self.choices.len() - 1;
+        self.selected = Selection::at(self.choices.len() - 1);
     }
 
     /// The answer `choice` gives, with the feedback typed when it keeps planning.
@@ -124,19 +125,19 @@ impl App {
         let Some(review) = self.plan_review.as_mut() else {
             return;
         };
-        let on_feedback_row = review.selected + 1 == review.choices.len();
+        let on_feedback_row = review.selected.index() + 1 == review.choices.len();
         let answer = match ev.code {
             KeyCode::Esc => Some(PlanChoice::KeepPlanning),
             KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(PlanChoice::KeepPlanning)
             }
-            KeyCode::Enter => review.choices.get(review.selected).copied(),
+            KeyCode::Enter => review.choices.get(review.selected.index()).copied(),
             KeyCode::Up => {
-                review.selected = review.selected.saturating_sub(1);
+                review.selected.previous();
                 None
             }
             KeyCode::Down => {
-                review.selected = (review.selected + 1).min(review.choices.len() - 1);
+                review.selected.next(review.choices.len());
                 None
             }
             KeyCode::Backspace if on_feedback_row => {

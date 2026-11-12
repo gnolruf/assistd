@@ -14,7 +14,7 @@ use crate::defaults::{
     DEFAULT_WAKEWORD_SILENCE_MS, DEFAULT_WAKEWORD_START_ON_LAUNCH, DEFAULT_WAKEWORD_THRESHOLD,
 };
 use crate::errors::UnitIntervalError;
-use crate::settings::{DescribeSettings, describe_fields};
+use crate::settings::{DescribeSettings, choice_setting, describe_fields};
 
 /// Voice input and output settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -253,6 +253,11 @@ pub enum VoiceFamily {
     /// it; words missing from the lexicon are skipped.
     Kokoro,
 }
+
+choice_setting!(VoiceFamily {
+    Vits => "vits",
+    Kokoro => "kokoro",
+});
 
 /// Text-to-speech settings: a sherpa-onnx voice.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

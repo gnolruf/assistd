@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use assistd_ipc::{PresenceTarget, Request};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -134,18 +135,18 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Commands::Daemon(args) => daemon::run(args).await,
         Commands::InitConfig => daemon::init_config(),
         Commands::Query(args) => query::run(args).await,
-        Commands::Sleep => presence::run(presence::PresenceAction::Sleep).await,
-        Commands::Drowse => presence::run(presence::PresenceAction::Drowse).await,
-        Commands::Wake => presence::run(presence::PresenceAction::Wake).await,
-        Commands::PttStart => ptt::run(ptt::PttAction::Start).await,
-        Commands::PttStop => ptt::run(ptt::PttAction::Stop).await,
-        Commands::ListenStart => listen::run(listen::ListenAction::Start).await,
-        Commands::ListenStop => listen::run(listen::ListenAction::Stop).await,
-        Commands::ListenToggle => listen::run(listen::ListenAction::Toggle).await,
-        Commands::ListenState => listen::run(listen::ListenAction::State).await,
-        Commands::VoiceToggle => voice_ctl::run(voice_ctl::VoiceCtlAction::Toggle).await,
-        Commands::VoiceSkip => voice_ctl::run(voice_ctl::VoiceCtlAction::Skip).await,
-        Commands::VoiceState => voice_ctl::run(voice_ctl::VoiceCtlAction::State).await,
+        Commands::Sleep => presence::run(PresenceTarget::Sleeping).await,
+        Commands::Drowse => presence::run(PresenceTarget::Drowsy).await,
+        Commands::Wake => presence::run(PresenceTarget::Active).await,
+        Commands::PttStart => ptt::run(|id| Request::PttStart { id }).await,
+        Commands::PttStop => ptt::run(|id| Request::PttStop { id }).await,
+        Commands::ListenStart => listen::run(|id| Request::ListenStart { id }).await,
+        Commands::ListenStop => listen::run(|id| Request::ListenStop { id }).await,
+        Commands::ListenToggle => listen::run(|id| Request::ListenToggle { id }).await,
+        Commands::ListenState => listen::run(|id| Request::GetListenState { id }).await,
+        Commands::VoiceToggle => voice_ctl::run(|id| Request::VoiceToggle { id }).await,
+        Commands::VoiceSkip => voice_ctl::run(|id| Request::VoiceSkip { id }).await,
+        Commands::VoiceState => voice_ctl::run(|id| Request::GetVoiceState { id }).await,
         #[cfg(feature = "chat")]
         Commands::Chat(args) => chat::run(args).await,
         #[cfg(feature = "chat")]

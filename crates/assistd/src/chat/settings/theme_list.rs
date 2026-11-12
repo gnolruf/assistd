@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use assistd_config::ThemeConfig;
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::panel::{EditAction, EditorShape, TextEditor};
+use super::super::selection::Selection;
+use super::super::text_editor::{EditAction, EditorShape, TextEditor};
 
 /// What the panel should do after a key in the theme list.
 pub(crate) enum ThemeListAction {
@@ -44,7 +45,7 @@ pub(crate) enum ThemeListState {
 pub(crate) struct ThemeList {
     entries: Vec<ThemeEntry>,
     /// Index into `entries`; their count selects the save row.
-    selected: usize,
+    selected: Selection,
     state: ThemeListState,
 }
 
@@ -66,7 +67,7 @@ impl ThemeList {
         let entries: Vec<ThemeEntry> = built_in.chain(saved).collect();
         let selected = active
             .and_then(|active| entries.iter().position(|entry| entry.name == active))
-            .unwrap_or(0);
+            .map_or_else(Selection::default, Selection::at);
         Self {
             entries,
             selected,
@@ -79,7 +80,7 @@ impl ThemeList {
     }
 
     pub(crate) fn selected(&self) -> usize {
-        self.selected
+        self.selected.index()
     }
 
     pub(crate) fn state(&self) -> &ThemeListState {
@@ -88,7 +89,7 @@ impl ThemeList {
 
     /// The selected theme; `None` on the save row.
     pub(crate) fn highlighted(&self) -> Option<&ThemeEntry> {
-        self.entries.get(self.selected)
+        self.entries.get(self.selected.index())
     }
 
     pub(crate) fn on_key(&mut self, ev: KeyEvent) -> ThemeListAction {
@@ -109,12 +110,12 @@ impl ThemeList {
     fn on_browse_key(&mut self, ev: KeyEvent) -> ThemeListAction {
         match (ev.code, self.highlighted()) {
             (KeyCode::Esc, _) => ThemeListAction::Close,
-            (KeyCode::Up | KeyCode::Char('k'), _) if self.selected > 0 => {
-                self.selected -= 1;
+            (KeyCode::Up | KeyCode::Char('k'), _) => {
+                self.selected.previous();
                 ThemeListAction::Changed
             }
-            (KeyCode::Down | KeyCode::Char('j'), _) if self.selected < self.entries.len() => {
-                self.selected += 1;
+            (KeyCode::Down | KeyCode::Char('j'), _) => {
+                self.selected.next(self.entries.len() + 1);
                 ThemeListAction::Changed
             }
             (KeyCode::Enter, Some(entry)) => ThemeListAction::Load {

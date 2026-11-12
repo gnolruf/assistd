@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::{DEFAULT_TASKS_KEPT_RUNS, DEFAULT_TASKS_RESUME_AFTER_IDLE_SECS};
-use crate::settings::{DescribeSettings, describe_fields};
+use crate::settings::{DescribeSettings, choice_setting, describe_fields};
 
 /// What a user message does when a task run holds the model's only lane. With
 /// more than one lane the two run at once and this never applies.
@@ -19,6 +19,12 @@ pub enum TaskInterruption {
     /// The message joins the back of the task queue.
     AfterQueue,
 }
+
+choice_setting!(TaskInterruption {
+    Interrupt => "interrupt",
+    AfterTask => "after_task",
+    AfterQueue => "after_queue",
+});
 
 /// How saved tasks share the model with the user's conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

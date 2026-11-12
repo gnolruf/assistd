@@ -23,9 +23,8 @@ mod preview;
 mod render;
 mod theme_list;
 
-pub(crate) use catalog::ListItem;
 pub(crate) use list_editor::{ListAction, ListEditor};
-pub(crate) use panel::{EditAction, EditorShape, SettingsPanel, TextEditor};
+pub(crate) use panel::SettingsPanel;
 pub(crate) use render::{
     editor_window, list_hint, place_cursor, render_list_editor, render_settings,
     render_wrapped_editor, titled_box,

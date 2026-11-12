@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use assistd_config::{Config, ConfigDocument};
+use assistd_config::{Config, ConfigDocument, SettingKind};
 
 use super::*;
 
@@ -32,7 +32,7 @@ fn sample(kind: SettingKind) -> toml::Value {
 }
 
 #[test]
-fn catalog_lists_every_schema_key_and_only_schema_keys() {
+fn catalog_lists_every_schema_key_and_every_value_kind_is_accepted() {
     let defaults = toml::Table::try_from(Config::default()).unwrap();
     let mut schema_keys = Vec::new();
     collect_leaf_keys(&defaults, "", &mut schema_keys);
@@ -57,9 +57,16 @@ fn catalog_lists_every_schema_key_and_only_schema_keys() {
         let value = document
             .default_value(setting.key)
             .cloned()
-            .unwrap_or_else(|| sample(setting.kind));
-        if let Err(e) = document.set(setting.key, &value) {
-            panic!("{}: {e}", setting.key);
+            .unwrap_or_else(|| sample(setting.kind()));
+        let choices = match setting.kind() {
+            SettingKind::Choice(options) => options,
+            _ => &[],
+        };
+        let values = choices.iter().map(|option| toml::Value::from(*option));
+        for value in values.chain([value]) {
+            if let Err(e) = document.set(setting.key, &value) {
+                panic!("{} = {value}: {e}", setting.key);
+            }
         }
     }
 }

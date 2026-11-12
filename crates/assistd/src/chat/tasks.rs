@@ -12,6 +12,8 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
+use super::selection::Selection;
+
 mod editor;
 mod prompt_box;
 mod queue;
@@ -131,7 +133,7 @@ pub(super) struct TasksPanel {
     listing: Vec<ListedTask>,
     loaded: bool,
     /// Index into the list rows: the tasks, then the new-task row.
-    selected: usize,
+    selected: Selection,
     editor: Option<TaskEditor>,
     outbox: Outbox,
     message: Option<Message>,
@@ -150,7 +152,7 @@ impl TasksPanel {
             tasks: Vec::new(),
             listing: Vec::new(),
             loaded: false,
-            selected: 0,
+            selected: Selection::default(),
             editor: None,
             outbox: Outbox::default(),
             message: None,
@@ -210,8 +212,8 @@ impl TasksPanel {
     }
 
     pub(super) fn selected_row(&self) -> ListRow {
-        if self.selected < self.tasks.len() {
-            ListRow::Task(self.selected)
+        if self.selected.index() < self.tasks.len() {
+            ListRow::Task(self.selected.index())
         } else {
             ListRow::NewTask
         }
@@ -316,8 +318,8 @@ impl TasksPanel {
     fn on_list_key(&mut self, ev: KeyEvent) -> PanelAction {
         match ev.code {
             KeyCode::Esc => return PanelAction::Close,
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected = (self.selected + 1).min(self.tasks.len()),
+            KeyCode::Up => self.selected.previous(),
+            KeyCode::Down => self.selected.next(self.tasks.len() + 1),
             KeyCode::Enter => self.open_selected(),
             KeyCode::Char(' ') => self.toggle_selected(),
             KeyCode::Char('r') => self.run_selected(),
@@ -358,9 +360,9 @@ impl TasksPanel {
         let Some(last) = self.tasks.len().checked_sub(1) else {
             return;
         };
-        let at = self.selected.min(last);
-        self.selected = at.saturating_add_signed(by).min(last);
-        if self.selected != at || self.runs.task().is_none() {
+        let at = self.selected.index().min(last);
+        self.selected = Selection::at(at.saturating_add_signed(by).min(last));
+        if self.selected.index() != at || self.runs.task().is_none() {
             self.request_runs();
         }
     }
@@ -511,7 +513,7 @@ impl TasksPanel {
             PendingOp::List => {
                 self.tasks = std::mem::take(&mut self.listing);
                 self.loaded = true;
-                self.selected = self.selected.min(self.tasks.len());
+                self.selected.clamp(self.tasks.len() + 1);
                 if self.tab == PanelTab::Runs {
                     self.request_runs();
                 }
@@ -528,7 +530,7 @@ impl TasksPanel {
             }
             PendingOp::Delete(task) => {
                 self.tasks.retain(|listed| listed.id != task);
-                self.selected = self.selected.min(self.tasks.len());
+                self.selected.clamp(self.tasks.len() + 1);
                 self.message = Some(Message::Info("deleted".into()));
             }
             PendingOp::Runs => self.runs.finish(request),

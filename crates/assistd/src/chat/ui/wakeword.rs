@@ -82,7 +82,7 @@ pub(super) fn render_wake_word_panel(
     panel: &WakeWordPanel,
     theme: &Theme,
 ) {
-    let accent = Style::default().fg(theme.accent);
+    let accent = theme.accent_style();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent)
@@ -131,11 +131,11 @@ fn status_body(status: &StatusState, theme: &Theme) -> Vec<Line<'static>> {
         Line::default(),
         Line::styled(
             "Change it as voice.wakeword.phrase in /settings, then restart the daemon.",
-            dim(theme),
+            theme.meta_style(),
         ),
         Line::styled(
             "Press Enter to say it and see whether I'd wake.",
-            dim(theme),
+            theme.meta_style(),
         ),
     ]);
     body
@@ -143,10 +143,10 @@ fn status_body(status: &StatusState, theme: &Theme) -> Vec<Line<'static>> {
 
 fn status_rows(status: &StatusState, theme: &Theme) -> Vec<Line<'static>> {
     match status {
-        StatusState::Loading => vec![Line::styled("Reading the wake word…", dim(theme))],
+        StatusState::Loading => vec![Line::styled("Reading the wake word…", theme.meta_style())],
         StatusState::Failed(message) => vec![Line::styled(
             format!("Couldn't read the wake word: {}", escaped(message)),
-            bad(theme),
+            theme.error_style(),
         )],
         StatusState::Loaded(status) => loaded_status_rows(status, theme),
     }
@@ -168,7 +168,7 @@ fn loaded_status_rows(status: &WakeWordStatus, theme: &Theme) -> Vec<Line<'stati
 }
 
 fn labelled(label: &str, mut value: Vec<Span<'static>>, theme: &Theme) -> Line<'static> {
-    value.insert(0, Span::styled(format!("{label:<12}"), dim(theme)));
+    value.insert(0, Span::styled(format!("{label:<12}"), theme.meta_style()));
     Line::from(value)
 }
 
@@ -244,13 +244,11 @@ fn computer_lines(
             .unwrap_or(art);
         if row == LANE_ROW {
             Line::from(vec![
-                Span::styled(inbound.clone(), Style::default().fg(theme.accent)),
+                Span::styled(inbound.clone(), theme.accent_style()),
                 Span::raw(*art),
                 Span::styled(
                     scene.outbound(),
-                    Style::default()
-                        .fg(theme.success)
-                        .add_modifier(Modifier::BOLD),
+                    theme.success_style().add_modifier(Modifier::BOLD),
                 ),
             ])
         } else {
@@ -280,13 +278,13 @@ fn test_captions(progress: &TestProgress, theme: &Theme) -> Vec<Line<'static>> {
     );
     let mut captions = vec![Line::styled(ask, bold()), Line::default()];
     if progress.results.is_empty() {
-        captions.push(Line::styled("Listening…", dim(theme)));
+        captions.push(Line::styled("Listening…", theme.meta_style()));
     }
     captions.extend(progress.results.iter().map(|&matched| {
         if matched {
-            Line::styled("✓ heard the wake word: I'd wake", good(theme))
+            Line::styled("✓ heard the wake word: I'd wake", theme.success_style())
         } else {
-            Line::styled("✗ heard speech without the wake word", bad(theme))
+            Line::styled("✗ heard speech without the wake word", theme.error_style())
         }
     }));
     captions
@@ -302,16 +300,4 @@ fn escaped(text: &str) -> Cow<'_, str> {
 
 fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
-}
-
-fn dim(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
-}
-
-fn good(theme: &Theme) -> Style {
-    Style::default().fg(theme.success)
-}
-
-fn bad(theme: &Theme) -> Style {
-    Style::default().fg(theme.error)
 }

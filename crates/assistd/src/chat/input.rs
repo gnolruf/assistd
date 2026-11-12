@@ -5,12 +5,15 @@ use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::text_editor::{EditAction, EditorShape, TextEditor};
+
 const HISTORY_CAP: usize = 500;
 
+/// A [`TextEditor`] box with submitted-text history; ↑/↓ move by row inside
+/// multi-line text and recall history from its first and last rows.
 #[derive(Debug)]
 pub(super) struct InputLine {
-    buffer: String,
-    cursor: usize,
+    editor: TextEditor,
     history: VecDeque<String>,
     history_idx: Option<usize>,
     draft: Option<String>,
@@ -35,8 +38,7 @@ impl Default for InputLine {
 impl InputLine {
     pub(super) fn new() -> Self {
         Self {
-            buffer: String::new(),
-            cursor: 0,
+            editor: TextEditor::new(String::new(), EditorShape::Box { wrap_width: 0 }),
             history: VecDeque::new(),
             history_idx: None,
             draft: None,
@@ -44,216 +46,82 @@ impl InputLine {
     }
 
     pub(super) fn buffer(&self) -> &str {
-        &self.buffer
+        self.editor.text()
     }
 
     /// Replace the buffer and put the cursor at the end.
     pub(super) fn set_buffer(&mut self, text: String) {
-        self.cursor = text.len();
-        self.buffer = text;
+        self.editor.set_text(text);
     }
 
     /// Cursor position in characters, not bytes, counting line breaks.
-    pub(super) fn cursor_offset(&self) -> u16 {
-        u16::try_from(self.buffer[..self.cursor].chars().count()).unwrap_or(u16::MAX)
+    pub(super) fn cursor_chars(&self) -> usize {
+        self.editor.cursor_chars()
+    }
+
+    /// Records the columns the buffer wraps at, so ↑/↓ move by the rows on screen.
+    pub(super) fn set_wrap_width(&mut self, width: u16) {
+        self.editor.set_wrap_width(width);
     }
 
     /// Insert pasted text at the cursor, line breaks included.
     pub(super) fn insert_paste(&mut self, text: &str) {
-        let text = normalize_line_breaks(text);
-        self.buffer.insert_str(self.cursor, &text);
-        self.cursor += text.len();
+        self.editor.insert_str(&normalize_line_breaks(text));
     }
 
     pub(super) fn on_key(&mut self, ev: KeyEvent) -> InputAction {
         if !matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return InputAction::None;
         }
-        let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = ev.modifiers.contains(KeyModifiers::ALT);
-
         match ev.code {
-            KeyCode::Char(c) if ctrl => self.on_ctrl_char(c),
-            KeyCode::Char(c) if !alt => {
-                self.insert_char(c);
-                InputAction::None
-            }
-            KeyCode::Backspace => {
-                self.backspace();
-                InputAction::None
-            }
-            KeyCode::Delete => {
-                self.delete_at_cursor();
-                InputAction::None
-            }
-            KeyCode::Left => {
-                self.move_left();
-                InputAction::None
-            }
-            KeyCode::Right => {
-                self.move_right();
-                InputAction::None
-            }
-            KeyCode::Home => {
-                self.cursor = 0;
-                InputAction::None
-            }
-            KeyCode::End => {
-                self.cursor = self.buffer.len();
-                InputAction::None
+            KeyCode::Char(c) if ev.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.on_ctrl_char(c);
             }
             KeyCode::Up => {
-                self.history_prev();
-                InputAction::None
+                if !self.editor.move_row(false) {
+                    self.history_prev();
+                }
             }
             KeyCode::Down => {
-                self.history_next();
-                InputAction::None
+                if !self.editor.move_row(true) {
+                    self.history_next();
+                }
             }
-            KeyCode::Enter
-                if ev
-                    .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-            {
-                self.insert_char('\n');
-                InputAction::None
-            }
-            KeyCode::Enter => self.submit(),
-            KeyCode::Esc => {
-                self.clear();
-                InputAction::None
-            }
-            _ => InputAction::None,
+            _ => match self.editor.on_key(ev) {
+                EditAction::Pending => {}
+                EditAction::Apply => return self.submit(),
+                EditAction::Cancel => self.clear(),
+            },
         }
+        InputAction::None
     }
 
     fn on_ctrl_char(&mut self, c: char) -> InputAction {
         match c.to_ascii_lowercase() {
-            'c' => {
-                if self.buffer.is_empty() {
-                    InputAction::Quit
-                } else {
-                    self.clear();
-                    InputAction::None
-                }
-            }
-            'd' => {
-                if self.buffer.is_empty() {
-                    InputAction::Quit
-                } else {
-                    self.delete_at_cursor();
-                    InputAction::None
-                }
-            }
-            'a' => {
-                self.cursor = 0;
-                InputAction::None
-            }
-            'e' => {
-                self.cursor = self.buffer.len();
-                InputAction::None
-            }
-            'k' => {
-                self.buffer.truncate(self.cursor);
-                InputAction::None
-            }
-            'u' => {
-                self.buffer.drain(..self.cursor);
-                self.cursor = 0;
-                InputAction::None
-            }
-            'w' => {
-                self.kill_word_back();
-                InputAction::None
-            }
-            'b' => {
-                self.move_left();
-                InputAction::None
-            }
-            'f' => {
-                self.move_right();
-                InputAction::None
-            }
-            'h' => {
-                self.backspace();
-                InputAction::None
-            }
-            _ => InputAction::None,
+            'c' | 'd' if self.buffer().is_empty() => return InputAction::Quit,
+            'c' => self.clear(),
+            'd' => self.editor.delete(),
+            'a' => self.editor.move_to_start(),
+            'e' => self.editor.move_to_end(),
+            'k' => self.editor.kill_to_end(),
+            'u' => self.editor.kill_to_start(),
+            'w' => self.editor.kill_word_back(),
+            'b' => self.editor.move_left(),
+            'f' => self.editor.move_right(),
+            'h' => self.editor.backspace(),
+            _ => {}
         }
-    }
-
-    fn insert_char(&mut self, c: char) {
-        self.buffer.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-    }
-
-    fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = self.buffer[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(i, _)| i);
-        self.buffer.drain(prev..self.cursor);
-        self.cursor = prev;
-    }
-
-    fn delete_at_cursor(&mut self) {
-        if self.cursor == self.buffer.len() {
-            return;
-        }
-        if let Some((_, ch)) = self.buffer[self.cursor..].char_indices().next() {
-            let end = self.cursor + ch.len_utf8();
-            self.buffer.drain(self.cursor..end);
-        }
-    }
-
-    fn move_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        self.cursor = self.buffer[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(i, _)| i);
-    }
-
-    fn move_right(&mut self) {
-        if self.cursor == self.buffer.len() {
-            return;
-        }
-        if let Some((_, ch)) = self.buffer[self.cursor..].char_indices().next() {
-            self.cursor += ch.len_utf8();
-        }
-    }
-
-    fn kill_word_back(&mut self) {
-        let chars: Vec<(usize, char)> = self.buffer[..self.cursor].char_indices().collect();
-        let mut n = chars.len();
-        while n > 0 && chars[n - 1].1.is_whitespace() {
-            n -= 1;
-        }
-        while n > 0 && !chars[n - 1].1.is_whitespace() {
-            n -= 1;
-        }
-        let Some(&(new_cursor, _)) = chars.get(n) else {
-            return;
-        };
-        self.buffer.drain(new_cursor..self.cursor);
-        self.cursor = new_cursor;
+        InputAction::None
     }
 
     fn clear(&mut self) {
-        self.buffer.clear();
-        self.cursor = 0;
+        self.editor.take_text();
         self.history_idx = None;
         self.draft = None;
     }
 
     fn submit(&mut self) -> InputAction {
-        let text = std::mem::take(&mut self.buffer);
-        self.cursor = 0;
+        let text = self.editor.take_text();
         self.history_idx = None;
         self.draft = None;
         if text.trim().is_empty() {
@@ -274,30 +142,27 @@ impl InputLine {
         }
         let new_idx = match self.history_idx {
             None => {
-                self.draft = Some(self.buffer.clone());
+                self.draft = Some(self.buffer().to_string());
                 self.history.len() - 1
             }
             Some(0) => 0,
             Some(i) => i - 1,
         };
         self.history_idx = Some(new_idx);
-        self.buffer = self.history[new_idx].clone();
-        self.cursor = self.buffer.len();
+        self.editor.set_text(self.history[new_idx].clone());
     }
 
     fn history_next(&mut self) {
         match self.history_idx {
             None => {}
             Some(i) if i + 1 < self.history.len() => {
-                let new_idx = i + 1;
-                self.history_idx = Some(new_idx);
-                self.buffer = self.history[new_idx].clone();
-                self.cursor = self.buffer.len();
+                self.history_idx = Some(i + 1);
+                self.editor.set_text(self.history[i + 1].clone());
             }
             Some(_) => {
                 self.history_idx = None;
-                self.buffer = self.draft.take().unwrap_or_default();
-                self.cursor = self.buffer.len();
+                let draft = self.draft.take().unwrap_or_default();
+                self.editor.set_text(draft);
             }
         }
     }
@@ -386,6 +251,22 @@ mod tests {
         assert_eq!(i.buffer(), "old");
         i.on_key(key(KeyCode::Down));
         assert_eq!(i.buffer(), "drafted");
+    }
+
+    #[test]
+    fn up_and_down_move_by_row_before_recalling_history() {
+        let mut i = InputLine::new();
+        i.set_wrap_width(20);
+        type_str(&mut i, "old");
+        i.on_key(key(KeyCode::Enter));
+        i.insert_paste("ab\ncd");
+        i.on_key(key(KeyCode::Up));
+        i.on_key(typed('X'));
+        assert_eq!(i.buffer(), "abX\ncd");
+        i.on_key(key(KeyCode::Up));
+        assert_eq!(i.buffer(), "old");
+        i.on_key(key(KeyCode::Down));
+        assert_eq!(i.buffer(), "abX\ncd");
     }
 
     #[test]

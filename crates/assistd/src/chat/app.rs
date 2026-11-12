@@ -14,6 +14,7 @@ use assistd_ipc::{
 use assistd_tools::{Approval, Attachment, ConfirmationRequest, Risk, Unattended};
 use assistd_utils::token_counter::TokenCounter;
 use chrono::{DateTime, Utc};
+use crossterm::event::KeyEvent;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -21,8 +22,10 @@ use tokio::task::{JoinError, JoinSet};
 
 use super::input::InputLine;
 use super::output::OutputPane;
+use super::selection::Selection;
 use super::settings::SettingsPanel;
 use super::tasks::TasksPanel;
+use super::text_editor::{EditorShape, TextEditor};
 use super::theme::Theme;
 
 mod agents;
@@ -176,7 +179,7 @@ pub(super) struct ConfirmationPrompt {
     confirm_id: String,
     pub answer_to: AnswerTo,
     /// Index into [`choices`](Self::choices).
-    pub selected: usize,
+    pub selected: Selection,
     /// Every script row is shown, scrolled to `scroll`, rather than the
     /// first few.
     pub expanded: bool,
@@ -209,11 +212,11 @@ impl ConfirmationPrompt {
             request,
             confirm_id,
             answer_to,
-            selected: 0,
+            selected: Selection::default(),
             expanded: false,
             scroll: 0,
         };
-        prompt.selected = prompt.choices().len() - 1;
+        prompt.selected = Selection::at(prompt.choices().len() - 1);
         prompt
     }
 
@@ -276,7 +279,7 @@ pub(super) struct App {
     chat_tx: mpsc::Sender<ChatEvent>,
     /// Connection and attachment-loading tasks; aborted on drop.
     tasks: JoinSet<()>,
-    slash_selected: usize,
+    slash_selected: Selection,
     /// Set by Esc on the slash popup; cleared when the buffer leaves its
     /// `/` prefix.
     slash_dismissed: bool,
@@ -402,9 +405,9 @@ pub(super) enum ResumeTab {
 pub(super) struct ResumePicker {
     entries: Vec<BranchListEntry>,
     tab: ResumeTab,
-    query: String,
+    query: TextEditor,
     /// Index into [`matches`](Self::matches).
-    selected: usize,
+    selected: Selection,
 }
 
 impl ResumePicker {
@@ -413,14 +416,11 @@ impl ResumePicker {
         let mut picker = Self {
             entries,
             tab: ResumeTab::Sessions,
-            query: String::new(),
-            selected: 0,
+            query: TextEditor::new(String::new(), EditorShape::Line),
+            selected: Selection::default(),
         };
-        picker.selected = picker
-            .matches()
-            .iter()
-            .position(|entry| entry.is_active())
-            .unwrap_or(0);
+        let active = picker.matches().iter().position(|entry| entry.is_active());
+        picker.selected = active.map_or_else(Selection::default, Selection::at);
         picker
     }
 
@@ -428,12 +428,12 @@ impl ResumePicker {
         self.tab
     }
 
-    pub(super) fn query(&self) -> &str {
+    pub(super) fn query(&self) -> &TextEditor {
         &self.query
     }
 
     pub(super) fn selected(&self) -> usize {
-        self.selected
+        self.selected.index()
     }
 
     /// How many entries the tab on screen lists before the search.
@@ -446,7 +446,7 @@ impl ResumePicker {
 
     /// The tab's entries the search keeps, in listing order.
     pub(super) fn matches(&self) -> Vec<&BranchListEntry> {
-        let query = self.query.to_lowercase();
+        let query = self.query.text().to_lowercase();
         self.entries
             .iter()
             .filter(|entry| entry.tab() == self.tab && entry.matches_query(&query))
@@ -459,38 +459,32 @@ impl ResumePicker {
             ResumeTab::Sessions => ResumeTab::Tasks,
             ResumeTab::Tasks => ResumeTab::Sessions,
         };
-        self.selected = 0;
+        self.selected = Selection::default();
     }
 
     /// The selected match as a session-qualified switch target.
     fn current_target(&self) -> Option<String> {
         self.matches()
-            .get(self.selected)
+            .get(self.selected.index())
             .map(|e| format!("{}/{}", e.session_short, e.name))
     }
 
     fn select_previous(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.selected.previous();
     }
 
     fn select_next(&mut self) {
-        let last = self.matches().len().saturating_sub(1);
-        self.selected = (self.selected + 1).min(last);
+        let count = self.matches().len();
+        self.selected.next(count);
     }
 
-    fn push_query(&mut self, c: char) {
-        self.query.push(c);
-        self.selected = 0;
-    }
-
-    fn pop_query(&mut self) {
-        self.query.pop();
-        self.selected = 0;
-    }
-
-    fn clear_query(&mut self) {
-        self.query.clear();
-        self.selected = 0;
+    /// Edits the search with `ev`, selecting the first match when it changed.
+    fn edit_query(&mut self, ev: KeyEvent) {
+        let before = self.query.text().len();
+        self.query.on_key(ev);
+        if self.query.text().len() != before {
+            self.selected = Selection::default();
+        }
     }
 }
 
@@ -536,7 +530,7 @@ impl App {
             branches_buffer: Vec::new(),
             chat_tx,
             tasks: JoinSet::new(),
-            slash_selected: 0,
+            slash_selected: Selection::default(),
             slash_dismissed: false,
             resume_picker: None,
             agent_panel: None,

@@ -7,12 +7,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use super::super::super::selection::list_window;
 use super::super::super::tasks::TasksPanel;
 use super::super::super::theme::Theme;
-use super::super::{picker_scroll_start, run_outcome};
-use super::{
-    DETAIL_INDENT, FIRE_FORMAT, NO_POINTER, POINTER, local, meta, pointer_style, trigger_summary,
-};
+use super::super::run_outcome;
+use super::{DETAIL_INDENT, FIRE_FORMAT, NO_POINTER, POINTER, local, trigger_summary};
 use crate::client::terminal_text::escape_controls_single_line;
 
 /// Rows each run takes: its outcome and start, then its trigger and duration.
@@ -25,7 +24,7 @@ pub(super) fn render_runs(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel,
     let Some(task) = panel.runs_task() else {
         let note = Line::styled(
             format!("{NO_POINTER}Select a task to see its runs."),
-            meta(theme),
+            theme.meta_style(),
         );
         frame.render_widget(Paragraph::new(note), area);
         return;
@@ -57,13 +56,13 @@ pub(super) fn render_runs(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel,
     }
     if !runs.loaded() {
         frame.render_widget(
-            Paragraph::new(Span::styled("Loading…", meta(theme))),
+            Paragraph::new(Span::styled("Loading…", theme.meta_style())),
             list_area,
         );
         return;
     }
     if runs.runs().is_empty() {
-        let empty = Line::styled(format!("{NO_POINTER}No runs yet."), meta(theme));
+        let empty = Line::styled(format!("{NO_POINTER}No runs yet."), theme.meta_style());
         frame.render_widget(Paragraph::new(empty), list_area);
         return;
     }
@@ -75,14 +74,9 @@ pub(super) fn render_runs(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel,
             .map(|listed| listed.spec.name.as_str().to_string())
     };
     let visible = (usize::from(list_area.height) / RUN_ROWS).max(1);
-    let start = picker_scroll_start(runs.selected(), runs.runs().len(), visible);
-    let lines: Vec<Line<'static>> = runs
-        .runs()
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .flat_map(|(index, run)| run_rows(run, index == runs.selected(), &name_of, theme))
+    let (records, selected) = (runs.runs(), runs.selected());
+    let lines: Vec<Line<'static>> = list_window(selected, records.len(), visible, 0)
+        .flat_map(|index| run_rows(&records[index], index == selected, &name_of, theme))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
 }
@@ -94,12 +88,12 @@ fn run_rows(
     theme: &Theme,
 ) -> [Line<'static>; RUN_ROWS] {
     let (pointer, style) = if selected {
-        (POINTER, pointer_style(theme))
+        (POINTER, theme.title_style())
     } else {
         (NO_POINTER, Style::default())
     };
     let outcome_style = match run.state {
-        TaskRunState::Failed { .. } => Style::default().fg(theme.error),
+        TaskRunState::Failed { .. } => theme.error_style(),
         _ => style,
     };
     let at = local(run.started_at.unwrap_or(run.queued_at), FIRE_FORMAT);
@@ -114,11 +108,11 @@ fn run_rows(
         Line::from(vec![
             Span::styled(format!("{pointer}run {} · ", run.run), style),
             Span::styled(run_outcome(&run.state), outcome_style),
-            Span::styled(format!(" · {at}"), meta(theme)),
+            Span::styled(format!(" · {at}"), theme.meta_style()),
         ]),
         Line::styled(
             format!("{DETAIL_INDENT}{}", details.join(" · ")),
-            meta(theme),
+            theme.meta_style(),
         ),
     ]
 }
@@ -135,7 +129,7 @@ fn run_duration(run: &TaskRunRecord) -> Option<String> {
 
 /// The run's final reply under a rule, wrapped, its control characters escaped.
 fn render_reply(frame: &mut Frame<'_>, area: Rect, reply: &str, theme: &Theme) {
-    let lines: Vec<Line<'static>> = std::iter::once(Line::styled("Reply", meta(theme)))
+    let lines: Vec<Line<'static>> = std::iter::once(Line::styled("Reply", theme.meta_style()))
         .chain(
             reply
                 .lines()

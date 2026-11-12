@@ -1,6 +1,7 @@
 //! The task editor: a task's name, prompt, permission mode, allowed hosts, announce flag,
 //! kept runs, triggers and enabled flag, saved through the daemon, which checks each trigger as written.
 
+use assistd_config::ListItem;
 use assistd_ipc::{
     HostName, KeptRuns, ModeRecommendation, PermissionMode, Plan, Request, TaskId, TaskName,
     TaskPrompt, TaskSpec, TaskTrigger,
@@ -11,9 +12,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::prompt_box::{PromptBox, RunPermissions};
 use super::trigger_form::{FormAction, TriggerForm, UpstreamChoice, cycled};
 use super::{Outbox, PendingOp};
-use crate::chat::settings::{
-    EditAction, EditorShape, ListAction, ListEditor, ListItem, TextEditor,
-};
+use crate::chat::selection::Selection;
+use crate::chat::settings::{ListAction, ListEditor};
+use crate::chat::text_editor::{EditAction, EditorShape, TextEditor};
 
 /// One row of the editor, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +89,7 @@ pub(in crate::chat) struct TaskEditor {
     enabled: bool,
     triggers: Vec<TriggerRow>,
     /// Index into [`rows`](Self::rows).
-    selected: usize,
+    selected: Selection,
     mode: EditorMode,
     /// Why the last save or step failed.
     error: Option<String>,
@@ -109,7 +110,7 @@ impl TaskEditor {
             kept_runs: None,
             enabled: false,
             triggers: Vec::new(),
-            selected: 0,
+            selected: Selection::default(),
             mode: EditorMode::Browse,
             error: None,
         }
@@ -176,7 +177,7 @@ impl TaskEditor {
 
     pub(in crate::chat) fn selected_row(&self) -> EditorRow {
         self.rows()
-            .get(self.selected)
+            .get(self.selected.index())
             .copied()
             .unwrap_or(EditorRow::Name)
     }
@@ -339,7 +340,7 @@ impl TaskEditor {
             .iter()
             .map(|trigger| checked_row(task, trigger.clone(), outbox))
             .collect();
-        self.selected = self.selected.min(self.rows().len() - 1);
+        self.selected.clamp(self.rows().len());
         self.stored = Some(spec);
     }
 
@@ -459,8 +460,8 @@ impl TaskEditor {
             KeyCode::Char('d') if control && self.task.is_some() => {
                 self.mode = EditorMode::ConfirmDelete;
             }
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected = (self.selected + 1).min(self.rows().len() - 1),
+            KeyCode::Up => self.selected.previous(),
+            KeyCode::Down => self.selected.next(self.rows().len()),
             KeyCode::Esc if self.is_modified() => self.mode = EditorMode::Unsaved,
             KeyCode::Esc => return EditorAction::Close,
             KeyCode::Left | KeyCode::Right if self.selected_row() == EditorRow::Mode => {

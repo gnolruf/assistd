@@ -13,16 +13,17 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
+use super::super::selection::list_window;
 use super::super::settings::{
-    TextEditor, editor_window, list_hint, place_cursor, render_list_editor, render_wrapped_editor,
-    titled_box,
+    editor_window, list_hint, place_cursor, render_list_editor, render_wrapped_editor, titled_box,
 };
 use super::super::tasks::{
     AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, PanelTab, QueueView,
     RefineNote, TaskEditor, TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
 };
+use super::super::text_editor::TextEditor;
 use super::super::theme::Theme;
-use super::{picker_scroll_start, render_rule, run_outcome};
+use super::{render_rule, run_outcome};
 use crate::client::terminal_text::escape_controls_single_line;
 
 mod queue;
@@ -170,9 +171,9 @@ fn tab_bar(shown: PanelTab, theme: &Theme) -> Line<'static> {
             PanelTab::Runs => " Runs ",
         };
         let style = if *tab == shown {
-            pointer_style(theme)
+            theme.title_style()
         } else {
-            meta(theme)
+            theme.meta_style()
         };
         [Span::styled(label, style), Span::raw(" ")]
     });
@@ -186,11 +187,11 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel, theme: 
         .editor()
         .and_then(|editor| editor_question(editor, &upstreams));
     let line = match (question, panel.message()) {
-        (Some(question), _) => Line::styled(question, Style::default().fg(theme.warning)),
-        (None, Some(Message::Info(text))) => Line::styled(text.clone(), meta(theme)),
+        (Some(question), _) => Line::styled(question, theme.warning_style()),
+        (None, Some(Message::Info(text))) => Line::styled(text.clone(), theme.meta_style()),
         (None, Some(Message::Error(text))) => Line::styled(
             escape_controls_single_line(text).into_owned(),
-            Style::default().fg(theme.error),
+            theme.error_style(),
         ),
         (None, None) => Line::raw(""),
     };
@@ -225,36 +226,37 @@ fn editor_question(editor: &TaskEditor, upstreams: &[UpstreamChoice]) -> Option<
 fn render_task_list(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel, theme: &Theme) {
     let tasks = panel.tasks();
     if !panel.loaded() {
-        frame.render_widget(Paragraph::new(Span::styled("Loading…", meta(theme))), area);
+        frame.render_widget(
+            Paragraph::new(Span::styled("Loading…", theme.meta_style())),
+            area,
+        );
         return;
     }
     let selected = panel.selected_row();
     let note = tasks
         .is_empty()
-        .then(|| Line::styled(format!("{NO_POINTER}No tasks yet."), meta(theme)));
-    let entries = tasks
-        .iter()
-        .enumerate()
-        .map(|(index, task)| task_entry_rows(task, tasks, selected == ListRow::Task(index), theme))
-        .chain([new_task_rows(selected == ListRow::NewTask, theme)]);
+        .then(|| Line::styled(format!("{NO_POINTER}No tasks yet."), theme.meta_style()));
     let selected_entry = match selected {
         ListRow::Task(index) => index,
         ListRow::NewTask => tasks.len(),
     };
     let visible = (usize::from(area.height) / TASK_ENTRY_ROWS).max(1);
-    let start = picker_scroll_start(selected_entry, tasks.len() + 1, visible);
-    let lines: Vec<Line<'static>> = note
-        .into_iter()
-        .chain(entries.skip(start).take(visible).flatten())
-        .collect();
+    let entries = list_window(selected_entry, tasks.len() + 1, visible, 0).flat_map(|index| {
+        let selected = index == selected_entry;
+        match tasks.get(index) {
+            Some(task) => task_entry_rows(task, tasks, selected, theme),
+            None => new_task_rows(selected, theme),
+        }
+    });
+    let lines: Vec<Line<'static>> = note.into_iter().chain(entries).collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn new_task_rows(selected: bool, theme: &Theme) -> [Line<'static>; TASK_ENTRY_ROWS] {
     let pointer = if selected { POINTER } else { NO_POINTER };
-    let label = Span::styled("+ new task", Style::default().fg(theme.accent));
+    let label = Span::styled("+ new task", theme.accent_style());
     [
-        Line::from(vec![Span::styled(pointer, pointer_style(theme)), label]),
+        Line::from(vec![Span::styled(pointer, theme.title_style()), label]),
         Line::raw(""),
     ]
 }
@@ -266,7 +268,7 @@ fn task_entry_rows(
     theme: &Theme,
 ) -> [Line<'static>; TASK_ENTRY_ROWS] {
     let (pointer, name_style) = if selected {
-        (POINTER, pointer_style(theme))
+        (POINTER, theme.title_style())
     } else {
         (NO_POINTER, Style::default())
     };
@@ -285,7 +287,7 @@ fn task_entry_rows(
             } else {
                 "  disabled"
             },
-            meta(theme),
+            theme.meta_style(),
         ),
     ];
     let mut details = vec![triggers_summary(&spec.triggers, tasks)];
@@ -302,7 +304,7 @@ fn task_entry_rows(
         Line::from(title),
         Line::styled(
             format!("{DETAIL_INDENT}{}", details.join(" · ")),
-            meta(theme),
+            theme.meta_style(),
         ),
     ]
 }
@@ -401,7 +403,7 @@ fn render_editor(
     if let Some(error) = editor.error() {
         let line = Line::styled(
             escape_controls_single_line(error).into_owned(),
-            Style::default().fg(theme.error),
+            theme.error_style(),
         );
         frame.render_widget(Paragraph::new(line), error_area);
     }
@@ -497,8 +499,9 @@ fn render_editor_rows(
         ));
     }
     let visible = usize::from(area.height).max(1);
-    let start = picker_scroll_start(selected_line, lines.len(), visible);
-    let shown: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
+    let window = list_window(selected_line, lines.len(), visible, 0);
+    let start = window.start;
+    let shown: Vec<Line<'static>> = lines.drain(window).collect();
     frame.render_widget(Paragraph::new(Text::from(shown)), area);
     if let Some((line, column)) = cursor.filter(|(line, _)| *line >= start) {
         place_cursor(frame, area, line - start, column);
@@ -583,14 +586,15 @@ fn add_row_lines(
     selected: bool,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let none =
-        empty_label.map(|label| labelled(false, label, Span::styled("none", meta(theme)), theme));
-    let add = labelled(
-        selected,
-        "",
-        Span::styled(add, Style::default().fg(theme.accent)),
-        theme,
-    );
+    let none = empty_label.map(|label| {
+        labelled(
+            false,
+            label,
+            Span::styled("none", theme.meta_style()),
+            theme,
+        )
+    });
+    let add = labelled(selected, "", Span::styled(add, theme.accent_style()), theme);
     none.into_iter().chain([add]).collect()
 }
 
@@ -606,7 +610,7 @@ fn mode_name(mode: PermissionMode) -> &'static str {
 fn mode_span(mode: PermissionMode, selected: bool, theme: &Theme) -> Span<'static> {
     let name = mode_name(mode);
     if selected {
-        Span::styled(format!("◂ {name} ▸"), Style::default().fg(theme.accent))
+        Span::styled(format!("◂ {name} ▸"), theme.accent_style())
     } else {
         Span::raw(name)
     }
@@ -616,14 +620,14 @@ fn mode_span(mode: PermissionMode, selected: bool, theme: &Theme) -> Span<'stati
 fn kept_runs_span(editor: &TaskEditor, theme: &Theme) -> Span<'static> {
     match editor.kept_runs() {
         Some(count) => Span::raw(count.to_string()),
-        None => Span::styled("default", meta(theme)),
+        None => Span::styled("default", theme.meta_style()),
     }
 }
 
 /// The allowed hosts on one line, or `none`.
 fn hosts_summary(editor: &TaskEditor, theme: &Theme) -> Span<'static> {
     if editor.hosts().is_empty() {
-        return Span::styled("none", meta(theme));
+        return Span::styled("none", theme.meta_style());
     }
     let hosts: Vec<&str> = editor.hosts().iter().map(HostName::as_str).collect();
     Span::raw(hosts.join(", "))
@@ -641,18 +645,18 @@ fn trigger_row_lines(
     let mut lines = vec![labelled(selected, label, Span::raw(summary), theme)];
     let indent = " ".repeat(value_column() + 2);
     let detail = match &row.check {
-        TriggerCheck::Checking { .. } => Some(Span::styled("checking…", meta(theme))),
+        TriggerCheck::Checking { .. } => Some(Span::styled("checking…", theme.meta_style())),
         TriggerCheck::Fires(fires) if fires.is_empty() => None,
         TriggerCheck::Fires(fires) => {
             let times: Vec<String> = fires.iter().map(|at| local(*at, FIRE_FORMAT)).collect();
             Some(Span::styled(
                 format!("next {}", times.join(" · ")),
-                meta(theme),
+                theme.meta_style(),
             ))
         }
         TriggerCheck::Refused(message) => Some(Span::styled(
             format!("⚠ {}", escape_controls_single_line(message)),
-            Style::default().fg(theme.error),
+            theme.error_style(),
         )),
     };
     lines.extend(detail.map(|span| Line::from(vec![Span::raw(indent), span])));
@@ -673,7 +677,7 @@ fn upstream_name(upstreams: &[UpstreamChoice]) -> impl Fn(TaskId) -> Option<Stri
 fn prompt_preview(prompt: &str, theme: &Theme) -> Span<'static> {
     let mut lines = prompt.lines();
     let Some(first) = lines.next().filter(|line| !line.trim().is_empty()) else {
-        return Span::styled("(empty)", meta(theme));
+        return Span::styled("(empty)", theme.meta_style());
     };
     let more = lines.count();
     let first = escape_controls_single_line(first);
@@ -686,7 +690,7 @@ fn prompt_preview(prompt: &str, theme: &Theme) -> Span<'static> {
 
 fn placeholder(text: &str, empty: &'static str, theme: &Theme) -> Span<'static> {
     if text.is_empty() {
-        Span::styled(empty, meta(theme))
+        Span::styled(empty, theme.meta_style())
     } else {
         Span::raw(escape_controls_single_line(text).into_owned())
     }
@@ -695,7 +699,7 @@ fn placeholder(text: &str, empty: &'static str, theme: &Theme) -> Span<'static> 
 /// A row: the pointer when selected, `label` padded to [`LABEL_WIDTH`], then `value`.
 fn labelled(selected: bool, label: &str, value: Span<'static>, theme: &Theme) -> Line<'static> {
     let (pointer, style) = if selected {
-        (POINTER, pointer_style(theme))
+        (POINTER, theme.title_style())
     } else {
         (NO_POINTER, Style::default())
     };
@@ -737,10 +741,7 @@ fn render_trigger_form(
         lines.push(labelled(focused, field.label(), value, theme));
     }
     if let Some(error) = form.error() {
-        lines.push(Line::styled(
-            error.to_string(),
-            Style::default().fg(theme.error),
-        ));
+        lines.push(Line::styled(error.to_string(), theme.error_style()));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
     if let Some((line, column)) = cursor {
@@ -751,7 +752,7 @@ fn render_trigger_form(
 fn choice_span(text: &str, focused: bool, theme: &Theme) -> Span<'static> {
     let text = escape_controls_single_line(text);
     if focused {
-        Span::styled(format!("◂ {text} ▸"), Style::default().fg(theme.accent))
+        Span::styled(format!("◂ {text} ▸"), theme.accent_style())
     } else {
         Span::raw(format!("  {text}"))
     }
@@ -772,14 +773,4 @@ fn value_column() -> usize {
 
 fn local(at: DateTime<Utc>, format: &str) -> String {
     at.with_timezone(&Local).format(format).to_string()
-}
-
-fn pointer_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn meta(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
 }

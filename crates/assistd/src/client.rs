@@ -21,24 +21,17 @@ pub(crate) mod voice_ctl;
 /// Send `req` and hand every event, terminal ones included, to `on_event`.
 /// Returns after `Done`; on `Error` prints the message and exits 1. A connection
 /// that closes without a terminal event is an error.
-async fn run_one_shot(req: Request, mut on_event: impl FnMut(&Event) -> Result<()>) -> Result<()> {
-    let mut stream = IpcClient::new()
-        .one_shot(req)
-        .await
-        .map_err(map_not_reachable)?;
-    loop {
-        let Some(event) = stream.next_event().await? else {
-            anyhow::bail!("daemon closed the connection without sending a terminal event");
-        };
-        on_event(&event)?;
-        match event {
-            Event::Done { .. } => return Ok(()),
-            Event::Error { message, .. } => {
-                writeln!(io::stderr(), "daemon error: {}", escape_controls(&message))?;
-                std::process::exit(1);
-            }
-            _ => {}
+async fn run_one_shot(req: Request, on_event: impl FnMut(&Event) -> Result<()>) -> Result<()> {
+    let Err(failure) = IpcClient::new().request(req, on_event).await else {
+        return Ok(());
+    };
+    match failure.downcast() {
+        Ok(IpcClientError::Daemon(message)) => {
+            writeln!(io::stderr(), "daemon error: {}", escape_controls(&message))?;
+            std::process::exit(1);
         }
+        Ok(other) => Err(map_not_reachable(other)),
+        Err(other) => Err(other),
     }
 }
 

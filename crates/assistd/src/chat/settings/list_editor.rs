@@ -1,10 +1,11 @@
 //! The box that edits a list setting entry by entry; each change is handed
 //! back to the panel to apply.
 
+use assistd_config::ListItem;
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::catalog::ListItem;
-use super::panel::{EditAction, EditorShape, TextEditor};
+use super::super::selection::Selection;
+use super::super::text_editor::{EditAction, EditorShape, TextEditor};
 
 /// What the panel should do after a key in the list box.
 pub(crate) enum ListAction {
@@ -33,7 +34,7 @@ pub(crate) enum ListState {
 pub(crate) struct ListEditor {
     item: ListItem,
     /// Index of the selected entry; the entry count selects the add row.
-    selected: usize,
+    selected: Selection,
     state: ListState,
 }
 
@@ -41,13 +42,13 @@ impl ListEditor {
     pub(crate) fn new(item: ListItem) -> Self {
         Self {
             item,
-            selected: 0,
+            selected: Selection::default(),
             state: ListState::Browse,
         }
     }
 
     pub(crate) fn selected(&self) -> usize {
-        self.selected
+        self.selected.index()
     }
 
     pub(crate) fn state(&self) -> &ListState {
@@ -69,7 +70,7 @@ impl ListEditor {
                 }
                 EditAction::Apply => match entry.value() {
                     Ok(value) => ListAction::Store {
-                        index: self.selected,
+                        index: self.selected.index(),
                         value,
                     },
                     Err(reason) => ListAction::Refused(reason),
@@ -84,7 +85,7 @@ impl ListEditor {
         match ev.code {
             KeyCode::Char('y' | 'Y') => {
                 self.state = ListState::Browse;
-                ListAction::Delete(self.selected)
+                ListAction::Delete(self.selected.index())
             }
             KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 self.state = ListState::Browse;
@@ -98,20 +99,22 @@ impl ListEditor {
         let add_row = entries.len();
         match ev.code {
             KeyCode::Esc | KeyCode::Char('q') => return ListAction::Close,
-            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(add_row),
-            KeyCode::Home => self.selected = 0,
-            KeyCode::End => self.selected = add_row,
+            KeyCode::Up | KeyCode::Char('k') => self.selected.previous(),
+            KeyCode::Down | KeyCode::Char('j') => self.selected.next(add_row + 1),
+            KeyCode::Home => self.selected = Selection::default(),
+            KeyCode::End => self.selected = Selection::at(add_row),
             KeyCode::Enter => {
-                self.state =
-                    ListState::Edit(EntryEditor::new(self.item, entries.get(self.selected)));
+                self.state = ListState::Edit(EntryEditor::new(
+                    self.item,
+                    entries.get(self.selected.index()),
+                ));
             }
             KeyCode::Char('a') | KeyCode::Insert => {
-                self.selected = add_row;
+                self.selected = Selection::at(add_row);
                 self.state = ListState::Edit(EntryEditor::new(self.item, None));
             }
             KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace
-                if self.selected < add_row =>
+                if self.selected.index() < add_row =>
             {
                 self.state = ListState::ConfirmDelete;
             }

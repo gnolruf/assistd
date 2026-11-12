@@ -36,6 +36,46 @@ impl Theme {
         }
     }
 
+    /// Secondary text: details, hints and placeholders.
+    pub(crate) fn meta_style(&self) -> Style {
+        Style::default().fg(self.status_text)
+    }
+
+    /// Secondary text for work in progress.
+    pub(crate) fn aside_style(&self) -> Style {
+        self.meta_style().add_modifier(Modifier::ITALIC)
+    }
+
+    pub(crate) fn accent_style(&self) -> Style {
+        Style::default().fg(self.accent)
+    }
+
+    /// Titles, headers and the selection pointer.
+    pub(crate) fn title_style(&self) -> Style {
+        self.accent_style().add_modifier(Modifier::BOLD)
+    }
+
+    /// Rules, borders and tree lines.
+    pub(crate) fn rule_style(&self) -> Style {
+        Style::default().fg(self.border)
+    }
+
+    pub(crate) fn code_style(&self) -> Style {
+        Style::default().fg(self.code)
+    }
+
+    pub(crate) fn success_style(&self) -> Style {
+        Style::default().fg(self.success)
+    }
+
+    pub(crate) fn warning_style(&self) -> Style {
+        Style::default().fg(self.warning)
+    }
+
+    pub(crate) fn error_style(&self) -> Style {
+        Style::default().fg(self.error)
+    }
+
     /// The selected entry: on the `selection` background, or in reverse
     /// video when that is the terminal default.
     pub(crate) fn selection(&self) -> Style {

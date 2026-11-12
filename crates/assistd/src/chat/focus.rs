@@ -65,11 +65,7 @@ pub(super) async fn report_closed(ipc: &IpcClient) {
 
 async fn send(ipc: &IpcClient, req: Request) {
     let kind = req.kind();
-    let result = match ipc.one_shot(req).await {
-        Ok(stream) => stream.collect().await.map(drop),
-        Err(e) => Err(e),
-    };
-    if let Err(e) = result {
+    if let Err(e) = ipc.send(req).await {
         tracing::debug!("{kind} failed: {e}");
     }
 }

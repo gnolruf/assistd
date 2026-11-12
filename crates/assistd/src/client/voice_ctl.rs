@@ -8,25 +8,9 @@ use uuid::Uuid;
 
 use super::run_one_shot;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum VoiceCtlAction {
-    Toggle,
-    Skip,
-    State,
-}
-
-impl VoiceCtlAction {
-    fn to_request(self, id: String) -> Request {
-        match self {
-            VoiceCtlAction::Toggle => Request::VoiceToggle { id },
-            VoiceCtlAction::Skip => Request::VoiceSkip { id },
-            VoiceCtlAction::State => Request::GetVoiceState { id },
-        }
-    }
-}
-
-pub(crate) async fn run(action: VoiceCtlAction) -> Result<()> {
-    let req = action.to_request(Uuid::new_v4().to_string());
+/// Sends the request `with_id` builds and prints the daemon's answer.
+pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {
+    let req = with_id(Uuid::new_v4().to_string());
     run_one_shot(req, |event| {
         match event {
             Event::VoiceOutputState { enabled, .. } => writeln!(

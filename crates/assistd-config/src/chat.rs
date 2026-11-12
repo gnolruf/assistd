@@ -63,7 +63,11 @@ pub struct ChatConfig {
 
 impl DescribeSettings for ChatConfig {
     describe_fields! {
-        system_prompt => ("system prompt", "First message of every request; empty sends none"),
+        system_prompt => (
+            "system prompt",
+            "First message of every request; empty sends none",
+            prose
+        ),
         max_history_tokens => (
             "history budget (tokens)",
             "Prompt and history budget; older messages are summarized past it",

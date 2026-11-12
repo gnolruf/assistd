@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
-use assistd_ipc::{Event, EventKind, IpcClient, Request, SubscribeFilter};
+use assistd_ipc::{Event, EventKind, IpcClient, IpcClientError, Request, SubscribeFilter};
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream, MouseEventKind};
 use crossterm::{cursor, execute, style, terminal};
@@ -42,8 +42,11 @@ mod focus;
 mod input;
 mod markdown;
 mod output;
+mod selection;
 pub(crate) mod settings;
 mod tasks;
+mod text;
+mod text_editor;
 mod theme;
 mod ui;
 
@@ -459,50 +462,43 @@ async fn get_mcp_unavailable(ipc: &IpcClient) -> Result<Vec<(String, String)>> {
     let req = Request::McpStatus {
         id: Uuid::new_v4().to_string(),
     };
-    let mut stream = ipc.one_shot(req).await?;
     let mut unavailable = Vec::new();
-    loop {
-        match stream.next_event().await? {
-            Some(Event::McpServer { server, state, .. }) => {
-                if let Some(reason) = state.unavailable_reason(&server) {
-                    unavailable.push((server, reason));
-                }
-            }
-            Some(Event::Done { .. }) => return Ok(unavailable),
-            Some(Event::Error { message, .. }) => anyhow::bail!("{message}"),
-            Some(_) => {}
-            None => anyhow::bail!("daemon closed without responding"),
+    ipc.request(req, |event| {
+        if let Event::McpServer { server, state, .. } = event
+            && let Some(reason) = state.unavailable_reason(server)
+        {
+            unavailable.push((server.clone(), reason));
         }
-    }
+        Ok::<(), IpcClientError>(())
+    })
+    .await?;
+    Ok(unavailable)
 }
 
 async fn get_capabilities(ipc: &IpcClient) -> Result<StartupCapabilities> {
     let req = Request::GetCapabilities {
         id: Uuid::new_v4().to_string(),
     };
-    let mut stream = ipc.one_shot(req).await?;
     let mut capabilities = StartupCapabilities::default();
-    loop {
-        match stream.next_event().await? {
-            Some(Event::Capabilities {
-                vision,
-                model_name,
-                auto_mode,
-                ..
-            }) => {
-                capabilities = StartupCapabilities {
-                    vision_enabled: vision,
-                    model_name,
-                    auto_mode,
-                    ..StartupCapabilities::default()
-                };
-            }
-            Some(Event::Done { .. }) => return Ok(capabilities),
-            Some(Event::Error { message, .. }) => anyhow::bail!("{message}"),
-            Some(_) => {}
-            None => anyhow::bail!("daemon closed without responding"),
+    ipc.request(req, |event| {
+        if let Event::Capabilities {
+            vision,
+            model_name,
+            auto_mode,
+            ..
+        } = event
+        {
+            capabilities = StartupCapabilities {
+                vision_enabled: *vision,
+                model_name: model_name.clone(),
+                auto_mode: *auto_mode,
+                ..StartupCapabilities::default()
+            };
         }
-    }
+        Ok::<(), IpcClientError>(())
+    })
+    .await?;
+    Ok(capabilities)
 }
 
 /// What the bus subscription task reports to.

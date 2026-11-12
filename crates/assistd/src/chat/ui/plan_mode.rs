@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 
 use super::super::app::{PlanChoice, PlanReview};
 use super::super::theme::Theme;
-use super::{CONFIRM_BORDER_ROWS, indented_rows, pointer_style, saturating_u16};
+use super::{CONFIRM_BORDER_ROWS, indented_rows, saturating_u16};
 
 const FEEDBACK_PLACEHOLDER: &str = "No, keep planning (type to say what to change)";
 
@@ -33,7 +33,7 @@ pub(super) fn render_plan_review_dock(
     let height = saturating_u16(body.len() + CONFIRM_BORDER_ROWS).min(area.height);
     let [output_area, dock_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(area);
-    let accent = Style::default().fg(theme.accent);
+    let accent = theme.accent_style();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent)
@@ -68,8 +68,8 @@ fn choice_rows(review: &PlanReview, width: usize, theme: &Theme) -> Vec<Line<'st
                     format!("No, keep planning: {}▏", review.feedback).into()
                 }
             };
-            let (pointer, style) = if index == review.selected {
-                ("❯", pointer_style(theme))
+            let (pointer, style) = if index == review.selected.index() {
+                ("❯", theme.title_style())
             } else {
                 (" ", Style::default())
             };

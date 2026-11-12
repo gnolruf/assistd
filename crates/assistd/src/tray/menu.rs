@@ -183,7 +183,7 @@ pub(super) async fn run_actions(
                     id: Uuid::new_v4().to_string(),
                     target,
                 };
-                if let Err(e) = send_until_done(&ipc, req).await {
+                if let Err(e) = ipc.send(req).await {
                     tracing::warn!(target: "tray", "set_presence({target:?}) failed: {e:#}");
                 }
             }
@@ -192,7 +192,7 @@ pub(super) async fn run_actions(
                     id: Uuid::new_v4().to_string(),
                     op: op.clone(),
                 };
-                if let Err(e) = send_until_done(&ipc, req).await {
+                if let Err(e) = ipc.send(req).await {
                     tracing::warn!(target: "tray", "task_queue({op:?}) failed: {e:#}");
                 }
             }
@@ -200,20 +200,6 @@ pub(super) async fn run_actions(
         }
     }
     Ok(())
-}
-
-async fn send_until_done(ipc: &IpcClient, req: Request) -> Result<()> {
-    let mut stream = ipc.one_shot(req).await?;
-    loop {
-        match stream.next_event().await? {
-            Some(Event::Done { .. }) => return Ok(()),
-            Some(Event::Error { message, .. }) => {
-                anyhow::bail!("daemon error: {message}");
-            }
-            Some(_) => continue,
-            None => anyhow::bail!("daemon closed before Done"),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -294,15 +294,8 @@ async fn interrupt_turn(ipc: IpcClient) {
     let req = Request::InterruptTurn {
         id: Uuid::new_v4().to_string(),
     };
-    match ipc.one_shot(req).await {
-        Ok(stream) => {
-            if let Err(e) = stream.collect().await {
-                tracing::warn!(target: "tray", "notification dismiss: interrupt_turn stream: {e}");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(target: "tray", "notification dismiss: interrupt_turn send failed: {e}");
-        }
+    if let Err(e) = ipc.send(req).await {
+        tracing::warn!(target: "tray", "notification dismiss: interrupt_turn failed: {e}");
     }
 }
 

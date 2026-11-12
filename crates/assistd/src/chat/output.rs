@@ -934,18 +934,12 @@ fn render_item_unwrapped(out: &mut Vec<Line<'static>>, item: &OutputItem, theme:
             out.extend(text.lines().map(|line| Line::from(line.to_string())));
             return;
         }
-        OutputItem::Tool(b) => {
-            single_span_line(format!("$ {}", b.command), tool_command_style(theme))
-        }
+        OutputItem::Tool(b) => single_span_line(format!("$ {}", b.command), theme.title_style()),
         OutputItem::Thumbnail(t) => {
             single_span_line(format!("attached: {}", t.name), info_style(theme))
         }
-        OutputItem::Thinking(t) => {
-            single_span_line(thinking_header_text(t), thinking_header_style(theme))
-        }
-        OutputItem::Compaction(c) => {
-            single_span_line(compaction_text(c), thinking_header_style(theme))
-        }
+        OutputItem::Thinking(t) => single_span_line(thinking_header_text(t), theme.aside_style()),
+        OutputItem::Compaction(c) => single_span_line(compaction_text(c), theme.aside_style()),
     });
 }
 
@@ -963,18 +957,18 @@ fn render_banner(out: &mut Vec<Line<'static>>, model_name: &str, width: u16, the
     let beside_logo = [None, None, None, Some(version.as_str()), Some(model_name)];
     out.push(Line::from(""));
     out.extend(LOGO.into_iter().zip(beside_logo).map(|(row, value)| {
-        let mut spans = vec![Span::styled(row, logo_style(theme))];
+        let mut spans = vec![Span::styled(row, theme.title_style())];
         spans.extend(value.map(|value| {
             let gap = usize::from(width)
                 .saturating_sub(display_width(row) + display_width(value))
                 .max(BANNER_GAP.len());
-            Span::styled(format!("{}{value}", " ".repeat(gap)), meta_style(theme))
+            Span::styled(format!("{}{value}", " ".repeat(gap)), theme.meta_style())
         }));
         Line::from(spans)
     }));
     out.push(single_span_line(
         BANNER_RULE.repeat(usize::from(width)),
-        Style::default().fg(theme.border),
+        theme.rule_style(),
     ));
     out.push(Line::from(""));
 }
@@ -1048,13 +1042,13 @@ fn render_thinking_block(
         theme,
     );
     if (t.expanded || verbose) && !t.text.is_empty() {
-        let bar = Span::styled("▎ ", thinking_header_style(theme));
+        let bar = Span::styled("▎ ", theme.aside_style());
         let inner_w = width.saturating_sub(2).max(1);
         for line in t.text.lines() {
             if line.is_empty() {
                 out.push(Line::from(vec![bar.clone()]));
             } else {
-                push_barred(out, &bar, line, thinking_text_style(theme), inner_w);
+                push_barred(out, &bar, line, theme.aside_style(), inner_w);
             }
         }
     }
@@ -1071,13 +1065,13 @@ fn push_live_header(
 ) {
     let (bar, bar_w) = if done {
         (
-            Span::styled("▎ ", thinking_header_style(theme)),
+            Span::styled("▎ ", theme.aside_style()),
             width.saturating_sub(2).max(1),
         )
     } else {
         (Span::raw(""), width.max(1))
     };
-    push_barred(out, &bar, text, thinking_header_style(theme), bar_w);
+    push_barred(out, &bar, text, theme.aside_style(), bar_w);
 }
 
 fn thinking_header_text(t: &ThinkingBlock) -> String {
@@ -1143,7 +1137,7 @@ fn render_tool_block(
             let bar = tool_bar(theme.status_text);
             push_tool_header(out, &bar, &b.command, inner_w, theme);
             let status = format!("running… ({}s)", started_at.elapsed().as_secs());
-            push_barred(out, &bar, &status, tool_running_style(theme), inner_w);
+            push_barred(out, &bar, &status, theme.aside_style(), inner_w);
         }
         ToolState::Finished {
             output,
@@ -1189,7 +1183,7 @@ fn push_tool_header(
         out,
         bar,
         &format!("$ {command}"),
-        tool_command_style(theme),
+        theme.title_style(),
         inner_w,
     );
 }
@@ -1209,9 +1203,9 @@ fn push_tool_body(
     for i in &visible_idxs {
         let line = &body_lines[*i];
         let style = if line.starts_with("[stderr] ") {
-            stderr_style(theme)
+            theme.error_style()
         } else {
-            tool_result_style(theme)
+            theme.code_style()
         };
         push_barred(out, bar, line, style, inner_w);
     }
@@ -1222,9 +1216,7 @@ fn push_tool_body(
                 out,
                 bar,
                 &format!("… ({hidden} more lines, Tab to expand)"),
-                Style::default()
-                    .fg(theme.status_text)
-                    .add_modifier(Modifier::ITALIC),
+                theme.aside_style(),
                 inner_w,
             );
         }
@@ -1346,21 +1338,9 @@ fn text_style(role: TextRole, theme: &Theme) -> Style {
     match role {
         TextRole::Gap => Style::default(),
         TextRole::Info => info_style(theme),
-        TextRole::Summary => Style::default().fg(theme.status_text),
-        TextRole::Error => Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD),
+        TextRole::Summary => theme.meta_style(),
+        TextRole::Error => theme.error_style().add_modifier(Modifier::BOLD),
     }
-}
-
-fn logo_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn meta_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
 }
 
 fn user_style(theme: &Theme) -> Style {
@@ -1368,41 +1348,7 @@ fn user_style(theme: &Theme) -> Style {
 }
 
 fn info_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::DIM)
-}
-
-fn tool_command_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.accent)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn tool_result_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.code)
-}
-
-fn tool_running_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.status_text)
-        .add_modifier(Modifier::ITALIC)
-}
-
-fn thinking_header_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.status_text)
-        .add_modifier(Modifier::ITALIC)
-}
-
-fn thinking_text_style(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.status_text)
-        .add_modifier(Modifier::ITALIC)
-}
-
-fn stderr_style(theme: &Theme) -> Style {
-    Style::default().fg(theme.error)
+    theme.accent_style().add_modifier(Modifier::DIM)
 }
 
 #[cfg(test)]

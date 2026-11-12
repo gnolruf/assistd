@@ -1,18 +1,20 @@
 //! ratatui render for the settings panel.
 
-use assistd_config::ThemeColor;
+use assistd_config::{SettingKind, ThemeColor};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 
+use super::super::selection::list_window;
+use super::super::text::{ellipsize, locate_cursor, wrap_input};
+use super::super::text_editor::TextEditor;
 use super::super::theme::{Theme, color};
-use super::super::ui::{locate_cursor, wrap_input};
-use super::catalog::{SECTIONS, Setting, SettingKind, Tab};
+use super::catalog::{SECTIONS, Setting, Tab};
 use super::color_picker::{ColorPicker, PALETTE_CELL_WIDTH, PickerFocus};
 use super::list_editor::{EntryEditor, ListEditor, ListState, entry_summary};
-use super::panel::{Feedback, PanelMode, Row, SettingsPanel, TextEditor, short_decimal};
+use super::panel::{Feedback, PanelMode, Row, SettingsPanel, short_decimal};
 use super::preview::render_theme_preview;
 use super::theme_list::{ThemeEntry, ThemeListState};
 use crate::client::terminal_text::escape_controls_single_line;
@@ -81,7 +83,10 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
     render_title(frame, title_area, panel, theme);
     render_tabs(frame, tab_area, panel.tab(), theme);
     let rule = RULE.repeat(usize::from(area.width));
-    frame.render_widget(Paragraph::new(Span::styled(rule, meta(theme))), rule_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(rule, theme.meta_style())),
+        rule_area,
+    );
     let list_area = if panel.tab() == Tab::Theme {
         let [list_area, preview_area] =
             Layout::vertical([Constraint::Min(3), Constraint::Percentage(PREVIEW_PERCENT)])
@@ -113,24 +118,24 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
     render_feedback(frame, feedback_area, panel.feedback(), theme);
     render_issues(frame, issues_area, panel.issues(), theme);
     frame.render_widget(
-        Paragraph::new(Span::styled(hint(panel.mode()), meta(theme))),
+        Paragraph::new(Span::styled(hint(panel.mode()), theme.meta_style())),
         hint_area,
     );
 }
 
 fn render_title(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
     let mut spans = vec![
-        Span::styled("Settings", accent(theme).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Settings",
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("  {}", panel.document().path().display()),
-            meta(theme),
+            theme.meta_style(),
         ),
     ];
     if panel.document().is_modified() {
-        spans.push(Span::styled(
-            "  · unsaved changes",
-            Style::default().fg(theme.warning),
-        ));
+        spans.push(Span::styled("  · unsaved changes", theme.warning_style()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -140,9 +145,11 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, current: Tab, theme: &Theme) {
         .iter()
         .flat_map(|&tab| {
             let style = if tab == current {
-                accent(theme).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                theme
+                    .accent_style()
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
-                meta(theme)
+                theme.meta_style()
             };
             [
                 Span::styled(format!(" {} ", tab.title()), style),
@@ -158,10 +165,11 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, current: Tab, theme: &Theme) {
 fn render_list(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme: &Theme) {
     let label_width = longest_label().min(usize::from(area.width) / 2);
     let value_width = usize::from(area.width).saturating_sub(NO_POINTER.len() + label_width);
-    let (lines, selected_line) = list_lines(panel, label_width, value_width, theme);
+    let (mut lines, selected_line) = list_lines(panel, label_width, value_width, theme);
     let visible = usize::from(area.height).max(1);
-    let start = scroll_start(selected_line, lines.len(), visible);
-    let lines: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
+    let window = list_window(selected_line, lines.len(), visible, SCROLL_MARGIN);
+    let start = window.start;
+    let lines: Vec<Line<'static>> = lines.drain(window).collect();
     frame.render_widget(Paragraph::new(lines), area);
     if let PanelMode::Edit(editor) = panel.mode()
         && !editor.is_box()
@@ -230,11 +238,15 @@ fn row_line(
             } else {
                 format!("▸ show {} advanced", SECTIONS[section].advanced_count())
             };
-            pointed_line(selected, theme, vec![Span::styled(text, meta(theme))])
+            pointed_line(
+                selected,
+                theme,
+                vec![Span::styled(text, theme.meta_style())],
+            )
         }
     };
     if panel.is_locked(row) {
-        line.style(meta(theme))
+        line.style(theme.meta_style())
     } else {
         line
     }
@@ -250,9 +262,9 @@ fn heading_line(
 ) -> Line<'static> {
     let section = &SECTIONS[section_index];
     let color = if panel.is_locked(Row::Heading(section_index)) {
-        meta(theme)
+        theme.meta_style()
     } else {
-        accent(theme)
+        theme.accent_style()
     };
     let mut style = color.add_modifier(Modifier::BOLD);
     if selected {
@@ -269,7 +281,7 @@ fn pointed_line(selected: bool, theme: &Theme, mut spans: Vec<Span<'static>>) ->
     if selected {
         spans.insert(
             0,
-            Span::styled(POINTER, accent(theme).add_modifier(Modifier::BOLD)),
+            Span::styled(POINTER, theme.accent_style().add_modifier(Modifier::BOLD)),
         );
         Line::from(spans).style(Style::default().add_modifier(Modifier::BOLD))
     } else {
@@ -286,25 +298,28 @@ fn value_span(
     width: usize,
     theme: &Theme,
 ) -> Span<'static> {
-    if setting.kind == SettingKind::Themes {
-        return Span::styled(ellipsized(panel.active_theme_name(), width), accent(theme));
+    if setting.kind() == SettingKind::Themes {
+        return Span::styled(
+            ellipsize(&panel.active_theme_name(), width),
+            theme.accent_style(),
+        );
     }
-    if setting.kind == SettingKind::Color {
+    if setting.kind() == SettingKind::Color {
         let shown = panel.current_color(setting);
         return Span::styled(
-            ellipsized(format!("{SWATCH} {shown}"), width),
+            ellipsize(&format!("{SWATCH} {shown}"), width),
             Style::default().fg(color(shown)),
         );
     }
     let from_file = panel.document().file_value(setting.key).is_some();
     let text = panel.current_value(setting.key).map_or_else(
         || "unset".to_string(),
-        |value| ellipsized(shown_value(setting.kind, value), width),
+        |value| ellipsize(&shown_value(setting.kind(), value), width),
     );
     if from_file {
         Span::raw(text)
     } else {
-        Span::styled(text, meta(theme))
+        Span::styled(text, theme.meta_style())
     }
 }
 
@@ -315,25 +330,26 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, theme
     };
     let default = panel.document().default_value(setting.key).map_or_else(
         || "unset".to_string(),
-        |value| shown_value(setting.kind, value),
+        |value| shown_value(setting.kind(), value),
     );
     let detail = format!(
         "{} : {} (default value: {default})",
         setting.key,
         setting.description()
     );
-    let detail = ellipsized(detail, usize::from(area.width));
-    frame.render_widget(Paragraph::new(Span::styled(detail, meta(theme))), area);
+    let detail = ellipsize(&detail, usize::from(area.width));
+    frame.render_widget(
+        Paragraph::new(Span::styled(detail, theme.meta_style())),
+        area,
+    );
 }
 
 fn render_feedback(frame: &mut Frame<'_>, area: Rect, feedback: Option<&Feedback>, theme: &Theme) {
     let span = match feedback {
-        Some(Feedback::Note(text)) => {
-            Span::styled(text.clone(), Style::default().fg(theme.success))
-        }
+        Some(Feedback::Note(text)) => Span::styled(text.clone(), theme.success_style()),
         Some(Feedback::Error(text)) => Span::styled(
             escape_controls_single_line(text).into_owned(),
-            Style::default().fg(theme.error),
+            theme.error_style(),
         ),
         None => return,
     };
@@ -341,7 +357,7 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, feedback: Option<&Feedback
 }
 
 fn render_issues(frame: &mut Frame<'_>, area: Rect, issues: &[String], theme: &Theme) {
-    let style = Style::default().fg(theme.warning);
+    let style = theme.warning_style();
     let mut lines: Vec<Line<'static>> = issues
         .iter()
         .take(MAX_ISSUE_ROWS)
@@ -406,8 +422,8 @@ fn box_block(panel: &SettingsPanel, theme: &Theme) -> Block<'static> {
 pub(crate) fn titled_box(title: &str, theme: &Theme) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(accent(theme))
-        .title(Span::styled(format!(" {title} "), accent(theme)))
+        .border_style(theme.accent_style())
+        .title(Span::styled(format!(" {title} "), theme.accent_style()))
 }
 
 /// The edited text wrapped in a bordered box, scrolled to keep the cursor
@@ -434,11 +450,10 @@ pub(crate) fn render_wrapped_editor(
     let rows = wrap_input(&chars, 0, area.width);
     let (cursor_row, cursor_column) = locate_cursor(&rows, editor.cursor_chars());
     let visible = usize::from(area.height).max(1);
-    let start = (cursor_row + 1).saturating_sub(visible);
-    let lines: Vec<Line<'static>> = rows
+    let window = list_window(cursor_row, rows.len(), visible, 0);
+    let start = window.start;
+    let lines: Vec<Line<'static>> = rows[window]
         .iter()
-        .skip(start)
-        .take(visible)
         .map(|&(row_start, row_end)| Line::raw(visible_chars(&chars[row_start..row_end])))
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
@@ -490,8 +505,9 @@ pub(crate) fn render_list_editor(
         }
     }
     let visible = usize::from(inner.height).max(1);
-    let start = scroll_start(selected_line, lines.len(), visible);
-    let lines: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
+    let window = list_window(selected_line, lines.len(), visible, SCROLL_MARGIN);
+    let start = window.start;
+    let lines: Vec<Line<'static>> = lines.drain(window).collect();
     frame.render_widget(Paragraph::new(lines), inner);
     if let Some((row, column)) = cursor {
         place_cursor(frame, inner, row.saturating_sub(start), column);
@@ -540,18 +556,22 @@ fn render_theme_box(frame: &mut Frame<'_>, area: Rect, panel: &SettingsPanel, th
         ThemeListState::Naming(editor) => {
             let (text, column) = editor_window(editor, width.saturating_sub(SAVE_AS.len()));
             cursor = Some((lines.len(), NO_POINTER.len() + SAVE_AS.len() + column));
-            let spans = vec![Span::styled(SAVE_AS, accent(theme)), Span::raw(text)];
+            let spans = vec![Span::styled(SAVE_AS, theme.accent_style()), Span::raw(text)];
             lines.push(pointed_line(true, theme, spans));
         }
         _ => lines.push(pointed_line(
             on_save_row,
             theme,
-            vec![Span::styled("+ save current colors as…", meta(theme))],
+            vec![Span::styled(
+                "+ save current colors as…",
+                theme.meta_style(),
+            )],
         )),
     }
     let visible = usize::from(inner.height).max(1);
-    let start = scroll_start(list.selected(), lines.len(), visible);
-    let lines: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
+    let window = list_window(list.selected(), lines.len(), visible, SCROLL_MARGIN);
+    let start = window.start;
+    let lines: Vec<Line<'static>> = lines.drain(window).collect();
     frame.render_widget(Paragraph::new(lines), inner);
     if let Some((row, column)) = cursor {
         place_cursor(frame, inner, row.saturating_sub(start), column);
@@ -577,7 +597,7 @@ fn theme_entry_spans(entry: &ThemeEntry, theme: &Theme) -> Vec<Span<'static>> {
             .map(|named| Span::styled(SWATCH, Style::default().fg(color(named)))),
     );
     if entry.built_in {
-        spans.push(Span::styled("  built-in", meta(theme)));
+        spans.push(Span::styled("  built-in", theme.meta_style()));
     }
     spans
 }
@@ -592,7 +612,7 @@ fn render_color_box(frame: &mut Frame<'_>, area: Rect, panel: &mut SettingsPanel
     let PanelMode::Color { picker, .. } = panel.mode() else {
         return;
     };
-    let mut lines = vec![Line::styled("Named", meta(theme))];
+    let mut lines = vec![Line::styled("Named", theme.meta_style())];
     let columns = (usize::from(inner.width) / PALETTE_CELL_WIDTH).max(1);
     lines.extend(
         picker
@@ -624,7 +644,7 @@ fn palette_row(
         };
         let name_width = PALETTE_CELL_WIDTH - POINTER.chars().count() - SWATCH.chars().count() - 1;
         [
-            Span::styled(pointer, accent(theme).add_modifier(Modifier::BOLD)),
+            Span::styled(pointer, theme.accent_style().add_modifier(Modifier::BOLD)),
             Span::styled(SWATCH, Style::default().fg(color(named))),
             Span::styled(format!(" {:name_width$}", named.to_string()), name_style),
         ]
@@ -636,11 +656,11 @@ fn palette_row(
 fn custom_color_line(picker: &ColorPicker, theme: &Theme) -> Line<'static> {
     let mixed = picker.mixed();
     let value = match picker.hex_input() {
-        Some(typed) => Span::styled(format!("#{typed}▏"), accent(theme)),
+        Some(typed) => Span::styled(format!("#{typed}▏"), theme.accent_style()),
         None => Span::raw(mixed.to_string()),
     };
     Line::from(vec![
-        Span::styled("Custom  ", meta(theme)),
+        Span::styled("Custom  ", theme.meta_style()),
         Span::styled(WIDE_SWATCH, Style::default().fg(color(mixed))),
         Span::raw(" "),
         value,
@@ -662,7 +682,7 @@ fn channel_line(
             GAUGE_FULL.repeat(filled),
             Style::default().fg(CHANNEL_COLORS[channel]),
         ),
-        Span::styled(GAUGE_EMPTY.repeat(width - filled), meta(theme)),
+        Span::styled(GAUGE_EMPTY.repeat(width - filled), theme.meta_style()),
     ];
     pointed_line(
         picker.focus() == PickerFocus::Channel(channel),
@@ -679,11 +699,11 @@ fn list_box_line(
     theme: &Theme,
 ) -> Line<'static> {
     let span = match entry {
-        Some(entry) => Span::raw(ellipsized(
-            escape_controls_single_line(&entry_summary(entry)).into_owned(),
+        Some(entry) => Span::raw(ellipsize(
+            &escape_controls_single_line(&entry_summary(entry)),
             width,
         )),
-        None => Span::styled("+ add entry", meta(theme)),
+        None => Span::styled("+ add entry", theme.meta_style()),
     };
     pointed_line(selected, theme, vec![span])
 }
@@ -696,8 +716,8 @@ fn confirm_delete_line(entry: &toml::Value, width: usize, theme: &Theme) -> Line
         true,
         theme,
         vec![Span::styled(
-            ellipsized(question, width),
-            Style::default().fg(theme.warning),
+            ellipsize(&question, width),
+            theme.warning_style(),
         )],
     )
 }
@@ -723,7 +743,11 @@ fn push_entry_lines(
     let field_width = width.saturating_sub(ENGINE_LABEL.len());
     for (index, (label, field, focused)) in fields.into_iter().enumerate() {
         let (text, column) = editor_window(field, field_width);
-        let label_style = if focused { accent(theme) } else { meta(theme) };
+        let label_style = if focused {
+            theme.accent_style()
+        } else {
+            theme.meta_style()
+        };
         let spans = vec![Span::styled(label, label_style), Span::raw(text)];
         if focused {
             cursor = (lines.len(), NO_POINTER.len() + label.len() + column);
@@ -771,16 +795,6 @@ fn shown_value(kind: SettingKind, value: &toml::Value) -> String {
     }
 }
 
-/// `text` cut to `width` characters, ending in `…` when anything was cut.
-fn ellipsized(text: String, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text;
-    }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
-
 fn checkbox(on: bool) -> &'static str {
     if on { CHECKED } else { UNCHECKED }
 }
@@ -819,24 +833,4 @@ pub(crate) fn place_cursor(frame: &mut Frame<'_>, area: Rect, row: usize, column
             .saturating_add(offset(row))
             .min(area.bottom().saturating_sub(1)),
     ));
-}
-
-/// First line of a `visible`-line window that keeps [`SCROLL_MARGIN`] lines
-/// below `selected` in view, or as many as half the window allows.
-fn scroll_start(selected: usize, total: usize, visible: usize) -> usize {
-    if total <= visible {
-        return 0;
-    }
-    let margin = SCROLL_MARGIN.min(visible.saturating_sub(1) / 2);
-    (selected + 1 + margin)
-        .saturating_sub(visible)
-        .min(total - visible)
-}
-
-fn accent(theme: &Theme) -> Style {
-    Style::default().fg(theme.accent)
-}
-
-fn meta(theme: &Theme) -> Style {
-    Style::default().fg(theme.status_text)
 }

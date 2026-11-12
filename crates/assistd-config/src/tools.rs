@@ -10,7 +10,7 @@ use crate::defaults::{
     DEFAULT_TOOLS_SCRATCH_RETENTION_DAYS, default_tools_overflow_dir, default_tools_scratch_dir,
     default_writable_paths,
 };
-use crate::settings::{DescribeSettings, describe_fields};
+use crate::settings::{DescribeSettings, choice_setting, describe_fields};
 
 /// Tools subsystem configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -144,6 +144,12 @@ pub enum BashSandboxMode {
     /// Never sandbox, so every tool is disabled.
     None,
 }
+
+choice_setting!(BashSandboxMode {
+    Auto => "auto",
+    Bwrap => "bwrap",
+    None => "none",
+});
 
 /// Policy for the scripts `bash` runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -126,14 +126,14 @@ impl App {
             KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(ConfirmChoice::Deny)
             }
-            KeyCode::Enter => choices.get(prompt.selected).copied(),
+            KeyCode::Enter => choices.get(prompt.selected.index()).copied(),
             KeyCode::Char(digit) => numbered_choice(choices, digit),
             KeyCode::Up => {
-                prompt.selected = prompt.selected.saturating_sub(1);
+                prompt.selected.previous();
                 None
             }
             KeyCode::Down => {
-                prompt.selected = (prompt.selected + 1).min(choices.len() - 1);
+                prompt.selected.next(choices.len());
                 None
             }
             KeyCode::Tab => {
