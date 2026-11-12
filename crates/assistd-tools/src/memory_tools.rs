@@ -532,9 +532,9 @@ mod tests {
 
     use assistd_embed::EmbedError;
     use assistd_memory::{
-        AdjacentChunks, BranchId, BranchSummary, ChunkId, Embedding, EmbeddingTarget, FileStamp,
-        IndexPass, MemoryError, MemoryId, MemoryStore, NoMemoryStore, NoSemanticStore,
-        NoTranscriptStore, PersistedMessage, Seq, SqliteHandle, SqliteMemoryStore,
+        AdjacentChunks, BranchId, BranchSummary, ChunkId, Embedding, EmbeddingSpace,
+        EmbeddingTarget, FileStamp, IndexPass, MemoryError, MemoryId, MemoryStore, NoMemoryStore,
+        NoSemanticStore, NoTranscriptStore, PersistedMessage, Seq, SqliteHandle, SqliteMemoryStore,
         SqliteSemanticStore, SqliteTranscriptStore, UnindexedRows,
     };
     use assistd_utils::readiness::Readiness;
@@ -602,8 +602,11 @@ mod tests {
         ) -> Result<Vec<MemoryHit>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn drop_other_models(&self, _model: &str) -> Result<u64, MemoryError> {
-            Ok(0)
+        async fn adopt_embedding_space(
+            &self,
+            _space: &EmbeddingSpace,
+        ) -> Result<Option<EmbeddingSpace>, MemoryError> {
+            Ok(None)
         }
         async fn count_missing(&self) -> Result<UnindexedRows, MemoryError> {
             Ok(UnindexedRows::default())
@@ -622,11 +625,7 @@ mod tests {
         ) -> Result<Vec<(ChunkId, String)>, MemoryError> {
             Ok(Vec::new())
         }
-        async fn store_embeddings(
-            &self,
-            _model: &str,
-            _embeddings: Vec<Embedding>,
-        ) -> Result<(), MemoryError> {
+        async fn store_embeddings(&self, _embeddings: Vec<Embedding>) -> Result<(), MemoryError> {
             Ok(())
         }
         async fn clear_unembeddable(&self) -> Result<u64, MemoryError> {
@@ -750,10 +749,7 @@ mod tests {
                     vector: Some(vec![1.0]),
                 })
                 .collect();
-            self.semantic
-                .store_embeddings("m", embeddings)
-                .await
-                .unwrap();
+            self.semantic.store_embeddings(embeddings).await.unwrap();
         }
 
         fn short_id(&self) -> String {

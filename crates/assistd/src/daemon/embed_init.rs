@@ -10,7 +10,9 @@ use assistd_embed::{
     EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
 };
 use assistd_ipc::{ComponentReadiness, StartupComponent};
-use assistd_memory::{NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore};
+use assistd_memory::{
+    EmbeddingSpace, NoSemanticStore, SemanticStore, SqliteHandle, SqliteSemanticStore,
+};
 use assistd_utils::child_server::{ApiKey, ChildServer};
 use assistd_utils::readiness::Readiness;
 use tokio::sync::{Notify, watch};
@@ -183,8 +185,7 @@ async fn start_and_record(
                 embedder.dim(),
                 startup.config.port,
             );
-            let worker =
-                drop_other_models_then_serve(state, embedder, startup, stages.worker).await;
+            let worker = adopt_space_then_serve(state, embedder, startup, stages.worker).await;
             Some(RunningEmbedding { server, worker })
         }
         Err(failure) => {
@@ -213,16 +214,20 @@ fn publish_readiness(state: &AppState) {
     );
 }
 
-/// Drop vectors from other models, then start the worker and mark the embedder
-/// ready. When dropping fails the embedder stays unavailable.
-async fn drop_other_models_then_serve(
+/// Drop vectors from any other embedding space, then start the worker and mark the
+/// embedder ready. When that fails the embedder stays unavailable.
+async fn adopt_space_then_serve(
     state: &AppState,
     embedder: Arc<dyn Embedder>,
     startup: EmbeddingStartup,
     worker_shutdown: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
-    let semantic = state.memory.semantic.as_ref();
-    if let Err(reason) = drop_other_models(semantic, embedder.model()).await {
+    let space = EmbeddingSpace {
+        model: embedder.model().to_owned(),
+        dim: embedder.dim(),
+        server_args: startup.config.custom_args.clone().into(),
+    };
+    if let Err(reason) = adopt_space(state.memory.semantic.as_ref(), &space).await {
         tracing::warn!("embedding: {reason}; semantic search disabled this run");
         state
             .memory
@@ -285,13 +290,17 @@ async fn start_server(
     }
 }
 
-async fn drop_other_models(semantic: &dyn SemanticStore, model_name: &str) -> Result<(), String> {
-    match semantic.drop_other_models(model_name).await {
-        Ok(0) => Ok(()),
-        Ok(dropped) => {
-            info!("embedding: dropped {dropped} vectors from models other than {model_name}");
+async fn adopt_space(semantic: &dyn SemanticStore, space: &EmbeddingSpace) -> Result<(), String> {
+    match semantic.adopt_embedding_space(space).await {
+        Ok(None) => Ok(()),
+        Ok(Some(replaced)) => {
+            info!(
+                "embedding: dropped every stored vector for re-embedding; they came from \
+                 model={}, dim={}, args={:?}",
+                replaced.model, replaced.dim, replaced.server_args
+            );
             Ok(())
         }
-        Err(e) => Err(format!("dropping other models' vectors failed: {e}")),
+        Err(e) => Err(format!("checking the stored vectors' model failed: {e}")),
     }
 }

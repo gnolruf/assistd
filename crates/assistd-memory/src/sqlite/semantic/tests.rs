@@ -2,9 +2,6 @@ use super::*;
 use crate::sqlite::{SqliteMemoryStore, SqliteTranscriptStore};
 use crate::{BranchId, MemoryStore, MessageId, PersistedMessage, PersistedRole, TranscriptStore};
 
-/// The model every helper stores vectors under.
-const MODEL: &str = "m";
-
 /// The stamp of a file no test has touched since it was indexed.
 const STAMP: FileStamp = FileStamp {
     mtime_ns: 1,
@@ -74,14 +71,11 @@ fn unit_vec(angle: f32) -> Vec<f32> {
 
 async fn embed_chunk(store: &SqliteSemanticStore, chunk_id: ChunkId, vector: &[f32]) {
     store
-        .store_embeddings(
-            MODEL,
-            vec![Embedding {
-                target: EmbeddingTarget::Chunk(chunk_id),
-                text: String::new(),
-                vector: Some(vector.to_vec()),
-            }],
-        )
+        .store_embeddings(vec![Embedding {
+            target: EmbeddingTarget::Chunk(chunk_id),
+            text: String::new(),
+            vector: Some(vector.to_vec()),
+        }])
         .await
         .unwrap();
 }
@@ -101,14 +95,11 @@ async fn embed_memory(
     vector: &[f32],
 ) {
     store
-        .store_embeddings(
-            MODEL,
-            vec![Embedding {
-                target: EmbeddingTarget::Memory(memory_id),
-                text: value.to_string(),
-                vector: Some(vector.to_vec()),
-            }],
-        )
+        .store_embeddings(vec![Embedding {
+            target: EmbeddingTarget::Memory(memory_id),
+            text: value.to_string(),
+            vector: Some(vector.to_vec()),
+        }])
         .await
         .unwrap();
 }
@@ -523,7 +514,7 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
         vector: None,
     })
     .to_vec();
-    store.store_embeddings(MODEL, unembeddable).await.unwrap();
+    store.store_embeddings(unembeddable).await.unwrap();
 
     assert_eq!(
         store.count_missing().await.unwrap(),
@@ -565,35 +556,35 @@ async fn unembeddable_rows_are_neither_missing_nor_searched_until_cleared_or_cha
 }
 
 #[tokio::test]
-async fn dropping_other_models_keeps_only_the_current_models_vectors() {
+async fn adopting_a_different_embedding_space_drops_every_vector() {
     let (handle, store, _temp) = fresh().await;
     let transcript = Transcript::new(&handle).await;
-    let (_, old_chunks) = transcript.append("old").await;
-    let mem_id = save_memory(&handle, "k", "v").await;
-    store
-        .store_embeddings(
-            "old",
-            vec![
-                Embedding {
-                    target: EmbeddingTarget::Chunk(old_chunks[0]),
-                    text: "old".to_string(),
-                    vector: Some(unit_vec(0.0)),
-                },
-                Embedding {
-                    target: EmbeddingTarget::Memory(mem_id),
-                    text: "v".to_string(),
-                    vector: Some(unit_vec(0.0)),
-                },
-            ],
-        )
-        .await
-        .unwrap();
-    let current = transcript
-        .embedded_chunk(&store, "current", &unit_vec(0.5))
+    let memory = save_memory(&handle, "k", "v").await;
+    let space = EmbeddingSpace {
+        model: "owner/repo:Q8_0".to_string(),
+        dim: 2,
+        server_args: String::new(),
+    };
+    assert_eq!(store.adopt_embedding_space(&space).await.unwrap(), None);
+    let chunk = transcript
+        .embedded_chunk(&store, "text", &unit_vec(0.0))
         .await;
+    embed_memory(&store, memory, "v", &unit_vec(0.0)).await;
 
-    assert_eq!(store.drop_other_models(MODEL).await.unwrap(), 2);
-    assert_eq!(store.drop_other_models(MODEL).await.unwrap(), 0);
+    assert_eq!(store.adopt_embedding_space(&space).await.unwrap(), None);
+    assert_eq!(
+        store.count_missing().await.unwrap(),
+        UnindexedRows::default()
+    );
+
+    let rearranged = EmbeddingSpace {
+        server_args: "--embd-normalize 1".to_string(),
+        ..space.clone()
+    };
+    assert_eq!(
+        store.adopt_embedding_space(&rearranged).await.unwrap(),
+        Some(space)
+    );
     assert_eq!(
         store.count_missing().await.unwrap(),
         UnindexedRows {
@@ -601,18 +592,23 @@ async fn dropping_other_models_keeps_only_the_current_models_vectors() {
             memories: 1
         }
     );
-    let hits = store
-        .nearest_chunks(unit_vec(0.0), 5, ChunkScope::Chats(SessionScope::All))
-        .await
-        .unwrap();
-    let ids: Vec<ChunkId> = hits.iter().map(|h| h.chunk_id).collect();
-    assert_eq!(ids, [current]);
+    let all_chats = ChunkScope::Chats(SessionScope::All);
+    let hits = store.nearest_chunks(unit_vec(0.0), 5, all_chats).await;
+    assert!(hits.unwrap().is_empty());
     assert!(
         store
             .nearest_memories(unit_vec(0.0), 5)
             .await
             .unwrap()
             .is_empty()
+    );
+
+    embed_chunk(&store, chunk, &unit_vec(0.0)).await;
+    let hits = store.nearest_chunks(unit_vec(0.0), 5, all_chats).await;
+    assert_eq!(hits.unwrap()[0].chunk_id, chunk);
+    assert_eq!(
+        store.adopt_embedding_space(&rearranged).await.unwrap(),
+        None
     );
 }
 
@@ -633,7 +629,7 @@ async fn batch_skips_targets_deleted_before_it_lands() {
             vector: Some(unit_vec(0.0)),
         })
         .to_vec();
-    store.store_embeddings(MODEL, embeddings).await.unwrap();
+    store.store_embeddings(embeddings).await.unwrap();
 
     let hits = store.nearest_memories(unit_vec(0.0), 5).await.unwrap();
     let hit_ids: Vec<MemoryId> = hits.iter().map(|hit| hit.memory_id).collect();

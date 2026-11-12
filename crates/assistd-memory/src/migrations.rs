@@ -476,6 +476,37 @@ CREATE TABLE active_session (
 ) STRICT;
 ";
 
+/// V20: stored vectors are identified by the one `embedding_meta` row naming the
+/// embedding space they are all in, in place of a model per vector. Drops every
+/// vector for re-embedding.
+const V20_SQL: &str = r"
+DROP TABLE message_chunk_embeddings;
+DROP TABLE document_chunk_embeddings;
+DROP TABLE memory_embeddings;
+
+CREATE TABLE message_chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    vector   BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+
+CREATE TABLE document_chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    vector   BLOB CHECK (length(vector) > 4)
+) STRICT;
+
+CREATE TABLE memory_embeddings (
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    vector    BLOB CHECK (length(vector) > 0 AND length(vector) % 4 = 0)
+) STRICT;
+
+CREATE TABLE embedding_meta (
+    id          INTEGER PRIMARY KEY CHECK (id = 0),
+    model       TEXT NOT NULL,
+    dim         INTEGER NOT NULL CHECK (dim > 0),
+    server_args TEXT NOT NULL
+) STRICT;
+";
+
 /// The full migration set.
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -498,6 +529,7 @@ fn migrations() -> Migrations<'static> {
         M::up(V17_SQL),
         M::up(V18_SQL),
         M::up(V19_SQL),
+        M::up(V20_SQL),
     ])
 }
 
@@ -524,6 +556,6 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
     }
 }

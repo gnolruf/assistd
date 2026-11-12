@@ -43,7 +43,7 @@ pub trait Embedder: fmt::Debug + Send + Sync + 'static {
         Ok(vectors)
     }
 
-    /// Model id, stored alongside every vector so models never mix.
+    /// Model id, as `<owner>/<repo>:<quant>`.
     fn model(&self) -> &str;
     /// Vector dimensionality, stable for the life of the embedder.
     fn dim(&self) -> usize;
