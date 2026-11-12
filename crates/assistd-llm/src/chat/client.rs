@@ -13,7 +13,7 @@ use assistd_config::{
 use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
 use assistd_utils::child_server::ApiKey;
-use assistd_utils::http::{local_client_builder, read_capped};
+use assistd_utils::http::local_client_builder;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, MutexGuard, mpsc};
@@ -35,8 +35,8 @@ use crate::{
 };
 
 const ERROR_BODY_CAP: usize = 1024;
-/// Largest accepted non-streamed summary response; summaries are capped at a few thousand tokens.
-const SUMMARY_BODY_MAX: usize = 4 * 1024 * 1024;
+/// The `type` llama-server gives an error refusing a prompt larger than its context window.
+const CONTEXT_OVERFLOW_ERROR: &str = "exceed_context_size_error";
 /// Written into the model's thinking where its budget ran out, so it moves
 /// on instead of starting over.
 const REASONING_BUDGET_MESSAGE: &str =
@@ -285,15 +285,7 @@ impl LlamaChatClient {
     /// Stream one completion outside the conversation and return its text,
     /// with reasoning discarded; `caller` names the request in a crash error.
     async fn stream_text(&self, body: Vec<u8>, caller: &str) -> LlmResult<String> {
-        let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
-        let stream = async {
-            let outcome = self.stream_openai(body, None, &tx).await;
-            drop(tx);
-            outcome
-        };
-        let drain = async { while rx.recv().await.is_some() {} };
-        let (outcome, ()) = tokio::join!(stream, drain);
-        match outcome {
+        match self.stream_unobserved(body).await {
             StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => Ok(accum.text),
             StreamOutcome::PreEmitError(e) | StreamOutcome::PartialAfterEmit { err: e, .. } => {
                 Err(LlmError::Chat(e))
@@ -302,6 +294,19 @@ impl LlamaChatClient {
                 "llama-server crashed during {caller}"
             ))),
         }
+    }
+
+    /// Stream one completion whose events nobody watches.
+    async fn stream_unobserved(&self, body: Vec<u8>) -> StreamOutcome {
+        let (tx, mut rx) = mpsc::channel::<LlmEvent>(64);
+        let stream = async {
+            let outcome = self.stream_openai(body, None, &tx).await;
+            drop(tx);
+            outcome
+        };
+        let drain = async { while rx.recv().await.is_some() {} };
+        let (outcome, ()) = tokio::join!(stream, drain);
+        outcome
     }
 
     /// Compact the conversation when it is over budget, summarizing with the
@@ -346,17 +351,80 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
-        if let Some((summary, cut)) = conv.summary_snapshot() {
-            let _ = tx
-                .send(LlmEvent::HistoryCompacted {
-                    summary: summary.to_string(),
-                    cut,
-                    elapsed: started_at.elapsed(),
-                })
-                .await;
-        }
-        send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
+        announce_compaction(&conv, started_at, tx).await;
         Ok(conv)
+    }
+
+    /// Drop history down to the low-water mark of the estimate, which the
+    /// server's refusal of the last prompt has just corrected.
+    async fn truncate_after_overflow(&self, tx: &mpsc::Sender<LlmEvent>) {
+        send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
+        let started_at = Instant::now();
+        let mut conv = self.conv.lock().await;
+        let before = (conv.message_count(), conv.approx_total_tokens());
+        conv.truncate_to_budget(&self.chat, &self.model);
+        warn!(
+            target: "assistd::chat",
+            messages_before = before.0,
+            messages_after = conv.message_count(),
+            tokens_before = before.1,
+            tokens_after = conv.approx_total_tokens(),
+            "prompt exceeded the context window; history truncated to retry"
+        );
+        announce_compaction(&conv, started_at, tx).await;
+    }
+
+    /// Fit the conversation to its budget, send it with `tools` offered, and
+    /// correct the token estimate by what the server measured.
+    async fn attempt_step(
+        &self,
+        tools: &[Value],
+        tx: &mpsc::Sender<LlmEvent>,
+    ) -> LlmResult<StreamOutcome> {
+        let (body_bytes, estimated_tokens, compaction_headroom) = {
+            let conv = self.fit_budget(tools, tx).await?;
+            send_context_size(&conv, tx).await;
+            let mut payload = self.base_request(conv.as_wire_messages());
+            offer_tools(&mut payload, tools.to_vec());
+            let body = serde_json::to_vec(&payload)
+                .map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?;
+            (
+                body,
+                conv.heuristic_tokens(),
+                self.compaction_headroom(&conv),
+            )
+        };
+
+        self.claim_slot().await;
+        let outcome = self
+            .stream_openai(body_bytes, compaction_headroom, tx)
+            .await;
+        let mut conv = self.conv.lock().await;
+        self.calibrate(&mut conv, estimated_tokens, &outcome);
+        Ok(outcome)
+    }
+
+    /// Record the prompt size the server measured for a request estimated at
+    /// `estimated_tokens`; a refusal naming no size counts as a full window.
+    fn calibrate(&self, conv: &mut Conversation, estimated_tokens: u32, outcome: &StreamOutcome) {
+        let measured = match outcome {
+            StreamOutcome::Ok(accum)
+            | StreamOutcome::PartialAfterEmit { accum, .. }
+            | StreamOutcome::ClientDisconnected(accum) => accum.prompt_tokens,
+            StreamOutcome::PreEmitError(ChatClientError::ContextOverflow { prompt_tokens }) => {
+                Some(prompt_tokens.unwrap_or(self.model.context_length.get()))
+            }
+            StreamOutcome::PreEmitError(_) | StreamOutcome::ServerRestart { .. } => None,
+        };
+        if let Some(prompt_tokens) = measured {
+            debug!(
+                target: "assistd::chat",
+                estimated_tokens,
+                prompt_tokens,
+                "calibrating token estimate from server usage"
+            );
+            conv.calibrate(estimated_tokens, prompt_tokens);
+        }
     }
 
     /// `None` when compaction is already near, so it is announced once.
@@ -415,10 +483,7 @@ impl LlamaChatClient {
         if !status.is_success() {
             let body =
                 read_body_capped(&mut response, ERROR_BODY_CAP, self.stream_inactivity()).await;
-            let err = ChatClientError::Server {
-                status: status.as_u16(),
-                body,
-            };
+            let err = http_error(status.as_u16(), body);
             return Err(self.fail(StreamAccum::default(), err, pid_at_request).await);
         }
         Ok(response)
@@ -577,7 +642,7 @@ impl LlmBackend for LlamaChatClient {
             .await;
 
         let mut conv = self.conv.lock().await;
-        calibrate_from(&mut conv, estimated_tokens, &outcome);
+        self.calibrate(&mut conv, estimated_tokens, &outcome);
         match outcome {
             StreamOutcome::Ok(accum) => {
                 conv.push_assistant(accum.text);
@@ -630,27 +695,12 @@ impl LlmBackend for LlamaChatClient {
     }
 
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome> {
-        let (body_bytes, estimated_tokens, compaction_headroom) = {
-            let conv = self.fit_budget(&tools, &tx).await?;
-            send_context_size(&conv, &tx).await;
-            let mut payload = self.base_request(conv.as_wire_messages());
-            offer_tools(&mut payload, tools);
-            let body = serde_json::to_vec(&payload)
-                .map_err(|e| LlmError::Chat(ChatClientError::Json(e)))?;
-            (
-                body,
-                conv.heuristic_tokens(),
-                self.compaction_headroom(&conv),
-            )
-        };
-
-        self.claim_slot().await;
-        let outcome = self
-            .stream_openai(body_bytes, compaction_headroom, &tx)
-            .await;
-
+        let mut outcome = self.attempt_step(&tools, &tx).await?;
+        if outcome.is_context_overflow() {
+            self.truncate_after_overflow(&tx).await;
+            outcome = self.attempt_step(&tools, &tx).await?;
+        }
         let mut conv = self.conv.lock().await;
-        calibrate_from(&mut conv, estimated_tokens, &outcome);
         match outcome {
             StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => {
                 commit_step(&mut conv, *accum)
@@ -849,7 +899,6 @@ impl Summarizer for ContinuationSummarizer<'_> {
     /// reply that calls a tool or is empty is asked again with no tools offered.
     async fn summarize(&self, request: SummaryRequest<'_>) -> Result<String, ChatClientError> {
         self.client.claim_slot().await;
-        self.client.serving_pid().await?;
         let SummaryRequest {
             mut messages,
             instruction,
@@ -881,40 +930,21 @@ impl ContinuationSummarizer<'_> {
         let client = self.client;
         let mut payload = client.base_request(messages);
         offer_tools(&mut payload, tools.to_vec());
-        payload.stream = false;
-        payload.stream_options = None;
         payload.temperature = client.chat.summary_temperature.get();
         payload.max_tokens = client.chat.max_summary_tokens();
         payload.reasoning_budget_tokens = Some(0);
         payload.reasoning_budget_message = None;
-
-        let url = format!("{}/v1/chat/completions", client.base_url);
-        let mut response = client
-            .client
-            .post(&url)
-            .timeout(client.request_timeout())
-            .json(&payload)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body =
-                read_body_capped(&mut response, ERROR_BODY_CAP, client.stream_inactivity()).await;
-            return Err(ChatClientError::Server {
-                status: status.as_u16(),
-                body,
-            });
+        let body = serde_json::to_vec(&payload)?;
+        match client.stream_unobserved(body).await {
+            StreamOutcome::Ok(accum) | StreamOutcome::ClientDisconnected(accum) => {
+                summary_text(*accum)
+            }
+            StreamOutcome::PreEmitError(err) | StreamOutcome::PartialAfterEmit { err, .. } => {
+                Err(err)
+            }
+            StreamOutcome::ServerRestart { pre_emit: true, .. } => Err(ChatClientError::NotReady),
+            StreamOutcome::ServerRestart { .. } => Err(ChatClientError::Restarted),
         }
-
-        let body: wire::ChatResponse =
-            serde_json::from_slice(&read_capped(response, SUMMARY_BODY_MAX).await?)?;
-        let message = body
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message)
-            .ok_or_else(|| ChatClientError::Summarize("no choices returned".into()))?;
-        summary_text(message)
     }
 }
 
@@ -926,11 +956,10 @@ fn offer_tools(payload: &mut wire::ChatRequest<'_>, tools: Vec<Value>) {
     }
 }
 
-/// The summary in `message`, refusing a reply that called a tool or said nothing.
-fn summary_text(message: wire::ChatChoiceMessage) -> Result<String, ChatClientError> {
-    let text = message.content.unwrap_or_default();
-    if message.tool_calls.is_some_and(|calls| !calls.is_empty()) || text.contains(TOOL_CALL_MARKUP)
-    {
+/// The summary a finished stream holds, refusing a reply that called a tool or said nothing.
+fn summary_text(reply: StreamAccum) -> Result<String, ChatClientError> {
+    let text = reply.text;
+    if !reply.tool_calls.is_empty() || text.contains(TOOL_CALL_MARKUP) {
         return Err(ChatClientError::Summarize(
             "the model called a tool instead of summarizing".into(),
         ));
@@ -1055,26 +1084,31 @@ enum StreamOutcome {
 }
 
 impl StreamOutcome {
-    fn prompt_tokens(&self) -> Option<u32> {
-        match self {
-            Self::Ok(accum)
-            | Self::PartialAfterEmit { accum, .. }
-            | Self::ClientDisconnected(accum) => accum.prompt_tokens,
-            Self::PreEmitError(_) | Self::ServerRestart { .. } => None,
-        }
+    fn is_context_overflow(&self) -> bool {
+        matches!(
+            self,
+            Self::PreEmitError(ChatClientError::ContextOverflow { .. })
+        )
     }
 }
 
-fn calibrate_from(conv: &mut Conversation, estimated_tokens: u32, outcome: &StreamOutcome) {
-    if let Some(prompt_tokens) = outcome.prompt_tokens() {
-        debug!(
-            target: "assistd::chat",
-            estimated_tokens,
-            prompt_tokens,
-            "calibrating token estimate from server usage"
-        );
-        conv.calibrate(estimated_tokens, prompt_tokens);
+/// Tell the consumer compaction finished, with the summary now heading the
+/// conversation when there is one.
+async fn announce_compaction(
+    conv: &Conversation,
+    started_at: Instant,
+    tx: &mpsc::Sender<LlmEvent>,
+) {
+    if let Some((summary, cut)) = conv.summary_snapshot() {
+        let _ = tx
+            .send(LlmEvent::HistoryCompacted {
+                summary: summary.to_string(),
+                cut,
+                elapsed: started_at.elapsed(),
+            })
+            .await;
     }
+    send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
 }
 
 async fn send_context_size(conv: &Conversation, tx: &mpsc::Sender<LlmEvent>) {
@@ -1196,9 +1230,23 @@ fn commit_step(conv: &mut Conversation, mut accum: StreamAccum) -> LlmResult<Ste
 }
 
 fn server_error(error: wire::StreamError) -> ChatClientError {
+    if error.kind.as_deref() == Some(CONTEXT_OVERFLOW_ERROR) {
+        return ChatClientError::ContextOverflow {
+            prompt_tokens: error.n_prompt_tokens,
+        };
+    }
     ChatClientError::Server {
         status: error.code,
         body: error.message,
+    }
+}
+
+/// The failure a non-success response reports, keeping its raw body unless
+/// it is a context overflow.
+fn http_error(status: u16, body: String) -> ChatClientError {
+    match serde_json::from_str::<wire::ErrorBody>(&body).map(|parsed| server_error(parsed.error)) {
+        Ok(overflow @ ChatClientError::ContextOverflow { .. }) => overflow,
+        _ => ChatClientError::Server { status, body },
     }
 }
 

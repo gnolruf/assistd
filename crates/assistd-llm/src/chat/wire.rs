@@ -171,28 +171,6 @@ pub struct FunctionCallSpec<'a> {
     pub arguments: &'a str,
 }
 
-/// Non-streaming response body.
-#[derive(Debug, Deserialize)]
-pub struct ChatResponse {
-    pub choices: Vec<ChatChoice>,
-}
-
-/// One choice in a non-streaming [`ChatResponse`].
-#[derive(Debug, Deserialize)]
-pub struct ChatChoice {
-    pub message: ChatChoiceMessage,
-}
-
-/// The assistant message inside a non-streaming choice; `content` is null
-/// when the reply is only tool calls.
-#[derive(Debug, Deserialize)]
-pub struct ChatChoiceMessage {
-    #[serde(default)]
-    pub content: Option<String>,
-    #[serde(default)]
-    pub tool_calls: Option<Vec<Value>>,
-}
-
 /// One streamed chunk from `/v1/chat/completions` when `stream: true`.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionChunk {
@@ -213,6 +191,18 @@ pub struct StreamError {
     /// The HTTP status the failure would have had before streaming began.
     pub code: u16,
     pub message: String,
+    /// llama-server's name for the class of failure.
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    /// The prompt size measured, on a context-overflow error.
+    #[serde(default)]
+    pub n_prompt_tokens: Option<u32>,
+}
+
+/// The body of a response llama-server fails with before streaming begins.
+#[derive(Debug, Deserialize)]
+pub struct ErrorBody {
+    pub error: StreamError,
 }
 
 /// Token counts the server measured for one request.

@@ -30,12 +30,12 @@ use assistd_tools::{JUDGE_TIMEOUT, JudgedCommand, SafetyJudge, Verdict};
 
 const MAX_REQUEST_HEADER_BYTES: usize = 128 * 1024;
 
-/// Scripted replies for the fake server, chosen by the request's `stream`
-/// field. Each request pops the front reply; the last one is reused.
+/// Scripted replies for the fake server, one queue for summary requests and
+/// one for the rest. Each request pops the front reply; the last one is reused.
 #[derive(Clone)]
 struct Script {
     stream_responses: Arc<Mutex<VecDeque<StreamResponse>>>,
-    summary_responses: Arc<Mutex<VecDeque<SummaryResponse>>>,
+    summary_responses: Arc<Mutex<VecDeque<StreamResponse>>>,
     captured: Arc<Mutex<Vec<CapturedRequest>>>,
 }
 
@@ -43,7 +43,8 @@ struct Script {
 struct CapturedRequest {
     path: String,
     body: Value,
-    stream: bool,
+    /// Whether the request closes with the compaction instruction.
+    summary: bool,
 }
 
 #[derive(Clone)]
@@ -63,14 +64,6 @@ enum StreamResponse {
     StallAfterErrorHeaders(u16),
 }
 
-#[derive(Clone)]
-enum SummaryResponse {
-    Ok(String),
-    /// A reply of one tool call and no text.
-    ToolCall,
-    HttpError(u16, String),
-}
-
 impl Script {
     fn new() -> Self {
         Self {
@@ -84,7 +77,7 @@ impl Script {
         self.stream_responses.lock().await.push_back(response);
     }
 
-    async fn push_summary(&self, response: SummaryResponse) {
+    async fn push_summary(&self, response: StreamResponse) {
         self.summary_responses.lock().await.push_back(response);
     }
 
@@ -101,7 +94,7 @@ impl Script {
         }
     }
 
-    async fn next_summary(&self) -> Option<SummaryResponse> {
+    async fn next_summary(&self) -> Option<StreamResponse> {
         let mut queue = self.summary_responses.lock().await;
         if queue.len() > 1 {
             queue.pop_front()
@@ -132,29 +125,26 @@ async fn serve_connection(mut sock: TcpStream, script: Script) -> io::Result<()>
     let Some((path, body_json)) = read_request(&mut sock).await? else {
         return Ok(());
     };
-    let is_stream = body_json
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let is_summary = body_json["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .and_then(|last| last["content"].as_str())
+        .is_some_and(|text| text.starts_with("[Context compaction]"));
 
     script.captured.lock().await.push(CapturedRequest {
         path,
         body: body_json,
-        stream: is_stream,
+        summary: is_summary,
     });
 
-    if is_stream {
-        let response = script.next_stream().await.unwrap_or_else(|| {
-            StreamResponse::HttpError(500, "no scripted stream response".into())
-        });
-        write_stream_response(&mut sock, response).await?;
+    let scripted = if is_summary {
+        script.next_summary().await
     } else {
-        let response = script.next_summary().await.unwrap_or_else(|| {
-            SummaryResponse::HttpError(500, "no scripted summary response".into())
-        });
-        write_summary_response(&mut sock, response).await?;
-    }
-    Ok(())
+        script.next_stream().await
+    };
+    let response =
+        scripted.unwrap_or_else(|| StreamResponse::HttpError(500, "no scripted response".into()));
+    write_stream_response(&mut sock, response).await
 }
 
 /// Read one request's path and JSON body, or `None` if the client hung up
@@ -260,35 +250,6 @@ async fn write_stream_response(sock: &mut TcpStream, response: StreamResponse) -
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
     }
-    let _ = sock.shutdown().await;
-    Ok(())
-}
-
-async fn write_summary_response(sock: &mut TcpStream, response: SummaryResponse) -> io::Result<()> {
-    let message = match response {
-        SummaryResponse::Ok(text) => json!({"role": "assistant", "content": text}),
-        SummaryResponse::ToolCall => json!({
-            "role": "assistant",
-            "content": null,
-            "tool_calls": [{
-                "id": "call-1",
-                "type": "function",
-                "function": {"name": "run", "arguments": "{\"command\":\"ls\"}"},
-            }],
-        }),
-        SummaryResponse::HttpError(status, body) => {
-            write_error(sock, status, &body).await?;
-            let _ = sock.shutdown().await;
-            return Ok(());
-        }
-    };
-    let body = json!({"choices": [{"message": message}]}).to_string();
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    sock.write_all(response.as_bytes()).await?;
     let _ = sock.shutdown().await;
     Ok(())
 }
@@ -466,7 +427,7 @@ async fn single_turn_streams_deltas_and_finishes() {
     let captured = script.captured().await;
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].path, "/v1/chat/completions");
-    assert!(captured[0].stream);
+    assert_eq!(captured[0].body["stream"], true);
     assert_eq!(
         captured[0].body["messages"],
         json!([
@@ -684,7 +645,7 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
     script.push_stream(reply_with_usage(20_000)).await;
     script.push_stream(reply_with_usage(20)).await;
     script
-        .push_summary(SummaryResponse::Ok("earlier turns".into()))
+        .push_summary(StreamResponse::Deltas(vec!["earlier turns".into()]))
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
@@ -712,17 +673,16 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
     );
 
     let captured = script.captured().await;
-    let streams: Vec<_> = captured.iter().filter(|r| r.stream).collect();
     assert!(
-        streams
+        captured
             .iter()
             .all(|r| r.body["stream_options"]["include_usage"] == true),
         "every streamed request asks for usage"
     );
     let summaries_before_last_turn = captured
         .iter()
-        .take_while(|r| !(r.stream && r.body.to_string().contains("turn 7")))
-        .filter(|r| !r.stream)
+        .take_while(|r| r.summary || !r.body.to_string().contains("turn 7"))
+        .filter(|r| r.summary)
         .count();
     assert_eq!(
         summaries_before_last_turn, 1,
@@ -746,7 +706,7 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
         .push_stream(StreamResponse::Deltas(vec!["final".into()]))
         .await;
     script
-        .push_summary(SummaryResponse::HttpError(500, "boom".into()))
+        .push_summary(StreamResponse::HttpError(500, "boom".into()))
         .await;
     let (port, _server) = spawn_fake(script.clone()).await;
 
@@ -767,7 +727,7 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
 
     let captured = script.captured().await;
     assert!(
-        captured.iter().any(|r| !r.stream),
+        captured.iter().any(|r| r.summary),
         "summarize endpoint should have been attempted"
     );
 }
@@ -775,9 +735,17 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
 #[tokio::test]
 async fn a_summary_that_calls_a_tool_is_asked_again_without_tools() {
     let script = Script::new();
-    script.push_summary(SummaryResponse::ToolCall).await;
     script
-        .push_summary(SummaryResponse::Ok("what the task found so far".into()))
+        .push_summary(StreamResponse::RawFrames(tool_call_frames(
+            "call-1",
+            "run",
+            &[r#"{"command":"ls"}"#],
+        )))
+        .await;
+    script
+        .push_summary(StreamResponse::Deltas(vec![
+            "what the task found so far".into(),
+        ]))
         .await;
     script
         .push_stream(StreamResponse::Deltas(vec!["next".into()]))
@@ -803,7 +771,7 @@ async fn a_summary_that_calls_a_tool_is_asked_again_without_tools() {
     drain(&mut rx).await;
 
     let captured = script.captured().await;
-    let summaries: Vec<_> = captured.iter().filter(|r| !r.stream).collect();
+    let summaries: Vec<_> = captured.iter().filter(|r| r.summary).collect();
     assert_eq!(summaries.len(), 2, "one retry after the tool call");
     assert_eq!(summaries[0].body["tools"], json!(tools));
     assert!(
@@ -813,7 +781,7 @@ async fn a_summary_that_calls_a_tool_is_asked_again_without_tools() {
     );
     let next_step = captured
         .iter()
-        .find(|r| r.stream)
+        .find(|r| !r.summary)
         .expect("the step was sent");
     assert!(
         next_step
@@ -1025,6 +993,89 @@ async fn step_failing_before_any_output_drops_the_user_message() {
             {"role": "system", "content": "test system prompt"},
             {"role": "user", "content": "second try"},
         ])
+    );
+}
+
+#[tokio::test]
+async fn step_refused_as_over_the_context_window_drops_old_history_and_retries_once() {
+    let overflow = json!({"error": {
+        "code": 400,
+        "message": "request (13000 tokens) exceeds the available context size (12000 tokens), try increasing it",
+        "type": "exceed_context_size_error",
+        "n_prompt_tokens": 13000,
+        "n_ctx": 12000,
+    }})
+    .to_string();
+    let script = Script::new();
+    for _ in 0..2 {
+        script
+            .push_stream(StreamResponse::Deltas(vec!["ok".into()]))
+            .await;
+    }
+    script
+        .push_stream(StreamResponse::RawFrames(tool_call_frames(
+            "call-1",
+            "run",
+            &[r#"{"command":"seq 99999"}"#],
+        )))
+        .await;
+    script
+        .push_stream(StreamResponse::HttpError(400, overflow.clone()))
+        .await;
+    script
+        .push_stream(StreamResponse::Deltas(vec!["done".into()]))
+        .await;
+    script
+        .push_stream(StreamResponse::HttpError(400, overflow))
+        .await;
+    let (port, _server) = spawn_fake(script.clone()).await;
+
+    let client = build_client(&chat_spec(port));
+    ask(&client, "first question").await;
+    ask(&client, "second question").await;
+    client
+        .push_user("third question".into(), Vec::new())
+        .await
+        .unwrap();
+    let (tx, _rx) = mpsc::channel(64);
+    client.step(Vec::new(), tx.clone()).await.unwrap();
+    client
+        .push_tool_results(vec![ToolResultPayload {
+            call_id: "call-1".into(),
+            name: "run".into(),
+            content: "1 2 3 4 5".into(),
+            attachments: Vec::new(),
+        }])
+        .await
+        .unwrap();
+
+    let outcome = client.step(Vec::new(), tx.clone()).await.unwrap();
+    assert!(matches!(outcome, StepOutcome::Final), "{outcome:?}");
+    let captured = script.captured().await;
+    assert_eq!(captured.len(), 5, "the refused step is retried once");
+    let retried = captured[4].body["messages"].to_string();
+    assert!(!retried.contains("first question"), "{retried}");
+    assert!(retried.contains("third question"), "{retried}");
+    assert!(retried.contains("1 2 3 4 5"), "{retried}");
+
+    client
+        .push_user("fourth question".into(), Vec::new())
+        .await
+        .unwrap();
+    let err = client.step(Vec::new(), tx).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LlmError::Chat(ChatClientError::ContextOverflow {
+                prompt_tokens: Some(13000)
+            })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        script.captured().await.len(),
+        7,
+        "a second refusal is not retried again"
     );
 }
 

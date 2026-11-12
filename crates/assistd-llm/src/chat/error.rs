@@ -1,6 +1,5 @@
 //! Chat client errors.
 
-use assistd_utils::http::BodyError;
 use thiserror::Error;
 
 /// Errors produced by [`crate::LlamaChatClient`].
@@ -8,9 +7,6 @@ use thiserror::Error;
 pub enum ChatClientError {
     #[error("HTTP transport error: {0}")]
     Http(#[from] reqwest::Error),
-
-    #[error("llama-server response: {0}")]
-    Body(#[from] BodyError),
 
     #[error("llama-server returned {status}: {body}")]
     Server { status: u16, body: String },
@@ -24,7 +20,16 @@ pub enum ChatClientError {
     #[error("summarization failed: {0}")]
     Summarize(String),
 
+    /// llama-server refused the prompt as larger than its context window;
+    /// `prompt_tokens` is the size it measured, when it reported one.
+    #[error("the prompt exceeds llama-server's context window")]
+    ContextOverflow { prompt_tokens: Option<u32> },
+
     /// The supervised llama-server was not serving, so nothing was sent.
     #[error("llama-server is not ready; request not sent")]
     NotReady,
+
+    /// The supervised llama-server restarted while the request was in flight.
+    #[error("llama-server restarted during the request")]
+    Restarted,
 }
