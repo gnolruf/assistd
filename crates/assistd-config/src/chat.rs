@@ -39,8 +39,8 @@ pub struct ChatConfig {
     /// Max tokens the model may think for in one response before the server
     /// ends its thinking and it must act. Must be below `max_response_tokens`.
     pub max_reasoning_tokens: NonZeroU32,
-    /// Seconds to the first streamed byte (prompt prefill); generation
-    /// itself is unbounded. Also caps the whole summarization call.
+    /// Seconds to the first streamed byte (prompt prefill), for a summary
+    /// too; generation itself is unbounded.
     pub request_timeout_secs: NonZeroU64,
     /// Temperature for the summarization call, `0.0..=2.0`.
     pub summary_temperature: Temperature,
