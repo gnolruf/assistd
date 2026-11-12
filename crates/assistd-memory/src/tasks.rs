@@ -72,8 +72,10 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
     /// Fails with [`MemoryError::TaskNameTaken`] or [`MemoryError::TaskNotFound`].
     async fn save(&self, id: Option<TaskId>, spec: TaskSpec) -> Result<TaskRecord>;
 
-    /// Remove task `id` and its runs; [`MemoryError::TaskNotFound`] when there is none.
-    async fn delete(&self, id: TaskId) -> Result<()>;
+    /// Remove task `id`, its runs and their transcript sessions, sparing the active session;
+    /// returns the saved relay answers the deleted sessions named, for the caller to delete.
+    /// [`MemoryError::TaskNotFound`] when there is none.
+    async fn delete(&self, id: TaskId) -> Result<Vec<PathBuf>>;
 
     /// Set whether task `id`'s triggers fire; [`MemoryError::TaskNotFound`] when there is none.
     async fn set_enabled(&self, id: TaskId, enabled: bool) -> Result<TaskRecord>;
@@ -161,7 +163,7 @@ impl TaskStore for NoTaskStore {
         Err(MemoryError::Disabled)
     }
 
-    async fn delete(&self, id: TaskId) -> Result<()> {
+    async fn delete(&self, id: TaskId) -> Result<Vec<PathBuf>> {
         Err(MemoryError::TaskNotFound(id))
     }
 

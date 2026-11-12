@@ -28,14 +28,20 @@ erDiagram
     chunks ||--o| document_chunk_embeddings : "embedded as"
     memories ||--o| memory_embeddings : "embedded as"
     tasks ||--o{ task_runs : "ran as"
+    task_runs ||--o| sessions : "recorded in"
+    sessions ||--o| active_session : "pointed at by"
 
     sessions {
         int id PK
         text uuid UK
         int started_at
-        int ended_at "NULL while open"
         text title
         int current_branch_id FK
+        int task_run_id FK "NULL for a user's session"
+    }
+    active_session {
+        int id PK "always 0"
+        int session_id FK
     }
     branches {
         int id PK
@@ -168,7 +174,6 @@ erDiagram
         int state "0 queued, 1 running, 2 suspended, 3 needs input, 4 succeeded, 5 failed, 6 cancelled"
         int suspend_reason "0 user conversation, 1 GPU busy"
         text failure
-        text session_uuid "the run's transcript session"
         int queued_at
         int started_at
         int ended_at "set once finished"
@@ -185,9 +190,12 @@ cascades to the rows that hang off it.
 ## Transcripts
 
 - **`sessions`**: one row per conversation, written with its first
-  message. A clean daemon shutdown sets `ended_at`. If a daemon dies
-  without one, the next daemon resumes the newest session that is still
-  open. `title` is a short name the model generates from the first prompt.
+  message. `title` is a short name the model generates from the first
+  prompt. `task_run_id` marks the session of a task run.
+- **`active_session`**: at most one row, naming the session the user's
+  conversation is on. It is written when a session is saved or switched
+  to and deleted when the user starts a new one, and a starting daemon
+  resumes the session it names on that session's current branch.
 - **`branches`**: each session starts with a `main` branch. Forking
   copies the source branch's `branch_messages` rows (and its summary)
   under a new name, records `parent_branch_id` and `fork_point_seq`
@@ -241,8 +249,9 @@ them and the plan and grants approved for the prompt. Saving a task
 whose `prompt` changed clears `plan` and `grants` in the same
 transaction, so an approval never outlives the prompt it was made for.
 **`task_runs`** records each run: the trigger that fired it, its state,
-its transcript session, and, once it succeeds, its final reply.
-Deleting a task deletes its runs; their transcript sessions stay.
+and, once it succeeds, its final reply. Deleting a task deletes its runs
+and their transcript sessions, except the active session, which stays
+as an ordinary one.
 
 ## Embeddings
 

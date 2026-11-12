@@ -578,7 +578,6 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                 branch_id: 7,
                 session_id: "s".into(),
                 session_started_at: "2026-01-01T00:00:00Z".into(),
-                session_ended_at: None,
                 session_title: Some("cats".into()),
                 name: "main".into(),
                 parent_branch_name: None,
@@ -597,7 +596,7 @@ fn session_event_cases() -> Vec<(Event, &'static str)> {
                     },
                 }),
             }),
-            r#"{"id":"r","type":"branch_info","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_ended_at":null,"session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false,"last_active_at":"2026-01-02T00:00:00Z","task_run":{"task":4,"run":9,"task_name":"digest","state":{"state":"failed","reason":"timed out"}}}"#,
+            r#"{"id":"r","type":"branch_info","branch_id":7,"session_id":"s","session_started_at":"2026-01-01T00:00:00Z","session_title":"cats","name":"main","parent_branch_name":null,"fork_point_seq":null,"created_at":"2026-01-01T00:00:00Z","message_count":4,"is_current_in_session":true,"is_active_session":false,"last_active_at":"2026-01-02T00:00:00Z","task_run":{"task":4,"run":9,"task_name":"digest","state":{"state":"failed","reason":"timed out"}}}"#,
         ),
         (
             event(EventBody::BranchSwitched {

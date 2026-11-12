@@ -1,6 +1,7 @@
 //! SQLite-backed [`TaskStore`] over the `tasks` and `task_runs` tables.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -27,7 +28,8 @@ const TASK_COLUMNS: &str =
     "id, name, prompt, triggers, enabled, mode, allowed_hosts, announce, next_fire_at, kept_runs";
 
 const RUN_RECORD_COLUMNS: &str = "id, trigger, state, suspend_reason, failure, queued_at, \
-     started_at, ended_at, reply, session_uuid";
+     started_at, ended_at, reply, \
+     (SELECT uuid FROM sessions s WHERE s.task_run_id = task_runs.id)";
 
 const MODE_MANUAL: i64 = 0;
 const MODE_ACCEPT_EDITS: i64 = 1;
@@ -92,22 +94,19 @@ impl TaskStore for SqliteTaskStore {
             .map_err(|error| task_save_error(error, id, name))
     }
 
-    /// Truncates the WAL so the deleted prompt leaves no trace.
-    async fn delete(&self, id: TaskId) -> Result<()> {
-        let deleted = self
-            .handle
+    /// Truncates the WAL so the deleted prompt and transcripts leave no trace.
+    async fn delete(&self, id: TaskId) -> Result<Vec<PathBuf>> {
+        self.handle
             .write_erasing("task delete", move |tx| {
+                let released_answer_files = delete_run_sessions(tx, id)?;
                 let deleted = tx.execute("DELETE FROM tasks WHERE id = ?1", [id.0])?;
                 Ok(Erasing {
-                    value: deleted,
+                    value: (deleted > 0).then_some(released_answer_files),
                     erased: deleted > 0,
                 })
             })
-            .await?;
-        if deleted == 0 {
-            return Err(MemoryError::TaskNotFound(id));
-        }
-        Ok(())
+            .await?
+            .ok_or(MemoryError::TaskNotFound(id))
     }
 
     async fn set_enabled(&self, id: TaskId, enabled: bool) -> Result<TaskRecord> {
@@ -189,13 +188,19 @@ impl TaskStore for SqliteTaskStore {
         let updated = self
             .handle
             .write("task start_run", move |tx| {
-                tx.execute(
+                let started = tx.execute(
                     "UPDATE task_runs
-                     SET state = ?2, suspend_reason = NULL, started_at = MAX(?3, queued_at),
-                         session_uuid = ?4
-                     WHERE id = ?1 AND state IN (?5, ?6)",
-                    rusqlite::params![run.0, RUN_RUNNING, now, session, RUN_QUEUED, RUN_SUSPENDED],
-                )
+                     SET state = ?2, suspend_reason = NULL, started_at = MAX(?3, queued_at)
+                     WHERE id = ?1 AND state IN (?4, ?5)",
+                    rusqlite::params![run.0, RUN_RUNNING, now, RUN_QUEUED, RUN_SUSPENDED],
+                )?;
+                if started > 0 {
+                    tx.execute(
+                        "UPDATE sessions SET task_run_id = ?1 WHERE uuid = ?2",
+                        rusqlite::params![run.0, session],
+                    )?;
+                }
+                Ok(started)
             })
             .await?;
         run_updated(updated, run)
@@ -369,6 +374,24 @@ impl TaskStore for SqliteTaskStore {
     }
 }
 
+/// Delete the sessions of task `task`'s runs, except the active session, returning the
+/// answer files their relay steps named.
+fn delete_run_sessions(tx: &Transaction<'_>, task: TaskId) -> rusqlite::Result<Vec<PathBuf>> {
+    let sessions: Vec<SessionId> = tx
+        .prepare_cached(
+            "SELECT s.uuid FROM sessions s JOIN task_runs r ON r.id = s.task_run_id
+             WHERE r.task_id = ?1 AND s.id NOT IN (SELECT session_id FROM active_session)",
+        )?
+        .query_map([task.0], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut released_answer_files = Vec::new();
+    for session in sessions {
+        released_answer_files.extend(session_answer_files(tx, session)?);
+        tx.execute("DELETE FROM sessions WHERE uuid = ?1", [session])?;
+    }
+    Ok(released_answer_files)
+}
+
 /// Delete each task's finished runs beyond those it keeps, `default_keep` when it names
 /// none, except one whose session is `spare`, with their sessions.
 fn delete_runs_beyond(
@@ -399,7 +422,9 @@ fn runs_beyond(
 ) -> rusqlite::Result<Vec<(TaskRunId, Option<SessionId>)>> {
     let mut select = tx.prepare_cached(
         "SELECT r.id, r.session_uuid
-         FROM (SELECT id, task_id, session_uuid,
+         FROM (SELECT id, task_id,
+                      (SELECT uuid FROM sessions s WHERE s.task_run_id = task_runs.id)
+                          AS session_uuid,
                       ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id DESC) AS newest
                FROM task_runs WHERE state IN (?1, ?2, ?3)) r
          JOIN tasks t ON t.id = r.task_id

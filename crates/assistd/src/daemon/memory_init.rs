@@ -1,5 +1,5 @@
 //! Memory subsystem wiring for the daemon: open SQLite, then resume the
-//! latest unended session or start an unsaved one.
+//! active session or start an unsaved one.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use assistd_core::branch_replay;
 use assistd_llm::HistoryReplay;
 use assistd_memory::{
-    BranchHistory, BranchId, HistoryScope, MemoryError, MemoryStore, SessionId, SqliteHandle,
-    SqliteMemoryStore, SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
+    BranchHistory, BranchId, HistoryScope, MemoryStore, SessionId, SqliteHandle, SqliteMemoryStore,
+    SqliteTaskStore, SqliteTranscriptStore, TaskStore, TranscriptStore,
 };
 use tracing::info;
 
@@ -29,13 +29,9 @@ pub(super) struct MemorySubsystem {
 }
 
 impl MemorySubsystem {
-    /// End the session row, if it was ever saved, then close the database once its
-    /// queued writes have run. Must run after every other database client has stopped.
+    /// Close the database once its queued writes have run. Must run after every other
+    /// database client has stopped.
     pub(super) async fn shutdown(self) {
-        match self.transcript_store.end_session(self.session_id).await {
-            Ok(()) | Err(MemoryError::SessionNotFound(_)) => {}
-            Err(e) => tracing::warn!("memory: end_session failed at shutdown: {e:#}"),
-        }
         if let Err(e) = self.sqlite_handle.close().await {
             tracing::warn!("memory: closing the database failed at shutdown: {e:#}");
         }
@@ -95,13 +91,13 @@ async fn transcript_store(handle: SqliteHandle, embedding_enabled: bool) -> Sqli
     transcripts
 }
 
-/// Resume the most recent unended session, else start an unsaved session
-/// that is inserted with its first message.
+/// Resume the active session, else start an unsaved session that is inserted
+/// with its first message.
 async fn resume_or_start_unsaved_session(
     transcripts: &SqliteTranscriptStore,
     db_path: &Path,
 ) -> (SessionId, Option<BranchId>, HistoryReplay) {
-    match transcripts.find_resumable_session().await {
+    match transcripts.active_session().await {
         Ok(Some(cand)) => {
             info!(
                 "memory: resuming prior session {} (branch={})",
@@ -118,7 +114,7 @@ async fn resume_or_start_unsaved_session(
             (SessionId::new(), None, HistoryReplay::default())
         }
         Err(e) => {
-            tracing::warn!("memory: find_resumable_session failed: {e:#}; starting fresh");
+            tracing::warn!("memory: active_session failed: {e:#}; starting fresh");
             (SessionId::new(), None, HistoryReplay::default())
         }
     }

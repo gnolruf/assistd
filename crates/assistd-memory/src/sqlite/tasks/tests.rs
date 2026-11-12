@@ -51,7 +51,7 @@ async fn save_refuses_a_taken_name_and_an_unknown_id() {
 }
 
 #[tokio::test]
-async fn a_run_session_is_listed_with_its_outcome_and_never_resumed() {
+async fn a_run_session_is_listed_with_its_outcome_and_never_made_active() {
     let temp = tempfile::tempdir().unwrap();
     let handle = SqliteHandle::open(&temp.path().join("memory.db"))
         .await
@@ -61,7 +61,7 @@ async fn a_run_session_is_listed_with_its_outcome_and_never_resumed() {
     let task = tasks.save(None, sample_spec("digest", "a")).await.unwrap();
     let user_session = SessionId::new();
     transcripts
-        .begin_session_with_main_branch(user_session)
+        .begin_active_session(user_session)
         .await
         .unwrap();
 
@@ -81,8 +81,8 @@ async fn a_run_session_is_listed_with_its_outcome_and_never_resumed() {
         tasks.finish_run(run, TaskRunEnd::Cancelled).await,
         Err(MemoryError::TaskRunNotFound(id)) if id == run
     ));
-    let resumable = transcripts.find_resumable_session().await.unwrap().unwrap();
-    assert_eq!(resumable.session_id, user_session);
+    let active = transcripts.active_session().await.unwrap().unwrap();
+    assert_eq!(active.session_id, user_session);
     let tags: Vec<_> = transcripts
         .list_branches()
         .await
@@ -232,6 +232,56 @@ async fn finished_run_with_relay(
         .await
         .unwrap();
     session
+}
+
+#[tokio::test]
+async fn deleting_a_task_deletes_its_run_sessions_except_the_active_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let tasks = SqliteTaskStore::new(handle.clone());
+    let transcripts = SqliteTranscriptStore::new(handle);
+    let task = tasks
+        .save(None, sample_spec("digest", "a"))
+        .await
+        .unwrap()
+        .id;
+    let other = tasks
+        .save(None, sample_spec("other", "b"))
+        .await
+        .unwrap()
+        .id;
+    let user_session = SessionId::new();
+    transcripts
+        .begin_active_session(user_session)
+        .await
+        .unwrap();
+    finished_run_with_relay(&tasks, &transcripts, task, "/r/1").await;
+    let viewed = finished_run_with_relay(&tasks, &transcripts, task, "/r/2").await;
+    let other_run = finished_run_with_relay(&tasks, &transcripts, other, "/o/1").await;
+    let viewed_main = transcripts.current_branch(viewed).await.unwrap().unwrap();
+    transcripts
+        .activate_branch(viewed, viewed_main)
+        .await
+        .unwrap();
+
+    let released = tasks.delete(task).await.unwrap();
+
+    assert_eq!(released, [PathBuf::from("/r/1")]);
+    let holds_run: HashMap<_, _> = transcripts
+        .list_branches()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|branch| (branch.session_id, branch.task_run.is_some()))
+        .collect();
+    assert_eq!(
+        holds_run,
+        HashMap::from([(user_session, false), (viewed, false), (other_run, true)])
+    );
+    let active = transcripts.active_session().await.unwrap().unwrap();
+    assert_eq!(active.session_id, viewed);
 }
 
 #[tokio::test]

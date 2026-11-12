@@ -67,10 +67,7 @@ impl TranscriptLog {
         if let Some(branch) = branch {
             return Ok((session, branch));
         }
-        let branch = self
-            .transcripts
-            .begin_session_with_main_branch(session)
-            .await?;
+        let branch = self.transcripts.begin_active_session(session).await?;
         self.session_ctx.replace(session, Some(branch)).await;
         Ok((session, branch))
     }

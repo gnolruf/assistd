@@ -11,6 +11,7 @@ use assistd_ipc::{
 };
 use assistd_memory::TaskRecord;
 
+use super::branches::delete_answer_files;
 use super::event_triggers::{check_chain, resolve_watched_paths};
 use super::fire_times::{check_triggers, next_fire, upcoming_fires};
 use super::task_service::TaskService;
@@ -132,7 +133,7 @@ impl TaskService {
             self.deps.admission.task_queue.forget_task(task);
             self.events.rewatch();
         }
-        deleted.context("task delete failed")?;
+        delete_answer_files(deleted.context("task delete failed")?).await;
         self.send_tasks(id, Vec::new(), &tx).await;
         Ok(())
     }
