@@ -1,6 +1,6 @@
 //! assistd configuration schema. An omitted key takes its value from
-//! [`defaults`]; an unknown key is ignored with a warning, and `0` in a
-//! `NonZero*` field is a parse error.
+//! [`defaults`]; an unknown key is ignored with a warning, and a value its
+//! field's type refuses is a parse error.
 
 pub mod chat;
 pub mod compositor;
@@ -22,16 +22,19 @@ pub mod theme;
 pub mod timeouts;
 pub mod tools;
 pub mod top;
+pub mod values;
 pub mod voice;
 
 pub use chat::ChatConfig;
 pub use compositor::{Compositor, CompositorConfig, CompositorType};
 pub use custom_args::{ChatServer, CustomArgs, EmbeddingServer, ServerKind};
 pub use document::ConfigDocument;
-pub use embedding::EmbeddingConfig;
+pub use embedding::{EmbeddingConfig, EmbeddingModel};
 pub use errors::{
-    ConfigError, CustomArgsError, McpServerNameError, SearchCommandError, ThemeColorError,
-    UnitIntervalError,
+    AbsoluteDirError, BlankStringError, ConfigError, ConfigIssue, CustomArgsError,
+    DecimalRangeError, EmbeddingModelError, EmptyListError, HfFileError, IntegerRangeError,
+    LoopbackAddrError, McpServerNameError, NoDefaultDirError, SearchCommandError, SttEncoderError,
+    ThemeColorError, ThemeNameError, UnitIntervalError, WakePhraseError, WritablePathError,
 };
 pub use mcp::{
     McpAuth, McpConfig, McpHeaders, McpHttpTransport, McpOAuthClient, McpServerConfig,
@@ -46,13 +49,18 @@ pub use settings::{
 };
 pub use sleep::SleepConfig;
 pub use tasks::{TaskInterruption, TasksConfig};
-pub use theme::{ThemeColor, ThemeConfig};
+pub use theme::{ThemeColor, ThemeConfig, ThemeName};
 pub use timeouts::TimeoutsConfig;
 pub use tools::{
     BashSandboxMode, ToolsBashConfig, ToolsConfig, ToolsOutputConfig, ToolsScratchConfig,
-    ToolsWriteConfig,
+    ToolsWriteConfig, WritablePath,
 };
 pub use top::Config;
+pub use values::{
+    AbsoluteDir, Bounded, HfFile, LengthScale, LoopbackAddr, NonBlankString, NonEmpty,
+    PresencePenalty, Temperature,
+};
 pub use voice::{
-    SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, VoiceFamily, WakeWordConfig,
+    SttEncoder, SynthesisConfig, TranscriptionConfig, UnitInterval, VoiceConfig, VoiceFamily,
+    WakePhrase, WakeWordConfig,
 };

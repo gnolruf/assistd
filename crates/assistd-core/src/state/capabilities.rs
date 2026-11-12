@@ -48,10 +48,11 @@ impl StatusService {
             Some(revalidator) => revalidator.probe().await,
             None => VisionState::default(),
         };
-        let model_name = self.config.model.name.rsplit_once('/').map_or_else(
-            || self.config.model.name.clone(),
-            |(_, rest)| rest.to_string(),
-        );
+        let configured = self.config.model.name.as_str();
+        let model_name = configured
+            .rsplit_once('/')
+            .map_or(configured, |(_, rest)| rest)
+            .to_string();
         let _ = tx
             .send(Event::new(
                 id.clone(),

@@ -13,7 +13,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use assistd_config::{
-    ChatConfig, ModelConfig, SynthesisConfig, TimeoutsConfig, TranscriptionConfig, VoiceFamily,
+    ChatConfig, HfFile, LoopbackAddr, ModelConfig, NonBlankString, SttEncoder, SynthesisConfig,
+    TimeoutsConfig, TranscriptionConfig, VoiceFamily,
 };
 use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent};
 use assistd_utils::time::saturating_millis;
@@ -69,19 +70,19 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     iterations: usize,
     /// llama-server host.
-    #[arg(long, default_value = "127.0.0.1")]
-    llama_host: IpAddr,
+    #[arg(long, default_value = "127.0.0.1", value_parser = parse_loopback)]
+    llama_host: LoopbackAddr,
     /// llama-server port.
     #[arg(long, default_value = "8080")]
     llama_port: NonZeroU16,
     /// Model name sent to `/v1/chat/completions`. llama-server usually
     /// does not validate it, so a placeholder works.
     #[arg(long, default_value = "default")]
-    model: String,
+    model: NonBlankString,
     /// Speech-to-text encoder, as in `voice.transcription.model`;
     /// defaults to the config default.
     #[arg(long)]
-    stt_model: Option<String>,
+    stt_model: Option<SttEncoder>,
     /// Transcribe on the CPU even when CUDA is usable.
     #[arg(long, default_value_t = false)]
     stt_cpu_only: bool,
@@ -98,7 +99,7 @@ struct Args {
     no_tts: bool,
     /// Voice, as in `voice.synthesis.voice`; defaults to the config default.
     #[arg(long)]
-    voice: Option<String>,
+    voice: Option<HfFile>,
     /// Model family of `--voice`: `vits` or `kokoro`.
     #[arg(long, default_value = "vits")]
     family: String,
@@ -357,6 +358,10 @@ fn init_tracing(collector: LatencyCollector) {
         .with(collector)
         .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
         .init();
+}
+
+fn parse_loopback(raw: &str) -> Result<LoopbackAddr> {
+    Ok(raw.parse::<IpAddr>()?.try_into()?)
 }
 
 async fn load_pcm(args: &Args) -> Result<Vec<i16>> {

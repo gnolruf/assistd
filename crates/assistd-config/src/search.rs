@@ -1,6 +1,5 @@
 //! Configuration for the local SearXNG instance web search goes through.
 
-use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -13,6 +12,7 @@ use crate::defaults::{
 };
 use crate::errors::SearchCommandError;
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::values::{LoopbackAddr, NonBlankString, NonEmpty};
 
 /// A daemon-supervised SearXNG instance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -25,17 +25,18 @@ pub struct SearchConfig {
     /// and answer `GET /healthz` with 200. Containers cannot: their socket is
     /// held outside that group, so the instance never becomes ready.
     pub command: SearchCommand,
-    /// Bind host. Must be loopback: the instance has no authentication.
-    pub host: IpAddr,
-    /// Bind port. Must differ from `model.port` and `embedding.port`.
+    /// Bind host; loopback because the instance has no authentication.
+    pub host: LoopbackAddr,
+    /// Bind port. When enabled, must differ from `model.port` and from an
+    /// enabled embedding server's `embedding.port`.
     pub port: NonZeroU16,
     /// Longest, in seconds, a freshly spawned instance may take to answer
     /// its health check before the attempt counts as failed.
     pub ready_timeout_secs: NonZeroU64,
     /// SearXNG engines to search with; only these load, each enabled even if
-    /// SearXNG ships it disabled or inactive. Must not be empty; a name
-    /// SearXNG does not know is logged and skipped.
-    pub engines: Vec<SearchEngine>,
+    /// SearXNG ships it disabled or inactive. A name SearXNG does not know
+    /// is logged and skipped.
+    pub engines: NonEmpty<SearchEngine>,
 }
 
 impl DescribeSettings for SearchConfig {
@@ -71,8 +72,10 @@ impl Default for SearchConfig {
             port: DEFAULT_SEARCH_PORT,
             ready_timeout_secs: DEFAULT_SEARCH_READY_TIMEOUT_SECS,
             engines: DEFAULT_SEARCH_ENGINES
-                .map(|name| SearchEngine::Named(name.to_owned()))
-                .to_vec(),
+                .map(default_engine)
+                .to_vec()
+                .try_into()
+                .expect("the default search engines are not empty"),
         }
     }
 }
@@ -82,9 +85,9 @@ impl Default for SearchConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SearchEngine {
-    Named(String),
+    Named(NonBlankString),
     Keyed {
-        name: String,
+        name: NonBlankString,
         /// File whose contents, trimmed of surrounding whitespace, are the
         /// key; read at each launch so it never sits in this config.
         #[serde(deserialize_with = "crate::home_path::deserialize")]
@@ -95,7 +98,7 @@ pub enum SearchEngine {
 impl SearchEngine {
     pub fn name(&self) -> &str {
         match self {
-            SearchEngine::Named(name) | SearchEngine::Keyed { name, .. } => name,
+            SearchEngine::Named(name) | SearchEngine::Keyed { name, .. } => name.as_str(),
         }
     }
 
@@ -158,4 +161,11 @@ impl From<SearchCommand> for String {
     fn from(command: SearchCommand) -> Self {
         command.source
     }
+}
+
+fn default_engine(name: &str) -> SearchEngine {
+    SearchEngine::Named(
+        name.parse()
+            .expect("the default engine names are not blank"),
+    )
 }

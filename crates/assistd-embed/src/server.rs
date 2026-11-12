@@ -28,7 +28,7 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.cfg.server_binary);
+        let mut cmd = Command::new(self.cfg.server_binary.as_str());
         cmd.args(self.cfg.custom_args.as_slice());
         push_managed_args(&mut cmd, &self.cfg, &self.api_key);
         remove_llama_env(&mut cmd);
@@ -39,7 +39,7 @@ impl ChildServerSpec for EmbedServerSpec {
     }
 
     fn listen_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.cfg.host, self.cfg.port.get())
+        SocketAddr::new(self.cfg.host.get(), self.cfg.port.get())
     }
 
     fn ready_timeout(&self) -> Duration {
@@ -55,7 +55,7 @@ fn push_managed_args(cmd: &mut Command, cfg: &EmbeddingConfig, api_key: &ApiKey)
         .arg("--pooling")
         .arg("mean")
         .arg("--hf-repo")
-        .arg(&cfg.model)
+        .arg(cfg.model.to_string())
         .arg("-ngl")
         .arg(cfg.gpu_layers.to_string())
         .arg("--host")

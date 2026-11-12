@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_config::defaults::{nz32, nz64};
+use assistd_config::defaults::{nz32, nz64, temperature};
 use assistd_ipc::ImageMime;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -59,11 +59,11 @@ fn spec(max_history: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
         system_prompt: "sys".into(),
         max_history_tokens: nz32(max_history),
         summary_target_tokens: nz32(max_history / 4),
-        temperature: 0.7,
+        temperature: temperature(0.7),
         max_response_tokens: nz32(512),
         max_reasoning_tokens: nz32(256),
         request_timeout_secs: nz64(60),
-        summary_temperature: 0.3,
+        summary_temperature: temperature(0.3),
         top_p: None,
         top_k: None,
         min_p: None,
@@ -72,7 +72,7 @@ fn spec(max_history: u32, ctx: u32) -> (ChatConfig, ModelConfig) {
         ..ChatConfig::default()
     };
     let model = ModelConfig {
-        name: "test-model".into(),
+        name: "test-model".parse().unwrap(),
         context_length: nz32(ctx),
         ..ModelConfig::default()
     };

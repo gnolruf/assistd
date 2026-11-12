@@ -357,9 +357,9 @@ fn build_slot_stash(
     slots: watch::Receiver<NonZeroU32>,
 ) -> Result<Arc<SlotStash>> {
     let slot_stash = SlotStash::new(
-        SocketAddr::new(config.model.host, config.model.port.get()),
+        SocketAddr::new(config.model.host.get(), config.model.port.get()),
         Some(api_key),
-        config.model.name.clone(),
+        config.model.name.to_string(),
         slot_dir,
         Some(Arc::clone(health_probe)),
     )
@@ -442,14 +442,14 @@ fn build_vision_revalidator(
     health_probe: &Arc<dyn LlmHealthProbe>,
 ) -> Result<Arc<VisionRevalidator>> {
     let control = LlamaServerControl::new(
-        SocketAddr::new(config.model.host, config.model.port.get()),
+        SocketAddr::new(config.model.host.get(), config.model.port.get()),
         Some(api_key),
         Some(Arc::clone(health_probe)),
     )
     .context("failed to construct llama-server control client for vision probe")?;
     Ok(VisionRevalidator::new(
         control,
-        config.model.name.clone(),
+        config.model.name.to_string(),
         presence,
     ))
 }

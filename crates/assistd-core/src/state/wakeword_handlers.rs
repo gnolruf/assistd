@@ -151,7 +151,7 @@ impl VoiceService {
             .send(Event::new(
                 id.clone(),
                 EventBody::WakeWordStatus {
-                    phrase: self.config.voice.wakeword.phrase.clone(),
+                    phrase: self.config.voice.wakeword.phrase.to_string(),
                     listening: capture.listener.is_active(),
                 },
             ))

@@ -157,7 +157,7 @@ impl Harness {
         });
         let mut config = Config::default();
         config.tasks.interruption = interruption;
-        config.tasks.resume_after_idle_secs = QUIET_SECS;
+        config.tasks.resume_after_idle_secs = assistd_config::defaults::bounded(QUIET_SECS);
         let (state, conv, _branch, task) =
             task_state_with(config, backend, Arc::new(ToolRegistry::default())).await;
         Self {

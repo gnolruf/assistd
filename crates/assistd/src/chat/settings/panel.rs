@@ -3,8 +3,9 @@
 
 use std::ops::ControlFlow;
 
-use assistd_config::theme::is_theme_name;
-use assistd_config::{ConfigDocument, ConfigError, SettingKind, ThemeColor, ThemeConfig};
+use assistd_config::{
+    ConfigDocument, ConfigError, ConfigIssue, SettingKind, ThemeColor, ThemeConfig, ThemeName,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::super::text_editor::{EditAction, EditorShape, TextEditor};
@@ -78,7 +79,7 @@ pub(crate) struct SettingsPanel {
     mode: PanelMode,
     feedback: Option<Feedback>,
     /// Why the config would not validate, if it would not.
-    issues: Vec<String>,
+    issues: Vec<ConfigIssue>,
 }
 
 impl SettingsPanel {
@@ -92,7 +93,7 @@ impl SettingsPanel {
             feedback: None,
             issues: Vec::new(),
         };
-        panel.issues = validation_issues(&panel.document);
+        panel.issues = panel.document.config().issues();
         panel.select_first();
         panel
     }
@@ -126,7 +127,7 @@ impl SettingsPanel {
         self.feedback.as_ref()
     }
 
-    pub(crate) fn issues(&self) -> &[String] {
+    pub(crate) fn issues(&self) -> &[ConfigIssue] {
         &self.issues
     }
 
@@ -327,20 +328,16 @@ impl SettingsPanel {
     /// Saves the current colors as theme `name`, refusing a name that is
     /// malformed or a built-in theme's.
     fn save_theme(&mut self, name: &str) {
-        if !is_theme_name(name) {
-            self.feedback = Some(Feedback::Error(
-                "a theme name is ASCII letters, digits, _ and -".into(),
-            ));
-        } else if ThemeConfig::built_in(name).is_some() {
-            self.feedback = Some(Feedback::Error(format!("{name} is a built-in theme")));
-        } else {
-            let theme = self.document.config().chat.theme;
-            self.change_themes(
-                |document| store_theme(document, name, &theme),
-                name,
-                "saved",
-            );
+        if let Err(refused) = name.parse::<ThemeName>() {
+            self.feedback = Some(Feedback::Error(refused.to_string()));
+            return;
         }
+        let theme = self.document.config().chat.theme;
+        self.change_themes(
+            |document| store_theme(document, name, &theme),
+            name,
+            "saved",
+        );
     }
 
     /// Makes `edit` to the saved themes and reopens the list on `name`.
@@ -666,11 +663,11 @@ impl SettingsPanel {
     ) -> Result<(), String> {
         let mut candidate = self.document.clone();
         edit(&mut candidate).map_err(|e| e.to_string())?;
-        let issues = validation_issues(&candidate);
-        let introduced: Vec<&str> = issues
+        let issues = candidate.config().issues();
+        let introduced: Vec<String> = issues
             .iter()
             .filter(|issue| !self.issues.contains(issue))
-            .map(String::as_str)
+            .map(ConfigIssue::to_string)
             .collect();
         if !introduced.is_empty() {
             return Err(format!("not applied: {}", introduced.join("; ")));
@@ -743,15 +740,6 @@ fn next_named_color(color: ThemeColor, forward: bool) -> ThemeColor {
         (index + offset) % named.len()
     });
     named[next]
-}
-
-/// Why `document`'s config would not validate; empty when it would.
-fn validation_issues(document: &ConfigDocument) -> Vec<String> {
-    match document.config().validate() {
-        Err(ConfigError::Validation(issues)) => issues,
-        Err(e) => vec![e.to_string()],
-        Ok(()) => Vec::new(),
-    }
 }
 
 /// `value` as the text an edit of it starts from.

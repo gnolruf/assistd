@@ -12,7 +12,9 @@ use crate::defaults::{
     DEFAULT_SYSTEM_PROMPT,
 };
 use crate::settings::{DescribeSettings, describe_fields};
-use crate::theme::ThemeConfig;
+use crate::theme::{ThemeConfig, ThemeName};
+use crate::values::{NonBlankString, PresencePenalty, Temperature};
+use crate::voice::UnitInterval;
 
 /// System prompt, history window and sampling. Sampler fields left `None`
 /// are omitted from requests, so llama-server applies its own default.
@@ -29,7 +31,7 @@ pub struct ChatConfig {
     /// Target summary length in tokens. Must be below `max_history_tokens`.
     pub summary_target_tokens: NonZeroU32,
     /// Sampling temperature, `0.0..=2.0`.
-    pub temperature: f32,
+    pub temperature: Temperature,
     /// Max tokens per model response, reasoning included; a response that
     /// hits it is discarded and retried. See `max_history_tokens` for the
     /// bound.
@@ -41,24 +43,23 @@ pub struct ChatConfig {
     /// itself is unbounded. Also caps the whole summarization call.
     pub request_timeout_secs: NonZeroU64,
     /// Temperature for the summarization call, `0.0..=2.0`.
-    pub summary_temperature: f32,
+    pub summary_temperature: Temperature,
     /// Nucleus sampling cutoff, `0.0..=1.0`.
-    pub top_p: Option<f32>,
+    pub top_p: Option<UnitInterval>,
     /// Top-k sampling cutoff: sample only from the k most likely tokens.
     pub top_k: Option<NonZeroU32>,
     /// Min-p sampling cutoff, `0.0..=1.0`.
-    pub min_p: Option<f32>,
+    pub min_p: Option<UnitInterval>,
     /// `-2.0..=2.0`.
-    pub presence_penalty: Option<f32>,
+    pub presence_penalty: Option<PresencePenalty>,
     /// `reasoning_effort` chat-template variable sent with every request, e.g.
     /// `low`. Valid values depend on the model's template; `None` keeps the
-    /// template's default. Must not be empty.
-    pub reasoning_effort: Option<String>,
+    /// template's default. Must not be blank.
+    pub reasoning_effort: Option<NonBlankString>,
     /// Colors of the chat TUI.
     pub theme: ThemeConfig,
-    /// Themes saved from the settings panel, by name; each name is ASCII
-    /// letters, digits, `_` and `-`, and no built-in theme's.
-    pub themes: BTreeMap<String, ThemeConfig>,
+    /// Themes saved from the settings panel, by name.
+    pub themes: BTreeMap<ThemeName, ThemeConfig>,
 }
 
 impl DescribeSettings for ChatConfig {

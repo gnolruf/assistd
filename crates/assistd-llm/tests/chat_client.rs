@@ -5,7 +5,6 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::net::Ipv4Addr;
 use std::num::NonZeroU16;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -19,8 +18,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use assistd_config::defaults::{nz32, nz64};
-use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::defaults::{nz32, nz64, temperature};
+use assistd_config::{ChatConfig, LoopbackAddr, ModelConfig, TimeoutsConfig};
 use assistd_ipc::StatusKind;
 use assistd_llm::{
     BackendJudgeModel, ChatClientError, HealthSnapshot, HealthWaitError, LlamaChatClient,
@@ -382,11 +381,11 @@ fn chat_spec(port: u16) -> ClientCfg {
             system_prompt: "test system prompt".into(),
             max_history_tokens: nz32(10_000),
             summary_target_tokens: nz32(1000),
-            temperature: 0.5,
+            temperature: temperature(0.5),
             max_response_tokens: nz32(256),
             max_reasoning_tokens: nz32(128),
             request_timeout_secs: nz64(5),
-            summary_temperature: 0.3,
+            summary_temperature: temperature(0.3),
             top_p: None,
             top_k: None,
             min_p: None,
@@ -395,9 +394,9 @@ fn chat_spec(port: u16) -> ClientCfg {
             ..ChatConfig::default()
         },
         model: ModelConfig {
-            name: "test-model".into(),
+            name: "test-model".parse().unwrap(),
             context_length: nz32(12_000),
-            host: Ipv4Addr::LOCALHOST.into(),
+            host: LoopbackAddr::LOCALHOST,
             port: NonZeroU16::new(port).expect("bound port is never 0"),
             ..ModelConfig::default()
         },

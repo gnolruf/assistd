@@ -74,18 +74,17 @@ impl WakeWordSpotter {
     /// `config.wakeword.phrase`. Fails when the model cannot spell the phrase,
     /// which sherpa-onnx would otherwise answer by ending the process.
     pub async fn load(config: &VoiceConfig) -> Result<Self, SpotterError> {
-        let cache_dir = config
-            .transcription
-            .model_cache_dir
-            .clone()
-            .map_or_else(|| download::default_cache_dir("stt"), Ok)?;
+        let cache_dir = config.transcription.model_cache_dir.as_ref().map_or_else(
+            || download::default_cache_dir("stt"),
+            |dir| Ok(dir.as_path().to_path_buf()),
+        )?;
         let mut dir = None;
         for name in [ENCODER, DECODER, JOINER, TOKENS, BPE_MODEL] {
             let path = download::ensure_cached(&format!("{MODEL_REPO}:{name}"), &cache_dir).await?;
             dir = path.parent().map(Path::to_path_buf);
         }
         let dir = dir.unwrap_or(cache_dir);
-        let phrase = config.wakeword.phrase.clone();
+        let phrase = config.wakeword.phrase.to_string();
         let threshold = config.wakeword.threshold.get();
         tokio::task::spawn_blocking(move || Self::create(&dir, phrase, threshold)).await?
     }

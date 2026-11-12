@@ -7,7 +7,9 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_config::{ChatConfig, ModelConfig, TimeoutsConfig};
+use assistd_config::{
+    ChatConfig, ModelConfig, NonBlankString, PresencePenalty, TimeoutsConfig, UnitInterval,
+};
 use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
 use assistd_utils::child_server::ApiKey;
@@ -83,7 +85,10 @@ impl LlamaChatClient {
             )
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        let base_url = format!("http://{}", SocketAddr::new(model.host, model.port.get()));
+        let base_url = format!(
+            "http://{}",
+            SocketAddr::new(model.host.get(), model.port.get())
+        );
         let conv = Conversation::new(chat.system_prompt.clone());
         Ok(Self {
             client,
@@ -128,12 +133,12 @@ impl LlamaChatClient {
             stream_options: Some(wire::StreamOptions {
                 include_usage: true,
             }),
-            temperature: self.chat.temperature,
+            temperature: self.chat.temperature.get(),
             max_tokens: self.chat.max_response_tokens.get(),
-            top_p: self.chat.top_p,
+            top_p: self.chat.top_p.map(UnitInterval::get),
             top_k: self.chat.top_k.map(NonZeroU32::get),
-            min_p: self.chat.min_p,
-            presence_penalty: self.chat.presence_penalty,
+            min_p: self.chat.min_p.map(UnitInterval::get),
+            presence_penalty: self.chat.presence_penalty.map(PresencePenalty::get),
             tools: None,
             tool_choice: None,
             reasoning_budget_tokens: Some(self.chat.max_reasoning_tokens.get()),
@@ -148,7 +153,11 @@ impl LlamaChatClient {
     /// defaults apply to all of them.
     fn template_kwargs(&self, thinking: Thinking) -> Option<wire::ChatTemplateKwargs<'_>> {
         let enable_thinking = (thinking == Thinking::Disabled).then_some(false);
-        let reasoning_effort = self.chat.reasoning_effort.as_deref();
+        let reasoning_effort = self
+            .chat
+            .reasoning_effort
+            .as_ref()
+            .map(NonBlankString::as_str);
         (enable_thinking.is_some() || reasoning_effort.is_some()).then_some(
             wire::ChatTemplateKwargs {
                 enable_thinking,
@@ -867,7 +876,7 @@ impl ContinuationSummarizer<'_> {
         offer_tools(&mut payload, tools.to_vec());
         payload.stream = false;
         payload.stream_options = None;
-        payload.temperature = client.chat.summary_temperature;
+        payload.temperature = client.chat.summary_temperature.get();
         payload.max_tokens = client.chat.max_summary_tokens();
         payload.reasoning_budget_tokens = Some(0);
         payload.reasoning_budget_message = None;

@@ -8,23 +8,23 @@ use crate::defaults::{
     DEFAULT_TRAY_ICON_GENERATING, DEFAULT_TRAY_ICON_LISTENING, DEFAULT_TRAY_ICON_SLEEPING,
 };
 use crate::settings::{DescribeSettings, describe_fields};
+use crate::values::{Bounded, NonBlankString};
 
-/// freedesktop icon-theme names the tray icon shows per state; none may be
-/// empty. Custom artwork under `~/.local/share/icons/<theme>/` is found by
+/// freedesktop icon-theme names the tray icon shows per state. Custom artwork under `~/.local/share/icons/<theme>/` is found by
 /// its file name without the extension.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TrayIconsConfig {
     /// The daemon is awake and idle.
-    pub active: String,
+    pub active: NonBlankString,
     /// The daemon is drowsy, asleep, or loading the model.
-    pub sleeping: String,
+    pub sleeping: NonBlankString,
     /// The wake phrase was heard, or a push-to-talk capture is underway.
-    pub listening: String,
+    pub listening: NonBlankString,
     /// A turn is in flight.
-    pub generating: String,
+    pub generating: NonBlankString,
     /// The daemon socket is unreachable.
-    pub disconnected: String,
+    pub disconnected: NonBlankString,
 }
 
 impl DescribeSettings for TrayIconsConfig {
@@ -40,11 +40,11 @@ impl DescribeSettings for TrayIconsConfig {
 impl Default for TrayIconsConfig {
     fn default() -> Self {
         Self {
-            active: DEFAULT_TRAY_ICON_ACTIVE.into(),
-            sleeping: DEFAULT_TRAY_ICON_SLEEPING.into(),
-            listening: DEFAULT_TRAY_ICON_LISTENING.into(),
-            generating: DEFAULT_TRAY_ICON_GENERATING.into(),
-            disconnected: DEFAULT_TRAY_ICON_DISCONNECTED.into(),
+            active: icon_name(DEFAULT_TRAY_ICON_ACTIVE),
+            sleeping: icon_name(DEFAULT_TRAY_ICON_SLEEPING),
+            listening: icon_name(DEFAULT_TRAY_ICON_LISTENING),
+            generating: icon_name(DEFAULT_TRAY_ICON_GENERATING),
+            disconnected: icon_name(DEFAULT_TRAY_ICON_DISCONNECTED),
         }
     }
 }
@@ -58,7 +58,7 @@ pub struct NotificationsConfig {
     pub enabled: bool,
     /// Idle ms before the notification closes, `500..=60000`. Reset by
     /// each event and paused while a turn is in flight.
-    pub auto_hide_ms: u64,
+    pub auto_hide_ms: Bounded<500, 60_000>,
     /// Ask for a short plain-text reply to a voice turn while the chat is
     /// unfocused or closed.
     pub brief_when_away: bool,
@@ -82,10 +82,10 @@ impl DescribeSettings for NotificationsConfig {
 }
 
 impl NotificationsConfig {
-    /// Idle timeout while continuous listening is active: `3 × auto_hide_ms`
-    /// (saturating), leaving time to hear the reply and answer verbally.
+    /// Idle timeout while continuous listening is active: `3 × auto_hide_ms`,
+    /// leaving time to hear the reply and answer verbally.
     pub fn listen_auto_hide_ms(&self) -> u64 {
-        self.auto_hide_ms.saturating_mul(3)
+        u64::from(self.auto_hide_ms.get()) * 3
     }
 }
 
@@ -98,4 +98,10 @@ impl Default for NotificationsConfig {
             icons: TrayIconsConfig::default(),
         }
     }
+}
+
+fn icon_name(default: &str) -> NonBlankString {
+    default
+        .parse()
+        .expect("the default icon names are not blank")
 }

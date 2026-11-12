@@ -6,7 +6,7 @@ const LONG_AGO: Duration = Duration::from_secs(90 * SECS_PER_DAY);
 
 fn scratch(dir: &Path, retention_days: u32) -> ToolsScratchConfig {
     ToolsScratchConfig {
-        dir: dir.to_path_buf(),
+        dir: Some(dir.to_str().unwrap().parse().unwrap()),
         retention_days,
     }
 }

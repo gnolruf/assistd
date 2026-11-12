@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio::sync::{Notify, watch};
 use tracing::warn;
 
-use assistd_config::{BashSandboxMode, Config};
+use assistd_config::{BashSandboxMode, Config, NoDefaultDirError, WritablePath};
 use assistd_embed::EmbedderHandle;
 use assistd_memory::{SemanticStore, SessionId};
 use assistd_search::{SearchError, SearxngClient};
@@ -44,6 +44,9 @@ pub(crate) const OVERFLOW_DIR_MODE: u32 = 0o700;
 /// Why [`build_tools`] could not assemble the tool registry.
 #[derive(Debug, Error)]
 pub enum BuildToolsError {
+    #[error(transparent)]
+    NoDefaultDir(#[from] NoDefaultDirError),
+
     #[error("failed to clear tools.output.overflow_dir {}: {source}", path.display())]
     ClearOverflowDir {
         path: PathBuf,
@@ -136,7 +139,7 @@ pub fn probe_tool_sandbox(
         },
         SharedDirs {
             scratch: Some(scratch::prepare(&config.tools.scratch)?),
-            read_only: vec![config.tools.output.overflow_dir.clone()],
+            read_only: vec![config.tools.output.resolved_overflow_dir()?],
         },
     )?)
 }
@@ -308,10 +311,11 @@ fn file_policies(
     let protected_dirs = vec![config_dir.to_path_buf()];
     let allowlist = Allowlist::load(sandbox.search_path(), config_dir.join(APPROVALS_FILE))?;
     let scratch_dir = sandbox.shared.scratch.clone();
-    let writable_paths: Vec<PathBuf> = resolve_writable_paths(&config.tools.write.writable_paths)
-        .into_iter()
-        .chain(scratch_dir.clone())
-        .collect();
+    let writable_paths: Vec<PathBuf> =
+        resolve_writable_paths(config.tools.write.writable_paths.as_slice())
+            .into_iter()
+            .chain(scratch_dir.clone())
+            .collect();
     let bash_cfg = Arc::new(BashPolicyCfg {
         timeout: Duration::from_secs(config.tools.bash.timeout_secs.get()),
         allowlist: Arc::new(allowlist),
@@ -338,7 +342,7 @@ fn web_access(
         .search
         .enabled
         .then(|| {
-            let addr = SocketAddr::new(config.search.host, config.search.port.get());
+            let addr = SocketAddr::new(config.search.host.get(), config.search.port.get());
             SearxngClient::new(addr, web_search)
         })
         .transpose()?;
@@ -511,11 +515,11 @@ fn sandbox_request(mode: BashSandboxMode) -> SandboxRequest {
 
 /// Canonicalize each configured writable path, dropping (with a warning)
 /// those that do not exist.
-fn resolve_writable_paths(raw_paths: &[String]) -> Vec<PathBuf> {
+fn resolve_writable_paths(raw_paths: &[WritablePath]) -> Vec<PathBuf> {
     raw_paths
         .iter()
         .filter_map(|raw| {
-            let expanded = expand_tilde_from_env(raw);
+            let expanded = expand_tilde_from_env(raw.as_str());
             std::fs::canonicalize(&expanded)
                 .inspect_err(|e| {
                     warn!(

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use assistd_config::{SynthesisConfig, VoiceFamily};
-use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id, parse_id};
+use assistd_utils::hf::download::{self, DownloadError, ensure_cached_id};
 
 use crate::tts::error::SpeechError;
 
@@ -28,16 +28,16 @@ pub enum VoiceFiles {
 
 /// Download whichever of the voice's files are missing and return their paths.
 pub async fn ensure_voice(config: &SynthesisConfig) -> Result<VoiceFiles, SpeechError> {
-    let cache_dir = config
-        .model_cache_dir
-        .clone()
-        .map_or_else(|| download::default_cache_dir("tts"), Ok)?;
-    let model_id = parse_id(&config.voice)?;
+    let cache_dir = config.model_cache_dir.as_ref().map_or_else(
+        || download::default_cache_dir("tts"),
+        |dir| Ok(dir.as_path().to_path_buf()),
+    )?;
+    let model_id = config.voice.id();
     let sibling = async |name| {
         let id = model_id
             .sibling(name)
             .map_err(|reason| DownloadError::InvalidId {
-                id: config.voice.clone(),
+                id: config.voice.to_string(),
                 reason,
             })?;
         ensure_cached_id(&id, &cache_dir).await
@@ -45,18 +45,18 @@ pub async fn ensure_voice(config: &SynthesisConfig) -> Result<VoiceFiles, Speech
     let tokens = sibling("tokens.txt")
         .await
         .map_err(|err| match config.family {
-            VoiceFamily::Vits => not_found_as_stock_voice(err, &config.voice),
+            VoiceFamily::Vits => not_found_as_stock_voice(err, &config.voice.to_string()),
             VoiceFamily::Kokoro => err.into(),
         })?;
     Ok(match config.family {
         VoiceFamily::Vits => VoiceFiles::Vits {
-            model: ensure_cached_id(&model_id, &cache_dir).await?,
+            model: ensure_cached_id(model_id, &cache_dir).await?,
             tokens,
         },
         VoiceFamily::Kokoro => VoiceFiles::Kokoro {
             voices: sibling("voices.bin").await?,
             lexicon: sibling("lexicon-us-en.txt").await?,
-            model: ensure_cached_id(&model_id, &cache_dir).await?,
+            model: ensure_cached_id(model_id, &cache_dir).await?,
             tokens,
         },
     })

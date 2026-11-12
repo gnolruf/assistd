@@ -2,17 +2,21 @@
 //! panel, declared beside its table with `describe_fields!`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::IpAddr;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
-use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use crate::custom_args::CustomArgs;
+use crate::embedding::EmbeddingModel;
 use crate::mcp::McpServerConfig;
 use crate::search::{SearchCommand, SearchEngine};
-use crate::theme::{ThemeColor, ThemeConfig};
+use crate::theme::{ThemeColor, ThemeConfig, ThemeName};
+use crate::tools::WritablePath;
 use crate::top::Config;
-use crate::voice::UnitInterval;
+use crate::values::{
+    AbsoluteDir, Bounded, HfFile, LengthScale, LoopbackAddr, NonBlankString, NonEmpty,
+    PresencePenalty, Temperature,
+};
+use crate::voice::{SttEncoder, UnitInterval, WakePhrase};
 
 static SETTINGS: LazyLock<HashMap<String, SettingInfo>> = LazyLock::new(|| {
     let mut settings = Vec::new();
@@ -85,7 +89,11 @@ impl SettingValue for Vec<String> {
     const KIND: SettingKind = SettingKind::List(ListItem::Text);
 }
 
-impl SettingValue for Vec<SearchEngine> {
+impl SettingValue for NonEmpty<WritablePath> {
+    const KIND: SettingKind = SettingKind::List(ListItem::Text);
+}
+
+impl SettingValue for NonEmpty<SearchEngine> {
     const KIND: SettingKind = SettingKind::List(ListItem::SearchEngine);
 }
 
@@ -97,7 +105,11 @@ impl SettingValue for ThemeColor {
     const KIND: SettingKind = SettingKind::Color;
 }
 
-impl SettingValue for BTreeMap<String, ThemeConfig> {
+impl<const MIN: u32, const MAX: u32> SettingValue for Bounded<MIN, MAX> {
+    const KIND: SettingKind = SettingKind::Integer;
+}
+
+impl SettingValue for BTreeMap<ThemeName, ThemeConfig> {
     const KIND: SettingKind = SettingKind::Themes;
 }
 
@@ -211,8 +223,9 @@ macro_rules! setting_values {
 
 setting_values!(Toggle: bool);
 setting_values!(Integer: u32, u64, NonZeroU16, NonZeroU32, NonZeroU64);
-setting_values!(Decimal: f32, UnitInterval);
-setting_values!(Text: String, PathBuf, IpAddr, SearchCommand);
+setting_values!(Decimal: UnitInterval, Temperature, PresencePenalty, LengthScale);
+setting_values!(Text: String, SearchCommand, NonBlankString, LoopbackAddr, AbsoluteDir);
+setting_values!(Text: HfFile, SttEncoder, EmbeddingModel, WakePhrase);
 
 /// Implements [`SettingValue`] for an enum as a choice between its variants'
 /// TOML names; a variant left out fails to compile.

@@ -269,8 +269,8 @@ async fn start_server(
             server: None,
         })?;
     match LlamaEmbedder::new(
-        SocketAddr::new(config.host, config.port.get()),
-        config.model.clone(),
+        SocketAddr::new(config.host.get(), config.port.get()),
+        config.model.to_string(),
         assistd_embed::REQUEST_TIMEOUT,
         Some(api_key),
         Some(server.status()),

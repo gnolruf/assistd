@@ -2,6 +2,7 @@
 //! within it: binary refused, long streams cut and spilled to a file, an `[exit:N | Mms]` footer.
 
 use std::cmp::Reverse;
+use std::env;
 use std::fs::{DirEntry, Metadata, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -10,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use assistd_config::ToolsOutputConfig;
-use assistd_config::defaults::default_tools_overflow_dir;
 use assistd_utils::text::human_size;
 
 use crate::command::{Attachment, CommandOutput};
@@ -53,8 +53,11 @@ impl PresentSpec {
 }
 
 impl Default for PresentSpec {
+    /// The default caps, spilling into `assistd/output` under the system
+    /// temporary directory.
     fn default() -> Self {
-        Self::from_config(&ToolsOutputConfig::default(), default_tools_overflow_dir())
+        let overflow_dir = env::temp_dir().join("assistd").join("output");
+        Self::from_config(&ToolsOutputConfig::default(), overflow_dir)
     }
 }
 

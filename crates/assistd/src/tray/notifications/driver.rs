@@ -119,7 +119,7 @@ impl Driver {
             last_activity: Instant::now(),
             was_busy: false,
             was_speaking: false,
-            auto_hide: Duration::from_millis(cfg.auto_hide_ms),
+            auto_hide: Duration::from_millis(cfg.auto_hide_ms.get().into()),
             listen_auto_hide: Duration::from_millis(cfg.listen_auto_hide_ms()),
         }
     }

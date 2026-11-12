@@ -1168,7 +1168,7 @@ async fn dispatch_query_tool_call_inhibits_idle_flush() {
     let mut tools = ToolRegistry::new();
     tools.register(SleepTool { ms: 300 });
     let mut config = config_with_partial_flush(50);
-    config.voice.synthesis.max_sentence_chars = assistd_config::defaults::nz32(400);
+    config.voice.synthesis.max_sentence_chars = assistd_config::defaults::bounded(400);
     let state = StateParts {
         config,
         backend,

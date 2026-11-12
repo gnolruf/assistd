@@ -78,34 +78,69 @@ fn defaults_validate() {
 }
 
 #[test]
-fn non_loopback_server_hosts_are_rejected() {
-    let cfg: Config =
-        toml::from_str("[model]\nhost = \"0.0.0.0\"\n[embedding]\nenabled = true\nhost = \"::\"\n")
-            .expect("config must parse");
-    let err = cfg
-        .validate()
-        .expect_err("wildcard hosts must not validate");
-    let message = err.to_string();
-    assert!(message.contains("model.host"), "{message}");
-    assert!(message.contains("embedding.host"), "{message}");
+fn non_loopback_server_hosts_do_not_parse() {
+    for source in [
+        "[model]\nhost = \"0.0.0.0\"\n",
+        "[embedding]\nenabled = false\nhost = \"::\"\n",
+        "[search]\nhost = \"192.168.1.2\"\n",
+    ] {
+        let err = toml::from_str::<Config>(source).expect_err("a wildcard host must not parse");
+        assert!(err.to_string().contains("loopback"), "{source}: {err}");
+    }
 }
 
 #[test]
-fn relative_writable_paths_are_rejected() {
+fn relative_writable_paths_do_not_parse() {
     for entry in [".", "docs", "~alice/notes", "./tmp"] {
-        let cfg: Config = toml::from_str(&format!(
-            "[tools.write]\nwritable_paths = [\"/tmp\", \"{entry}\"]\n"
-        ))
-        .expect("config must parse");
-        let err = cfg
-            .validate()
-            .expect_err("a relative writable_paths entry must not validate");
-        let message = err.to_string();
+        let source = format!("[tools.write]\nwritable_paths = [\"/tmp\", \"{entry}\"]\n");
+        toml::from_str::<Config>(&source)
+            .expect_err("a relative writable_paths entry must not parse");
+    }
+    toml::from_str::<Config>("[tools.write]\nwritable_paths = []\n")
+        .expect_err("an empty writable_paths must not parse");
+}
+
+#[test]
+fn a_key_outside_its_range_does_not_parse_even_when_its_feature_is_off() {
+    for source in [
+        "[chat]\ntemperature = 2.5\n",
+        "[chat]\npresence_penalty = nan\n",
+        "[chat]\nreasoning_effort = \"\"\n",
+        "[chat.themes.nord]\n",
+        "[voice]\nenabled = false\n[voice.wakeword]\nphrase = \"hey computer 2\"\n",
+        "[voice.wakeword]\ncommand_timeout_ms = 499\n",
+        "[voice.transcription]\nmodel = \"owner/repo:decoder.onnx\"\n",
+        "[voice.synthesis]\nlength_scale = 0.0\n",
+        "[voice.synthesis]\nmodel_cache_dir = \"cache\"\n",
+        "[embedding]\nenabled = false\ntop_k = 21\n",
+        "[embedding]\nmodel = \"owner/repo@main:Q4_K_M\"\n",
+        "[search]\nenabled = false\nengines = []\n",
+        "[notifications]\nenabled = false\nauto_hide_ms = 100\n",
+        "[tasks]\nkept_runs = 0\n",
+    ] {
         assert!(
-            message.contains("tools.write.writable_paths"),
-            "{entry}: {message}"
+            toml::from_str::<Config>(source).is_err(),
+            "{source:?} must not parse"
         );
     }
+}
+
+#[test]
+fn a_tool_timeout_the_tool_call_deadline_would_cut_short_is_rejected() {
+    let validate = |source: &str| -> Result<(), String> {
+        let cfg: Config = toml::from_str(source).expect("config must parse");
+        cfg.validate().map_err(|err| err.to_string())
+    };
+    validate("[tools.bash]\ntimeout_secs = 180\n").expect("180 s leaves room for a prompt");
+    let bash = validate("[tools.bash]\ntimeout_secs = 181\n").expect_err("181 s is cut short");
+    assert!(bash.contains("tools.bash.timeout_secs"), "{bash}");
+    let server =
+        "[[mcp.servers]]\nname = \"slow\"\ncommand = \"npx\"\nrequest_timeout_secs = 600\n";
+    let mcp =
+        validate(&format!("[mcp]\nenabled = true\n{server}")).expect_err("600 s is cut short");
+    assert!(mcp.contains("mcp.servers[0].request_timeout_secs"), "{mcp}");
+    validate(&format!("[mcp]\nenabled = false\n{server}"))
+        .expect("a disabled server is not called");
 }
 
 #[test]

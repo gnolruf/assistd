@@ -1,6 +1,6 @@
 //! ratatui render for the settings panel.
 
-use assistd_config::{SettingKind, ThemeColor};
+use assistd_config::{ConfigIssue, SettingKind, ThemeColor};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -356,7 +356,7 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, feedback: Option<&Feedback
     frame.render_widget(Paragraph::new(span), area);
 }
 
-fn render_issues(frame: &mut Frame<'_>, area: Rect, issues: &[String], theme: &Theme) {
+fn render_issues(frame: &mut Frame<'_>, area: Rect, issues: &[ConfigIssue], theme: &Theme) {
     let style = theme.warning_style();
     let mut lines: Vec<Line<'static>> = issues
         .iter()

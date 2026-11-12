@@ -121,10 +121,12 @@ impl TurnAdmission {
     /// How long the user's conversation stays open after its last reply finishes:
     /// `resume_after_idle_secs`, or the wake word's follow-up window when longer.
     pub(super) fn conversation_quiet_time(&self) -> Duration {
-        let idle = Duration::from_secs(self.config.tasks.resume_after_idle_secs.into());
+        let idle = Duration::from_secs(self.config.tasks.resume_after_idle_secs.get().into());
         let voice = &self.config.voice;
         if voice.enabled && voice.wakeword.enabled {
-            idle.max(Duration::from_millis(voice.wakeword.follow_up_ms.into()))
+            idle.max(Duration::from_millis(
+                voice.wakeword.follow_up_ms.get().into(),
+            ))
         } else {
             idle
         }

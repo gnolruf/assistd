@@ -1,7 +1,9 @@
 //! Errors from loading, editing and validating configuration.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+use assistd_utils::hf::InvalidHfId;
 use thiserror::Error;
 
 /// Errors produced while loading, writing, or validating configuration.
@@ -64,7 +66,7 @@ pub enum ConfigError {
     AlreadyExists(PathBuf),
 
     #[error("{}", format_validation_errors(.0))]
-    Validation(Vec<String>),
+    Validation(Vec<ConfigIssue>),
 }
 
 impl ConfigError {
@@ -79,6 +81,79 @@ impl ConfigError {
             message: error.message().to_owned(),
         }
     }
+}
+
+/// A rule between keys, or between a key and this machine, that a parsed
+/// config breaks.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConfigIssue {
+    #[error(
+        "chat.max_history_tokens + chat.max_response_tokens ({total}) must not exceed 90% of \
+         model.context_length ({budget})"
+    )]
+    HistoryAndResponseOverBudget { total: u64, budget: u32 },
+
+    #[error("chat.max_reasoning_tokens must be strictly less than chat.max_response_tokens")]
+    ReasoningNotBelowResponse,
+
+    #[error("chat.summary_target_tokens must be strictly less than chat.max_history_tokens")]
+    SummaryNotBelowHistory,
+
+    #[error(
+        "sleep.idle_to_sleep_mins must be greater than sleep.idle_to_drowsy_mins \
+         (set either to 0 to disable that transition)"
+    )]
+    SleepNotAfterDrowsy,
+
+    #[error(transparent)]
+    NoDefaultDir(#[from] NoDefaultDirError),
+
+    #[error(
+        "{key} must be a directory of its own, not {} (assistd removes old files from it)",
+        dir.display()
+    )]
+    SharedToolDir { key: &'static str, dir: PathBuf },
+
+    #[error(
+        "tools.output.max_kb ({max_kb} KB, about {head_tokens} tokens) must not exceed a \
+         quarter of chat.max_history_tokens ({allowed} tokens)"
+    )]
+    ToolOutputOverShare {
+        max_kb: u32,
+        head_tokens: u64,
+        allowed: u64,
+    },
+
+    #[error(
+        "{key} ({timeout_secs}) must be at most {max_secs}: a tool call is cut off after \
+         {valve_secs} s, {confirmation_secs} s of which are kept for a confirmation prompt"
+    )]
+    ToolTimeoutOverValve {
+        key: String,
+        timeout_secs: u64,
+        max_secs: u64,
+        valve_secs: u64,
+        confirmation_secs: u64,
+    },
+
+    #[error("{key} must differ from {other}")]
+    PortClash {
+        key: &'static str,
+        other: &'static str,
+    },
+
+    #[error("mcp.servers[{index}].name '{name}' is duplicated; names must be unique")]
+    DuplicateMcpServer { index: usize, name: String },
+}
+
+/// A tool directory left unset on a machine with nowhere to default it to.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "{key} has no default: neither XDG_RUNTIME_DIR, XDG_CACHE_HOME nor a home directory is \
+     available; set it to an absolute path"
+)]
+pub struct NoDefaultDirError {
+    pub key: &'static str,
 }
 
 /// Why a `custom_args` string was refused.
@@ -112,6 +187,91 @@ pub enum SearchCommandError {
 #[error("{0} is outside the range 0.0..=1.0")]
 pub struct UnitIntervalError(pub f32);
 
+/// A number refused by a bounded decimal such as [`crate::values::Temperature`].
+#[derive(Debug, Error)]
+#[error("{value} must be {expected}")]
+pub struct DecimalRangeError {
+    pub value: f32,
+    pub expected: &'static str,
+}
+
+/// A number refused by [`crate::values::Bounded`].
+#[derive(Debug, Error)]
+#[error("{value} is outside the range {min}..={max}")]
+pub struct IntegerRangeError {
+    pub value: u32,
+    pub min: u32,
+    pub max: u32,
+}
+
+/// An address refused by [`crate::values::LoopbackAddr`].
+#[derive(Debug, Error)]
+#[error("{0} is not a loopback address (127.0.0.0/8 or ::1)")]
+pub struct LoopbackAddrError(pub IpAddr);
+
+/// A string refused by [`crate::values::NonBlankString`].
+#[derive(Debug, Error)]
+#[error("must not be empty or blank")]
+pub struct BlankStringError;
+
+/// A list refused by [`crate::values::NonEmpty`].
+#[derive(Debug, Error)]
+#[error("must have at least one entry")]
+pub struct EmptyListError;
+
+/// A path refused by [`crate::values::AbsoluteDir`].
+#[derive(Debug, Error)]
+#[error("`{0}` must be an absolute path or start with `~/`")]
+pub struct AbsoluteDirError(pub String);
+
+/// A string refused by [`crate::values::HfFile`].
+#[derive(Debug, Error)]
+#[error("`{id}` must be of the form '<owner>/<repo>[@<revision>]:<file>': {reason}")]
+pub struct HfFileError {
+    pub id: String,
+    pub reason: InvalidHfId,
+}
+
+/// A string refused by [`crate::voice::SttEncoder`].
+#[derive(Debug, Error)]
+pub enum SttEncoderError {
+    #[error(transparent)]
+    Id(#[from] HfFileError),
+
+    #[error("`{0}` must name the model's encoder .onnx, a file whose name starts with `encoder`")]
+    NotAnEncoder(String),
+}
+
+/// A string refused by [`crate::embedding::EmbeddingModel`].
+#[derive(Debug, Error)]
+pub enum EmbeddingModelError {
+    #[error(transparent)]
+    Id(#[from] HfFileError),
+
+    #[error("`{0}` pins a revision, which the embedding model does not support")]
+    Pinned(String),
+}
+
+/// A string refused by [`crate::voice::WakePhrase`].
+#[derive(Debug, Error)]
+#[error("{0:?} must be 1 to 6 words of letters and apostrophes")]
+pub struct WakePhraseError(pub String);
+
+/// A string refused by [`crate::tools::WritablePath`].
+#[derive(Debug, Error)]
+#[error("{0:?} must be absolute or start with `~/`")]
+pub struct WritablePathError(pub String);
+
+/// A string refused by [`crate::theme::ThemeName`].
+#[derive(Debug, Error)]
+pub enum ThemeNameError {
+    #[error("a theme name is ASCII letters, digits, _ and -")]
+    Malformed,
+
+    #[error("{0} is a built-in theme")]
+    BuiltIn(String),
+}
+
 /// A string refused by [`crate::mcp::McpServerName`].
 #[derive(Debug, Error)]
 #[error(
@@ -132,7 +292,7 @@ fn at_line(line: Option<usize>) -> String {
         .unwrap_or_default()
 }
 
-fn format_validation_errors(errors: &[String]) -> String {
+fn format_validation_errors(errors: &[ConfigIssue]) -> String {
     let mut report = format!("configuration has {} error(s):", errors.len());
     for (i, error) in errors.iter().enumerate() {
         report.push_str(&format!("\n  {}: {}", i + 1, error));

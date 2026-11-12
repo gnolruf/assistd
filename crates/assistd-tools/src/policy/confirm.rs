@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
+use assistd_config::defaults::CONFIRMATION_PROMPT_SECS;
 use assistd_ipc::{ConfirmSource, Event, EventBody, HostName, PermissionMode, PlanVerdict};
 
 use super::judge::{JudgedCommand, SafetyJudge, Verdict};
@@ -22,7 +23,7 @@ use crate::TurnContext;
 pub const MAX_PENDING_CONFIRMS: usize = 32;
 
 /// How long a prompt waits for the client's answer before it is denied.
-pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(CONFIRMATION_PROMPT_SECS);
 
 /// A request for the user's confirmation before a command runs.
 #[derive(Debug, Clone)]
