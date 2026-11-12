@@ -460,7 +460,7 @@ fn describe(effect: &Effect, path: &Path, guard: Guard) -> String {
         Action::Read => "reads",
         Action::Write => "writes",
         Action::Delete => "deletes",
-        Action::ChangeAttributes => "changes the mode or owner of",
+        Action::ChangeAttributes => "changes the mode of",
     };
     let holding = if guard.holds { "a tree holding " } else { "" };
     let class = if guard.guarded.is_catastrophic() {
