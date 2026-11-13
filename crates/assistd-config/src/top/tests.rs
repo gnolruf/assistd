@@ -29,7 +29,7 @@ fn write_sample_creates_owner_only_file_and_new_parent_dirs() {
     assert_eq!(mode_of(&path), 0o600);
     assert_eq!(mode_of(&inner), 0o700);
     assert_eq!(mode_of(&outer), 0o700);
-    assert_eq!(Config::load_from_file(&path).unwrap(), Config::default());
+    assert_eq!(Config::load_unvalidated(&path).unwrap(), Config::default());
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn a_removed_key_fails_to_load() {
     let path = root.path().join("config.toml");
     fs::write(&path, "[tools.bash]\nallowed_programs = [\"ls\"]\n").unwrap();
 
-    let err = Config::load_from_file(&path).unwrap_err();
+    let err = Config::load_unvalidated(&path).unwrap_err();
 
     assert!(
         matches!(
@@ -95,7 +95,7 @@ fn a_rejected_mcp_header_value_is_not_echoed_by_load() {
     )
     .unwrap();
 
-    let message = Config::load_from_file(&path).unwrap_err().to_string();
+    let message = Config::load_unvalidated(&path).unwrap_err().to_string();
 
     assert!(message.contains("Authorization"), "{message}");
     assert!(message.contains("line 4"), "{message}");

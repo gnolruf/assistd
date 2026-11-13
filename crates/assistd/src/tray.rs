@@ -28,19 +28,16 @@ pub(crate) struct TrayArgs {
 pub(crate) async fn run(args: TrayArgs) -> Result<()> {
     init_tracing();
 
-    let config_path = match args.config.clone() {
-        Some(p) => p,
-        None => Config::default_path()?,
-    };
-    let config = load_config(&config_path);
-    match &config {
-        Ok(_) => tracing::info!(target: "tray", "loaded config from {}", config_path.display()),
-        Err(e) => tracing::error!(
+    let config_path = Config::path_or_default(args.config)?;
+    let (config, config_error) = load_config(&config_path);
+    match &config_error {
+        None => tracing::info!(target: "tray", "loaded config from {}", config_path.display()),
+        Some(e) => tracing::error!(
             target: "tray",
-            "config unusable; tray will flag it until fixed: {e}"
+            "config has errors; tray will flag them until fixed: {e}"
         ),
     }
-    let config_error = config.as_ref().err().map(ToString::to_string);
+    let config_error = config_error.map(|e| e.to_string());
 
     if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
         anyhow::bail!(
@@ -53,7 +50,6 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
 
     let notifications = config
         .as_ref()
-        .ok()
         .and_then(|cfg| notifications::spawn_notifications(cfg, ipc.clone()));
     let notification_sink = notifications.as_ref().map(|n| n.sink.clone());
 
@@ -91,10 +87,15 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_config(path: &Path) -> Result<Config, ConfigError> {
-    let config = Config::load_from_file(path)?;
-    config.validate()?;
-    Ok(config)
+/// The config at `path` unless it cannot be parsed, beside what is wrong with it.
+fn load_config(path: &Path) -> (Option<Config>, Option<ConfigError>) {
+    match Config::load_unvalidated(path) {
+        Ok(config) => {
+            let invalid = config.validate().err();
+            (Some(config), invalid)
+        }
+        Err(unparsed) => (None, Some(unparsed)),
+    }
 }
 
 fn build_activate_callback(

@@ -38,7 +38,7 @@ fn edits_keep_comments_and_refuse_values_the_schema_rejects() {
     assert!(saved.contains("name = \"other/repo:Q8_0\"  # owner/repo:quant"));
     assert!(!saved.contains("port"));
     assert!(!saved.contains("no_such_key"));
-    let reloaded = Config::load_from_file(&path).unwrap();
+    let reloaded = Config::load_unvalidated(&path).unwrap();
     assert_eq!(reloaded.voice.wakeword.silence_ms.get(), 600);
     assert_eq!(reloaded.model.port, Config::default().model.port);
     assert_eq!(

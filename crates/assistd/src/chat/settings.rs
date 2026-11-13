@@ -40,10 +40,7 @@ pub(crate) struct SettingsArgs {
 /// Edit the config file full-screen until the panel closes. Fails before
 /// touching the terminal when the file cannot be read or parsed.
 pub(crate) async fn run(args: SettingsArgs) -> Result<()> {
-    let path = match args.config {
-        Some(path) => path,
-        None => Config::default_path()?,
-    };
+    let path = Config::path_or_default(args.config)?;
     let mut panel = SettingsPanel::new(ConfigDocument::open(&path)?);
     let _guard = TerminalGuard::enter()?;
     let mut terminal =

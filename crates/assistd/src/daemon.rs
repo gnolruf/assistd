@@ -67,12 +67,8 @@ pub(crate) async fn run(args: DaemonArgs) -> Result<()> {
     init_tracing();
     assistd_core::install_panic_hook();
 
-    let config_path = match args.config {
-        Some(p) => p,
-        None => Config::default_path()?,
-    };
-    let config = Config::load_from_file(&config_path)?;
-    config.validate()?;
+    let config_path = Config::path_or_default(args.config)?;
+    let config = Config::load(&config_path)?;
 
     info!(
         "assistd v{}: local model agent OS assistant daemon",

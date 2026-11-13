@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use assistd_config::ConfigIssue;
 use assistd_core::Config;
 use assistd_core::socket::open_private_lock_file;
 use assistd_ipc::{
@@ -86,6 +87,7 @@ struct TuiContext {
     capabilities: StartupCapabilities,
     daemon_reachable: bool,
     config_path: PathBuf,
+    config_issues: Vec<ConfigIssue>,
     theme: Theme,
 }
 
@@ -212,12 +214,9 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
 
     let _log_guard = init_file_tracing()?;
 
-    let config_path = match args.config.clone() {
-        Some(p) => p,
-        None => Config::default_path()?,
-    };
-    let config = Config::load_from_file(&config_path)?;
-    config.validate()?;
+    let config_path = Config::path_or_default(args.config)?;
+    let config = Config::load_unvalidated(&config_path)?;
+    let config_issues = config.issues();
 
     info!("assistd chat v{}", crate::VERSION);
     info!("loaded config from {}", config_path.display());
@@ -257,6 +256,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
         capabilities,
         daemon_reachable,
         config_path,
+        config_issues,
         theme: Theme::new(&config.chat.theme),
     })
     .await;
@@ -303,6 +303,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         capabilities,
         daemon_reachable,
         config_path,
+        config_issues,
         theme,
     } = ctx;
 
@@ -321,6 +322,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         config_path,
     )
     .with_theme(theme)
+    .with_config_issues(&config_issues)
     .with_mcp_unavailable(capabilities.mcp_unavailable)
     .with_daemon_reachable(daemon_reachable);
     if daemon_reachable {
