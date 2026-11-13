@@ -807,8 +807,9 @@ held to the `[tools.output]` cap by the registry, spilling overflow to
 
 When a server's process or session ends, its process group is killed
 at once, and the next call to one of its tools starts it again. Restarts
-follow exponential backoff; a call inside the backoff fails with a
-"server unavailable" error instead of waiting. The daemon never blocks
+follow exponential backoff, counted from when the session ended; a call
+inside the backoff fails with a "server unavailable" error instead of
+waiting. The daemon never blocks
 on a slow MCP server: the handshake and each call are bounded by that
 server's `request_timeout_secs`, and a timeout surfaces as a structured
 error to the model. Each message is capped at 64 MiB, whether a stdio
