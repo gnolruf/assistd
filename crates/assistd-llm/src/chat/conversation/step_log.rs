@@ -1,7 +1,7 @@
 //! Compact record of tool steps folded out of the current turn: each call, its reported exit
 //! status, and the first error line of a failure.
 
-use super::{Conversation, Message, ToolCallRecord, truncate_utf8};
+use super::{Message, ToolCallRecord, truncate_utf8};
 
 /// Most folded calls a turn keeps; older entries fall off the front.
 const MAX_LOGGED_CALLS: usize = 24;
@@ -29,13 +29,10 @@ pub(super) fn records(steps: &[Message]) -> Vec<StepRecord> {
     let mut out = Vec::new();
     let mut rest = steps;
     while let Some((step, tail)) = rest.split_first() {
-        let result_count = tail
-            .iter()
-            .take_while(|m| Conversation::is_tool_result(m))
-            .count();
+        let result_count = tail.iter().take_while(|m| m.is_tool_result()).count();
         let (results, after) = tail.split_at(result_count);
         out.extend(
-            step.tool_calls
+            step.tool_calls()
                 .iter()
                 .enumerate()
                 .map(|(position, call)| record(call, result_for(call, position, results))),
@@ -87,14 +84,14 @@ pub(super) fn rendered_len(records: &[StepRecord]) -> usize {
 }
 
 fn record(call: &ToolCallRecord, result: Option<&Message>) -> StepRecord {
-    let exit_code = result.and_then(|r| exit_code(&r.content));
+    let exit_code = result.and_then(|r| exit_code(r.content()));
     StepRecord {
         call: truncate_utf8(
             &format!("{} {}", call.name, call.arguments),
             LOGGED_CALL_BYTES,
         ),
         exit_code,
-        failure: result.and_then(|r| failure_line(&r.content, exit_code)),
+        failure: result.and_then(|r| failure_line(r.content(), exit_code)),
     }
 }
 
@@ -105,7 +102,7 @@ fn result_for<'a>(
 ) -> Option<&'a Message> {
     results
         .iter()
-        .find(|r| r.tool_call_id.as_deref() == Some(call.id.as_str()))
+        .find(|r| matches!(r, Message::ToolResult { call_id, .. } if *call_id == call.id))
         .or_else(|| results.get(position))
 }
 

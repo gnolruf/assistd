@@ -21,8 +21,8 @@ use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{debug, info, warn};
 
 use super::conversation::{
-    Conversation, Message, Role, Summarizer, SummaryRequest, TOOL_RESULT_PREFIX, ToolCallRecord,
-    approx_tokens_bytes, ensure_budget,
+    AssistantMessage, Conversation, Message, Role, Summarizer, SummaryRequest, ToolCallRecord,
+    UserMessage, approx_tokens_bytes, ensure_budget,
 };
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
@@ -685,8 +685,8 @@ impl LlmBackend for LlamaChatClient {
                 conv.push_tool_result(result.call_id, result.content);
             } else {
                 conv.push_tool_result_with_attachments(
-                    &result.name,
-                    &result.content,
+                    result.name,
+                    result.content,
                     result.attachments,
                 );
             }
@@ -1261,24 +1261,25 @@ fn error_event(payload: &str) -> ChatClientError {
 
 fn history_message(entry: HistoryEntry) -> Message {
     match entry.role {
-        HistoryRole::User => Message::text(Role::User, entry.content),
-        HistoryRole::Assistant => Message {
-            tool_calls: entry.tool_calls,
+        HistoryRole::User => Message::User(UserMessage {
+            content: entry.content,
+            ..UserMessage::default()
+        }),
+        HistoryRole::Assistant => Message::Assistant(AssistantMessage {
+            content: entry.content,
             reasoning: entry.reasoning,
-            ..Message::text(Role::Assistant, entry.content)
-        },
+            tool_calls: entry.tool_calls,
+        }),
         HistoryRole::Tool => match entry.tool_call_id {
-            Some(call_id) => Message {
-                tool_call_id: Some(call_id),
-                ..Message::text(Role::Tool, entry.content)
+            Some(call_id) => Message::ToolResult {
+                call_id,
+                content: entry.content,
             },
-            None => {
-                let name = entry.tool_name.unwrap_or_default();
-                Message::text(
-                    Role::User,
-                    format!("{TOOL_RESULT_PREFIX}{name}]\n{}", entry.content),
-                )
-            }
+            None => Message::ToolImageResult {
+                tool_name: entry.tool_name.unwrap_or_default(),
+                content: entry.content,
+                attachments: Vec::new(),
+            },
         },
     }
 }

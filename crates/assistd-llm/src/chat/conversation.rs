@@ -39,9 +39,9 @@ const SUMMARY_INSTRUCTION_RULES: &str = "Start with where things stand now: what
     and decisions over verbatim detail. Write with no preamble or commentary.";
 /// Longest quote of a message the summary instruction uses to name it.
 const SUMMARY_QUOTE_BYTES: usize = 120;
-/// Marks an image-carrying tool result sent on the user role (templates
-/// render images only on user turns); text-only results use [`Role::Tool`].
-pub const TOOL_RESULT_PREFIX: &str = "[tool:";
+/// Delimiters around the tool name that heads an image-carrying tool result.
+const TOOL_RESULT_OPEN: &str = "[tool:";
+const TOOL_RESULT_CLOSE: &str = "]\n";
 /// Plain-text delimiters around a context block folded into its user turn;
 /// templates mishandle system messages anywhere but the head of the list.
 const CONTEXT_OPEN: &str = "[Context: added automatically, not written by the user]\n";
@@ -131,40 +131,82 @@ impl ImageDataUri {
     }
 }
 
-/// One turn in the in-memory conversation, owned by [`Conversation`].
+/// One entry in the in-memory conversation, owned by [`Conversation`].
 #[derive(Debug, Clone)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-    pub attachments: Vec<ImageDataUri>,
-    /// Non-empty only on assistant messages that requested tool calls.
-    pub tool_calls: Vec<ToolCallRecord>,
-    /// On [`Role::Tool`] messages: the id of the call this answers.
-    pub tool_call_id: Option<String>,
-    /// Reasoning behind an assistant's `tool_calls`, sent back with them.
-    pub reasoning: String,
-    /// Context block rendered at the head of a user message's text,
-    /// keeping earlier turns byte-identical for the prefix cache.
-    pub context: Option<String>,
-    /// On a real user message: tool calls already folded out of its turn,
-    /// rendered after its text.
-    pub earlier_steps: Vec<StepRecord>,
+pub enum Message {
+    /// Compaction summary of the history before it, without its prefix.
+    Summary(String),
+    /// A turn the user wrote, which opens a new tool loop.
+    User(UserMessage),
+    Assistant(AssistantMessage),
+    /// Text output answering the assistant tool call `call_id`.
+    ToolResult {
+        call_id: String,
+        content: String,
+    },
+    /// Image-carrying tool output. Sent on the user role, the only one
+    /// templates render images on, without closing its tool loop.
+    ToolImageResult {
+        tool_name: String,
+        content: String,
+        attachments: Vec<ImageDataUri>,
+    },
 }
 
 impl Message {
-    /// A message with only `role` and `content` set.
-    pub fn text(role: Role, content: String) -> Self {
-        Self {
-            role,
-            content,
-            attachments: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            reasoning: String::new(),
-            context: None,
-            earlier_steps: Vec::new(),
+    fn role(&self) -> Role {
+        match self {
+            Message::Summary(_) => Role::System,
+            Message::User(_) | Message::ToolImageResult { .. } => Role::User,
+            Message::Assistant(_) => Role::Assistant,
+            Message::ToolResult { .. } => Role::Tool,
         }
     }
+
+    fn content(&self) -> &str {
+        match self {
+            Message::Summary(content)
+            | Message::ToolResult { content, .. }
+            | Message::ToolImageResult { content, .. } => content,
+            Message::User(user) => &user.content,
+            Message::Assistant(assistant) => &assistant.content,
+        }
+    }
+
+    fn tool_calls(&self) -> &[ToolCallRecord] {
+        match self {
+            Message::Assistant(assistant) => &assistant.tool_calls,
+            _ => &[],
+        }
+    }
+
+    fn is_tool_result(&self) -> bool {
+        matches!(
+            self,
+            Message::ToolResult { .. } | Message::ToolImageResult { .. }
+        )
+    }
+}
+
+/// A user turn's text and what is sent along with it.
+#[derive(Debug, Clone, Default)]
+pub struct UserMessage {
+    pub content: String,
+    pub attachments: Vec<ImageDataUri>,
+    /// Context block rendered at the head of the text, keeping earlier
+    /// turns byte-identical for the prefix cache.
+    pub context: Option<String>,
+    /// Tool calls already folded out of this turn, rendered after its text.
+    pub earlier_steps: Vec<StepRecord>,
+}
+
+/// An assistant reply, or a tool step when `tool_calls` is non-empty.
+#[derive(Debug, Clone, Default)]
+pub struct AssistantMessage {
+    pub content: String,
+    /// Reasoning behind `tool_calls`, sent back with them.
+    pub reasoning: String,
+    pub tool_calls: Vec<ToolCallRecord>,
 }
 
 /// What a compaction summary leaves of the conversation: its `kept_turns`
@@ -196,8 +238,8 @@ pub trait Summarizer: Send + Sync {
 }
 
 /// Mutable conversation state. `messages` never holds the system prompt,
-/// only turns plus at most one `SUMMARY_PREFIX` system message at index 0;
-/// the rendered form carries a single system message, at its head.
+/// only turns plus at most one [`Message::Summary`], at index 0; the
+/// rendered form carries a single system message, at its head.
 #[derive(Debug, Clone)]
 pub struct Conversation {
     system_prompt: String,
@@ -272,34 +314,35 @@ impl Conversation {
     /// array: one `text` part followed by one `image_url` part per
     /// attachment.
     pub fn push_user_with_attachments(&mut self, content: String, attachments: Vec<Attachment>) {
-        self.messages.push(Message {
+        self.messages.push(Message::User(UserMessage {
+            content,
             attachments: encode_all(attachments),
             context: self.pending_context.take(),
-            ..Message::text(Role::User, content)
-        });
+            earlier_steps: Vec::new(),
+        }));
     }
 
-    /// Append an image-carrying tool result as a tagged user message
-    /// (see [`TOOL_RESULT_PREFIX`]). Unlike a real user turn this does
-    /// not close the tool loop it belongs to.
+    /// Append the output of the tool `name` together with the images it
+    /// produced, as a [`Message::ToolImageResult`].
     pub fn push_tool_result_with_attachments(
         &mut self,
-        name: &str,
-        content: &str,
+        name: String,
+        content: String,
         attachments: Vec<Attachment>,
     ) {
-        self.messages.push(Message {
+        self.messages.push(Message::ToolImageResult {
+            tool_name: name,
+            content,
             attachments: encode_all(attachments),
-            ..Message::text(
-                Role::User,
-                format!("{TOOL_RESULT_PREFIX}{name}]\n{content}"),
-            )
         });
     }
 
     /// Appends a plain-text assistant turn.
     pub fn push_assistant(&mut self, content: String) {
-        self.messages.push(Message::text(Role::Assistant, content));
+        self.messages.push(Message::Assistant(AssistantMessage {
+            content,
+            ..AssistantMessage::default()
+        }));
     }
 
     /// Append an assistant turn that requested `calls` (non-empty), with
@@ -314,31 +357,24 @@ impl Conversation {
             !calls.is_empty(),
             "push_assistant_with_tool_calls requires at least one call"
         );
-        self.messages.push(Message {
-            tool_calls: calls,
+        self.messages.push(Message::Assistant(AssistantMessage {
+            content: content.unwrap_or_default(),
             reasoning,
-            ..Message::text(Role::Assistant, content.unwrap_or_default())
-        });
+            tool_calls: calls,
+        }));
     }
 
     /// Append the output of one tool call as a `role: "tool"` message.
     pub fn push_tool_result(&mut self, call_id: String, content: String) {
-        self.messages.push(Message {
-            tool_call_id: Some(call_id),
-            ..Message::text(Role::Tool, content)
-        });
+        self.messages.push(Message::ToolResult { call_id, content });
     }
 
     /// Drop the most recent message if it is a real user message (not a
     /// tool result), returning its context block to pending so a retried
     /// turn still carries it.
     pub fn rollback_last_user(&mut self) {
-        if self
-            .messages
-            .last()
-            .is_some_and(|m| m.role == Role::User && !Self::is_tool_result(m))
-            && let Some(user) = self.messages.pop()
-        {
+        let last_user = self.messages.pop_if(|message| is_user_turn(message));
+        if let Some(Message::User(user)) = last_user {
             self.pending_context = user.context;
             self.revision += 1;
         }
@@ -354,12 +390,12 @@ impl Conversation {
         mut msgs: Vec<Message>,
     ) {
         if !folded_steps.is_empty()
-            && let Some(question) = msgs.first_mut()
+            && let Some(Message::User(question)) = msgs.first_mut()
         {
             step_log::append(&mut question.earlier_steps, step_log::records(folded_steps));
         }
         self.messages = summary
-            .map(|text| Message::text(Role::System, format!("{SUMMARY_PREFIX}{text}")))
+            .map(|text| Message::Summary(text.to_owned()))
             .into_iter()
             .chain(msgs)
             .collect();
@@ -390,9 +426,11 @@ impl Conversation {
             .messages
             .iter()
             .rev()
-            .filter(|m| Self::is_real_user(m))
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.content.clone()),
+                _ => None,
+            })
             .take(limit)
-            .map(|m| m.content.clone())
             .collect();
         texts.reverse();
         texts
@@ -423,13 +461,9 @@ impl Conversation {
     /// The current summary text and what it leaves in place, or `None` when
     /// there is no summary or no turn after it.
     pub fn summary_snapshot(&self) -> Option<(&str, CompactionCut)> {
-        let summary = self
-            .messages
-            .first()?
-            .content
-            .strip_prefix(SUMMARY_PREFIX)?;
+        let summary = self.summary()?;
         let kept = &self.messages[self.summary_insertion_index()..];
-        let kept_turns = kept.iter().filter(|m| Self::is_real_user(m)).count();
+        let kept_turns = kept.iter().filter(|m| is_user_turn(m)).count();
         let cut = CompactionCut {
             kept_turns: NonZeroUsize::new(kept_turns)?,
             kept_steps: Self::kept_steps_of_folded_turn(kept),
@@ -440,13 +474,15 @@ impl Conversation {
     /// Tool steps left in the turn opening `kept` when that turn's earlier
     /// steps were folded into its call log.
     fn kept_steps_of_folded_turn(kept: &[Message]) -> Option<NonZeroUsize> {
-        let (question, rest) = kept.split_first()?;
+        let (Message::User(question), rest) = kept.split_first()? else {
+            return None;
+        };
         if question.earlier_steps.is_empty() {
             return None;
         }
         let steps = rest
             .iter()
-            .take_while(|m| !Self::is_real_user(m))
+            .take_while(|m| !is_user_turn(m))
             .filter(|m| is_tool_step(m))
             .count();
         NonZeroUsize::new(steps)
@@ -479,7 +515,7 @@ impl Conversation {
     pub fn as_wire_messages(&self) -> Vec<wire::ChatMessage<'_>> {
         let mut out = Vec::with_capacity(self.messages.len() + 2);
         let turns_start = self.summary_insertion_index();
-        out.extend(self.system_head_message(turns_start));
+        out.extend(self.system_head_message());
         out.extend(self.messages[turns_start..].iter().map(wire_message));
         if let Some(note) = &self.transient_note {
             let content = wire::ContentBody::Text(Cow::Borrowed(note.as_str()));
@@ -489,18 +525,13 @@ impl Conversation {
     }
 
     /// The system prompt with any summary appended, as one message.
-    fn system_head_message(&self, turns_start: usize) -> Option<wire::ChatMessage<'_>> {
-        let summary = self.messages[..turns_start]
-            .first()
-            .map(|m| m.content.as_str());
+    fn system_head_message(&self) -> Option<wire::ChatMessage<'_>> {
+        let summary = self.summary().map(summary_text);
         let head = match (self.system_prompt.as_str(), summary) {
             ("", None) => return None,
-            ("", Some(summary)) => neutralise_template_tokens(summary),
+            ("", Some(summary)) => Cow::Owned(summary),
             (prompt, None) => Cow::Borrowed(prompt),
-            (prompt, Some(summary)) => Cow::Owned(format!(
-                "{prompt}\n\n{}",
-                neutralise_template_tokens(summary)
-            )),
+            (prompt, Some(summary)) => Cow::Owned(format!("{prompt}\n\n{summary}")),
         };
         Some(wire::ChatMessage::plain(
             Role::System.as_wire(),
@@ -543,9 +574,11 @@ impl Conversation {
     /// was injected for those moments is not summarized as conversation fact.
     fn without_folded_context(&self, fold: Fold) -> Self {
         let mut snapshot = self.clone();
-        snapshot.messages[..fold.end.min(fold.turn_start)]
-            .iter_mut()
-            .for_each(|message| message.context = None);
+        for message in &mut snapshot.messages[..fold.end.min(fold.turn_start)] {
+            if let Message::User(user) = message {
+                user.context = None;
+            }
+        }
         snapshot
     }
 
@@ -590,8 +623,8 @@ impl Conversation {
                 "Cover everything before the {} message containing \"{}\", including any earlier \
                  conversation summary. That message and everything after it stay in context word \
                  for word.",
-                kept.role.as_wire(),
-                quote(&kept.content)
+                kept.role().as_wire(),
+                quote(kept.content())
             ),
             None => "Cover the whole conversation, including any earlier conversation summary."
                 .to_string(),
@@ -650,10 +683,7 @@ impl Conversation {
         }
         self.messages.splice(
             ..fold.end.min(fold.turn_start),
-            [Message::text(
-                Role::System,
-                format!("{SUMMARY_PREFIX}{summary}"),
-            )],
+            [Message::Summary(summary.to_owned())],
         );
         self.record_compaction(before);
     }
@@ -669,7 +699,7 @@ impl Conversation {
     fn fold_steps_into_log(&mut self, turn_start: usize, steps: Range<usize>) {
         let records = step_log::records(&self.messages[steps.clone()]);
         self.messages.drain(steps);
-        if let Some(question) = self.messages.get_mut(turn_start) {
+        if let Some(Message::User(question)) = self.messages.get_mut(turn_start) {
             step_log::append(&mut question.earlier_steps, records);
         }
     }
@@ -723,7 +753,7 @@ impl Conversation {
         let results = if is_tool_step(&self.messages[idx]) {
             self.messages[idx + 1..]
                 .iter()
-                .take_while(|m| Self::is_tool_result(m))
+                .take_while(|m| m.is_tool_result())
                 .count()
         } else {
             0
@@ -731,22 +761,15 @@ impl Conversation {
         idx..idx + 1 + results
     }
 
-    /// True for a user message that is not a tool result.
-    fn is_real_user(m: &Message) -> bool {
-        m.role == Role::User && !Self::is_tool_result(m)
-    }
-
-    /// True for a [`Role::Tool`] message or a [`TOOL_RESULT_PREFIX`] user message.
-    fn is_tool_result(m: &Message) -> bool {
-        m.role == Role::Tool || (m.role == Role::User && m.content.starts_with(TOOL_RESULT_PREFIX))
+    fn summary(&self) -> Option<&str> {
+        match self.messages.first() {
+            Some(Message::Summary(text)) => Some(text),
+            _ => None,
+        }
     }
 
     fn summary_insertion_index(&self) -> usize {
-        usize::from(
-            self.messages
-                .first()
-                .is_some_and(|m| m.role == Role::System && m.content.starts_with(SUMMARY_PREFIX)),
-        )
+        usize::from(self.summary().is_some())
     }
 
     /// Start of the newest `preserve_pairs` user/assistant pairs, widened so
@@ -759,21 +782,21 @@ impl Conversation {
         let mut idx = len;
         while idx > start && pairs_seen < preserve_pairs {
             let prev = idx - 1;
-            match self.messages[prev].role {
-                Role::User => {
+            match self.messages[prev] {
+                Message::User(_) | Message::ToolImageResult { .. } => {
                     pairs_seen += 1;
                     idx = prev;
                 }
-                Role::Assistant => {
+                Message::Assistant(_) => {
                     idx = if prev > start { prev - 1 } else { prev };
                     pairs_seen += 1;
                 }
-                Role::System | Role::Tool => {
+                Message::Summary(_) | Message::ToolResult { .. } => {
                     idx = prev;
                 }
             }
         }
-        while idx > start && self.messages.get(idx).is_some_and(Self::is_tool_result) {
+        while idx > start && self.messages.get(idx).is_some_and(Message::is_tool_result) {
             idx -= 1;
         }
         idx.min(self.current_turn_start()).max(start)
@@ -798,9 +821,7 @@ impl Conversation {
     }
 
     fn last_real_user_index(&self) -> Option<usize> {
-        self.messages
-            .iter()
-            .rposition(|m| m.role == Role::User && !Self::is_tool_result(m))
+        self.messages.iter().rposition(is_user_turn)
     }
 
     fn current_turn_start(&self) -> usize {
@@ -808,35 +829,62 @@ impl Conversation {
     }
 }
 
+fn is_user_turn(m: &Message) -> bool {
+    matches!(m, Message::User(_))
+}
+
 fn is_tool_step(m: &Message) -> bool {
-    m.role == Role::Assistant && !m.tool_calls.is_empty()
+    !m.tool_calls().is_empty()
 }
 
 fn approx_tokens(text: &str) -> u32 {
     u32::try_from(text.len()).unwrap_or(u32::MAX).div_ceil(4)
 }
 
-fn approx_message_tokens(m: &Message) -> u32 {
-    let image_cost = u32::try_from(m.attachments.len())
-        .unwrap_or(u32::MAX)
-        .saturating_mul(TOKENS_PER_IMAGE);
-    let tool_call_bytes: usize = m
+fn approx_message_tokens(message: &Message) -> u32 {
+    let body = match message {
+        Message::Summary(text) => approx_tokens_bytes(SUMMARY_PREFIX.len() + text.len()),
+        Message::User(user) => approx_user_tokens(user),
+        Message::Assistant(assistant) => approx_assistant_tokens(assistant),
+        Message::ToolResult { content, .. } => approx_tokens(content),
+        Message::ToolImageResult {
+            tool_name,
+            content,
+            attachments,
+        } => approx_tokens_bytes(
+            TOOL_RESULT_OPEN.len() + tool_name.len() + TOOL_RESULT_CLOSE.len() + content.len(),
+        )
+        .saturating_add(approx_image_tokens(attachments)),
+    };
+    TOKENS_PER_MESSAGE_OVERHEAD.saturating_add(body)
+}
+
+fn approx_user_tokens(user: &UserMessage) -> u32 {
+    let context_cost = user.context.as_deref().map_or(0, |ctx| {
+        approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len())
+    });
+    let step_log_cost = approx_tokens_bytes(step_log::rendered_len(&user.earlier_steps));
+    approx_tokens(&user.content)
+        .saturating_add(approx_image_tokens(&user.attachments))
+        .saturating_add(context_cost)
+        .saturating_add(step_log_cost)
+}
+
+fn approx_assistant_tokens(assistant: &AssistantMessage) -> u32 {
+    let tool_call_bytes: usize = assistant
         .tool_calls
         .iter()
         .map(|c| c.id.len() + c.name.len() + c.arguments.len() + 32)
         .sum();
-    let tool_call_cost = approx_tokens_bytes(tool_call_bytes);
-    let context_cost = m.context.as_deref().map_or(0, |ctx| {
-        approx_tokens_bytes(CONTEXT_OPEN.len() + ctx.len() + CONTEXT_CLOSE.len())
-    });
-    let step_log_cost = approx_tokens_bytes(step_log::rendered_len(&m.earlier_steps));
-    TOKENS_PER_MESSAGE_OVERHEAD
-        .saturating_add(approx_tokens(&m.content))
-        .saturating_add(approx_tokens(&m.reasoning))
-        .saturating_add(image_cost)
-        .saturating_add(tool_call_cost)
-        .saturating_add(context_cost)
-        .saturating_add(step_log_cost)
+    approx_tokens(&assistant.content)
+        .saturating_add(approx_tokens(&assistant.reasoning))
+        .saturating_add(approx_tokens_bytes(tool_call_bytes))
+}
+
+fn approx_image_tokens(attachments: &[ImageDataUri]) -> u32 {
+    u32::try_from(attachments.len())
+        .unwrap_or(u32::MAX)
+        .saturating_mul(TOKENS_PER_IMAGE)
 }
 
 fn messages_tokens(messages: &[Message]) -> u32 {
@@ -850,20 +898,52 @@ pub(super) fn approx_tokens_bytes(n: usize) -> u32 {
 }
 
 fn wire_message(message: &Message) -> wire::ChatMessage<'_> {
-    if !message.tool_calls.is_empty() {
-        return tool_calls_message(message);
+    let role = message.role().as_wire();
+    match message {
+        Message::Summary(text) => wire::ChatMessage::plain(
+            role,
+            wire::ContentBody::Text(Cow::Owned(summary_text(text))),
+        ),
+        Message::User(user) => {
+            wire::ChatMessage::plain(role, content_body(wire_text(user), &user.attachments))
+        }
+        Message::Assistant(step) if !step.tool_calls.is_empty() => tool_calls_message(step),
+        Message::Assistant(reply) => wire::ChatMessage::plain(role, defanged(&reply.content)),
+        Message::ToolResult { call_id, content } => wire::ChatMessage {
+            tool_call_id: Some(call_id),
+            ..wire::ChatMessage::plain(role, defanged(content))
+        },
+        Message::ToolImageResult {
+            tool_name,
+            content,
+            attachments,
+        } => wire::ChatMessage::plain(
+            role,
+            content_body(
+                Cow::Owned(image_result_text(tool_name, content)),
+                attachments,
+            ),
+        ),
     }
-    if message.role == Role::Tool {
-        let content = wire::ContentBody::Text(neutralise_template_tokens(&message.content));
-        return wire::ChatMessage {
-            tool_call_id: message.tool_call_id.as_deref(),
-            ..wire::ChatMessage::plain(message.role.as_wire(), content)
-        };
-    }
-    wire::ChatMessage::plain(message.role.as_wire(), turn_content(message))
 }
 
-fn tool_calls_message(message: &Message) -> wire::ChatMessage<'_> {
+fn defanged(text: &str) -> wire::ContentBody<'_> {
+    wire::ContentBody::Text(neutralise_template_tokens(text))
+}
+
+fn summary_text(summary: &str) -> String {
+    format!("{SUMMARY_PREFIX}{}", neutralise_template_tokens(summary))
+}
+
+fn image_result_text(tool_name: &str, content: &str) -> String {
+    format!(
+        "{TOOL_RESULT_OPEN}{}{TOOL_RESULT_CLOSE}{}",
+        neutralise_template_tokens(tool_name),
+        neutralise_template_tokens(content)
+    )
+}
+
+fn tool_calls_message(message: &AssistantMessage) -> wire::ChatMessage<'_> {
     let specs = message
         .tool_calls
         .iter()
@@ -877,9 +957,8 @@ fn tool_calls_message(message: &Message) -> wire::ChatMessage<'_> {
         })
         .collect();
     wire::ChatMessage {
-        role: message.role.as_wire(),
-        content: (!message.content.is_empty())
-            .then(|| wire::ContentBody::Text(neutralise_template_tokens(&message.content))),
+        role: Role::Assistant.as_wire(),
+        content: (!message.content.is_empty()).then(|| defanged(&message.content)),
         tool_calls: Some(specs),
         tool_call_id: None,
         reasoning_content: (!message.reasoning.is_empty())
@@ -887,49 +966,40 @@ fn tool_calls_message(message: &Message) -> wire::ChatMessage<'_> {
     }
 }
 
-fn turn_content(message: &Message) -> wire::ContentBody<'_> {
-    let text = wire_text(message);
-    if message.attachments.is_empty() {
+fn content_body<'a>(text: Cow<'a, str>, attachments: &'a [ImageDataUri]) -> wire::ContentBody<'a> {
+    if attachments.is_empty() {
         return wire::ContentBody::Text(text);
     }
-    let mut parts = Vec::with_capacity(message.attachments.len() + 1);
+    let mut parts = Vec::with_capacity(attachments.len() + 1);
     parts.push(wire::ContentPart::Text { text });
-    parts.extend(
-        message
-            .attachments
-            .iter()
-            .map(|image| wire::ContentPart::ImageUrl {
-                image_url: wire::ImageUrl {
-                    url: image.as_str(),
-                },
-            }),
-    );
+    parts.extend(attachments.iter().map(|image| wire::ContentPart::ImageUrl {
+        image_url: wire::ImageUrl {
+            url: image.as_str(),
+        },
+    }));
     wire::ContentBody::Parts(parts)
 }
 
-fn wire_text(message: &Message) -> Cow<'_, str> {
-    let text = text_with_context(message);
-    if message.earlier_steps.is_empty() {
+fn wire_text(user: &UserMessage) -> Cow<'_, str> {
+    let text = text_with_context(user);
+    if user.earlier_steps.is_empty() {
         return text;
     }
-    let log = step_log::render(&message.earlier_steps);
+    let log = step_log::render(&user.earlier_steps);
     Cow::Owned(format!("{text}\n\n{}", neutralise_template_tokens(&log)))
 }
 
-fn text_with_context(message: &Message) -> Cow<'_, str> {
-    match &message.context {
+fn text_with_context(user: &UserMessage) -> Cow<'_, str> {
+    match &user.context {
         Some(ctx) => {
             let ctx = neutralise_context_markers(ctx.trim_end());
             Cow::Owned(format!(
                 "{CONTEXT_OPEN}{}{CONTEXT_CLOSE}{}",
                 neutralise_template_tokens(&ctx),
-                message.content
+                user.content
             ))
         }
-        None if message.role == Role::Assistant || Conversation::is_tool_result(message) => {
-            neutralise_template_tokens(&message.content)
-        }
-        None => Cow::Borrowed(&message.content),
+        None => Cow::Borrowed(&user.content),
     }
 }
 
@@ -987,7 +1057,7 @@ fn quote(text: &str) -> String {
 
 /// `step`'s first tool call as the instruction names it.
 fn quote_first_call(step: &Message) -> String {
-    step.tool_calls.first().map_or_else(String::new, |call| {
+    step.tool_calls().first().map_or_else(String::new, |call| {
         format!(
             "`{}` with arguments `{}`",
             call.name,
