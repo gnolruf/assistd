@@ -11,15 +11,17 @@ use assistd_voice::mic::consumer::drain_to_pcm;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
 
-/// Push one second of a 440 Hz mono sine at `rate_hz` into a ring and
+const TONE_AMPLITUDE: f32 = 0.5;
+
+/// Push one second of a `tone_hz` mono sine at `rate_hz` into a ring and
 /// drain it with the stop flag already set.
-fn drain_one_second(rate_hz: u32) -> Vec<i16> {
+fn drain_one_second(rate_hz: u32, tone_hz: f32) -> Vec<i16> {
     let sample_count = rate_hz as usize;
     let (mut producer, consumer) = HeapRb::<f32>::new(sample_count).split();
     for index in 0..sample_count {
         let secs = index as f32 / rate_hz as f32;
         producer
-            .try_push((2.0 * PI * 440.0 * secs).sin() * 0.5)
+            .try_push((2.0 * PI * tone_hz * secs).sin() * TONE_AMPLITUDE)
             .expect("ring sized for the whole clip");
     }
     drop(producer);
@@ -34,24 +36,37 @@ fn drain_one_second(rate_hz: u32) -> Vec<i16> {
     .expect("drain_to_pcm error")
 }
 
-fn assert_mostly_nonzero(pcm: &[i16], label: &str) {
-    let nonzero = pcm.iter().filter(|&&sample| sample != 0).count();
-    assert!(
-        nonzero > pcm.len() / 2,
-        "{label}: {nonzero} of {} samples non-zero",
-        pcm.len()
-    );
+fn rms(pcm: &[i16]) -> f32 {
+    let energy: f32 = pcm.iter().map(|&sample| f32::from(sample).powi(2)).sum();
+    (energy / pcm.len() as f32).sqrt()
 }
 
 #[test]
 fn drain_resamples_common_device_rates_to_16k() {
+    let tone_rms = TONE_AMPLITUDE * f32::from(i16::MAX) / 2f32.sqrt();
     for rate in [48_000, 44_100] {
-        let pcm = drain_one_second(rate);
-        assert!(
-            pcm.len().abs_diff(16_000) <= 600,
-            "{rate} Hz: resampled to {} samples (zero-padded last chunk allows slack)",
-            pcm.len()
+        let pcm = drain_one_second(rate, 440.0);
+        assert_eq!(
+            pcm.len(),
+            16_000,
+            "{rate} Hz: one second in, one second out"
         );
-        assert_mostly_nonzero(&pcm, &format!("{rate} Hz"));
+        let level = rms(&pcm) / tone_rms;
+        assert!(
+            (0.95..1.05).contains(&level),
+            "{rate} Hz: 440 Hz tone came out at {level} of its level"
+        );
+    }
+}
+
+#[test]
+fn drain_filters_out_what_16k_cannot_carry() {
+    let tone_rms = TONE_AMPLITUDE * f32::from(i16::MAX) / 2f32.sqrt();
+    for rate in [48_000, 44_100] {
+        let level = rms(&drain_one_second(rate, 12_000.0)) / tone_rms;
+        assert!(
+            level < 0.01,
+            "{rate} Hz: 12 kHz tone aliased through at {level} of its level"
+        );
     }
 }

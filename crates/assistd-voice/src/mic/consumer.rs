@@ -35,6 +35,9 @@ pub fn drain_to_pcm(
         failure.check()?;
         if stop_flag.load(Ordering::Relaxed) {
             append_capped(resampler.pull(&mut consumer)?, &mut pcm, max_pcm_samples);
+            while let Some(tail) = resampler.flush()? {
+                append_capped(Some(tail), &mut pcm, max_pcm_samples);
+            }
             break;
         }
         std::thread::park_timeout(IDLE_PARK);
