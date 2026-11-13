@@ -85,12 +85,7 @@ impl Config {
     /// Fails with [`ConfigError::Validation`] listing [`Self::issues`] when
     /// there are any.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let issues = self.issues();
-        if issues.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigError::Validation(issues))
-        }
+        ConfigError::reject(self.issues())
     }
 
     /// Every rule between keys, and between a key and this machine, that
@@ -119,18 +114,18 @@ impl Config {
         explicit.map_or_else(Self::default_path, Ok)
     }
 
-    /// Loads the config at `path` as [`Self::load_unvalidated`] does, then
-    /// fails with [`ConfigError::Validation`] when it has any [`Self::issues`].
+    /// Loads the config at `path`, failing with [`ConfigError::Validation`]
+    /// on any issue [`Self::load_with_issues`] finds.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let config = Self::load_unvalidated(path)?;
-        config.validate()?;
+        let (config, issues) = Self::load_with_issues(path)?;
+        ConfigError::reject(issues)?;
         Ok(config)
     }
 
-    /// Deserializes the TOML file at `path` without checking [`Self::issues`].
-    /// Unknown keys are skipped with a warning each, as is a file that sets MCP
-    /// secrets other users can read; fails with [`ConfigError::Removed`] on a removed key.
-    pub fn load_unvalidated(path: &Path) -> Result<Self, ConfigError> {
+    /// Deserializes the TOML file at `path`, beside an issue for each key the
+    /// schema does not know, then [`Self::issues`]. Fails with
+    /// [`ConfigError::Removed`] on a removed key.
+    pub fn load_with_issues(path: &Path) -> Result<(Self, Vec<ConfigIssue>), ConfigError> {
         let content = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
@@ -149,16 +144,18 @@ impl Config {
                 replacement,
             });
         }
-        for key in unknown {
-            tracing::warn!(
-                target: "assistd::config",
-                "ignoring `{key}` in {}: assistd has no such setting \
-                 (see config.sample.toml for the ones it reads)",
-                path.display()
-            );
-        }
         config.warn_if_credentials_exposed(path);
-        Ok(config)
+        let issues = config.issues_after_unknown_keys(&unknown);
+        Ok((config, issues))
+    }
+
+    /// An issue for each of `unknown_keys`, then [`Self::issues`].
+    pub(crate) fn issues_after_unknown_keys(&self, unknown_keys: &[String]) -> Vec<ConfigIssue> {
+        unknown_keys
+            .iter()
+            .map(|key| ConfigIssue::UnknownKey { key: key.clone() })
+            .chain(self.issues())
+            .collect()
     }
 
     /// Dotted paths of the keys in `raw` that no field of `self` accounts

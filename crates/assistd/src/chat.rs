@@ -215,8 +215,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let _log_guard = init_file_tracing()?;
 
     let config_path = Config::path_or_default(args.config)?;
-    let config = Config::load_unvalidated(&config_path)?;
-    let config_issues = config.issues();
+    let (config, config_issues) = Config::load_with_issues(&config_path)?;
 
     info!("assistd chat v{}", crate::VERSION);
     info!("loaded config from {}", config_path.display());
