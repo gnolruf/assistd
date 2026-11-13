@@ -61,10 +61,13 @@ fn build_description(
          globs (*, ?, []) on unquoted arguments; quote an argument to pass \
          it through literally, including a `|` that belongs to the \
          argument rather than the pipeline (`grep \"a|b\" f.txt`). \
-         Redirections (>, <, 2>, 2>&1), here-docs, env expansion ($VAR), \
-         and backgrounding (&) are NOT supported: stderr is already \
-         captured in the result, and `bash \"…\"` gives a real shell when \
-         needed. ",
+         Redirections (>, <, 2>, 2>&1), here-docs, expansion ($VAR, \
+         $(…), backticks), `#` comments, a second line, and backgrounding \
+         (&) are NOT supported and are rejected outside quotes: stderr is \
+         already captured in the result, and `bash \"…\"` gives a real \
+         shell when needed. A pipeline fails when any stage fails, exiting \
+         with the last failing stage's code, so `grep x f | wc -l` exits 1 \
+         when nothing matches. ",
     );
     desc.push_str(&format!(
         "Output is returned whole unless the result exceeds {max_lines} \
@@ -89,7 +92,8 @@ fn build_description(
          command with no (or insufficient) arguments to see its full \
          usage (exit code 2, stdout); `<cmd> --help` prints the same \
          text and works for commands like `ls` and `echo` whose bare \
-         form does real work. Errors in real calls exit with a \
+         form does real work, while a quoted `--help`, or one after \
+         `--`, is an ordinary argument. Errors in real calls exit with a \
          `[<name>]\\t` stderr prefix, distinct from help on stdout. Each \
          error line follows `[error] <cmd>: <what-went-wrong>. <Hint>: \
          <recovery>` where `<Hint>` is one of `Use:` / `Try:` / `Check:` / \
@@ -171,6 +175,20 @@ fn parse_error_line(e: &ParseError) -> String {
             Hint::Use,
             "a quoted ERE pattern, as in `grep \"TODO|FIXME\" FILE`",
         ),
+        ParseError::Expansion => (
+            Hint::Use,
+            "bash \"...\" to expand it, quotes to keep it literal, or ~ for $HOME",
+        ),
+        ParseError::Newline => (
+            Hint::Use,
+            "';' between commands on one line, quotes around multi-line text, \
+             or bash \"...\" for a script",
+        ),
+        ParseError::Comment => (
+            Hint::Try,
+            "dropping the comment, or quoting the word to keep a literal '#'",
+        ),
+        ParseError::EscapedSpace => (Hint::Use, "quotes around the argument, as in \"a b\""),
         ParseError::TooManyOperators => (
             Hint::Try,
             "splitting it into several run calls, or bash \"...\" for a script",

@@ -275,6 +275,18 @@ async fn a_pipe_exits_with_its_rightmost_failing_stage() {
 }
 
 #[tokio::test]
+async fn only_an_unquoted_help_flag_before_a_double_dash_prints_usage() {
+    let mut r = CommandRegistry::new();
+    r.register(StdinKind);
+    for line in ["stdin_kind --help", "stdin_kind -x --help"] {
+        assert_eq!(run_line(line, &r).await.exit_code, 2, "{line:?}");
+    }
+    for line in ["stdin_kind '--help'", "stdin_kind -- --help"] {
+        assert_eq!(run_line(line, &r).await.stdout, b"none", "{line:?}");
+    }
+}
+
+#[tokio::test]
 async fn stderr_lines_are_each_prefixed_with_the_command_name() {
     let r = registry_of([Stub {
         name: "boom",
