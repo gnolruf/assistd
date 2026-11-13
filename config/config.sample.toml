@@ -1,5 +1,5 @@
 # assistd configuration, read from ~/.config/assistd/config.toml; `assistd init-config` writes this file there.
-# Every key is optional unless marked required. Commented keys show a default or an example; uncomment one to set it. Unknown keys are ignored with a warning.
+# Every key is optional unless marked required. Commented keys show a default or an example; uncomment one to set it. An unknown key is an error.
 # Units, ranges and validation rules are documented on the assistd-config schema types.
 
 [model]

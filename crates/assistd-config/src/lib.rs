@@ -1,5 +1,5 @@
 //! assistd configuration schema. An omitted key takes its value from
-//! [`defaults`]; an unknown key is ignored with a warning, and a value its
+//! [`defaults`]; an unknown key is a [`ConfigIssue`], and a value its
 //! field's type refuses is a parse error.
 
 pub mod chat;

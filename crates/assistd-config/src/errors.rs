@@ -70,6 +70,15 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
+    /// Fails with [`Self::Validation`] unless `issues` is empty.
+    pub fn reject(issues: Vec<ConfigIssue>) -> Result<(), Self> {
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::Validation(issues))
+        }
+    }
+
     pub(crate) fn parse(path: &Path, text: &str, error: &toml::de::Error) -> Self {
         let line = error
             .span()
@@ -83,10 +92,13 @@ impl ConfigError {
     }
 }
 
-/// A rule between keys, or between a key and this machine, that a parsed
-/// config breaks.
+/// A key the schema does not know, or a rule between keys, or between a key
+/// and this machine, that a parsed config breaks.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigIssue {
+    #[error("`{key}` is not a setting: correct its name or delete it")]
+    UnknownKey { key: String },
+
     #[error(
         "chat.max_history_tokens + chat.max_response_tokens ({total}) must not exceed 90% of \
          model.context_length ({budget})"

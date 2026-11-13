@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
-use crate::errors::ConfigError;
+use crate::errors::{ConfigError, ConfigIssue};
 use crate::top::{Config, create_private_dir_all};
 
 /// An editable `config.toml`. Every accepted change leaves a document that
-/// parses into a [`Config`]; [`save`](Self::save) also requires it to validate.
+/// parses into a [`Config`]; [`save`](Self::save) also requires it to have no issues.
 #[derive(Debug, Clone)]
 pub struct ConfigDocument {
     path: PathBuf,
@@ -21,6 +21,8 @@ pub struct ConfigDocument {
     /// The document's keys as parsed, without defaults.
     raw: toml::Table,
     config: Config,
+    /// Dotted paths of the document's keys that the schema does not know.
+    unknown_keys: Vec<String>,
     defaults: toml::Table,
 }
 
@@ -39,8 +41,9 @@ impl ConfigDocument {
             }
         };
         let parse_error = |source| ConfigError::parse(path, &text, &source);
-        let config = toml::from_str(&text).map_err(parse_error)?;
+        let config: Config = toml::from_str(&text).map_err(parse_error)?;
         let raw = toml::from_str(&text).map_err(parse_error)?;
+        let unknown_keys = config.unknown_keys(&raw)?;
         let document = text.parse().map_err(|source| ConfigError::Document {
             path: path.to_path_buf(),
             source,
@@ -51,6 +54,7 @@ impl ConfigDocument {
             saved_text: text,
             raw,
             config,
+            unknown_keys,
             defaults: toml::Table::try_from(Config::default())?,
         })
     }
@@ -62,6 +66,17 @@ impl ConfigDocument {
     /// The config the document describes, with defaults filled in.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Dotted paths of the document's keys that the schema does not know.
+    pub fn unknown_keys(&self) -> &[String] {
+        &self.unknown_keys
+    }
+
+    /// Why the document would not load: an issue for each of
+    /// [`Self::unknown_keys`], then its config's [`Config::issues`].
+    pub fn issues(&self) -> Vec<ConfigIssue> {
+        self.config.issues_after_unknown_keys(&self.unknown_keys)
     }
 
     /// The value the document sets at dotted `key`, if it sets one.
@@ -116,10 +131,10 @@ impl ConfigDocument {
     }
 
     /// Writes the document over the file, owner-only, replacing it atomically
-    /// (a symlink's target, not the link). Refused when the config does not
-    /// validate.
+    /// (a symlink's target, not the link). Refused with
+    /// [`ConfigError::Validation`] when the document has any [`Self::issues`].
     pub fn save(&mut self) -> Result<(), ConfigError> {
-        self.config.validate()?;
+        ConfigError::reject(self.issues())?;
         let text = self.document.to_string();
         replace_private_file(&self.path, &text)?;
         self.saved_text = text;
@@ -135,12 +150,14 @@ impl ConfigDocument {
             key.strip_prefix(unknown.as_str())
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
         };
-        if config.unknown_keys(&raw)?.iter().any(names_key) {
+        let unknown_keys = config.unknown_keys(&raw)?;
+        if unknown_keys.iter().any(names_key) {
             return Err(edit_error(key, "not a config key"));
         }
         self.document = document;
         self.raw = raw;
         self.config = config;
+        self.unknown_keys = unknown_keys;
         Ok(())
     }
 }

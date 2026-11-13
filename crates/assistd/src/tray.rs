@@ -89,11 +89,8 @@ pub(crate) async fn run(args: TrayArgs) -> Result<()> {
 
 /// The config at `path` unless it cannot be parsed, beside what is wrong with it.
 fn load_config(path: &Path) -> (Option<Config>, Option<ConfigError>) {
-    match Config::load_unvalidated(path) {
-        Ok(config) => {
-            let invalid = config.validate().err();
-            (Some(config), invalid)
-        }
+    match Config::load_with_issues(path) {
+        Ok((config, issues)) => (Some(config), ConfigError::reject(issues).err()),
         Err(unparsed) => (None, Some(unparsed)),
     }
 }

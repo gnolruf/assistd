@@ -78,7 +78,7 @@ pub(crate) struct SettingsPanel {
     selected: usize,
     mode: PanelMode,
     feedback: Option<Feedback>,
-    /// Why the config would not validate, if it would not.
+    /// Why the config would not load, if it would not.
     issues: Vec<ConfigIssue>,
 }
 
@@ -93,7 +93,7 @@ impl SettingsPanel {
             feedback: None,
             issues: Vec::new(),
         };
-        panel.issues = panel.document.config().issues();
+        panel.issues = panel.document.issues();
         panel.select_first();
         panel
     }
@@ -246,6 +246,7 @@ impl SettingsPanel {
                 }
             }
             KeyCode::Char('r') | KeyCode::Delete | KeyCode::Backspace => self.reset_selected(),
+            KeyCode::Char('x') => self.delete_unknown_keys(),
             _ => {}
         }
         ControlFlow::Continue(())
@@ -655,6 +656,27 @@ impl SettingsPanel {
         });
     }
 
+    /// Deletes the keys the schema does not know, and says so when some are
+    /// left: one inside a list entry is out of the panel's reach.
+    fn delete_unknown_keys(&mut self) {
+        let unknown = self.document.unknown_keys().to_vec();
+        if unknown.is_empty() {
+            return;
+        }
+        let deleted =
+            self.change(|document| unknown.iter().try_for_each(|key| document.reset(key)));
+        self.feedback = Some(match deleted {
+            Ok(()) if self.document.unknown_keys().is_empty() => {
+                Feedback::Note("deleted the unknown keys; Ctrl+S writes it".to_string())
+            }
+            Ok(()) => Feedback::Error(format!(
+                "delete the remaining unknown keys in {}",
+                self.document.path().display()
+            )),
+            Err(reason) => Feedback::Error(reason),
+        });
+    }
+
     /// Makes `edit` and keeps it only when the config gains no validation
     /// problem; otherwise the document is left as it was and the error says why.
     fn change(
@@ -663,7 +685,7 @@ impl SettingsPanel {
     ) -> Result<(), String> {
         let mut candidate = self.document.clone();
         edit(&mut candidate).map_err(|e| e.to_string())?;
-        let issues = candidate.config().issues();
+        let issues = candidate.issues();
         let introduced: Vec<String> = issues
             .iter()
             .filter(|issue| !self.issues.contains(issue))

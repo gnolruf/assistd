@@ -118,7 +118,7 @@ pub(crate) fn render_settings(frame: &mut Frame<'_>, area: Rect, panel: &mut Set
     render_feedback(frame, feedback_area, panel.feedback(), theme);
     render_issues(frame, issues_area, panel.issues(), theme);
     frame.render_widget(
-        Paragraph::new(Span::styled(hint(panel.mode()), theme.meta_style())),
+        Paragraph::new(Span::styled(hint(panel), theme.meta_style())),
         hint_area,
     );
 }
@@ -370,8 +370,11 @@ fn render_issues(frame: &mut Frame<'_>, area: Rect, issues: &[ConfigIssue], them
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn hint(mode: &PanelMode) -> &'static str {
-    match mode {
+fn hint(panel: &SettingsPanel) -> &'static str {
+    match panel.mode() {
+        PanelMode::Browse if !panel.document().unknown_keys().is_empty() => {
+            "x delete unknown keys · Tab switch tab · ↑/↓ move · Enter edit · ←/→ change · r reset · a advanced · Ctrl+S save · Esc close"
+        }
         PanelMode::Browse => {
             "Tab switch tab · ↑/↓ move · Enter edit · ←/→ change · r reset · a advanced · Ctrl+S save · Esc close"
         }

@@ -1,3 +1,6 @@
+use std::fs;
+
+use assistd_config::Config;
 use crossterm::event::KeyModifiers;
 
 use super::*;
@@ -70,4 +73,24 @@ fn themes_load_save_and_delete_through_the_list() {
             .file_value("chat.theme")
             .is_none_or(|table| { table.as_table().is_some_and(toml::Table::is_empty) })
     );
+}
+
+#[test]
+fn unknown_keys_block_saving_until_deleted() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    fs::write(
+        &path,
+        "[chat]\nmax_histroy_tokens = 4096\n\n[remote]\nport = 1\n",
+    )
+    .unwrap();
+    let mut panel = SettingsPanel::new(ConfigDocument::open(&path).unwrap());
+    assert_eq!(panel.issues().len(), 2);
+    assert!(!panel.save());
+
+    press(&mut panel, KeyCode::Char('x'));
+
+    assert!(panel.issues().is_empty());
+    assert!(panel.save());
+    assert_eq!(Config::load(&path).unwrap(), Config::default());
 }
