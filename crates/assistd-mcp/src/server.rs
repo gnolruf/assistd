@@ -6,9 +6,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use rmcp::model::{CallToolResult, Tool};
 use serde_json::Value;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, info, warn};
 
@@ -28,12 +30,17 @@ const HUNG_AFTER_TIMEOUTS: u32 = 2;
 /// A configured server. A call that finds its process dead restarts it, or fails with
 /// [`McpError::ServerDown`] while backoff says to wait; one whose requests keep timing out is
 /// killed, and one that needs authorization has its session closed and fails every later call
-/// with that. Dropping it SIGKILLs the live process group.
+/// with that. Calls made while another one restarts it wait for that restart. Dropping it
+/// SIGKILLs the live process group.
 #[derive(Debug)]
 pub struct McpServer {
     name: String,
     connector: Connector,
     state: Mutex<ServerState>,
+    /// Held to open a session in place of one that ended, or to stop for good; the lifecycle
+    /// leaves `Down` only under it.
+    reopening: AsyncMutex<()>,
+    stopping: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -93,20 +100,35 @@ impl McpServer {
             name,
             connector,
             state: Mutex::new(state),
+            reopening: AsyncMutex::new(()),
+            stopping: CancellationToken::new(),
         })
     }
 
-    /// Stop the live process and refuse every later call with
+    /// Stop the live process, abandon a restart in progress, and refuse every later call with
     /// [`McpError::ServerDown`].
     pub async fn shutdown(&self) {
-        let lifecycle = mem::replace(&mut self.state.lock().await.lifecycle, Lifecycle::Stopped);
+        self.stopping.cancel();
+        let lifecycle = {
+            let _reopening = self.reopening.lock().await;
+            mem::replace(&mut self.state.lock().lifecycle, Lifecycle::Stopped)
+        };
         if let Lifecycle::Live(session) = lifecycle {
             session.stop().await;
         }
     }
 
     async fn live_client(&self) -> Result<Arc<McpPeer>, McpError> {
-        let mut state = self.state.lock().await;
+        match self.current_client()? {
+            Some(client) => Ok(client),
+            None => self.reopen().await,
+        }
+    }
+
+    /// The live session's client, or `None` when a session is due to be opened in place of
+    /// one that ended.
+    fn current_client(&self) -> Result<Option<Arc<McpPeer>>, McpError> {
+        let mut state = self.state.lock();
         let ServerState {
             lifecycle, policy, ..
         } = &mut *state;
@@ -115,10 +137,10 @@ impl McpServer {
         {
             *lifecycle = self.down_after(policy, session, SessionEnd::Died);
         }
-        match &state.lifecycle {
-            Lifecycle::Live(session) => Ok(session.client.clone()),
+        match lifecycle {
+            Lifecycle::Live(session) => Ok(Some(session.client.clone())),
             Lifecycle::Down { retry_at } if Instant::now() < *retry_at => Err(McpError::ServerDown),
-            Lifecycle::Down { .. } => self.reopen(&mut state).await,
+            Lifecycle::Down { .. } => Ok(None),
             Lifecycle::NeedsAuthorization { scopes } => Err(McpError::NeedsAuthorization {
                 scopes: scopes.clone(),
             }),
@@ -129,8 +151,8 @@ impl McpServer {
     /// Apply the outcome of a request made through `client`, unless its session is no longer
     /// the live one: a timeout counts toward killing the session as hung, an answer clears
     /// that count, and a session the server ended or refused authorization to is dropped.
-    async fn record_outcome<T>(&self, client: &Arc<McpPeer>, outcome: &Result<T, McpError>) {
-        let mut state = self.state.lock().await;
+    fn record_outcome<T>(&self, client: &Arc<McpPeer>, outcome: &Result<T, McpError>) {
+        let mut state = self.state.lock();
         let ServerState {
             lifecycle, policy, ..
         } = &mut *state;
@@ -170,16 +192,36 @@ impl McpServer {
         }
     }
 
-    /// Open a session in place of the one that ended, backing off again if that fails.
-    async fn reopen(&self, state: &mut ServerState) -> Result<Arc<McpPeer>, McpError> {
-        match Session::open(&self.connector).await {
+    /// Open a session in place of the one that ended, unless a concurrent call just has.
+    /// A shutdown abandons the attempt, which then fails with [`McpError::ServerDown`].
+    async fn reopen(&self) -> Result<Arc<McpPeer>, McpError> {
+        let client = {
+            let _reopening = self.reopening.lock().await;
+            if let Some(client) = self.current_client()? {
+                return Ok(client);
+            }
+            let opened = tokio::select! {
+                biased;
+                () = self.stopping.cancelled() => return Err(McpError::ServerDown),
+                opened = Session::open(&self.connector) => opened,
+            };
+            self.settle_reopen(opened)?
+        };
+        let advertised = self.state.lock().advertised.clone();
+        if let Some(advertised) = advertised {
+            self.warn_if_tools_changed(&advertised, &client).await;
+        }
+        Ok(client)
+    }
+
+    /// Make an `opened` session the live one, or back off again if opening it failed.
+    fn settle_reopen(&self, opened: Result<Session, McpError>) -> Result<Arc<McpPeer>, McpError> {
+        let mut state = self.state.lock();
+        match opened {
             Ok(session) => {
                 info!(target: "assistd::mcp", server = %self.name, "MCP server restarted");
                 let client = session.client.clone();
                 state.lifecycle = Lifecycle::Live(session);
-                if let Some(advertised) = &state.advertised {
-                    self.warn_if_tools_changed(advertised, &client).await;
-                }
                 Ok(client)
             }
             Err(McpError::NeedsAuthorization { scopes }) => {
@@ -278,11 +320,10 @@ impl McpClient for McpServer {
     async fn list_tools(&self) -> Result<Vec<Tool>, McpError> {
         let client = self.live_client().await?;
         let outcome = client.list_tools().await;
-        self.record_outcome(&client, &outcome).await;
+        self.record_outcome(&client, &outcome);
         let tools = outcome?;
         self.state
             .lock()
-            .await
             .advertised
             .get_or_insert_with(|| tools.clone());
         Ok(tools)
@@ -291,7 +332,7 @@ impl McpClient for McpServer {
     async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, McpError> {
         let client = self.live_client().await?;
         let outcome = client.invoke(name, arguments).await;
-        self.record_outcome(&client, &outcome).await;
+        self.record_outcome(&client, &outcome);
         outcome
     }
 }

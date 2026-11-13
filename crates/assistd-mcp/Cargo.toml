@@ -18,6 +18,7 @@ base64 = { workspace = true }
 futures-util = { workspace = true }
 http = { workspace = true }
 oauth2 = { workspace = true }
+parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 rmcp = { workspace = true, features = ["auth"] }
 rustix = { workspace = true }
@@ -33,7 +34,6 @@ url = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
-parking_lot = { workspace = true }
 assistd-tools = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "io-util", "net"] }

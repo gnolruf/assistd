@@ -16,6 +16,10 @@ const FAIL_INIT_WITH_ORPHAN_ENV: &str = "FAKE_MCP_FAIL_INIT_WITH_ORPHAN_PID_FILE
 /// creating it, so only the first start is refused.
 const FAIL_FIRST_INIT_ENV: &str = "FAKE_MCP_FAIL_FIRST_INIT_MARKER";
 
+/// When set, only the first start's `initialize` is answered, creating
+/// the named file; a later one writes its pid there and never answers.
+const STALL_RESTART_ENV: &str = "FAKE_MCP_STALL_RESTART_PID_FILE";
+
 fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -56,12 +60,12 @@ fn main() {
     }
 }
 
-/// The reply to request `req`, or `None` when the tool answers by
-/// writing to `out` directly.
+/// The reply to request `req`, or `None` when it goes unanswered or the
+/// tool answers by writing to `out` directly.
 fn respond(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let response = match method {
-        "initialize" => initialize(id),
+        "initialize" => return initialize(id),
         "tools/list" => tools_list(id),
         "tools/call" => return call_tool(req, id, out),
         "ping" => json!({
@@ -81,26 +85,32 @@ fn respond(req: &Value, id: &Value, out: &mut impl Write) -> Option<Value> {
     Some(response)
 }
 
-fn initialize(id: &Value) -> Value {
+fn initialize(id: &Value) -> Option<Value> {
     if let Some(pid_file) = std::env::var_os(FAIL_INIT_WITH_ORPHAN_ENV) {
         let orphan = spawn_orphan();
         std::fs::write(pid_file, orphan.to_string()).expect("write orphan pid file");
-        return json!({
+        return Some(json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": -32000, "message": "initialize refused by fixture"}
-        });
+        }));
     }
     if let Some(marker) = std::env::var_os(FAIL_FIRST_INIT_ENV)
         && std::fs::File::create_new(marker).is_ok()
     {
-        return json!({
+        return Some(json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": -32000, "message": "first initialize refused by fixture"}
-        });
+        }));
     }
-    json!({
+    if let Some(pid_file) = std::env::var_os(STALL_RESTART_ENV)
+        && std::fs::File::create_new(&pid_file).is_err()
+    {
+        std::fs::write(pid_file, std::process::id().to_string()).expect("write pid file");
+        return None;
+    }
+    Some(json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
@@ -108,7 +118,7 @@ fn initialize(id: &Value) -> Value {
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fake-mcp", "version": "0.0.0"}
         }
-    })
+    }))
 }
 
 /// A `sleep` that inherits this process group and outlives this process.
