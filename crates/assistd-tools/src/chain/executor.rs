@@ -196,8 +196,8 @@ fn attachment_bytes(attachment: &Attachment) -> usize {
     }
 }
 
-/// Dispatch one stage. `--help` anywhere in its args prints usage, even for
-/// commands whose bare form does real work.
+/// Dispatch one stage. An unquoted `--help` before any `--` prints usage,
+/// even for commands whose bare form does real work.
 async fn run_command(
     words: &[Word],
     registry: &CommandRegistry,
@@ -232,7 +232,7 @@ async fn run_command(
     } else {
         words[1..].to_vec()
     };
-    if args.iter().any(|arg| arg.as_str() == "--help") {
+    if asks_for_help(&args) {
         return CommandOutput::usage(cmd.help());
     }
 
@@ -255,6 +255,12 @@ async fn run_command(
         exit_code: out.exit_code,
         attachments: out.attachments,
     }
+}
+
+fn asks_for_help(args: &[Word]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.text != "--")
+        .any(|arg| !arg.quoted && arg.text == "--help")
 }
 
 fn glob_failure(name: &str, err: &ExpandError) -> CommandOutput {

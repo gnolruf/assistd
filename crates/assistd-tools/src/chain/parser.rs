@@ -33,6 +33,14 @@ pub enum ParseError {
          on the previous word"
     )]
     UnquotedAlternation,
+    #[error("'$' and backtick expansion is not supported")]
+    Expansion,
+    #[error("a newline outside quotes is not supported")]
+    Newline,
+    #[error("'#' comments are not supported")]
+    Comment,
+    #[error("a backslash-escaped space is not supported")]
+    EscapedSpace,
     #[error("more than {MAX_OPERATORS} operators in one command line")]
     TooManyOperators,
 }
@@ -87,8 +95,8 @@ impl Op {
 }
 
 /// Parse a command line into a [`Chain`]: `;` binds loosest, then `&&`/`||`, then `|`, all
-/// left-associative as in bash, with a trailing `;` allowed.
-/// Fails with [`ParseError::TooManyOperators`] past [`MAX_OPERATORS`].
+/// left-associative as in bash, with a trailing `;` allowed. Fails on shell syntax that would
+/// otherwise pass as literal text, and past [`MAX_OPERATORS`].
 pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
@@ -104,17 +112,16 @@ pub fn parse_chain(input: &str) -> Result<Chain, ParseError> {
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
+    let input = input.trim_ascii();
     let bytes = input.as_bytes();
     let mut i = 0;
     let mut tokens = Vec::new();
 
     while i < bytes.len() {
         let c = bytes[i];
-        if c.is_ascii_whitespace() {
-            i += 1;
-            continue;
-        }
         match c {
+            b'\n' => return Err(ParseError::Newline),
+            _ if c.is_ascii_whitespace() => i += 1,
             b'|' => {
                 if bytes.get(i + 1) == Some(&b'|') {
                     tokens.push(Token::Op(Op::Or));
@@ -205,7 +212,7 @@ fn redirection_kind(tokens: &[Token], bytes: &[u8], i: usize) -> Redirection {
 
 /// Read one word starting at `start`, returning it with quotes resolved and
 /// the offset just past it. Single quotes are fully literal; in double quotes
-/// `\` escapes only `"` and `\`; unquoted, `\` is literal.
+/// `\` escapes only `"` and `\`; unquoted, `\` is literal except before a space.
 fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
     let bytes = input.as_bytes();
     let mut text = String::new();
@@ -224,11 +231,23 @@ fn read_word(input: &str, start: usize) -> Result<(Word, usize), ParseError> {
             }
             c if c.is_ascii_whitespace() => break,
             b'|' | b'&' | b';' | b'>' | b'<' => break,
+            b'`' => return Err(ParseError::Expansion),
+            b'$' if begins_expansion(bytes.get(i + 1)) => return Err(ParseError::Expansion),
+            b'#' if i == start => return Err(ParseError::Comment),
+            b'\\' if matches!(bytes.get(i + 1), Some(b' ' | b'\t')) => {
+                return Err(ParseError::EscapedSpace);
+            }
             _ => i = push_char(input, i, &mut text),
         }
     }
 
     Ok((Word { text, quoted }, i))
+}
+
+/// Whether bash expands a `$` followed by `next`. Before anything else it
+/// stands for itself, as in the regex `foo$`.
+fn begins_expansion(next: Option<&u8>) -> bool {
+    next.is_some_and(|b| b.is_ascii_alphanumeric() || b"_{(?!#$*@-'\"".contains(b))
 }
 
 /// Append the single-quoted body starting at `begin`; returns the offset
@@ -473,6 +492,43 @@ mod tests {
                 Err(ParseError::Redirection(expected)),
                 "wrong classification for {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn tokenize_rejects_shell_syntax_it_would_pass_as_text() {
+        for (line, expected) in [
+            ("cat $HOME/x", ParseError::Expansion),
+            ("cat ${HOME}/x", ParseError::Expansion),
+            ("echo a$(date)", ParseError::Expansion),
+            ("echo `date`", ParseError::Expansion),
+            ("sort -t$'\\t' f", ParseError::Expansion),
+            ("ls\ncat f", ParseError::Newline),
+            ("ls &&\n cat f", ParseError::Newline),
+            ("# list it\nls", ParseError::Comment),
+            ("ls # list it", ParseError::Comment),
+            (r"cat my\ file.txt", ParseError::EscapedSpace),
+        ] {
+            assert_eq!(tokenize(line), Err(expected), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn tokenize_keeps_the_same_characters_where_bash_reads_them_as_text() {
+        for (line, expected) in [
+            ("grep foo$ f", vec![bare("grep"), bare("foo$"), bare("f")]),
+            (
+                "bash \"echo $HOME `date` # x\ny\"",
+                vec![bare("bash"), quoted("echo $HOME `date` # x\ny")],
+            ),
+            (
+                "echo '$HOME' a#b",
+                vec![bare("echo"), quoted("$HOME"), bare("a#b")],
+            ),
+            (r"grep a\.b f", vec![bare("grep"), bare(r"a\.b"), bare("f")]),
+            ("\n ls\r\n", vec![bare("ls")]),
+        ] {
+            assert_eq!(tokenize(line), Ok(expected), "{line:?}");
         }
     }
 
