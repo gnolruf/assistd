@@ -147,6 +147,10 @@ agent turn surfaces an `LlmError::ServerRestarting`. The agent
 retries once after the new child reports healthy; further failures
 propagate up to the client as an `EventBody::Error`.
 
+A `Ready` child is still probed on `GET /health` every 30 seconds. Three
+failed probes in a row (10 second timeout each) mark it hung: the
+supervisor kills its process group and restarts it like a crash.
+
 Vision support is detected dynamically: `probe_capabilities_routed()` calls
 `GET /props` on the running server to learn whether the model has a
 vision projector. The `VisionGate` flips on if so, allowing the `see`
@@ -840,7 +844,8 @@ instance the daemon runs as a child process when `[search] enabled =
 true`. It needs no GPU, so it starts as soon as the socket opens rather
 than waiting for the model, and runs under the same `ChildServer`
 supervisor as the llama-servers: health probe on `GET /healthz` (checked
-against `/proc` listener ownership), restart with backoff, and a degraded
+against `/proc` listener ownership, and repeated while ready to catch a
+hung server), restart with backoff, and a degraded
 state after repeated failures, in which it is retried every five
 minutes. A `search.command` that is not on `$PATH` fails at once instead
 of going through the restart attempts.
