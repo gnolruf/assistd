@@ -114,6 +114,9 @@ pub struct MicContinuousListener {
     /// `Off` exactly when no session's pipeline is running.
     phase_tx: watch::Sender<ListenPhase>,
     heard: broadcast::Sender<Heard>,
+    /// Told why, each time listening fails to open the mic or loses it
+    /// without being stopped.
+    capture_lost: mpsc::UnboundedSender<String>,
     listen_mode: Mutex<ListenMode>,
 }
 
@@ -240,13 +243,15 @@ impl ListenWorkers {
 impl MicContinuousListener {
     /// Listens for the wake phrase `spotter` finds; the audio device opens on [`Self::start`].
     /// `speech` supplies reply text that barge-in checks reject as echo; `silero` decides which
-    /// frames hold speech.
+    /// frames hold speech; `capture_lost` is told why whenever listening cannot open the mic or
+    /// loses it without being stopped.
     pub fn new(
         transcriber: Arc<dyn Transcriber>,
         config: &VoiceConfig,
         speech: Arc<VoiceOutputController>,
         silero: SileroVad,
         spotter: Arc<WakeWordSpotter>,
+        capture_lost: mpsc::UnboundedSender<String>,
     ) -> Self {
         let tuning = tuning_from_config(&config.wakeword);
         let (phase_tx, _) = watch::channel(ListenPhase::Off);
@@ -267,6 +272,7 @@ impl MicContinuousListener {
             last_push_to_talk: parking_lot::Mutex::new(None),
             phase_tx,
             heard,
+            capture_lost,
             listen_mode: Mutex::new(ListenMode::Off),
         }
     }
@@ -375,7 +381,11 @@ impl ContinuousListener for MicContinuousListener {
             handle: mut capture_handle,
         } = capture::start(self.mic_device.as_deref(), frame_tx);
         let capture_stop = CaptureStop(Arc::clone(&stop_flag));
-        await_capture_open(opened, &mut capture_handle).await?;
+        await_capture_open(opened, &mut capture_handle)
+            .await
+            .inspect_err(|err| {
+                let _ = self.capture_lost.send(err.to_string());
+            })?;
 
         self.phase_tx.send_replace(ListenPhase::Armed);
         let workers = self.spawn_workers(capture_handle, frame_rx);
@@ -383,6 +393,7 @@ impl ContinuousListener for MicContinuousListener {
             workers,
             stop_flag,
             self.phase_tx.clone(),
+            self.capture_lost.clone(),
         ));
         *mode = ListenMode::Listening(ListenSession {
             capture_stop,
@@ -838,28 +849,27 @@ async fn shut_down(session: Option<ListenSession>) {
 }
 
 /// Run a session's workers to the end, then report listening off. Capture
-/// ending without a stop request is logged as an error.
+/// ending without a stop request is logged as an error and reported on
+/// `capture_lost`.
 async fn supervise_pipeline(
     workers: ListenWorkers,
     stop_requested: Arc<AtomicBool>,
     phase: watch::Sender<ListenPhase>,
+    capture_lost: mpsc::UnboundedSender<String>,
 ) {
     let captured = workers.join().await;
     phase.send_replace(ListenPhase::Off);
-    match (stop_requested.load(Ordering::SeqCst), captured) {
-        (true, Ok(())) => {}
+    let lost = match (stop_requested.load(Ordering::SeqCst), captured) {
+        (true, Ok(())) => return,
         (true, Err(err)) => {
             warn!(target: "assistd::voice::listen", "capture worker error: {err}");
+            return;
         }
-        (false, Ok(())) => error!(
-            target: "assistd::voice::listen",
-            "wake-word capture ended unexpectedly; listening is off"
-        ),
-        (false, Err(err)) => error!(
-            target: "assistd::voice::listen",
-            "wake-word capture failed; listening is off: {err}"
-        ),
-    }
+        (false, Ok(())) => "wake-word capture ended unexpectedly".to_string(),
+        (false, Err(err)) => format!("wake-word capture failed: {err}"),
+    };
+    error!(target: "assistd::voice::listen", "{lost}; listening is off");
+    let _ = capture_lost.send(lost);
 }
 
 #[cfg(test)]

@@ -165,7 +165,7 @@ impl Session<'_> {
     }
 
     /// Hand out the proxies for a component that came up, resuming listening
-    /// if it was on before the worker restarted.
+    /// if it was on when capture went away.
     fn record_startup(&self, report: StartupReport, resumes: &mut JoinSet<()>) {
         match report {
             StartupReport::Capture(startup) => {
@@ -305,7 +305,7 @@ fn readiness_of<T>(startup: Startup, ready: T) -> Readiness<T> {
 
 async fn resume_listening(listener: Arc<dyn crate::ContinuousListener>) {
     match listener.start().await {
-        Ok(()) => info!(target: "assistd::voice::worker", "listening resumed after a restart"),
+        Ok(()) => info!(target: "assistd::voice::worker", "listening resumed"),
         Err(e) => warn!(target: "assistd::voice::worker", "failed to resume listening: {e}"),
     }
 }

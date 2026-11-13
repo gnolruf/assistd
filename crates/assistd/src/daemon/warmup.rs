@@ -5,10 +5,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use assistd_core::{
-    AppState, CaptureUnavailable, Component, ContinuousListener, PresenceManager,
-    VisionRevalidator, VoiceCapture, VoiceManager, listen_dispatcher, spawn_supervised,
+    AppState, Component, ContinuousListener, PresenceManager, VisionRevalidator, VoiceCapture,
+    VoiceManager, listen_dispatcher, spawn_supervised,
 };
-use assistd_utils::readiness::NotReady;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -45,21 +44,25 @@ async fn run(warmup: Warmup, mut shutdown: watch::Receiver<bool>) {
         return;
     }
     model_settled.send_replace(true);
+    let voice = &state.config.voice;
+    if !(voice.enabled && voice.wakeword.enabled) {
+        return;
+    }
     let capture = until_shutdown(&mut shutdown, started_capture(&state.subsystems.voice)).await;
     if let Some(Some(capture)) = capture {
         run_listen_dispatcher(&state, capture.listener, shutdown).await;
     }
 }
 
-/// The capture handles once capture is up; `None` when it is unavailable.
+/// The capture handles once capture is up, waiting through any time it is
+/// unavailable first; `None` once `voice` reports nothing more.
 async fn started_capture(voice: &VoiceManager) -> Option<VoiceCapture> {
     let mut changes = voice.subscribe_readiness();
     loop {
-        match voice.capture() {
-            Ok(capture) => return Some(capture),
-            Err(CaptureUnavailable(NotReady::Unavailable(_))) => return None,
-            Err(CaptureUnavailable(NotReady::Starting)) => changes.changed().await.ok()?,
+        if let Ok(capture) = voice.capture() {
+            return Some(capture);
         }
+        changes.changed().await.ok()?;
     }
 }
 
@@ -100,15 +103,14 @@ async fn run_listen_dispatcher(
     listener: Arc<dyn ContinuousListener>,
     shutdown: watch::Receiver<bool>,
 ) {
-    let voice = &state.config.voice;
-    if !(voice.enabled && voice.wakeword.enabled) {
-        return;
-    }
     let forwarder = listen_dispatcher::spawn_dispatcher(
         state.clone(),
         listener,
-        voice.wakeword.start_on_launch,
+        state.config.voice.wakeword.start_on_launch,
         shutdown,
     );
     let _ = forwarder.await;
 }
+
+#[cfg(test)]
+mod tests;

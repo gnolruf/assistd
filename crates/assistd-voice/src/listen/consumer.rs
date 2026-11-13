@@ -10,18 +10,20 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use super::vad::FRAME_SAMPLES;
-use crate::mic::capture::AudioCaptureError;
+use crate::mic::capture::{AudioCaptureError, StreamFailure};
 use crate::mic::resample::{CHUNK_SIZE, ChunkResampler, f32_to_i16};
 
 const IDLE_PARK: Duration = Duration::from_millis(10);
 
 /// Emit 20 ms frames on `frame_tx` until `stop_flag` is set. A dropped
-/// receiver is a silent stop.
+/// receiver is a silent stop; errors once `failure` says the stream
+/// feeding the ring has failed.
 pub fn drain_to_frames(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
     stop_flag: &AtomicBool,
     frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
+    failure: &StreamFailure,
 ) -> Result<(), AudioCaptureError> {
     let mut resampler = ChunkResampler::new(native_rate)?;
     let mut pending: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 2);
@@ -38,6 +40,7 @@ pub fn drain_to_frames(
             continue;
         }
 
+        failure.check()?;
         if stop_flag.load(Ordering::Relaxed) {
             debug!(
                 target: "assistd::voice::listen",

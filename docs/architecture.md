@@ -710,6 +710,13 @@ conversation, so no follow-up window opens until the wake phrase starts a
 new one. The listener reports `ListenPhase` (`Off`, `Armed`, `Capturing`)
 and a `WakeWordDetected` event on the bus. The listener keeps running
 while presence sleeps, and a command wakes the model like any other query.
+
+A cpal stream error that ends the stream (the device was unplugged) fails the
+capture reading it: a push-to-talk recording errors, and the listener goes
+`Off`. When listening loses the mic that way, or cannot open it, the worker
+reports capture `Unavailable`, waits under `RestartPolicy` backoff for
+`voice.mic_device` to be plugged in as it does at startup, then reports capture
+ready, on which the daemon resumes listening if it was on.
 Separately, Silero VAD (`voice.transcription.vad_enabled`) trims non-speech from
 every recording before decoding. The mic stays open while replies are
 spoken, so the listener hears the daemon's own TTS; outside a
