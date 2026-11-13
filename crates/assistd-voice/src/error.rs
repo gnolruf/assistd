@@ -35,7 +35,7 @@ pub enum VoiceOutputError {
     Synthesis(#[source] crate::tts::SpeechError),
 
     #[cfg(feature = "tts")]
-    #[error("speech playback enqueue failed: {0}")]
+    #[error("speech playback failed: {0}")]
     Playback(#[source] crate::tts::SpeechError),
 
     #[error(transparent)]

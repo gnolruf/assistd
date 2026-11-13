@@ -26,4 +26,7 @@ pub enum SpeechError {
 
     #[error("rodio failed to open default audio output: {0}")]
     Audio(String),
+
+    #[error("the audio output stopped playing with speech still queued")]
+    OutputStalled,
 }
