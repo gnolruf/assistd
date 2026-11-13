@@ -287,8 +287,8 @@ impl PresenceManager {
     }
 
     /// Wait until llama-server reports `ReadyState::Ready` or `budget`
-    /// elapses. Fails immediately with `Degraded` once the supervisor has
-    /// given up, and with `NoService` when nothing is attached.
+    /// elapses. Fails immediately with `Degraded` while the supervisor is
+    /// slow-retrying, and with `NoService` when nothing is attached.
     pub async fn wait_llama_ready(&self, budget: Duration) -> Result<(), HealthWaitError> {
         let mut rx = self
             .lifecycle

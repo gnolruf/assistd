@@ -678,8 +678,8 @@ whenever it changes, for the worker's `QueuedTranscriber`. When the worker
 dies, calls in flight fail (speech is dropped and the turn carries on as text;
 a push-to-talk recording fails), the listener reports `Off`, capture and speech
 go back to `Starting`, and the supervisor restarts it under `RestartPolicy`
-backoff, resuming listening if it was on; once the policy gives up both are
-`Unavailable`. The `VramLedger` counts the worker's VRAM as the daemon's own.
+backoff, resuming listening if it was on; while a restart cap is tripped both
+are `Unavailable` between retries five minutes apart. The `VramLedger` counts the worker's VRAM as the daemon's own.
 
 Push-to-talk: the daemon receives `RequestBody::PttStart` from a client
 or compositor binding, opens the configured microphone via cpal, and
@@ -841,8 +841,9 @@ true`. It needs no GPU, so it starts as soon as the socket opens rather
 than waiting for the model, and runs under the same `ChildServer`
 supervisor as the llama-servers: health probe on `GET /healthz` (checked
 against `/proc` listener ownership), restart with backoff, and a degraded
-state after repeated failures. A `search.command` that is not on `$PATH`
-fails at once instead of going through the restart attempts.
+state after repeated failures, in which it is retried every five
+minutes. A `search.command` that is not on `$PATH` fails at once instead
+of going through the restart attempts.
 
 Each launch writes a fresh `settings.yml` (mode 0600, under
 `$XDG_RUNTIME_DIR/assistd/searxng/`) that loads only the engines in

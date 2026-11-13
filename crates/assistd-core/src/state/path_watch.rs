@@ -19,9 +19,6 @@ use super::task_service::TaskService;
 /// Changes held between bursts; more than this inside one window add nothing.
 const CHANGE_BUFFER: usize = 16;
 
-/// The wait between retries once a watch keeps failing.
-const SLOW_RETRY_INTERVAL: Duration = Duration::from_secs(300);
-
 /// Why a watch on a trigger's path stopped.
 enum WatchEnd {
     /// The watch could not be set up.
@@ -108,32 +105,18 @@ impl TaskService {
     }
 }
 
-/// Register the next retry of `task`'s watch and pick how long to wait before it, at
-/// most [`SLOW_RETRY_INTERVAL`].
+/// Register the next retry of `task`'s watch and pick how long to wait before it.
 fn retry_delay(task: TaskId, policy: &mut RestartPolicy) -> Duration {
-    match policy.next_restart(Instant::now()) {
-        RestartDecision::Backoff { delay, .. } => delay,
-        RestartDecision::ConsecutiveCapReached { failures } => {
-            error!(
-                target: "assistd::tasks",
-                %task,
-                failures,
-                retry_secs = SLOW_RETRY_INTERVAL.as_secs(),
-                "watching the trigger's path failed {failures} times in a row; slowing retries"
-            );
-            SLOW_RETRY_INTERVAL
-        }
-        RestartDecision::WindowCapReached { restarts } => {
-            error!(
-                target: "assistd::tasks",
-                %task,
-                restarts,
-                retry_secs = SLOW_RETRY_INTERVAL.as_secs(),
-                "the trigger's path watch restarted {restarts} times in the rolling window; slowing retries"
-            );
-            SLOW_RETRY_INTERVAL
-        }
+    let decision = policy.next_restart(Instant::now());
+    if let RestartDecision::SlowRetry { delay, cap } = decision {
+        error!(
+            target: "assistd::tasks",
+            %task,
+            retry_secs = delay.as_secs(),
+            "the watch on the trigger's path {cap}; slowing retries"
+        );
     }
+    decision.delay()
 }
 
 /// [`watch_changes`] run on the blocking pool, since a recursive watch walks the

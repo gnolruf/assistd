@@ -14,10 +14,7 @@ use super::error::ChildServerError;
 use super::health::HealthChecker;
 use super::process::ChildProcess;
 use super::service::ReadyState;
-use crate::backoff::{
-    MAX_CONSECUTIVE_FAILURES, MAX_RESTARTS_PER_WINDOW, RESTART_WINDOW, RestartDecision,
-    RestartPolicy,
-};
+use crate::backoff::{MAX_CONSECUTIVE_FAILURES, RestartDecision, RestartPolicy};
 
 /// How long a stopping child gets to exit after SIGTERM before its process
 /// group gets SIGKILL.
@@ -67,8 +64,8 @@ impl<S: ChildServerSpec> Supervisor<S> {
         }
     }
 
-    /// Run until shutdown is requested. Once a restart cap trips it broadcasts
-    /// [`ReadyState::Degraded`] and only waits for shutdown.
+    /// Run until shutdown is requested. While a restart cap is tripped it broadcasts
+    /// [`ReadyState::Degraded`] between restarts and makes them at the slow cadence.
     pub(super) async fn run(mut self) {
         let mut policy = RestartPolicy::default();
 
@@ -83,33 +80,9 @@ impl<S: ChildServerSpec> Supervisor<S> {
                 return;
             }
 
-            match policy.next_restart(Instant::now()) {
-                RestartDecision::Backoff { failures: 0, .. } => {}
-                RestartDecision::Backoff { delay, failures } => {
-                    if self.back_off(delay, failures).await.is_break() {
-                        return;
-                    }
-                }
-                RestartDecision::ConsecutiveCapReached { .. } => {
-                    error!(
-                        target: "assistd::child_server",
-                        server = self.spec.name(),
-                        "{MAX_CONSECUTIVE_FAILURES} consecutive failures; entering degraded state"
-                    );
-                    self.park_degraded().await;
-                    return;
-                }
-                RestartDecision::WindowCapReached { restarts } => {
-                    error!(
-                        target: "assistd::child_server",
-                        server = self.spec.name(),
-                        restarts,
-                        window_secs = RESTART_WINDOW.as_secs(),
-                        "{MAX_RESTARTS_PER_WINDOW} restarts in rolling window; entering degraded state"
-                    );
-                    self.park_degraded().await;
-                    return;
-                }
+            let decision = policy.next_restart(Instant::now());
+            if self.wait_to_restart(decision).await.is_break() {
+                return;
             }
         }
     }
@@ -151,28 +124,40 @@ impl<S: ChildServerSpec> Supervisor<S> {
         ControlFlow::Continue(())
     }
 
-    async fn park_degraded(&mut self) {
-        let _ = self.ready_tx.send(ReadyState::Degraded);
-        let _ = self.shutdown_rx.wait_for(|v| *v).await;
-    }
-
-    /// Sleep out `delay` before restart `attempt`; breaks if shutdown arrives first.
-    async fn back_off(&mut self, delay: Duration, attempt: u32) -> ControlFlow<()> {
-        warn!(
-            target: "assistd::child_server",
-            server = self.spec.name(),
-            "restarting {} in {delay:?} (attempt {attempt}/{MAX_CONSECUTIVE_FAILURES})",
-            self.spec.name(),
-        );
-        let _ = self.ready_tx.send(ReadyState::BackingOff { attempt });
+    /// Broadcast the wait `decision` calls for and sleep it out; breaks if
+    /// shutdown arrives first.
+    async fn wait_to_restart(&mut self, decision: RestartDecision) -> ControlFlow<()> {
+        let server = self.spec.name();
+        match decision {
+            RestartDecision::Backoff { failures: 0, .. } => return ControlFlow::Continue(()),
+            RestartDecision::Backoff { delay, failures } => {
+                warn!(
+                    target: "assistd::child_server",
+                    server,
+                    "restarting {server} in {delay:?} (attempt {failures}/{MAX_CONSECUTIVE_FAILURES})"
+                );
+                let _ = self
+                    .ready_tx
+                    .send(ReadyState::BackingOff { attempt: failures });
+            }
+            RestartDecision::SlowRetry { delay, cap } => {
+                error!(
+                    target: "assistd::child_server",
+                    server,
+                    retry_secs = delay.as_secs(),
+                    "{server} {cap}; entering degraded state and slowing restarts"
+                );
+                let _ = self.ready_tx.send(ReadyState::Degraded);
+            }
+        }
 
         tokio::select! {
-            () = tokio::time::sleep(delay) => ControlFlow::Continue(()),
+            () = tokio::time::sleep(decision.delay()) => ControlFlow::Continue(()),
             _ = self.shutdown_rx.changed() => {
                 info!(
                     target: "assistd::child_server",
-                    server = self.spec.name(),
-                    "supervisor shutdown during backoff"
+                    server,
+                    "supervisor shutdown while waiting to restart"
                 );
                 ControlFlow::Break(())
             }

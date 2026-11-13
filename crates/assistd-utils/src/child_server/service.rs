@@ -21,7 +21,8 @@ pub enum ReadyState {
     /// The last spawn attempt failed; a restart is scheduled after `attempt`
     /// consecutive failures.
     BackingOff { attempt: u32 },
-    /// A restart limit was hit; the supervisor stopped restarting.
+    /// A restart limit was hit; the supervisor is waiting out the slow
+    /// retry interval before its next attempt.
     Degraded,
 }
 
