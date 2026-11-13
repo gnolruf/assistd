@@ -98,7 +98,7 @@ rubato = "5.0"
 hound = "3.5"
 landlock = "0.4.7"
 rmcp = { version = "3.9", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client"] }
-sse-stream = "0.2.4"
+sse-stream = "0.3.0"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 
 [workspace.lints.rust]
