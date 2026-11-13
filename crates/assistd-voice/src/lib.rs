@@ -86,7 +86,8 @@ pub trait VoiceOutput: fmt::Debug + Send + Sync + 'static {
     /// not once played; use [`wait_idle`](Self::wait_idle) for that.
     async fn speak(&self, text: String) -> Result<(), VoiceOutputError>;
 
-    /// Block until the playback queue drains.
+    /// Block until the playback queue drains. Errors when the audio output
+    /// stops playing with speech still queued.
     async fn wait_idle(&self) -> Result<(), VoiceOutputError> {
         Ok(())
     }

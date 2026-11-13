@@ -188,8 +188,10 @@ impl VoiceOutput for SherpaVoiceOutput {
         if degraded {
             return Ok(());
         }
-        self.playback.drain().await;
-        Ok(())
+        self.playback
+            .drain()
+            .await
+            .map_err(VoiceOutputError::Playback)
     }
 
     async fn cancel(&self) {

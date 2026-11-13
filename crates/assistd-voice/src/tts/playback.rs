@@ -9,31 +9,30 @@ use std::time::Duration;
 use rodio::buffer::SamplesBuffer;
 use rodio::cpal::traits::HostTrait;
 use rodio::stream::DeviceSinkBuilder;
-use rodio::{ChannelCount, DeviceTrait, Player, SampleRate, cpal};
+use rodio::{ChannelCount, DeviceTrait, Player, cpal};
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::tts::engine::Utterance;
 use crate::tts::error::SpeechError;
 
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long past the expected end of the queued audio `drain` waits before
+/// calling the output stalled.
+const DRAIN_STALL_MARGIN: Duration = Duration::from_secs(5);
+
 /// How long `Drop` waits for the device thread before abandoning the join.
 const DROP_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Owns the rodio playback path. The `!Send` device sink lives on a dedicated
-/// thread for the worker's lifetime; `Player` calls that can block on rodio's
-/// queue mutex run on the blocking pool.
+/// Owns the rodio playback path. `Player` calls that can block on rodio's
+/// queue mutex run on the blocking pool. A stream that stalls is closed by
+/// [`drain`](Self::drain) and reopened by the next [`play`](Self::play).
+#[derive(Debug)]
 pub struct RodioPlaybackWorker {
-    player: Arc<Player>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
-    device_thread: Option<thread::JoinHandle<()>>,
-}
-
-impl fmt::Debug for RodioPlaybackWorker {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RodioPlaybackWorker")
-            .field("device_thread", &self.device_thread)
-            .finish_non_exhaustive()
-    }
+    device_name: Option<String>,
+    /// `None` between a stall and the `play` that reopens the device.
+    stream: Mutex<Option<Arc<OutputStream>>>,
 }
 
 impl RodioPlaybackWorker {
@@ -41,12 +40,119 @@ impl RodioPlaybackWorker {
     /// system default for `None`. A name that isn't found falls back
     /// to the default with a warning.
     pub async fn start(device_name: Option<String>) -> Result<Self, SpeechError> {
-        tokio::task::spawn_blocking(move || Self::open(device_name.as_deref()))
+        let stream = OutputStream::open(device_name.clone()).await?;
+        Ok(Self {
+            device_name,
+            stream: Mutex::new(Some(Arc::new(stream))),
+        })
+    }
+
+    /// Queue an utterance. Returns once enqueued; see
+    /// [`drain`](Self::drain) to wait for playback. Errors when a stalled
+    /// stream cannot be reopened.
+    pub async fn play(&self, utterance: Utterance) -> Result<(), SpeechError> {
+        let stream = self.open_stream().await?;
+        let channels: ChannelCount = NonZero::new(1u16).expect("1 is non-zero");
+        let audio = utterance.duration();
+        let buffer = SamplesBuffer::new(channels, utterance.sample_rate, utterance.samples);
+        stream.extend_queue(audio);
+        tokio::task::spawn_blocking(move || stream.player.append(buffer))
+            .await
+            .map_err(|err| SpeechError::Audio(format!("playback append task failed: {err}")))?;
+        tracing::debug!(
+            target: "assistd::voice::latency",
+            stage = "playback_enqueued",
+            "voice latency stage"
+        );
+        Ok(())
+    }
+
+    /// Wait until the queue has finished playing. Polls because rodio's
+    /// `sleep_until_end` holds the queue mutex and would block every later `append`.
+    /// Errors, closing the stream, once the queue is five seconds overdue.
+    pub async fn drain(&self) -> Result<(), SpeechError> {
+        let Some(stream) = self.stream.lock().await.clone() else {
+            return Ok(());
+        };
+        while !stream.player.empty() {
+            if stream.is_overdue() {
+                self.close_stalled(&stream).await;
+                return Err(SpeechError::OutputStalled);
+            }
+            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+        }
+        Ok(())
+    }
+
+    /// Drop pending audio. rodio's `Player::clear` also pauses the
+    /// player, so `play` must follow or later appends are silent.
+    pub async fn clear(&self) {
+        let Some(stream) = self.stream.lock().await.clone() else {
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || {
+            stream.player.clear();
+            stream.player.play();
+            stream.empty_queue();
+        })
+        .await;
+    }
+
+    /// The open stream, first reopening the device if a stall closed it.
+    async fn open_stream(&self) -> Result<Arc<OutputStream>, SpeechError> {
+        let mut open = self.stream.lock().await;
+        if let Some(stream) = open.as_ref() {
+            return Ok(Arc::clone(stream));
+        }
+        let stream = Arc::new(OutputStream::open(self.device_name.clone()).await?);
+        tracing::info!(target: "assistd::voice::tts", "audio output reopened after a stall");
+        Ok(Arc::clone(open.insert(stream)))
+    }
+
+    /// Close `stalled`, unless it has been replaced already.
+    async fn close_stalled(&self, stalled: &Arc<OutputStream>) {
+        let closed = self
+            .stream
+            .lock()
+            .await
+            .take_if(|open| Arc::ptr_eq(open, stalled));
+        if closed.is_some() {
+            tracing::warn!(
+                target: "assistd::voice::tts",
+                margin_secs = DRAIN_STALL_MARGIN.as_secs(),
+                "audio output stopped playing its queue; closed it to reopen on the next sentence"
+            );
+        }
+    }
+}
+
+/// One open output stream. The `!Send` device sink lives on a dedicated
+/// thread until the stream is dropped.
+struct OutputStream {
+    player: Player,
+    /// When the audio queued so far should have finished playing.
+    queued_until: parking_lot::Mutex<Instant>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
+    device_thread: Option<thread::JoinHandle<()>>,
+}
+
+impl fmt::Debug for OutputStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OutputStream")
+            .field("queued_until", &self.queued_until)
+            .field("device_thread", &self.device_thread)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OutputStream {
+    async fn open(device_name: Option<String>) -> Result<Self, SpeechError> {
+        tokio::task::spawn_blocking(move || Self::open_blocking(device_name.as_deref()))
             .await
             .map_err(|err| SpeechError::Audio(format!("audio init task failed: {err}")))?
     }
 
-    fn open(device_name: Option<&str>) -> Result<Self, SpeechError> {
+    fn open_blocking(device_name: Option<&str>) -> Result<Self, SpeechError> {
         let host = cpal::default_host();
         let selected = select_output_device(&host, device_name);
 
@@ -60,51 +166,29 @@ impl RodioPlaybackWorker {
             .map_err(SpeechError::Audio)?;
 
         Ok(Self {
-            player: Arc::new(player),
+            player,
+            queued_until: parking_lot::Mutex::new(Instant::now()),
             shutdown_tx: Some(shutdown_tx),
             device_thread: Some(device_thread),
         })
     }
 
-    /// Queue an utterance. Returns once enqueued; see
-    /// [`drain`](Self::drain) to wait for playback.
-    pub async fn play(&self, utterance: Utterance) -> Result<(), SpeechError> {
-        let channels: ChannelCount = NonZero::new(1u16).expect("1 is non-zero");
-        let sample_rate: SampleRate = utterance.sample_rate;
-        let buffer = SamplesBuffer::new(channels, sample_rate, utterance.samples);
-        let player = self.player.clone();
-        tokio::task::spawn_blocking(move || player.append(buffer))
-            .await
-            .map_err(|err| SpeechError::Audio(format!("playback append task failed: {err}")))?;
-        tracing::debug!(
-            target: "assistd::voice::latency",
-            stage = "playback_enqueued",
-            "voice latency stage"
-        );
-        Ok(())
+    /// Count `audio` as queued behind whatever is still due to play.
+    fn extend_queue(&self, audio: Duration) {
+        let mut queued_until = self.queued_until.lock();
+        *queued_until = (*queued_until).max(Instant::now()) + audio;
     }
 
-    /// Wait until the queue has finished playing. Polls because rodio's
-    /// `sleep_until_end` holds the queue mutex and would block every later `append`.
-    pub async fn drain(&self) {
-        while !self.player.empty() {
-            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
-        }
+    fn empty_queue(&self) {
+        *self.queued_until.lock() = Instant::now();
     }
 
-    /// Drop pending audio. rodio 0.22's `Player::clear` also pauses the
-    /// player, so `play` must follow or later appends are silent.
-    pub async fn clear(&self) {
-        let player = self.player.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            player.clear();
-            player.play();
-        })
-        .await;
+    fn is_overdue(&self) -> bool {
+        Instant::now() > *self.queued_until.lock() + DRAIN_STALL_MARGIN
     }
 }
 
-impl Drop for RodioPlaybackWorker {
+impl Drop for OutputStream {
     fn drop(&mut self) {
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
@@ -275,5 +359,39 @@ fn join_with_timeout(device_thread: thread::JoinHandle<()>) {
             error = %err,
             "could not spawn drop watchdog; device thread detached"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_fails_and_closes_a_stream_that_never_plays_its_queue() {
+        let (player, _never_played) = Player::new();
+        let playback = RodioPlaybackWorker {
+            device_name: None,
+            stream: Mutex::new(Some(Arc::new(OutputStream {
+                player,
+                queued_until: parking_lot::Mutex::new(Instant::now()),
+                shutdown_tx: None,
+                device_thread: None,
+            }))),
+        };
+        let two_seconds = Utterance {
+            sample_rate: NonZero::new(16_000).expect("non-zero"),
+            samples: vec![0.0; 32_000],
+        };
+        let queued_at = Instant::now();
+        playback.play(two_seconds).await.expect("enqueue");
+
+        let drained = playback.drain().await;
+
+        assert!(matches!(drained, Err(SpeechError::OutputStalled)));
+        assert!(queued_at.elapsed() >= Duration::from_secs(2) + DRAIN_STALL_MARGIN);
+        assert!(
+            playback.stream.lock().await.is_none(),
+            "the next play must reopen the device"
+        );
     }
 }

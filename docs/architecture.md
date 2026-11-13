@@ -757,7 +757,10 @@ sherpa-onnx links as shared libraries, so a CUDA build only swaps in
 the CUDA release's libraries; the `assistd` runpath finds them beside it
 or in `../lib/assistd`. Before each sentence, `VoiceOutputController`
 returns a `SpeakDecision`: speak it, or drop it because TTS is toggled
-off or the reply was skipped. Tunables live in `[voice.synthesis]`.
+off or the reply was skipped. If the output device stops playing, the
+wait for a reply's audio fails five seconds after that audio should have
+ended, and the next sentence reopens the device. Tunables live in
+`[voice.synthesis]`.
 
 ### Window manager (`assistd-wm`)
 

@@ -3,6 +3,7 @@
 
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::time::Duration;
 
 use sherpa_onnx::{
     GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
@@ -27,6 +28,14 @@ const NOISE_SCALE_W: f32 = 0.8;
 pub struct Utterance {
     pub sample_rate: NonZeroU32,
     pub samples: Vec<f32>,
+}
+
+impl Utterance {
+    /// How long the audio takes to play.
+    pub fn duration(&self) -> Duration {
+        let samples = u64::try_from(self.samples.len()).unwrap_or(u64::MAX);
+        Duration::from_secs(samples) / self.sample_rate.get()
+    }
 }
 
 /// A loaded voice. Synthesis blocks, so call it off the async runtime.
