@@ -114,11 +114,23 @@ impl Config {
         Ok(config_dir.join("assistd/config.toml"))
     }
 
-    /// Loads and deserializes a config from the given TOML file. Keys the
-    /// schema doesn't know are skipped, with a warning logged for each; a
-    /// warning is also logged if other users can read a file that sets MCP env.
-    /// Fails with [`ConfigError::Removed`] on a key assistd no longer reads.
-    pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
+    /// `explicit`, or [`Self::default_path`] when there is none.
+    pub fn path_or_default(explicit: Option<PathBuf>) -> Result<PathBuf, ConfigError> {
+        explicit.map_or_else(Self::default_path, Ok)
+    }
+
+    /// Loads the config at `path` as [`Self::load_unvalidated`] does, then
+    /// fails with [`ConfigError::Validation`] when it has any [`Self::issues`].
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let config = Self::load_unvalidated(path)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Deserializes the TOML file at `path` without checking [`Self::issues`].
+    /// Unknown keys are skipped with a warning each, as is a file that sets MCP
+    /// secrets other users can read; fails with [`ConfigError::Removed`] on a removed key.
+    pub fn load_unvalidated(path: &Path) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,

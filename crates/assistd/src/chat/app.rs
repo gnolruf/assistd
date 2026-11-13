@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use assistd_config::ConfigIssue;
 use assistd_core::PresenceState;
 use assistd_ipc::{
     ComponentReadiness, Event, ImageMime, IpcClient, PausedPrompt, PermissionMode, Request,
@@ -54,6 +55,8 @@ const NOTICE_HOLD: Duration = Duration::from_secs(3);
 /// How recently the daemon's branch must have been written for the chat to resume it.
 const RESUME_RECENCY_SECS: u64 = 10;
 
+const CONFIG_ISSUES_HINT: &str =
+    "[the daemon will not start with these config errors; fix them in /settings]";
 /// Query ids remembered so their copies on the broadcast bus are ignored;
 /// the daemon runs one turn at a time, so a few suffice.
 const OWN_TURN_MEMORY: usize = 8;
@@ -551,6 +554,17 @@ impl App {
             daemon_reachable,
             ..self
         }
+    }
+
+    /// Show each of the config file's `issues` under the banner, with what they cost.
+    pub(super) fn with_config_issues(mut self, issues: &[ConfigIssue]) -> Self {
+        for issue in issues {
+            self.output.push_error(&format!("[config] {issue}"));
+        }
+        if !issues.is_empty() {
+            self.output.push_info(CONFIG_ISSUES_HINT);
+        }
+        self
     }
 
     /// Show each MCP server in `unavailable`, with why it is, under the banner.

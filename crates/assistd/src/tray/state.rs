@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 /// What the tray icon should currently display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrayState {
-    /// The tray's own config file failed to load or validate.
+    /// The config file failed to load or validate.
     ConfigError,
     /// Daemon socket is unreachable.
     Disconnected,
