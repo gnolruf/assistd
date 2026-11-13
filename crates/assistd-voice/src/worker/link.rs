@@ -42,8 +42,8 @@ pub(super) struct Link {
     pub(super) heard: broadcast::Sender<Heard>,
     /// Where the running wake-word test's reports go.
     pub(super) wake_test: parking_lot::Mutex<Option<mpsc::Sender<WakeTest>>>,
-    /// Whether listening was started and not stopped since, so a restarted
-    /// worker resumes it.
+    /// Whether listening was started and not stopped since, so capture that
+    /// comes back resumes it.
     pub(super) listen_wanted: AtomicBool,
     pub(super) last_push_to_talk: parking_lot::Mutex<Option<Instant>>,
 }

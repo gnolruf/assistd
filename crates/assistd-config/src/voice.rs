@@ -29,7 +29,8 @@ pub struct VoiceConfig {
     /// Enables voice input.
     pub enabled: bool,
     /// ALSA/PulseAudio input device. `None` uses the system default. A named
-    /// device that is unplugged when voice starts is polled for until it appears.
+    /// device that is unplugged, at startup or while listening, is polled for
+    /// until it appears.
     pub mic_device: Option<String>,
     pub transcription: TranscriptionConfig,
     pub wakeword: WakeWordConfig,

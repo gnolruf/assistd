@@ -6,6 +6,7 @@
 use std::f32::consts::PI;
 use std::sync::atomic::AtomicBool;
 
+use assistd_voice::mic::capture::StreamFailure;
 use assistd_voice::mic::consumer::drain_to_pcm;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
@@ -23,7 +24,14 @@ fn drain_one_second(rate_hz: u32) -> Vec<i16> {
     }
     drop(producer);
     let stop = AtomicBool::new(true);
-    drain_to_pcm(consumer, rate_hz, 16_000 * 4, &stop).expect("drain_to_pcm error")
+    drain_to_pcm(
+        consumer,
+        rate_hz,
+        16_000 * 4,
+        &stop,
+        &StreamFailure::default(),
+    )
+    .expect("drain_to_pcm error")
 }
 
 fn assert_mostly_nonzero(pcm: &[i16], label: &str) {

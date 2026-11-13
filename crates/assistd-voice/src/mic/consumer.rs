@@ -7,18 +7,20 @@ use ringbuf::HeapCons;
 use ringbuf::traits::Observer;
 use tracing::debug;
 
-use super::capture::AudioCaptureError;
+use super::capture::{AudioCaptureError, StreamFailure};
 use super::resample::{CHUNK_SIZE, ChunkResampler, f32_to_i16};
 
 const IDLE_PARK: Duration = Duration::from_millis(10);
 
 /// Drain the ring until `stop_flag` is set or `max_pcm_samples` is
-/// reached, returning 16 kHz i16 PCM.
+/// reached, returning 16 kHz i16 PCM. Errors once `failure` says the
+/// stream feeding the ring has failed, even if `stop_flag` is set too.
 pub fn drain_to_pcm(
     mut consumer: HeapCons<f32>,
     native_rate: u32,
     max_pcm_samples: usize,
     stop_flag: &AtomicBool,
+    failure: &StreamFailure,
 ) -> Result<Vec<i16>, AudioCaptureError> {
     let mut resampler = ChunkResampler::new(native_rate)?;
     let mut pcm: Vec<i16> = Vec::with_capacity(max_pcm_samples.min(16_000 * 10));
@@ -30,6 +32,7 @@ pub fn drain_to_pcm(
             }
             continue;
         }
+        failure.check()?;
         if stop_flag.load(Ordering::Relaxed) {
             append_capped(resampler.pull(&mut consumer)?, &mut pcm, max_pcm_samples);
             break;

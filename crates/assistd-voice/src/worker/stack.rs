@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use assistd_config::{SynthesisConfig, VoiceConfig};
 use assistd_utils::backoff::backoff_delay;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::listen::{ContinuousListener, MicContinuousListener, NoContinuousListener};
@@ -66,13 +67,15 @@ pub(super) async fn start_output(config: &SynthesisConfig) -> Result<Arc<dyn Voi
 }
 
 /// Push-to-talk input and the listener, or why there are none. `speech`
-/// supplies the reply text barge-in checks reject as echo. While the
+/// supplies the reply text barge-in checks reject as echo; `capture_lost`
+/// is told why whenever listening cannot open the mic or loses it. While the
 /// configured device is unplugged this waits for it, handing `on_missing`
 /// the reason once.
 pub(super) async fn start_capture(
     config: &VoiceConfig,
     gpu: Arc<ReportedGpu>,
     speech: Arc<VoiceOutputController>,
+    capture_lost: mpsc::UnboundedSender<String>,
     on_missing: impl FnOnce(String),
 ) -> Result<VoiceCapture, String> {
     if !config.enabled {
@@ -90,7 +93,7 @@ pub(super) async fn start_capture(
     let is_gpu = primary.is_gpu();
     let transcriber = with_cpu_fallback(config, gpu, Arc::new(primary), is_gpu);
     let mic = MicVoiceInput::new(transcriber.clone(), config.mic_device.clone());
-    let listener = match start_listener(config, &transcriber, speech).await {
+    let listener = match start_listener(config, &transcriber, speech, capture_lost).await {
         Some(listener) => listener,
         None => Arc::new(NoContinuousListener::new()),
     };
@@ -102,7 +105,7 @@ pub(super) async fn start_capture(
 
 /// Return once the configured input device is plugged in, polling with
 /// backoff while it is missing; errors when devices cannot be enumerated.
-async fn wait_for_mic_device(
+pub(super) async fn wait_for_mic_device(
     mic_device: Option<&str>,
     on_missing: impl FnOnce(String),
 ) -> Result<(), String> {
@@ -142,6 +145,7 @@ async fn start_listener(
     config: &VoiceConfig,
     transcriber: &Arc<dyn Transcriber>,
     speech: Arc<VoiceOutputController>,
+    capture_lost: mpsc::UnboundedSender<String>,
 ) -> Option<Arc<dyn ContinuousListener>> {
     if !config.wakeword.enabled {
         info!("voice.wakeword: disabled in config");
@@ -168,6 +172,7 @@ async fn start_listener(
         speech,
         silero,
         Arc::new(spotter),
+        capture_lost,
     );
     Some(Arc::new(listener))
 }

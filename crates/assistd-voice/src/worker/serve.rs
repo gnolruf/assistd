@@ -4,6 +4,7 @@
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use futures_util::FutureExt;
 use thiserror::Error;
@@ -11,9 +12,10 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, Stdin};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use assistd_config::VoiceConfig;
+use assistd_utils::backoff::RestartPolicy;
 use assistd_utils::text::panic_message;
 
 use super::protocol::{
@@ -77,16 +79,13 @@ impl Worker {
     /// as long as the worker runs. A missing mic device is reported as
     /// unavailable, then as ready once it is plugged in and capture builds.
     async fn start_capture(self: Arc<Self>, config: VoiceConfig) {
-        let report_missing = |reason| {
-            self.send(FromWorker::CaptureReadiness {
-                startup: Startup::Unavailable { reason },
-            });
-        };
+        let (capture_lost_tx, capture_lost) = mpsc::unbounded_channel();
         let capture = stack::start_capture(
             &config,
             Arc::clone(&self.gpu),
             self.speech.clone(),
-            report_missing,
+            capture_lost_tx,
+            |reason| self.report_capture_unavailable(reason),
         )
         .await;
         let startup = startup_of(&capture);
@@ -97,8 +96,45 @@ impl Worker {
                 self.forward_capture_state(capture),
                 self.forward_phase(capture.listener.as_ref()),
                 self.forward_heard(capture.listener.as_ref()),
+                self.recover_lost_capture(config.mic_device.as_deref(), capture_lost),
             );
         }
+    }
+
+    /// Each time listening cannot open the mic or loses it, report capture
+    /// unavailable, wait for the device as at startup, then report capture
+    /// ready, on which the daemon restarts the listening it still wants.
+    async fn recover_lost_capture(
+        &self,
+        mic_device: Option<&str>,
+        mut capture_lost: mpsc::UnboundedReceiver<String>,
+    ) {
+        let mut policy = RestartPolicy::default();
+        let mut ready_since = Instant::now();
+        while let Some(reason) = capture_lost.recv().await {
+            self.report_capture_unavailable(reason);
+            policy.record_session_end(ready_since.elapsed());
+            let delay = policy.next_restart(Instant::now()).delay();
+            warn!("voice: listening has no mic; looking for the device again in {delay:?}");
+            tokio::time::sleep(delay).await;
+            let found = stack::wait_for_mic_device(mic_device, |reason| {
+                self.report_capture_unavailable(reason);
+            })
+            .await;
+            if found.is_ok() {
+                info!("voice: the mic device is present; capture is ready again");
+            }
+            self.send(FromWorker::CaptureReadiness {
+                startup: startup_of(&found),
+            });
+            ready_since = Instant::now();
+        }
+    }
+
+    fn report_capture_unavailable(&self, reason: String) {
+        self.send(FromWorker::CaptureReadiness {
+            startup: Startup::Unavailable { reason },
+        });
     }
 
     fn send(&self, message: FromWorker) {

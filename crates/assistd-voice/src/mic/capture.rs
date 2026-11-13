@@ -1,11 +1,11 @@
 //! cpal stream construction and the audio-thread callback.
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Error as CpalError, SampleFormat, Stream, StreamConfig};
+use cpal::{Device, Error as CpalError, ErrorKind, SampleFormat, Stream, StreamConfig};
 use parking_lot::Mutex;
 use ringbuf::traits::{Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
@@ -82,6 +82,7 @@ pub struct CaptureSession {
 pub struct ProducerStream {
     pub consumer: HeapCons<f32>,
     pub native_rate: u32,
+    pub failure: StreamFailure,
     pub stream: Stream,
 }
 
@@ -90,6 +91,29 @@ impl fmt::Debug for ProducerStream {
         f.debug_struct("ProducerStream")
             .field("native_rate", &self.native_rate)
             .finish_non_exhaustive()
+    }
+}
+
+/// Why an input stream stopped delivering audio, shared between cpal's
+/// error callback and the consumer draining the stream's ring.
+#[derive(Debug, Clone, Default)]
+pub struct StreamFailure(Arc<OnceLock<String>>);
+
+impl StreamFailure {
+    /// Log `error`, keeping it as the failure when it ends the stream.
+    fn observe(&self, error: &CpalError) {
+        warn!(target: "assistd::voice::mic", "cpal stream error: {error}");
+        if ends_stream(error.kind()) {
+            let _ = self.0.set(error.to_string());
+        }
+    }
+
+    /// [`AudioCaptureError::DeviceError`] once the stream has failed.
+    pub fn check(&self) -> Result<(), AudioCaptureError> {
+        match self.0.get() {
+            Some(reason) => Err(AudioCaptureError::DeviceError(reason.clone())),
+            None => Ok(()),
+        }
     }
 }
 
@@ -162,7 +186,9 @@ pub fn open_producer_stream(
     let ring = HeapRb::<f32>::new(ring_capacity_samples.max(sample_rate as usize));
     let (producer, consumer) = ring.split();
 
-    let stream = build_stream(&device, &config, sample_format, channels, producer, overrun)?;
+    let state = CallbackState::new(producer, channels, overrun);
+    let failure = StreamFailure::default();
+    let stream = build_stream(&device, &config, sample_format, state, failure.clone())?;
     stream
         .play()
         .map_err(|err| AudioCaptureError::PlayStream(err.to_string()))?;
@@ -180,6 +206,7 @@ pub fn open_producer_stream(
     Ok(ProducerStream {
         consumer,
         native_rate: sample_rate,
+        failure,
         stream,
     })
 }
@@ -221,14 +248,15 @@ fn capture_ptt(
     let ProducerStream {
         consumer,
         native_rate,
+        failure,
         stream,
     } = open_producer_stream(device_hint, ring_capacity, overrun)?;
     let _ = opened.send(());
 
     let max_pcm_samples = TARGET_SAMPLE_RATE as usize * MAX_RECORDING_SECS;
-    let pcm = consumer::drain_to_pcm(consumer, native_rate, max_pcm_samples, stop_flag)?;
+    let pcm = consumer::drain_to_pcm(consumer, native_rate, max_pcm_samples, stop_flag, &failure);
     drop(stream);
-    Ok(pcm)
+    pcm
 }
 
 /// Check that the named input device exists, logging the available ones when
@@ -315,17 +343,27 @@ fn build_stream(
     device: &Device,
     config: &StreamConfig,
     format: SampleFormat,
-    channels: usize,
-    producer: RingProducer,
-    overrun: Arc<AtomicU64>,
+    state: CallbackState,
+    failure: StreamFailure,
 ) -> Result<Stream, AudioCaptureError> {
-    let state = CallbackState::new(producer, channels, overrun);
     match format {
-        SampleFormat::F32 => build_input_stream(device, config, state, |sample: f32| sample),
-        SampleFormat::I16 => build_input_stream(device, config, state, i16_to_f32),
-        SampleFormat::U16 => build_input_stream(device, config, state, offset_binary_u16_to_f32),
+        SampleFormat::F32 => {
+            build_input_stream(device, config, state, failure, |sample: f32| sample)
+        }
+        SampleFormat::I16 => build_input_stream(device, config, state, failure, i16_to_f32),
+        SampleFormat::U16 => {
+            build_input_stream(device, config, state, failure, offset_binary_u16_to_f32)
+        }
         _ => Err(AudioCaptureError::UnsupportedFormat),
     }
+}
+
+/// Whether cpal delivers no more audio after reporting an error of `kind`.
+fn ends_stream(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::DeviceNotAvailable | ErrorKind::StreamInvalidated
+    )
 }
 
 fn i16_to_f32(sample: i16) -> f32 {
@@ -341,14 +379,36 @@ fn build_input_stream<T: cpal::SizedSample>(
     device: &Device,
     config: &StreamConfig,
     state: CallbackState,
+    failure: StreamFailure,
     to_f32: impl Fn(T) -> f32 + Send + 'static,
 ) -> Result<Stream, AudioCaptureError> {
     device
         .build_input_stream(
             *config,
             move |data: &[T], _| state.push(data, &to_f32),
-            |err: CpalError| warn!(target: "assistd::voice::mic", "cpal stream error: {err}"),
+            move |error: CpalError| failure.observe(&error),
             None,
         )
         .map_err(|err| AudioCaptureError::BuildStream(err.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_vanished_device_fails_the_recording_and_an_xrun_does_not() {
+        let released = AtomicBool::new(true);
+        let failure = StreamFailure::default();
+        let drain = || {
+            let (_producer, consumer) = HeapRb::<f32>::new(16).split();
+            consumer::drain_to_pcm(consumer, TARGET_SAMPLE_RATE, 16, &released, &failure)
+        };
+
+        failure.observe(&CpalError::new(ErrorKind::Xrun));
+        assert!(matches!(drain(), Ok(pcm) if pcm.is_empty()));
+
+        failure.observe(&CpalError::new(ErrorKind::DeviceNotAvailable));
+        assert!(matches!(drain(), Err(AudioCaptureError::DeviceError(_))));
+    }
 }

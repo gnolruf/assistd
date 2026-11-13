@@ -62,6 +62,7 @@ fn capture_continuous(
     let ProducerStream {
         consumer,
         native_rate,
+        failure,
         stream,
     } = open_producer_stream(device_hint, ring_capacity, Arc::clone(&overrun))?;
     let _ = opened.send(());
@@ -72,7 +73,7 @@ fn capture_continuous(
         "listen capture started"
     );
 
-    let result = drain_to_frames(consumer, native_rate, stop_flag, frame_tx);
+    let result = drain_to_frames(consumer, native_rate, stop_flag, frame_tx, &failure);
 
     let total_overrun = overrun.load(Ordering::Relaxed);
     if total_overrun > 0 {
