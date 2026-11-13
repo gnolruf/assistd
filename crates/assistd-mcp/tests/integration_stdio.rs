@@ -113,6 +113,17 @@ fn read_pid_file(path: &Path) -> u32 {
         .expect("pid file holds a pid")
 }
 
+/// The pid the fixture writes to `path`, once it has.
+async fn pid_written_to(path: &Path) -> u32 {
+    loop {
+        let written = std::fs::read_to_string(path).unwrap_or_default();
+        if let Ok(pid) = written.trim().parse() {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
 async fn discovers_and_invokes_a_tool_end_to_end() {
     let server = start_fake().await;
@@ -240,6 +251,42 @@ async fn server_that_stops_answering_is_killed_and_restarted() {
     );
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_abandons_a_restart_stuck_in_its_handshake() {
+    let pid_dir = tempfile::tempdir().unwrap();
+    let pid_file = pid_dir.path().join("restarted.pid");
+    let mut cfg = make_stdio_config("fake");
+    cfg.request_timeout = Duration::from_secs(60);
+    cfg.env.insert(
+        "FAKE_MCP_STALL_RESTART_PID_FILE".into(),
+        pid_file.to_string_lossy().into_owned(),
+    );
+    let server = McpServer::start("fake".into(), Connector::Stdio(cfg))
+        .await
+        .expect("server should start");
+    let _ = server.invoke("crash_me", json!({})).await;
+
+    let calls_until_one_restarts = async {
+        while !pid_file.metadata().is_ok_and(|file| file.len() > 0) {
+            let _ = server.invoke("echo", json!({"msg": "x"})).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let shutdown_during_the_restart = async {
+        let restarted = pid_written_to(&pid_file).await;
+        tokio::time::timeout(Duration::from_secs(5), server.shutdown())
+            .await
+            .expect("shutdown must not wait for the restart's handshake");
+        restarted
+    };
+    let ((), restarted) = tokio::join!(calls_until_one_restarts, shutdown_during_the_restart);
+
+    assert!(
+        wait_until_process_is_gone(restarted).await,
+        "half-started server {restarted} must be killed by the shutdown"
+    );
 }
 
 #[tokio::test]
