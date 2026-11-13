@@ -31,6 +31,10 @@ enum CycleResult {
         status: ExitStatus,
         ran_for: Duration,
     },
+    /// Child stopped answering its health check while ready and was killed.
+    HungAfterReady {
+        ran_for: Duration,
+    },
 }
 
 /// How a freshly spawned child's startup ended.
@@ -108,6 +112,14 @@ impl<S: ChildServerSpec> Supervisor<S> {
                 );
                 policy.record_session_end(ran_for);
             }
+            Ok(CycleResult::HungAfterReady { ran_for }) => {
+                warn!(
+                    target: "assistd::child_server",
+                    server,
+                    "{server} stopped answering health checks after {ran_for:?} post-ready; restarting"
+                );
+                policy.record_session_end(ran_for);
+            }
             Ok(CycleResult::FailedToStart { status }) => {
                 error!(
                     target: "assistd::child_server",
@@ -165,24 +177,30 @@ impl<S: ChildServerSpec> Supervisor<S> {
     }
 
     async fn supervise_once(&mut self) -> Result<CycleResult, ChildServerError> {
-        let mut child = ChildProcess::spawn(&self.spec)?;
+        let child = ChildProcess::spawn(&self.spec)?;
         *self.pid.lock() = child.pid();
+        let result = self.supervise_child(child).await;
+        *self.pid.lock() = None;
+        result
+    }
+
+    async fn supervise_child(
+        &mut self,
+        mut child: ChildProcess,
+    ) -> Result<CycleResult, ChildServerError> {
         let health = HealthChecker::new(&self.spec, child.process_group())?;
 
         match wait_for_startup(&mut child, &health, &mut self.shutdown_rx).await {
             StartupOutcome::Ready => {}
             StartupOutcome::ChildExited(status) => {
-                *self.pid.lock() = None;
                 return Ok(CycleResult::FailedToStart { status });
             }
             StartupOutcome::ShuttingDown => {
-                child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock() = None;
+                stop_child(child).await;
                 return Ok(CycleResult::ShutdownRequested);
             }
             StartupOutcome::StartupError(e) => {
-                child.shutdown(TERM_TIMEOUT).await?;
-                *self.pid.lock() = None;
+                stop_child(child).await;
                 return Err(e);
             }
         }
@@ -191,21 +209,32 @@ impl<S: ChildServerSpec> Supervisor<S> {
         let _ = self.ready_tx.send(ReadyState::Ready);
         info!(target: "assistd::child_server", server = self.spec.name(), "{} ready", self.spec.name());
 
-        let result = tokio::select! {
-            exit = child.wait() => match exit {
-                Ok(status) => Ok(CycleResult::CrashedAfterReady {
+        tokio::select! {
+            exit = child.wait() => {
+                let status = exit?;
+                Ok(CycleResult::CrashedAfterReady {
                     status,
                     ran_for: ready_at.elapsed(),
-                }),
-                Err(e) => Err(ChildServerError::Io(e)),
-            },
+                })
+            }
+            () = health.wait_hung() => {
+                let ran_for = ready_at.elapsed();
+                stop_child(child).await;
+                Ok(CycleResult::HungAfterReady { ran_for })
+            }
             _ = self.shutdown_rx.changed() => {
-                child.shutdown(TERM_TIMEOUT).await?;
+                stop_child(child).await;
                 Ok(CycleResult::ShutdownRequested)
             }
-        };
-        *self.pid.lock() = None;
-        result
+        }
+    }
+}
+
+/// Stop `child`, logging rather than returning a failure to reap it so the
+/// cycle's own result survives.
+async fn stop_child(child: ChildProcess) {
+    if let Err(e) = child.shutdown(TERM_TIMEOUT).await {
+        warn!(target: "assistd::child_server", "stopping child failed: {e}");
     }
 }
 

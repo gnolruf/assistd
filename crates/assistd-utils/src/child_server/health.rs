@@ -15,9 +15,12 @@ use crate::http::local_client_builder;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const LIVENESS_INTERVAL: Duration = Duration::from_secs(30);
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const HUNG_AFTER_FAILED_PROBES: u32 = 3;
 
-/// Polls the spec's health path until the child reports ready or a timeout elapses.
-/// A 200 only counts when the listener belongs to the child's process group.
+/// Polls the spec's health path: until the child reports ready, then for liveness.
+/// A ready 200 only counts when the listener belongs to the child's process group.
 pub(super) struct HealthChecker {
     server: &'static str,
     client: reqwest::Client,
@@ -70,7 +73,7 @@ impl HealthChecker {
                 _ = shutdown_rx.changed() => {
                     return Err(ChildServerError::ShutdownDuringHealth);
                 }
-                probe = self.probe() => {
+                probe = self.probe(PROBE_TIMEOUT) => {
                     match probe {
                         Ok(true) if self.served_by_child().await => return Ok(()),
                         Ok(true) => warn!(
@@ -104,6 +107,29 @@ impl HealthChecker {
         }
     }
 
+    /// Probe a ready child every [`LIVENESS_INTERVAL`] and return once
+    /// [`HUNG_AFTER_FAILED_PROBES`] probes in a row got no 200.
+    pub(super) async fn wait_hung(&self) {
+        let mut failed_probes = 0;
+        while failed_probes < HUNG_AFTER_FAILED_PROBES {
+            tokio::time::sleep(LIVENESS_INTERVAL).await;
+            let failure = match self.probe(LIVENESS_PROBE_TIMEOUT).await {
+                Ok(true) => {
+                    failed_probes = 0;
+                    continue;
+                }
+                Ok(false) => "non-200 response".to_owned(),
+                Err(e) => e.to_string(),
+            };
+            failed_probes += 1;
+            warn!(
+                target: "assistd::child_server",
+                server = self.server,
+                "health: liveness probe {failed_probes}/{HUNG_AFTER_FAILED_PROBES} failed: {failure}"
+            );
+        }
+    }
+
     async fn served_by_child(&self) -> bool {
         let (addr, owner) = (self.addr, self.owner);
         tokio::task::spawn_blocking(move || is_listening_in_group(addr, owner))
@@ -120,13 +146,8 @@ impl HealthChecker {
             })
     }
 
-    async fn probe(&self) -> Result<bool, reqwest::Error> {
-        let response = self
-            .client
-            .get(&self.url)
-            .timeout(PROBE_TIMEOUT)
-            .send()
-            .await?;
+    async fn probe(&self, timeout: Duration) -> Result<bool, reqwest::Error> {
+        let response = self.client.get(&self.url).timeout(timeout).send().await?;
         Ok(response.status() == reqwest::StatusCode::OK)
     }
 }

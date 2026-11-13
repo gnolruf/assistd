@@ -38,7 +38,8 @@ pub trait ChildServerSpec: Send + Sync + 'static {
     /// Address the child serves HTTP on, including its health endpoint.
     fn listen_addr(&self) -> SocketAddr;
 
-    /// Path whose 200 response marks the child ready.
+    /// Path whose 200 response marks the child ready, and keeps marking a
+    /// ready child alive.
     fn health_path(&self) -> &'static str {
         "/health"
     }
