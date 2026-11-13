@@ -296,12 +296,12 @@ fn spawn_background_starts(
     }
 }
 
-/// Write a default config file to the platform config directory.
+/// Write the annotated sample config to the platform config directory.
 pub(crate) fn init_config() -> Result<()> {
     init_tracing();
     let path = Config::default_path()?;
-    Config::write_default(&path)?;
-    info!("wrote default config to {}", path.display());
+    Config::write_sample(&path)?;
+    info!("wrote the sample config to {}", path.display());
     Ok(())
 }
 
