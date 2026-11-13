@@ -40,7 +40,7 @@ enum Commands {
     /// Run the assistd daemon
     Daemon(daemon::DaemonArgs),
 
-    /// Write a default config file to ~/.config/assistd/config.toml
+    /// Write the annotated sample config to ~/.config/assistd/config.toml
     InitConfig,
 
     /// Send a one-shot query to a running assistd daemon

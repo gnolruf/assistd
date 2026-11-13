@@ -106,15 +106,13 @@ fn collect_key_paths(value: &toml::Value, prefix: &str, out: &mut BTreeSet<Strin
 }
 
 #[test]
-fn sample_as_shipped_is_a_valid_config() {
-    let cfg: Config = toml::from_str(SAMPLE).expect("config.sample.toml must parse as a Config");
-    cfg.validate()
-        .expect("config.sample.toml must be a valid configuration");
-    let raw: toml::Table = toml::from_str(SAMPLE).expect("config.sample.toml must be valid TOML");
-    let unknown = cfg.unknown_keys(&raw).expect("config must serialize");
+fn sample_as_shipped_sets_no_key() {
+    let raw: toml::Value = toml::from_str(SAMPLE).expect("config.sample.toml must be valid TOML");
+    let mut live = BTreeSet::new();
+    collect_key_paths(&raw, "", &mut live);
     assert!(
-        unknown.is_empty(),
-        "config.sample.toml sets unknown keys: {unknown:?}"
+        live.is_empty(),
+        "config.sample.toml sets keys, which `init-config` would pin in every new config: {live:#?}"
     );
 }
 

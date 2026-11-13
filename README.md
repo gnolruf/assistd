@@ -109,8 +109,10 @@ libraries.
 assistd init-config
 ```
 
-This writes a working config to `~/.config/assistd/config.toml`. The
-defaults are runnable as-is. Open the file if you want to:
+This writes the annotated [sample config](config/config.sample.toml)
+to `~/.config/assistd/config.toml`. Every key in it is commented out,
+so the built-in defaults apply and keep up with later releases; they
+are runnable as-is. Uncomment a key to set it, for example to:
 
 - swap `[model] name` for a different Hugging Face GGUF
   (`owner/repo:quant`),
@@ -119,8 +121,7 @@ defaults are runnable as-is. Open the file if you want to:
 - enable voice (`[voice] enabled = true`) or TTS
   (`[voice.synthesis] enabled = true`).
 
-`init-config` refuses to overwrite an existing file. The
-[sample config](config/config.sample.toml) lists every key.
+`init-config` refuses to overwrite an existing file.
 
 ### 3. Run the daemon
 
@@ -181,7 +182,7 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 | Command                  | What it does                                                  |
 |--------------------------|---------------------------------------------------------------|
 | `assistd daemon`         | Run the daemon (foreground).                                  |
-| `assistd init-config`    | Write the default config to `~/.config/assistd/config.toml`.  |
+| `assistd init-config`    | Write the sample config to `~/.config/assistd/config.toml`.   |
 | `assistd query <text>`   | One-shot query; prints the streamed response and exits.       |
 | `assistd chat`           | Interactive ratatui TUI.                                      |
 | `assistd settings`       | Edit `config.toml` in a terminal panel (also `/settings` in chat). |

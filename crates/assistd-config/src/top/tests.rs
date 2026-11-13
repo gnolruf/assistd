@@ -18,13 +18,13 @@ fn mode_of(path: &Path) -> u32 {
 }
 
 #[test]
-fn write_default_creates_owner_only_file_and_new_parent_dirs() {
+fn write_sample_creates_owner_only_file_and_new_parent_dirs() {
     let root = tempfile::tempdir().unwrap();
     let outer = root.path().join("outer");
     let inner = outer.join("assistd");
     let path = inner.join("config.toml");
 
-    Config::write_default(&path).unwrap();
+    Config::write_sample(&path).unwrap();
 
     assert_eq!(mode_of(&path), 0o600);
     assert_eq!(mode_of(&inner), 0o700);
@@ -33,22 +33,22 @@ fn write_default_creates_owner_only_file_and_new_parent_dirs() {
 }
 
 #[test]
-fn write_default_leaves_existing_parent_mode_alone() {
+fn write_sample_leaves_existing_parent_mode_alone() {
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
 
-    Config::write_default(&root.path().join("config.toml")).unwrap();
+    Config::write_sample(&root.path().join("config.toml")).unwrap();
 
     assert_eq!(mode_of(root.path()), 0o755);
 }
 
 #[test]
-fn write_default_refuses_to_overwrite_an_existing_file() {
+fn write_sample_refuses_to_overwrite_an_existing_file() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("config.toml");
     fs::write(&path, "# mine\n").unwrap();
 
-    let error = Config::write_default(&path).unwrap_err();
+    let error = Config::write_sample(&path).unwrap_err();
 
     assert!(matches!(error, ConfigError::AlreadyExists(ref existing) if existing == &path));
     assert_eq!(fs::read_to_string(&path).unwrap(), "# mine\n");
