@@ -7,7 +7,6 @@ use std::time::Duration;
 use assistd_ipc::{IpcClient, Request, RequestBody};
 use crossterm::event::Event as TermEvent;
 use tokio::sync::{Notify, watch};
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -25,34 +24,32 @@ pub(super) fn track(focus: &watch::Sender<bool>, ev: &TermEvent) {
 
 /// Send the focus to the daemon now, on every change, and whenever `daemon_attached` is
 /// notified, so a restarted daemon learns it, until `shutdown` flips.
-pub(super) fn spawn_reporter(
+pub(super) async fn report_changes(
     ipc: Arc<IpcClient>,
     mut focus: watch::Receiver<bool>,
     daemon_attached: Arc<Notify>,
     mut shutdown: watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let focused = *focus.borrow_and_update();
-            send(
-                &ipc,
-                Request::new(
-                    Uuid::new_v4().to_string(),
-                    RequestBody::ChatState { focused },
-                ),
-            )
-            .await;
-            tokio::select! {
-                _ = shutdown.changed() => break,
-                changed = focus.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
+) {
+    loop {
+        let focused = *focus.borrow_and_update();
+        send(
+            &ipc,
+            Request::new(
+                Uuid::new_v4().to_string(),
+                RequestBody::ChatState { focused },
+            ),
+        )
+        .await;
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            changed = focus.changed() => {
+                if changed.is_err() {
+                    break;
                 }
-                () = daemon_attached.notified() => {}
             }
+            () = daemon_attached.notified() => {}
         }
-    })
+    }
 }
 
 /// Tell the daemon the chat is exiting, giving up after [`CLOSE_TIMEOUT`].
