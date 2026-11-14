@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use client::terminal_text::escape_controls;
-use client::{listen, mcp, memory, presence, ptt, query, task, voice_ctl};
+use client::{listen, mcp, memory, presence, ptt, task, voice_ctl};
 
 #[cfg(feature = "chat")]
 mod chat;
@@ -45,9 +45,6 @@ enum Commands {
 
     /// Write the annotated sample config to ~/.config/assistd/config.toml
     InitConfig,
-
-    /// Send a one-shot query to a running assistd daemon
-    Query(query::QueryArgs),
 
     /// Drive a running daemon to Sleeping (stop llama-server, free all VRAM)
     Sleep,
@@ -158,7 +155,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Daemon(args) => daemon::run(args).await,
         Commands::InitConfig => daemon::init_config(),
-        Commands::Query(args) => query::run(args).await,
         Commands::Sleep => presence::run(PresenceTarget::Sleeping).await,
         Commands::Drowse => presence::run(PresenceTarget::Drowsy).await,
         Commands::Wake => presence::run(PresenceTarget::Active).await,

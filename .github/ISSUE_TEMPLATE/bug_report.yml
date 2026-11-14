@@ -22,7 +22,7 @@ body:
       description: The smallest command, prompt or config that triggers it.
       placeholder: |
         1. assistd daemon
-        2. assistd query "..."
+        2. assistd chat, then send "..."
         3. ...
     validations:
       required: true

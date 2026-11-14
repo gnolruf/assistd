@@ -1,4 +1,4 @@
-//! Reading and validating image files, as wire attachments or command attachments.
+//! Reading image files as command attachments, and validating image bytes.
 
 use std::fmt;
 use std::io;
@@ -13,14 +13,7 @@ use assistd_utils::text::human_size;
 
 use crate::command::Attachment;
 
-/// A validated image read by [`load_image`].
-#[derive(Debug)]
-pub struct LoadedImage {
-    pub mime: ImageMime,
-    pub bytes: Vec<u8>,
-}
-
-/// Why [`load_image`] refused a file.
+/// Why [`load_image_attachment`] refused a file.
 #[derive(Debug)]
 pub enum LoadImageError {
     Io {
@@ -121,17 +114,10 @@ impl std::error::Error for LoadImageError {
     }
 }
 
-/// Read `path` as a supported image, returning the attachment and its size
-/// in bytes.
+/// Read `path` as a supported image no larger than [`MAX_IMAGE_BYTES`], returning the attachment
+/// and its size in bytes. The size is checked from metadata before the read, and the read stops
+/// past the limit.
 pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), LoadImageError> {
-    let LoadedImage { mime, bytes } = load_image(path).await?;
-    let size = bytes.len();
-    Ok((Attachment::Image { mime, bytes }, size))
-}
-
-/// Read `path` and validate it is a supported image no larger than [`MAX_IMAGE_BYTES`]. The size
-/// is checked from metadata before the read, and the read stops past the limit.
-pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
     let display_path = || path.display().to_string();
     let io_error = |source: io::Error| LoadImageError::Io {
         path: display_path(),
@@ -156,7 +142,8 @@ pub async fn load_image(path: &Path) -> Result<LoadedImage, LoadImageError> {
         return Err(too_large(read));
     }
     let mime = sniff_image(&bytes).map_err(|e| e.at_path(display_path()))?;
-    Ok(LoadedImage { mime, bytes })
+    let byte_count = bytes.len();
+    Ok((Attachment::Image { mime, bytes }, byte_count))
 }
 
 /// Detect the format of `bytes` from its magic number, accepting only PNG, JPEG and WebP.
@@ -198,7 +185,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("anim.gif");
         tokio::fs::write(&path, GIF_BYTES).await.unwrap();
-        let err = load_image(&path).await.unwrap_err();
+        let err = load_image_attachment(&path).await.unwrap_err();
         match err {
             LoadImageError::UnsupportedFormat { mime, .. } => assert_eq!(mime, "image/gif"),
             other => panic!("expected UnsupportedFormat, got {other:?}"),
@@ -212,7 +199,7 @@ mod tests {
         let sparse = tokio::fs::File::create(&path).await.unwrap();
         sparse.set_len(MAX_IMAGE_BYTES + 1).await.unwrap();
         drop(sparse);
-        let err = load_image(&path).await.unwrap_err();
+        let err = load_image_attachment(&path).await.unwrap_err();
         match err {
             LoadImageError::TooLarge { size, max, .. } => {
                 assert_eq!(size, MAX_IMAGE_BYTES + 1);
@@ -228,7 +215,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let fifo = dir.path().join("pipe.png");
         rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::from_raw_mode(0o600)).unwrap();
-        let err = tokio::time::timeout(Duration::from_secs(5), load_image(&fifo))
+        let err = tokio::time::timeout(Duration::from_secs(5), load_image_attachment(&fifo))
             .await
             .expect("loading a FIFO must not block")
             .unwrap_err();

@@ -497,27 +497,6 @@ impl Request {
         }
     }
 
-    /// Build a text-only [`RequestBody::Query`].
-    pub fn query(id: impl Into<String>, text: impl Into<String>) -> Self {
-        Self::query_with_attachments(id, text, Vec::new())
-    }
-
-    /// Build a [`RequestBody::Query`] with image attachments.
-    pub fn query_with_attachments(
-        id: impl Into<String>,
-        text: impl Into<String>,
-        attachments: Vec<ImageAttachment>,
-    ) -> Self {
-        Self::new(
-            id,
-            RequestBody::Query {
-                text: text.into(),
-                attachments,
-                plan: PlanMode::Off,
-            },
-        )
-    }
-
     /// The variant's wire `"type"` tag.
     pub fn kind(&self) -> &'static str {
         match self.body {

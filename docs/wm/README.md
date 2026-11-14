@@ -54,18 +54,16 @@ guides have the config snippets.
 After reloading the compositor config:
 
 ```sh
-# 1. Daemon up?
-assistd query "what time is it"
-
-# 2. Presence changes work?
+# 1. Daemon up, and presence changes work? Each prints the new state,
+#    or fails with "daemon is not running".
 assistd drowse  # Active → Drowsy
 assistd sleep   # Drowsy → Sleeping
 assistd wake    # blocks until Active
 
-# 3. Scratchpad visible?
+# 2. Scratchpad visible?
 #    Press $mod+grave; the chat should appear floating, centered.
 
-# 4. PTT round-trips?
+# 3. PTT round-trips?
 #    Hold $mod+space, say "hello", release. The chat streams the response.
 ```
 

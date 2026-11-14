@@ -9,7 +9,6 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 pub(crate) mod presence;
 pub(crate) mod ptt;
-pub(crate) mod query;
 pub(crate) mod task;
 pub(crate) mod terminal_text;
 pub(crate) mod voice_ctl;

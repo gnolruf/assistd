@@ -11,7 +11,6 @@ reply.
 flowchart TB
     subgraph clients["Clients"]
         direction LR
-        query["assistd query"]
         chat["assistd chat (TUI)"]
         ptt["assistd ptt-start / sleep"]
         hooks["Compositor hooks<br/>(i3 / Sway exec)"]
@@ -77,7 +76,7 @@ three. `core` sits at the top because it's where every subsystem is
 wired into a working daemon.
 
 The same binary also ships several client subcommands that speak the
-Unix-socket IPC: `query`, `chat`, `sleep` / `wake` / `drowse`,
+Unix-socket IPC: `chat`, `sleep` / `wake` / `drowse`,
 `ptt-start` / `ptt-stop`, `listen-*`, `voice-*`, `memory`, and `tray`. The tray subcommand is a long-lived
 [StatusNotifierItem](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)
 client (via the [`ksni`](https://crates.io/crates/ksni) crate): it
@@ -458,7 +457,7 @@ can change mid-turn. While it is set every ask is refused and counted, and an ag
 built by `Planner::chat_agent` offers, before each step, the planning registry
 plus `exit_plan_mode` in place of the main registry plus `enter_plan_mode`; its
 conversation carries the plan-mode note only while planning. A query's `plan`
-says whether its turn may plan: `off` for voice and `assistd query`, which get
+says whether its turn may plan: `off`, the default and what voice turns use, which gets
 the plain agent; `offered` for chat messages; `planning` for chat messages sent
 in plan mode, which start with the flag set.
 
@@ -589,9 +588,8 @@ yet approved, in every mode, and follows redirects only to the same or an approv
 vision projector. "Always allow" for a web host, an MCP tool or an application is saved
 beside the config in `approved_hosts.toml`, `approved_mcp_tools.toml` or
 `approved_apps.toml`.
-`assistd query` cannot answer prompts and denies them, so there only
-approved hosts, tools and programs run. A turn asked by voice (push-to-talk
-or the wake word) has nobody to answer either: it runs in accept-edits mode
+A turn asked by voice (push-to-talk
+or the wake word) has nobody to answer prompts: it runs in accept-edits mode
 and every other prompt is denied at once, without being shown to any client.
 
 A query connection starts in manual mode, where every prompt goes to the
@@ -891,12 +889,13 @@ daemon's own client talks to SearXNG.
 
 ## Data flow: end-to-end query
 
-A walk through `assistd query "what files changed this week?"`:
+A walk through "what files changed this week?" typed into `assistd chat`:
 
-1. **Client.** `assistd query` constructs a `Request` with an `id` and a
-   `RequestBody::Query { text, attachments: [] }`, dials
-   `$XDG_RUNTIME_DIR/assistd.sock`, writes the JSON line, half-closes
-   the write side, and reads `Event` lines until `Done`.
+1. **Client.** The chat constructs a `Request` with an `id` and a
+   `RequestBody::Query { text, attachments: [], plan }`, dials
+   `$XDG_RUNTIME_DIR/assistd.sock`, writes the JSON line, and reads
+   `Event` lines until `Done`, keeping the write side open to answer
+   confirmation prompts with `RequestBody::ConfirmResponse`.
 
 2. **Socket server** ([`crates/assistd-core/src/socket.rs`](../crates/assistd-core/src/socket.rs)).
    Parses the request and hands it to `AppState::dispatch` with the
@@ -974,17 +973,16 @@ A walk through `assistd query "what files changed this week?"`:
    Tokens stream out as `EventBody::Delta`s, the loop closes with
    `EventBody::Done`, the socket connection closes.
 
-8. **Client output.** `assistd query` prints deltas as they arrive,
-   exits 0 on `Done` or non-zero on `Error`.
+8. **Client output.** The chat renders deltas as they arrive and ends
+   the reply on `Done` or `Error`.
 
 For push-to-talk, `assistd ptt-stop` sends `RequestBody::PttStop`
 instead; `dispatch` routes it to `VoiceService::handle_ptt_stop`, which
 transcribes the recording and emits `EventBody::Transcription`, and then
 runs the prompt it returns as a turn from step 3 on.
 
-For `assistd chat`, the TUI is a long-lived client but not a single
-connection: each turn opens its own connection, kept writable so the
-TUI can answer confirmation prompts with `RequestBody::ConfirmResponse`,
+The TUI is a long-lived client but not a single
+connection: each turn opens its own connection,
 while separate long-lived `RequestBody::Subscribe` connections carry
 broadcast events such as session titles. A subscription opens with the
 current task queue, presence, listen phase and capture state and is sent
