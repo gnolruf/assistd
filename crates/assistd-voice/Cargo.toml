@@ -6,25 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["stt", "mic", "listen", "tts"]
-stt = [
-    "dep:nvml-wrapper",
-    "dep:num-traits",
-    "dep:sherpa-onnx",
-]
-# Requires `stt` because `MicVoiceInput` hands its audio to a `Transcriber`.
-mic = ["stt", "dep:cpal", "dep:ringbuf", "dep:rubato"]
-listen = ["mic", "dep:sentencepiece-rust"]
-# Pulls in rodio (which itself uses cpal) and sherpa-onnx.
-tts = [
-    "dep:rodio",
-    "dep:sherpa-onnx",
-]
-test-support = ["stt", "mic", "listen", "tts", "assistd-utils/test-support"]
-
-[[example]]
-name = "voice_latency_bench"
-required-features = ["stt", "tts"]
+test-support = ["assistd-utils/test-support"]
 
 [dependencies]
 dirs = { workspace = true }
@@ -41,16 +23,16 @@ rustix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-nvml-wrapper = { workspace = true, optional = true }
-num-traits = { workspace = true, optional = true }
+nvml-wrapper = { workspace = true }
+num-traits = { workspace = true }
 
-cpal = { workspace = true, optional = true }
-ringbuf = { workspace = true, optional = true }
-rubato = { workspace = true, optional = true }
+cpal = { workspace = true }
+ringbuf = { workspace = true }
+rubato = { workspace = true }
 
-rodio = { workspace = true, optional = true }
-sherpa-onnx = { workspace = true, optional = true }
-sentencepiece-rust = { workspace = true, optional = true }
+rodio = { workspace = true }
+sherpa-onnx = { workspace = true }
+sentencepiece-rust = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }

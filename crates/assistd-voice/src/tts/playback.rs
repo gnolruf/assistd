@@ -9,10 +9,11 @@ use std::time::Duration;
 use rodio::buffer::SamplesBuffer;
 use rodio::cpal::traits::HostTrait;
 use rodio::stream::DeviceSinkBuilder;
-use rodio::{ChannelCount, DeviceTrait, Player, cpal};
+use rodio::{ChannelCount, Player, cpal};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
+use crate::device::device_name;
 use crate::tts::engine::Utterance;
 use crate::tts::error::SpeechError;
 
@@ -21,9 +22,6 @@ const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How long past the expected end of the queued audio `drain` waits before
 /// calling the output stalled.
 const DRAIN_STALL_MARGIN: Duration = Duration::from_secs(5);
-
-/// How long `Drop` waits for the device thread before abandoning the join.
-const DROP_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Owns the rodio playback path. `Player` calls that can block on rodio's
 /// queue mutex run on the blocking pool. A stream that stalls is closed by
@@ -126,21 +124,19 @@ impl RodioPlaybackWorker {
     }
 }
 
-/// One open output stream. The `!Send` device sink lives on a dedicated
-/// thread until the stream is dropped.
+/// One open output stream. The `!Send` device sink lives on a dedicated,
+/// detached thread that closes it once the stream is dropped.
 struct OutputStream {
     player: Player,
     /// When the audio queued so far should have finished playing.
     queued_until: parking_lot::Mutex<Instant>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
-    device_thread: Option<thread::JoinHandle<()>>,
+    shutdown_tx: mpsc::Sender<()>,
 }
 
 impl fmt::Debug for OutputStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OutputStream")
             .field("queued_until", &self.queued_until)
-            .field("device_thread", &self.device_thread)
             .finish_non_exhaustive()
     }
 }
@@ -158,7 +154,7 @@ impl OutputStream {
 
         let (init_tx, init_rx) = mpsc::channel::<Result<Player, String>>();
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
-        let device_thread = spawn_device_thread(selected, init_tx, shutdown_rx)?;
+        spawn_device_thread(selected, init_tx, shutdown_rx)?;
 
         let player = init_rx
             .recv()
@@ -168,8 +164,7 @@ impl OutputStream {
         Ok(Self {
             player,
             queued_until: parking_lot::Mutex::new(Instant::now()),
-            shutdown_tx: Some(shutdown_tx),
-            device_thread: Some(device_thread),
+            shutdown_tx,
         })
     }
 
@@ -190,24 +185,8 @@ impl OutputStream {
 
 impl Drop for OutputStream {
     fn drop(&mut self) {
-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            let _ = shutdown_tx.send(());
-        }
-        if let Some(device_thread) = self.device_thread.take() {
-            join_off_runtime(device_thread);
-        }
+        let _ = self.shutdown_tx.send(());
     }
-}
-
-fn device_name(device: &cpal::Device) -> String {
-    device.description().map_or_else(
-        |_| "<unknown>".into(),
-        |description| {
-            description
-                .driver()
-                .map_or_else(|| description.name().to_string(), str::to_string)
-        },
-    )
 }
 
 /// Log the available outputs, then pick the named one or the default.
@@ -285,10 +264,11 @@ fn spawn_device_thread(
     device: Option<cpal::Device>,
     init_tx: mpsc::Sender<Result<Player, String>>,
     shutdown_rx: mpsc::Receiver<()>,
-) -> Result<thread::JoinHandle<()>, SpeechError> {
+) -> Result<(), SpeechError> {
     thread::Builder::new()
         .name("tts-rodio".into())
         .spawn(move || run_device_thread(device, &init_tx, &shutdown_rx))
+        .map(drop)
         .map_err(|err| SpeechError::Audio(format!("spawn audio thread: {err}")))
 }
 
@@ -324,44 +304,6 @@ fn run_device_thread(
     drop(device_sink);
 }
 
-/// Run [`join_with_timeout`] on the blocking pool when dropped inside a
-/// runtime, so no async worker waits on the device; runtime shutdown still
-/// waits for it.
-fn join_off_runtime(device_thread: thread::JoinHandle<()>) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(runtime) => drop(runtime.spawn_blocking(move || join_with_timeout(device_thread))),
-        Err(_) => join_with_timeout(device_thread),
-    }
-}
-
-/// Join `device_thread` from a watchdog thread so a wedged audio device cannot
-/// hang shutdown; on timeout or spawn failure the thread is left detached.
-fn join_with_timeout(device_thread: thread::JoinHandle<()>) {
-    let (done_tx, done_rx) = mpsc::channel::<()>();
-    let spawned = thread::Builder::new()
-        .name("tts-rodio-drop-watchdog".into())
-        .spawn(move || {
-            let _ = device_thread.join();
-            let _ = done_tx.send(());
-        });
-    match spawned {
-        Ok(_) => {
-            if done_rx.recv_timeout(DROP_JOIN_TIMEOUT).is_err() {
-                tracing::error!(
-                    target: "assistd::voice::tts",
-                    timeout_secs = DROP_JOIN_TIMEOUT.as_secs(),
-                    "rodio device thread did not exit within budget; abandoning join"
-                );
-            }
-        }
-        Err(err) => tracing::warn!(
-            target: "assistd::voice::tts",
-            error = %err,
-            "could not spawn drop watchdog; device thread detached"
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,8 +316,7 @@ mod tests {
             stream: Mutex::new(Some(Arc::new(OutputStream {
                 player,
                 queued_until: parking_lot::Mutex::new(Instant::now()),
-                shutdown_tx: None,
-                device_thread: None,
+                shutdown_tx: mpsc::channel().0,
             }))),
         };
         let two_seconds = Utterance {

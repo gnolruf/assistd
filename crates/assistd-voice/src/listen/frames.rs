@@ -1,78 +1,52 @@
-//! Continuous-listen ring consumer: emits 20 ms 16 kHz i16 frames over
-//! a channel.
+//! Continuous-listen capture sink: cuts captured audio into 20 ms 16 kHz i16
+//! frames for the VAD task.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::ops::ControlFlow;
 
-use ringbuf::HeapCons;
-use ringbuf::traits::Observer;
 use tokio::sync::mpsc;
 use tracing::debug;
 
 use super::vad::FRAME_SAMPLES;
-use crate::mic::capture::{AudioCaptureError, StreamFailure};
-use crate::mic::resample::{CHUNK_SIZE, ChunkResampler, f32_to_i16};
+use crate::mic::consumer::ChunkSink;
+use crate::mic::resample::f32_to_i16;
 
-const IDLE_PARK: Duration = Duration::from_millis(10);
+/// Sends each complete 20 ms frame on a channel, ending the capture once
+/// the receiver is dropped.
+#[derive(Debug)]
+pub struct FrameSink {
+    frame_tx: mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
+    pending: Vec<i16>,
+}
 
-/// Emit 20 ms frames on `frame_tx` until `stop_flag` is set. A dropped
-/// receiver is a silent stop; errors once `failure` says the stream
-/// feeding the ring has failed.
-pub fn drain_to_frames(
-    mut consumer: HeapCons<f32>,
-    native_rate: u32,
-    stop_flag: &AtomicBool,
-    frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
-    failure: &StreamFailure,
-) -> Result<(), AudioCaptureError> {
-    let mut resampler = ChunkResampler::new(native_rate)?;
-    let mut pending: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 2);
-    let mut frames_emitted: u64 = 0;
-
-    loop {
-        if consumer.occupied_len() >= CHUNK_SIZE {
-            if let Some(samples) = resampler.pull(&mut consumer)? {
-                pending.extend(samples.iter().map(|&sample| f32_to_i16(sample)));
-            }
-            if !send_full_frames(&mut pending, frame_tx, &mut frames_emitted) {
-                return Ok(());
-            }
-            continue;
+impl FrameSink {
+    pub fn new(frame_tx: mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>) -> Self {
+        Self {
+            frame_tx,
+            pending: Vec::with_capacity(FRAME_SAMPLES * 2),
         }
-
-        failure.check()?;
-        if stop_flag.load(Ordering::Relaxed) {
-            debug!(
-                target: "assistd::voice::listen",
-                frames_emitted,
-                "stop_flag observed; ending stream"
-            );
-            return Ok(());
-        }
-
-        std::thread::park_timeout(IDLE_PARK);
     }
 }
 
-/// Send every complete frame buffered in `pending`. False once the receiver is dropped.
-fn send_full_frames(
-    pending: &mut Vec<i16>,
-    frame_tx: &mpsc::Sender<Box<[i16; FRAME_SAMPLES]>>,
-    frames_emitted: &mut u64,
-) -> bool {
-    while pending.len() >= FRAME_SAMPLES {
-        let mut frame = Box::new([0i16; FRAME_SAMPLES]);
-        frame.copy_from_slice(&pending[..FRAME_SAMPLES]);
-        pending.drain(..FRAME_SAMPLES);
-        if frame_tx.blocking_send(frame).is_err() {
-            debug!(
-                target: "assistd::voice::listen",
-                frames_emitted = *frames_emitted,
-                "frame receiver dropped; stopping capture"
-            );
-            return false;
+impl ChunkSink for FrameSink {
+    type Captured = ();
+
+    fn accept(&mut self, chunk: &[f32]) -> ControlFlow<()> {
+        self.pending
+            .extend(chunk.iter().map(|&sample| f32_to_i16(sample)));
+        while self.pending.len() >= FRAME_SAMPLES {
+            let mut frame = Box::new([0i16; FRAME_SAMPLES]);
+            frame.copy_from_slice(&self.pending[..FRAME_SAMPLES]);
+            self.pending.drain(..FRAME_SAMPLES);
+            if self.frame_tx.blocking_send(frame).is_err() {
+                debug!(
+                    target: "assistd::voice::listen",
+                    "frame receiver dropped; stopping capture"
+                );
+                return ControlFlow::Break(());
+            }
         }
-        *frames_emitted += 1;
+        ControlFlow::Continue(())
     }
-    true
+
+    fn finish(self) {}
 }

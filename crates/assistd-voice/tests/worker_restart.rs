@@ -2,8 +2,6 @@
 //! real path: killing it mid-speech fails the speech, reports voice starting,
 //! and the restarted worker brings voice back.
 
-#![cfg(all(feature = "listen", feature = "tts"))]
-
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;

@@ -14,19 +14,14 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use super::consumer;
+use super::consumer::{self, ChunkSink};
+use crate::device::device_name;
 
 /// The transcriber's input rate; the consumer resamples the device rate to it.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
-/// Native rate assumed when sizing the push-to-talk ring before the device is opened.
-const ASSUMED_NATIVE_RATE: usize = 48_000;
-
-/// Seconds of native audio the push-to-talk ring holds while the consumer catches up.
-const RING_SECS: usize = 2;
-
-/// Push-to-talk recording length past which audio is dropped; guards a stuck key.
-const MAX_RECORDING_SECS: usize = 120;
+/// Seconds of native audio the ring holds while the consumer catches up.
+const RING_SECS: usize = 5;
 
 /// Errors produced during cpal audio capture.
 #[derive(Debug, Error)]
@@ -67,14 +62,13 @@ pub(crate) enum DeviceValidationError {
     NotFound { requested: String, listing: String },
 }
 
-/// Handles to a running push-to-talk capture. `opened` resolves once the
-/// device is recording and errors if it failed to open.
+/// Handles to a running capture that ends with a `T`. `opened` resolves once
+/// the device is recording and errors if it failed to open.
 #[derive(Debug)]
-pub struct CaptureSession {
+pub struct CaptureSession<T> {
     pub stop_flag: Arc<AtomicBool>,
-    pub overrun: Arc<AtomicU64>,
     pub opened: oneshot::Receiver<()>,
-    pub handle: JoinHandle<Result<Vec<i16>, AudioCaptureError>>,
+    pub handle: JoinHandle<Result<T, AudioCaptureError>>,
 }
 
 /// A running input stream and the ring consumer it feeds. `stream` is
@@ -83,6 +77,8 @@ pub struct ProducerStream {
     pub consumer: HeapCons<f32>,
     pub native_rate: u32,
     pub failure: StreamFailure,
+    /// Samples the callback dropped on a full ring.
+    pub overrun: Arc<AtomicU64>,
     pub stream: Stream,
 }
 
@@ -164,16 +160,13 @@ impl CallbackState {
 }
 
 /// Open the input device and start a stream pushing mono f32 samples
-/// at the native rate into a ring of `ring_capacity_samples`. The
-/// callback bumps `overrun` for every sample dropped on a full ring.
+/// at the native rate into a ring.
 pub fn open_producer_stream(
     device_hint: Option<&str>,
-    ring_capacity_samples: usize,
-    overrun: Arc<AtomicU64>,
 ) -> Result<ProducerStream, AudioCaptureError> {
     let host = cpal::default_host();
     let device = select_device(&host, device_hint)?;
-    let device_name = device_name(&device).unwrap_or_else(|_| "<unknown>".to_string());
+    let device_name = device_name(&device);
 
     let supported = device
         .default_input_config()
@@ -183,10 +176,11 @@ pub fn open_producer_stream(
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
 
-    let ring = HeapRb::<f32>::new(ring_capacity_samples.max(sample_rate as usize));
-    let (producer, consumer) = ring.split();
+    let ring_capacity = sample_rate as usize * RING_SECS;
+    let (producer, consumer) = HeapRb::<f32>::new(ring_capacity).split();
 
-    let state = CallbackState::new(producer, channels, overrun);
+    let overrun = Arc::new(AtomicU64::new(0));
+    let state = CallbackState::new(producer, channels, Arc::clone(&overrun));
     let failure = StreamFailure::default();
     let stream = build_stream(&device, &config, sample_format, state, failure.clone())?;
     stream
@@ -199,7 +193,7 @@ pub fn open_producer_stream(
         sample_rate,
         channels,
         format = ?sample_format,
-        ring_capacity = ring_capacity_samples,
+        ring_capacity,
         "audio stream started"
     );
 
@@ -207,56 +201,58 @@ pub fn open_producer_stream(
         consumer,
         native_rate: sample_rate,
         failure,
+        overrun,
         stream,
     })
 }
 
-/// Spawn a blocking worker that records until stopped and returns the
-/// 16 kHz mono i16 PCM.
-pub fn start(device_hint: Option<&str>) -> CaptureSession {
+/// Spawn a blocking worker that feeds `sink` 16 kHz mono audio from the
+/// device until the stop flag is set or the sink ends the capture.
+pub fn start<S: ChunkSink>(device_hint: Option<&str>, sink: S) -> CaptureSession<S::Captured> {
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let overrun = Arc::new(AtomicU64::new(0));
     let device_hint_owned = device_hint.map(str::to_string);
 
     let (opened_tx, opened) = oneshot::channel();
     let worker_stop = Arc::clone(&stop_flag);
-    let worker_overrun = Arc::clone(&overrun);
     let handle = tokio::task::spawn_blocking(move || {
-        capture_ptt(
-            device_hint_owned.as_deref(),
-            &worker_stop,
-            worker_overrun,
-            opened_tx,
-        )
+        capture_into(device_hint_owned.as_deref(), &worker_stop, sink, opened_tx)
     });
 
     CaptureSession {
         stop_flag,
-        overrun,
         opened,
         handle,
     }
 }
 
-fn capture_ptt(
+fn capture_into<S: ChunkSink>(
     device_hint: Option<&str>,
     stop_flag: &AtomicBool,
-    overrun: Arc<AtomicU64>,
+    sink: S,
     opened: oneshot::Sender<()>,
-) -> Result<Vec<i16>, AudioCaptureError> {
-    let ring_capacity = ASSUMED_NATIVE_RATE * RING_SECS;
+) -> Result<S::Captured, AudioCaptureError> {
     let ProducerStream {
         consumer,
         native_rate,
         failure,
+        overrun,
         stream,
-    } = open_producer_stream(device_hint, ring_capacity, overrun)?;
+    } = open_producer_stream(device_hint)?;
     let _ = opened.send(());
 
-    let max_pcm_samples = TARGET_SAMPLE_RATE as usize * MAX_RECORDING_SECS;
-    let pcm = consumer::drain_to_pcm(consumer, native_rate, max_pcm_samples, stop_flag, &failure);
+    let captured = consumer::drain(consumer, native_rate, stop_flag, &failure, sink);
+
+    let overrun_samples = overrun.load(Ordering::Relaxed);
+    if overrun_samples > 0 {
+        warn!(
+            target: "assistd::voice::mic",
+            overrun_samples,
+            "ring buffer overrun during capture; audio was truncated"
+        );
+    }
+
     drop(stream);
-    pcm
+    captured
 }
 
 /// Check that the named input device exists, logging the available ones when
@@ -265,9 +261,7 @@ fn capture_ptt(
 pub(crate) fn validate(requested: Option<&str>) -> Result<(), DeviceValidationError> {
     let host = cpal::default_host();
     let names: Vec<String> = match host.input_devices() {
-        Ok(devices) => devices
-            .map(|device| device_name(&device).unwrap_or_else(|_| "<unknown>".to_string()))
-            .collect(),
+        Ok(devices) => devices.map(|device| device_name(&device)).collect(),
         Err(source) => match requested {
             Some(requested) => {
                 return Err(DeviceValidationError::Enumerate {
@@ -293,8 +287,7 @@ pub(crate) fn validate(requested: Option<&str>) -> Result<(), DeviceValidationEr
 fn log_devices(host: &cpal::Host, names: &[String]) {
     let default_name = host
         .default_input_device()
-        .and_then(|device| device_name(&device).ok())
-        .unwrap_or_else(|| "<none>".to_string());
+        .map_or_else(|| "<none>".to_string(), |device| device_name(&device));
     tracing::info!(
         target: "assistd::voice::mic",
         default = %default_name,
@@ -314,14 +307,6 @@ fn device_listing(names: &[String]) -> String {
         .join(", ")
 }
 
-fn device_name(device: &Device) -> Result<String, CpalError> {
-    device.description().map(|description| {
-        description
-            .driver()
-            .map_or_else(|| description.name().to_string(), str::to_string)
-    })
-}
-
 /// The named input device, or the system default when `hint` is `None`.
 pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, AudioCaptureError> {
     match hint {
@@ -333,7 +318,7 @@ pub fn select_device(host: &cpal::Host, hint: Option<&str>) -> Result<Device, Au
                 .input_devices()
                 .map_err(|err| AudioCaptureError::DefaultConfig(err.to_string()))?;
             devices
-                .find(|device| device_name(device).is_ok_and(|candidate| candidate == name))
+                .find(|device| device_name(device) == name)
                 .ok_or_else(|| AudioCaptureError::NoMatchingDevice(name.to_string()))
         }
     }
@@ -394,6 +379,7 @@ fn build_input_stream<T: cpal::SizedSample>(
 
 #[cfg(test)]
 mod tests {
+    use super::consumer::PcmRecording;
     use super::*;
 
     #[test]
@@ -402,7 +388,13 @@ mod tests {
         let failure = StreamFailure::default();
         let drain = || {
             let (_producer, consumer) = HeapRb::<f32>::new(16).split();
-            consumer::drain_to_pcm(consumer, TARGET_SAMPLE_RATE, 16, &released, &failure)
+            consumer::drain(
+                consumer,
+                TARGET_SAMPLE_RATE,
+                &released,
+                &failure,
+                PcmRecording::capped_at(16),
+            )
         };
 
         failure.observe(&CpalError::new(ErrorKind::Xrun));

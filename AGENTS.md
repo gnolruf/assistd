@@ -135,7 +135,7 @@ and data-flow walkthrough.
 | `assistd-search` | SearXNG launch spec: the `ChildServerSpec` for the daemon-supervised search instance, run with a generated settings file, its `SEARXNG_*` environment replaced, and a per-launch secret; plus `SearxngClient`, a typed client for its JSON search API. |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
 | `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, capped child-output line forwarding, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the `ProcessGroup` kill-on-drop guard, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor (spawn, `/health` poll checked against `/proc` listener ownership, restart, degrade) that both llama-servers run under. No internal deps. |
-| `assistd-voice`  | `VoiceInput` (Parakeet STT and Silero VAD through `sherpa-onnx`, push-to-talk and VAD continuous modes), `VoiceOutput` (sherpa-onnx TTS streamed sentence-by-sentence, Piper voices phonemized by spawning `espeak-ng`), adaptive `SpeakDecision`, plus the voice worker: the protocol, the worker side the hidden `assistd voice-worker` subcommand runs, and the daemon-side proxies and supervisor. Feature-gated (`stt`, `mic`, `listen`, `tts`). |
+| `assistd-voice`  | `VoiceInput` (Parakeet STT and Silero VAD through `sherpa-onnx`, push-to-talk and VAD continuous modes), `VoiceOutput` (sherpa-onnx TTS streamed sentence-by-sentence, Piper voices phonemized by spawning `espeak-ng`), adaptive `SpeakDecision`, plus the voice worker: the protocol, the worker side the hidden `assistd voice-worker` subcommand runs, and the daemon-side proxies and supervisor. |
 | `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback. Backs both the system-prompt active-window injection and the `wm` command, including `wm open`'s launches through the compositor. Feature-gated per compositor. |
 
 **Dependency direction.** Crates lower in the table do not depend on
@@ -156,10 +156,10 @@ stays where it is used.
   `workspace.dependencies` in the root `Cargo.toml` — do not pin
   versions per-crate. If you need a new third-party crate, add it
   there first.
-- **Respect feature flags.** Crates like `assistd-voice` and
-  `assistd-wm` gate large dep trees behind features. Don't promote
-  a feature-gated import into an unconditional dependency to
-  silence a build error — fix the feature wiring.
+- **Respect feature flags.** Crates like `assistd-wm` gate large
+  dep trees behind features. Don't promote a feature-gated import
+  into an unconditional dependency to silence a build error — fix
+  the feature wiring.
 - **External processes are supervised, not assumed.** `llama-server`,
   the embedding `llama-server`, SearXNG, MCP servers and the voice worker
   are all child processes with supervisors that handle restart and

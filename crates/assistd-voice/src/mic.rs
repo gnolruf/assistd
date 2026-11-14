@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::info;
 
+use self::consumer::PcmRecording;
 use crate::transcribe::Transcriber;
 use crate::{VoiceCaptureState, VoiceInput, VoiceInputError};
 
@@ -17,6 +18,11 @@ pub mod consumer;
 pub(crate) mod resample;
 
 pub use capture::AudioCaptureError;
+
+/// Recording length past which a press's audio is dropped; guards a stuck key.
+const MAX_RECORDING_SECS: usize = 120;
+
+type PressCapture = capture::CaptureSession<Vec<i16>>;
 
 /// Push-to-talk voice input backed by cpal and a [`Transcriber`]. The
 /// audio device is opened on [`start_recording`](VoiceInput::start_recording),
@@ -41,7 +47,7 @@ struct PttState {
 #[derive(Debug)]
 struct Press {
     session_id: u64,
-    capture: capture::CaptureSession,
+    capture: PressCapture,
 }
 
 /// Publishes a press's state only while it is still the active press.
@@ -111,23 +117,11 @@ impl MicVoiceInput {
     }
 
     /// Wait for the stopped capture and transcribe what it recorded.
-    async fn transcribe_session(
-        &self,
-        session: capture::CaptureSession,
-    ) -> Result<String, VoiceInputError> {
+    async fn transcribe_session(&self, session: PressCapture) -> Result<String, VoiceInputError> {
         let pcm = session
             .handle
             .await
             .map_err(VoiceInputError::ConsumerPanic)??;
-
-        let overrun = session.overrun.load(Ordering::Relaxed);
-        if overrun > 0 {
-            warn!(
-                target: "assistd::voice::mic",
-                overrun_samples = overrun,
-                "ring buffer overrun during PTT capture; audio was truncated"
-            );
-        }
 
         if pcm.is_empty() {
             return Ok(String::new());
@@ -185,7 +179,10 @@ impl VoiceInput for MicVoiceInput {
 
         let press = ptt.press.insert(Press {
             session_id,
-            capture: capture::start(self.mic_device.as_deref()),
+            capture: capture::start(
+                self.mic_device.as_deref(),
+                PcmRecording::capped_at(capture::TARGET_SAMPLE_RATE as usize * MAX_RECORDING_SECS),
+            ),
         });
         if let Err(err) = await_capture_open(&mut press.capture).await {
             ptt.press = None;
@@ -237,7 +234,7 @@ impl VoiceInput for MicVoiceInput {
 }
 
 /// Wait until the capture is recording; its error if the device failed to open.
-async fn await_capture_open(session: &mut capture::CaptureSession) -> Result<(), VoiceInputError> {
+async fn await_capture_open(session: &mut PressCapture) -> Result<(), VoiceInputError> {
     if (&mut session.opened).await.is_ok() {
         return Ok(());
     }

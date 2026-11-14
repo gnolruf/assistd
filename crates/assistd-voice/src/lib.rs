@@ -1,5 +1,5 @@
 //! Voice subsystem: the [`VoiceInput`] (speech-to-text) and [`VoiceOutput`] (text-to-speech)
-//! traits, with sherpa-onnx and cpal implementations behind cargo features.
+//! traits, with their sherpa-onnx, cpal and rodio implementations.
 
 use std::fmt;
 
@@ -8,52 +8,34 @@ use tokio::sync::watch;
 
 pub use assistd_ipc::VoiceCaptureState;
 
-#[cfg(feature = "stt")]
-pub mod gpu;
-#[cfg(feature = "stt")]
-pub mod stt;
-#[cfg(feature = "stt")]
-pub mod transcribe;
-#[cfg(feature = "stt")]
-pub mod vad;
-
-#[cfg(feature = "mic")]
-pub mod mic;
-
-#[cfg(feature = "listen")]
-pub mod listen;
-
-#[cfg(feature = "tts")]
-pub mod tts;
-
 pub mod controller;
+mod device;
 pub mod error;
-#[cfg(feature = "listen")]
+pub mod gpu;
+pub mod listen;
 pub mod manager;
+pub mod mic;
 pub mod sentence;
-#[cfg(all(feature = "listen", feature = "tts"))]
+pub mod stt;
+pub mod transcribe;
+pub mod tts;
+pub mod vad;
 pub mod worker;
 
 pub use controller::{SpeakDecision, SpeakingGuard, VoiceOutputController};
 pub use error::{VoiceInputError, VoiceOutputError, VoiceWorkerError};
-#[cfg(feature = "listen")]
 pub use listen::{
     ContinuousListener, Heard, ListenError, MicContinuousListener, NoContinuousListener, SileroVad,
     SpotterError, WakeTest, WakeWordSpotter,
 };
-#[cfg(feature = "listen")]
 pub use manager::{CaptureUnavailable, VoiceCapture, VoiceManager};
-#[cfg(feature = "mic")]
 pub use mic::{AudioCaptureError, MicVoiceInput};
 pub use sentence::SentenceBuffer;
-#[cfg(feature = "stt")]
 pub use stt::SherpaTranscriber;
-#[cfg(feature = "stt")]
 pub use transcribe::{
     BusyProbe, CpuFallbackFactory, NullBusyProbe, QueuedTranscriber, Transcriber,
     TranscriptionError,
 };
-#[cfg(feature = "tts")]
 pub use tts::{SherpaVoiceOutput, SpeechError};
 
 /// Push-to-talk voice capture: buffer mic audio between
