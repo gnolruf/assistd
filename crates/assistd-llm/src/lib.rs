@@ -193,7 +193,7 @@ pub struct ToolCall {
 }
 
 /// Result of executing one [`ToolCall`], fed back to the model through
-/// [`LlmBackend::push_tool_results`].
+/// [`TurnConversation::push_tool_results`].
 #[derive(Debug, Clone)]
 pub struct ToolResultPayload {
     /// The `id` of the [`ToolCall`] that produced this result.
@@ -205,13 +205,13 @@ pub struct ToolResultPayload {
     pub attachments: Vec<Attachment>,
 }
 
-/// Outcome of a single [`LlmBackend::step`] call.
+/// Outcome of a single [`TurnConversation::step`] call.
 #[derive(Debug)]
 pub enum StepOutcome {
     /// The model emitted plain text; the turn is complete.
     Final,
     /// The model requested tool calls, whose results must be fed back via
-    /// [`LlmBackend::push_tool_results`] before the next `step`.
+    /// [`TurnConversation::push_tool_results`] before the next `step`.
     ToolCalls(Vec<ToolCall>),
     /// The response hit the output-token limit before finishing. Nothing
     /// was recorded and no tool call runs; the step may be retried.
@@ -249,16 +249,10 @@ pub struct HistoryReplay {
     pub entries: Vec<HistoryEntry>,
 }
 
-/// A language model holding one in-memory conversation. Optional
-/// capabilities have default implementations that do nothing, or that
-/// fail with [`LlmError::Unavailable`] where a result is required.
+/// The part of a conversation an agent turn drives: the messages the turn appends and the
+/// model steps over them. No method has a default, so a wrapper forwards or replaces each.
 #[async_trait]
-pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
-    /// Generate a single-turn response to `prompt`, streaming tokens
-    /// through `tx` and ending with [`LlmEvent::Done`]. A failed `send`
-    /// means the consumer is gone; stop generating and return `Ok(())`.
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()>;
-
+pub trait TurnConversation: fmt::Debug + Send + Sync + 'static {
     /// Append a user message without invoking the model. Backends
     /// without vision support ignore `attachments` rather than error.
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()>;
@@ -274,19 +268,21 @@ pub trait LlmBackend: fmt::Debug + Send + Sync + 'static {
 
     /// Append `reply` as the assistant's answer to a turn cut off before the
     /// model finished, dropping any pending transient note.
-    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
-        Ok(())
-    }
-
-    /// Stash a context block rendered ahead of the next user turn's text.
-    async fn set_transient_context(&self, _text: String) -> LlmResult<()> {
-        Ok(())
-    }
+    async fn push_interrupted_reply(&self, reply: String) -> LlmResult<()>;
 
     /// Stash a one-shot instruction rendered by the next [`Self::step`]
     /// as the final message of the conversation, then discarded once
     /// that request commits.
-    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+    async fn set_transient_note(&self, text: String) -> LlmResult<()>;
+}
+
+/// A language model holding one in-memory conversation: what a turn drives, plus optional
+/// capabilities whose defaults do nothing, or fail with [`LlmError::Unavailable`] where a
+/// result is required.
+#[async_trait]
+pub trait LlmBackend: TurnConversation {
+    /// Stash a context block rendered ahead of the next user turn's text.
+    async fn set_transient_context(&self, _text: String) -> LlmResult<()> {
         Ok(())
     }
 

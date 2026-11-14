@@ -686,7 +686,7 @@ mod tests {
 
     use assistd_llm::{
         LlmBackend, LlmError, LlmEvent, LlmResult, SlotAssignment, SlotDir, StepOutcome,
-        ToolResultPayload,
+        ToolResultPayload, TurnConversation,
     };
     use assistd_tools::{Approvals, Attachment, DenyAllGate};
 
@@ -699,11 +699,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl LlmBackend for WatchedParent {
-        async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-            unimplemented!("parent is never driven")
-        }
-
+    impl TurnConversation for WatchedParent {
         async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
             unimplemented!("parent is never driven")
         }
@@ -720,6 +716,16 @@ mod tests {
             unimplemented!("parent is never driven")
         }
 
+        async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+            unimplemented!("parent is never driven")
+        }
+
+        async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+            unimplemented!("parent is never driven")
+        }
+    }
+
+    impl LlmBackend for WatchedParent {
         fn isolated_conversation(
             &self,
             _system_prompt: String,

@@ -24,7 +24,7 @@ use assistd_ipc::StatusKind;
 use assistd_llm::{
     BackendJudgeModel, ChatClientError, HealthSnapshot, HealthWaitError, LlamaChatClient,
     LlmBackend, LlmError, LlmEvent, LlmHealthProbe, OneShotReply, ReadyState, SlotAssignment,
-    StepOutcome, Thinking, ToolCall, ToolResultPayload,
+    StepOutcome, Thinking, ToolCall, ToolResultPayload, TurnConversation,
 };
 use assistd_tools::{JUDGE_TIMEOUT, JudgedCommand, SafetyJudge, Verdict};
 
@@ -387,12 +387,12 @@ async fn next_non_context_event(rx: &mut mpsc::Receiver<LlmEvent>) -> Option<Llm
     }
 }
 
-/// Push `text` as a user turn and run one step to completion.
-async fn ask(backend: &dyn LlmBackend, text: &str) {
+/// Push `text` as a user turn, run one step to completion, and return what it streamed.
+async fn ask(backend: &dyn LlmBackend, text: &str) -> Vec<LlmEvent> {
     backend.push_user(text.into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     backend.step(Vec::new(), tx).await.unwrap();
-    drain(&mut rx).await;
+    drain(&mut rx).await
 }
 
 async fn drain(rx: &mut mpsc::Receiver<LlmEvent>) -> Vec<LlmEvent> {
@@ -416,12 +416,9 @@ async fn single_turn_streams_deltas_and_finishes() {
     let (port, _server) = spawn_fake(script.clone()).await;
 
     let client = build_client(&chat_spec(port));
-    let (tx, mut rx) = mpsc::channel(32);
-    client.generate("hi".into(), tx).await.unwrap();
-
     assert_eq!(
-        drain(&mut rx).await,
-        [delta("Hello"), delta(" "), delta("world"), LlmEvent::Done]
+        ask(&client, "hi").await,
+        [delta("Hello"), delta(" "), delta("world")]
     );
 
     let captured = script.captured().await;
@@ -447,8 +444,9 @@ async fn conv_lock_is_not_held_while_streaming() {
     let client = Arc::new(build_client(&chat_spec(port)));
     // One slot: once the test stops draining, the stream parks mid-flight.
     let (tx, mut rx) = mpsc::channel(1);
-    let gen_client = Arc::clone(&client);
-    let stream_task = tokio::spawn(async move { gen_client.generate("first".into(), tx).await });
+    client.push_user("first".into(), Vec::new()).await.unwrap();
+    let step_client = Arc::clone(&client);
+    let stream_task = tokio::spawn(async move { step_client.step(Vec::new(), tx).await });
     next_non_context_event(&mut rx).await.expect("first delta");
 
     timeout(
@@ -463,7 +461,7 @@ async fn conv_lock_is_not_held_while_streaming() {
     stream_task
         .await
         .expect("stream task joined")
-        .expect("generate completed");
+        .expect("step completed");
 }
 
 #[tokio::test]
@@ -481,22 +479,24 @@ async fn stalled_stream_aborts_within_inactivity_timeout() {
     spec.timeouts.stream_inactivity_secs = 1;
     let client = build_client(&spec);
 
+    client.push_user("hi".into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let started = Instant::now();
-    let res = timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
+    let err = timeout(Duration::from_secs(5), client.step(Vec::new(), tx))
         .await
-        .expect("generate must return within outer 5s budget");
-    res.expect("partial-after-emit path returns Ok");
+        .expect("step must return within outer 5s budget")
+        .expect_err("a reply that stalls midway is an error");
+    assert!(
+        matches!(err, LlmError::Chat(ChatClientError::Sse(_))),
+        "{err:?}"
+    );
     let elapsed = started.elapsed();
     assert!(
         elapsed < Duration::from_secs(4),
-        "generate took too long ({elapsed:?}); inactivity timeout did not fire"
+        "step took too long ({elapsed:?}); inactivity timeout did not fire"
     );
 
-    assert_eq!(
-        drain(&mut rx).await,
-        [delta("hello"), delta(" "), LlmEvent::Done]
-    );
+    assert_eq!(drain(&mut rx).await, [delta("hello"), delta(" ")]);
 }
 
 #[tokio::test]
@@ -511,10 +511,11 @@ async fn stalled_error_body_aborts_within_inactivity_timeout() {
     spec.timeouts.stream_inactivity_secs = 1;
     let client = build_client(&spec);
 
+    client.push_user("hi".into(), Vec::new()).await.unwrap();
     let (tx, _rx) = mpsc::channel(32);
-    let err = timeout(Duration::from_secs(5), client.generate("hi".into(), tx))
+    let err = timeout(Duration::from_secs(5), client.step(Vec::new(), tx))
         .await
-        .expect("generate must return within outer 5s budget")
+        .expect("step must return within outer 5s budget")
         .expect_err("an error status is still an error");
     assert!(
         matches!(
@@ -538,11 +539,12 @@ async fn slow_first_token_is_not_treated_as_a_stall() {
     spec.chat.request_timeout_secs = nz64(4);
     let client = build_client(&spec);
 
+    client.push_user("hi".into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
     let started = Instant::now();
-    let res = timeout(Duration::from_secs(15), client.generate("hi".into(), tx))
+    let res = timeout(Duration::from_secs(15), client.step(Vec::new(), tx))
         .await
-        .expect("generate must return within outer 15s budget");
+        .expect("step must return within outer 15s budget");
     let err = res.expect_err("a first byte that never arrives is still an error");
     assert!(
         matches!(err, LlmError::Chat(ChatClientError::Sse(_))),
@@ -551,7 +553,7 @@ async fn slow_first_token_is_not_treated_as_a_stall() {
     let elapsed = started.elapsed();
     assert!(
         elapsed >= Duration::from_secs(3),
-        "generate returned after {elapsed:?}; the inter-chunk deadline fired before the first byte"
+        "step returned after {elapsed:?}; the inter-chunk deadline fired before the first byte"
     );
     assert!(drain(&mut rx).await.is_empty());
 }
@@ -575,14 +577,11 @@ async fn generation_longer_than_request_timeout_is_not_truncated() {
     spec.timeouts.stream_inactivity_secs = 2;
     let client = build_client(&spec);
 
-    let (tx, mut rx) = mpsc::channel(32);
-    timeout(Duration::from_secs(10), client.generate("hi".into(), tx))
+    let events = timeout(Duration::from_secs(10), ask(&client, "hi"))
         .await
-        .expect("generate must return within outer 10s budget")
-        .expect("generate completed");
+        .expect("step must return within outer 10s budget");
 
-    let texts: Vec<_> = drain(&mut rx)
-        .await
+    let texts: Vec<_> = events
         .into_iter()
         .filter_map(|e| match e {
             LlmEvent::Delta { text } => Some(text),
@@ -593,7 +592,7 @@ async fn generation_longer_than_request_timeout_is_not_truncated() {
 }
 
 #[tokio::test]
-async fn mid_stream_drop_after_deltas_emits_done() {
+async fn step_dropped_mid_reply_fails_and_leaves_the_turn_out_of_history() {
     let script = Script::new();
     script
         .push_stream(StreamResponse::DropAfterDeltas(vec![
@@ -608,25 +607,24 @@ async fn mid_stream_drop_after_deltas_emits_done() {
 
     let client = build_client(&chat_spec(port));
 
+    client.push_user("hi".into(), Vec::new()).await.unwrap();
     let (tx, mut rx) = mpsc::channel(32);
-    client.generate("hi".into(), tx).await.unwrap();
-    assert_eq!(
-        drain(&mut rx).await,
-        [delta("partial"), delta(" reply"), LlmEvent::Done]
+    let err = client.step(Vec::new(), tx).await.unwrap_err();
+    assert!(
+        matches!(err, LlmError::Chat(ChatClientError::Http(_))),
+        "{err:?}"
     );
+    assert_eq!(drain(&mut rx).await, [delta("partial"), delta(" reply")]);
 
-    let (tx2, mut rx2) = mpsc::channel(32);
-    client.generate("followup".into(), tx2).await.unwrap();
-    drain(&mut rx2).await;
-
+    ask(&client, "followup").await;
     let captured = script.captured().await;
-    assert_eq!(captured.len(), 2);
-    let second_messages = captured[1].body["messages"].as_array().unwrap();
-    let assistant_before = second_messages
-        .iter()
-        .find(|m| m["role"] == "assistant")
-        .expect("assistant message carried forward");
-    assert_eq!(assistant_before["content"], "partial reply");
+    assert_eq!(
+        captured[1].body["messages"],
+        json!([
+            {"role": "system", "content": "test system prompt"},
+            {"role": "user", "content": "followup"},
+        ])
+    );
 }
 
 #[tokio::test]
@@ -653,9 +651,7 @@ async fn server_reported_usage_triggers_summarization_the_heuristic_would_skip()
     let client = build_client(&spec);
     let mut compaction_notices = Vec::new();
     for i in 0..8 {
-        let (tx, mut rx) = mpsc::channel(32);
-        client.generate(format!("turn {i}"), tx).await.unwrap();
-        let announced = drain(&mut rx).await.iter().any(|ev| {
+        let announced = ask(&client, &format!("turn {i}")).await.iter().any(|ev| {
             matches!(
                 ev,
                 LlmEvent::Status {
@@ -716,13 +712,7 @@ async fn summarize_failure_falls_back_to_truncation_and_still_responds() {
     let client = build_client(&spec);
 
     for i in 0..8 {
-        let (tx, mut rx) = mpsc::channel(32);
-        client
-            .generate(format!("turn {i}"), tx)
-            .await
-            .expect("generate should not fail despite summarize error");
-        let events = drain(&mut rx).await;
-        assert!(matches!(events.last(), Some(LlmEvent::Done)));
+        ask(&client, &format!("turn {i}")).await;
     }
 
     let captured = script.captured().await;
@@ -1634,21 +1624,17 @@ async fn history_is_not_sent_for_summarizing_while_the_server_is_not_serving() {
     let probe = ScriptedProbe::serving();
     let client = build_probed_client(&spec, &probe);
     for i in 0..2 {
-        let (tx, mut rx) = mpsc::channel(32);
-        client
-            .generate(format!("turn {i} with padding"), tx)
-            .await
-            .unwrap();
-        drain(&mut rx).await;
+        ask(&client, &format!("turn {i} with padding")).await;
     }
     let sent_while_serving = script.captured().await.len();
 
     probe.set(Some(ReadyState::BackingOff { attempt: 1 }), None);
-    let (tx, mut rx) = mpsc::channel(32);
-    let err = client
-        .generate("turn 2 with padding".into(), tx)
+    client
+        .push_user("turn 2 with padding".into(), Vec::new())
         .await
-        .unwrap_err();
+        .unwrap();
+    let (tx, mut rx) = mpsc::channel(32);
+    let err = client.step(Vec::new(), tx).await.unwrap_err();
     assert!(matches!(err, LlmError::ServerRestarting(_)), "{err:?}");
     let compacting = drain(&mut rx).await.iter().any(|ev| {
         matches!(

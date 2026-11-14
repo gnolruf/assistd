@@ -403,24 +403,7 @@ struct SlowBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::LlmBackend for SlowBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        tx: mpsc::Sender<assistd_llm::LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        for i in 0..self.deltas {
-            let _ = tx
-                .send(assistd_llm::LlmEvent::Delta {
-                    text: format!("d{i}"),
-                })
-                .await;
-            tokio::time::sleep(self.pause).await;
-        }
-        let _ = tx.send(assistd_llm::LlmEvent::Done).await;
-        Ok(())
-    }
-
+impl assistd_llm::TurnConversation for SlowBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -451,7 +434,17 @@ impl assistd_llm::LlmBackend for SlowBackend {
         }
         Ok(assistd_llm::StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl assistd_llm::LlmBackend for SlowBackend {}
 
 /// Backend that emits a single delta then blocks indefinitely on an
 /// un-awoken channel.
@@ -459,21 +452,7 @@ impl assistd_llm::LlmBackend for SlowBackend {
 struct StuckBackend;
 
 #[async_trait::async_trait]
-impl assistd_llm::LlmBackend for StuckBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        tx: mpsc::Sender<assistd_llm::LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        let _ = tx
-            .send(assistd_llm::LlmEvent::Delta {
-                text: "stuck".into(),
-            })
-            .await;
-        std::future::pending::<()>().await;
-        Ok(())
-    }
-
+impl assistd_llm::TurnConversation for StuckBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -502,7 +481,17 @@ impl assistd_llm::LlmBackend for StuckBackend {
         std::future::pending::<()>().await;
         Ok(assistd_llm::StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl assistd_llm::LlmBackend for StuckBackend {}
 
 #[tokio::test]
 async fn graceful_shutdown_waits_for_in_flight_stream() {
@@ -693,16 +682,7 @@ struct GatedToolBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::LlmBackend for GatedToolBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        tx: mpsc::Sender<assistd_llm::LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        let _ = tx.send(assistd_llm::LlmEvent::Done).await;
-        Ok(())
-    }
-
+impl assistd_llm::TurnConversation for GatedToolBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -734,7 +714,17 @@ impl assistd_llm::LlmBackend for GatedToolBackend {
             },
         ]))
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl assistd_llm::LlmBackend for GatedToolBackend {}
 
 /// Tool that runs the production IPC gate on a request the given modes may approve unasked,
 /// and reports its verdict.
@@ -901,16 +891,7 @@ impl FloodBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::LlmBackend for FloodBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        tx: mpsc::Sender<assistd_llm::LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        Self::flood(&tx).await;
-        Ok(())
-    }
-
+impl assistd_llm::TurnConversation for FloodBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -934,7 +915,17 @@ impl assistd_llm::LlmBackend for FloodBackend {
         Self::flood(&tx).await;
         Ok(assistd_llm::StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl assistd_llm::LlmBackend for FloodBackend {}
 
 /// Sends a query and returns the connection after its first event has
 /// arrived, so the caller controls when the client goes away.
@@ -1031,15 +1022,7 @@ struct HangingCallBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::LlmBackend for HangingCallBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<assistd_llm::LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
-
+impl assistd_llm::TurnConversation for HangingCallBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1076,7 +1059,17 @@ impl assistd_llm::LlmBackend for HangingCallBackend {
             .await;
         Ok(assistd_llm::StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl assistd_llm::LlmBackend for HangingCallBackend {}
 
 /// Never returns and emits nothing; `dropped` flips when the invocation
 /// future is torn down.

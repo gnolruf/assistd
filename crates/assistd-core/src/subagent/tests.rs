@@ -57,11 +57,7 @@ impl AnsweringParent {
 }
 
 #[async_trait]
-impl LlmBackend for AnsweringParent {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        unimplemented!("parent is never driven")
-    }
-
+impl TurnConversation for AnsweringParent {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         unimplemented!("parent is never driven")
     }
@@ -78,6 +74,16 @@ impl LlmBackend for AnsweringParent {
         unimplemented!("parent is never driven")
     }
 
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        unimplemented!("parent is never driven")
+    }
+
+    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+        unimplemented!("parent is never driven")
+    }
+}
+
+impl LlmBackend for AnsweringParent {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
@@ -92,11 +98,7 @@ impl LlmBackend for AnsweringParent {
 }
 
 #[async_trait]
-impl LlmBackend for AnsweringConversation {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        unimplemented!("sub-agent uses the step path only")
-    }
-
+impl TurnConversation for AnsweringConversation {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         Ok(())
     }
@@ -114,6 +116,17 @@ impl LlmBackend for AnsweringConversation {
         Ok(StepOutcome::Final)
     }
 
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LlmBackend for AnsweringConversation {
     async fn complete_with_schema(
         &self,
         _instruction: String,
@@ -136,11 +149,7 @@ struct HangingConversation {
 }
 
 #[async_trait]
-impl LlmBackend for HangingParent {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        unimplemented!("parent is never driven")
-    }
-
+impl TurnConversation for HangingParent {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         unimplemented!("parent is never driven")
     }
@@ -157,6 +166,16 @@ impl LlmBackend for HangingParent {
         unimplemented!("parent is never driven")
     }
 
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        unimplemented!("parent is never driven")
+    }
+
+    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+        unimplemented!("parent is never driven")
+    }
+}
+
+impl LlmBackend for HangingParent {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
@@ -169,11 +188,7 @@ impl LlmBackend for HangingParent {
 }
 
 #[async_trait]
-impl LlmBackend for HangingConversation {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        unimplemented!("sub-agent uses the step path only")
-    }
-
+impl TurnConversation for HangingConversation {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         Ok(())
     }
@@ -190,7 +205,17 @@ impl LlmBackend for HangingConversation {
         self.stepping.notify_one();
         std::future::pending().await
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl LlmBackend for HangingConversation {}
 
 #[tokio::test]
 async fn cancelling_the_parent_turn_stops_the_run() {

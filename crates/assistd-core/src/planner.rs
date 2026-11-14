@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use assistd_ipc::{HostName, ModeRecommendation, PermissionMode, Plan, TaskPrompt, TaskSpecError};
 use assistd_llm::{
     LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, StepOutcome, ToolResultPayload,
+    TurnConversation,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
@@ -171,7 +172,7 @@ impl Planner {
     pub fn chat_agent(
         &self,
         turn: &TurnContext,
-        conversation: Arc<dyn LlmBackend>,
+        conversation: Arc<dyn TurnConversation>,
         acting: &ToolRegistry,
     ) -> Agent {
         let mut acting = acting.clone();
@@ -200,8 +201,8 @@ impl Planner {
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> Result<Refinement, PlanError> {
-        let conversation = self
-            .explore(conversation, ask, request_id, tx, &cancel)
+        let exploring = Arc::clone(&conversation) as Arc<dyn TurnConversation>;
+        self.explore(exploring, ask, request_id, tx, &cancel)
             .await?;
         let instruction = format!("{REFINE_INSTRUCTION} {PLAN_LAYOUT}");
         let draft: RefinementDraft = draft_of(
@@ -230,20 +231,18 @@ impl Planner {
         })
     }
 
-    /// Run the planning turn on `ask`, returning the conversation in plan mode.
+    /// Run the planning turn on `ask` over `conversation` in plan mode.
     async fn explore(
         &self,
-        conversation: Arc<dyn LlmBackend>,
+        conversation: Arc<dyn TurnConversation>,
         ask: PlanAsk,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
         cancel: &CancellationToken,
-    ) -> Result<Arc<dyn LlmBackend>, PlanError> {
+    ) -> Result<(), PlanError> {
         let turn = TurnContext::answered_by(ConfirmRouter::for_planning(request_id));
-        let conversation: Arc<dyn LlmBackend> =
-            PlanModeConversation::new(conversation, FINDINGS_ENDING, turn.clone());
         let agent = Agent::new(
-            Arc::clone(&conversation),
+            PlanModeConversation::new(conversation, FINDINGS_ENDING, turn.clone()),
             Arc::clone(&self.tools.registry),
             self.health.clone(),
             self.tool_deadline,
@@ -254,7 +253,7 @@ impl Planner {
         if cancel.is_cancelled() {
             return Err(PlanError::Cancelled);
         }
-        Ok(conversation)
+        Ok(())
     }
 }
 
@@ -288,7 +287,7 @@ async fn draft_of<T: DeserializeOwned>(
 /// ahead of any one-shot note the agent loop adds.
 #[derive(Debug)]
 struct PlanModeConversation {
-    inner: Arc<dyn LlmBackend>,
+    inner: Arc<dyn TurnConversation>,
     turn: TurnContext,
     /// [`PLAN_MODE_RULES`] and how the turn should end.
     preamble: String,
@@ -297,7 +296,7 @@ struct PlanModeConversation {
 
 impl PlanModeConversation {
     /// `inner` with the plan-mode rules and then `ending` at its tail while `turn` plans.
-    fn new(inner: Arc<dyn LlmBackend>, ending: &str, turn: TurnContext) -> Arc<Self> {
+    fn new(inner: Arc<dyn TurnConversation>, ending: &str, turn: TurnContext) -> Arc<Self> {
         Arc::new(Self {
             inner,
             turn,
@@ -308,11 +307,7 @@ impl PlanModeConversation {
 }
 
 #[async_trait]
-impl LlmBackend for PlanModeConversation {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        self.inner.generate(prompt, tx).await
-    }
-
+impl TurnConversation for PlanModeConversation {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         self.inner.push_user(text, attachments).await
     }
@@ -339,21 +334,9 @@ impl LlmBackend for PlanModeConversation {
         self.inner.push_interrupted_reply(reply).await
     }
 
-    async fn set_transient_context(&self, text: String) -> LlmResult<()> {
-        self.inner.set_transient_context(text).await
-    }
-
     async fn set_transient_note(&self, text: String) -> LlmResult<()> {
         *self.note.lock() = Some(text);
         Ok(())
-    }
-
-    async fn complete_with_schema(
-        &self,
-        instruction: String,
-        schema: Map<String, Value>,
-    ) -> LlmResult<String> {
-        self.inner.complete_with_schema(instruction, schema).await
     }
 }
 

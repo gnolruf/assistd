@@ -25,14 +25,7 @@ struct LoggedMain {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for LoggedMain {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
+impl TurnConversation for LoggedMain {
     async fn push_user(
         &self,
         text: String,
@@ -41,12 +34,14 @@ impl LlmBackend for LoggedMain {
         *self.last_prompt.lock() = text;
         Ok(())
     }
+
     async fn push_tool_results(
         &self,
         _results: Vec<ToolResultPayload>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
@@ -56,6 +51,17 @@ impl LlmBackend for LoggedMain {
         self.log.lock().push(format!("user:{prompt}"));
         Ok(StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+}
+
+impl LlmBackend for LoggedMain {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
@@ -80,14 +86,7 @@ struct LoggedTask {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for LoggedTask {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
+impl TurnConversation for LoggedTask {
     async fn push_user(
         &self,
         _text: String,
@@ -95,12 +94,14 @@ impl LlmBackend for LoggedTask {
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn push_tool_results(
         &self,
         _results: Vec<ToolResultPayload>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
@@ -119,7 +120,17 @@ impl LlmBackend for LoggedTask {
             .await;
         Ok(StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl LlmBackend for LoggedTask {}
 
 /// A one-lane daemon under `interruption` whose runs get, in order, a task conversation
 /// per entry of `tasks`: its name, and the gate its first step waits on, if any.

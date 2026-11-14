@@ -17,8 +17,8 @@ use tracing::{debug, info, instrument, warn};
 
 use assistd_ipc::{RelayEvent, StatusKind};
 use assistd_llm::{
-    HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
-    ToolResultPayload,
+    HealthWaitError, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall, ToolResultPayload,
+    TurnConversation,
 };
 use assistd_tools::{Attachment, RelayObserver, ToolOutput, ToolRegistry, TurnContext};
 use assistd_utils::text::panic_message;
@@ -57,7 +57,7 @@ const TRUNCATION_NOTE: &str = "Your previous response reached the output-token l
 /// A tool still running after `tool_deadline` is reported to the model as failed.
 #[derive(Debug)]
 pub struct Agent {
-    backend: Arc<dyn LlmBackend>,
+    conversation: Arc<dyn TurnConversation>,
     tools: Arc<ToolRegistry>,
     /// Offered in place of `tools` while the turn plans.
     planning_tools: Option<Arc<ToolRegistry>>,
@@ -66,16 +66,16 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Build an agent over `backend` and `tools`; see [`Agent`] for how
+    /// Build an agent over `conversation` and `tools`; see [`Agent`] for how
     /// `health` and `tool_deadline` shape a turn.
     pub fn new(
-        backend: Arc<dyn LlmBackend>,
+        conversation: Arc<dyn TurnConversation>,
         tools: Arc<ToolRegistry>,
         health: Option<Arc<dyn LlmHealthProbe>>,
         tool_deadline: Duration,
     ) -> Self {
         Self {
-            backend,
+            conversation,
             tools,
             planning_tools: None,
             health,
@@ -102,7 +102,9 @@ impl Agent {
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> Result<(), LlmError> {
-        self.backend.push_user(user_text, user_attachments).await?;
+        self.conversation
+            .push_user(user_text, user_attachments)
+            .await?;
         let tools = Arc::clone(self.tools_for(context));
         let mut turn = Turn {
             context: context
@@ -148,7 +150,7 @@ impl Agent {
                 StepOutcome::ToolCalls(calls) => {
                     turn.truncated_steps = 0;
                     let (results, stuck) = self.dispatch_tool_calls(&mut turn, calls).await;
-                    self.backend.push_tool_results(results).await?;
+                    self.conversation.push_tool_results(results).await?;
                     turn.offer(self.tools_for(&turn.context));
                     turn.iteration += 1;
                     if let Some(why) = ToolBudgetExhausted::check(stuck, turn.iteration) {
@@ -188,7 +190,7 @@ impl Agent {
             let result = cancelled_tool_result(call, "ended; tools are unavailable");
             results.push(send_tool_result(turn, call, result).await);
         }
-        self.backend.push_tool_results(results).await?;
+        self.conversation.push_tool_results(results).await?;
         let _ = turn.tx.send(LlmEvent::Done).await;
         Ok(())
     }
@@ -225,7 +227,7 @@ impl Agent {
             ))
             .await;
         if let Err(e) = self
-            .backend
+            .conversation
             .set_transient_note(turn.truncation_note())
             .await
         {
@@ -242,7 +244,9 @@ impl Agent {
     /// interrupted, in the conversation and for whoever records the turn.
     async fn record_interruption(&self, turn: &Turn, streamed: &str) -> Result<(), LlmError> {
         let reply = interrupted_reply(streamed);
-        self.backend.push_interrupted_reply(reply.clone()).await?;
+        self.conversation
+            .push_interrupted_reply(reply.clone())
+            .await?;
         let _ = turn.tx.send(LlmEvent::Interrupted { reply }).await;
         Ok(())
     }
@@ -280,11 +284,11 @@ impl Agent {
         }
     }
 
-    /// Run one backend step, passing its events on to the turn. The step is
+    /// Run one model step, passing its events on to the turn. The step is
     /// dropped once the turn is cancelled or its consumer leaves.
     async fn relay_step(&self, turn: &Turn) -> Result<StepEnd, LlmError> {
         let (step_tx, mut step_rx) = mpsc::channel(STEP_EVENT_BUFFER);
-        let mut step = pin!(self.backend.step(turn.schemas.clone(), step_tx));
+        let mut step = pin!(self.conversation.step(turn.schemas.clone(), step_tx));
         let mut streamed = String::new();
         loop {
             tokio::select! {
@@ -406,7 +410,7 @@ impl Agent {
                 ),
             ))
             .await;
-        if let Err(e) = self.backend.set_transient_note(why.model_note()).await {
+        if let Err(e) = self.conversation.set_transient_note(why.model_note()).await {
             warn!(
                 target: "assistd::agent",
                 error = %e,
