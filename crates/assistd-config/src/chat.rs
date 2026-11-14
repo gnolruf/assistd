@@ -113,6 +113,7 @@ impl DescribeSettings for ChatConfig {
             advanced
         ),
         theme => nested,
+        #[consumer(SettingsPanel)]
         themes => ("themes", "Load a built-in or saved theme, or save the current colors"),
     }
 }

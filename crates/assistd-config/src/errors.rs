@@ -62,6 +62,9 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
+    #[error("config file {path} was changed on disk after it was opened")]
+    ChangedOnDisk { path: PathBuf },
+
     #[error("config file already exists at {0} (not overwriting)")]
     AlreadyExists(PathBuf),
 

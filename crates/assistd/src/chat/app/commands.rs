@@ -5,7 +5,7 @@ use assistd_ipc::{Request, RequestBody};
 use uuid::Uuid;
 
 use super::{App, BranchOp, Panel, PendingAttachment, RESUME_RECENCY_SECS, WireStream};
-use crate::chat::settings::SettingsPanel;
+use crate::chat::settings::{PanelHost, SettingsPanel};
 
 /// A typed slash command with its trimmed argument.
 enum SlashCommand {
@@ -110,7 +110,8 @@ impl App {
     fn open_settings_panel(&mut self) {
         match ConfigDocument::open(&self.config_path) {
             Ok(document) => {
-                self.panel = Some(Panel::Settings(Box::new(SettingsPanel::new(document))));
+                let panel = SettingsPanel::new(document, PanelHost::Chat);
+                self.panel = Some(Panel::Settings(Box::new(panel)));
             }
             Err(e) => {
                 self.output.push_error(&format!("[error] settings: {e}"));
