@@ -564,3 +564,63 @@ async fn messages_stored_without_chunks_are_chunked_later() {
     let texts: Vec<&str> = pending.iter().map(|(_, text)| text.as_str()).collect();
     assert_eq!(texts, ["where is the spare key"]);
 }
+
+#[tokio::test]
+async fn a_message_whose_tool_calls_no_longer_decode_loads_without_them() {
+    let (store, _temp) = fresh_store().await;
+    let branch = store
+        .begin_session_with_main_branch(SessionId::new())
+        .await
+        .unwrap();
+    let turn = store
+        .begin_turn(branch, PersistedMessage::user("list files"))
+        .await
+        .unwrap()
+        .turn;
+    let calls = vec![PersistedToolCall {
+        id: "c-1".into(),
+        name: "run".into(),
+        arguments: serde_json::json!({"command": "ls"}),
+    }];
+    let call = store
+        .append_message_to_branch(
+            branch,
+            turn,
+            PersistedMessage::assistant_tool_calls("looking", calls, None),
+        )
+        .await
+        .unwrap();
+    store
+        .append_message_to_branch(branch, turn, PersistedMessage::assistant_text("done", None))
+        .await
+        .unwrap();
+
+    store
+        .handle
+        .write("store tool calls this build rejects", move |tx| {
+            tx.execute(
+                "UPDATE messages SET tool_calls = '[{\"renamed\":1}]' WHERE id = ?1",
+                [call.id],
+            )
+        })
+        .await
+        .unwrap();
+
+    let history = store
+        .load_branch(branch, HistoryScope::Whole)
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(
+        contents(&history),
+        [
+            (PersistedRole::User, "list files"),
+            (PersistedRole::Assistant, "looking"),
+            (PersistedRole::Assistant, "done"),
+        ]
+    );
+    assert_eq!(
+        history[1].message,
+        PersistedMessage::assistant_text("looking", None)
+    );
+}

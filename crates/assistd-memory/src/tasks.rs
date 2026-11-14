@@ -23,6 +23,16 @@ pub struct TaskRecord {
     pub next_fire: Option<DateTime<Utc>>,
 }
 
+/// A row of the `tasks` table that no longer decodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndecodableTask {
+    pub id: TaskId,
+    /// Its name as stored, unchecked.
+    pub name: String,
+    /// What about the row failed to decode.
+    pub reason: String,
+}
+
 /// How a task run finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskRunEnd {
@@ -62,8 +72,11 @@ pub struct PrunedRuns {
 /// Persistent saved tasks.
 #[async_trait]
 pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
-    /// Every task, sorted by name.
+    /// Every task, sorted by name; one whose stored row no longer decodes is left out.
     async fn list(&self) -> Result<Vec<TaskRecord>>;
+
+    /// The tasks [`Self::list`] leaves out, sorted by stored name.
+    async fn undecodable(&self) -> Result<Vec<UndecodableTask>>;
 
     /// The task with `id`; [`MemoryError::TaskNotFound`] when there is none.
     async fn get(&self, id: TaskId) -> Result<TaskRecord>;
@@ -136,8 +149,8 @@ pub trait TaskStore: fmt::Debug + Send + Sync + 'static {
     /// How each task's latest finished run ended, for every task with one.
     async fn last_finished_runs(&self) -> Result<HashMap<TaskId, TaskRunState>>;
 
-    /// Task `task`'s latest `limit` runs, newest first; [`MemoryError::TaskNotFound`] when
-    /// there is no such task.
+    /// Task `task`'s latest `limit` runs, newest first, leaving out any whose stored row no
+    /// longer decodes; [`MemoryError::TaskNotFound`] when there is no such task.
     async fn runs(&self, task: TaskId, limit: u32) -> Result<Vec<TaskRunRecord>>;
 
     /// Delete each task's finished runs beyond those it keeps, `default_keep` when it names
@@ -152,6 +165,10 @@ pub struct NoTaskStore;
 #[async_trait]
 impl TaskStore for NoTaskStore {
     async fn list(&self) -> Result<Vec<TaskRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn undecodable(&self) -> Result<Vec<UndecodableTask>> {
         Ok(Vec::new())
     }
 

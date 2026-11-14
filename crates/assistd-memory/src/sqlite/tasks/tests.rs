@@ -357,3 +357,72 @@ async fn prune_keeps_each_tasks_newest_finished_runs_and_the_spared_session() {
         .unwrap();
     assert_eq!(counts, (4, 8));
 }
+
+#[tokio::test]
+async fn rows_that_no_longer_decode_are_left_out_of_every_list() {
+    let temp = tempfile::tempdir().unwrap();
+    let handle = SqliteHandle::open(&temp.path().join("memory.db"))
+        .await
+        .unwrap();
+    let tasks = SqliteTaskStore::new(handle.clone());
+    let transcripts = SqliteTranscriptStore::new(handle.clone());
+    let kept = tasks.save(None, sample_spec("digest", "a")).await.unwrap();
+    let misnamed = tasks.save(None, sample_spec("other", "b")).await.unwrap();
+    let stale_run = tasks.queue_run(kept.id, TaskTrigger::Manual).await.unwrap();
+    let run = tasks.queue_run(kept.id, TaskTrigger::Manual).await.unwrap();
+    let misnamed_run = tasks
+        .queue_run(misnamed.id, TaskTrigger::Manual)
+        .await
+        .unwrap();
+    let run_session = SessionId::new();
+    transcripts
+        .begin_session_with_main_branch(run_session)
+        .await
+        .unwrap();
+    tasks.start_run(misnamed_run, run_session).await.unwrap();
+    let user_session = SessionId::new();
+    transcripts
+        .begin_session_with_main_branch(user_session)
+        .await
+        .unwrap();
+
+    handle
+        .write("store values this build rejects", move |tx| {
+            tx.execute("UPDATE tasks SET name = ' ' WHERE id = ?1", [misnamed.id.0])?;
+            tx.execute(
+                "UPDATE task_runs SET trigger = '{\"kind\":\"renamed\"}' WHERE id = ?1",
+                [stale_run.0],
+            )
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(tasks.list().await.unwrap(), std::slice::from_ref(&kept));
+    let runs: Vec<_> = tasks
+        .runs(kept.id, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.run)
+        .collect();
+    assert_eq!(runs, [run]);
+    let sessions: Vec<_> = transcripts
+        .list_branches()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|branch| branch.session_id)
+        .collect();
+    assert_eq!(sessions, [user_session]);
+
+    let undecodable: Vec<_> = tasks
+        .undecodable()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| (task.id, task.name))
+        .collect();
+    assert_eq!(undecodable, [(misnamed.id, " ".to_string())]);
+    tasks.delete(misnamed.id).await.unwrap();
+    assert!(tasks.undecodable().await.unwrap().is_empty());
+}

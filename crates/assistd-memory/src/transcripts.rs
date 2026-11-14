@@ -305,7 +305,7 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     ) -> Result<HashMap<MessageId, Vec<PersistedRelayStep>>>;
 
     /// Every branch of every session, most recently active first, then by
-    /// branch id.
+    /// branch id; one whose stored row no longer decodes is left out.
     async fn list_branches(&self) -> Result<Vec<BranchInfo>>;
 
     /// Metadata of `branch`, or `None` when it does not exist.
@@ -328,6 +328,7 @@ pub trait TranscriptStore: fmt::Debug + Send + Sync + 'static {
     async fn fork_and_switch(&self, src: BranchId, new_name: &str) -> Result<BranchId>;
 
     /// `branch`'s summary and the rows `scope` selects; empty when the branch is missing.
+    /// A message whose stored tool calls no longer decode is returned without them.
     async fn load_branch(&self, branch: BranchId, scope: HistoryScope) -> Result<BranchHistory>;
 
     /// Make `summary` the summary of `branch`, replacing any earlier one.

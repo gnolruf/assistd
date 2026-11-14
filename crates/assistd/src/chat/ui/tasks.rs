@@ -19,7 +19,8 @@ use super::super::settings::{
 };
 use super::super::tasks::{
     AT_FORMAT, EditorMode, EditorRow, ListRow, ListedTask, Message, PanelTab, QueueView,
-    RefineNote, TaskEditor, TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UpstreamChoice,
+    RefineNote, TaskEditor, TasksPanel, TriggerCheck, TriggerForm, TriggerRow, UndecodableTask,
+    UpstreamChoice,
 };
 use super::super::text_editor::TextEditor;
 use super::super::theme::Theme;
@@ -43,6 +44,7 @@ const FIRE_FORMAT: &str = "%a %m-%d %H:%M";
 const NEXT_FIRE_FORMAT: &str = "%Y-%m-%d %H:%M";
 const LIST_HINT: &str =
     "↑/↓ select · Enter open · Space on/off · r run now · Tab queue · Esc close";
+const UNDECODABLE_HINT: &str = "↑/↓ select · Del delete · Tab queue · Esc close";
 const NEW_TASK_HINT: &str = "↑/↓ select · Enter new task · Tab queue · Esc close";
 const RUNS_HINT: &str = "↑/↓ select · ←/→ task · Enter resume session · Tab tasks · Esc close";
 const FIELD_HINT: &str = "Enter apply · Esc cancel";
@@ -107,9 +109,13 @@ pub(super) fn tasks_panel_hint(panel: &TasksPanel) -> Cow<'static, str> {
             EditorMode::ConfirmDelete => DELETE_HINT,
             EditorMode::ConfirmRemoveTrigger(_) => REMOVE_TRIGGER_HINT,
         },
+        None if panel.deleting().is_some() => DELETE_HINT,
         None => match panel.tab() {
-            PanelTab::Tasks if panel.selected_row() == ListRow::NewTask => NEW_TASK_HINT,
-            PanelTab::Tasks => LIST_HINT,
+            PanelTab::Tasks => match panel.selected_row() {
+                ListRow::Task(_) => LIST_HINT,
+                ListRow::Undecodable(_) => UNDECODABLE_HINT,
+                ListRow::NewTask => NEW_TASK_HINT,
+            },
             PanelTab::Queue => return Cow::Owned(queue_hint(panel.queue())),
             PanelTab::Runs => RUNS_HINT,
         },
@@ -180,12 +186,13 @@ fn tab_bar(shown: PanelTab, theme: &Theme) -> Line<'static> {
     Line::from(spans.collect::<Vec<_>>())
 }
 
-/// The editor's open question, else the panel's last message.
+/// The editor's or the list's open question, else the panel's last message.
 fn render_message(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel, theme: &Theme) {
     let upstreams = panel.upstream_choices();
     let question = panel
         .editor()
-        .and_then(|editor| editor_question(editor, &upstreams));
+        .and_then(|editor| editor_question(editor, &upstreams))
+        .or_else(|| panel.deleting().map(|task| delete_question(&task.name)));
     let line = match (question, panel.message()) {
         (Some(question), _) => Line::styled(question, theme.warning_style()),
         (None, Some(Message::Info(text))) => Line::styled(text.clone(), theme.meta_style()),
@@ -210,19 +217,23 @@ fn editor_question(editor: &TaskEditor, upstreams: &[UpstreamChoice]) -> Option<
             Some(format!("Remove trigger \"{summary}\"?"))
         }
         EditorMode::Unsaved => Some("Save changes before leaving?".into()),
-        EditorMode::ConfirmDelete if editor.name().is_empty() => {
-            Some("Delete this task and its run history?".into())
-        }
-        EditorMode::ConfirmDelete => Some(format!(
-            "Delete {} and its run history?",
-            escape_controls_single_line(editor.name())
-        )),
+        EditorMode::ConfirmDelete => Some(delete_question(editor.name())),
         _ => None,
     }
 }
 
-/// Every task with its triggers, next fire and last run, then the new-task row; a note
-/// stands above that row while there are no tasks.
+fn delete_question(name: &str) -> String {
+    if name.trim().is_empty() {
+        return "Delete this task and its run history?".into();
+    }
+    format!(
+        "Delete {} and its run history?",
+        escape_controls_single_line(name)
+    )
+}
+
+/// Every task with its triggers, next fire and last run, the undecodable tasks, then the
+/// new-task row; a note stands above that row while there are no tasks.
 fn render_task_list(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel, theme: &Theme) {
     let tasks = panel.tasks();
     if !panel.loaded() {
@@ -233,19 +244,25 @@ fn render_task_list(frame: &mut Frame<'_>, area: Rect, panel: &TasksPanel, theme
         return;
     }
     let selected = panel.selected_row();
-    let note = tasks
-        .is_empty()
+    let undecodable = panel.undecodable();
+    let listed = tasks.len() + undecodable.len();
+    let note = (listed == 0)
         .then(|| Line::styled(format!("{NO_POINTER}No tasks yet."), theme.meta_style()));
     let selected_entry = match selected {
         ListRow::Task(index) => index,
-        ListRow::NewTask => tasks.len(),
+        ListRow::Undecodable(index) => tasks.len() + index,
+        ListRow::NewTask => listed,
     };
     let visible = (usize::from(area.height) / TASK_ENTRY_ROWS).max(1);
-    let entries = list_window(selected_entry, tasks.len() + 1, visible, 0).flat_map(|index| {
+    let entries = list_window(selected_entry, listed + 1, visible, 0).flat_map(|index| {
         let selected = index == selected_entry;
-        match tasks.get(index) {
-            Some(task) => task_entry_rows(task, tasks, selected, theme),
-            None => new_task_rows(selected, theme),
+        let undecodable = index
+            .checked_sub(tasks.len())
+            .and_then(|index| undecodable.get(index));
+        match (tasks.get(index), undecodable) {
+            (Some(task), _) => task_entry_rows(task, tasks, selected, theme),
+            (None, Some(task)) => undecodable_task_rows(task, selected, theme),
+            (None, None) => new_task_rows(selected, theme),
         }
     });
     let lines: Vec<Line<'static>> = note.into_iter().chain(entries).collect();
@@ -258,6 +275,33 @@ fn new_task_rows(selected: bool, theme: &Theme) -> [Line<'static>; TASK_ENTRY_RO
     [
         Line::from(vec![Span::styled(pointer, theme.title_style()), label]),
         Line::raw(""),
+    ]
+}
+
+/// The task's stored name marked unreadable, over why it does not decode.
+fn undecodable_task_rows(
+    task: &UndecodableTask,
+    selected: bool,
+    theme: &Theme,
+) -> [Line<'static>; TASK_ENTRY_ROWS] {
+    let (pointer, name_style) = if selected {
+        (POINTER, theme.title_style())
+    } else {
+        (NO_POINTER, Style::default())
+    };
+    let name = escape_controls_single_line(&task.name);
+    [
+        Line::from(vec![
+            Span::styled(format!("{pointer}{name}"), name_style),
+            Span::styled("  unreadable", theme.warning_style()),
+        ]),
+        Line::styled(
+            format!(
+                "{DETAIL_INDENT}{}",
+                escape_controls_single_line(&task.reason)
+            ),
+            theme.meta_style(),
+        ),
     ]
 }
 

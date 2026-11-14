@@ -3,6 +3,7 @@
 
 mod connection;
 mod memories;
+mod rows;
 mod semantic;
 mod sql_types;
 mod tasks;

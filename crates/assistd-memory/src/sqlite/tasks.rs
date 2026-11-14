@@ -17,10 +17,11 @@ use assistd_ipc::{
 
 use crate::{
     MemoryError, PrunedRuns, RecoveredQueue, Result, SessionId, TaskRecord, TaskRunEnd, TaskStore,
-    WaitingRun,
+    UndecodableTask, WaitingRun,
 };
 
 use super::connection::{Erasing, SqliteHandle};
+use super::rows::decodable_rows;
 use super::timestamp::{now_millis, optional_timestamp_at, timestamp_at};
 use super::transcripts::session_answer_files;
 
@@ -61,8 +62,19 @@ impl TaskStore for SqliteTaskStore {
     async fn list(&self) -> Result<Vec<TaskRecord>> {
         self.handle
             .read("task list", |c| {
+                let mut stmt =
+                    c.prepare_cached(&format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY name"))?;
+                decodable_rows(stmt.query([])?, "tasks", task_record)
+            })
+            .await
+    }
+
+    async fn undecodable(&self) -> Result<Vec<UndecodableTask>> {
+        self.handle
+            .read("task undecodable", |c| {
                 c.prepare_cached(&format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY name"))?
-                    .query_map([], task_record)?
+                    .query_map([], undecodable_task)?
+                    .filter_map(Result::transpose)
                     .collect()
             })
             .await
@@ -351,10 +363,8 @@ impl TaskStore for SqliteTaskStore {
                     "SELECT {RUN_RECORD_COLUMNS} FROM task_runs WHERE task_id = ?1
                      ORDER BY id DESC LIMIT ?2"
                 ))?;
-                let rows = stmt
-                    .query_map(rusqlite::params![task.0, limit], run_record)?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(Some(rows))
+                let rows = stmt.query(rusqlite::params![task.0, limit])?;
+                decodable_rows(rows, "task_runs", run_record).map(Some)
             })
             .await?
             .ok_or(MemoryError::TaskNotFound(task))
@@ -698,6 +708,22 @@ fn task_record(row: &Row<'_>) -> rusqlite::Result<TaskRecord> {
         },
         next_fire: optional_timestamp_at(row, 8)?,
     })
+}
+
+/// A `tasks` row selected as [`TASK_COLUMNS`] with why it fails to decode; `None` when
+/// it decodes.
+fn undecodable_task(row: &Row<'_>) -> rusqlite::Result<Option<UndecodableTask>> {
+    let Err(error) = task_record(row) else {
+        return Ok(None);
+    };
+    Ok(Some(UndecodableTask {
+        id: TaskId(row.get(0)?),
+        name: row.get(1)?,
+        reason: match error {
+            rusqlite::Error::FromSqlConversionFailure(_, _, source) => source.to_string(),
+            other => other.to_string(),
+        },
+    }))
 }
 
 fn mode_code(mode: PermissionMode) -> i64 {

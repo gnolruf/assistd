@@ -1105,6 +1105,14 @@ fn task_event_cases() -> Vec<(Event, &'static str)> {
             wire.leak(),
         ),
         (
+            event(EventBody::UndecodableTask {
+                task_id: TaskId(5),
+                name: "digest".into(),
+                reason: "unknown variant `hourly`".into(),
+            }),
+            r#"{"id":"r","type":"undecodable_task","task_id":5,"name":"digest","reason":"unknown variant `hourly`"}"#,
+        ),
+        (
             event(EventBody::TriggerFires { fires: DateTime::from_timestamp(1_793_887_200, 0)
                     .into_iter()
                     .collect() }),

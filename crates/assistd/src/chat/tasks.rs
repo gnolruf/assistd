@@ -20,7 +20,7 @@ mod queue;
 mod runs;
 mod trigger_form;
 
-use editor::EditorAction;
+use editor::{EditorAction, confirmation};
 pub(super) use editor::{EditorMode, EditorRow, TaskEditor, TriggerCheck, TriggerRow};
 pub(super) use prompt_box::RefineNote;
 use queue::QueueAction;
@@ -36,6 +36,14 @@ pub(super) struct ListedTask {
     pub next_fire: Option<DateTime<Utc>>,
     pub last_run: Option<TaskRunState>,
     pub trigger_failure: Option<String>,
+}
+
+/// A stored task the daemon cannot decode, which the list only offers to delete.
+pub(super) struct UndecodableTask {
+    pub id: TaskId,
+    /// Its name as stored, unchecked.
+    pub name: String,
+    pub reason: String,
 }
 
 /// What a request the panel sent is for, so its events land in the right place.
@@ -112,10 +120,12 @@ impl PanelTab {
     }
 }
 
-/// One row of the task list: a task, or the row that makes a new one after them.
+/// One row of the task list: a task, then an undecodable task, or the row that makes a
+/// new one after them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ListRow {
     Task(usize),
+    Undecodable(usize),
     NewTask,
 }
 
@@ -129,11 +139,14 @@ pub(super) enum Message {
 pub(super) struct TasksPanel {
     tab: PanelTab,
     tasks: Vec<ListedTask>,
+    undecodable: Vec<UndecodableTask>,
     /// Rows of the `TaskList` in flight.
     listing: Vec<ListedTask>,
     loaded: bool,
-    /// Index into the list rows: the tasks, then the new-task row.
+    /// Index into the list rows: the tasks, the undecodable tasks, then the new-task row.
     selected: Selection,
+    /// The undecodable task the list is asking whether to delete.
+    deleting: Option<TaskId>,
     editor: Option<TaskEditor>,
     outbox: Outbox,
     message: Option<Message>,
@@ -150,9 +163,11 @@ impl TasksPanel {
         let mut panel = Self {
             tab: PanelTab::Tasks,
             tasks: Vec::new(),
+            undecodable: Vec::new(),
             listing: Vec::new(),
             loaded: false,
             selected: Selection::default(),
+            deleting: None,
             editor: None,
             outbox: Outbox::default(),
             message: None,
@@ -207,16 +222,31 @@ impl TasksPanel {
         &self.tasks
     }
 
+    pub(super) fn undecodable(&self) -> &[UndecodableTask] {
+        &self.undecodable
+    }
+
+    /// The undecodable task the list is asking whether to delete.
+    pub(super) fn deleting(&self) -> Option<&UndecodableTask> {
+        let deleting = self.deleting?;
+        self.undecodable.iter().find(|task| task.id == deleting)
+    }
+
     pub(super) fn loaded(&self) -> bool {
         self.loaded
     }
 
     pub(super) fn selected_row(&self) -> ListRow {
-        if self.selected.index() < self.tasks.len() {
-            ListRow::Task(self.selected.index())
-        } else {
-            ListRow::NewTask
+        let index = self.selected.index();
+        match index.checked_sub(self.tasks.len()) {
+            None => ListRow::Task(index),
+            Some(index) if index < self.undecodable.len() => ListRow::Undecodable(index),
+            Some(_) => ListRow::NewTask,
         }
+    }
+
+    fn list_rows(&self) -> usize {
+        self.tasks.len() + self.undecodable.len() + 1
     }
 
     pub(super) fn editor(&self) -> Option<&TaskEditor> {
@@ -261,7 +291,8 @@ impl TasksPanel {
     }
 
     /// Ctrl+C closes the panel from any view, stopping a refine; the editor takes every
-    /// other key while open, else Tab and shift+Tab change tabs and the rest go to the tab.
+    /// other key while open, then the list's delete question while it asks, else Tab and
+    /// shift+Tab change tabs and the rest go to the tab.
     pub(super) fn on_key(&mut self, ev: KeyEvent) -> PanelAction {
         if ev.code == KeyCode::Char('c') && ev.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(editor) = self.editor.as_mut() {
@@ -272,6 +303,10 @@ impl TasksPanel {
         self.message = None;
         if self.editor.is_some() {
             self.on_editor_key(ev);
+            return PanelAction::Stay;
+        }
+        if let Some(task) = self.deleting {
+            self.answer_delete_question(ev, task);
             return PanelAction::Stay;
         }
         match ev.code {
@@ -314,13 +349,15 @@ impl TasksPanel {
     }
 
     /// ↑/↓ select, Enter opens the task or makes a new one, Space turns the task on or off,
-    /// `r` queues a run of it, and Esc closes the panel.
+    /// `r` queues a run of it, Delete or Backspace asks to delete an undecodable task, and
+    /// Esc closes the panel.
     fn on_list_key(&mut self, ev: KeyEvent) -> PanelAction {
         match ev.code {
             KeyCode::Esc => return PanelAction::Close,
             KeyCode::Up => self.selected.previous(),
-            KeyCode::Down => self.selected.next(self.tasks.len() + 1),
+            KeyCode::Down => self.selected.next(self.list_rows()),
             KeyCode::Enter => self.open_selected(),
+            KeyCode::Delete | KeyCode::Backspace => self.ask_to_delete_selected(),
             KeyCode::Char(' ') => self.toggle_selected(),
             KeyCode::Char('r') => self.run_selected(),
             _ => {}
@@ -343,8 +380,8 @@ impl TasksPanel {
         });
     }
 
-    /// List the runs of the task selected in the task list, or show none when the new-task
-    /// row is selected.
+    /// List the runs of the task selected in the task list, or show none when another row
+    /// is selected.
     fn request_runs(&mut self) {
         let ListRow::Task(index) = self.selected_row() else {
             self.runs.clear();
@@ -372,6 +409,7 @@ impl TasksPanel {
     fn open_selected(&mut self) {
         let editor = match self.selected_row() {
             ListRow::NewTask => TaskEditor::new_task(self.auto_offered),
+            ListRow::Undecodable(_) => return,
             ListRow::Task(index) => {
                 let task = &self.tasks[index];
                 let spec = task.spec.clone();
@@ -391,6 +429,23 @@ impl TasksPanel {
                     RequestBody::Task(TaskRequest::SetEnabled { task, enabled }),
                 )
             });
+        }
+    }
+
+    fn ask_to_delete_selected(&mut self) {
+        if let ListRow::Undecodable(index) = self.selected_row() {
+            self.deleting = Some(self.undecodable[index].id);
+        }
+    }
+
+    /// Enter deletes undecodable task `task`, Esc keeps it, and other keys leave the
+    /// question open.
+    fn answer_delete_question(&mut self, ev: KeyEvent, task: TaskId) {
+        if let Some(confirmed) = confirmation(ev) {
+            self.deleting = None;
+            if confirmed {
+                self.delete(task);
+            }
         }
     }
 
@@ -441,6 +496,15 @@ impl TasksPanel {
                     trigger_failure,
                 },
             ),
+            EventBody::UndecodableTask {
+                task_id,
+                name,
+                reason,
+            } => self.undecodable.push(UndecodableTask {
+                id: task_id,
+                name,
+                reason,
+            }),
             EventBody::TriggerFires { fires } => {
                 self.record_check(&id, TriggerCheck::Fires(fires));
             }
@@ -513,7 +577,7 @@ impl TasksPanel {
             PendingOp::List => {
                 self.tasks = std::mem::take(&mut self.listing);
                 self.loaded = true;
-                self.selected.clamp(self.tasks.len() + 1);
+                self.selected.clamp(self.list_rows());
                 if self.tab == PanelTab::Runs {
                     self.request_runs();
                 }
@@ -530,7 +594,8 @@ impl TasksPanel {
             }
             PendingOp::Delete(task) => {
                 self.tasks.retain(|listed| listed.id != task);
-                self.selected.clamp(self.tasks.len() + 1);
+                self.undecodable.retain(|listed| listed.id != task);
+                self.selected.clamp(self.list_rows());
                 self.message = Some(Message::Info("deleted".into()));
             }
             PendingOp::Runs => self.runs.finish(request),
@@ -559,6 +624,7 @@ impl TasksPanel {
             PendingOp::List => {
                 self.loaded = true;
                 self.listing.clear();
+                self.undecodable.clear();
                 self.message = Some(Message::Error(message));
             }
             PendingOp::Runs => {
@@ -594,3 +660,6 @@ pub(super) fn task_confirm(
         }),
     )
 }
+
+#[cfg(test)]
+mod tests;

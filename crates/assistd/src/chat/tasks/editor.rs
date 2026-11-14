@@ -632,7 +632,7 @@ fn parsed_kept_runs(text: &str) -> Result<Option<KeptRuns>, String> {
 }
 
 /// `Some(true)` for Enter, `Some(false)` for Esc, and `None` for any other key.
-fn confirmation(ev: KeyEvent) -> Option<bool> {
+pub(super) fn confirmation(ev: KeyEvent) -> Option<bool> {
     match ev.code {
         KeyCode::Enter => Some(true),
         KeyCode::Esc => Some(false),

@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::types::Type;
 use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction};
+use tracing::warn;
 
 use assistd_ipc::{TaskId, TaskName, TaskRunId, TaskRunSummary};
 
@@ -20,6 +21,7 @@ use crate::{
 };
 
 use super::connection::{Erasing, SqliteHandle};
+use super::rows::decodable_rows;
 use super::tasks::run_state_at;
 use super::timestamp::{now_millis, timestamp_at};
 
@@ -233,9 +235,8 @@ impl TranscriptStore for SqliteTranscriptStore {
         self.handle
             .read("list_branches", |c| {
                 let sql = format!("{BRANCH_INFO_SELECT} ORDER BY last_active_at DESC, b.id ASC");
-                c.prepare_cached(&sql)?
-                    .query_map([], branch_info)?
-                    .collect()
+                let mut stmt = c.prepare_cached(&sql)?;
+                decodable_rows(stmt.query([])?, "branches", branch_info)
             })
             .await
     }
@@ -979,13 +980,22 @@ fn reasoning_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Option<Reasoning>
         .map(|(text, duration_ms)| Reasoning { text, duration_ms }))
 }
 
+/// The tool calls stored as JSON at `idx` of a [`history_rows`] row; none, with a warning,
+/// when the JSON no longer decodes, so the message still loads.
 fn tool_calls_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<Vec<PersistedToolCall>> {
-    row.get::<_, Option<String>>(idx)?
-        .map_or(Ok(Vec::new()), |json| {
-            serde_json::from_str(&json).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(e))
-            })
-        })
+    let Some(json) = row.get::<_, Option<String>>(idx)? else {
+        return Ok(Vec::new());
+    };
+    let message: MessageId = row.get(0)?;
+    Ok(serde_json::from_str(&json).unwrap_or_else(|error| {
+        warn!(
+            target: "assistd::memory",
+            %message,
+            %error,
+            "loading a message without its stored tool calls, which do not decode"
+        );
+        Vec::new()
+    }))
 }
 
 #[cfg(test)]
