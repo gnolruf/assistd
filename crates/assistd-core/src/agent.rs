@@ -17,8 +17,8 @@ use tracing::{debug, info, instrument, warn};
 
 use assistd_ipc::{RelayEvent, StatusKind};
 use assistd_llm::{
-    HealthWaitError, LlmBackend, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall,
-    ToolResultPayload,
+    HealthWaitError, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall, ToolResultPayload,
+    TurnBackend,
 };
 use assistd_tools::{Attachment, RelayObserver, ToolOutput, ToolRegistry, TurnContext};
 use assistd_utils::text::panic_message;
@@ -57,7 +57,7 @@ const TRUNCATION_NOTE: &str = "Your previous response reached the output-token l
 /// A tool still running after `tool_deadline` is reported to the model as failed.
 #[derive(Debug)]
 pub struct Agent {
-    backend: Arc<dyn LlmBackend>,
+    backend: Arc<dyn TurnBackend>,
     tools: Arc<ToolRegistry>,
     /// Offered in place of `tools` while the turn plans.
     planning_tools: Option<Arc<ToolRegistry>>,
@@ -69,7 +69,7 @@ impl Agent {
     /// Build an agent over `backend` and `tools`; see [`Agent`] for how
     /// `health` and `tool_deadline` shape a turn.
     pub fn new(
-        backend: Arc<dyn LlmBackend>,
+        backend: Arc<dyn TurnBackend>,
         tools: Arc<ToolRegistry>,
         health: Option<Arc<dyn LlmHealthProbe>>,
         tool_deadline: Duration,
@@ -280,7 +280,7 @@ impl Agent {
         }
     }
 
-    /// Run one backend step, passing its events on to the turn. The step is
+    /// Run one model step, passing its events on to the turn. The step is
     /// dropped once the turn is cancelled or its consumer leaves.
     async fn relay_step(&self, turn: &Turn) -> Result<StepEnd, LlmError> {
         let (step_tx, mut step_rx) = mpsc::channel(STEP_EVENT_BUFFER);

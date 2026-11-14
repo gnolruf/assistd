@@ -31,7 +31,7 @@ use super::wire;
 use crate::{
     ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent,
     LlmHealthProbe, LlmResult, OneShotReply, ReadyState, SlotAssignment, SlotStash, StepOutcome,
-    Thinking, ToolCall, ToolResultPayload,
+    Thinking, ToolCall, ToolResultPayload, TurnBackend,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -604,70 +604,7 @@ impl LlamaChatClient {
 }
 
 #[async_trait]
-impl LlmBackend for LlamaChatClient {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        let (body_bytes, estimated_tokens, compaction_headroom) = {
-            let lock_start = std::time::Instant::now();
-            let mut conv = self.conv.lock().await;
-            if lock_start.elapsed() > Duration::from_secs(1) {
-                warn!(
-                    target: "assistd::chat",
-                    "chat lock contended for {:?}",
-                    lock_start.elapsed()
-                );
-            }
-            conv.push_user(prompt);
-            drop(conv);
-            let mut conv = match self.fit_budget(&[], &tx).await {
-                Ok(conv) => conv,
-                Err(e) => {
-                    self.conv.lock().await.rollback_last_user();
-                    return Err(e);
-                }
-            };
-            send_context_size(&conv, &tx).await;
-            let payload = self.base_request(conv.as_wire_messages());
-            match serde_json::to_vec(&payload) {
-                Ok(b) => (b, conv.heuristic_tokens(), self.compaction_headroom(&conv)),
-                Err(e) => {
-                    conv.rollback_last_user();
-                    return Err(LlmError::Chat(ChatClientError::Json(e)));
-                }
-            }
-        };
-
-        self.claim_slot().await;
-        let outcome = self
-            .stream_openai(body_bytes, compaction_headroom, &tx)
-            .await;
-
-        let mut conv = self.conv.lock().await;
-        self.calibrate(&mut conv, estimated_tokens, &outcome);
-        match outcome {
-            StreamOutcome::Ok(accum) => {
-                conv.push_assistant(accum.text);
-                let _ = tx.send(LlmEvent::Done).await;
-                Ok(())
-            }
-            StreamOutcome::PartialAfterEmit { accum, .. } => {
-                conv.push_assistant(accum.text);
-                let _ = tx.send(LlmEvent::Done).await;
-                Ok(())
-            }
-            StreamOutcome::ClientDisconnected(accum) => {
-                conv.push_assistant(accum.text);
-                Ok(())
-            }
-            StreamOutcome::PreEmitError(e) => {
-                conv.rollback_last_user();
-                Err(LlmError::Chat(e))
-            }
-            StreamOutcome::ServerRestart { .. } => Err(LlmError::ServerRestarting(
-                "llama-server crashed during generate".into(),
-            )),
-        }
-    }
-
+impl TurnBackend for LlamaChatClient {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         if attachments.is_empty() {
@@ -730,15 +667,18 @@ impl LlmBackend for LlamaChatClient {
         Ok(())
     }
 
-    async fn set_transient_context(&self, text: String) -> LlmResult<()> {
-        let mut conv = self.conv.lock().await;
-        conv.set_transient_context(text);
-        Ok(())
-    }
-
     async fn set_transient_note(&self, text: String) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         conv.set_transient_note(text);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LlmBackend for LlamaChatClient {
+    async fn set_transient_context(&self, text: String) -> LlmResult<()> {
+        let mut conv = self.conv.lock().await;
+        conv.set_transient_context(text);
         Ok(())
     }
 

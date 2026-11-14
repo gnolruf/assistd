@@ -16,7 +16,7 @@ use assistd_config::{
     ChatConfig, HfFile, LoopbackAddr, ModelConfig, NonBlankString, SttEncoder, SynthesisConfig,
     TimeoutsConfig, TranscriptionConfig, VoiceFamily,
 };
-use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent};
+use assistd_llm::{LlamaChatClient, LlmBackend, LlmEvent, LlmResult};
 use assistd_utils::time::saturating_millis;
 use assistd_voice::{
     SentenceBuffer, SherpaTranscriber, SherpaVoiceOutput, Transcriber, VoiceOutput,
@@ -521,7 +521,7 @@ async fn transcribe_prompt(stt: &dyn Transcriber, pcm: &[i16], no_think: bool) -
     })
 }
 
-/// Logs a failed `generate`, since the stage table only shows stages that
+/// Logs a failed step, since the stage table only shows stages that
 /// fired and a silent failure would look like the LLM never replied.
 fn spawn_generation(
     llm: Arc<dyn LlmBackend>,
@@ -530,16 +530,30 @@ fn spawn_generation(
 ) -> JoinHandle<()> {
     tokio::spawn(
         async move {
-            if let Err(err) = llm.generate(prompt, llm_tx).await {
-                tracing::error!(
+            match reply_once(llm.as_ref(), prompt, &llm_tx).await {
+                Ok(()) => {
+                    let _ = llm_tx.send(LlmEvent::Done).await;
+                }
+                Err(err) => tracing::error!(
                     target: "voice_latency_bench",
                     error = %err,
-                    "LLM generate failed; iteration will report no llm_first_token"
-                );
+                    "LLM step failed; iteration will report no llm_first_token"
+                ),
             }
         }
         .in_current_span(),
     )
+}
+
+/// One model step on `prompt` with no tools offered.
+async fn reply_once(
+    llm: &dyn LlmBackend,
+    prompt: String,
+    llm_tx: &mpsc::Sender<LlmEvent>,
+) -> LlmResult<()> {
+    llm.push_user(prompt, Vec::new()).await?;
+    llm.step(Vec::new(), llm_tx.clone()).await?;
+    Ok(())
 }
 
 /// Speaks each sentence without `wait_idle`: the bench measures
@@ -559,7 +573,7 @@ fn spawn_speaker(
 }
 
 /// Segment streamed deltas into sentences for the speaker until `Done`.
-/// `generate` runs no agent loop, so tool events never arrive; reasoning is never spoken.
+/// A lone step runs no agent loop, so tool events never arrive; reasoning is never spoken.
 async fn forward_sentences(mut llm_rx: mpsc::Receiver<LlmEvent>, speech_tx: mpsc::Sender<String>) {
     let mut sentences = SentenceBuffer::new(220);
     let mut first_emitted = false;

@@ -6,15 +6,15 @@ use std::future::pending;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use assistd_ipc::{StatusKind, TaskId, TaskRunId};
 use assistd_llm::{
-    ConversationKey, HistoryReplay, LlmBackend, LlmError, LlmEvent, LlmResult, OneShotReply,
-    SlotAssignment, StepOutcome, ToolResultPayload,
+    ConversationKey, LlmBackend, LlmError, LlmEvent, LlmResult, StepOutcome, ToolResultPayload,
+    TurnBackend,
 };
 use assistd_tools::{Attachment, YieldableLane};
 
@@ -152,16 +152,12 @@ impl YieldableLane for RunLane {
 /// before each step, and mid-step by discarding what streamed so far.
 #[derive(Debug)]
 pub(in crate::state) struct YieldingBackend {
-    pub(in crate::state) inner: Arc<dyn LlmBackend>,
+    pub(in crate::state) inner: Arc<dyn TurnBackend>,
     pub(in crate::state) lane: Arc<RunLane>,
 }
 
 #[async_trait]
-impl LlmBackend for YieldingBackend {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        self.inner.generate(prompt, tx).await
-    }
-
+impl TurnBackend for YieldingBackend {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         self.inner.push_user(text, attachments).await
     }
@@ -187,48 +183,8 @@ impl LlmBackend for YieldingBackend {
         self.inner.push_interrupted_reply(reply).await
     }
 
-    async fn set_transient_context(&self, text: String) -> LlmResult<()> {
-        self.inner.set_transient_context(text).await
-    }
-
     async fn set_transient_note(&self, text: String) -> LlmResult<()> {
         self.inner.set_transient_note(text).await
-    }
-
-    async fn replace_history(&self, replay: HistoryReplay) -> LlmResult<()> {
-        self.inner.replace_history(replay).await
-    }
-
-    async fn truncate_to_last_real_user(&self) -> LlmResult<usize> {
-        self.inner.truncate_to_last_real_user().await
-    }
-
-    async fn complete_oneshot(&self, prompt: String, reply: OneShotReply) -> LlmResult<String> {
-        self.inner.complete_oneshot(prompt, reply).await
-    }
-
-    async fn recent_user_messages(&self, limit: usize) -> Vec<String> {
-        self.inner.recent_user_messages(limit).await
-    }
-
-    async fn complete_with_schema(
-        &self,
-        instruction: String,
-        schema: Map<String, Value>,
-    ) -> LlmResult<String> {
-        self.inner.complete_with_schema(instruction, schema).await
-    }
-
-    fn isolated_conversation(
-        &self,
-        system_prompt: String,
-        slot: SlotAssignment,
-    ) -> LlmResult<Arc<dyn LlmBackend>> {
-        self.inner.isolated_conversation(system_prompt, slot)
-    }
-
-    fn move_to_slot(&self, slot: SlotAssignment) {
-        self.inner.move_to_slot(slot);
     }
 }
 

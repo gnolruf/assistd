@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use assistd_tools::Attachment;
 
-use crate::{LlmBackend, LlmEvent, LlmResult, StepOutcome, ToolResultPayload};
+use crate::{LlmBackend, LlmEvent, LlmResult, StepOutcome, ToolResultPayload, TurnBackend};
 
 /// Trivial backend that echoes the user's most recent push as a single
 /// delta on the next `step`. Tool calls are never emitted.
@@ -31,13 +31,7 @@ impl EchoBackend {
 }
 
 #[async_trait]
-impl LlmBackend for EchoBackend {
-    async fn generate(&self, prompt: String, tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        let _ = tx.send(LlmEvent::Delta { text: prompt }).await;
-        let _ = tx.send(LlmEvent::Done).await;
-        Ok(())
-    }
-
+impl TurnBackend for EchoBackend {
     async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         *self.last_user.lock().await = text;
         Ok(())
@@ -54,4 +48,14 @@ impl LlmBackend for EchoBackend {
         }
         Ok(StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl LlmBackend for EchoBackend {}

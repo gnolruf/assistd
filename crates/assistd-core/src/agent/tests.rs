@@ -48,11 +48,7 @@ impl MockBackend {
 }
 
 #[async_trait]
-impl LlmBackend for MockBackend {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        unimplemented!("mock uses step path only")
-    }
-
+impl TurnBackend for MockBackend {
     async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         self.pushed_users.lock().push(text);
         Ok(())
@@ -82,6 +78,10 @@ impl LlmBackend for MockBackend {
             let _ = tx.send(LlmEvent::Delta { text: "ok".into() }).await;
         }
         Ok(outcome)
+    }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        Ok(())
     }
 
     async fn set_transient_note(&self, text: String) -> LlmResult<()> {
@@ -680,11 +680,7 @@ impl ErrorInjectingBackend {
 }
 
 #[async_trait]
-impl LlmBackend for ErrorInjectingBackend {
-    async fn generate(&self, _prompt: String, _tx: mpsc::Sender<LlmEvent>) -> LlmResult<()> {
-        unimplemented!("mock uses step path only")
-    }
-
+impl TurnBackend for ErrorInjectingBackend {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         Ok(())
     }
@@ -704,6 +700,14 @@ impl LlmBackend for ErrorInjectingBackend {
         }
         let _ = tx.send(LlmEvent::Delta { text: "ok".into() }).await;
         Ok(StepOutcome::Final)
+    }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> LlmResult<()> {
+        Ok(())
     }
 }
 

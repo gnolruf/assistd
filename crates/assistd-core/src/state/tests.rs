@@ -18,6 +18,7 @@ use assistd_ipc::{
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
+    TurnBackend,
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
@@ -540,14 +541,7 @@ struct TitlingBackend {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for TitlingBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
+impl TurnBackend for TitlingBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -555,12 +549,14 @@ impl LlmBackend for TitlingBackend {
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn push_tool_results(
         &self,
         _results: Vec<ToolResultPayload>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
@@ -568,6 +564,18 @@ impl LlmBackend for TitlingBackend {
     ) -> assistd_llm::LlmResult<StepOutcome> {
         Ok(StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for TitlingBackend {
     async fn complete_oneshot(
         &self,
         _prompt: String,
@@ -992,14 +1000,7 @@ impl StreamingDeltaBackend {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for StreamingDeltaBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
+impl TurnBackend for StreamingDeltaBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1007,12 +1008,14 @@ impl LlmBackend for StreamingDeltaBackend {
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn push_tool_results(
         &self,
         _results: Vec<ToolResultPayload>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
@@ -1029,7 +1032,17 @@ impl LlmBackend for StreamingDeltaBackend {
         }
         Ok(StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl LlmBackend for StreamingDeltaBackend {}
 
 fn config_with_partial_flush(ms: u32) -> Config {
     let mut cfg = Config::default();
@@ -1082,14 +1095,7 @@ impl ToolCallBackend {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for ToolCallBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
+impl TurnBackend for ToolCallBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1097,12 +1103,14 @@ impl LlmBackend for ToolCallBackend {
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn push_tool_results(
         &self,
         _results: Vec<ToolResultPayload>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
@@ -1123,7 +1131,17 @@ impl LlmBackend for ToolCallBackend {
         tx.send(LlmEvent::Delta { text: text.into() }).await.ok();
         Ok(outcome)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl LlmBackend for ToolCallBackend {}
 
 /// Sleeps before returning, spanning the partial-flush window.
 #[derive(Debug)]
@@ -1446,14 +1464,7 @@ struct StallingBackend {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for StallingBackend {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
+impl TurnBackend for StallingBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1461,12 +1472,14 @@ impl LlmBackend for StallingBackend {
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn push_tool_results(
         &self,
         _results: Vec<ToolResultPayload>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
@@ -1477,11 +1490,18 @@ impl LlmBackend for StallingBackend {
         self.streamed.notify_one();
         std::future::pending().await
     }
+
     async fn push_interrupted_reply(&self, reply: String) -> assistd_llm::LlmResult<()> {
         self.interrupted_replies.lock().push(reply);
         Ok(())
     }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
 }
+
+impl LlmBackend for StallingBackend {}
 
 #[tokio::test]
 async fn an_interrupted_reply_is_kept_with_a_marker_in_the_conversation_and_the_transcript() {
@@ -2373,14 +2393,7 @@ impl MainConversation {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for MainConversation {
-    async fn generate(
-        &self,
-        _prompt: String,
-        _tx: mpsc::Sender<LlmEvent>,
-    ) -> assistd_llm::LlmResult<()> {
-        unimplemented!("uses step path")
-    }
+impl TurnBackend for MainConversation {
     async fn push_user(
         &self,
         text: String,
@@ -2389,12 +2402,14 @@ impl LlmBackend for MainConversation {
         self.pushed.lock().push(text);
         Ok(())
     }
+
     async fn push_tool_results(
         &self,
         _results: Vec<ToolResultPayload>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }
+
     async fn step(
         &self,
         _tools: Vec<serde_json::Value>,
@@ -2402,6 +2417,17 @@ impl LlmBackend for MainConversation {
     ) -> assistd_llm::LlmResult<StepOutcome> {
         Ok(StepOutcome::Final)
     }
+
+    async fn push_interrupted_reply(&self, _reply: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+
+    async fn set_transient_note(&self, _text: String) -> assistd_llm::LlmResult<()> {
+        Ok(())
+    }
+}
+
+impl LlmBackend for MainConversation {
     fn isolated_conversation(
         &self,
         _system_prompt: String,
