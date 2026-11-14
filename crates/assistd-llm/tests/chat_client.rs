@@ -465,6 +465,26 @@ async fn conv_lock_is_not_held_while_streaming() {
 }
 
 #[tokio::test]
+async fn conv_lock_is_not_held_while_the_consumer_is_stalled() {
+    let (port, _server) = spawn_fake(Script::new()).await;
+    let client = build_client(&chat_spec(port));
+    client.push_user("first".into(), Vec::new()).await.unwrap();
+    let (tx, _rx) = mpsc::channel(1);
+    tx.try_send(delta("unread")).unwrap();
+
+    let step = client.step(Vec::new(), tx);
+    tokio::pin!(step);
+    timeout(Duration::from_millis(100), &mut step)
+        .await
+        .expect_err("the step waits for room in the full channel");
+
+    let recent = timeout(Duration::from_secs(2), client.recent_user_messages(1))
+        .await
+        .expect("reading recent messages must not wait on a stalled consumer");
+    assert_eq!(recent, ["first"]);
+}
+
+#[tokio::test]
 async fn stalled_stream_aborts_within_inactivity_timeout() {
     let script = Script::new();
     script
