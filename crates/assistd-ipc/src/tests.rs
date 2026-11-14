@@ -53,18 +53,22 @@ fn wake_word_request_cases() -> Vec<(Request, &'static str)> {
 fn voice_and_presence_request_cases() -> Vec<(Request, &'static str)> {
     vec![
         (
-            Request::query("r", "hi"),
+            request(RequestBody::Query {
+                text: "hi".into(),
+                attachments: Vec::new(),
+                plan: PlanMode::Off,
+            }),
             r#"{"id":"r","type":"query","text":"hi"}"#,
         ),
         (
-            Request::query_with_attachments(
-                "r",
-                "describe this",
-                vec![ImageAttachment::from_bytes(
+            request(RequestBody::Query {
+                text: "describe this".into(),
+                attachments: vec![ImageAttachment::from_bytes(
                     ImageMime::Png,
                     &[0xDE, 0xAD, 0xBE, 0xEF],
                 )],
-            ),
+                plan: PlanMode::Off,
+            }),
             r#"{"id":"r","type":"query","text":"describe this","attachments":[{"mime":"image/png","data_base64":"3q2+7w=="}]}"#,
         ),
         (

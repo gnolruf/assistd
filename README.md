@@ -133,25 +133,7 @@ The socket opens at once; the model downloads (first launch only) and
 loads in the background, and queries wait for it. Logs go to stdout at
 `info`; set `RUST_LOG` to change that.
 
-### 4. First query
-
-```sh
-assistd query "what time is it?"
-```
-
-The reply streams to stdout, with a line for each tool call, and the
-process exits 0:
-
-```text
-[tool call: run date]
-[tool result: run exit:0]
-The current time is 14:32 PDT.
-```
-
-`query` cannot answer confirmation prompts, so a command that needs
-one is denied; use `chat` for those.
-
-### 5. Open the chat TUI
+### 4. Open the chat TUI
 
 ```sh
 assistd chat
@@ -161,6 +143,10 @@ The TUI is a long-lived client onto the running daemon; while no
 daemon is listening its status line shows the daemon offline, and it
 connects once one starts. Only one chat may be open at a time, since every chat
 drives the daemon's single conversation.
+
+Type a prompt such as `what time is it?` and press Enter. The reply
+streams in, each tool call is shown as it runs, and a command that
+needs confirmation asks first.
 
 `/settings` in the chat, or `assistd settings` on its own, opens the
 config in an editable panel, one section at a time, with
@@ -187,7 +173,6 @@ A non-exhaustive tour. `assistd --help` is the canonical reference.
 |--------------------------|---------------------------------------------------------------|
 | `assistd daemon`         | Run the daemon (foreground).                                  |
 | `assistd init-config`    | Write the sample config to `~/.config/assistd/config.toml`.   |
-| `assistd query <text>`   | One-shot query; prints the streamed response and exits.       |
 | `assistd chat`           | Interactive ratatui TUI.                                      |
 | `assistd settings`       | Edit `config.toml` in a terminal panel (also `/settings` in chat). |
 | `assistd sleep` / `drowse` / `wake` | Jump to a specific presence state.                 |

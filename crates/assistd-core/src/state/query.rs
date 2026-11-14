@@ -72,7 +72,7 @@ impl Query {
 /// How a turn's prompt reached the daemon.
 #[derive(Debug)]
 pub enum TurnOrigin {
-    /// Text from a client: the chat, `assistd query`, or another tool. The client answers
+    /// Text from a client: the chat or another tool. The client answers
     /// the turn's prompts through this context.
     Typed(TurnContext),
     /// A push-to-talk or continuous-listening transcription, which nobody can answer

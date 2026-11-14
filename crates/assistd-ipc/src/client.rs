@@ -270,9 +270,20 @@ impl DialogConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RequestBody;
+    use crate::{PlanMode, RequestBody};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+
+    fn query() -> Request {
+        Request::new(
+            "r",
+            RequestBody::Query {
+                text: "x".into(),
+                attachments: Vec::new(),
+                plan: PlanMode::Off,
+            },
+        )
+    }
 
     /// Mock daemon: accepts one connection, parses one request, writes `responses`, then closes.
     /// The returned `TempDir` owns the socket and must outlive the test.
@@ -325,9 +336,7 @@ mod tests {
                 first_line.to_owned(),
                 r#"{"type":"done","id":"r"}"#.into(),
             ]);
-            let outcome = IpcClient::with_path(path)
-                .one_shot(Request::query("r", "x"))
-                .await;
+            let outcome = IpcClient::with_path(path).one_shot(query()).await;
             server.await.unwrap();
             outcome.map(|_| ())
         };
@@ -357,7 +366,7 @@ mod tests {
             r#"{"type":"done","id":"r"}"#.into(),
         ]);
         let client = IpcClient::with_path(path);
-        let stream = client.one_shot(Request::query("r", "x")).await.unwrap();
+        let stream = client.one_shot(query()).await.unwrap();
         let outcome = stream.collect().await;
         assert!(
             matches!(outcome, Err(IpcClientError::Json(_))),
@@ -375,7 +384,7 @@ mod tests {
             },
         )]);
         let client = IpcClient::with_path(path);
-        let stream = client.one_shot(Request::query("r", "x")).await.unwrap();
+        let stream = client.one_shot(query()).await.unwrap();
         let err = stream.collect().await.expect_err("expected DaemonClosed");
         assert!(matches!(err, IpcClientError::DaemonClosed), "{err:?}");
         server.await.unwrap();
@@ -395,7 +404,7 @@ mod tests {
             let (_dir, path, server) = mock_server(events);
             let mut seen = 0;
             let outcome = IpcClient::with_path(path)
-                .request(Request::query("r", "x"), |_| {
+                .request(query(), |_| {
                     seen += 1;
                     Ok::<(), IpcClientError>(())
                 })
@@ -462,7 +471,7 @@ mod tests {
         });
 
         let client = IpcClient::with_path(&path);
-        let mut conn = client.open_dialog(Request::query("r", "go")).await.unwrap();
+        let mut conn = client.open_dialog(query()).await.unwrap();
 
         let event = conn.next_event().await.unwrap().expect("ConfirmRequest");
         match event.body {
