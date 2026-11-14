@@ -104,6 +104,10 @@ pub(super) async fn run(
         SearchError::Unavailable(reason) => {
             search_failed(format_args!("search is unavailable: {reason}"), FETCH_KNOWN)
         }
+        SearchError::Redirected => search_failed(
+            "a word starting with !! is a shortcut to another site, which search never follows",
+            "the query without words that start with !!",
+        ),
         e => search_failed(e, "re-running the search"),
     })?;
     Ok(listed(&results, args.limit))

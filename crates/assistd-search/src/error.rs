@@ -40,6 +40,10 @@ pub enum SearchError {
     #[error("search request failed: {0}")]
     Transport(#[source] reqwest::Error),
 
+    /// The query held a `!!` shortcut, which SearXNG answers by redirecting to another site.
+    #[error("search server answered with a redirect to another site; it was not followed")]
+    Redirected,
+
     #[error("search server returned {0}")]
     Status(StatusCode),
 

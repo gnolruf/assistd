@@ -881,6 +881,11 @@ model can act on rather than waiting on a dead port. Results come back
 from `GET /search?format=json` and are printed as TSV hits for the model
 to pick from and read with `web fetch`.
 
+SearXNG answers a query holding an external bang (`!!<name>`) with a
+redirect to the bang's site rather than with results. No client for a
+server on this machine follows redirects, so the daemon never requests
+that URL: the search fails and tells the model to drop the `!!` word.
+
 The instance has no authentication, so `search.host` must be loopback.
 `web fetch` never fetches loopback or other non-public addresses, so
 the model cannot reach the search port through it, and sandboxed `bash`

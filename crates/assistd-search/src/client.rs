@@ -100,7 +100,8 @@ impl SearxngClient {
 
     /// Fails without sending with [`SearchError::NotServing`] while the
     /// instance is starting or not serving, and [`SearchError::Unavailable`]
-    /// when it never started.
+    /// when it never started. A redirect is never followed and fails with
+    /// [`SearchError::Redirected`].
     pub async fn search(&self, query: &SearchQuery<'_>) -> Result<SearchResults, SearchError> {
         self.ensure_serving()?;
         let response = self
@@ -110,6 +111,9 @@ impl SearxngClient {
             .await
             .map_err(SearchError::Transport)?;
         let status = response.status();
+        if status.is_redirection() {
+            return Err(SearchError::Redirected);
+        }
         if !status.is_success() {
             return Err(SearchError::Status(status));
         }
