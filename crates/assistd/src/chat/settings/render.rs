@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 
 use super::super::selection::list_window;
-use super::super::text::{ellipsize, locate_cursor, wrap_input};
+use super::super::text::{chars_width, chars_within, ellipsize, locate_cursor, wrap_input};
 use super::super::text_editor::TextEditor;
 use super::super::theme::{Theme, color};
 use super::catalog::{SECTIONS, Setting, Tab};
@@ -449,15 +449,19 @@ pub(crate) fn render_wrapped_editor(
     editor: &TextEditor,
     show_cursor: bool,
 ) {
-    let chars: Vec<char> = editor.text().chars().collect();
+    let chars: Vec<char> = editor
+        .text()
+        .chars()
+        .map(|c| if c == '\n' { c } else { visible_char(c) })
+        .collect();
     let rows = wrap_input(&chars, 0, area.width);
-    let (cursor_row, cursor_column) = locate_cursor(&rows, editor.cursor_chars());
+    let (cursor_row, cursor_column) = locate_cursor(&chars, &rows, editor.cursor_chars());
     let visible = usize::from(area.height).max(1);
     let window = list_window(cursor_row, rows.len(), visible, 0);
     let start = window.start;
     let lines: Vec<Line<'static>> = rows[window]
         .iter()
-        .map(|&(row_start, row_end)| Line::raw(visible_chars(&chars[row_start..row_end])))
+        .map(|&(row_start, row_end)| Line::raw(String::from_iter(&chars[row_start..row_end])))
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
     if show_cursor {
@@ -762,11 +766,8 @@ fn push_entry_lines(
 
 /// `chars` with control characters shown as `↵` so they cannot move the
 /// terminal's cursor.
-fn visible_chars(chars: &[char]) -> String {
-    chars
-        .iter()
-        .map(|&c| if c.is_control() { '↵' } else { c })
-        .collect()
+fn visible_char(c: char) -> char {
+    if c.is_control() { '↵' } else { c }
 }
 
 /// `value` as listed: toggles as checkboxes, structured values as a count.
@@ -802,13 +803,17 @@ fn checkbox(on: bool) -> &'static str {
     if on { CHECKED } else { UNCHECKED }
 }
 
-/// The slice of the editor's text that fits `width` columns with the cursor
-/// in view, and the cursor's column within it.
+/// The slice of the editor's text that fits `width` display columns with the
+/// cursor in view, and the cursor's column within it.
 pub(crate) fn editor_window(editor: &TextEditor, width: usize) -> (String, usize) {
+    let chars: Vec<char> = editor.text().chars().map(visible_char).collect();
     let cursor = editor.cursor_chars();
-    let start = cursor.saturating_sub(width.saturating_sub(1));
-    let chars: Vec<char> = editor.text().chars().skip(start).take(width).collect();
-    (visible_chars(&chars), cursor - start)
+    let start = cursor - chars_within(chars[..cursor].iter().rev(), width.saturating_sub(1));
+    let end = start + chars_within(&chars[start..], width);
+    (
+        String::from_iter(&chars[start..end]),
+        chars_width(&chars[start..cursor]),
+    )
 }
 
 fn longest_label() -> usize {

@@ -1026,7 +1026,7 @@ fn unwrapped_prompt_rows<'a>(
 }
 
 fn padded_to(mut s: String, width: u16) -> String {
-    let visible = s.chars().count();
+    let visible = display_width(&s);
     let cap = usize::from(width);
     if visible < cap {
         s.push_str(&" ".repeat(cap - visible));

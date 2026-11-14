@@ -98,9 +98,27 @@ pub(crate) fn hard_wrap(text: &str, cols: usize) -> Vec<String> {
     rows
 }
 
+/// Display columns `chars` take.
+pub(crate) fn chars_width(chars: &[char]) -> usize {
+    chars.iter().map(|&c| char_width(c)).sum()
+}
+
+/// How many of `chars`, taken in order, fit in `cols` display columns.
+pub(crate) fn chars_within<'a>(chars: impl IntoIterator<Item = &'a char>, cols: usize) -> usize {
+    let mut used = 0;
+    chars
+        .into_iter()
+        .take_while(|&&c| {
+            used += char_width(c);
+            used <= cols
+        })
+        .count()
+}
+
 /// `(start, end)` char ranges of each input row: a new row at each line
-/// break, otherwise after the last whitespace that fits past the prompt. A
-/// final row that fills the width is followed by an empty one for the cursor.
+/// break, otherwise after the last whitespace that fits the display columns
+/// past the prompt. A final row that fills the width is followed by an empty
+/// one for the cursor.
 pub(crate) fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize, usize)> {
     let n = buf.len();
     if width == 0 {
@@ -119,22 +137,22 @@ pub(crate) fn wrap_input(buf: &[char], prompt_w: u16, width: u16) -> Vec<(usize,
         start = end + 1;
     }
     let (ls, le) = *rows.last().expect("rows non-empty");
-    if le - ls >= cap {
+    if chars_width(&buf[ls..le]) >= cap {
         rows.push((n, n));
     }
     rows
 }
 
-/// Append the rows, at most `cap` chars each, of the break-free span
-/// `(start, end)` to `rows`, always at least one.
+/// Append the rows, at most `cap` display columns each unless one char is
+/// wider, of the break-free span `(start, end)` to `rows`, always at least one.
 fn wrap_input_line(
     buf: &[char],
     (mut start, end): (usize, usize),
     cap: usize,
     rows: &mut Vec<(usize, usize)>,
 ) {
-    while end - start > cap {
-        let end_max = start + cap;
+    while chars_width(&buf[start..end]) > cap {
+        let end_max = start + chars_within(&buf[start..end], cap).max(1);
         let row_end = buf[start..end_max]
             .iter()
             .rposition(|c| c.is_whitespace())
@@ -145,23 +163,24 @@ fn wrap_input_line(
     rows.push((start, end));
 }
 
-/// Row and column of char offset `cursor`. At a soft wrap the cursor moves
-/// to the next row; before a line break it stays at the end of its row.
-pub(crate) fn locate_cursor(rows: &[(usize, usize)], cursor: usize) -> (usize, usize) {
-    for (idx, &(s, e)) in rows.iter().enumerate() {
-        if cursor < e {
-            return (idx, cursor - s);
-        }
-        if cursor == e {
-            if rows.get(idx + 1).is_some_and(|&(next, _)| next == e) {
-                return (idx + 1, 0);
-            }
-            return (idx, cursor - s);
-        }
-    }
-    let last = rows.len().saturating_sub(1);
-    let (s, e) = rows.get(last).copied().unwrap_or((0, 0));
-    (last, cursor.saturating_sub(s).min(e - s))
+/// Row and display column of char offset `cursor` in `buf` laid out as
+/// `rows`. At a soft wrap the cursor moves to the next row; before a line
+/// break it stays at the end of its row.
+pub(crate) fn locate_cursor(
+    buf: &[char],
+    rows: &[(usize, usize)],
+    cursor: usize,
+) -> (usize, usize) {
+    let row = rows
+        .iter()
+        .enumerate()
+        .position(|(idx, &(_, end))| {
+            cursor < end
+                || (cursor == end && rows.get(idx + 1).is_none_or(|&(next, _)| next != end))
+        })
+        .unwrap_or(rows.len().saturating_sub(1));
+    let (start, end) = rows.get(row).copied().unwrap_or((0, 0));
+    (row, chars_width(&buf[start..cursor.clamp(start, end)]))
 }
 
 #[cfg(test)]
@@ -196,10 +215,10 @@ mod tests {
         let buf = chars("hello world");
         let rows = wrap_input(&buf, 2, 10);
         assert_eq!(rows, [(0, 6), (6, 11)]);
-        assert_eq!(locate_cursor(&rows, 0), (0, 0));
-        assert_eq!(locate_cursor(&rows, 5), (0, 5));
-        assert_eq!(locate_cursor(&rows, 6), (1, 0));
-        assert_eq!(locate_cursor(&rows, 11), (1, 5));
+        assert_eq!(locate_cursor(&buf, &rows, 0), (0, 0));
+        assert_eq!(locate_cursor(&buf, &rows, 5), (0, 5));
+        assert_eq!(locate_cursor(&buf, &rows, 6), (1, 0));
+        assert_eq!(locate_cursor(&buf, &rows, 11), (1, 5));
     }
 
     #[test]
@@ -207,16 +226,26 @@ mod tests {
         let buf = chars("ab\n\ncd\n");
         let rows = wrap_input(&buf, 2, 10);
         assert_eq!(rows, [(0, 2), (3, 3), (4, 6), (7, 7)]);
-        assert_eq!(locate_cursor(&rows, 2), (0, 2));
-        assert_eq!(locate_cursor(&rows, 3), (1, 0));
-        assert_eq!(locate_cursor(&rows, 6), (2, 2));
-        assert_eq!(locate_cursor(&rows, 7), (3, 0));
+        assert_eq!(locate_cursor(&buf, &rows, 2), (0, 2));
+        assert_eq!(locate_cursor(&buf, &rows, 3), (1, 0));
+        assert_eq!(locate_cursor(&buf, &rows, 6), (2, 2));
+        assert_eq!(locate_cursor(&buf, &rows, 7), (3, 0));
+    }
+
+    #[test]
+    fn wide_chars_wrap_and_place_the_cursor_by_display_columns() {
+        let buf = chars("漢字漢字漢");
+        let rows = wrap_input(&buf, 2, 6);
+        assert_eq!(rows, [(0, 2), (2, 4), (4, 5)]);
+        assert_eq!(locate_cursor(&buf, &rows, 3), (1, 2));
+        assert_eq!(locate_cursor(&buf, &rows, 5), (2, 2));
+        assert_eq!(chars_within(&buf[..2], 3), 1);
     }
 
     #[test]
     fn locate_cursor_lands_on_phantom_row_after_full_row() {
         let buf = chars("aaaaaaaa");
         let rows = wrap_input(&buf, 2, 10);
-        assert_eq!(locate_cursor(&rows, 8), (1, 0));
+        assert_eq!(locate_cursor(&buf, &rows, 8), (1, 0));
     }
 }

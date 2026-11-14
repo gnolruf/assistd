@@ -8,7 +8,7 @@ use assistd_core::{PresenceState, VoiceCaptureState};
 use assistd_ipc::{ConfirmSource, PermissionMode, TaskRunState, TurnStats};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
@@ -811,12 +811,14 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let prompt_w = saturating_u16(INPUT_PROMPT.chars().count());
     let buf_chars: Vec<char> = app.input.buffer().chars().collect();
     let rows = wrap_input(&buf_chars, prompt_w, area.width);
+    let (cursor_row, cursor_column) = locate_cursor(&buf_chars, &rows, app.input.cursor_chars());
+    let window = list_window(cursor_row, rows.len(), usize::from(area.height), 0);
+    let first_shown = window.start;
 
-    let lines: Vec<Line<'_>> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, &(start, end))| {
-            let mut row = if i == 0 {
+    let lines: Vec<Line<'_>> = window
+        .map(|row_index| {
+            let (start, end) = rows[row_index];
+            let mut row = if row_index == 0 {
                 INPUT_PROMPT.to_string()
             } else {
                 " ".repeat(usize::from(prompt_w))
@@ -826,15 +828,12 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &App) {
         })
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
-
-    let (row_idx, col) = locate_cursor(&rows, app.input.cursor_chars());
-    let cursor_x = saturating_u16(col).saturating_add(prompt_w);
-    let cy = area
-        .y
-        .saturating_add(saturating_u16(row_idx))
-        .min(area.y + area.height.saturating_sub(1));
-    let cx = (area.x + cursor_x).min(area.x + area.width.saturating_sub(1));
-    frame.set_cursor_position(Position::new(cx, cy));
+    place_cursor(
+        frame,
+        area,
+        cursor_row - first_shown,
+        cursor_column + usize::from(prompt_w),
+    );
 }
 
 /// Rows the input line needs in a dock `dock_height` rows tall, leaving
@@ -856,9 +855,14 @@ fn saturating_u16(value: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use assistd_ipc::IpcClient;
     use assistd_tools::{ConfirmationRequest, Risk, Unattended};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use tokio::sync::mpsc;
 
     use super::*;
 
@@ -884,10 +888,15 @@ mod tests {
                 render_confirmation_dock(frame, frame.area(), prompt, &Theme::default());
             })
             .expect("draw");
+        screen_text(&terminal)
+    }
+
+    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();
-        (0..height)
+        let area = buffer.area;
+        (0..area.height)
             .map(|y| {
-                (0..width)
+                (0..area.width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             })
@@ -940,6 +949,31 @@ mod tests {
         let clamped = prompt.scroll;
         prompt_screen(&mut prompt, 100, 30);
         assert_eq!(prompt.scroll, clamped);
+    }
+
+    #[test]
+    fn input_taller_than_its_area_scrolls_to_the_cursor_row() {
+        let (chat_tx, _chat_rx) = mpsc::channel(1);
+        let mut app = App::new(
+            Arc::new(IpcClient::with_path("/tmp/assistd-test-nonexistent.sock")),
+            chat_tx,
+            "test-model".into(),
+            false,
+            false,
+            None,
+            PathBuf::from("/tmp/assistd-test-nonexistent.toml"),
+        );
+        app.input.insert_paste(&numbered_script(20));
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("test terminal");
+        terminal
+            .draw(|frame| render_input(frame, frame.area(), &app))
+            .expect("draw");
+        let screen = screen_text(&terminal);
+        assert!(
+            screen.ends_with("  cmd18             \n  cmd19             "),
+            "{screen}"
+        );
+        terminal.backend_mut().assert_cursor_position((7, 3));
     }
 
     #[test]
