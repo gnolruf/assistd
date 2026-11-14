@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde::de::Error as _;
 use serde_json::{Map, Value, json};
 
-use assistd_utils::text::{is_format, is_line_separator};
+use assistd_utils::text::{is_format, is_line_separator, neutralise_template_tokens};
 
 const SUMMARY_MAX_CHARS: usize = 1_200;
 const EVIDENCE_MAX_ITEMS: usize = 12;
@@ -183,7 +183,7 @@ pub(super) struct SavedAnswer {
 }
 
 /// `answer` as it is saved: control, format and separator characters removed,
-/// chat-template and tool-call markup escaped, and quoted under the untrusted-data header.
+/// chat-template tokens made inert, and quoted under the untrusted-data header.
 pub(super) fn saved_answer(answer: &str) -> SavedAnswer {
     let body = sanitised(answer);
     SavedAnswer {
@@ -230,7 +230,7 @@ fn quoted(body: &str) -> String {
 }
 
 fn sanitised(text: &str) -> String {
-    neutralize_markup(&strip_invisible(text))
+    neutralise_template_tokens(&strip_invisible(text)).into_owned()
 }
 
 /// `text` without control characters other than newline and tab, invisible format
@@ -241,35 +241,4 @@ fn strip_invisible(text: &str) -> String {
             !((c.is_control() && c != '\n' && c != '\t') || is_format(c) || is_line_separator(c))
         })
         .collect()
-}
-
-/// `text` with the `<` of anything tag-shaped and the `[` of upper-case bracket tokens
-/// escaped, so no chat-template special token or tool-call tag survives verbatim.
-fn neutralize_markup(text: &str) -> String {
-    let mut neutral = String::with_capacity(text.len());
-    for (index, c) in text.char_indices() {
-        let rest = &text[index + c.len_utf8()..];
-        match c {
-            '<' if opens_tag(rest) => neutral.push_str("&lt;"),
-            '[' if opens_bracket_token(rest) => neutral.push_str("&#91;"),
-            _ => neutral.push(c),
-        }
-    }
-    neutral
-}
-
-/// `<|im_start|>`, `<｜end▁of▁sentence｜>`, `<tool_call>`, `</think>`, `<function=…>`.
-fn opens_tag(rest: &str) -> bool {
-    rest.chars()
-        .next()
-        .is_some_and(|next| matches!(next, '|' | '｜' | '/' | '!') || next.is_ascii_alphabetic())
-}
-
-/// `[INST]`, `[/INST]`, `[TOOL_CALLS]`.
-fn opens_bracket_token(rest: &str) -> bool {
-    let name = rest.strip_prefix('/').unwrap_or(rest);
-    let name_len = name
-        .find(|c: char| !(c.is_ascii_uppercase() || c == '_'))
-        .unwrap_or(name.len());
-    name_len > 0 && name[name_len..].starts_with(']')
 }

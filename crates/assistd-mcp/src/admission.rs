@@ -2,10 +2,13 @@
 //! what name.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use assistd_config::McpServerName;
 use assistd_tools::MCP_TOOL_NAME_PREFIX;
+use assistd_utils::text::{neutralise_template_tokens, neutralise_template_tokens_in_json};
 use rmcp::model::Tool;
+use serde_json::Value;
 use thiserror::Error;
 use tracing::warn;
 
@@ -40,13 +43,14 @@ enum Rejection {
 /// Pair each acceptable tool from `server_name` with its registry name
 /// `mcp__<server_name>__<tool>`, skipping with a warning any whose name is
 /// invalid or taken, or whose description or schema is over its cap. Tools are
-/// admitted in listed order until the server's count or byte budget runs out.
+/// admitted in listed order until the server's count or byte budget runs out,
+/// each with the chat-template tokens in its description and schema made inert.
 pub(crate) fn admit_tools(server_name: &McpServerName, tools: Vec<Tool>) -> Vec<(String, Tool)> {
     let mut taken = HashSet::new();
     let mut admitted = Vec::new();
     let mut catalog_bytes = 0;
     let listed = tools.len();
-    for (position, tool) in tools.into_iter().enumerate() {
+    for (position, tool) in tools.into_iter().map(without_template_tokens).enumerate() {
         let registry_name = format!("{MCP_TOOL_NAME_PREFIX}{server_name}__{}", tool.name);
         let size = match check_tool(&registry_name, &tool, &mut taken) {
             Ok(size) => size,
@@ -70,6 +74,19 @@ pub(crate) fn admit_tools(server_name: &McpServerName, tools: Vec<Tool>) -> Vec<
         admitted.push((registry_name, tool));
     }
     admitted
+}
+
+fn without_template_tokens(mut tool: Tool) -> Tool {
+    tool.description = tool
+        .description
+        .map(|description| neutralise_template_tokens(&description).into_owned().into());
+    let mut schema = tool.schema_as_json_value();
+    if neutralise_template_tokens_in_json(&mut schema)
+        && let Value::Object(inert) = schema
+    {
+        tool.input_schema = Arc::new(inert);
+    }
+    tool
 }
 
 fn warn_skipped(server_name: &McpServerName, tool: &Tool, rejection: &Rejection) {

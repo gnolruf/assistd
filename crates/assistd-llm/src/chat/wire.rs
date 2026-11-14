@@ -112,7 +112,7 @@ pub struct ChatMessage<'a> {
     /// Only set on messages with `role: "tool"`: the id of the assistant
     /// tool call this message answers.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<&'a str>,
+    pub tool_call_id: Option<Cow<'a, str>>,
     /// The reasoning that led to an assistant message's `tool_calls`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<Cow<'a, str>>,
@@ -157,7 +157,7 @@ pub struct ImageUrl<'a> {
 /// One entry in an outgoing `tool_calls` array on an assistant message.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCallSpec<'a> {
-    pub id: &'a str,
+    pub id: Cow<'a, str>,
     #[serde(rename = "type")]
     pub kind: &'static str,
     pub function: FunctionCallSpec<'a>,
@@ -166,9 +166,9 @@ pub struct ToolCallSpec<'a> {
 /// The `function` object of a [`ToolCallSpec`].
 #[derive(Debug, Clone, Serialize)]
 pub struct FunctionCallSpec<'a> {
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     /// JSON-encoded string, never an object; strict parsers reject objects.
-    pub arguments: &'a str,
+    pub arguments: Cow<'a, str>,
 }
 
 /// One streamed chunk from `/v1/chat/completions` when `stream: true`.

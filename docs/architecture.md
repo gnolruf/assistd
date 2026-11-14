@@ -66,7 +66,7 @@ flowchart TB
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
-| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision`, run in a supervised `voice-worker` child behind daemon-side proxies. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `config`, `utils`                                                                |
 
@@ -216,10 +216,11 @@ replayed with branch history.
 A sub-agent's final answer is saved whole, with no length cap, to
 `~/.local/share/assistd/relays/<session>/relay-<uuid>.txt`, written by the
 runner rather than the sub-agent so the file always exists and is complete.
-It is sanitised first: control, bidi and format characters are stripped, the
-`<` of anything tag-shaped (`<|im_start|>`, `<tool_call>`) and the `[` of
-bracket tokens (`[INST]`) are escaped, and it is quoted under a header that
-labels it untrusted data. The run then takes one more turn through
+It is sanitised first: control, bidi and format characters are stripped,
+chat-template tokens (`<|im_start|>`, `<tool_call>`, `[INST]`) are broken with
+a space, from the same token list the conversation uses for every other piece
+of untrusted text, and it is quoted under a header that labels it untrusted
+data. The run then takes one more turn through
 `complete_with_schema`, a tool-free, thinking-free request whose
 `response_format` holds the reply by grammar to a fixed contract: `status`
 (done, partial or blocked), a `summary`, and arrays of `evidence` and

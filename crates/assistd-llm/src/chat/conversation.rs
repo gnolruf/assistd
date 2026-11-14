@@ -8,10 +8,12 @@ use std::sync::Arc;
 
 use assistd_config::{ChatConfig, ModelConfig};
 use assistd_tools::Attachment;
+use assistd_utils::text::{neutralise_template_tokens, neutralise_template_tokens_in_json};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
@@ -46,19 +48,6 @@ const TOOL_RESULT_CLOSE: &str = "]\n";
 /// templates mishandle system messages anywhere but the head of the list.
 const CONTEXT_OPEN: &str = "[Context: added automatically, not written by the user]\n";
 const CONTEXT_CLOSE: &str = "\n[End of context]\n\n";
-/// Chat-template token text and its inert spelling; llama-server tokenizes
-/// message text with special-token parsing on, so untrusted text could
-/// otherwise forge a turn boundary or tool call.
-const TEMPLATE_TOKEN_DEFANGS: [(&str, &str); 8] = [
-    ("<|", "< |"),
-    ("|>", "| >"),
-    ("<think>", "< think>"),
-    ("</think>", "< /think>"),
-    ("<tool_call>", "< tool_call>"),
-    ("</tool_call>", "< /tool_call>"),
-    ("<tool_response>", "< tool_response>"),
-    ("</tool_response>", "< /tool_response>"),
-];
 const TOKENS_PER_MESSAGE_OVERHEAD: u32 = 4;
 /// Conservative per-image token weight; errs toward summarizing early.
 const TOKENS_PER_IMAGE: u32 = 1000;
@@ -96,7 +85,7 @@ impl Role {
 }
 
 /// One tool call recorded on an assistant turn. `arguments` is the
-/// JSON-encoded string the model emitted, replayed verbatim.
+/// JSON-encoded string the model emitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
     pub id: String,
@@ -910,7 +899,7 @@ fn wire_message(message: &Message) -> wire::ChatMessage<'_> {
         Message::Assistant(step) if !step.tool_calls.is_empty() => tool_calls_message(step),
         Message::Assistant(reply) => wire::ChatMessage::plain(role, defanged(&reply.content)),
         Message::ToolResult { call_id, content } => wire::ChatMessage {
-            tool_call_id: Some(call_id),
+            tool_call_id: Some(neutralise_template_tokens(call_id)),
             ..wire::ChatMessage::plain(role, defanged(content))
         },
         Message::ToolImageResult {
@@ -948,11 +937,11 @@ fn tool_calls_message(message: &AssistantMessage) -> wire::ChatMessage<'_> {
         .tool_calls
         .iter()
         .map(|call| wire::ToolCallSpec {
-            id: &call.id,
+            id: neutralise_template_tokens(&call.id),
             kind: "function",
             function: wire::FunctionCallSpec {
-                name: &call.name,
-                arguments: &call.arguments,
+                name: neutralise_template_tokens(&call.name),
+                arguments: replayed_arguments(&call.arguments),
             },
         })
         .collect();
@@ -963,6 +952,19 @@ fn tool_calls_message(message: &AssistantMessage) -> wire::ChatMessage<'_> {
         tool_call_id: None,
         reasoning_content: (!message.reasoning.is_empty())
             .then(|| neutralise_template_tokens(&message.reasoning)),
+    }
+}
+
+/// `arguments` with every key and string neutralised after JSON decoding, so no
+/// escape sequence carries a template token past; verbatim when it holds none.
+fn replayed_arguments(arguments: &str) -> Cow<'_, str> {
+    let Ok(mut decoded) = serde_json::from_str::<Value>(arguments) else {
+        return neutralise_template_tokens(arguments);
+    };
+    if neutralise_template_tokens_in_json(&mut decoded) {
+        Cow::Owned(decoded.to_string())
+    } else {
+        Cow::Borrowed(arguments)
     }
 }
 
@@ -1016,22 +1018,6 @@ fn neutralise_context_markers(ctx: &str) -> Cow<'_, str> {
     )
 }
 
-pub(super) fn neutralise_template_tokens(text: &str) -> Cow<'_, str> {
-    if !TEMPLATE_TOKEN_DEFANGS
-        .iter()
-        .any(|(token, _)| text.contains(token))
-    {
-        return Cow::Borrowed(text);
-    }
-    Cow::Owned(
-        TEMPLATE_TOKEN_DEFANGS
-            .iter()
-            .fold(text.to_string(), |acc, (token, inert)| {
-                acc.replace(token, inert)
-            }),
-    )
-}
-
 fn encode_all(attachments: Vec<Attachment>) -> Vec<ImageDataUri> {
     attachments.into_iter().map(ImageDataUri::encode).collect()
 }
@@ -1060,7 +1046,7 @@ fn quote_first_call(step: &Message) -> String {
     step.tool_calls().first().map_or_else(String::new, |call| {
         format!(
             "`{}` with arguments `{}`",
-            call.name,
+            neutralise_template_tokens(&call.name),
             quote(&call.arguments)
         )
     })

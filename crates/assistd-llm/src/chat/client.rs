@@ -14,6 +14,7 @@ use assistd_ipc::{Component, StatusKind, StatusSeverity};
 use assistd_tools::Attachment;
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::local_client_builder;
+use assistd_utils::text::neutralise_template_tokens;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, MutexGuard, mpsc};
@@ -22,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use super::conversation::{
     AssistantMessage, Conversation, Message, Role, Summarizer, SummaryRequest, ToolCallRecord,
-    UserMessage, approx_tokens_bytes, ensure_budget, neutralise_template_tokens,
+    UserMessage, approx_tokens_bytes, ensure_budget,
 };
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
