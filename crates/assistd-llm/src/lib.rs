@@ -299,9 +299,9 @@ pub trait LlmBackend: TurnBackend {
         Ok(0)
     }
 
-    /// Answer `prompt` outside the conversation within the summary token
-    /// allowance, returning the final text with reasoning discarded. The
-    /// conversation's cached prompt on its slot survives the request.
+    /// Answer `prompt` outside the conversation within the summary token allowance, returning
+    /// the final text with reasoning discarded. Chat-template tokens in `prompt` reach the
+    /// model as inert text, and the conversation's cached prompt on its slot survives.
     async fn complete_oneshot(&self, _prompt: String, _reply: OneShotReply) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),

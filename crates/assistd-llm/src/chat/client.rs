@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 
 use super::conversation::{
     AssistantMessage, Conversation, Message, Role, Summarizer, SummaryRequest, ToolCallRecord,
-    UserMessage, approx_tokens_bytes, ensure_budget,
+    UserMessage, approx_tokens_bytes, ensure_budget, neutralise_template_tokens,
 };
 use super::error::ChatClientError;
 use super::sse::{SseEvent, SseLineReader};
@@ -711,7 +711,7 @@ impl LlmBackend for LlamaChatClient {
         let body_bytes = {
             let mut payload = self.base_request(vec![wire::ChatMessage::plain(
                 "user",
-                wire::ContentBody::Text(prompt.as_str().into()),
+                wire::ContentBody::Text(neutralise_template_tokens(&prompt)),
             )]);
             payload.max_tokens = self.chat.max_summary_tokens();
             payload.id_slot = None;

@@ -1016,7 +1016,7 @@ fn neutralise_context_markers(ctx: &str) -> Cow<'_, str> {
     )
 }
 
-fn neutralise_template_tokens(text: &str) -> Cow<'_, str> {
+pub(super) fn neutralise_template_tokens(text: &str) -> Cow<'_, str> {
     if !TEMPLATE_TOKEN_DEFANGS
         .iter()
         .any(|(token, _)| text.contains(token))
