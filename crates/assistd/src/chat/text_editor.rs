@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::text::{locate_cursor, wrap_input};
+use super::text::{chars_within, locate_cursor, wrap_input};
 
 /// What a [`TextEditor`] key asks of its owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,8 +173,8 @@ impl TextEditor {
         self.cursor = word_start;
     }
 
-    /// Moves to the same column of the wrapped row above or below, or to
-    /// that row's end when it is shorter. Returns whether there was such a
+    /// Moves to the same display column of the wrapped row above or below, or
+    /// to that row's end when it is shorter. Returns whether there was such a
     /// row; a line has none.
     pub(crate) fn move_row(&mut self, down: bool) -> bool {
         let EditorShape::Box { wrap_width } = self.shape else {
@@ -182,7 +182,7 @@ impl TextEditor {
         };
         let chars: Vec<char> = self.text.chars().collect();
         let rows = wrap_input(&chars, 0, wrap_width);
-        let (row, column) = locate_cursor(&rows, self.cursor_chars());
+        let (row, column) = locate_cursor(&chars, &rows, self.cursor_chars());
         let target = if down {
             row.checked_add(1)
         } else {
@@ -191,7 +191,7 @@ impl TextEditor {
         let Some(&(start, end)) = target.and_then(|target| rows.get(target)) else {
             return false;
         };
-        let char_offset = start + column.min(end - start);
+        let char_offset = start + chars_within(&chars[start..end], column);
         self.cursor = self
             .text
             .char_indices()
