@@ -25,7 +25,7 @@ struct LoggedMain {
 }
 
 #[async_trait::async_trait]
-impl TurnConversation for LoggedMain {
+impl TurnBackend for LoggedMain {
     async fn push_user(
         &self,
         text: String,
@@ -86,7 +86,7 @@ struct LoggedTask {
 }
 
 #[async_trait::async_trait]
-impl TurnConversation for LoggedTask {
+impl TurnBackend for LoggedTask {
     async fn push_user(
         &self,
         _text: String,

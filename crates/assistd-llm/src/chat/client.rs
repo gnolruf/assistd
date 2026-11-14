@@ -31,7 +31,7 @@ use super::wire;
 use crate::{
     ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, LlmError, LlmEvent,
     LlmHealthProbe, LlmResult, OneShotReply, ReadyState, SlotAssignment, SlotStash, StepOutcome,
-    Thinking, ToolCall, ToolResultPayload, TurnConversation,
+    Thinking, ToolCall, ToolResultPayload, TurnBackend,
 };
 
 const ERROR_BODY_CAP: usize = 1024;
@@ -604,7 +604,7 @@ impl LlamaChatClient {
 }
 
 #[async_trait]
-impl TurnConversation for LlamaChatClient {
+impl TurnBackend for LlamaChatClient {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         let mut conv = self.conv.lock().await;
         if attachments.is_empty() {

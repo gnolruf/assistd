@@ -24,7 +24,7 @@ use assistd_ipc::StatusKind;
 use assistd_llm::{
     BackendJudgeModel, ChatClientError, HealthSnapshot, HealthWaitError, LlamaChatClient,
     LlmBackend, LlmError, LlmEvent, LlmHealthProbe, OneShotReply, ReadyState, SlotAssignment,
-    StepOutcome, Thinking, ToolCall, ToolResultPayload, TurnConversation,
+    StepOutcome, Thinking, ToolCall, ToolResultPayload, TurnBackend,
 };
 use assistd_tools::{JUDGE_TIMEOUT, JudgedCommand, SafetyJudge, Verdict};
 

@@ -15,9 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use assistd_ipc::{RelayEvent, StatusKind};
-use assistd_llm::{
-    LlmBackend, LlmError, LlmEvent, LlmHealthProbe, SlotAssignment, TurnConversation,
-};
+use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe, SlotAssignment, TurnBackend};
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{ToolRegistry, TurnContext};
 use assistd_utils::time::saturating_millis;
@@ -109,7 +107,7 @@ impl SubAgentRunner {
             .parent
             .isolated_conversation(system_prompt, SlotAssignment::Unassigned)?;
         let agent = Agent::new(
-            Arc::clone(&backend) as Arc<dyn TurnConversation>,
+            Arc::clone(&backend) as Arc<dyn TurnBackend>,
             tools,
             self.health.clone(),
             self.tool_deadline,

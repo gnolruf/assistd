@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use assistd_ipc::{HostName, ModeRecommendation, PermissionMode, Plan, TaskPrompt, TaskSpecError};
 use assistd_llm::{
     LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, StepOutcome, ToolResultPayload,
-    TurnConversation,
+    TurnBackend,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
@@ -172,7 +172,7 @@ impl Planner {
     pub fn chat_agent(
         &self,
         turn: &TurnContext,
-        conversation: Arc<dyn TurnConversation>,
+        conversation: Arc<dyn TurnBackend>,
         acting: &ToolRegistry,
     ) -> Agent {
         let mut acting = acting.clone();
@@ -201,7 +201,7 @@ impl Planner {
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> Result<Refinement, PlanError> {
-        let exploring = Arc::clone(&conversation) as Arc<dyn TurnConversation>;
+        let exploring = Arc::clone(&conversation) as Arc<dyn TurnBackend>;
         self.explore(exploring, ask, request_id, tx, &cancel)
             .await?;
         let instruction = format!("{REFINE_INSTRUCTION} {PLAN_LAYOUT}");
@@ -234,7 +234,7 @@ impl Planner {
     /// Run the planning turn on `ask` over `conversation` in plan mode.
     async fn explore(
         &self,
-        conversation: Arc<dyn TurnConversation>,
+        conversation: Arc<dyn TurnBackend>,
         ask: PlanAsk,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
@@ -287,7 +287,7 @@ async fn draft_of<T: DeserializeOwned>(
 /// ahead of any one-shot note the agent loop adds.
 #[derive(Debug)]
 struct PlanModeConversation {
-    inner: Arc<dyn TurnConversation>,
+    inner: Arc<dyn TurnBackend>,
     turn: TurnContext,
     /// [`PLAN_MODE_RULES`] and how the turn should end.
     preamble: String,
@@ -296,7 +296,7 @@ struct PlanModeConversation {
 
 impl PlanModeConversation {
     /// `inner` with the plan-mode rules and then `ending` at its tail while `turn` plans.
-    fn new(inner: Arc<dyn TurnConversation>, ending: &str, turn: TurnContext) -> Arc<Self> {
+    fn new(inner: Arc<dyn TurnBackend>, ending: &str, turn: TurnContext) -> Arc<Self> {
         Arc::new(Self {
             inner,
             turn,
@@ -307,7 +307,7 @@ impl PlanModeConversation {
 }
 
 #[async_trait]
-impl TurnConversation for PlanModeConversation {
+impl TurnBackend for PlanModeConversation {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         self.inner.push_user(text, attachments).await
     }

@@ -193,7 +193,7 @@ pub struct ToolCall {
 }
 
 /// Result of executing one [`ToolCall`], fed back to the model through
-/// [`TurnConversation::push_tool_results`].
+/// [`TurnBackend::push_tool_results`].
 #[derive(Debug, Clone)]
 pub struct ToolResultPayload {
     /// The `id` of the [`ToolCall`] that produced this result.
@@ -205,13 +205,13 @@ pub struct ToolResultPayload {
     pub attachments: Vec<Attachment>,
 }
 
-/// Outcome of a single [`TurnConversation::step`] call.
+/// Outcome of a single [`TurnBackend::step`] call.
 #[derive(Debug)]
 pub enum StepOutcome {
     /// The model emitted plain text; the turn is complete.
     Final,
     /// The model requested tool calls, whose results must be fed back via
-    /// [`TurnConversation::push_tool_results`] before the next `step`.
+    /// [`TurnBackend::push_tool_results`] before the next `step`.
     ToolCalls(Vec<ToolCall>),
     /// The response hit the output-token limit before finishing. Nothing
     /// was recorded and no tool call runs; the step may be retried.
@@ -249,10 +249,10 @@ pub struct HistoryReplay {
     pub entries: Vec<HistoryEntry>,
 }
 
-/// The part of a conversation an agent turn drives: the messages the turn appends and the
-/// model steps over them. No method has a default, so a wrapper forwards or replaces each.
+/// The part of a backend an agent turn drives: the messages the turn appends and the model
+/// steps over them. No method has a default, so a wrapper forwards or replaces each.
 #[async_trait]
-pub trait TurnConversation: fmt::Debug + Send + Sync + 'static {
+pub trait TurnBackend: fmt::Debug + Send + Sync + 'static {
     /// Append a user message without invoking the model. Backends
     /// without vision support ignore `attachments` rather than error.
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()>;
@@ -280,7 +280,7 @@ pub trait TurnConversation: fmt::Debug + Send + Sync + 'static {
 /// capabilities whose defaults do nothing, or fail with [`LlmError::Unavailable`] where a
 /// result is required.
 #[async_trait]
-pub trait LlmBackend: TurnConversation {
+pub trait LlmBackend: TurnBackend {
     /// Stash a context block rendered ahead of the next user turn's text.
     async fn set_transient_context(&self, _text: String) -> LlmResult<()> {
         Ok(())

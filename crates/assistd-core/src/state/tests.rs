@@ -18,7 +18,7 @@ use assistd_ipc::{
 };
 use assistd_llm::{
     EchoBackend, LlmError, LlmEvent, SlotAssignment, StepOutcome, ToolCall, ToolResultPayload,
-    TurnConversation,
+    TurnBackend,
 };
 use assistd_memory::{
     AdjacentChunks, BranchId, ChunkId, ChunkLocator, ChunkScope, Embedding, EmbeddingHit,
@@ -541,7 +541,7 @@ struct TitlingBackend {
 }
 
 #[async_trait::async_trait]
-impl TurnConversation for TitlingBackend {
+impl TurnBackend for TitlingBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1000,7 +1000,7 @@ impl StreamingDeltaBackend {
 }
 
 #[async_trait::async_trait]
-impl TurnConversation for StreamingDeltaBackend {
+impl TurnBackend for StreamingDeltaBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1095,7 +1095,7 @@ impl ToolCallBackend {
 }
 
 #[async_trait::async_trait]
-impl TurnConversation for ToolCallBackend {
+impl TurnBackend for ToolCallBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1464,7 +1464,7 @@ struct StallingBackend {
 }
 
 #[async_trait::async_trait]
-impl TurnConversation for StallingBackend {
+impl TurnBackend for StallingBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -2393,7 +2393,7 @@ impl MainConversation {
 }
 
 #[async_trait::async_trait]
-impl TurnConversation for MainConversation {
+impl TurnBackend for MainConversation {
     async fn push_user(
         &self,
         text: String,

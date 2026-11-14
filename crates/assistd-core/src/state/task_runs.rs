@@ -20,7 +20,7 @@ use assistd_tools::{ConfirmRouter, TurnContext};
 use super::branches::delete_answer_files;
 use super::event_triggers::Occurrence;
 use super::lanes::LaneLease;
-use super::run_lane::{LaneHold, RunLane, YieldingConversation};
+use super::run_lane::{LaneHold, RunLane, YieldingBackend};
 use super::task_announce::TaskReply;
 use super::task_confirms::TaskRunParking;
 use super::task_queue::QueuedRun;
@@ -358,12 +358,12 @@ impl TaskService {
         let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
             self.deps.presence.clone(),
         )));
-        let yielding = Arc::new(YieldingConversation {
+        let backend = Arc::new(YieldingBackend {
             inner: conversation,
             lane: Arc::clone(&lane),
         });
         let agent = Agent::new(
-            yielding,
+            backend,
             self.deps.tools.snapshot(),
             health,
             Duration::from_secs(self.deps.config.timeouts.tool_call_secs),

@@ -48,7 +48,7 @@ impl MockBackend {
 }
 
 #[async_trait]
-impl TurnConversation for MockBackend {
+impl TurnBackend for MockBackend {
     async fn push_user(&self, text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         self.pushed_users.lock().push(text);
         Ok(())
@@ -680,7 +680,7 @@ impl ErrorInjectingBackend {
 }
 
 #[async_trait]
-impl TurnConversation for ErrorInjectingBackend {
+impl TurnBackend for ErrorInjectingBackend {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         Ok(())
     }

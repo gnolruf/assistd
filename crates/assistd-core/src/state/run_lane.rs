@@ -1,6 +1,6 @@
 //! `RunLane`: the model lane a task run holds while its turn may decode, given up
-//! while it waits on the user or yields to the user's conversation, and the conversation
-//! wrapper that makes each model step yield.
+//! while it waits on the user or yields to the user's conversation, and the backend
+//! that makes each model step yield.
 
 use std::future::pending;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use assistd_ipc::{StatusKind, TaskId, TaskRunId};
 use assistd_llm::{
     ConversationKey, LlmBackend, LlmError, LlmEvent, LlmResult, StepOutcome, ToolResultPayload,
-    TurnConversation,
+    TurnBackend,
 };
 use assistd_tools::{Attachment, YieldableLane};
 
@@ -151,13 +151,13 @@ impl YieldableLane for RunLane {
 /// A task run's conversation whose model steps give way to the user's conversation:
 /// before each step, and mid-step by discarding what streamed so far.
 #[derive(Debug)]
-pub(in crate::state) struct YieldingConversation {
-    pub(in crate::state) inner: Arc<dyn TurnConversation>,
+pub(in crate::state) struct YieldingBackend {
+    pub(in crate::state) inner: Arc<dyn TurnBackend>,
     pub(in crate::state) lane: Arc<RunLane>,
 }
 
 #[async_trait]
-impl TurnConversation for YieldingConversation {
+impl TurnBackend for YieldingBackend {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         self.inner.push_user(text, attachments).await
     }

@@ -403,7 +403,7 @@ struct SlowBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::TurnConversation for SlowBackend {
+impl assistd_llm::TurnBackend for SlowBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -452,7 +452,7 @@ impl assistd_llm::LlmBackend for SlowBackend {}
 struct StuckBackend;
 
 #[async_trait::async_trait]
-impl assistd_llm::TurnConversation for StuckBackend {
+impl assistd_llm::TurnBackend for StuckBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -682,7 +682,7 @@ struct GatedToolBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::TurnConversation for GatedToolBackend {
+impl assistd_llm::TurnBackend for GatedToolBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -891,7 +891,7 @@ impl FloodBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::TurnConversation for FloodBackend {
+impl assistd_llm::TurnBackend for FloodBackend {
     async fn push_user(
         &self,
         _text: String,
@@ -1022,7 +1022,7 @@ struct HangingCallBackend {
 }
 
 #[async_trait::async_trait]
-impl assistd_llm::TurnConversation for HangingCallBackend {
+impl assistd_llm::TurnBackend for HangingCallBackend {
     async fn push_user(
         &self,
         _text: String,

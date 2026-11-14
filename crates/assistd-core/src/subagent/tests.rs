@@ -57,7 +57,7 @@ impl AnsweringParent {
 }
 
 #[async_trait]
-impl TurnConversation for AnsweringParent {
+impl TurnBackend for AnsweringParent {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         unimplemented!("parent is never driven")
     }
@@ -98,7 +98,7 @@ impl LlmBackend for AnsweringParent {
 }
 
 #[async_trait]
-impl TurnConversation for AnsweringConversation {
+impl TurnBackend for AnsweringConversation {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         Ok(())
     }
@@ -149,7 +149,7 @@ struct HangingConversation {
 }
 
 #[async_trait]
-impl TurnConversation for HangingParent {
+impl TurnBackend for HangingParent {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         unimplemented!("parent is never driven")
     }
@@ -188,7 +188,7 @@ impl LlmBackend for HangingParent {
 }
 
 #[async_trait]
-impl TurnConversation for HangingConversation {
+impl TurnBackend for HangingConversation {
     async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
         Ok(())
     }

@@ -686,7 +686,7 @@ mod tests {
 
     use assistd_llm::{
         LlmBackend, LlmError, LlmEvent, LlmResult, SlotAssignment, SlotDir, StepOutcome,
-        ToolResultPayload, TurnConversation,
+        ToolResultPayload, TurnBackend,
     };
     use assistd_tools::{Approvals, Attachment, DenyAllGate};
 
@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl TurnConversation for WatchedParent {
+    impl TurnBackend for WatchedParent {
         async fn push_user(&self, _text: String, _attachments: Vec<Attachment>) -> LlmResult<()> {
             unimplemented!("parent is never driven")
         }
