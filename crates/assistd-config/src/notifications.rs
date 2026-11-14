@@ -29,6 +29,7 @@ pub struct TrayIconsConfig {
 
 impl DescribeSettings for TrayIconsConfig {
     describe_fields! {
+        #![consumer(Tray)]
         active => ("awake", "Tray icon while awake and idle"),
         sleeping => ("sleeping", "Tray icon while drowsy, asleep or loading the model"),
         listening => ("listening", "Tray icon while hearing a query"),
@@ -68,11 +69,13 @@ pub struct NotificationsConfig {
 
 impl DescribeSettings for NotificationsConfig {
     describe_fields! {
+        #![consumer(Tray)]
         enabled => ("enabled", "Desktop notifications of each turn from assistd tray"),
         auto_hide_ms => (
             "hide after idle (ms)",
             "Idle time before a notification closes, 500 to 60000"
         ),
+        #[consumer(Daemon)]
         brief_when_away => (
             "brief voice replies when away",
             "Ask for short replies to voice turns while the chat is unfocused"

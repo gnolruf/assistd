@@ -24,7 +24,7 @@ mod render;
 mod theme_list;
 
 pub(crate) use list_editor::{ListAction, ListEditor};
-pub(crate) use panel::SettingsPanel;
+pub(crate) use panel::{PanelHost, SettingsPanel};
 pub(crate) use render::{
     editor_window, list_hint, place_cursor, render_list_editor, render_settings,
     render_wrapped_editor, titled_box,
@@ -41,7 +41,7 @@ pub(crate) struct SettingsArgs {
 /// touching the terminal when the file cannot be read or parsed.
 pub(crate) async fn run(args: SettingsArgs) -> Result<()> {
     let path = Config::path_or_default(args.config)?;
-    let mut panel = SettingsPanel::new(ConfigDocument::open(&path)?);
+    let mut panel = SettingsPanel::new(ConfigDocument::open(&path)?, PanelHost::Standalone);
     let _guard = TerminalGuard::enter()?;
     let mut terminal =
         Terminal::new(CrosstermBackend::new(io::stdout())).context("Terminal::new")?;

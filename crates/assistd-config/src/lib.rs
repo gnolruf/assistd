@@ -45,7 +45,7 @@ pub use model::ModelConfig;
 pub use notifications::{NotificationsConfig, TrayIconsConfig};
 pub use search::{SearchCommand, SearchConfig, SearchEngine};
 pub use settings::{
-    DescribeSettings, ListItem, SettingInfo, SettingKind, SettingValue, setting_info,
+    Consumer, DescribeSettings, ListItem, SettingInfo, SettingKind, SettingValue, setting_info,
 };
 pub use sleep::SleepConfig;
 pub use tasks::{TaskInterruption, TasksConfig};

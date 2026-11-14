@@ -184,6 +184,7 @@ impl ThemeConfig {
 
 impl DescribeSettings for ThemeConfig {
     describe_fields! {
+        #![consumer(Chat)]
         accent => ("accent", "Logo, headings, pointers, tool commands and notices"),
         user_message => ("user messages", "Background of user messages"),
         assistant_text => ("reply text", "Reply prose and its bold text"),

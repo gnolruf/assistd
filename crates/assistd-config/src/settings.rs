@@ -1,7 +1,7 @@
-//! Each config key's label, description, visibility and kind in the settings
-//! panel, declared beside its table with `describe_fields!`.
+//! Each config key's label, description, visibility, consumer and kind in the
+//! settings panel, declared beside its table with `describe_fields!`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::sync::LazyLock;
 
@@ -38,8 +38,23 @@ pub struct SettingInfo {
     pub description: &'static str,
     /// Listed only while its section shows advanced settings.
     pub advanced: bool,
+    /// What reads the key, and so when a saved change to it applies.
+    pub consumer: Consumer,
     /// How the key is edited and shown.
     pub kind: SettingKind,
+}
+
+/// What reads a config key, and when it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Consumer {
+    /// The daemon, once as it starts.
+    Daemon,
+    /// `assistd tray`, once as it starts.
+    Tray,
+    /// `assistd chat`, as it starts and again when its settings panel closes.
+    Chat,
+    /// The settings panel, each time it opens.
+    SettingsPanel,
 }
 
 /// How a setting is edited and shown.
@@ -124,6 +139,26 @@ pub fn setting_info(key: &str) -> Option<&'static SettingInfo> {
     SETTINGS.get(key)
 }
 
+/// The consumers of the keys whose values differ between `before` and
+/// `after`, two configs serialized with their defaults filled in.
+pub(crate) fn consumers_of_changes(
+    before: &toml::Table,
+    after: &toml::Table,
+) -> BTreeSet<Consumer> {
+    SETTINGS
+        .values()
+        .filter(|setting| value_at(before, &setting.key) != value_at(after, &setting.key))
+        .map(|setting| setting.consumer)
+        .collect()
+}
+
+/// The value at dotted `key` in `table`, if it holds one.
+pub(crate) fn value_at<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
+    let mut segments = key.split('.');
+    let first = table.get(segments.next()?)?;
+    segments.try_fold(first, |value, segment| value.get(segment))
+}
+
 /// The kind `value`'s type is edited as.
 pub(crate) fn kind_of<T: SettingValue>(_value: &T) -> SettingKind {
     T::KIND
@@ -138,10 +173,9 @@ pub(crate) fn child_key(prefix: &str, name: &str) -> String {
     }
 }
 
-/// Implements [`DescribeSettings::describe_settings`] from one entry per field,
-/// destructuring `Self` without `..` so a field added, removed or renamed
-/// without its entry fails to compile. A key's kind is its field type's, or
-/// `Prose` for an entry marked `prose`. See the arms for the entry forms.
+/// Implements [`DescribeSettings::describe_settings`]; a field without an entry fails
+/// to compile. A key's kind is its field type's, or `Prose` when marked `prose`; its
+/// consumer is the daemon, or the table's `#![consumer(..)]` or its own `#[consumer(..)]`.
 macro_rules! describe_fields {
     (@key $field:ident, ()) => {
         stringify!($field)
@@ -149,8 +183,14 @@ macro_rules! describe_fields {
     (@key $field:ident, ($key:literal)) => {
         $key
     };
-    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt, skip) => {};
-    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt, nested) => {
+    (@consumer ($table:ident)) => {
+        $crate::settings::Consumer::$table
+    };
+    (@consumer ($table:ident $own:ident)) => {
+        $crate::settings::Consumer::$own
+    };
+    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt, ($table:ident), skip) => {};
+    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt, ($table:ident), nested) => {
         $crate::settings::DescribeSettings::describe_settings(
             &$config.$field,
             &$crate::settings::child_key(
@@ -160,28 +200,28 @@ macro_rules! describe_fields {
             $out,
         );
     };
-    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt,
+    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt, $consumer:tt,
         ($label:literal, $description:literal)) => {
         $crate::settings::describe_fields!(
-            @push $prefix, $out, $field, $key, $label, $description, false,
+            @push $prefix, $out, $field, $key, $consumer, $label, $description, false,
             $crate::settings::kind_of(&$config.$field)
         );
     };
-    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt,
+    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt, $consumer:tt,
         ($label:literal, $description:literal, advanced)) => {
         $crate::settings::describe_fields!(
-            @push $prefix, $out, $field, $key, $label, $description, true,
+            @push $prefix, $out, $field, $key, $consumer, $label, $description, true,
             $crate::settings::kind_of(&$config.$field)
         );
     };
-    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt,
+    (@entry $config:tt, $prefix:tt, $out:tt, $field:ident, $key:tt, $consumer:tt,
         ($label:literal, $description:literal, prose)) => {
         $crate::settings::describe_fields!(
-            @push $prefix, $out, $field, $key, $label, $description, false,
+            @push $prefix, $out, $field, $key, $consumer, $label, $description, false,
             $crate::settings::SettingKind::Prose
         );
     };
-    (@push $prefix:tt, $out:tt, $field:ident, $key:tt,
+    (@push $prefix:tt, $out:tt, $field:ident, $key:tt, $consumer:tt,
         $label:literal, $description:literal, $advanced:literal, $kind:expr) => {
         $out.push($crate::settings::SettingInfo {
             key: $crate::settings::child_key(
@@ -191,10 +231,12 @@ macro_rules! describe_fields {
             label: $label,
             description: $description,
             advanced: $advanced,
+            consumer: $crate::settings::describe_fields!(@consumer $consumer),
             kind: $kind,
         });
     };
-    ($($field:ident $(as $key:literal)? => $setting:tt),* $(,)?) => {
+    (#![consumer($table:ident)]
+        $($(#[consumer($own:ident)])? $field:ident $(as $key:literal)? => $setting:tt),* $(,)?) => {
         fn describe_settings(
             &self,
             prefix: &str,
@@ -203,9 +245,15 @@ macro_rules! describe_fields {
             let Self { $($field: _),* } = self;
             $(
                 $crate::settings::describe_fields!(
-                    @entry self, prefix, out, $field, ($($key)?), $setting
+                    @entry self, prefix, out, $field, ($($key)?), ($table $($own)?), $setting
                 );
             )*
+        }
+    };
+    ($($(#[consumer($own:ident)])? $field:ident $(as $key:literal)? => $setting:tt),* $(,)?) => {
+        $crate::settings::describe_fields! {
+            #![consumer(Daemon)]
+            $($(#[consumer($own)])? $field $(as $key)? => $setting),*
         }
     };
 }

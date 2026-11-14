@@ -1,10 +1,12 @@
 //! Settings panel state and key handling. Changes stay in memory until
 //! saved, and only a config that validates is written.
 
+use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 
 use assistd_config::{
-    ConfigDocument, ConfigError, ConfigIssue, SettingKind, ThemeColor, ThemeConfig, ThemeName,
+    ConfigDocument, ConfigError, ConfigIssue, Consumer, SettingKind, ThemeColor, ThemeConfig,
+    ThemeName,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -19,7 +21,15 @@ const THEME_KEY: &str = "chat.theme";
 pub(crate) const SAVED_THEMES_KEY: &str = "chat.themes";
 /// Rows PgUp/PgDn move the selection.
 const PAGE_ROWS: usize = 10;
-const SAVED_NOTE: &str = "saved; restart the daemon to apply (systemctl --user restart assistd)";
+
+/// Where the panel runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PanelHost {
+    /// In the chat, which takes the saved theme when the panel closes.
+    Chat,
+    /// On its own, as `assistd settings`.
+    Standalone,
+}
 
 /// One line of the settings list; sections are indexes into [`SECTIONS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +70,9 @@ pub(crate) enum PanelMode {
     },
     /// Closing with unsaved changes; waits for save, discard or cancel.
     ConfirmClose,
+    /// Saving over a file that changed on disk; waits for reload, overwrite
+    /// or cancel.
+    ConfirmOverwrite,
 }
 
 /// The outcome of the last action, shown under the list.
@@ -71,6 +84,7 @@ pub(crate) enum Feedback {
 /// The settings list over an open config file.
 pub(crate) struct SettingsPanel {
     document: ConfigDocument,
+    host: PanelHost,
     tab: Tab,
     /// Per section, whether its advanced settings are listed.
     advanced_shown: [bool; SECTIONS.len()],
@@ -83,9 +97,10 @@ pub(crate) struct SettingsPanel {
 }
 
 impl SettingsPanel {
-    pub(crate) fn new(document: ConfigDocument) -> Self {
+    pub(crate) fn new(document: ConfigDocument, host: PanelHost) -> Self {
         let mut panel = Self {
             document,
+            host,
             tab: Tab::ALL[0],
             advanced_shown: [false; SECTIONS.len()],
             selected: 0,
@@ -217,6 +232,10 @@ impl SettingsPanel {
                 ControlFlow::Continue(())
             }
             PanelMode::ConfirmClose => self.on_confirm_close_key(ev),
+            PanelMode::ConfirmOverwrite => {
+                self.on_confirm_overwrite_key(ev);
+                ControlFlow::Continue(())
+            }
         }
     }
 
@@ -448,16 +467,46 @@ impl SettingsPanel {
     fn on_confirm_close_key(&mut self, ev: KeyEvent) -> ControlFlow<()> {
         match ev.code {
             KeyCode::Char('s') => {
+                self.mode = PanelMode::Browse;
                 if self.save() {
                     return ControlFlow::Break(());
                 }
-                self.mode = PanelMode::Browse;
             }
             KeyCode::Char('d') => return ControlFlow::Break(()),
             KeyCode::Esc => self.mode = PanelMode::Browse,
             _ => {}
         }
         ControlFlow::Continue(())
+    }
+
+    fn on_confirm_overwrite_key(&mut self, ev: KeyEvent) {
+        match ev.code {
+            KeyCode::Char('r') => self.reload(),
+            KeyCode::Char('o') => {
+                self.mode = PanelMode::Browse;
+                let outcome = self.document.overwrite();
+                self.report_save(&outcome);
+            }
+            KeyCode::Esc => self.mode = PanelMode::Browse,
+            _ => {}
+        }
+    }
+
+    /// Reopens the file, dropping every change made here; a file that no
+    /// longer loads leaves the panel as it was.
+    fn reload(&mut self) {
+        self.mode = PanelMode::Browse;
+        match ConfigDocument::open(self.document.path()) {
+            Ok(document) => {
+                self.issues = document.issues();
+                self.document = document;
+                if !self.is_selectable(self.selected_row()) {
+                    self.select_first();
+                }
+                self.feedback = Some(Feedback::Note("reloaded from disk".to_string()));
+            }
+            Err(e) => self.feedback = Some(Feedback::Error(format!("not reloaded: {e}"))),
+        }
     }
 
     fn request_close(&mut self) -> ControlFlow<()> {
@@ -699,11 +748,20 @@ impl SettingsPanel {
         Ok(())
     }
 
-    /// Returns whether the file was written.
+    /// Returns whether the file was written; one that changed on disk is
+    /// left for [`PanelMode::ConfirmOverwrite`] to settle.
     fn save(&mut self) -> bool {
         let outcome = self.document.save();
-        self.feedback = Some(match &outcome {
-            Ok(()) => Feedback::Note(SAVED_NOTE.to_string()),
+        if matches!(outcome, Err(ConfigError::ChangedOnDisk { .. })) {
+            self.mode = PanelMode::ConfirmOverwrite;
+        }
+        self.report_save(&outcome)
+    }
+
+    /// Shows how a save went and returns whether the file was written.
+    fn report_save(&mut self, outcome: &Result<BTreeSet<Consumer>, ConfigError>) -> bool {
+        self.feedback = Some(match outcome {
+            Ok(changed) => Feedback::Note(saved_note(changed, self.host)),
             Err(ConfigError::Validation(_)) => {
                 Feedback::Error("not saved: fix the problems listed below first".to_string())
             }
@@ -725,6 +783,24 @@ impl SettingsPanel {
         if let PanelMode::Edit(editor) = &mut self.mode {
             editor.set_wrap_width(width);
         }
+    }
+}
+
+/// `saved`, then whatever must restart before the `changed` consumers' keys apply.
+fn saved_note(changed: &BTreeSet<Consumer>, host: PanelHost) -> String {
+    let restarts: Vec<&str> = changed
+        .iter()
+        .filter_map(|consumer| match consumer {
+            Consumer::Daemon => Some("the daemon (systemctl --user restart assistd)"),
+            Consumer::Tray => Some("the tray"),
+            Consumer::Chat if host == PanelHost::Standalone => Some("the chat"),
+            Consumer::Chat | Consumer::SettingsPanel => None,
+        })
+        .collect();
+    if restarts.is_empty() {
+        "saved".to_string()
+    } else {
+        format!("saved; restart {} to apply", restarts.join(" and "))
     }
 }
 

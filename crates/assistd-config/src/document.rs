@@ -1,6 +1,7 @@
 //! A config file opened for editing: changes keep the file's comments and
 //! layout, and each one is checked against the schema as it is made.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table};
 
 use crate::errors::{ConfigError, ConfigIssue};
+use crate::settings::{Consumer, consumers_of_changes, value_at};
 use crate::top::{Config, create_private_dir_all};
 
 /// An editable `config.toml`. Every accepted change leaves a document that
@@ -18,6 +20,10 @@ pub struct ConfigDocument {
     document: DocumentMut,
     /// The file's text as last read or saved.
     saved_text: String,
+    /// The config that text describes, serialized with its defaults filled in.
+    saved_values: toml::Table,
+    /// Whether the document's text differs from `saved_text`.
+    modified: bool,
     /// The document's keys as parsed, without defaults.
     raw: toml::Table,
     config: Config,
@@ -30,16 +36,7 @@ impl ConfigDocument {
     /// Opens `path`; a missing file opens as an empty document that saving
     /// creates.
     pub fn open(path: &Path) -> Result<Self, ConfigError> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(source) => {
-                return Err(ConfigError::Read {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
+        let text = read_text(path)?;
         let parse_error = |source| ConfigError::parse(path, &text, &source);
         let config: Config = toml::from_str(&text).map_err(parse_error)?;
         let raw = toml::from_str(&text).map_err(parse_error)?;
@@ -52,6 +49,8 @@ impl ConfigDocument {
             path: path.to_path_buf(),
             document,
             saved_text: text,
+            saved_values: toml::Table::try_from(&config)?,
+            modified: false,
             raw,
             config,
             unknown_keys,
@@ -81,17 +80,17 @@ impl ConfigDocument {
 
     /// The value the document sets at dotted `key`, if it sets one.
     pub fn file_value(&self, key: &str) -> Option<&toml::Value> {
-        lookup(&self.raw, key)
+        value_at(&self.raw, key)
     }
 
     /// The default at dotted `key`; `None` for keys that are unset by default.
     pub fn default_value(&self, key: &str) -> Option<&toml::Value> {
-        lookup(&self.defaults, key)
+        value_at(&self.defaults, key)
     }
 
     /// Whether the document differs from the file as last read or saved.
     pub fn is_modified(&self) -> bool {
-        self.document.to_string() != self.saved_text
+        self.modified
     }
 
     /// Sets dotted `key` to `value`, keeping any comment beside the old value.
@@ -130,22 +129,42 @@ impl ConfigDocument {
         self.replace(document, key)
     }
 
-    /// Writes the document over the file, owner-only, replacing it atomically
-    /// (a symlink's target, not the link). Refused with
-    /// [`ConfigError::Validation`] when the document has any [`Self::issues`].
-    pub fn save(&mut self) -> Result<(), ConfigError> {
+    /// [`Self::overwrite`], refused with [`ConfigError::ChangedOnDisk`] when the
+    /// file no longer holds the text last read or saved.
+    pub fn save(&mut self) -> Result<BTreeSet<Consumer>, ConfigError> {
         ConfigError::reject(self.issues())?;
+        if read_text(&self.path)? != self.saved_text {
+            return Err(ConfigError::ChangedOnDisk {
+                path: self.path.clone(),
+            });
+        }
+        self.write()
+    }
+
+    /// Writes the document over the file, owner-only and atomically (a symlink's
+    /// target, not the link), returning the consumers of the keys whose values it
+    /// changed. Refused with [`ConfigError::Validation`] on any [`Self::issues`].
+    pub fn overwrite(&mut self) -> Result<BTreeSet<Consumer>, ConfigError> {
+        ConfigError::reject(self.issues())?;
+        self.write()
+    }
+
+    fn write(&mut self) -> Result<BTreeSet<Consumer>, ConfigError> {
+        let values = toml::Table::try_from(&self.config)?;
+        let changed = consumers_of_changes(&self.saved_values, &values);
         let text = self.document.to_string();
         replace_private_file(&self.path, &text)?;
         self.saved_text = text;
-        Ok(())
+        self.saved_values = values;
+        self.modified = false;
+        Ok(changed)
     }
 
     fn replace(&mut self, document: DocumentMut, key: &str) -> Result<(), ConfigError> {
         let text = document.to_string();
         let schema_error = |source: toml::de::Error| edit_error(key, source.message());
-        let config: Config = toml::from_str(&text).map_err(schema_error)?;
         let raw: toml::Table = toml::from_str(&text).map_err(schema_error)?;
+        let config: Config = raw.clone().try_into().map_err(schema_error)?;
         let names_key = |unknown: &String| {
             key.strip_prefix(unknown.as_str())
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
@@ -154,6 +173,7 @@ impl ConfigDocument {
         if unknown_keys.iter().any(names_key) {
             return Err(edit_error(key, "not a config key"));
         }
+        self.modified = text != self.saved_text;
         self.document = document;
         self.raw = raw;
         self.config = config;
@@ -169,10 +189,16 @@ fn edit_error(key: &str, reason: &str) -> ConfigError {
     }
 }
 
-fn lookup<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
-    let mut segments = key.split('.');
-    let first = table.get(segments.next()?)?;
-    segments.try_fold(first, |value, segment| value.get(segment))
+/// The text of the file at `path`; empty when there is no file.
+fn read_text(path: &Path) -> Result<String, ConfigError> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(source) => Err(ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// The item at dotted `key`, creating missing parent tables (inline inside

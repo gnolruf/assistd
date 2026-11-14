@@ -18,7 +18,7 @@ fn typed(panel: &mut SettingsPanel, text: &str) {
 /// The panel on the Theme tab's theme list, over an empty config file.
 fn theme_list_panel(root: &tempfile::TempDir) -> SettingsPanel {
     let document = ConfigDocument::open(&root.path().join("config.toml")).unwrap();
-    let mut panel = SettingsPanel::new(document);
+    let mut panel = SettingsPanel::new(document, PanelHost::Standalone);
     while panel.tab() != Tab::Theme {
         press(&mut panel, KeyCode::Tab);
     }
@@ -84,7 +84,7 @@ fn unknown_keys_block_saving_until_deleted() {
         "[chat]\nmax_histroy_tokens = 4096\n\n[remote]\nport = 1\n",
     )
     .unwrap();
-    let mut panel = SettingsPanel::new(ConfigDocument::open(&path).unwrap());
+    let mut panel = SettingsPanel::new(ConfigDocument::open(&path).unwrap(), PanelHost::Standalone);
     assert_eq!(panel.issues().len(), 2);
     assert!(!panel.save());
 

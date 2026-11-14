@@ -402,6 +402,9 @@ fn hint(panel: &SettingsPanel) -> &'static str {
         PanelMode::ConfirmClose => {
             "unsaved changes: s save and close · d discard · Esc keep editing"
         }
+        PanelMode::ConfirmOverwrite => {
+            "file changed on disk: r reload, dropping changes here · o overwrite · Esc keep editing"
+        }
     }
 }
 
@@ -409,7 +412,7 @@ fn has_box(mode: &PanelMode) -> bool {
     match mode {
         PanelMode::Edit(editor) => editor.is_box(),
         PanelMode::List(_) | PanelMode::Color { .. } | PanelMode::Themes { .. } => true,
-        PanelMode::Browse | PanelMode::ConfirmClose => false,
+        PanelMode::Browse | PanelMode::ConfirmClose | PanelMode::ConfirmOverwrite => false,
     }
 }
 
