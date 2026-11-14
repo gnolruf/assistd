@@ -1,12 +1,15 @@
 //! `assistd` binary: CLI parsing and subcommand dispatch.
 
+use std::io::{self, Write};
+use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::Result;
-use assistd_ipc::{PresenceTarget, Request, RequestBody};
+use anyhow::{Error, Result};
+use assistd_ipc::{IpcClientError, PresenceTarget, Request, RequestBody};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use client::terminal_text::escape_controls;
 use client::{listen, mcp, memory, presence, ptt, query, task, voice_ctl};
 
 #[cfg(feature = "chat")]
@@ -122,12 +125,33 @@ fn env_filter_or(default_directives: &str) -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_directives))
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            print_failure(&failure);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let result = runtime.block_on(dispatch(cli));
     runtime.shutdown_timeout(BLOCKING_SHUTDOWN_GRACE);
     result
+}
+
+/// Write `failure` to stderr: a daemon's error message on one line with its control
+/// characters escaped, anything else with its chain of causes.
+fn print_failure(failure: &Error) {
+    let mut stderr = io::stderr().lock();
+    let _ = match failure.downcast_ref() {
+        Some(IpcClientError::Daemon(message)) => {
+            writeln!(stderr, "daemon error: {}", escape_controls(message))
+        }
+        _ => writeln!(stderr, "Error: {failure:?}"),
+    };
 }
 
 async fn dispatch(cli: Cli) -> Result<()> {

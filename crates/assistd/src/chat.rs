@@ -3,7 +3,7 @@
 
 use std::fs::{DirBuilder, File, Permissions, TryLockError};
 use std::future;
-use std::io;
+use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -20,7 +20,7 @@ use assistd_ipc::{
 };
 use clap::Args;
 use crossterm::event::{self, Event as TermEvent, EventStream, MouseEventKind};
-use crossterm::{cursor, execute, style, terminal};
+use crossterm::{cursor, execute, queue, style, terminal};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -29,9 +29,8 @@ use rustix::fs::{Mode, OFlags};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Notify, mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior};
-use tokio_util::task::AbortOnDropHandle;
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt;
@@ -126,56 +125,80 @@ impl InstanceLock {
     }
 }
 
+/// Which input the terminal reports under a [`TerminalGuard`].
+#[derive(Clone, Copy)]
+enum TerminalInput {
+    /// Keys and pastes; the mouse stays with the terminal, which keeps its own text selection.
+    Keyboard,
+    /// Keys, pastes, mouse events and focus changes.
+    KeyboardMouseFocus,
+}
+
 /// Restores the terminal on drop.
-struct TerminalGuard;
+struct TerminalGuard {
+    input: TerminalInput,
+}
 
 impl TerminalGuard {
     /// Enter raw mode and the alternate screen with modifier-aware key reports
     /// and bracketed paste, saving the window title, and install a panic hook that restores the
     /// terminal before the previous hook runs.
-    fn enter() -> Result<Self> {
+    fn enter(input: TerminalInput) -> Result<Self> {
         terminal::enable_raw_mode().context("enable_raw_mode")?;
-        if let Err(e) = execute!(
-            io::stdout(),
-            terminal::EnterAlternateScreen,
-            style::Print(PUSH_WINDOW_TITLE),
-            event::EnableMouseCapture,
-            event::EnableFocusChange,
-            event::EnableBracketedPaste,
-            event::PushKeyboardEnhancementFlags(
-                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            )
-        ) {
+        if let Err(e) = Self::enable_reports(input) {
             let _ = terminal::disable_raw_mode();
             return Err(e).context("EnterAlternateScreen");
         }
         let previous_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = Self::cleanup();
+            let _ = Self::cleanup(input);
             previous_hook(info);
         }));
-        Ok(Self)
+        Ok(Self { input })
     }
 
-    fn cleanup() -> io::Result<()> {
+    fn enable_reports(input: TerminalInput) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        queue!(
+            stdout,
+            terminal::EnterAlternateScreen,
+            style::Print(PUSH_WINDOW_TITLE),
+            event::EnableBracketedPaste,
+            event::PushKeyboardEnhancementFlags(
+                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        )?;
+        if let TerminalInput::KeyboardMouseFocus = input {
+            queue!(stdout, event::EnableMouseCapture, event::EnableFocusChange)?;
+        }
+        stdout.flush()
+    }
+
+    fn cleanup(input: TerminalInput) -> io::Result<()> {
         terminal::disable_raw_mode()?;
-        execute!(
-            io::stdout(),
+        let mut stdout = io::stdout();
+        if let TerminalInput::KeyboardMouseFocus = input {
+            queue!(
+                stdout,
+                event::DisableFocusChange,
+                event::DisableMouseCapture
+            )?;
+        }
+        queue!(
+            stdout,
             event::PopKeyboardEnhancementFlags,
             event::DisableBracketedPaste,
-            event::DisableFocusChange,
-            event::DisableMouseCapture,
             style::Print(POP_WINDOW_TITLE),
             terminal::LeaveAlternateScreen,
             cursor::Show,
         )?;
-        Ok(())
+        stdout.flush()
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = Self::cleanup();
+        let _ = Self::cleanup(self.input);
     }
 }
 
@@ -203,8 +226,9 @@ impl Drop for StderrRedirect {
     }
 }
 
-/// Run the TUI against the daemon, showing it offline until its socket accepts.
-/// Fails before touching the terminal when another chat is open.
+/// Run the TUI against the daemon, showing it offline until its socket accepts, until it
+/// quits or SIGINT or SIGTERM arrives. Fails before touching the terminal when another chat
+/// is open.
 pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     let ipc = Arc::new(IpcClient::new());
     let daemon_reachable = UnixStream::connect(ipc.socket_path()).await.is_ok();
@@ -220,15 +244,24 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     info!("assistd chat v{}", crate::VERSION);
     info!("loaded config from {}", config_path.display());
 
-    let (shutdown_tx, _) = watch::channel(false);
-    let _signal_handler = AbortOnDropHandle::new(install_signal_handler(shutdown_tx.clone()));
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let mut background = JoinSet::new();
+    let signalled = shutdown_signal().context("installing signal handlers")?;
+    let signal_shutdown_tx = shutdown_tx.clone();
+    background.spawn(async move {
+        signalled.await;
+        let _ = signal_shutdown_tx.send(true);
+    });
 
-    let capabilities = resolve_capabilities(&ipc, &config).await?;
+    let capabilities = tokio::select! {
+        resolved = resolve_capabilities(&ipc, &config) => resolved?,
+        _ = shutdown_rx.wait_for(|&stopping| stopping) => return Ok(()),
+    };
 
     let (chat_tx, chat_rx) = mpsc::channel::<ChatEvent>(CHAT_CHANNEL_CAPACITY);
 
     let bus_attached = Arc::new(Notify::new());
-    let _bus_handle = AbortOnDropHandle::new(spawn_bus_subscription(
+    background.spawn(follow_bus(
         BusFollower {
             ipc: ipc.clone(),
             chat_tx: chat_tx.clone(),
@@ -239,29 +272,32 @@ pub(crate) async fn run(args: ChatArgs) -> Result<()> {
     ));
 
     let (focus_tx, focus_rx) = watch::channel(true);
-    let focus_reporter = AbortOnDropHandle::new(focus::spawn_reporter(
+    background.spawn(focus::report_changes(
         ipc.clone(),
         focus_rx,
         bus_attached,
         shutdown_tx.subscribe(),
     ));
 
-    let run_result = run_tui(TuiContext {
-        ipc: ipc.clone(),
-        focus_tx,
-        chat_tx,
-        chat_rx,
-        shutdown_rx: shutdown_tx.subscribe(),
-        capabilities,
-        daemon_reachable,
-        config_path,
-        config_issues,
-        theme: Theme::new(&config.chat.theme),
-    })
+    let run_result = run_tui(
+        TuiContext {
+            ipc: ipc.clone(),
+            focus_tx,
+            chat_tx,
+            chat_rx,
+            shutdown_rx,
+            capabilities,
+            daemon_reachable,
+            config_path,
+            config_issues,
+            theme: Theme::new(&config.chat.theme),
+        },
+        &mut background,
+    )
     .await;
 
     let _ = shutdown_tx.send(true);
-    drop(focus_reporter);
+    background.shutdown().await;
     focus::report_closed(&ipc).await;
     info!("assistd chat stopped");
     run_result
@@ -292,7 +328,9 @@ async fn resolve_capabilities(ipc: &IpcClient, config: &Config) -> Result<Startu
     Ok(capabilities)
 }
 
-async fn run_tui(ctx: TuiContext) -> Result<()> {
+/// Draw the chat until it quits, a signal arrives or the terminal closes. Fails when a task
+/// in `background` panics.
+async fn run_tui(ctx: TuiContext, background: &mut JoinSet<()>) -> Result<()> {
     let TuiContext {
         ipc,
         focus_tx,
@@ -306,7 +344,7 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
         theme,
     } = ctx;
 
-    let _guard = TerminalGuard::enter()?;
+    let _guard = TerminalGuard::enter(TerminalInput::KeyboardMouseFocus)?;
     let picker = probe_graphics();
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).context("Terminal::new")?;
@@ -368,8 +406,11 @@ async fn run_tui(ctx: TuiContext) -> Result<()> {
                 redraw = false;
                 frame_due = Instant::now() + FRAME_INTERVAL;
             }
-            _ = shutdown_rx.changed() => {
+            _ = shutdown_rx.wait_for(|&stopping| stopping) => {
                 break;
+            }
+            Some(finished) = background.join_next() => {
+                finished.context("a chat task panicked")?;
             }
         }
     }
@@ -514,26 +555,20 @@ struct BusFollower {
 /// Follow the daemon's broadcast bus for the daemon's state, session titles and turns this
 /// chat did not start (push-to-talk, continuous listening, other clients).
 /// Reconnects on a fixed delay, reporting the loss and the reconnect to the app;
-/// `start_lost` reports the first subscribe as a reconnect too.
-fn spawn_bus_subscription(
-    follower: BusFollower,
-    mut shutdown: watch::Receiver<bool>,
-    start_lost: bool,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut lost = start_lost;
-        loop {
-            tokio::select! {
-                _ = shutdown.changed() => break,
-                () = pump_bus(&follower, &mut lost) => {
-                    tokio::select! {
-                        _ = shutdown.changed() => break,
-                        () = tokio::time::sleep(BUS_RECONNECT_DELAY) => {}
-                    }
+/// `start_lost` reports the first subscribe as a reconnect too. Returns when `shutdown` flips.
+async fn follow_bus(follower: BusFollower, mut shutdown: watch::Receiver<bool>, start_lost: bool) {
+    let mut lost = start_lost;
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            () = pump_bus(&follower, &mut lost) => {
+                tokio::select! {
+                    _ = shutdown.changed() => break,
+                    () = tokio::time::sleep(BUS_RECONNECT_DELAY) => {}
                 }
             }
         }
-    })
+    }
 }
 
 /// Forward bus events until the subscription ends. `lost` says a previous
@@ -592,20 +627,16 @@ async fn subscribe_bus(ipc: &IpcClient) -> Option<assistd_ipc::EventStream> {
         .ok()
 }
 
-fn install_signal_handler(shutdown_tx: watch::Sender<bool>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("failed to install SIGTERM handler: {e}");
-                return;
-            }
-        };
+/// Install the SIGINT and SIGTERM handlers; the returned future resolves on the first of
+/// either signal.
+fn shutdown_signal() -> io::Result<impl Future<Output = ()>> {
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    Ok(async move {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => info!("received SIGINT"),
-            _ = term.recv() => info!("received SIGTERM"),
+            _ = interrupt.recv() => info!("received SIGINT"),
+            _ = terminate.recv() => info!("received SIGTERM"),
         }
-        let _ = shutdown_tx.send(true);
     })
 }
 
