@@ -1,5 +1,5 @@
 //! Text fitting shared by the chat views: cutting to a width with an
-//! ellipsis, hard wrapping, and the row layout of editable text.
+//! ellipsis, expanding tabs, hard wrapping, and the row layout of editable text.
 
 use textwrap::core::display_width;
 
@@ -23,6 +23,59 @@ pub(crate) fn ellipsize(text: &str, cols: usize) -> String {
         .collect();
     cut.push('…');
     cut
+}
+
+/// `text` with its tabs and carriage returns expanded as [`append_expanded`] does, a final
+/// carriage return dropped.
+pub(crate) fn expanded(text: String, tab_stop: usize) -> String {
+    if !text.contains(['\t', '\r']) {
+        return text;
+    }
+    let mut expanded = String::with_capacity(text.len());
+    append_expanded(&mut expanded, &text, tab_stop);
+    if expanded.ends_with('\r') {
+        expanded.pop();
+    }
+    expanded
+}
+
+/// Append `delta` to `text`, widening each tab to the next multiple of `tab_stop` columns
+/// and turning each carriage return, with any line feed after it, into one line break. A
+/// carriage return ending `delta` stays last in `text` until the next call resolves it.
+pub(crate) fn append_expanded(text: &mut String, delta: &str, tab_stop: usize) {
+    let mut after_return = text.ends_with('\r');
+    if after_return {
+        text.pop();
+    }
+    let mut column = display_width(text.rsplit('\n').next().unwrap_or_default());
+    for c in delta.chars() {
+        if std::mem::take(&mut after_return) {
+            text.push('\n');
+            column = 0;
+            if c == '\n' {
+                continue;
+            }
+        }
+        match c {
+            '\r' => after_return = true,
+            '\n' => {
+                text.push('\n');
+                column = 0;
+            }
+            '\t' => {
+                let fill = tab_stop - column % tab_stop;
+                text.extend(std::iter::repeat_n(' ', fill));
+                column += fill;
+            }
+            c => {
+                text.push(c);
+                column += char_width(c);
+            }
+        }
+    }
+    if after_return {
+        text.push('\r');
+    }
 }
 
 /// Split `text` into rows of at most `cols` display columns, breaking
