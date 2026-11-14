@@ -478,48 +478,66 @@ fn offered(script: &str, approvals: &Allowlist) -> Vec<String> {
 #[tokio::test]
 async fn approvals_vet_only_the_runs_they_cover() {
     let bin = tempfile::tempdir().expect("tempdir");
-    let approvals = approvals_over(bin.path(), &["cargo", "git", "python3", "history"]);
+    let approvals = approvals_over(
+        bin.path(),
+        &[
+            "systemctl",
+            "ip",
+            "python3",
+            "history",
+            "cargo",
+            "git",
+            "make",
+        ],
+    );
     for (script, expected) in [
         (
-            "cargo build --release && git status",
-            &["cargo build …", "git status …"][..],
+            "systemctl status --all && ip addr",
+            &["systemctl status …", "ip addr …"][..],
         ),
         (
-            "cargo build; cargo test x",
-            &["cargo build …", "cargo test …"],
+            "systemctl status; systemctl show x",
+            &["systemctl status …", "systemctl show …"],
         ),
-        ("cargo --version -v", &["cargo [options]"]),
-        ("git -C dir status", &[]),
-        ("cargo +nightly build", &[]),
-        ("cargo \"$cmd\"", &[]),
-        ("find . | xargs cargo", &[]),
-        ("find . -exec cargo {} \\;", &[]),
-        ("cargo build; $cmd", &[]),
-        ("cargo build; ./x", &[]),
-        ("cd sub && cargo build && rm a", &[]),
+        ("systemctl --version -v", &["systemctl [options]"]),
+        ("ip -n dir addr", &[]),
+        ("systemctl +nightly status", &[]),
+        ("systemctl \"$cmd\"", &[]),
+        ("find . | xargs systemctl", &[]),
+        ("find . -exec systemctl {} \\;", &[]),
+        ("systemctl status; $cmd", &[]),
+        ("systemctl status; ./x", &[]),
+        ("cd sub && systemctl status && rm a", &[]),
         ("python3 -V", &[]),
         ("history -w", &[]),
         ("nope build", &[]),
+        ("cargo run --manifest-path /tmp/x/Cargo.toml", &[]),
+        ("cd /tmp/repo && git status", &[]),
+        ("make -f/tmp/Makefile", &[]),
+        ("systemctl status && make", &[]),
     ] {
         assert_eq!(offered(script, &approvals), expected, "{script:?}");
     }
 
     approvals
-        .approve(&analyze("cargo build", None, Some(&approvals)).always_allow)
+        .approve(&analyze("systemctl status", None, Some(&approvals)).always_allow)
         .await
         .expect("approve");
     let class = |script: &str| analyze(script, None, Some(&approvals)).class;
-    assert_eq!(class("cargo build --release"), Class::ReadOnly);
-    assert!(matches!(class("cargo build > out"), Class::Edit { .. }));
-    assert!(matches!(class("cargo test"), Class::Unvetted { .. }));
-    assert_eq!(offered("cargo test", &approvals), ["cargo test …"]);
+    assert_eq!(class("systemctl status --all"), Class::ReadOnly);
+    assert!(matches!(
+        class("systemctl status > out"),
+        Class::Edit { .. }
+    ));
+    assert!(matches!(class("systemctl show"), Class::Unvetted { .. }));
+    assert_eq!(offered("systemctl show", &approvals), ["systemctl show …"]);
 
     for script in [
-        "RUSTC_WRAPPER=sh cargo build",
-        "export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=sh; cargo build",
-        "env RUSTC_WRAPPER=sh cargo build",
-        "declare -x RUSTC_WRAPPER=sh; cargo build",
-        "set -a; RUSTC_WRAPPER=sh; cargo build",
+        "SYSTEMD_PAGER=sh systemctl status",
+        "export SYSTEMD_EDITOR=sh; systemctl status",
+        "env SYSTEMD_PAGER=sh systemctl status",
+        "declare -x SYSTEMD_PAGER=sh; systemctl status",
+        "set -a; SYSTEMD_PAGER=sh; systemctl status",
     ] {
         assert!(
             matches!(class(script), Class::Unvetted { .. }),
@@ -527,6 +545,9 @@ async fn approvals_vet_only_the_runs_they_cover() {
         );
         assert!(offered(script, &approvals).is_empty(), "{script:?}");
     }
-    assert_eq!(class("LC_ALL=C TZ=UTC cargo build"), Class::ReadOnly);
-    assert_eq!(class("for f in a b; do cargo build; done"), Class::ReadOnly);
+    assert_eq!(class("LC_ALL=C TZ=UTC systemctl status"), Class::ReadOnly);
+    assert_eq!(
+        class("for f in a b; do systemctl status; done"),
+        Class::ReadOnly
+    );
 }

@@ -95,6 +95,96 @@ const RUNS_ANY_CODE: &[&str] = &[
     "zsh",
 ];
 
+/// Build tools, compilers, package managers and version control, named without a trailing
+/// version. Each runs code named by the project, config or options it is pointed at, so
+/// "always allow" never covers them.
+const RUNS_PROJECT_CODE: &[&str] = &[
+    "ant",
+    "bazel",
+    "bazelisk",
+    "bmake",
+    "buck",
+    "bundle",
+    "bundler",
+    "c++",
+    "cabal",
+    "cargo",
+    "cc",
+    "clang",
+    "clang++",
+    "cmake",
+    "composer",
+    "conda",
+    "cpan",
+    "cpanm",
+    "ctest",
+    "dart",
+    "dotnet",
+    "dune",
+    "flutter",
+    "g++",
+    "gcc",
+    "gem",
+    "gh",
+    "ghc",
+    "git",
+    "gmake",
+    "go",
+    "go-task",
+    "gradle",
+    "hatch",
+    "hg",
+    "java",
+    "javac",
+    "jj",
+    "just",
+    "lein",
+    "luarocks",
+    "make",
+    "makepkg",
+    "mamba",
+    "meson",
+    "mix",
+    "mvn",
+    "nimble",
+    "ninja",
+    "nix",
+    "nix-build",
+    "nix-shell",
+    "nox",
+    "npm",
+    "npx",
+    "opam",
+    "paru",
+    "pdm",
+    "pip",
+    "pipenv",
+    "pipx",
+    "pixi",
+    "pnpm",
+    "pnpx",
+    "poetry",
+    "pre-commit",
+    "pytest",
+    "qmake",
+    "rake",
+    "rebar",
+    "rustc",
+    "rustup",
+    "sbt",
+    "scons",
+    "stack",
+    "svn",
+    "swift",
+    "tox",
+    "uv",
+    "uvx",
+    "xmake",
+    "yarn",
+    "yay",
+    "zig",
+];
+
 /// Bash builtins the classifier leaves unvetted. Bash runs them in place of any program of the
 /// same name, so an approval pinned to that program would not cover what runs.
 const UNVETTED_BUILTINS: &[&str] = &[
@@ -262,8 +352,8 @@ impl Allowlist {
     }
 
     /// Whether `name`, or the file `path` finally links to, is a shell, one of
-    /// [`RUNS_ANY_CODE`] with or without a version (`python3.12`), or one of
-    /// [`UNVETTED_BUILTINS`].
+    /// [`RUNS_ANY_CODE`] or [`RUNS_PROJECT_CODE`] with or without a version (`python3.12`), or
+    /// one of [`UNVETTED_BUILTINS`].
     fn never_approvable(&self, name: &str, path: &Path) -> bool {
         if UNVETTED_BUILTINS.contains(&name) {
             return true;
@@ -277,7 +367,7 @@ impl Allowlist {
             self.shells.contains(name)
                 || [name.to_ascii_lowercase(), program(name)]
                     .iter()
-                    .any(|name| RUNS_ANY_CODE.contains(&name.as_str()))
+                    .any(|name| runs_code(name))
         })
     }
 
@@ -290,6 +380,10 @@ impl Allowlist {
                 std::fs::metadata(candidate).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0)
             })
     }
+}
+
+fn runs_code(name: &str) -> bool {
+    RUNS_ANY_CODE.contains(&name) || RUNS_PROJECT_CODE.contains(&name)
 }
 
 /// The file names of every shell [`SHELLS_FILE`] lists and of the files

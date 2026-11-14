@@ -566,11 +566,15 @@ owner-only file in `$HOME`, a startup file, a shell profile or a
 directory on `PATH` always asks. Asking for an unvetted script offers
 "always allow" for the programs on neither list, saved in
 `allowed_programs.toml` beside the config and pinned to the file the
-name resolved to; an approval covers one subcommand (`cargo build …`),
+name resolved to; an approval covers one subcommand (`systemctl status …`),
 or only options when the program was run without positional arguments,
 and counts that run as vetted from then on. Shells, interpreters,
 `sudo`-like wrappers and builtins that shadow a program are never
-offered it. A script then runs in the bubblewrap
+offered it, and neither are build tools, compilers, package managers
+and version control (`make`, `cargo`, `npm`, `git`): each runs code
+named by the project, config or options it is pointed at, which the
+model can write, so an approval would let it run its own code unasked.
+A script then runs in the bubblewrap
 sandbox; tools never run unsandboxed, so when `bwrap` is missing (or
 `tools.bash.sandbox = "none"`) the model is offered no tools at all and
 clients are told why. `wm open` is the one way out of the sandbox: it
@@ -932,8 +936,9 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    The agent emits `EventBody::ToolCall`, hands the args to `RunTool`,
    which parses the command line and dispatches to `BashCommand`.
    `git` is on neither the read-only nor the edit list, so the script
-   is unvetted and the user confirms it first, unless they have
-   already "always allowed" `git log`, which makes it read-only.
+   is unvetted and the user confirms it first, every time: `git`
+   runs what a repository's config names, so it is never offered
+   "always allow".
 
 6. **Sandbox.** `BashCommand` invokes the bubblewrap sandbox: a
    read-only root with writable entries

@@ -70,18 +70,35 @@ fn a_program_that_runs_any_code_or_is_shadowed_by_a_builtin_is_never_approved() 
     let config = tempfile::tempdir().expect("tempdir");
     let python = executable(bin.path(), "python3.12");
     std::os::unix::fs::symlink(&python, bin.path().join("py")).expect("symlink");
-    executable(bin.path(), "history");
-    executable(bin.path(), "tool");
+    let gcc = executable(bin.path(), "gcc-14");
+    std::os::unix::fs::symlink(&gcc, bin.path().join("compile")).expect("symlink");
+    let cargo = executable(bin.path(), "cargo");
+    for name in ["history", "git", "make", "npm", "tool"] {
+        executable(bin.path(), name);
+    }
     let store = config.path().join(APPROVALS_FILE);
     let stored = format!(
-        "[[program]]\nname = \"py\"\npath = \"{}\"\n",
-        python.display()
+        "[[program]]\nname = \"py\"\npath = \"{}\"\n\n\
+         [[program]]\nname = \"cargo\"\nsubcommand = \"run\"\npath = \"{}\"\n",
+        python.display(),
+        cargo.display()
     );
     std::fs::write(&store, stored).expect("write approvals");
     let allowlist = Allowlist::load(search_path(&[bin.path()]), store).expect("load");
-    for name in ["python3.12", "py", "history"] {
+    let run = ApprovalScope::Subcommand("run".to_string());
+    for (name, scope) in [
+        ("python3.12", OPTIONS_ONLY),
+        ("py", OPTIONS_ONLY),
+        ("history", OPTIONS_ONLY),
+        ("cargo", Some(&run)),
+        ("npm", Some(&run)),
+        ("git", OPTIONS_ONLY),
+        ("make", OPTIONS_ONLY),
+        ("gcc-14", OPTIONS_ONLY),
+        ("compile", OPTIONS_ONLY),
+    ] {
         assert_eq!(
-            allowlist.verdict(name, OPTIONS_ONLY),
+            allowlist.verdict(name, scope),
             Verdict::Unapproved { approvable: false },
             "{name}"
         );
@@ -96,14 +113,14 @@ fn a_program_that_runs_any_code_or_is_shadowed_by_a_builtin_is_never_approved() 
 async fn an_approval_covers_only_its_subcommand() {
     let bin = tempfile::tempdir().expect("tempdir");
     let config = tempfile::tempdir().expect("tempdir");
-    executable(bin.path(), "cargo");
+    executable(bin.path(), "systemctl");
     let store = config.path().join(APPROVALS_FILE);
     let subcommand = |name: &str| ApprovalScope::Subcommand(name.to_string());
     let allowlist = Allowlist::load(search_path(&[bin.path()]), store.clone()).expect("load");
     allowlist
         .approve(&[ProgramApproval {
-            name: "cargo".to_string(),
-            scope: subcommand("build"),
+            name: "systemctl".to_string(),
+            scope: subcommand("status"),
         }])
         .await
         .expect("approve");
@@ -111,18 +128,18 @@ async fn an_approval_covers_only_its_subcommand() {
     let reloaded = Allowlist::load(search_path(&[bin.path()]), store).expect("reload");
     for allowlist in [&allowlist, &reloaded] {
         assert_eq!(
-            allowlist.verdict("cargo", Some(&subcommand("build"))),
+            allowlist.verdict("systemctl", Some(&subcommand("status"))),
             Verdict::Approved
         );
-        for other in [Some(&subcommand("publish")), OPTIONS_ONLY] {
+        for other in [Some(&subcommand("restart")), OPTIONS_ONLY] {
             assert_eq!(
-                allowlist.verdict("cargo", other),
+                allowlist.verdict("systemctl", other),
                 Verdict::Unapproved { approvable: true },
                 "{other:?}"
             );
         }
         assert_eq!(
-            allowlist.verdict("cargo", None),
+            allowlist.verdict("systemctl", None),
             Verdict::Unapproved { approvable: false }
         );
     }
