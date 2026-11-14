@@ -199,9 +199,7 @@ impl Agent {
     async fn retry_truncated_step(&self, turn: &mut Turn) -> Result<(), LlmError> {
         turn.truncated_steps += 1;
         if turn.truncated_steps > TRUNCATION_RETRY_LIMIT {
-            let error = LlmError::OutputLimit(turn.truncated_steps);
-            fail_turn(&turn.tx, &format!("{}: {error}", llm_error_label(&error))).await;
-            return Err(error);
+            return Err(LlmError::OutputLimit(turn.truncated_steps));
         }
         recovery_event!(
             StatusSeverity::Warning,
@@ -248,15 +246,13 @@ impl Agent {
     }
 
     /// One LLM step. A crash is replayed once after the server is ready
-    /// again; any other failure ends the turn with an error after telling
-    /// the client.
+    /// again; any other failure ends the turn with an error and no `Done`.
     async fn step_with_replay(&self, turn: &Turn) -> Result<StepEnd, LlmError> {
         let mut restart_attempted = false;
         loop {
             let replay_probe = self.health.as_ref().filter(|_| !restart_attempted);
             let _ = turn.tx.send(LlmEvent::StepStarted).await;
             match (self.relay_step(turn).await, replay_probe) {
-                (Ok(end), _) => return Ok(end),
                 (Err(LlmError::ServerRestarting(reason)), Some(probe)) => {
                     restart_attempted = true;
                     match await_restart(probe, turn, &reason).await {
@@ -267,15 +263,11 @@ impl Agent {
                             });
                         }
                         Replay::Abandoned(final_msg) => {
-                            fail_turn(&turn.tx, &final_msg).await;
                             return Err(LlmError::ServerRestarting(final_msg));
                         }
                     }
                 }
-                (Err(e), _) => {
-                    fail_turn(&turn.tx, &format!("{}: {e}", llm_error_label(&e))).await;
-                    return Err(e);
-                }
+                (step_end, _) => return step_end,
             }
         }
     }
@@ -570,16 +562,6 @@ fn interrupted_reply(streamed: &str) -> String {
     }
 }
 
-fn llm_error_label(error: &LlmError) -> &'static str {
-    match error {
-        LlmError::Chat(_) => "chat backend",
-        LlmError::ToolCallParse(_) => "tool-call parse",
-        LlmError::Unavailable(_) => "backend unavailable",
-        LlmError::ServerRestarting(_) => "llm restarting",
-        LlmError::OutputLimit(_) => "output limit",
-    }
-}
-
 /// Tell the client the server crashed, wait for the supervisor to bring
 /// it back, and report whether the step can be replayed.
 async fn await_restart(probe: &Arc<dyn LlmHealthProbe>, turn: &Turn, reason: &str) -> Replay {
@@ -673,16 +655,6 @@ async fn abandon_replay(turn: &Turn, wait_err: HealthWaitError) -> String {
         ))
         .await;
     final_msg.to_string()
-}
-
-/// Show the failure inline without sending `Done`; the caller's error
-/// becomes the turn's only terminal event.
-async fn fail_turn(tx: &mpsc::Sender<LlmEvent>, message: &str) {
-    let _ = tx
-        .send(LlmEvent::Delta {
-            text: format!("\n[agent error: {message}]\n"),
-        })
-        .await;
 }
 
 fn status_event(

@@ -216,11 +216,12 @@ fn status_kinds(events: &[LlmEvent]) -> Vec<StatusKind> {
         .collect()
 }
 
-/// A failed turn ends on its inline error note and never sends `Done`.
+/// A failed turn streams no text for its failure and never sends `Done`.
 fn assert_failed_without_done(events: &[LlmEvent]) {
-    assert!(!events.contains(&LlmEvent::Done), "{events:?}");
     assert!(
-        matches!(events.last(), Some(LlmEvent::Delta { text }) if text.contains("[agent error:")),
+        !events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::Done | LlmEvent::Delta { .. })),
         "{events:?}"
     );
 }

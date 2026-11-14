@@ -61,18 +61,13 @@ impl SpeechPipeline {
         }
     }
 
-    async fn flush_idle(&mut self) {
-        if let Some(partial) = self.sentences.flush_idle()
-            && self.tx.send(partial).await.is_err()
-        {
-            debug!(
-                target: "assistd::voice",
-                "speech worker channel closed; dropping idle flush"
-            );
+    fn flush_idle(&mut self) {
+        if let Some(partial) = self.sentences.flush_idle() {
+            self.queue_sentence(partial);
         }
     }
 
-    async fn speak(&mut self, sentences: Vec<String>) {
+    fn speak(&mut self, sentences: Vec<String>) {
         for sentence in sentences {
             if !self.first_sentence_emitted {
                 debug!(
@@ -82,13 +77,19 @@ impl SpeechPipeline {
                 );
                 self.first_sentence_emitted = true;
             }
-            if self.tx.send(sentence).await.is_err() {
-                debug!(
-                    target: "assistd::voice",
-                    "speech worker channel closed; dropping sentence"
-                );
-                break;
-            }
+            self.queue_sentence(sentence);
+        }
+    }
+
+    /// Hand `sentence` to the speech worker, dropping it when the worker is gone or has
+    /// fallen a full queue behind, so a stalled voice never holds up the turn's events.
+    fn queue_sentence(&self, sentence: String) {
+        if let Err(error) = self.tx.try_send(sentence) {
+            debug!(
+                target: "assistd::voice",
+                %error,
+                "speech worker is not taking sentences; dropping one"
+            );
         }
     }
 }
@@ -417,7 +418,7 @@ impl TurnDriver {
                 NextLlmEvent::Closed => break,
                 NextLlmEvent::Idle => {
                     if let Some(speech) = &mut self.speech {
-                        speech.flush_idle().await;
+                        speech.flush_idle();
                     }
                     continue;
                 }
@@ -434,7 +435,7 @@ impl TurnDriver {
                 self.cancel_for_departed_client(cancel);
             }
             if let Some(speech) = &mut self.speech {
-                speech.speak(sentences).await;
+                speech.speak(sentences);
             }
         }
         self.translator.persist_turn_stats().await;
