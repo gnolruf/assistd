@@ -14,6 +14,7 @@ use textwrap::core::display_width;
 use assistd_ipc::{RelayEvent, RelayStepPlan, RelayStepRecord};
 
 use super::markdown::{last_block_boundary, render_markdown};
+use super::text::{append_expanded, expanded};
 use super::theme::Theme;
 use super::ui::compact_duration;
 use crate::client::terminal_text::escape_bidi_controls;
@@ -52,6 +53,10 @@ const LOGO: [&str; 5] = [
 ];
 const BANNER_GAP: &str = "   ";
 const BANNER_RULE: &str = "─";
+/// Columns between tab stops, as a terminal sets them.
+const TAB_STOP: usize = 8;
+/// Columns between tab stops in a reply, the width markdown gives a tab.
+const MARKDOWN_TAB_STOP: usize = 4;
 
 /// One tool invocation, shown from the moment it is called.
 pub(super) struct ToolBlock {
@@ -275,7 +280,7 @@ impl OutputPane {
             }
         };
         if let Some(OutputItem::Assistant(text)) = self.items.get_mut(idx) {
-            text.push_str(&escape_bidi_controls(delta));
+            append_expanded(text, &escape_bidi_controls(delta), MARKDOWN_TAB_STOP);
             self.wrap.invalidate_tail(idx);
         }
     }
@@ -302,9 +307,9 @@ impl OutputPane {
         duration_ms: u64,
     ) {
         self.close_open_assistant();
-        let output = without_bidi_controls(output);
+        let output = expanded_without_bidi_controls(output);
         self.items.push(OutputItem::Tool(ToolBlock {
-            command: without_bidi_controls(command),
+            command: expanded_without_bidi_controls(command),
             expanded: starts_expanded(&output),
             relay: None,
             state: ToolState::Finished {
@@ -327,11 +332,11 @@ impl OutputPane {
     ) {
         self.close_open_assistant();
         self.items.push(OutputItem::Tool(ToolBlock {
-            command: without_bidi_controls(command),
+            command: expanded_without_bidi_controls(command),
             expanded: false,
             relay: Some(RelayRun::replayed(steps)),
             state: ToolState::Finished {
-                output: without_bidi_controls(output),
+                output: expanded_without_bidi_controls(output),
                 exit_code,
                 duration_ms,
             },
@@ -341,7 +346,7 @@ impl OutputPane {
     pub(super) fn begin_tool_block(&mut self, command: String) {
         self.close_open_assistant();
         self.items.push(OutputItem::Tool(ToolBlock {
-            command: without_bidi_controls(command),
+            command: expanded_without_bidi_controls(command),
             state: ToolState::Running {
                 started_at: Instant::now(),
             },
@@ -404,7 +409,7 @@ impl OutputPane {
             self.push_tool_block(UNANNOUNCED_COMMAND.into(), output, exit_code, duration_ms);
             return;
         };
-        let output = without_bidi_controls(output);
+        let output = expanded_without_bidi_controls(output);
         block.expanded = block.relay.is_none() && starts_expanded(&output);
         if let Some(run) = block.relay.as_mut() {
             run.end();
@@ -471,7 +476,7 @@ impl OutputPane {
     fn push_thinking(&mut self, text: String, timing: BlockTiming) {
         self.close_open_assistant();
         self.items.push(OutputItem::Thinking(ThinkingBlock {
-            text: without_bidi_controls(text),
+            text: expanded_without_bidi_controls(text),
             timing,
             expanded: false,
             glyph_frame: 0,
@@ -489,7 +494,7 @@ impl OutputPane {
             self.begin_thinking();
         }
         if let Some(OutputItem::Thinking(t)) = self.items.last_mut() {
-            t.text.push_str(&escape_bidi_controls(delta));
+            append_expanded(&mut t.text, &escape_bidi_controls(delta), TAB_STOP);
             self.wrap.invalidate(self.items.len() - 1);
         }
     }
@@ -655,14 +660,16 @@ impl OutputPane {
 
     fn push_prompt(&mut self, text: String) {
         self.close_open_assistant();
-        self.items.push(OutputItem::Prompt(text));
+        self.items
+            .push(OutputItem::Prompt(expanded(text, TAB_STOP)));
         self.items.push(OutputItem::gap());
     }
 
     /// Append one line and the blank row that separates it from the next item.
     fn push_separated(&mut self, text: String, role: TextRole) {
         self.close_open_assistant();
-        self.items.push(OutputItem::Text(text, role));
+        self.items
+            .push(OutputItem::Text(expanded(text, TAB_STOP), role));
         self.items.push(OutputItem::gap());
     }
 
@@ -1300,11 +1307,12 @@ pub(super) fn tool_block_label(name: String, args: Option<&Value>) -> String {
         .map_or(name, str::to_string)
 }
 
-fn without_bidi_controls(text: String) -> String {
-    match escape_bidi_controls(&text) {
+fn expanded_without_bidi_controls(text: String) -> String {
+    let escaped = match escape_bidi_controls(&text) {
         Cow::Owned(escaped) => escaped,
         Cow::Borrowed(_) => text,
-    }
+    };
+    expanded(escaped, TAB_STOP)
 }
 
 fn single_span_line(text: String, style: Style) -> Line<'static> {

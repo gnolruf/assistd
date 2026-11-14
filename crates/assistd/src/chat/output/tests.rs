@@ -124,7 +124,7 @@ fn collapsed_block_keeps_stderr_lines_visible() {
     p.push_tool_block("grep foo bar".into(), body, 1, 3);
     let rendered = rendered_lines(&mut p, 80, 80);
     assert!(
-        rendered.contains(&"▎ [stderr] [grep]\tboom".to_string()),
+        rendered.contains(&"▎ [stderr] [grep] boom".to_string()),
         "{rendered:#?}"
     );
     assert!(
@@ -423,4 +423,42 @@ fn a_new_theme_restyles_rows_already_wrapped() {
         error_color(&mut p, &Theme::new(&config)),
         Some(Color::Magenta)
     );
+}
+
+#[test]
+fn tool_output_keeps_tab_stops_and_breaks_lines_at_carriage_returns() {
+    let mut p = OutputPane::new();
+    let output = "all:\n\tcc a.c\nab\tc\n10%\r50%\r\ndone\r\n[exit:0 | 1ms]";
+    p.push_tool_block("cat\tMakefile".into(), output.into(), 0, 1);
+    let rendered = rendered_lines(&mut p, 40, 20);
+    assert_eq!(
+        rendered[..7],
+        [
+            "▎ $ cat     Makefile",
+            "▎ all:",
+            "▎         cc a.c",
+            "▎ ab      c",
+            "▎ 10%",
+            "▎ 50%",
+            "▎ done",
+        ]
+    );
+}
+
+#[test]
+fn streamed_text_expands_tabs_and_joins_a_crlf_split_across_deltas() {
+    let mut p = OutputPane::new();
+    p.append_assistant("```\nif x {\r");
+    p.append_assistant("\n\treturn\tx\r}\n```");
+    assert_eq!(
+        rendered_lines(&mut p, 40, 5),
+        ["if x {", "    return  x", "}"]
+    );
+
+    let mut p = OutputPane::new();
+    p.set_verbose(true);
+    p.append_thinking("a\r");
+    p.append_thinking("\n漢\tb");
+    p.finish_thinking();
+    assert_eq!(rendered_lines(&mut p, 40, 5)[1..3], ["▎ a", "▎ 漢      b"]);
 }
