@@ -928,6 +928,7 @@ impl Event {
             | EventBody::HistoryEntry { .. }
             | EventBody::UndoApplied { .. }
             | EventBody::Task { .. }
+            | EventBody::UndecodableTask { .. }
             | EventBody::TaskRunRecord { .. }
             | EventBody::TaskRunQueued { .. }
             | EventBody::Queued { .. }
@@ -1129,6 +1130,13 @@ pub enum EventBody {
         /// `None` while every watch runs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger_failure: Option<String>,
+    },
+    /// One saved task whose stored form the daemon cannot decode, listed by `TaskList` so
+    /// it can be deleted; `name` is as stored and `reason` says what failed.
+    UndecodableTask {
+        task_id: TaskId,
+        name: String,
+        reason: String,
     },
     /// The next fire times of the trigger a `TaskCheckTrigger` checked, soonest first, at
     /// most three; empty for a trigger that fires on request or on an event.

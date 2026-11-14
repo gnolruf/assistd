@@ -551,7 +551,8 @@ pub enum LaneHolder {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum TaskRequest {
-    /// List every saved task by name with its next fire time. Emits `Task`s, then `Done`.
+    /// List every saved task by name with its next fire time. Emits an `UndecodableTask`
+    /// for each one the daemon cannot decode, then `Task`s, then `Done`.
     List,
     /// Create a task, or replace task `task`. Errors when the name is taken, or `spec.mode` is
     /// Auto and the daemon does not allow it. Emits the saved `Task`, then `Done`.

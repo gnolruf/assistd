@@ -76,6 +76,24 @@ impl TaskService {
         tx: EventSink,
     ) -> Result<(), DispatchError> {
         let tasks = self.deps.store.list().await.context("task list failed")?;
+        let undecodable = self
+            .deps
+            .store
+            .undecodable()
+            .await
+            .context("task list failed")?;
+        for task in undecodable {
+            let _ = tx
+                .send(Event::new(
+                    id.clone(),
+                    EventBody::UndecodableTask {
+                        task_id: task.id,
+                        name: task.name,
+                        reason: task.reason,
+                    },
+                ))
+                .await;
+        }
         self.send_tasks(id, tasks, &tx).await;
         Ok(())
     }

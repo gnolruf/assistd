@@ -180,6 +180,7 @@ impl App {
             | EventBody::WakeWordTest { .. }
             | EventBody::WakeWordSpeech { .. }
             | EventBody::Task { .. }
+            | EventBody::UndecodableTask { .. }
             | EventBody::TaskRunRecord { .. }
             | EventBody::TaskRunQueued { .. }
             | EventBody::TaskRun { .. }
