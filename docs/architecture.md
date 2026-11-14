@@ -124,7 +124,9 @@ if the child changed since the save), deleting the file once restored.
 requests and restores it after, so a relay inside a task run keeps that run's
 slot; with more than one slot the main conversation keeps slot 0 to itself, so
 the group runs without either. A file is deleted when its conversation ends (a finished run, `/new`),
-and past two suspended runs the oldest run's file is dropped. Any failure only
+and past two suspended runs the oldest run's file is dropped. The stash applies
+these transitions one at a time on a task it owns, so one that has begun
+finishes even when the turn that asked for it is interrupted. Any failure only
 costs re-processing that conversation's context. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when

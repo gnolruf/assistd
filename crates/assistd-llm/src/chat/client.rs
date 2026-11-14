@@ -48,8 +48,9 @@ const TOOL_CALL_MARKUP: &str = "<tool_call>";
 const SHARED_SLOT: u32 = 0;
 
 /// HTTP streaming chat client backed by a locally-managed llama-server. The conversation lock
-/// is held only while state is mutated, never across the HTTP stream or a compaction summary,
-/// so a hung server never blocks `push_user` or `set_transient_context`.
+/// is held only while state is mutated, never across the HTTP stream, a compaction summary or
+/// an event send, so neither a hung server nor a stalled consumer blocks `push_user` or
+/// `set_transient_context`.
 #[derive(Debug)]
 pub struct LlamaChatClient {
     client: reqwest::Client,
@@ -311,18 +312,20 @@ impl LlamaChatClient {
 
     /// Compact the conversation when it is over budget, summarizing with the
     /// same `tools` the coming request offers so its prompt prefix is
-    /// unchanged, and return it locked for that request.
+    /// unchanged, and return it locked for that request, with the events to
+    /// send once it is unlocked.
     async fn fit_budget(
         &self,
         tools: &[Value],
         tx: &mpsc::Sender<LlmEvent>,
-    ) -> LlmResult<MutexGuard<'_, Conversation>> {
+    ) -> LlmResult<(MutexGuard<'_, Conversation>, Vec<LlmEvent>)> {
         let conv = self.conv.lock().await;
         if !conv.exceeds_budget(&self.chat, &self.model) {
-            if self.compaction_headroom(&conv).is_none() {
-                send_compaction_status(tx, StatusKind::CompactingSoon, "compacting soon").await;
-            }
-            return Ok(conv);
+            let compacting_soon = self
+                .compaction_headroom(&conv)
+                .is_none()
+                .then(|| compaction_status(StatusKind::CompactingSoon, "compacting soon"));
+            return Ok((conv, compacting_soon.into_iter().collect()));
         }
         let before = (conv.message_count(), conv.approx_total_tokens());
         drop(conv);
@@ -351,8 +354,8 @@ impl LlamaChatClient {
             tokens_after = conv.approx_total_tokens(),
             "history compacted to fit the token budget"
         );
-        announce_compaction(&conv, started_at, tx).await;
-        Ok(conv)
+        let events = compaction_events(&conv, started_at);
+        Ok((conv, events))
     }
 
     /// Drop history down to the low-water mark of the estimate, which the
@@ -360,18 +363,21 @@ impl LlamaChatClient {
     async fn truncate_after_overflow(&self, tx: &mpsc::Sender<LlmEvent>) {
         send_compaction_status(tx, StatusKind::CompactingHistory, "compacting history…").await;
         let started_at = Instant::now();
-        let mut conv = self.conv.lock().await;
-        let before = (conv.message_count(), conv.approx_total_tokens());
-        conv.truncate_to_budget(&self.chat, &self.model);
-        warn!(
-            target: "assistd::chat",
-            messages_before = before.0,
-            messages_after = conv.message_count(),
-            tokens_before = before.1,
-            tokens_after = conv.approx_total_tokens(),
-            "prompt exceeded the context window; history truncated to retry"
-        );
-        announce_compaction(&conv, started_at, tx).await;
+        let events = {
+            let mut conv = self.conv.lock().await;
+            let before = (conv.message_count(), conv.approx_total_tokens());
+            conv.truncate_to_budget(&self.chat, &self.model);
+            warn!(
+                target: "assistd::chat",
+                messages_before = before.0,
+                messages_after = conv.message_count(),
+                tokens_before = before.1,
+                tokens_after = conv.approx_total_tokens(),
+                "prompt exceeded the context window; history truncated to retry"
+            );
+            compaction_events(&conv, started_at)
+        };
+        send_events(tx, events).await;
     }
 
     /// Fit the conversation to its budget, send it with `tools` offered, and
@@ -381,9 +387,9 @@ impl LlamaChatClient {
         tools: &[Value],
         tx: &mpsc::Sender<LlmEvent>,
     ) -> LlmResult<StreamOutcome> {
-        let (body_bytes, estimated_tokens, compaction_headroom) = {
-            let conv = self.fit_budget(tools, tx).await?;
-            send_context_size(&conv, tx).await;
+        let (body_bytes, estimated_tokens, compaction_headroom, events) = {
+            let (conv, mut events) = self.fit_budget(tools, tx).await?;
+            events.push(context_size(&conv));
             let mut payload = self.base_request(conv.as_wire_messages());
             offer_tools(&mut payload, tools.to_vec());
             let body = serde_json::to_vec(&payload)
@@ -392,8 +398,10 @@ impl LlamaChatClient {
                 body,
                 conv.heuristic_tokens(),
                 self.compaction_headroom(&conv),
+                events,
             )
         };
+        send_events(tx, events).await;
 
         self.claim_slot().await;
         let outcome = self
@@ -1032,40 +1040,44 @@ impl StreamOutcome {
     }
 }
 
-/// Tell the consumer compaction finished, with the summary now heading the
-/// conversation when there is one.
-async fn announce_compaction(
-    conv: &Conversation,
-    started_at: Instant,
-    tx: &mpsc::Sender<LlmEvent>,
-) {
-    if let Some((summary, cut)) = conv.summary_snapshot() {
-        let _ = tx
-            .send(LlmEvent::HistoryCompacted {
-                summary: summary.to_string(),
-                cut,
-                elapsed: started_at.elapsed(),
-            })
-            .await;
-    }
-    send_compaction_status(tx, StatusKind::HistoryCompacted, "history compacted").await;
+/// The events telling the consumer compaction finished, led by the summary
+/// now heading the conversation when there is one.
+fn compaction_events(conv: &Conversation, started_at: Instant) -> Vec<LlmEvent> {
+    let summarized = conv
+        .summary_snapshot()
+        .map(|(summary, cut)| LlmEvent::HistoryCompacted {
+            summary: summary.to_string(),
+            cut,
+            elapsed: started_at.elapsed(),
+        });
+    let finished = compaction_status(StatusKind::HistoryCompacted, "history compacted");
+    summarized.into_iter().chain([finished]).collect()
 }
 
-async fn send_context_size(conv: &Conversation, tx: &mpsc::Sender<LlmEvent>) {
-    let tokens = conv.approx_total_tokens();
-    let total = conv.total_tokens();
-    let _ = tx.send(LlmEvent::ContextSize { tokens, total }).await;
+fn context_size(conv: &Conversation) -> LlmEvent {
+    LlmEvent::ContextSize {
+        tokens: conv.approx_total_tokens(),
+        total: conv.total_tokens(),
+    }
+}
+
+fn compaction_status(event: StatusKind, message: &str) -> LlmEvent {
+    LlmEvent::Status {
+        severity: StatusSeverity::Info,
+        component: Component::Llm,
+        event,
+        message: message.into(),
+    }
 }
 
 async fn send_compaction_status(tx: &mpsc::Sender<LlmEvent>, event: StatusKind, message: &str) {
-    let _ = tx
-        .send(LlmEvent::Status {
-            severity: StatusSeverity::Info,
-            component: Component::Llm,
-            event,
-            message: message.into(),
-        })
-        .await;
+    let _ = tx.send(compaction_status(event, message)).await;
+}
+
+async fn send_events(tx: &mpsc::Sender<LlmEvent>, events: Vec<LlmEvent>) {
+    for event in events {
+        let _ = tx.send(event).await;
+    }
 }
 
 async fn warn_when_compaction_nears(tx: &mpsc::Sender<LlmEvent>, accum: &mut StreamAccum) {

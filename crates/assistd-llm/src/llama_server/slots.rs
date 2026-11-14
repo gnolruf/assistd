@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 
 use assistd_ipc::TaskRunId;
@@ -30,6 +31,7 @@ const SLOT_PATH: &str = "/slots/0";
 const MAX_SUSPENDED_RUNS: usize = 2;
 const SLOT_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const SLOT_RESPONSE_MAX: usize = 64 * 1024;
+const TRANSITION_QUEUE_CAPACITY: usize = 8;
 
 /// A mode-0700 directory passed as `--slot-save-path`, emptied before every
 /// server spawn since a slot file is only valid for the model and settings
@@ -99,20 +101,16 @@ pub enum SlotAssignment {
 /// re-processing its context. Every failure is logged and costs only that.
 #[derive(Debug)]
 pub struct SlotStash {
-    client: reqwest::Client,
-    url: String,
-    model: String,
-    slot_dir: SlotDir,
-    health: Option<Arc<dyn LlmHealthProbe>>,
     /// The server's slot count; one until told otherwise.
     slots: watch::Receiver<NonZeroU32>,
-    state: Mutex<StashState>,
+    transitions: mpsc::Sender<QueuedTransition>,
+    _worker: AbortOnDropHandle<()>,
 }
 
 impl SlotStash {
     /// A stash for `model`'s slot on the router at `addr`, whose files land in
     /// `slot_dir`. With `health`, a restore is skipped once the serving child
-    /// has changed since the save.
+    /// has changed since the save. Call inside a Tokio runtime.
     pub fn new(
         addr: SocketAddr,
         api_key: Option<&ApiKey>,
@@ -128,14 +126,19 @@ impl SlotStash {
             )
             .timeout(SLOT_ACTION_TIMEOUT)
             .build()?;
-        Ok(Self {
+        let worker = SlotWorker {
             client,
             url: format!("http://{addr}{SLOT_PATH}"),
             model,
             slot_dir,
             health,
+            state: StashState::default(),
+        };
+        let (transitions, queued) = mpsc::channel(TRANSITION_QUEUE_CAPACITY);
+        Ok(Self {
             slots: watch::channel(NonZeroU32::MIN).1,
-            state: Mutex::new(StashState::default()),
+            transitions,
+            _worker: AbortOnDropHandle::new(tokio::spawn(worker.run(queued))),
         })
     }
 
@@ -147,17 +150,9 @@ impl SlotStash {
 
     /// Hand the slot to `key`: save it for the conversation holding it, then
     /// restore `key`'s saved state, if any. Call before every request `key` makes.
+    /// A switch that has begun finishes even if this future is dropped.
     pub async fn switch_to(&self, key: ConversationKey) {
-        let mut state = self.state.lock().await;
-        if state.occupant == Some(key) {
-            return;
-        }
-        self.set_aside(&mut state).await;
-        if let Some(saved) = state.take(key) {
-            self.restore(key, saved).await;
-            self.remove_file(key).await;
-        }
-        state.occupant = Some(key);
+        self.apply(Transition::SwitchTo(key)).await;
     }
 
     /// Run `group` of unkeyed requests between a save and a restore of the
@@ -169,12 +164,7 @@ impl SlotStash {
         if self.slots.borrow().get() > 1 {
             return group.await;
         }
-        let owner = {
-            let mut state = self.state.lock().await;
-            let owner = state.occupant;
-            self.set_aside(&mut state).await;
-            owner
-        };
+        let owner = self.apply(Transition::SetAside).await;
         let output = group.await;
         if let Some(owner) = owner {
             self.switch_to(owner).await;
@@ -182,27 +172,92 @@ impl SlotStash {
         output
     }
 
-    /// Forget `key`'s conversation, which has ended, deleting its saved state.
+    /// Forget `key`'s conversation, which has ended, deleting its saved state
+    /// once every transition begun earlier has finished.
     pub async fn end(&self, key: ConversationKey) {
-        let mut state = self.state.lock().await;
-        if state.occupant == Some(key) {
-            state.occupant = None;
-        }
-        if state.take(key).is_some() {
-            self.remove_file(key).await;
+        self.apply(Transition::End(key)).await;
+    }
+
+    /// Queue `transition` behind those already begun and wait for it, returning
+    /// the conversation that held the slot before it.
+    async fn apply(&self, transition: Transition) -> Option<ConversationKey> {
+        let (done, applied) = oneshot::channel();
+        let queued = QueuedTransition { transition, done };
+        self.transitions.send(queued).await.ok()?;
+        applied.await.ok().flatten()
+    }
+}
+
+#[derive(Debug)]
+enum Transition {
+    SwitchTo(ConversationKey),
+    /// Save the slot for its occupant and leave it to unkeyed requests.
+    SetAside,
+    End(ConversationKey),
+}
+
+#[derive(Debug)]
+struct QueuedTransition {
+    transition: Transition,
+    /// Sent the conversation that held the slot before the transition.
+    done: oneshot::Sender<Option<ConversationKey>>,
+}
+
+/// Applies the stash's transitions one at a time on a task of its own, so each
+/// runs to its end whether or not its caller still waits for it.
+struct SlotWorker {
+    client: reqwest::Client,
+    url: String,
+    model: String,
+    slot_dir: SlotDir,
+    health: Option<Arc<dyn LlmHealthProbe>>,
+    state: StashState,
+}
+
+impl SlotWorker {
+    async fn run(mut self, mut queued: mpsc::Receiver<QueuedTransition>) {
+        while let Some(QueuedTransition { transition, done }) = queued.recv().await {
+            let previous_occupant = self.state.occupant;
+            match transition {
+                Transition::SwitchTo(key) => self.switch_to(key).await,
+                Transition::SetAside => self.set_aside().await,
+                Transition::End(key) => self.end(key).await,
+            }
+            let _ = done.send(previous_occupant);
         }
     }
 
-    /// Save the slot for its occupant, which then no longer holds it, evicting
-    /// the oldest suspended task conversation past [`MAX_SUSPENDED_RUNS`].
-    async fn set_aside(&self, state: &mut StashState) {
-        let Some(owner) = state.occupant.take() else {
+    async fn switch_to(&mut self, key: ConversationKey) {
+        if self.state.occupant == Some(key) {
+            return;
+        }
+        self.set_aside().await;
+        if let Some(saved) = self.state.saved_for(key) {
+            self.restore(key, saved).await;
+            self.state.forget(key);
+        }
+        self.state.occupant = Some(key);
+        self.remove_file(key).await;
+    }
+
+    async fn end(&mut self, key: ConversationKey) {
+        if self.state.occupant == Some(key) {
+            self.state.occupant = None;
+        }
+        self.state.forget(key);
+        self.remove_file(key).await;
+    }
+
+    /// Save the slot for its occupant, which holds it until the save returns,
+    /// evicting the oldest suspended task conversation past [`MAX_SUSPENDED_RUNS`].
+    async fn set_aside(&mut self) {
+        let Some(owner) = self.state.occupant else {
             return;
         };
-        if let Some(saved) = self.save(owner).await {
-            state.saved.push((owner, saved));
-        }
-        if let Some(evicted) = state.evict_past_limit() {
+        let saved = self.save(owner).await;
+        self.state.occupant = None;
+        self.state.saved.extend(saved.map(|saved| (owner, saved)));
+        if let Some(evicted) = self.state.evict_past_limit() {
             debug!(target: "assistd::slots", ?evicted, "dropped the oldest suspended slot");
             self.remove_file(evicted).await;
         }
@@ -320,9 +375,14 @@ struct StashState {
 }
 
 impl StashState {
-    fn take(&mut self, key: ConversationKey) -> Option<SavedSlot> {
-        let index = self.saved.iter().position(|(saved, _)| *saved == key)?;
-        Some(self.saved.remove(index).1)
+    fn saved_for(&self, key: ConversationKey) -> Option<SavedSlot> {
+        self.saved
+            .iter()
+            .find_map(|(saved_key, saved)| (*saved_key == key).then_some(*saved))
+    }
+
+    fn forget(&mut self, key: ConversationKey) {
+        self.saved.retain(|(saved_key, _)| *saved_key != key);
     }
 
     fn evict_past_limit(&mut self) -> Option<ConversationKey> {
