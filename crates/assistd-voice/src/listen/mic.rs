@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, trace, warn};
 
 use super::barge_in::{BargeInWatch, confirms_barge_in};
-use super::capture::{self, ListenCaptureSession};
+use super::frames::FrameSink;
 use super::session::{CapturedUtterance, SessionAudio};
 use super::silero::{FrameClassifier, SileroVad};
 use super::spotter::WakeWordSpotter;
@@ -23,7 +23,7 @@ use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, UtteranceVad, VadEvent, VadTunin
 use super::wake_gate::{Admission, WakeGate};
 use super::{ContinuousListener, Heard, ListenError, WakeTest};
 use crate::controller::VoiceOutputController;
-use crate::mic::capture::AudioCaptureError;
+use crate::mic::capture::{self, AudioCaptureError, CaptureSession};
 use crate::transcribe::Transcriber;
 
 const UTTERANCE_CHANNEL_DEPTH: usize = 16;
@@ -329,11 +329,11 @@ impl MicContinuousListener {
     /// Run capture and the VAD into `sink` until it closes or capture fails.
     async fn stream_utterances(&self, sink: mpsc::Sender<SessionAudio>) -> Result<(), ListenError> {
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
-        let ListenCaptureSession {
+        let CaptureSession {
             stop_flag,
             opened: _,
             handle: mut capture_handle,
-        } = capture::start(self.mic_device.as_deref(), frame_tx);
+        } = capture::start(self.mic_device.as_deref(), FrameSink::new(frame_tx));
         let stop = CaptureStop(stop_flag);
         let tuning = self.tuning;
         let classifier = FrameClassifier::new(Arc::clone(&self.silero));
@@ -375,11 +375,11 @@ impl ContinuousListener for MicContinuousListener {
         }
 
         let (frame_tx, frame_rx) = mpsc::channel::<Box<[i16; FRAME_SAMPLES]>>(FRAME_CHANNEL_DEPTH);
-        let ListenCaptureSession {
+        let CaptureSession {
             stop_flag,
             opened,
             handle: mut capture_handle,
-        } = capture::start(self.mic_device.as_deref(), frame_tx);
+        } = capture::start(self.mic_device.as_deref(), FrameSink::new(frame_tx));
         let capture_stop = CaptureStop(Arc::clone(&stop_flag));
         await_capture_open(opened, &mut capture_handle)
             .await

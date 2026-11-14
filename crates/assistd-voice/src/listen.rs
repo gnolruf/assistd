@@ -13,8 +13,7 @@ use tokio::time::Instant;
 use crate::mic::AudioCaptureError;
 
 pub mod barge_in;
-pub mod capture;
-pub mod consumer;
+pub mod frames;
 pub mod mic;
 mod session;
 pub mod silero;

@@ -1,13 +1,11 @@
-//! `mic::consumer::drain_to_pcm` rate conversion to 16 kHz, fed from a
+//! `mic::consumer::drain` rate conversion to 16 kHz, fed from a
 //! ring buffer directly so no audio hardware is needed.
-
-#![cfg(feature = "mic")]
 
 use std::f32::consts::PI;
 use std::sync::atomic::AtomicBool;
 
 use assistd_voice::mic::capture::StreamFailure;
-use assistd_voice::mic::consumer::drain_to_pcm;
+use assistd_voice::mic::consumer::{PcmRecording, drain};
 use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
 
@@ -26,14 +24,14 @@ fn drain_one_second(rate_hz: u32, tone_hz: f32) -> Vec<i16> {
     }
     drop(producer);
     let stop = AtomicBool::new(true);
-    drain_to_pcm(
+    drain(
         consumer,
         rate_hz,
-        16_000 * 4,
         &stop,
         &StreamFailure::default(),
+        PcmRecording::capped_at(16_000 * 4),
     )
-    .expect("drain_to_pcm error")
+    .expect("drain error")
 }
 
 fn rms(pcm: &[i16]) -> f32 {
