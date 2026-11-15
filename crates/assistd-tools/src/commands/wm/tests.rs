@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use assistd_ipc::PermissionMode;
 use assistd_wm::{
     ExecCommand, FocusedWindowContext, Layout, OutputInfo, ResizeDir, Window, WindowId, WmResult,
     WorkspaceId, WorkspaceInfo,
@@ -10,7 +11,9 @@ use super::desktop_entry::DesktopEntry;
 use super::*;
 use crate::TurnContext;
 use crate::command::run_rendered;
+use crate::commands::test_support::router_in;
 use crate::commands::{RecordingGate, test_wm};
+use crate::policy::IpcConfirmationGate;
 
 fn id(n: u64) -> WindowId {
     WindowId::new(n).expect("test ids are non-zero")
@@ -235,6 +238,29 @@ async fn approved_apps_skip_the_prompt_only_when_launched_without_targets_or_cwd
     );
     assert!(!confirmed(&["--cwd", "/tmp", "viewer"]).await);
     assert_eq!(gate.prompts().len(), 2, "--cwd asks: {:?}", gate.prompts());
+}
+
+#[tokio::test]
+async fn a_target_for_an_app_that_takes_urls_asks_even_in_auto_mode() {
+    let cmd = WmCommand::new(
+        Arc::new(StubWm::default()),
+        Arc::new(IpcConfirmationGate),
+        Arc::new(Approvals::unsaved()),
+    );
+    for (exec, target, asks) in [
+        ("viewer %F", "/tmp/notes.txt", false),
+        ("viewer %U", "https://x.org/?q=secret", true),
+        ("viewer %u", "/tmp/page.html", true),
+    ] {
+        let (router, mut rx) = router_in(PermissionMode::Auto);
+        let args = open_args(&["viewer", target]);
+        let launch = PreparedLaunch::new(viewer(exec), &args).expect("launchable");
+        let confirmed = cmd
+            .confirmed(&TurnContext::answered_by(router), &args, &launch)
+            .await;
+        assert_eq!(rx.try_recv().is_ok(), asks, "{exec} {target}");
+        assert_eq!(confirmed, !asks, "{exec} {target}");
+    }
 }
 
 #[tokio::test]

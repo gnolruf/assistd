@@ -610,7 +610,8 @@ whose content the prompt shows in full. Auto mode, offered only when
 `tools.allow_auto_mode` is set, additionally puts the remaining edits,
 unvetted scripts, unapproved `wm open` launches and unapproved MCP tool calls
 to the safety judge, a one-shot model verdict that asks the user whenever it is
-unsure, fails or times out. A new web host always asks: egress is the
+unsure, fails or times out. A new web host always asks, and so does a `wm open`
+launch that hands a file or URL to an entry whose `Exec` takes URLs: egress is the
 exfiltration path, so it is never left to the judge. Each unasked approval is logged
 on `assistd::policy`; nothing is added to the allowlist.
 

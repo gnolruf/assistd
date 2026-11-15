@@ -117,7 +117,8 @@ impl WmCommand {
     }
 
     /// Whether the user, or in auto mode the safety judge, lets `launch` run. Approvals cover a
-    /// launch with no files, URLs, or `--cwd`; one with any of them is never approved for good.
+    /// launch with no files, URLs, or `--cwd`; one with any of them is never approved for good,
+    /// and one that opens a URL always asks.
     async fn confirmed(
         &self,
         turn: &TurnContext,
@@ -145,15 +146,7 @@ impl WmCommand {
             } else {
                 Risk::Routine
             },
-            unattended: Unattended::Judged(JudgeContext {
-                class: JudgedClass::Launch,
-                cwd: None,
-                why: format!(
-                    "it launches {} ({key}) as the user, outside the sandbox, and the launch is \
-                     not yet approved",
-                    entry.name
-                ),
-            }),
+            unattended: unattended_launch(launch, &key),
             source: ConfirmSource::Main,
         };
         if has_targets {
@@ -426,6 +419,22 @@ async fn layout(wm: &dyn WindowManager, args: &[Word]) -> Result<CommandOutput, 
         .await
         .map_err(|e| wm_error(format_args!("layout '{layout}'"), &e))?;
     Ok(CommandOutput::ok(Vec::new()))
+}
+
+/// Opening a URL is egress, which no mode approves; the safety judge may settle any other launch.
+fn unattended_launch(launch: &PreparedLaunch, key: &str) -> Unattended {
+    if launch.opens_url {
+        return Unattended::Never;
+    }
+    Unattended::Judged(JudgeContext {
+        class: JudgedClass::Launch,
+        cwd: None,
+        why: format!(
+            "it launches {} ({key}) as the user, outside the sandbox, and the launch is not yet \
+             approved",
+            launch.entry.name
+        ),
+    })
 }
 
 fn opened(launch: &PreparedLaunch, workspace: Option<&WorkspaceId>) -> CommandOutput {

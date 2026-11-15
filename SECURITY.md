@@ -34,7 +34,8 @@ the patched release is out.
 - **Permission modes.** Manual asks for every edit and unvetted script;
   Accept-edits also runs edits inside `tools.write.writable_paths`; the
   opt-in Auto puts the rest, plus unapproved app launches and MCP tool
-  calls, to the safety judge. A new web host always asks.
+  calls, to the safety judge. A new web host always asks, as does a
+  launch that hands a file or URL to an app that takes URLs.
 - **Safety judge.** A one-shot model verdict in Auto mode; it asks the
   user whenever it is unsure, fails or times out.
 - **Sandbox.** Every command runs under bubblewrap, with a read-only

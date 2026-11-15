@@ -143,6 +143,9 @@ impl OpenError {
 pub(super) struct PreparedLaunch {
     pub(super) entry: DesktopEntry,
     pub(super) command: ExecCommand,
+    /// Whether an entry that takes URLs is handed a target, which it may fetch or, when a
+    /// local file, load and follow to any host.
+    pub(super) opens_url: bool,
 }
 
 impl PreparedLaunch {
@@ -155,6 +158,7 @@ impl PreparedLaunch {
     /// The shell command line that runs `entry` as `args` asks.
     pub(super) fn new(entry: DesktopEntry, args: &OpenArgs) -> Result<Self, OpenError> {
         let targets = resolve_targets(&entry, &args.targets)?;
+        let opens_url = !targets.is_empty() && matches!(entry.targets(), Targets::Urls { .. });
         let mut argv = entry.command_line(&targets);
         if entry.terminal {
             argv.splice(0..0, terminal_prefix(&entry.name)?);
@@ -165,7 +169,11 @@ impl PreparedLaunch {
             None => exec,
         };
         let command = ExecCommand::new(line)?;
-        Ok(Self { entry, command })
+        Ok(Self {
+            entry,
+            command,
+            opens_url,
+        })
     }
 }
 
