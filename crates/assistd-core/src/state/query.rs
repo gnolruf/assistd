@@ -14,7 +14,7 @@ use assistd_embed::EmbedderHandle;
 use assistd_ipc::{Event, EventBody, ImageAttachment, PlanMode};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_memory::{PersistedMessage, SemanticStore, SessionId};
-use assistd_tools::{Attachment, ConfirmRouter, ToolCatalog, TurnContext};
+use assistd_tools::{Attachment, ConfirmRouter, HostReads, ToolCatalog, TurnContext};
 use assistd_voice::{
     SpeakDecision, SpeakingGuard, VoiceManager, VoiceOutput, VoiceOutputController,
 };
@@ -23,6 +23,7 @@ use assistd_wm::WindowManager;
 use super::branches::BranchService;
 use super::chat_focus::ChatFocusSlot;
 use super::context::{combine_context_blocks, voice_approvals_note};
+use super::host_reads::BranchHostReads;
 use super::persistence::TranscriptLog;
 use super::session::SessionContext;
 use super::transcript_writer::PersistTarget;
@@ -122,6 +123,7 @@ pub struct TurnService {
     pub(super) deps: TurnDeps,
     /// The chat's last focus report.
     pub(super) chat_focus: ChatFocusSlot,
+    host_reads: BranchHostReads,
 }
 
 impl TurnService {
@@ -129,6 +131,7 @@ impl TurnService {
         Self {
             deps,
             chat_focus: ChatFocusSlot::default(),
+            host_reads: BranchHostReads::default(),
         }
     }
 
@@ -177,7 +180,9 @@ impl TurnService {
 
         let title_user_text = text.clone();
         let (llm_tx, llm_rx) = mpsc::channel::<LlmEvent>(32);
-        let turn = origin.into_turn_context(&id);
+        let turn = origin
+            .into_turn_context(&id)
+            .reading_into(self.active_branch_host_reads().await);
         let agent_task =
             self.spawn_agent_task(turn, (text, attachments), plan, llm_tx, cancel.clone());
 
@@ -291,6 +296,14 @@ impl TurnService {
                 (session, None)
             }
         }
+    }
+
+    async fn active_branch_host_reads(&self) -> HostReads {
+        let (_session, branch) = self.deps.session_ctx.current().await;
+        let offered = Planner::chat_tools(&self.deps.tools.snapshot());
+        self.host_reads
+            .of(branch, self.deps.transcript.store().as_ref(), &offered)
+            .await
     }
 
     async fn assemble_transient_context(

@@ -72,3 +72,22 @@ pub enum Chain {
     Or(Box<Chain>, Box<Chain>),
     Seq(Box<Chain>, Box<Chain>),
 }
+
+impl Chain {
+    /// Every command of the chain, in the order written.
+    pub fn commands(&self) -> Vec<&[Word]> {
+        match self {
+            Self::Command(argv) => vec![argv],
+            Self::Pipe(left, argv) => {
+                let mut commands = left.commands();
+                commands.push(argv);
+                commands
+            }
+            Self::And(left, right) | Self::Or(left, right) | Self::Seq(left, right) => {
+                let mut commands = left.commands();
+                commands.extend(right.commands());
+                commands
+            }
+        }
+    }
+}

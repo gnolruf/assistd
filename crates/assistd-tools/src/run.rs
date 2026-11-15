@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::TurnContext;
 use crate::chain::{ParseError, Redirection, execute, parse_chain};
-use crate::command::{CommandOutput, CommandRegistry, Hint, error_line};
+use crate::command::{Command, CommandOutput, CommandRegistry, Hint, error_line};
 use crate::presentation::{OutputCap, PresentResult, PresentSpec, present};
 use crate::{RawStreams, Tool, ToolError, ToolOutput};
 
@@ -139,6 +139,21 @@ impl Tool for RunTool {
             },
             "required": ["command"]
         })
+    }
+
+    /// A chain reads this machine when any command it names does; one that does not parse,
+    /// or names no known command, runs nothing.
+    fn reads_host(&self, args: &Value) -> bool {
+        args.get("command")
+            .and_then(Value::as_str)
+            .and_then(|command| parse_chain(command).ok())
+            .is_some_and(|chain| {
+                chain
+                    .commands()
+                    .into_iter()
+                    .filter_map(|argv| self.registry.get(argv.first()?.as_str()))
+                    .any(Command::reads_host)
+            })
     }
 
     #[tracing::instrument(skip(self, turn, args), fields(cmd = tracing::field::Empty))]

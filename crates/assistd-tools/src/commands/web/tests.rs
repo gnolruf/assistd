@@ -92,13 +92,17 @@ fn allowing() -> WebCommand {
 }
 
 async fn fetch(cmd: &WebCommand, url: &str) -> CommandOutput {
+    fetch_in(cmd, url, TurnContext::default()).await
+}
+
+async fn fetch_in(cmd: &WebCommand, url: &str, turn: TurnContext) -> CommandOutput {
     run_rendered(
         cmd,
         CommandInput {
             args: vec![Word::bare("fetch"), Word::bare(url)],
             stdin: None,
             scope: crate::FileScope::Host,
-            turn: TurnContext::default(),
+            turn,
         },
     )
     .await
@@ -156,6 +160,40 @@ async fn fetch_from_a_new_host_asks_even_in_auto_mode() {
         "the new host was not put to the user"
     );
     assert_eq!(out.exit_code, POLICY_DENIED_EXIT, "{}", stderr(&out));
+}
+
+#[tokio::test]
+async fn approved_host_asks_about_each_url_once_the_turn_has_read_this_machine() {
+    let hosts = Arc::new(Approvals::unsaved());
+    hosts.approve("127.0.0.1").await.expect("unsaved approve");
+    let gate = RecordingGate::answering(Approval::Deny);
+    let cmd = loopback_only(ApprovalGate::new(gate.clone(), hosts));
+    let url = "https://127.0.0.1:9/?q=secret";
+    let turn = TurnContext::default();
+
+    let before = fetch_in(&cmd, url, turn.clone()).await;
+    assert_ne!(before.exit_code, POLICY_DENIED_EXIT, "{}", stderr(&before));
+    assert!(gate.requests().is_empty(), "{:?}", gate.requests());
+
+    turn.record_host_read();
+    let after = fetch_in(&cmd, url, turn.clone()).await;
+    assert_eq!(after.exit_code, POLICY_DENIED_EXIT, "{}", stderr(&after));
+    let asked = gate.requests();
+    let [request] = asked.as_slice() else {
+        panic!("expected one prompt, got {asked:?}");
+    };
+    assert_eq!(request.script, format!("web fetch {url}"));
+    assert!(request.always_allow.is_empty());
+    assert_eq!(request.unattended, Unattended::Never);
+
+    let quarantined = fetch_in(&cmd, url, turn.quarantined()).await;
+    assert_ne!(
+        quarantined.exit_code,
+        POLICY_DENIED_EXIT,
+        "{}",
+        stderr(&quarantined)
+    );
+    assert_eq!(gate.requests().len(), 1);
 }
 
 #[tokio::test]

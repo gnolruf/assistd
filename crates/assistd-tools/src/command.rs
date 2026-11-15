@@ -279,6 +279,11 @@ pub trait Command: fmt::Debug + Send + Sync + 'static {
     fn expands_args(&self) -> bool {
         true
     }
+    /// Whether the command's output can hold data from this machine; `false` only when it
+    /// holds nothing but what the web returned.
+    fn reads_host(&self) -> bool {
+        true
+    }
     /// Execute the command. `Err` is a failure with nothing else to report;
     /// one that still has output sets the exit code of an `Ok`.
     async fn run(&self, input: CommandInput) -> Result<CommandOutput, CommandError>;

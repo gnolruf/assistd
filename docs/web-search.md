@@ -12,8 +12,10 @@ web fetch [--raw | --full] <URL>              # page text, or the body as sent
 ```
 
 The model usually searches, picks a hit, and then fetches it. Fetching
-from a host you haven't approved yet asks you first. Search queries
-never ask, because they only go to the local instance. A query word
+from a host you haven't approved yet asks you first, and so does every
+fetch once the conversation has read files or other data on this
+machine, since the URL could carry it. Search queries never ask: they
+go to the local instance, which passes them to its search engines. A query word
 starting with `!!` is a SearXNG shortcut that redirects to another
 site; the daemon never follows it, and the search fails instead.
 

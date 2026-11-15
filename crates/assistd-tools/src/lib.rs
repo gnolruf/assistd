@@ -48,7 +48,7 @@ pub use presentation::{OutputCap, PresentSpec};
 pub use quarantine::{Egress, Quarantine, QuarantineError};
 pub use run::RunTool;
 pub use tool_output::{RawStreams, ToolOutput};
-pub use turn::{RelayObserver, TurnContext, YieldableLane};
+pub use turn::{HostReads, RelayObserver, TurnContext, YieldableLane};
 pub use vision::VisionGate;
 
 /// Prefix of every MCP-adapted tool's name (`mcp__<server>__<tool>`).
@@ -83,6 +83,12 @@ pub trait Tool: fmt::Debug + Send + Sync + 'static {
     /// Whether a call is abandoned once it outlives the agent's tool deadline.
     /// `false` only for tools that bound their own run time.
     fn bounded_by_tool_deadline(&self) -> bool {
+        true
+    }
+
+    /// Whether a call with `args` can put data from this machine in its result. `false` only
+    /// when the result holds nothing but what the model sent or the web returned.
+    fn reads_host(&self, _args: &Value) -> bool {
         true
     }
 
@@ -203,6 +209,10 @@ impl Tool for CappedTool {
 
     fn bounded_by_tool_deadline(&self) -> bool {
         self.inner.bounded_by_tool_deadline()
+    }
+
+    fn reads_host(&self, args: &Value) -> bool {
+        self.inner.reads_host(args)
     }
 
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {

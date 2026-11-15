@@ -36,6 +36,7 @@ pub(crate) mod context;
 pub(crate) mod conversation;
 pub(crate) mod event_triggers;
 pub(crate) mod fire_times;
+pub(crate) mod host_reads;
 pub(crate) mod lanes;
 pub(crate) mod mcp_handlers;
 pub(crate) mod memory_handlers;

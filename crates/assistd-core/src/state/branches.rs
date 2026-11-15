@@ -625,7 +625,7 @@ fn tool_call_record(call: &PersistedToolCall) -> ToolCallRecord {
 }
 
 /// The arguments of every tool call recorded on `rows`, by call id.
-fn tool_call_arguments(rows: &[HistoryRow]) -> HashMap<String, Value> {
+pub(super) fn tool_call_arguments(rows: &[HistoryRow]) -> HashMap<String, Value> {
     rows.iter()
         .flat_map(|row| match &row.message.kind {
             MessageKind::Assistant { tool_calls, .. } => tool_calls.as_slice(),

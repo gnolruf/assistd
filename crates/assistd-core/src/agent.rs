@@ -789,6 +789,9 @@ async fn dispatch_tool_call(turn: &Turn, call: &ToolCall, deadline: Duration) ->
     } else {
         Some(invocation.await)
     };
+    if tool.reads_host(&call.arguments) {
+        turn.context.record_host_read();
+    }
     let Some(result) = finished else {
         let duration = start.elapsed();
         warn!(

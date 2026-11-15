@@ -88,9 +88,9 @@ enum Rendering {
     Raw,
 }
 
-/// `web <search|fetch>`: search through SearXNG, or HTTP GET a URL and
-/// return the body as stdout. Hosts not yet approved for good are fetched
-/// only once the user confirms, and only public addresses are connected to.
+/// `web <search|fetch>`: search through SearXNG, or HTTP GET a URL and return the body as
+/// stdout. A host not yet approved for good, or any host once the turn's history has read
+/// this machine, is fetched only once the user confirms; only public addresses are connected to.
 #[derive(Debug)]
 pub struct WebCommand {
     client: reqwest::Client,
@@ -133,6 +133,9 @@ impl WebCommand {
 
     async fn host_confirmed(&self, turn: &TurnContext, url: &Url) -> bool {
         let host = url.host_str().unwrap_or_default();
+        if turn.has_read_host() {
+            return self.url_confirmed(turn, url, host).await;
+        }
         self.egress
             .hosts
             .confirm(turn, host, || ConfirmationRequest {
@@ -144,6 +147,27 @@ impl WebCommand {
                 unattended: Unattended::WebHost(host.to_string()),
                 source: ConfirmSource::Main,
             })
+            .await
+    }
+
+    async fn url_confirmed(&self, turn: &TurnContext, url: &Url, host: &str) -> bool {
+        self.egress
+            .hosts
+            .confirm_once(
+                turn,
+                ConfirmationRequest {
+                    tool: NAME.to_string(),
+                    script: format!("web fetch {url}"),
+                    matched_pattern: format!(
+                        "fetches from {host} after files or other data on this machine were \
+                         read, which the URL could carry"
+                    ),
+                    always_allow: Vec::new(),
+                    risk: Risk::Elevated,
+                    unattended: Unattended::Never,
+                    source: ConfirmSource::Main,
+                },
+            )
             .await
     }
 
@@ -282,6 +306,10 @@ impl Command for WebCommand {
 
     /// URLs and search queries never name files, so `?` and `*` stay literal.
     fn expands_args(&self) -> bool {
+        false
+    }
+
+    fn reads_host(&self) -> bool {
         false
     }
 

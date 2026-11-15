@@ -188,6 +188,14 @@ impl Tool for RememberTool {
         })
     }
 
+    /// A save's result repeats what the model sent; a search returns saved memories.
+    fn reads_host(&self, args: &Value) -> bool {
+        !matches!(
+            RememberRequest::parse(args),
+            Ok(RememberRequest::Save { .. })
+        )
+    }
+
     #[tracing::instrument(skip(self, args))]
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();

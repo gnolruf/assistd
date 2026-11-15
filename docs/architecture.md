@@ -317,7 +317,8 @@ handed only the previous step's rendered `RelayReport` beneath its task and
 its saved answer as an extra input. Since a report carries what its sub-agent
 read, a plan with a web step after a file step is refused as invalid arguments.
 The tool result is the last step's rendered `RelayReport`; a failed step ends
-the plan as a failed tool result, not a failed turn. A relay starts without confirmation; commands inside it ask
+the plan as a failed tool result, not a failed turn. A relay starts without confirmation, unless it has a
+web step and the calling conversation has read this machine; commands inside it ask
 the same `ConfirmationGate` as the main agent's, with the prompt marked
 `ConfirmSource::Relay` and the step's task so the user can tell who is asking.
 Cancelling the turn drops the call, which drops the run and removes the
@@ -410,7 +411,8 @@ nothing from the main conversation. A
 mode approves but a run does once when the host is one of the task's
 `allowed_hosts`, matched exactly. What the mode and hosts approve runs once,
 logged on `assistd::policy`, and never reaches the allowlist or the
-`approved_*.toml` files. Anything else is parked: the run turns `NeedsInput`,
+`approved_*.toml` files. Once the run has read this machine, each fetch is
+parked instead, whatever its host. Anything else is parked: the run turns `NeedsInput`,
 gives up its lane and request guard (on lane 0 its slot state stays in the
 stash), and broadcasts the prompt as a `TaskRun`-wrapped `ConfirmRequest`; the
 queue snapshot carries it too, as the run's `PausedPrompt`, so a client that
@@ -595,6 +597,20 @@ yet approved, in every mode, and follows redirects only to the same or an approv
 vision projector. "Always allow" for a web host, an MCP tool or an application is saved
 beside the config in `approved_hosts.toml`, `approved_mcp_tools.toml` or
 `approved_apps.toml`.
+An approved host is trusted with what the model was told, not with what it
+has read. Once a tool call has read this machine into a conversation, `web fetch`
+asks about every URL, approved host or not, with no "always allow", and `relay`
+asks before a plan with a web step starts, showing those steps' tasks: either
+could carry what was read. `Tool::reads_host` decides what counts: every tool
+and `run` command does except `web`, a `relay` of web steps only, a `remember`
+save, and the plan-mode tools. The record (`HostReads`) travels in the `TurnContext`. The
+user's conversation keeps one across its turns, rebuilt from the branch's saved
+tool calls when another branch becomes active; a task run starts with a new
+one; a sub-agent's reads are not recorded, since its quarantine holds files or
+the web, never both. Host-level trust remains for a conversation that has only
+searched and fetched, which can still send what the user typed, recalled
+memories and the window title to an approved host, and `web search` queries
+reach SearXNG's search engines unasked.
 A turn asked by voice (push-to-talk
 or the wake word) has nobody to answer prompts: it runs in accept-edits mode
 and every other prompt is denied at once, without being shown to any client.
@@ -929,7 +945,8 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    The handler builds `Agent::new(...)` from the handles it holds
    and calls `run_turn()` with the turn's `TurnContext`, which every
    tool call receives: it carries who answers the turn's prompts, who
-   watches its relays, and the lane a task run gives up on request. A
+   watches its relays, the lane a task run gives up on request, and whether
+   the conversation has read this machine. A
    `TurnDriver`, the same one a task run uses, persists the agent's
    events and sends them to the sink.
 

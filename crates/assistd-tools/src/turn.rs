@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -28,14 +29,49 @@ pub trait YieldableLane: fmt::Debug + Send + Sync + 'static {
     async fn give_way(&self) -> bool;
 }
 
-/// The turn a tool call belongs to: who answers its prompts, who watches its relays, and
-/// the lane it may have to give up. The default belongs to no turn: its prompts are denied,
-/// nobody watches, and it holds no lane.
+/// Whether tool calls have read this machine into a history, after which anything the model
+/// sends out could carry what they read. Clones share the answer.
 #[derive(Debug, Clone, Default)]
+pub struct HostReads(Arc<AtomicBool>);
+
+impl HostReads {
+    /// A history already known to hold what tool calls read from this machine, or to hold none.
+    pub fn known(seen: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(seen)))
+    }
+
+    /// Whether a tool call has read this machine into the history.
+    pub fn seen(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Note that a tool call read this machine into the history.
+    pub fn record(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// The turn a tool call belongs to: who answers its prompts, who watches its relays, the lane
+/// it may have to give up, and what its history has read from this machine. The default belongs
+/// to no turn: prompts are denied, nobody watches, it holds no lane, and its history is new.
+#[derive(Debug, Clone)]
 pub struct TurnContext {
     router: Option<Arc<ConfirmRouter>>,
     relay_observer: Option<Arc<dyn RelayObserver>>,
     lane: Option<Arc<dyn YieldableLane>>,
+    /// `None` in a quarantine, whose reads are not recorded.
+    host_reads: Option<HostReads>,
+}
+
+impl Default for TurnContext {
+    fn default() -> Self {
+        Self {
+            router: None,
+            relay_observer: None,
+            lane: None,
+            host_reads: Some(HostReads::default()),
+        }
+    }
 }
 
 impl TurnContext {
@@ -57,6 +93,34 @@ impl TurnContext {
     pub fn on_lane(mut self, lane: Arc<dyn YieldableLane>) -> Self {
         self.lane = Some(lane);
         self
+    }
+
+    /// Record what the turn's tool calls read from this machine in `host_reads`, which every
+    /// turn over the same history shares.
+    pub fn reading_into(mut self, host_reads: HostReads) -> Self {
+        self.host_reads = Some(host_reads);
+        self
+    }
+
+    /// The same turn for a sub-agent in a quarantine, which reaches files or the web but
+    /// never both, so its reads are not recorded.
+    pub fn quarantined(&self) -> Self {
+        Self {
+            host_reads: None,
+            ..self.clone()
+        }
+    }
+
+    /// Note that a tool call read this machine into the turn's history.
+    pub fn record_host_read(&self) {
+        if let Some(host_reads) = &self.host_reads {
+            host_reads.record();
+        }
+    }
+
+    /// Whether a tool call has read this machine into the turn's history.
+    pub fn has_read_host(&self) -> bool {
+        self.host_reads.as_ref().is_some_and(HostReads::seen)
     }
 
     /// Who answers the turn's prompts; `None` when nobody can.

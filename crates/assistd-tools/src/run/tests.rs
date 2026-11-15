@@ -93,6 +93,23 @@ fn invoke(tool: &RunTool, cmd: &str) -> Value {
     serde_json::to_value(output.report()).unwrap()
 }
 
+#[test]
+fn only_a_chain_of_web_commands_leaves_this_machine_unread() {
+    let dir = fresh_dir();
+    let tool = tool_with(dir.path(), full_registry());
+    let reads_host = |command: &str| tool.reads_host(&json!({ "command": command }));
+
+    assert!(!reads_host("web fetch https://example.com/"));
+    assert!(!reads_host(
+        "web search rust ; web fetch https://example.com/"
+    ));
+    assert!(reads_host("web fetch https://example.com/ | grep install"));
+    assert!(reads_host(
+        "cat notes.txt && web fetch https://example.com/"
+    ));
+    assert!(reads_host("bash \"cat ~/.ssh/id_rsa\""));
+}
+
 fn assert_footer(output: &str, expected_exit: i32) {
     let footer = Regex::new(&format!(r"\[exit:{expected_exit} \| \d+ms\]$")).unwrap();
     assert!(

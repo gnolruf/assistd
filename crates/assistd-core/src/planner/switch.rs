@@ -85,6 +85,10 @@ impl Tool for EnterPlanModeTool {
         false
     }
 
+    fn reads_host(&self, _args: &Value) -> bool {
+        false
+    }
+
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let reason = string_arg(&args, "reason")?;
@@ -121,6 +125,10 @@ impl Tool for ExitPlanModeTool {
     }
 
     fn bounded_by_tool_deadline(&self) -> bool {
+        false
+    }
+
+    fn reads_host(&self, _args: &Value) -> bool {
         false
     }
 

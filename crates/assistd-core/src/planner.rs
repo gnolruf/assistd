@@ -188,6 +188,14 @@ impl Planner {
         .with_planning_tools(Arc::new(planning))
     }
 
+    /// Every tool a chat turn over `acting` may have called, acting or planning.
+    pub(crate) fn chat_tools(acting: &ToolRegistry) -> ToolRegistry {
+        let mut tools = acting.clone();
+        tools.register(EnterPlanModeTool);
+        tools.register(ExitPlanModeTool);
+        tools
+    }
+
     /// Run a planning turn on `ask` in `conversation`, streaming it on `tx`, then ask for the
     /// task prompt rewritten as a brief for an unattended run, with the plan of that brief,
     /// each action checked against the machine and `permissions`, and the mode its runs are
@@ -369,6 +377,10 @@ impl<T: Tool> Tool for PlanModeTool<T> {
 
     fn bounded_by_tool_deadline(&self) -> bool {
         self.inner.bounded_by_tool_deadline()
+    }
+
+    fn reads_host(&self, args: &Value) -> bool {
+        self.inner.reads_host(args)
     }
 
     async fn invoke(&self, turn: &TurnContext, args: Value) -> Result<ToolOutput, ToolError> {
