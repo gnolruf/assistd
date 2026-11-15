@@ -5,14 +5,17 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use assistd_utils::text::human_size;
 use async_trait::async_trait;
 use tracing::warn;
 
 use crate::TurnContext;
 use crate::chain::Word;
-use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
-use crate::exec::{SPAWN_FAILED_EXIT, supervise};
-use crate::policy::{BashPolicyCfg, ConfirmationGate, SandboxInfo, SubprocessPolicy};
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage, error_line};
+use crate::exec::{SCRATCH_FULL_EXIT, SPAWN_FAILED_EXIT, supervise};
+use crate::policy::{
+    BashPolicyCfg, ConfirmationGate, Guarded, SandboxInfo, ScratchCap, SubprocessPolicy,
+};
 
 /// `bash SCRIPT`: run a policy-gated `bash -c <script>` subprocess. Policy
 /// refusals exit 126; a timeout kills the process group and exits 137.
@@ -107,7 +110,7 @@ pub(crate) struct ScriptRun {
 }
 
 /// Run `script` as `bash -c` under `policy` within `turn`, reporting as `tool`: reviewed and authorized,
-/// then sandboxed, fed `stdin`, timed and capped.
+/// then sandboxed, fed `stdin`, timed and capped, and killed if it outgrows the scratch cap.
 pub(crate) async fn run_script(
     policy: &SubprocessPolicy,
     turn: &TurnContext,
@@ -125,16 +128,50 @@ pub(crate) async fn run_script(
         .await
         .map_err(|error| spawn_failed(&error))?;
     let private_dirs = display_list(&policy.sandbox.private_dirs_named(&cmd, &script));
-    let out = supervise(
+    let run = supervise(
         tool,
         cmd,
         policy.sandbox.confined_spawner(),
         stdin,
         policy.cfg.timeout,
-    )
-    .await
+    );
+    let out = match &policy.sandbox.shared.scratch_cap {
+        Some(cap) => scratch_capped(tool, cap, cap.guard(run).await),
+        None => run.await,
+    }
     .map_err(|error| spawn_failed(&error))?;
     Ok(ScriptRun { out, private_dirs })
+}
+
+/// The output of a `run` guarded by `cap`: an error in place of a run the scratch directory
+/// outgrew `cap` under, and a note when files were removed to fit it.
+fn scratch_capped(
+    tool: &str,
+    cap: &ScratchCap,
+    run: Guarded<io::Result<CommandOutput>>,
+) -> io::Result<CommandOutput> {
+    let dir = cap.dir().display();
+    let max = human_size(cap.max_bytes());
+    let mut out = run.output.unwrap_or_else(|| {
+        let killed = error_line(
+            tool,
+            format_args!("killed: {dir} grew past its {max} cap"),
+            Hint::Try,
+            "writing less there",
+        );
+        Ok(CommandOutput::failed(SCRATCH_FULL_EXIT, killed))
+    })?;
+    if run.removed > 0 {
+        if out.stderr.last().is_some_and(|last| *last != b'\n') {
+            out.stderr.push(b'\n');
+        }
+        let note = format!(
+            "[note] {tool}: {dir} outgrew its {max} cap; removed {} of its oldest files\n",
+            run.removed
+        );
+        out.stderr.extend_from_slice(note.as_bytes());
+    }
+    Ok(out)
 }
 
 fn spawn_failed(error: &io::Error) -> CommandError {

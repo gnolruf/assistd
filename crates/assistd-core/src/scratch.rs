@@ -9,18 +9,29 @@ use std::time::{Duration, SystemTime};
 use tracing::warn;
 
 use assistd_config::ToolsScratchConfig;
+use assistd_tools::{SCRATCH_MARKER, ScratchCap};
 
 use crate::build_tools::{BuildToolsError, OVERFLOW_DIR_MODE};
 
 const SECS_PER_DAY: u64 = 24 * 60 * 60;
 
-/// The file that marks a scratch directory assistd created, the only kind it prunes.
-const OWNED_MARKER: &str = ".assistd-scratch";
+/// The most a scratch directory may hold, however large its filesystem.
+const MAX_SCRATCH_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Create `scratch.dir` owner-only, remove what has not changed in `scratch.retention_days`
-/// when assistd created the directory, and return its canonical path. Errors with [`BuildToolsError::CreateScratchDir`] when the
-/// directory cannot be created, restricted or resolved; failed removals are only logged.
-pub(crate) fn prepare(scratch: &ToolsScratchConfig) -> Result<PathBuf, BuildToolsError> {
+/// The part of its filesystem's size a scratch directory may hold: one in this many.
+const FILESYSTEM_SHARE: u64 = 4;
+
+/// The scratch directory's canonical path, and its cap when assistd created it.
+#[derive(Debug)]
+pub(crate) struct PreparedScratch {
+    pub(crate) dir: PathBuf,
+    pub(crate) cap: Option<ScratchCap>,
+}
+
+/// Create `scratch.dir` owner-only and, when assistd created it, remove what outlived
+/// `scratch.retention_days` and trim the rest to its cap. Errors with [`BuildToolsError::CreateScratchDir`]
+/// when the directory cannot be created, restricted or resolved; failed removals are only logged.
+pub(crate) fn prepare(scratch: &ToolsScratchConfig) -> Result<PreparedScratch, BuildToolsError> {
     let scratch_dir = scratch.resolved_dir()?;
     let scratch_dir = scratch_dir.as_path();
     let create_error = |source| BuildToolsError::CreateScratchDir {
@@ -34,22 +45,35 @@ pub(crate) fn prepare(scratch: &ToolsScratchConfig) -> Result<PathBuf, BuildTool
         .map_err(create_error)?;
     std::fs::set_permissions(scratch_dir, Permissions::from_mode(OVERFLOW_DIR_MODE))
         .map_err(create_error)?;
-    let scratch_dir = std::fs::canonicalize(scratch_dir).map_err(create_error)?;
-    if claim(&scratch_dir) {
-        prune_owned(&scratch_dir, retention_cutoff(scratch.retention_days));
-    } else {
+    let dir = std::fs::canonicalize(scratch_dir).map_err(create_error)?;
+    let cap = claim(&dir).then(|| {
+        prune_owned(&dir, retention_cutoff(scratch.retention_days));
+        let cap = ScratchCap::new(dir.clone(), cap_bytes(&dir));
+        cap.trim();
+        cap
+    });
+    if cap.is_none() {
         warn!(
             target: "assistd::policy",
-            path = %scratch_dir.display(),
-            "tools.scratch.dir held files before assistd used it, so they are never pruned"
+            path = %dir.display(),
+            "tools.scratch.dir held files before assistd used it, so it is never pruned or capped"
         );
     }
-    Ok(scratch_dir)
+    Ok(PreparedScratch { dir, cap })
 }
 
-/// Whether assistd owns `dir`: it holds [`OWNED_MARKER`], or was empty and now does.
+/// What the scratch directory `dir` may hold: [`FILESYSTEM_SHARE`] of its filesystem's size, at
+/// most [`MAX_SCRATCH_BYTES`], which also stands in for a size that cannot be read.
+fn cap_bytes(dir: &Path) -> u64 {
+    rustix::fs::statvfs(dir).map_or(MAX_SCRATCH_BYTES, |filesystem| {
+        let share = filesystem.f_blocks.saturating_mul(filesystem.f_frsize) / FILESYSTEM_SHARE;
+        share.min(MAX_SCRATCH_BYTES)
+    })
+}
+
+/// Whether assistd owns `dir`: it holds [`SCRATCH_MARKER`], or was empty and now does.
 fn claim(dir: &Path) -> bool {
-    let marker = dir.join(OWNED_MARKER);
+    let marker = dir.join(SCRATCH_MARKER);
     if marker.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
         return true;
     }
@@ -62,7 +86,7 @@ fn prune_owned(dir: &Path, cutoff: SystemTime) {
     match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name() != OWNED_MARKER)
+            .filter(|entry| entry.file_name() != SCRATCH_MARKER)
             .for_each(|entry| {
                 prune(&entry.path(), cutoff);
             }),

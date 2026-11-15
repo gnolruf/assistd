@@ -993,8 +993,12 @@ A walk through "what files changed this week?" typed into `assistd chat`:
    Landlock scoping (before 6.12) get no tools in that case. The
    one exception is `tools.scratch.dir`, bound writable at its own
    path so `bash` and the in-process commands share files there (entries
-   older than `tools.scratch.retention_days` are pruned at startup), with
-   the spill directory bound read-only beside it. A script that names
+   older than `tools.scratch.retention_days` are pruned at startup, and a
+   sandboxed command that grows it past a quarter of its filesystem's
+   size, or 512 MB if that is less, is killed, with its oldest files
+   removed around every command until the rest fit; neither applies to a
+   directory that held files before assistd used it), with the spill
+   directory bound read-only beside it. A script that names
    any other path in one of the sandbox's tmpfs mounts gets a `[note]`
    line on stderr (and a daemon warning) pointing at the scratch
    directory, as does a `write` that puts a file there. The sandboxed `git` runs, returns

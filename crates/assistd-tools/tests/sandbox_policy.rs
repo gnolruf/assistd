@@ -15,8 +15,8 @@ use assistd_tools::commands::{BashCommand, BashPolicyCfg, WriteCommand, WritePol
 use assistd_tools::policy::{ToolSandbox, probe_sandbox};
 use assistd_tools::{
     Allowlist, AlwaysAllowGate, Approval, CommandInput, ConfirmationGate, ConfirmationRequest,
-    DenyAllGate, FileScope, Protected, SandboxInfo, SandboxRequest, SearchPath, SharedDirs,
-    TurnContext, Unattended, run_rendered,
+    DenyAllGate, FileScope, Protected, SandboxInfo, SandboxRequest, ScratchCap, SearchPath,
+    SharedDirs, TurnContext, Unattended, run_rendered,
 };
 
 const POLICY_DENIED_EXIT: i32 = 126;
@@ -362,6 +362,7 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
     std::fs::write(spill.path().join("cmd-1.txt"), "spilled\n").expect("spill file");
     let shared = SharedDirs {
         scratch: Some(scratch.path().to_path_buf()),
+        scratch_cap: None,
         read_only: vec![spill.path().to_path_buf()],
     };
     let probed = probe_sandbox(
@@ -410,6 +411,48 @@ async fn scratch_dir_files_cross_between_write_and_bash_without_a_note() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(std::fs::read(&from_bash).expect("kept"), b"hispilled\n");
+}
+
+#[tokio::test]
+async fn a_script_that_outgrows_the_scratch_cap_is_killed_and_what_it_wrote_removed() {
+    const CAP_BYTES: u64 = 8 * 1024 * 1024;
+    let scratch = tempfile::Builder::new()
+        .prefix("assistd-scratch-")
+        .tempdir_in("/tmp")
+        .expect("host scratch dir");
+    let dir = std::fs::canonicalize(scratch.path()).expect("canonical scratch dir");
+    let shared = SharedDirs {
+        scratch: Some(dir.clone()),
+        scratch_cap: Some(ScratchCap::new(dir.clone(), CAP_BYTES)),
+        read_only: Vec::new(),
+    };
+    let probed = probe_sandbox(
+        SandboxRequest::Bwrap,
+        Vec::new(),
+        Protected::default(),
+        shared,
+    );
+    let Ok(ToolSandbox::Bwrap(sandbox)) = probed else {
+        return;
+    };
+    let cfg = BashPolicyCfg {
+        timeout: Duration::from_secs(10),
+        scratch: Some(dir.clone()),
+        ..BashPolicyCfg::default()
+    };
+    let bash = BashCommand::new(Arc::new(cfg), sandbox, Arc::new(PanicGate));
+    let filled = dir.join("filled.bin");
+
+    let out = run_rendered(
+        &bash,
+        input(&format!("cat /dev/zero > {}", filled.display())),
+    )
+    .await;
+
+    assert_eq!(out.exit_code, 137);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("grew past its 8.0MB cap"), "{stderr}");
+    assert!(!filled.exists(), "the file that outgrew the cap was kept");
 }
 
 #[tokio::test]

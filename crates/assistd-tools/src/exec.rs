@@ -29,6 +29,10 @@ pub(crate) const SPAWN_FAILED_EXIT: i32 = 127;
 /// Exit code for timeout: 128 + SIGKILL, as bash reports it.
 pub(crate) const TIMEOUT_EXIT: i32 = 137;
 
+/// Exit code for a command killed for outgrowing the scratch directory's
+/// cap: 128 + SIGKILL, like a timeout.
+pub(crate) const SCRATCH_FULL_EXIT: i32 = TIMEOUT_EXIT;
+
 /// Max bytes captured per stream from a supervised child, enforced while it
 /// runs so a runaway script cannot balloon daemon memory before the timeout.
 pub(crate) const OUTPUT_BUF_MAX: usize = OUTPUT_MAX;

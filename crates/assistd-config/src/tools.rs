@@ -58,6 +58,8 @@ pub struct ToolsScratchConfig {
     /// Days an entry in `dir` is kept after it last changed; older ones,
     /// and directories that leaves empty, are removed on daemon startup when
     /// assistd created `dir`. 0 empties the directory at every startup.
+    /// Whatever their age, the oldest files go once `dir` outgrows its
+    /// share of the filesystem it is on.
     pub retention_days: u32,
 }
 

@@ -42,10 +42,10 @@ pub use judge::{JUDGE_TIMEOUT, JudgeModel, JudgedCommand, SafetyJudge, Verdict};
 pub use path_class::{GuardRoots, PathGuards, PathVerdict};
 pub(crate) use path_class::{admits_edit, split_at_existing};
 pub use review::{Action, Analysis, Class, Confirmation, Delete, Effect, analyze, classify};
-pub(crate) use sandbox::{ConfinedSpawner, InputBind, is_within_visible_home_entry};
+pub(crate) use sandbox::{ConfinedSpawner, Guarded, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
-    Protected, ResolvedSandboxMode, SandboxError, SandboxInfo, SandboxPrograms, SandboxRequest,
-    ScopeError, SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
+    Protected, ResolvedSandboxMode, SCRATCH_MARKER, SandboxError, SandboxInfo, SandboxPrograms,
+    SandboxRequest, ScopeError, ScratchCap, SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
 };
 
 /// Policy for the commands that spawn subprocesses: read-only scripts run unasked, edits ask

@@ -14,7 +14,7 @@ fn scratch(dir: &Path, retention_days: u32) -> ToolsScratchConfig {
 /// A scratch directory assistd created earlier, with its marker.
 fn owned_dir() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
-    File::create(temp.path().join(OWNED_MARKER)).unwrap();
+    File::create(temp.path().join(SCRATCH_MARKER)).unwrap();
     temp
 }
 
@@ -32,7 +32,7 @@ fn prepare_creates_a_missing_dir_owner_only() {
 
     let prepared = prepare(&scratch(&dir, 30)).unwrap();
 
-    assert_eq!(prepared, std::fs::canonicalize(&dir).unwrap());
+    assert_eq!(prepared.dir, std::fs::canonicalize(&dir).unwrap());
     let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, OVERFLOW_DIR_MODE);
 }
@@ -54,7 +54,7 @@ fn prepare_removes_expired_entries_and_the_dirs_they_empty() {
         "old-dir",
         "mixed-dir/b.txt",
         "mixed-dir",
-        OWNED_MARKER,
+        SCRATCH_MARKER,
     ] {
         age(&dir.join(path));
     }
@@ -65,7 +65,12 @@ fn prepare_removes_expired_entries_and_the_dirs_they_empty() {
     for gone in ["old.txt", "old-dir", "mixed-dir/b.txt"] {
         assert!(!exists(gone), "{gone} outlived its retention");
     }
-    for kept in ["new.txt", "mixed-dir", "mixed-dir/fresh.txt", OWNED_MARKER] {
+    for kept in [
+        "new.txt",
+        "mixed-dir",
+        "mixed-dir/fresh.txt",
+        SCRATCH_MARKER,
+    ] {
         assert!(exists(kept), "{kept} was removed early");
     }
 }
@@ -95,5 +100,5 @@ fn a_dir_that_held_files_before_assistd_is_never_pruned() {
     prepare(&scratch(dir, 0)).unwrap();
 
     assert!(dir.join("thesis.tex").exists());
-    assert!(!dir.join(OWNED_MARKER).exists());
+    assert!(!dir.join(SCRATCH_MARKER).exists());
 }
