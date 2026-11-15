@@ -11,7 +11,9 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, info, info_span, warn};
 
 use assistd_ipc::{ConfirmSource, Event, EventBody, TaskId, TaskRunId, TaskTrigger};
-use assistd_llm::{ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
+use assistd_llm::{
+    BackendJudgeModel, ConversationKey, LlmBackend, LlmError, LlmEvent, LlmHealthProbe,
+};
 use assistd_memory::{
     MemoryError, PersistedMessage, Result as MemoryResult, SessionId, TaskRecord, TaskRunEnd,
 };
@@ -376,15 +378,16 @@ impl TaskService {
             lane: Arc::clone(&lane),
         };
         let spec = &turn.task.spec;
+        let prompt = spec.prompt.as_str().to_string();
+        let judge_model = BackendJudgeModel::for_prompt(Arc::clone(&self.deps.llm), prompt.clone());
         let router = ConfirmRouter::for_task_run(
             turn.id.clone(),
             source,
             spec.mode,
-            safety_judge(&self.deps.config, &self.deps.llm),
+            safety_judge(&self.deps.config, judge_model),
             spec.allowed_hosts.clone(),
             Arc::new(parking),
         );
-        let prompt = turn.task.spec.prompt.as_str().to_string();
         let context = TurnContext::answered_by(router).on_lane(lane);
         let agent_turn = async move {
             agent

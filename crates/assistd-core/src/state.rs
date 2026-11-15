@@ -363,7 +363,8 @@ impl AppState {
 
     /// The judge that answers for the user in Auto mode, when `tools.allow_auto_mode` allows it.
     pub fn safety_judge(&self) -> Option<SafetyJudge> {
-        safety_judge(&self.config, &self.subsystems.llm)
+        let model = BackendJudgeModel::new(Arc::clone(&self.subsystems.llm));
+        safety_judge(&self.config, model)
     }
 
     /// Wait for every queued transcript write and every background
@@ -552,12 +553,12 @@ fn planner(config: &Config, subsystems: &Subsystems) -> Planner {
     )
 }
 
-/// The judge that answers for the user in Auto mode, when `tools.allow_auto_mode` allows it.
-fn safety_judge(config: &Config, llm: &Arc<dyn LlmBackend>) -> Option<SafetyJudge> {
-    config.tools.allow_auto_mode.then(|| {
-        let model = BackendJudgeModel::new(Arc::clone(llm));
-        SafetyJudge::new(Arc::new(model), JUDGE_TIMEOUT)
-    })
+/// A judge asking `model`, when `tools.allow_auto_mode` allows Auto mode.
+fn safety_judge(config: &Config, model: BackendJudgeModel) -> Option<SafetyJudge> {
+    config
+        .tools
+        .allow_auto_mode
+        .then(|| SafetyJudge::new(Arc::new(model), JUDGE_TIMEOUT))
 }
 
 async fn replied(reply: impl Future<Output = ()>) -> Result<(), DispatchError> {

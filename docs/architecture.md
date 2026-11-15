@@ -403,7 +403,9 @@ their sessions and saved relay answers, sparing the session the user is in.
 A run's prompts are labelled `ConfirmSource::Task` (a relayed sub-agent's
 prompts name the run too) and go through `ConfirmRouter::for_task_run`, set to
 the task's `mode` as a chat connection would be, with the safety judge in Auto
-when `tools.allow_auto_mode` allows it (`TaskSave` refuses Auto otherwise). A
+when `tools.allow_auto_mode` allows it (`TaskSave` refuses Auto otherwise). The
+judge is given the task's prompt as the whole of what the user asked for, and
+nothing from the main conversation. A
 `web` fetch from a host not yet approved asks as `Unattended::WebHost`, which no
 mode approves but a run does once when the host is one of the task's
 `allowed_hosts`, matched exactly. What the mode and hosts approve runs once,

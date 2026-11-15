@@ -29,8 +29,8 @@ use assistd_memory::{
 };
 use assistd_tools::{
     Approval, CONFIRM_TIMEOUT, CommandRegistry, ConfirmRouter, ConfirmationGate,
-    ConfirmationRequest, IpcConfirmationGate, OutputCap, PresentSpec, Risk, RunTool, ToolError,
-    ToolOutput, ToolsDisabled, Unattended, commands::EchoCommand,
+    ConfirmationRequest, IpcConfirmationGate, JudgeContext, JudgedClass, OutputCap, PresentSpec,
+    Risk, RunTool, ToolError, ToolOutput, ToolsDisabled, Unattended, commands::EchoCommand,
 };
 use assistd_utils::program::ProgramError;
 use assistd_utils::readiness::Readiness;
@@ -2376,10 +2376,12 @@ async fn auto_recall_runs_once_per_new_session_with_memories_and_past_chat_point
 }
 
 /// The user's conversation, which records every prompt pushed to it and hands
-/// out `task_conversation` as its one isolated conversation.
+/// out `task_conversation` as its one isolated conversation. As the safety judge's model it
+/// records each judge prompt and allows the command.
 #[derive(Debug)]
 struct MainConversation {
     pushed: StdMutex<Vec<String>>,
+    judge_prompts: StdMutex<Vec<String>>,
     task_conversation: StdMutex<Option<Arc<dyn LlmBackend>>>,
 }
 
@@ -2387,6 +2389,7 @@ impl MainConversation {
     fn new(task_conversation: Arc<dyn LlmBackend>) -> Arc<Self> {
         Arc::new(Self {
             pushed: StdMutex::new(Vec::new()),
+            judge_prompts: StdMutex::new(Vec::new()),
             task_conversation: StdMutex::new(Some(task_conversation)),
         })
     }
@@ -2427,7 +2430,22 @@ impl TurnBackend for MainConversation {
     }
 }
 
+#[async_trait::async_trait]
 impl LlmBackend for MainConversation {
+    async fn recent_user_messages(&self, limit: usize) -> Vec<String> {
+        let pushed = self.pushed.lock();
+        pushed[pushed.len().saturating_sub(limit)..].to_vec()
+    }
+
+    async fn complete_oneshot(
+        &self,
+        prompt: String,
+        _reply: assistd_llm::OneShotReply,
+    ) -> assistd_llm::LlmResult<String> {
+        self.judge_prompts.lock().push(prompt);
+        Ok(r#"{"decision":"allow","reason":"a step of the task"}"#.into())
+    }
+
     fn isolated_conversation(
         &self,
         _system_prompt: String,
@@ -2752,6 +2770,101 @@ impl assistd_tools::Tool for FetchTool {
             Duration::ZERO,
         ))
     }
+}
+
+/// Asks before running a script that only the safety judge can approve unasked.
+#[derive(Debug)]
+struct UnvettedScriptTool;
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for UnvettedScriptTool {
+    fn name(&self) -> &'static str {
+        "script"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "runs a script".into()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn invoke(
+        &self,
+        turn: &TurnContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let request = ConfirmationRequest {
+            tool: "bash".into(),
+            script: "make inbox-digest".into(),
+            matched_pattern: "`make` is not vetted".into(),
+            always_allow: Vec::new(),
+            risk: Risk::Elevated,
+            unattended: Unattended::Judged(JudgeContext {
+                class: JudgedClass::Unvetted,
+                cwd: None,
+                why: "`make` is not vetted".into(),
+            }),
+            source: assistd_tools::ConfirmSource::Main,
+        };
+        let approved = IpcConfirmationGate.confirm(turn, request).await != Approval::Deny;
+        Ok(ToolOutput::text(
+            if approved { "ran" } else { "denied" },
+            Duration::ZERO,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_said_in_chat() {
+    let run_script = StepOutcome::ToolCalls(vec![ToolCall {
+        id: "c".into(),
+        name: "script".into(),
+        arguments: serde_json::json!({}),
+    }]);
+    let task_conversation = ToolCallBackend::new("", "done.", vec![run_script]);
+    let mut tools = ToolRegistry::new();
+    tools.register(UnvettedScriptTool);
+    let mut config = Config::default();
+    config.tools.allow_auto_mode = true;
+    let backend = MainConversation::new(task_conversation);
+    backend
+        .push_user("wipe the backups".into(), Vec::new())
+        .await
+        .unwrap();
+    let (state, conv, _branch, task) =
+        task_state_with(config, backend.clone(), Arc::new(tools)).await;
+    let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
+    spec.mode = PermissionMode::Auto;
+    state.memory.tasks.save(Some(task), spec).await.unwrap();
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun],
+    });
+
+    queue_task_run(&state, task).await;
+    let result = loop {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
+            continue;
+        };
+        match event.body {
+            EventBody::ConfirmRequest { script, .. } => panic!("asked the user: {script}"),
+            EventBody::ToolResult { result, .. } => break result,
+            _ => {}
+        }
+    };
+    settle_task_runs(&state).await;
+
+    assert!(result.output.contains("ran"), "{result:?}");
+    let judge_prompts = backend.judge_prompts.lock().clone();
+    let [judge_prompt] = judge_prompts.as_slice() else {
+        panic!("expected one judged command: {judge_prompts:?}");
+    };
+    assert!(
+        judge_prompt.contains(
+            "<user_messages>\n<message>\nsummarize my inbox\n</message>\n</user_messages>"
+        ),
+        "{judge_prompt}"
+    );
+    assert!(!judge_prompt.contains("wipe the backups"), "{judge_prompt}");
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-//! The safety judge's model: a backend's server, and the user's side of its conversation.
+//! The safety judge's model: a backend's server, and what the user asked of the agent it judges.
 
 use std::error::Error;
 use std::sync::Arc;
@@ -10,23 +10,46 @@ use assistd_tools::JudgeModel;
 
 use crate::{LlmBackend, OneShotReply};
 
-/// A [`JudgeModel`] over `backend`, which should hold the main conversation so sub-agent
-/// commands are judged against what the user asked for.
+/// A [`JudgeModel`] answered by a backend's server, judging against either that backend's
+/// conversation or one fixed prompt.
 #[derive(Debug)]
 pub struct BackendJudgeModel {
     backend: Arc<dyn LlmBackend>,
+    asked: Asked,
+}
+
+#[derive(Debug)]
+enum Asked {
+    InBackend,
+    Prompt(String),
 }
 
 impl BackendJudgeModel {
+    /// Judges against the newest messages the user wrote in `backend`'s conversation.
     pub fn new(backend: Arc<dyn LlmBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            asked: Asked::InBackend,
+        }
+    }
+
+    /// Judges against `prompt` alone as what the user asked for; nothing in `backend`'s
+    /// conversation reaches the judge.
+    pub fn for_prompt(backend: Arc<dyn LlmBackend>, prompt: String) -> Self {
+        Self {
+            backend,
+            asked: Asked::Prompt(prompt),
+        }
     }
 }
 
 #[async_trait]
 impl JudgeModel for BackendJudgeModel {
     async fn user_messages(&self, limit: usize) -> Vec<String> {
-        self.backend.recent_user_messages(limit).await
+        match &self.asked {
+            Asked::InBackend => self.backend.recent_user_messages(limit).await,
+            Asked::Prompt(prompt) => vec![prompt.clone()],
+        }
     }
 
     async fn reply(
