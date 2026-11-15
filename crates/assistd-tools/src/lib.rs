@@ -38,9 +38,9 @@ pub use policy::{
     Allowlist, AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_TIMEOUT, ConfirmRouter,
     ConfirmationGate, ConfirmationRequest, FileScope, IpcConfirmationGate, JUDGE_TIMEOUT,
     JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm, NoPendingReview,
-    PromptParking, Protected, Risk, SafetyJudge, SandboxError, SandboxInfo, SandboxPrograms,
-    SandboxRequest, ScopeError, SearchPath, SharedDirs, StandingApprovals, ToolSandbox,
-    ToolsDisabled, Unattended, Verdict, probe_sandbox,
+    PromptParking, Protected, Risk, SCRATCH_MARKER, SafetyJudge, SandboxError, SandboxInfo,
+    SandboxPrograms, SandboxRequest, ScopeError, ScratchCap, SearchPath, SharedDirs,
+    StandingApprovals, ToolSandbox, ToolsDisabled, Unattended, Verdict, probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use policy::{AlwaysAllowGate, DenyAllGate};

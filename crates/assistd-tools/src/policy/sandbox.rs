@@ -21,10 +21,13 @@ use scope::CommandScope;
 
 mod confined;
 mod scope;
+mod scratch_cap;
 mod seccomp;
 
 pub(crate) use confined::ConfinedSpawner;
 pub use scope::ScopeError;
+pub(crate) use scratch_cap::Guarded;
+pub use scratch_cap::{SCRATCH_MARKER, ScratchCap};
 
 /// The `PATH` sandboxed commands run with, and the fallback when the
 /// daemon has no usable one.
@@ -207,6 +210,8 @@ pub struct Protected {
 pub struct SharedDirs {
     /// Writable: where files cross between `bash` and the other commands.
     pub scratch: Option<PathBuf>,
+    /// What `scratch` may hold; `None` leaves it to grow.
+    pub scratch_cap: Option<ScratchCap>,
     /// Read-only, such as the directory truncated output is spilled to.
     pub read_only: Vec<PathBuf>,
 }
@@ -237,7 +242,7 @@ impl SandboxInfo {
             protected: Protected::default(),
             shared: SharedDirs {
                 scratch: Some(scratch),
-                read_only: Vec::new(),
+                ..SharedDirs::default()
             },
             host_path: host_path(&std::env::var_os("PATH").unwrap_or_default()),
             unit_dirs: Vec::new(),
@@ -266,6 +271,7 @@ impl SandboxInfo {
                 protected: Protected::default(),
                 shared: SharedDirs {
                     scratch: Some(home.clone()),
+                    scratch_cap: None,
                     read_only,
                 },
                 host_path: self.host_path.clone(),
@@ -1386,6 +1392,7 @@ mod tests {
         let info = Arc::new(SandboxInfo {
             shared: SharedDirs {
                 scratch: Some(PathBuf::from("/run/user/1000/assistd/scratch")),
+                scratch_cap: None,
                 read_only: vec![PathBuf::from("/tmp/assistd-output")],
             },
             ..bwrap_info(Vec::new())
@@ -1603,6 +1610,7 @@ mod tests {
         let info = SandboxInfo {
             shared: SharedDirs {
                 scratch: Some(go_bin.clone()),
+                scratch_cap: None,
                 read_only: Vec::new(),
             },
             host_path: vec![go_bin.clone(), tools_bin.clone()],
@@ -1770,6 +1778,7 @@ mod tests {
             },
             shared: SharedDirs {
                 scratch: Some(home.join("projects/tools/scratch")),
+                scratch_cap: None,
                 read_only: Vec::new(),
             },
             host_path: vec![home.join("projects/tools/bin")],

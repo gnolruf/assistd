@@ -130,6 +130,7 @@ pub fn probe_tool_sandbox(
     config_path: &Path,
 ) -> Result<ToolSandbox, BuildToolsError> {
     let config_dir = canonical_config_dir(config_path)?;
+    let scratch = scratch::prepare(&config.tools.scratch)?;
     Ok(probe_sandbox(
         sandbox_request(config.tools.bash.sandbox),
         config.tools.bash.bwrap_extra_args.clone(),
@@ -138,7 +139,8 @@ pub fn probe_tool_sandbox(
             sockets: vec![assistd_ipc::socket_path()],
         },
         SharedDirs {
-            scratch: Some(scratch::prepare(&config.tools.scratch)?),
+            scratch: Some(scratch.dir),
+            scratch_cap: scratch.cap,
             read_only: vec![config.tools.output.resolved_overflow_dir()?],
         },
     )?)
