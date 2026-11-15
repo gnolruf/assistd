@@ -622,7 +622,9 @@ would destroy the home directory, a personal folder or a work tree are refused
 in every mode, and those touching a sensitive path always ask. Accept-edits mode
 also runs, unasked, edits whose every target lands strictly below a
 `tools.write.writable_paths` entry or the scratch directory, and `write`s there
-whose content the prompt shows in full. Auto mode, offered only when
+whose content the prompt shows in full. A `cp` or `mv` whose source is a symlink, or a
+tree holding a symlink or hidden entry, is unvetted: either would land where
+the script names no target. Auto mode, offered only when
 `tools.allow_auto_mode` is set, additionally puts the remaining edits,
 unvetted scripts, unapproved `wm open` launches and unapproved MCP tool calls
 to the safety judge, a one-shot model verdict that asks the user whenever it is

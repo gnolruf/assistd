@@ -256,6 +256,9 @@ pub struct Delete {
 pub struct Analysis {
     pub class: Class,
     pub effects: Vec<Effect>,
+    /// The sources of its copies and moves, spelled as [`Effect::path`] is: each lands
+    /// elsewhere as it is, a symlink still a link and a tree with every entry it holds.
+    pub carried: Vec<String>,
     /// What "always allow" would approve so that an unvetted script is vetted next time; empty
     /// when it is vetted, or when something other than a program approvals can cover leaves it
     /// unvetted.
@@ -393,6 +396,7 @@ struct Classifier<'a> {
     scratch: Option<&'a str>,
     approvals: Option<&'a Allowlist>,
     effects: Vec<Effect>,
+    carried: Vec<String>,
     runs_edit_program: bool,
     directory: Directory,
     /// The script may change `HOME`, so `$HOME` is not `~`.
@@ -777,11 +781,11 @@ impl Classifier<'_> {
                 self.each(Action::ChangeAttributes, &operands[1..], recursive);
             }
             (Targets::WritesLast, Some((last, sources))) if !sources.is_empty() => {
-                self.each(Action::Read, sources, recursive);
+                self.carry(Action::Read, sources, recursive);
                 self.copied_into(last, sources, recursive);
             }
             (Targets::Moves, Some((last, sources))) if !sources.is_empty() => {
-                self.each(Action::Delete, sources, true);
+                self.carry(Action::Delete, sources, true);
                 self.copied_into(last, sources, false);
             }
             (Targets::WritesLast | Targets::Moves, Some(_)) => {}
@@ -792,6 +796,20 @@ impl Classifier<'_> {
     fn each(&mut self, action: Action, paths: &[String], recursive: bool) {
         for path in paths {
             self.target(action, path.clone(), recursive);
+        }
+    }
+
+    /// Record `action` on each of a copy's or move's `sources`, and that it lands elsewhere.
+    fn carry(&mut self, action: Action, sources: &[String], recursive: bool) {
+        for source in sources {
+            if let Some(path) = self.placed(action, source.clone()) {
+                self.carried.push(path.clone());
+                self.effects.push(Effect {
+                    action,
+                    path,
+                    recursive,
+                });
+            }
         }
     }
 
@@ -807,25 +825,32 @@ impl Classifier<'_> {
         }
     }
 
-    /// Record an effect on `path`, joined to the directory a `cd` entered when relative.
+    /// Record an effect on `path` where the script's directory places it.
     fn target(&mut self, action: Action, path: String, recursive: bool) {
+        if let Some(path) = self.placed(action, path) {
+            self.effects.push(Effect {
+                action,
+                path,
+                recursive,
+            });
+        }
+    }
+
+    /// `path`, joined to the directory a `cd` entered when relative; `None`, noting the path,
+    /// when that directory is unknown.
+    fn placed(&mut self, action: Action, path: String) -> Option<String> {
         let relative = is_relative(&path);
         let moved = !matches!(self.directory, Directory::Start);
         let unknown = matches!(self.directory, Directory::Unknown);
         if relative && (unknown || (moved && action != Action::Read)) {
             self.relative_after_cd.get_or_insert_with(|| path.clone());
         }
-        let path = match &self.directory {
-            _ if !relative => path,
-            Directory::Start => path,
-            Directory::At(dir) => joined_path(dir, &path),
-            Directory::Unknown => return,
-        };
-        self.effects.push(Effect {
-            action,
-            path,
-            recursive,
-        });
+        match &self.directory {
+            _ if !relative => Some(path),
+            Directory::Start => Some(path),
+            Directory::At(dir) => Some(joined_path(dir, &path)),
+            Directory::Unknown => None,
+        }
     }
 
     fn into_analysis(self, outcome: Result<(), String>) -> Analysis {
@@ -841,6 +866,7 @@ impl Classifier<'_> {
         Analysis {
             class,
             effects: self.effects,
+            carried: self.carried,
             always_allow: if approvable {
                 self.always_allow
             } else {

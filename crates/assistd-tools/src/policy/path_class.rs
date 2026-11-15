@@ -2,7 +2,10 @@
 //! from a short fixed list of trees in `$HOME`, the XDG directories and the systemd unit path,
 //! and from which files only their owner may read.
 
+use std::ffi::OsStr;
 use std::fmt;
+use std::fs::FileType;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +54,10 @@ const DEFAULT_DATA_HOME: &str = ".local/share";
 /// How many entries of a directory read throughout are checked for owner-only files.
 const MAX_SCANNED_ENTRIES: usize = 1024;
 
+/// How many entries of a copied or moved tree are checked for symlinks and hidden entries; a
+/// tree holding more is not vetted.
+const MAX_CARRIED_ENTRIES: usize = 4096;
+
 /// The personal folders, each with its `user-dirs.dirs` key and the name used without one.
 const PERSONAL_FOLDERS: &[(&str, &str)] = &[
     ("XDG_DESKTOP_DIR", "Desktop"),
@@ -70,7 +77,7 @@ pub enum PathVerdict {
     /// profile or a directory on `PATH`, which always asks; holds what and where, for the prompt.
     Sensitive(String),
     /// Every effect is ordinary. Holds the script's class, made unvetted when a target cannot
-    /// be resolved.
+    /// be resolved, or a copy or move carries a symlink or hidden entry no effect names.
     Ordinary(Class),
 }
 
@@ -217,13 +224,16 @@ impl PathGuards {
         if let Some(why) = sensitive {
             return PathVerdict::Sensitive(why);
         }
-        PathVerdict::Ordinary(match (analysis.class, unresolved) {
-            (Class::Unvetted { why }, _) => Class::Unvetted { why },
-            (_, Some(effect)) => Class::Unvetted {
-                why: format!("where `{}` lies cannot be resolved", effect.path),
-            },
-            (class, None) => class,
-        })
+        if matches!(analysis.class, Class::Unvetted { .. }) {
+            return PathVerdict::Ordinary(analysis.class);
+        }
+        let why = unresolved
+            .map(|effect| format!("where `{}` lies cannot be resolved", effect.path))
+            .or_else(|| {
+                let carried = &analysis.carried;
+                carried.iter().find_map(|source| self.unnamed_cargo(source))
+            });
+        PathVerdict::Ordinary(why.map_or(analysis.class, |why| Class::Unvetted { why }))
     }
 
     /// The directory relative targets resolve against.
@@ -256,19 +266,46 @@ impl PathGuards {
     /// link itself; `None` when `~` or the working directory is unknown.
     fn resolve(&self, effect: &Effect) -> Option<PathBuf> {
         let raw = effect.path.as_str();
+        self.located(
+            raw,
+            effect.action != Action::Delete || names_directory_itself(raw),
+        )
+    }
+
+    /// The canonical path `raw` names, a final symlink followed only when `follows_link`;
+    /// `None` when `~` or the working directory is unknown.
+    fn located(&self, raw: &str, follows_link: bool) -> Option<PathBuf> {
         let absolute = match tilde_remainder(raw) {
             Some(_) => expand_tilde(raw, self.home.as_deref()?),
             None if raw.starts_with('~') => return None,
             None if Path::new(raw).is_absolute() => PathBuf::from(raw),
             None => self.cwd.as_deref()?.join(raw),
         };
-        if effect.action != Action::Delete || names_directory_itself(raw) {
+        if follows_link {
             return canonical_existing(&absolute);
         }
         match (absolute.parent(), absolute.file_name()) {
             (Some(parent), Some(name)) => Some(canonical_existing(parent)?.join(name)),
             _ => canonical_existing(&absolute),
         }
+    }
+
+    /// Why a copy or move of `source`, as written, cannot be vetted: it is a symlink, or a tree
+    /// holding a symlink or hidden entry, which lands where no effect names it. A source the
+    /// script has yet to make is neither.
+    fn unnamed_cargo(&self, source: &str) -> Option<String> {
+        let path = self.located(source, names_directory_itself(source))?;
+        let meta = path.symlink_metadata().ok()?;
+        if meta.is_symlink() {
+            return Some(format!(
+                "`{source}` is a symlink, so a write to where it is copied or moved may land \
+                 anywhere"
+            ));
+        }
+        let cargo = meta.is_dir().then(|| unnamed_entry(&path)).flatten()?;
+        Some(format!(
+            "`{source}` holds {cargo}, which a copy or move carries along unnamed"
+        ))
     }
 
     /// The guard `action` on the canonical `path` falls under, if any.
@@ -345,7 +382,57 @@ pub(crate) fn admits_edit(dir: &Path, path: &Path) -> bool {
 /// Whether any component of `path` is a hidden (dot) entry.
 fn has_hidden_component(path: &Path) -> bool {
     path.components()
-        .any(|component| component.as_os_str().as_encoded_bytes().starts_with(b"."))
+        .any(|component| is_hidden(component.as_os_str()))
+}
+
+fn is_hidden(name: &OsStr) -> bool {
+    name.as_encoded_bytes().starts_with(b".")
+}
+
+/// The first symlink or hidden entry found below the directory `tree`, or that it holds more
+/// entries than are checked or some that cannot be listed; `None` when it holds none of these.
+fn unnamed_entry(tree: &Path) -> Option<String> {
+    let mut pending = vec![tree.to_path_buf()];
+    let mut checked = 0;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = typed_entries(&dir) else {
+            return Some(format!(
+                "entries of `{}` that cannot be listed",
+                dir.display()
+            ));
+        };
+        checked += entries.len();
+        if checked > MAX_CARRIED_ENTRIES {
+            return Some(format!(
+                "more than {MAX_CARRIED_ENTRIES} entries, too many to check for symlinks and \
+                 hidden entries"
+            ));
+        }
+        for (path, kind) in entries {
+            if kind.is_symlink() {
+                return Some(format!("the symlink `{}`", path.display()));
+            }
+            if path.file_name().is_some_and(is_hidden) {
+                return Some(format!("the hidden entry `{}`", path.display()));
+            }
+            if kind.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    None
+}
+
+/// Up to one more than [`MAX_CARRIED_ENTRIES`] entries of `dir`, each with its own type, not
+/// that of what a symlink points at.
+fn typed_entries(dir: &Path) -> io::Result<Vec<(PathBuf, FileType)>> {
+    std::fs::read_dir(dir)?
+        .take(MAX_CARRIED_ENTRIES + 1)
+        .map(|entry| {
+            let entry = entry?;
+            Ok((entry.path(), entry.file_type()?))
+        })
+        .collect()
 }
 
 /// Whether a recursive operation on `path` reaches `tree`: it lies below `path` and exists.

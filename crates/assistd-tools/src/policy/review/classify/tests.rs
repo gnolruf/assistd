@@ -426,6 +426,13 @@ fn edits_record_their_targets_as_written() {
             },
         ),
         (
+            "echo hook > /run/scratch/tree/.envrc; echo x > /tmp/.git/config",
+            Class::Edit {
+                writes: writes(&["/run/scratch/tree/.envrc", "/tmp/.git/config"]),
+                deletes: Vec::new(),
+            },
+        ),
+        (
             "echo hi | tee",
             Class::Edit {
                 writes: Vec::new(),

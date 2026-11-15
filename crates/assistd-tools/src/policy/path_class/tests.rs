@@ -155,3 +155,32 @@ fn a_path_known_only_at_run_time_reaches_only_credentials_that_exist() {
     let verdict = Home::new().verdict(&format!("cd ~ && {script}"));
     assert!(matches!(verdict, PathVerdict::Sensitive(_)), "{verdict:?}");
 }
+
+#[test]
+fn a_copy_or_move_that_carries_a_symlink_or_hidden_entry_is_unvetted() {
+    let home = Home::new();
+    for script in [
+        "cp -P home link && echo run >> link/.bashrc",
+        "mv home link; echo run >> link/.bashrc",
+        "cp -a ~/work ~/copy && echo run >> ~/copy/home/.bashrc",
+        "cp * ~/Documents/project/",
+        "cp -rT ~/repo ~/Documents/project",
+    ] {
+        let verdict = home.verdict(script);
+        assert!(
+            matches!(verdict, PathVerdict::Ordinary(Class::Unvetted { .. })),
+            "{script:?}: {verdict:?}"
+        );
+    }
+    for script in [
+        "cp ~/Documents/notes.txt copy && echo more >> copy",
+        "cp -r ~/Documents/project copy && echo x > copy/build/out",
+        "echo x > draft.tmp && mv draft.tmp draft",
+    ] {
+        let verdict = home.verdict(script);
+        assert!(
+            matches!(verdict, PathVerdict::Ordinary(Class::Edit { .. })),
+            "{script:?}: {verdict:?}"
+        );
+    }
+}

@@ -6,7 +6,7 @@ use std::{fmt, mem};
 
 use super::allowlist::ProgramApproval;
 use super::confirm::Risk;
-use super::path_class::canonical_existing;
+use super::path_class::{admits_edit, canonical_existing};
 use super::shell::{self, Script, Word};
 
 mod classify;
@@ -258,8 +258,8 @@ fn is_subcommand(text: &str) -> bool {
 }
 
 /// A literal redirection target that is a standard stream, `/dev/null`, a path under `/tmp`
-/// with no `..` a symlink could lead out through, or one that also stays under the canonical
-/// `scratch` once the symlinks already there are followed. Blocks on the filesystem.
+/// behind no hidden entry or `..`, or one that also stays so under the canonical `scratch`
+/// once the symlinks already there are followed. Blocks on the filesystem.
 fn is_harmless_target(target: &Word, scratch: Option<&str>) -> bool {
     let path = target.text.as_str();
     !target.dynamic
@@ -273,18 +273,21 @@ fn is_harmless_target(target: &Word, scratch: Option<&str>) -> bool {
             }))
 }
 
-/// Whether `path` still lands strictly below `dir` with the symlinks on disk followed.
+/// Whether `path` still lands where an edit of `dir` may, with the symlinks on disk followed.
 fn resolves_under(path: &str, dir: &Path) -> bool {
-    canonical_existing(Path::new(path)).is_some_and(|real| real != dir && real.starts_with(dir))
+    canonical_existing(Path::new(path)).is_some_and(|real| admits_edit(dir, &real))
 }
 
+/// Whether `path` is written strictly below `dir`, naming no hidden entry or `..` there.
 fn stays_under(path: &str, dir: &str) -> bool {
     if !path.starts_with('/') {
         return false;
     }
     let path: Vec<&str> = path_components(path).collect();
     let dir: Vec<&str> = path_components(dir).collect();
-    path.len() > dir.len() && path.starts_with(&dir) && !path.contains(&"..")
+    path.len() > dir.len()
+        && path.starts_with(&dir)
+        && !path[dir.len()..].iter().any(|name| name.starts_with('.'))
 }
 
 fn path_components(path: &str) -> impl Iterator<Item = &str> {
