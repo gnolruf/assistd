@@ -4,7 +4,7 @@ use assistd_wm::NoWindowManager;
 
 use super::*;
 use crate::commands::{
-    BashCommand, CatCommand, LsCommand, WebCommand, WmCommand, permissive_write, test_screenshot,
+    BashCommand, LsCommand, WebCommand, WmCommand, permissive_write, test_cat, test_screenshot,
     test_see, test_wm,
 };
 use crate::policy::{
@@ -73,7 +73,7 @@ fn wm_without_compositor() -> WmCommand {
 async fn failing_invocations() -> Vec<(&'static str, CommandOutput)> {
     let missing = &["/nonexistent/assistd-convention-test"];
     vec![
-        ("cat", run_cmd(CatCommand, missing).await),
+        ("cat", run_cmd(test_cat(), missing).await),
         ("ls", run_cmd(LsCommand, missing).await),
         (
             "see",

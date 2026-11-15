@@ -15,8 +15,8 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use super::{
-    BashCommand, BashPolicyCfg, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand, WebCommand,
-    WmCommand, WriteCommand, WritePolicyCfg, register_readers,
+    BashCommand, BashPolicyCfg, CatCommand, ScreenshotCommand, ScreenshotPolicyCfg, SeeCommand,
+    WebCommand, WmCommand, WriteCommand, WritePolicyCfg, register_readers,
 };
 use crate::TurnContext;
 use crate::command::CommandRegistry;
@@ -61,8 +61,17 @@ pub(crate) fn permissive_write() -> WriteCommand {
     )
 }
 
+/// `cat` over the host's files, never asking.
+pub(crate) fn test_cat() -> CatCommand {
+    CatCommand::new(SandboxInfo::none(), Arc::new(AlwaysAllowGate))
+}
+
 pub(crate) fn test_see() -> SeeCommand {
-    SeeCommand::new(VisionGate::new(true))
+    SeeCommand::new(
+        VisionGate::new(true),
+        SandboxInfo::none(),
+        Arc::new(AlwaysAllowGate),
+    )
 }
 
 pub(crate) fn test_screenshot() -> ScreenshotCommand {

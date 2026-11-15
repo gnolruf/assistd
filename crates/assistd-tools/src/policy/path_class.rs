@@ -236,6 +236,25 @@ impl PathGuards {
         PathVerdict::Ordinary(why.map_or(analysis.class, |why| Class::Unvetted { why }))
     }
 
+    /// Why a read of the absolute `path`, following symlinks, asks: it lands on credentials or
+    /// an owner-only file in `$HOME`, or nowhere that can be resolved. `None` when it is
+    /// ordinary. Blocks on the filesystem.
+    pub(crate) fn sensitive_read(&self, path: &Path) -> Option<String> {
+        let Some(real) = canonical_existing(path) else {
+            return Some(format!(
+                "reads `{}`, and where that lies cannot be resolved",
+                path.display()
+            ));
+        };
+        let guard = self.guarded(Action::Read, &real, false)?;
+        let effect = Effect {
+            action: Action::Read,
+            path: path.display().to_string(),
+            recursive: false,
+        };
+        Some(describe(&effect, &real, guard))
+    }
+
     /// The directory relative targets resolve against.
     pub(crate) fn cwd(&self) -> Option<&Path> {
         self.cwd.as_deref()

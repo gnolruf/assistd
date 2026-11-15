@@ -4,13 +4,18 @@ use tempfile::{TempDir, tempdir};
 
 use super::*;
 use crate::TurnContext;
+use crate::Unattended;
 use crate::command::run_rendered;
-use crate::commands::{FILE_READ_MAX, hold_fifo_open, make_fifo};
+use crate::commands::{FILE_READ_MAX, RecordingGate, hold_fifo_open, make_fifo, test_cat};
 use crate::fixtures::PNG_BYTES;
 
 async fn run_cat(args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
+    run_cat_as(&test_cat(), args, stdin).await
+}
+
+async fn run_cat_as(cat: &CatCommand, args: &[&str], stdin: Option<&[u8]>) -> CommandOutput {
     run_rendered(
-        &CatCommand,
+        cat,
         CommandInput {
             args: args.iter().copied().map(Word::bare).collect(),
             stdin: stdin.map(<[u8]>::to_vec),
@@ -25,6 +30,35 @@ fn write_file(dir: &TempDir, name: &str, bytes: &[u8]) -> String {
     let path = dir.path().join(name);
     std::fs::write(&path, bytes).unwrap();
     path.to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn cat_asks_before_a_credentials_path_and_a_refusal_reads_nothing() {
+    let home = std::env::var("HOME").expect("HOME is set");
+    let key = format!("{home}/.ssh/assistd-test-key-that-does-not-exist");
+    let dir = tempdir().unwrap();
+    let ordinary = write_file(&dir, "notes.txt", b"notes\n");
+    let gate = RecordingGate::new(false);
+    let cat = CatCommand::new(SandboxInfo::none(), gate.clone());
+
+    let read = run_cat_as(&cat, &[&ordinary], None).await;
+    assert_eq!(read.stdout, b"notes\n");
+    assert!(gate.prompts().is_empty(), "{:?}", gate.prompts());
+
+    let refused = run_cat_as(&cat, &[&ordinary, &key], None).await;
+    assert_eq!(refused.exit_code, 126, "{refused:?}");
+    assert!(refused.stdout.is_empty(), "{refused:?}");
+    let requests = gate.requests();
+    let [request] = requests.as_slice() else {
+        panic!("expected one prompt: {requests:?}");
+    };
+    assert_eq!(request.tool, "cat");
+    assert_eq!(request.script, format!("cat {ordinary:?} {key:?}"));
+    assert_eq!(request.unattended, Unattended::Never);
+
+    let described = run_cat_as(&cat, &["-b", &key], None).await;
+    assert_eq!(described.exit_code, 1, "{described:?}");
+    assert_eq!(gate.prompts().len(), 1, "metadata alone does not ask");
 }
 
 #[tokio::test]

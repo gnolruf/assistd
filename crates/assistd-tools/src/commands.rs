@@ -40,7 +40,7 @@ pub use write::{WriteCommand, WritePolicyCfg};
 #[cfg(test)]
 pub(crate) use test_support::{
     RecordingGate, hold_fifo_open, make_fifo, permissive_write, register_test_readers, test_bash,
-    test_registry, test_screenshot, test_see, test_wm,
+    test_cat, test_registry, test_screenshot, test_see, test_wm,
 };
 
 /// Largest file a command reads into memory; a bigger one would overflow
@@ -100,14 +100,15 @@ async fn open_regular(scope: &FileScope, path: &Path) -> io::Result<(tokio::fs::
 }
 
 /// Register the file and text commands: `cat`, `ls` and `echo` in-process, and every
-/// [`ProgramCommand`] under `cfg`, inside `sandbox`, asking `gate`.
+/// [`ProgramCommand`] under `cfg`, inside `sandbox`, asking `gate`, as `cat` does before a
+/// sensitive file.
 pub fn register_readers(
     registry: &mut CommandRegistry,
     cfg: &Arc<BashPolicyCfg>,
     sandbox: &Arc<SandboxInfo>,
     gate: &Arc<dyn ConfirmationGate>,
 ) {
-    registry.register(CatCommand);
+    registry.register(CatCommand::new(Arc::clone(sandbox), Arc::clone(gate)));
     registry.register(LsCommand);
     registry.register(EchoCommand);
     for program in ProgramCommand::all(cfg, sandbox, gate) {

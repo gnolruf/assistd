@@ -450,7 +450,11 @@ fn builtin_commands(deps: BuiltinCommandDeps) -> CommandRegistry {
         confirmation_gate.clone(),
         sandbox.clone(),
     ));
-    commands.register(SeeCommand::new(vision_gate.clone()));
+    commands.register(SeeCommand::new(
+        vision_gate.clone(),
+        sandbox.clone(),
+        confirmation_gate.clone(),
+    ));
     commands.register(ScreenshotCommand::new(screenshot_cfg, vision_gate));
     commands.register(WebCommand::new(approved_hosts, search));
     commands.register(BashCommand::new(

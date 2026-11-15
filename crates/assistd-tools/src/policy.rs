@@ -8,6 +8,7 @@ use std::time::Duration;
 use assistd_ipc::ConfirmSource;
 
 use crate::TurnContext;
+use crate::chain::Word;
 use crate::command::{CommandError, Hint};
 use crate::exec::POLICY_DENIED_EXIT;
 
@@ -164,6 +165,73 @@ impl SubprocessPolicy {
         )
         .await
     }
+}
+
+/// The path guards and gate the in-daemon commands read files under.
+#[derive(Debug)]
+pub(crate) struct ReadPolicy {
+    pub(crate) sandbox: Arc<SandboxInfo>,
+    pub(crate) gate: Arc<dyn ConfirmationGate>,
+}
+
+impl ReadPolicy {
+    /// Refuse `tool`'s read of `paths`, as `scope` resolves them, when one is sensitive and
+    /// `turn`'s gate declines; no mode reads a sensitive path unasked.
+    pub(crate) async fn authorize(
+        &self,
+        turn: &TurnContext,
+        tool: &str,
+        scope: &FileScope,
+        paths: &[&Word],
+    ) -> Result<(), CommandError> {
+        let Some(why) = self.first_sensitive(scope, paths).await? else {
+            return Ok(());
+        };
+        let confirmation = Confirmation::Sensitive(why);
+        let request = ConfirmationRequest {
+            tool: tool.to_string(),
+            script: read_as_shown(tool, paths),
+            matched_pattern: confirmation.to_string(),
+            always_allow: Vec::new(),
+            risk: confirmation.risk(),
+            unattended: Unattended::Never,
+            source: ConfirmSource::Main,
+        };
+        if self.gate.confirm(turn, request).await == Approval::Deny {
+            return Err(cancelled("read", &confirmation));
+        }
+        Ok(())
+    }
+
+    /// What the path guards say of the first of `paths` whose read is sensitive, on the
+    /// blocking pool; `Err` when a path cannot be made absolute.
+    async fn first_sensitive(
+        &self,
+        scope: &FileScope,
+        paths: &[&Word],
+    ) -> Result<Option<String>, CommandError> {
+        let sandbox = Arc::clone(&self.sandbox);
+        let scope = scope.clone();
+        let paths: Vec<Word> = paths.iter().copied().cloned().collect();
+        on_blocking_pool(move || {
+            let guards = sandbox.path_guards();
+            paths
+                .iter()
+                .find_map(|path| match scope.absolute(Path::new(path.as_str())) {
+                    Ok(absolute) => guards.sensitive_read(&absolute).map(Ok),
+                    Err(error) => Some(Err(CommandError::io(path, &error))),
+                })
+                .transpose()
+        })
+        .await
+    }
+}
+
+/// `tool` and the `paths` it reads, each quoted, as a prompt shows them.
+fn read_as_shown(tool: &str, paths: &[&Word]) -> String {
+    paths.iter().fold(tool.to_string(), |shown, path| {
+        format!("{shown} {:?}", path.as_str())
+    })
 }
 
 /// What the path guards make of `analysis`: an edit is checked against `edit_scope`, minus
