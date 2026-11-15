@@ -38,7 +38,8 @@ static KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(KEY_PATTERN).expect("KEY_PATTERN compiles"));
 
 /// Saves `(key, value)` facts about the user, waking the embedding worker for each
-/// new or changed value, and searches them by semantic similarity to a query.
+/// new or changed value, and searches them by semantic similarity to a query. A save's
+/// result repeats the key and value, so every client that shows results shows what was kept.
 #[derive(Debug)]
 pub struct RememberTool {
     ops: Arc<MemoryOps>,
@@ -88,12 +89,13 @@ impl RememberTool {
     }
 
     async fn save(&self, key: &str, value: String) -> Result<String, ToolError> {
+        let report = format!("remembered {key}: {value}");
         let saved = self.ops.save(key, value).await?;
         if saved.value_changed {
             self.embed_wake.notify_one();
         }
         tracing::info!(target: "assistd::memory", key = %key, "remember saved");
-        Ok(format!("remembered {key}"))
+        Ok(report)
     }
 
     async fn search(&self, query: String) -> Result<String, ToolError> {
@@ -916,12 +918,14 @@ mod tests {
         )
         .await
         .unwrap();
-        tool.invoke(
-            &TurnContext::default(),
-            json!({"action": "save", "key": "editor_preference", "text": "neovim"}),
-        )
-        .await
-        .unwrap();
+        let saved = tool
+            .invoke(
+                &TurnContext::default(),
+                json!({"action": "save", "key": "editor_preference", "text": "neovim"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.output, "remembered editor_preference: neovim");
         let rows = ops.list_full("").await.unwrap();
         let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
         assert_eq!(keys, ["editor_preference"]);

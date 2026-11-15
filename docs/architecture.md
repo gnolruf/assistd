@@ -634,6 +634,10 @@ compaction summary. On resume, the LLM gets that summary plus only the
 rows after it, so it sees the same prompt it had before; the client
 still gets every row.
 
+Saved memories recalled into a new session's first turn sit in its context
+block under a header that labels them untrusted data, not instructions. A
+save is not gated: its tool result repeats the key and value, so the chat
+shows what was kept, and `assistd memory` lists and removes memories.
 Saving through the `remember` tool inserts the K/V row, and each user
 or assistant message is chunked in the transaction that saves it. With
 `embedding.enabled = false` no chunks are cut; the next start with
