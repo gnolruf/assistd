@@ -142,6 +142,31 @@ fn credentials_and_startup_files_always_ask() {
 }
 
 #[test]
+fn a_read_by_absolute_path_asks_where_the_same_script_read_would() {
+    let home = Home::new();
+    let guards = home.guards();
+    let at = |below: &str| home.dir.path().join(below);
+    for sensitive in [
+        ".ssh/id_ed25519",
+        ".ssh/not-there-yet",
+        "work/home/.ssh/id_ed25519",
+        "work/home/.config/gh/hosts.yml",
+    ] {
+        let why = guards.sensitive_read(&at(sensitive));
+        assert!(why.is_some(), "{sensitive:?}");
+    }
+    for ordinary in [
+        ".bashrc",
+        "Documents/notes.txt",
+        "spill/output.txt",
+        ".ssh/..",
+    ] {
+        let why = guards.sensitive_read(&at(ordinary));
+        assert_eq!(why, None, "{ordinary:?}");
+    }
+}
+
+#[test]
 fn a_path_known_only_at_run_time_reaches_only_credentials_that_exist() {
     let script = "f=data/stars.dat; tail -5 $f";
     let bare = TempDir::new().expect("tempdir");

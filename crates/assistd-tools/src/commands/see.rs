@@ -1,4 +1,5 @@
-//! `see`: attach an image file as vision input for the next model turn.
+//! `see`: attach an image file as vision input for the next model turn, asking before a
+//! sensitive one.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -9,19 +10,31 @@ use async_trait::async_trait;
 use crate::attachment::{LoadImageError, load_image_attachment};
 use crate::chain::Word;
 use crate::command::{Attachment, Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
+use crate::policy::{ConfirmationGate, ReadPolicy, SandboxInfo};
 use crate::vision::VisionGate;
 
 /// `see PATH`: read an image file and attach it as a vision input.
 #[derive(Debug)]
 pub struct SeeCommand {
     gate: Arc<VisionGate>,
+    policy: ReadPolicy,
 }
 
 impl SeeCommand {
-    /// A `see` command that refuses to run while `gate` reports no
-    /// vision support.
-    pub fn new(gate: Arc<VisionGate>) -> Self {
-        Self { gate }
+    /// A `see` command that refuses to run while `gate` reports no vision support, and asks
+    /// `confirmation_gate` before reading a file `sandbox`'s path guards call sensitive.
+    pub fn new(
+        gate: Arc<VisionGate>,
+        sandbox: Arc<SandboxInfo>,
+        confirmation_gate: Arc<dyn ConfirmationGate>,
+    ) -> Self {
+        Self {
+            gate,
+            policy: ReadPolicy {
+                sandbox,
+                gate: confirmation_gate,
+            },
+        }
     }
 }
 
@@ -47,7 +60,9 @@ impl Command for SeeCommand {
          next turn. Attachments flow through pipes untouched (e.g. \
          `see img.png | wc` still surfaces the image).\n\
          \n\
-         Exit 1 if the file is missing or not a recognized image format.\n",
+         Exit 1 if the file is missing or not a recognized image format. \
+         Credentials and files in $HOME only their owner may read ask the user \
+         first; a refusal exits 126.\n",
         )
     }
 
@@ -69,6 +84,9 @@ impl Command for SeeCommand {
                 ));
             }
         };
+        self.policy
+            .authorize(&input.turn, "see", &input.scope, &[path])
+            .await?;
         let (attachment, size) = load_image_attachment(Path::new(path.as_str()))
             .await
             .map_err(|e| load_failed(e, path))?;
@@ -129,6 +147,7 @@ mod tests {
     use crate::command::run_rendered;
     use crate::commands::test_see;
     use crate::fixtures::PNG_BYTES;
+    use crate::policy::AlwaysAllowGate;
 
     async fn run_see(cmd: &SeeCommand, args: &[&str]) -> CommandOutput {
         let input = CommandInput {
@@ -161,7 +180,11 @@ mod tests {
 
     #[tokio::test]
     async fn vision_disabled_returns_exact_error() {
-        let cmd = SeeCommand::new(VisionGate::new(false));
+        let cmd = SeeCommand::new(
+            VisionGate::new(false),
+            SandboxInfo::none(),
+            Arc::new(AlwaysAllowGate),
+        );
         let out = run_see(&cmd, &["/tmp/some-image.png"]).await;
         assert_eq!(out.exit_code, 1);
         assert!(out.stdout.is_empty());

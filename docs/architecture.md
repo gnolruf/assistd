@@ -546,7 +546,9 @@ LLM-facing tools with their own JSON schemas.
 
 Built-in commands: `bash`, `cat`, `echo`, `grep`, `head`, `ls`,
 `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`,
-`write`. `cat`, `ls` and `echo` run in the daemon. `grep`, `head`,
+`write`. `cat`, `ls` and `echo` run in the daemon; `cat` and `see` put
+each file through the path guards first and ask before reading
+credentials or an owner-only file in `$HOME`. `grep`, `head`,
 `tail`, `sort`, `uniq` and `wc` are the system's GNU programs: their
 arguments are quoted into a script that runs as a `bash` script does,
 through the classifier, the path guards and the sandbox, so they see the

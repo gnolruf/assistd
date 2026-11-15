@@ -67,6 +67,16 @@ impl FileScope {
         }
     }
 
+    /// `path` made absolute as an open would start it, with no symlink resolved: from the
+    /// daemon's working directory on the host, from the root's home when confined.
+    pub(crate) fn absolute(&self, path: &Path) -> io::Result<PathBuf> {
+        match self {
+            Self::Host if path.is_absolute() => Ok(path.to_path_buf()),
+            Self::Host => Ok(std::env::current_dir()?.join(path)),
+            Self::Confined(root) => Ok(lexical_clean(&root.home.join(path))),
+        }
+    }
+
     /// The directory `~` expands to: `$HOME` on the host, the root's home
     /// when confined.
     pub(crate) fn expand_tilde(&self, raw: &str) -> PathBuf {

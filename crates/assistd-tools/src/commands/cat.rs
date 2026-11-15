@@ -1,4 +1,6 @@
-//! `cat`: print text files or stdin, refusing binary files.
+//! `cat`: print text files or stdin, refusing binary files and asking before sensitive ones.
+
+use std::sync::Arc;
 
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
@@ -7,15 +9,28 @@ use crate::chain::OUTPUT_MAX;
 use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::commands::{read_regular_file, read_regular_head};
-use crate::policy::FileScope;
+use crate::policy::{ConfirmationGate, FileScope, ReadPolicy, SandboxInfo};
 
 /// How much of a file's head [`sniff_binary`] looks at for a NUL byte.
 pub(crate) const SNIFF_LEN: usize = 8192;
 
 /// `cat [-bn] [FILE]...`: concatenate files, or echo stdin if none are
-/// given. Binary files are rejected so their bytes stay out of the context.
+/// given. Binary files are rejected so their bytes stay out of the context,
+/// and a sensitive file's content is read only once the user agrees.
 #[derive(Debug)]
-pub struct CatCommand;
+pub struct CatCommand {
+    policy: ReadPolicy,
+}
+
+impl CatCommand {
+    /// A `cat` command that asks `gate` before reading a file `sandbox`'s path guards
+    /// call sensitive.
+    pub fn new(sandbox: Arc<SandboxInfo>, gate: Arc<dyn ConfirmationGate>) -> Self {
+        Self {
+            policy: ReadPolicy { sandbox, gate },
+        }
+    }
+}
 
 #[derive(Default)]
 struct Flags {
@@ -37,7 +52,9 @@ impl Command for CatCommand {
         Usage::new(
             "[-bn] [FILE]...",
             "Concatenate files, or echo stdin if no files given. Binary files \
-         are rejected so their raw bytes don't pollute the model's context.\n\
+         are rejected so their raw bytes don't pollute the model's context. \
+         Credentials and files in $HOME only their owner may read ask the user \
+         first; a refusal exits 126.\n\
          \n\
          Flags:\n  \
            -b  print metadata (mime, size) instead of content (safe for binary files)\n  \
@@ -65,6 +82,11 @@ impl Command for CatCommand {
             return Ok(CommandOutput::ok(number_if(stdin, &flags)));
         }
 
+        if !flags.metadata_only {
+            self.policy
+                .authorize(&input.turn, "cat", &input.scope, &files)
+                .await?;
+        }
         let mut out = Vec::new();
         for path in files {
             let chunk = if flags.metadata_only {

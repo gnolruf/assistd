@@ -30,7 +30,10 @@ the patched release is out.
 - **Path guards.** Resolve every `bash` and `write` target: destroying `$HOME`, a personal
   folder or a git work tree is refused; touching credentials, owner-only
   files, startup files, shell profiles or `PATH` directories always
-  asks.
+  asks. `cat` and `see`, which read in the daemon rather than the
+  sandbox, put each file through the same check before reading it, so
+  credentials and owner-only files ask there too. `ls` and `cat -b`
+  show names, sizes and types without asking, as `ls` in a script does.
 - **Permission modes.** Manual asks for every edit and unvetted script;
   Accept-edits also runs edits inside `tools.write.writable_paths`; the
   opt-in Auto puts the rest, plus unapproved app launches and MCP tool
