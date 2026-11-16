@@ -117,7 +117,7 @@ wrong, fix the test and explain why in the commit message.
 
 ## Workspace layout
 
-The workspace is split into one binary plus twelve library crates.
+The workspace is split into one binary plus thirteen library crates.
 `assistd-utils` sits at the very bottom (no internal deps), with
 `assistd-config` and `assistd-ipc` just above it; `assistd-core` and
 the `assistd` binary sit at the top. See
@@ -126,26 +126,33 @@ and data-flow walkthrough.
 
 | Crate            | Responsibility                                                                                                                  |
 |------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `assistd`        | Binary (`assistd` on `$PATH`; package `assistd-cli`). CLI parsing (`daemon`, `chat`, `settings`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat`, `tray`, and the compositor backends (`i3`, `sway`) are optional features; `settings` ships with `chat`. |
+| `assistd`        | Binary (`assistd` on `$PATH`; package `assistd-cli`). CLI parsing (`daemon`, `chat`, `settings`, `ptt-*`, `cycle`, `memory …`), subsystem init, lifecycle. The daemon and IPC client subcommands are always built; `chat` (which pulls in `assistd-chat`), `tray`, and the compositor backends (`i3`, `sway`) are optional features; `settings` ships with `chat`. |
+| `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel: a ratatui client that renders the events it reads off the socket. Depends only on `assistd-config`, `assistd-ipc` and `assistd-utils`, so it cannot reach a daemon-side crate. An entry-point crate like the binary, so its two `run` functions return `anyhow` errors. |
 | `assistd-config` | TOML schema, defaults, validation. Single source of truth for every tunable, including each key's settings-panel label, description, advanced flag, consumer (the program that reads it) and kind (taken from the field's type), declared per table with `describe_fields!`; every other crate that needs configuration depends on this one. Depends only on `assistd-utils`. |
 | `assistd-core`   | Daemon glue. Owns `AppState`, the per-turn `Agent` loop, the Unix-socket server, the presence state machine, the idle and GPU-contention monitors that drive it, the wake-word listen dispatcher, and the `build_tools()` factory that wires every subsystem together. |
 | `assistd-embed`  | Embedding HTTP client + background job queue. Pulls chunks off an mpsc, batches them to the embedding `llama-server`, writes vectors into `assistd-memory`'s semantic store. |
-| `assistd-ipc`    | Wire-protocol types (`Hello`, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`). Intentionally dependency-light; depends only on `assistd-utils`. The async socket client (`IpcClient`), which refuses a daemon from another version, sits behind the `client` feature, which only the binary enables. |
+| `assistd-ipc`    | Wire-protocol types (`Hello`, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`), one module per family and all re-exported at the root, plus what the daemon and its clients must agree on beside the wire: the in-memory image `Attachment` with its format check and capped file loader, and the socket path with its owner-only directory and lock files. Intentionally dependency-light; depends only on `assistd-utils`. The async socket client (`IpcClient`), which refuses a daemon from another version, sits behind the `client` feature, which the binary and `assistd-chat` enable. |
 | `assistd-llm`    | `LlmBackend` trait and `TurnBackend`, the part of it an agent turn drives and wrappers implement, `LlamaClient` (HTTP/SSE to `llama-server`), the router-mode launch spec run by the shared child-server supervisor, the HTTP control plane, and vision-capability detection. |
 | `assistd-mcp`    | MCP client for stdio and Streamable HTTP servers on top of `rmcp`: process spawning, restart on the next call with backoff, OAuth 2.1 bearer tokens kept in an owner-only token file, and `McpToolAdapter` which exposes discovered tools through the `Tool` trait under `mcp__<server>__<tool>`. |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore` (K/V facts), `TranscriptStore` (transcripts with branching/undo), `SemanticStore` (embedding-indexed chunks), `TaskStore` (saved tasks and their runs). Uses `tokio-rusqlite` + `rusqlite_migration`. |
 | `assistd-search` | SearXNG launch spec: the `ChildServerSpec` for the daemon-supervised search instance, run with a generated settings file, its `SEARXNG_*` environment replaced, and a per-launch secret; plus `SearxngClient`, a typed client for its JSON search API. |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, the single `RunTool` the model sees, all built-in commands (`bash`, `cat`, `echo`, `grep`, `head`, `ls`, `screenshot`, `see`, `sort`, `tail`, `uniq`, `wc`, `web`, `wm`, `write`), and the policy gates (`ConfirmationGate`, `VisionGate`, `SandboxRequest`). |
-| `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, capped child-output line forwarding, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, the `ProcessGroup` kill-on-drop guard, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor (spawn, `/health` poll checked against `/proc` listener ownership, restart, degrade) that both llama-servers run under. No internal deps. |
+| `assistd-utils`  | Helpers every other crate may use: exponential backoff and rolling-window `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, capped child-output line forwarding, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, the escapes that make daemon-supplied text safe to print on a terminal, the `ProcessGroup` kill-on-drop guard, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor (spawn, `/health` poll checked against `/proc` listener ownership, restart, degrade) that both llama-servers run under. No internal deps. |
 | `assistd-voice`  | `VoiceInput` (Parakeet STT and Silero VAD through `sherpa-onnx`, push-to-talk and VAD continuous modes), `VoiceOutput` (sherpa-onnx TTS streamed sentence-by-sentence, Piper voices phonemized by spawning `espeak-ng`), adaptive `SpeakDecision`, plus the voice worker: the protocol, the worker side the hidden `assistd voice-worker` subcommand runs, and the daemon-side proxies and supervisor. |
 | `assistd-wm`     | `WindowManager` trait with i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager` fallback. Backs both the system-prompt active-window injection and the `wm` command, including `wm open`'s launches through the compositor. Feature-gated per compositor. |
 
-**Dependency direction.** Crates lower in the table do not depend on
-crates higher up. If you find yourself wanting `assistd-memory` to
-call into `assistd-core`, you're holding it wrong — invert the
-dependency or move the type. `assistd-utils` has no internal deps and
-is the only one `assistd-config` and `assistd-ipc` may take; they're
-the foundation everything else builds on.
+**Dependency direction.** Dependencies point one way through these
+layers, each crate taking only crates from layers before its own:
+`utils`; then `config` and `ipc`; then `chat`, `llm`, `memory`,
+`search`, `voice` and `wm`; then `embed`; then `tools`; then `mcp`;
+then `core`; then the binary. If you find yourself wanting
+`assistd-memory` to call into `assistd-core`, you're holding it wrong
+— invert the dependency or move the type. `assistd-utils` has no
+internal deps and is the only one `assistd-config` and `assistd-ipc`
+may take; they're the foundation everything else builds on.
+`assistd-llm` does not depend on `assistd-tools`, nor the other way
+round: what both need lives in `assistd-ipc`, and `assistd-core`
+joins them.
 
 **Shared logic goes in `assistd-utils`.** When the same function or
 type would otherwise be written in two crates, put it in
@@ -171,6 +178,8 @@ stays where it is used.
 - **The TUI is a daemon client.** `assistd chat` is a long-lived
   client onto the daemon's Unix socket. The TUI should never spawn
   its own LLM/voice/MCP services; it talks IPC and renders events.
+  `assistd-chat` takes no dependency on a daemon-side crate; a type
+  it needs from one belongs on the wire in `assistd-ipc`.
 - **`config.toml` is canonical.** The annotated
   [config/config.sample.toml](config/config.sample.toml) documents
   every tunable. If you add a new option, update the schema in
@@ -185,8 +194,9 @@ stays where it is used.
   (use `tracing` macros at the appropriate level).
 - Bypass `cargo fmt` / `cargo clippy` / `cargo test` and ship
   anyway.
-- Add cross-crate dependencies that flow upward (lower-numbered
-  crates depending on higher-numbered ones in the table above).
+- Add cross-crate dependencies that flow upward (a crate depending
+  on one from its own layer or a later one, as listed under
+  "Dependency direction").
 - Sprinkle comments to explain code that explains itself; document
   *why*, not *what*, and only when *why* is non-obvious.
 - Expand scope. Fix the thing in front of you; open a follow-up

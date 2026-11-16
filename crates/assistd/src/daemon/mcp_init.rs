@@ -5,12 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::config::{
-    McpAuth, McpHttpTransport, McpOAuthClient, McpServerUrl, McpStdioTransport, McpTransport,
+use assistd_config::{
+    Config, McpAuth, McpHttpTransport, McpOAuthClient, McpServerConfig, McpServerUrl,
+    McpStdioTransport, McpTransport,
 };
-use assistd_core::{
-    Config, McpAccountError, McpAccounts, McpHost, McpLogin, McpServerConfig, McpServerStatus,
-};
+use assistd_core::{McpAccountError, McpAccounts, McpHost, McpLogin, McpServerStatus};
 use assistd_ipc::{McpServerState, McpTransportKind, TokenRevocation};
 use assistd_mcp::{
     Connector, HttpAuth, HttpConfig, LaunchTarget, McpError, McpServer, OAuthConfig, Revocation,

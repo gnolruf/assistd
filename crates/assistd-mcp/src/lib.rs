@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assistd_config::McpServerName;
-use assistd_tools::attachment::MAX_IMAGE_BYTES;
+use assistd_ipc::Attachment;
+use assistd_ipc::attachment::MAX_IMAGE_BYTES;
 use assistd_tools::{
-    ApprovalGate, Attachment, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext,
-    JudgedClass, Risk, Tool, ToolError, ToolOutput, TurnContext, Unattended, VisionGate,
+    ApprovalGate, ConfirmSource, ConfirmationRequest, ImageMime, JudgeContext, JudgedClass, Risk,
+    Tool, ToolError, ToolOutput, TurnContext, Unattended, VisionGate,
 };
 use assistd_utils::text::human_size;
 use async_trait::async_trait;

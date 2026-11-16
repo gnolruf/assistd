@@ -5,7 +5,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use assistd_core::{AppState, Config};
+use assistd_config::Config;
+use assistd_core::AppState;
 use assistd_embed::{
     EmbedServerSpec, Embedder, EmbedderHandle, LlamaEmbedder, spawn_embedder_task,
 };

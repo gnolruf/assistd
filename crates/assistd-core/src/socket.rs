@@ -1,16 +1,15 @@
 //! Unix-socket IPC server: one newline-delimited JSON request per
 //! connection, answered by a stream of events.
 
-use std::fs::{DirBuilder, File, OpenOptions, Permissions, TryLockError};
+use std::fs::{File, Permissions, TryLockError};
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use rustix::fs::OFlags;
 use rustix::io::Errno;
 use rustix::process::geteuid;
 use serde::Serialize;
@@ -22,6 +21,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{Instrument, debug, error, info, warn};
 
+use assistd_ipc::socket::{SocketDirError, ensure_private_socket_dir, open_private_lock_file};
 use assistd_ipc::{Event, EventBody, Hello, Request, RequestBody};
 use assistd_tools::{Approval, CONFIRM_TIMEOUT, ConfirmRouter, TurnContext};
 use assistd_utils::time::saturating_millis;
@@ -64,14 +64,8 @@ const FD_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(100);
 /// treated as stale; one that hangs past this is treated as live.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Mode for a socket directory the daemon has to create itself.
-const SOCKET_DIR_MODE: u32 = 0o700;
-
 /// Mode for the socket itself: only the daemon's user may connect.
 const SOCKET_MODE: u32 = 0o600;
-
-/// Mode for lock files beside the socket.
-const LOCK_FILE_MODE: u32 = 0o600;
 
 /// Errors produced by the socket listener and per-connection handlers.
 #[derive(Debug, Error)]
@@ -88,13 +82,6 @@ pub enum SocketError {
     )]
     AlreadyStarting { path: PathBuf },
 
-    #[error("failed to open lock file at {path}: {source}")]
-    LockFile {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-
     #[error("failed to take the startup lock at {path}: {source}")]
     StartupLock {
         path: PathBuf,
@@ -109,18 +96,8 @@ pub enum SocketError {
         source: io::Error,
     },
 
-    #[error("failed to prepare socket directory {path}: {source}")]
-    SocketDir {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-
-    #[error("socket directory {path} is {problem}; refusing to listen there")]
-    UnsafeSocketDir {
-        path: PathBuf,
-        problem: &'static str,
-    },
+    #[error(transparent)]
+    SocketDir(#[from] SocketDirError),
 
     #[error("failed to bind unix socket at {path}: {source}")]
     Bind {
@@ -226,55 +203,6 @@ where
     }
 
     result
-}
-
-/// Open (creating owner-only if needed) a lock file in the socket
-/// directory without following a symlink at `lock_path`. Fails when the
-/// directory is not a private directory owned by this user.
-pub fn open_private_lock_file(lock_path: &Path) -> Result<File, SocketError> {
-    if let Some(dir) = lock_path.parent() {
-        ensure_private_socket_dir(dir)?;
-    }
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(LOCK_FILE_MODE)
-        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed())
-        .open(lock_path)
-        .map_err(|source| SocketError::LockFile {
-            path: lock_path.to_path_buf(),
-            source,
-        })
-}
-
-fn ensure_private_socket_dir(dir: &Path) -> Result<(), SocketError> {
-    let dir_error = |source| SocketError::SocketDir {
-        path: dir.to_path_buf(),
-        source,
-    };
-    DirBuilder::new()
-        .recursive(true)
-        .mode(SOCKET_DIR_MODE)
-        .create(dir)
-        .map_err(dir_error)?;
-    let metadata = std::fs::symlink_metadata(dir).map_err(dir_error)?;
-    let problem = if !metadata.is_dir() {
-        Some("not a directory")
-    } else if metadata.uid() != geteuid().as_raw() {
-        Some("owned by another user")
-    } else if metadata.mode() & 0o022 != 0 {
-        Some("writable by other users")
-    } else {
-        None
-    };
-    problem.map_or(Ok(()), |problem| {
-        Err(SocketError::UnsafeSocketDir {
-            path: dir.to_path_buf(),
-            problem,
-        })
-    })
 }
 
 async fn prepare_socket_path(path: &Path) -> Result<(), SocketError> {
@@ -780,12 +708,16 @@ async fn write_frame(
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::sync::oneshot;
 
+    use assistd_config::Config;
+    use assistd_ipc::{PresenceState, PresenceTarget};
+
     use super::*;
-    use crate::{Config, PresenceManager, PresenceState, PresenceTarget};
+    use crate::PresenceManager;
 
     fn test_state() -> Arc<AppState> {
         state_with_backend(Arc::new(assistd_llm::EchoBackend::new()))
@@ -1103,8 +1035,8 @@ mod tests {
 
         let _lock = StartupLock::acquire_at(&socket_path).unwrap();
 
-        assert_eq!(mode_of(&dir), SOCKET_DIR_MODE);
-        assert_eq!(mode_of(&socket_path.with_extension("lock")), LOCK_FILE_MODE);
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(mode_of(&socket_path.with_extension("lock")), 0o600);
     }
 
     fn mode_of(path: &Path) -> u32 {
@@ -1134,7 +1066,7 @@ mod tests {
         });
         wait_for_listener(&path).await;
 
-        assert_eq!(mode_of(&dir), SOCKET_DIR_MODE);
+        assert_eq!(mode_of(&dir), 0o700);
 
         shutdown.send(()).unwrap();
         task.await.unwrap();
@@ -1153,7 +1085,7 @@ mod tests {
         .await
         .expect_err("a world-writable socket dir must be refused");
         assert!(
-            matches!(err, SocketError::UnsafeSocketDir { problem, .. } if problem == "writable by other users"),
+            matches!(err, SocketError::SocketDir(SocketDirError::Unsafe { problem, .. }) if problem == "writable by other users"),
             "{err:?}"
         );
     }
@@ -1174,7 +1106,7 @@ mod tests {
         .await
         .expect_err("a symlinked socket dir must be refused");
         assert!(
-            matches!(err, SocketError::UnsafeSocketDir { problem, .. } if problem == "not a directory"),
+            matches!(err, SocketError::SocketDir(SocketDirError::Unsafe { problem, .. }) if problem == "not a directory"),
             "{err:?}"
         );
     }
@@ -1192,7 +1124,7 @@ mod tests {
         async fn push_user(
             &self,
             _text: String,
-            _attachments: Vec<assistd_tools::Attachment>,
+            _attachments: Vec<assistd_ipc::Attachment>,
         ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
@@ -1241,7 +1173,7 @@ mod tests {
         async fn push_user(
             &self,
             _text: String,
-            _attachments: Vec<assistd_tools::Attachment>,
+            _attachments: Vec<assistd_ipc::Attachment>,
         ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
@@ -1471,7 +1403,7 @@ mod tests {
         async fn push_user(
             &self,
             _text: String,
-            _attachments: Vec<assistd_tools::Attachment>,
+            _attachments: Vec<assistd_ipc::Attachment>,
         ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
@@ -1680,7 +1612,7 @@ mod tests {
         async fn push_user(
             &self,
             _text: String,
-            _attachments: Vec<assistd_tools::Attachment>,
+            _attachments: Vec<assistd_ipc::Attachment>,
         ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }
@@ -1811,7 +1743,7 @@ mod tests {
         async fn push_user(
             &self,
             _text: String,
-            _attachments: Vec<assistd_tools::Attachment>,
+            _attachments: Vec<assistd_ipc::Attachment>,
         ) -> assistd_llm::LlmResult<()> {
             Ok(())
         }

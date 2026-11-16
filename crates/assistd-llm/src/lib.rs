@@ -11,13 +11,11 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use assistd_ipc::{Component, RelayEvent, StatusKind, StatusSeverity};
-use assistd_tools::{Attachment, ToolOutput};
+use assistd_ipc::{Attachment, Component, RelayEvent, StatusKind, StatusSeverity, ToolReport};
 
 pub mod completion;
 #[cfg(feature = "test-support")]
 mod echo;
-mod judge;
 pub mod llama_server;
 
 pub use assistd_utils::child_server::ReadyState;
@@ -25,7 +23,6 @@ pub use completion::history::{CompactionCut, ToolCallRecord};
 pub use completion::{LlamaClient, LlamaClientError};
 #[cfg(feature = "test-support")]
 pub use echo::EchoBackend;
-pub use judge::BackendJudgeModel;
 pub use llama_server::{
     LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotAssignment, SlotDir, SlotHolder,
     SlotStash, VisionState, probe_capabilities_routed,
@@ -155,7 +152,7 @@ pub enum LlmEvent {
     ToolResult {
         id: String,
         name: String,
-        result: Box<ToolOutput>,
+        result: Box<ToolReport>,
     },
     /// Progress of a relay running inside the tool call in flight.
     Relay(RelayEvent),

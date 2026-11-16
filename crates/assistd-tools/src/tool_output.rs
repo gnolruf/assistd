@@ -6,10 +6,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 
-use assistd_ipc::{ToolAttachment, ToolReport, ToolStreams};
+use assistd_ipc::{Attachment, ToolAttachment, ToolReport, ToolStreams};
 use assistd_utils::time::saturating_millis;
-
-use crate::command::Attachment;
 
 /// What a tool call produced: the text the model reads plus the outcome
 /// clients are shown.

@@ -5,17 +5,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use assistd_config::Config;
 use assistd_core::planner::PlanningTools;
-use assistd_core::{
-    BuildToolsDeps, Config, McpServerStatus, RelayDeps, ToolRegistry, WindowManager,
-};
+use assistd_core::{BuildToolsDeps, McpServerStatus, RelayDeps};
 use assistd_memory::SessionId;
 use assistd_tools::{
-    ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, ToolSandbox, ToolsDisabled,
-    VisionGate,
+    ApprovalGate, ConfirmationGate, IpcConfirmationGate, MemoryOps, ToolRegistry, ToolSandbox,
+    ToolsDisabled, VisionGate,
 };
 use assistd_utils::child_server::ChildServerStatus;
 use assistd_utils::readiness::ReadinessCell;
+use assistd_wm::WindowManager;
 use tokio::sync::watch;
 use tracing::info;
 

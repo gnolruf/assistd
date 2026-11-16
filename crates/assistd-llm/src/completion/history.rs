@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use assistd_config::{ChatConfig, ModelConfig};
-use assistd_tools::Attachment;
+use assistd_ipc::Attachment;
 use assistd_utils::text::{neutralise_template_tokens, neutralise_template_tokens_in_json};
 use async_trait::async_trait;
 use base64::Engine;

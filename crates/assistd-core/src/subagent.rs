@@ -217,7 +217,7 @@ fn relay_event_of(event: LlmEvent, compacting_since: &mut Option<Instant>) -> Op
         }),
         LlmEvent::ToolResult { name, result, .. } => Some(RelayEvent::ToolResult {
             name,
-            result: result.report().without_attachments(),
+            result: result.without_attachments(),
         }),
         LlmEvent::Status {
             event: StatusKind::CompactingHistory,

@@ -4,12 +4,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use assistd_ipc::Attachment;
+use assistd_ipc::attachment::{LoadImageError, load_image_attachment};
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
-use crate::attachment::{LoadImageError, load_image_attachment};
 use crate::chain::Word;
-use crate::command::{Attachment, Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::policy::{ConfirmationGate, ReadPolicy, SandboxInfo};
 use crate::vision::VisionGate;
 

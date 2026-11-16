@@ -14,7 +14,7 @@ use assistd_ipc::{Event, EventBody, InteractionHold, TaskQueueSnapshot};
 
 use super::interaction::{InteractionState, InteractionTurn, UserInteraction};
 use super::lanes::ModelLanes;
-use super::task_queue::{TaskQueue, TurnStart};
+use super::tasks::queue::{TaskQueue, TurnStart};
 use crate::bus::EventSink;
 
 /// Longest preview of a queued user turn's text, in characters.

@@ -4,11 +4,13 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use assistd_ipc::Attachment;
+
 use super::expand::{ExpandError, expand_args};
 use super::{Chain, Word};
 use crate::TurnContext;
 use crate::command::{
-    Attachment, CommandInput, CommandOutput, CommandRegistry, Hint, error_line, run_rendered,
+    CommandInput, CommandOutput, CommandRegistry, Hint, error_line, run_rendered,
 };
 
 /// Most bytes of stdout, or of stderr, that one stage or a whole chain may

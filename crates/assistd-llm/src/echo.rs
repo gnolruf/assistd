@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
-use assistd_tools::Attachment;
+use assistd_ipc::Attachment;
 
 use crate::{LlmBackend, LlmEvent, LlmResult, StepOutcome, ToolResultPayload, TurnBackend};
 

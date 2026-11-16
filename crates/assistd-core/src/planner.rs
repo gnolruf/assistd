@@ -13,15 +13,17 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use assistd_ipc::{HostName, ModeRecommendation, PermissionMode, Plan, TaskPrompt, TaskSpecError};
+use assistd_ipc::{
+    Attachment, HostName, ModeRecommendation, PermissionMode, Plan, TaskPrompt, TaskSpecError,
+};
 use assistd_llm::{
     LlmBackend, LlmError, LlmEvent, LlmHealthProbe, LlmResult, StepOutcome, ToolResultPayload,
     TurnBackend,
 };
 use assistd_tools::policy::on_blocking_pool;
 use assistd_tools::{
-    ActionCheck, Attachment, ConfirmRouter, SearchPath, Tool, ToolCatalog, ToolError, ToolOutput,
-    ToolRegistry, TurnContext,
+    ActionCheck, ConfirmRouter, SearchPath, Tool, ToolCatalog, ToolError, ToolOutput, ToolRegistry,
+    TurnContext,
 };
 
 use crate::agent::Agent;

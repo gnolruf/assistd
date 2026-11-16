@@ -13,17 +13,7 @@ path = "src/main.rs"
 default = ["chat", "tray", "i3", "sway"]
 i3 = ["assistd-wm/i3"]
 sway = ["assistd-wm/sway"]
-chat = [
-    "dep:ratatui",
-    "dep:crossterm",
-    "dep:tracing-appender",
-    "dep:textwrap",
-    "dep:pulldown-cmark",
-    "dep:shlex",
-    "dep:ratatui-image",
-    "dep:image",
-    "dep:toml",
-]
+chat = ["dep:assistd-chat"]
 tray = [
     "dep:ksni",
     "dep:zbus",
@@ -31,6 +21,7 @@ tray = [
 
 [dependencies]
 dirs = { workspace = true }
+assistd-chat   = { workspace = true, optional = true }
 assistd-config = { workspace = true }
 assistd-core   = { workspace = true }
 assistd-embed  = { workspace = true }
@@ -49,7 +40,6 @@ chrono = { workspace = true }
 clap = { workspace = true }
 futures-util = { workspace = true }
 parking_lot = { workspace = true }
-rustix = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -58,15 +48,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
-ratatui          = { workspace = true, optional = true }
-crossterm        = { workspace = true, optional = true }
-tracing-appender = { workspace = true, optional = true }
-textwrap         = { workspace = true, optional = true }
-pulldown-cmark   = { workspace = true, optional = true }
-shlex            = { workspace = true, optional = true }
-ratatui-image    = { workspace = true, optional = true }
-image            = { workspace = true, optional = true }
-toml             = { workspace = true, optional = true }
 ksni             = { workspace = true, optional = true }
 zbus             = { workspace = true, optional = true }
 

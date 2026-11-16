@@ -11,10 +11,10 @@ use tracing::{Instrument, debug, warn};
 
 use assistd_config::{Config, EmbeddingConfig};
 use assistd_embed::EmbedderHandle;
-use assistd_ipc::{Event, EventBody, ImageAttachment, PlanMode};
+use assistd_ipc::{Attachment, Event, EventBody, ImageAttachment, PlanMode};
 use assistd_llm::{LlmBackend, LlmError, LlmEvent, LlmHealthProbe};
 use assistd_memory::{PersistedMessage, SemanticStore, SessionId};
-use assistd_tools::{Attachment, ConfirmRouter, HostReads, ToolCatalog, TurnContext};
+use assistd_tools::{ConfirmRouter, HostReads, ToolCatalog, TurnContext};
 use assistd_voice::{
     SpeakDecision, SpeakingGuard, VoiceManager, VoiceOutput, VoiceOutputController,
 };

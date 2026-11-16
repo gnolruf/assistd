@@ -4,13 +4,13 @@ use std::io;
 use std::time::Duration;
 
 use assistd_config::Compositor;
+use assistd_ipc::attachment::MAX_IMAGE_BYTES;
 use assistd_utils::text::human_size;
 use serde_json::Value;
 use tokio::process::Command as ProcCommand;
 
 use super::geometry::{find_focused_sway_rect, parse_hyprland_geom, parse_xrandr_monitor_geom};
 use super::{Backend, Target};
-use crate::attachment::MAX_IMAGE_BYTES;
 use crate::command::{CommandError, Hint};
 use crate::exec::{SPAWN_FAILED_EXIT, TIMEOUT_EXIT, WaitOutcome, capture, exit_code};
 

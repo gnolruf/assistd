@@ -3,8 +3,8 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 use tokio::sync::Notify;
 
+use assistd_ipc::Attachment;
 use assistd_llm::{LlmResult, SlotAssignment, StepOutcome, ToolResultPayload};
-use assistd_tools::Attachment;
 
 use super::*;
 

@@ -1,9 +1,16 @@
-//! The image formats and size limits of a [`RequestBody::Query`](crate::RequestBody::Query)'s
-//! attachments.
+//! Image attachments: the accepted formats and size limits, and reading an image file as one.
 
 use std::fmt;
+use std::io;
+use std::path::Path;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio::io::AsyncReadExt;
+
+use assistd_utils::text::human_size;
 
 /// Largest accepted image: room for a 4K PNG screenshot, small enough to reject video or RAW.
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -48,5 +55,251 @@ impl ImageMime {
 impl fmt::Display for ImageMime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// An image on a [`RequestBody::Query`](crate::RequestBody::Query); `data_base64` is standard
+/// padded base64.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageAttachment {
+    pub mime: ImageMime,
+    pub data_base64: String,
+}
+
+impl ImageAttachment {
+    /// Encode raw image `bytes` as standard padded base64.
+    pub fn from_bytes(mime: ImageMime, bytes: &[u8]) -> Self {
+        Self {
+            mime,
+            data_base64: STANDARD.encode(bytes),
+        }
+    }
+
+    /// Decode `data_base64`; errors when it is not valid standard base64.
+    pub fn decode_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+        STANDARD.decode(&self.data_base64)
+    }
+}
+
+/// An image held as raw bytes: one a user turn carries to the model, or a side-channel payload
+/// a command emits beside its stdout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    Image { mime: ImageMime, bytes: Vec<u8> },
+}
+
+/// Why [`load_image_attachment`] refused a file.
+#[derive(Debug)]
+pub enum LoadImageError {
+    Io {
+        path: String,
+        source: io::Error,
+    },
+    /// File exceeds [`MAX_IMAGE_BYTES`].
+    TooLarge {
+        path: String,
+        size: u64,
+        max: u64,
+    },
+    /// No magic number matched.
+    Unrecognized {
+        path: String,
+    },
+    NotAnImage {
+        path: String,
+        detected: String,
+    },
+    /// An image, but not PNG, JPEG or WebP.
+    UnsupportedFormat {
+        path: String,
+        mime: String,
+    },
+}
+
+impl LoadImageError {
+    /// One-line, unprefixed, human-readable description of the failure.
+    pub fn user_message(&self) -> String {
+        match self {
+            LoadImageError::Io { path, source } => match source.kind() {
+                io::ErrorKind::NotFound => format!("file not found: {path}"),
+                io::ErrorKind::PermissionDenied => format!("permission denied: {path}"),
+                _ => format!("{path}: {source}"),
+            },
+            LoadImageError::TooLarge { path, size, max } => format!(
+                "image too large: {path} ({} > {} max)",
+                human_size(*size),
+                human_size(*max),
+            ),
+            LoadImageError::Unrecognized { path } => {
+                format!("not a recognized image file: {path}")
+            }
+            LoadImageError::NotAnImage { path, detected } => {
+                format!("not an image file: {path} (detected {detected})")
+            }
+            LoadImageError::UnsupportedFormat { path, mime } => format!(
+                "unsupported image format: {path} ({mime}). Supported: {}",
+                ImageMime::supported_list()
+            ),
+        }
+    }
+}
+
+/// Why [`sniff_image`] refused a byte buffer.
+#[derive(Debug, Error)]
+pub enum ImageFormatError {
+    #[error("not a recognized image")]
+    Unrecognized,
+    #[error("not an image (detected {detected})")]
+    NotAnImage { detected: &'static str },
+    #[error(
+        "unsupported image format {mime}; supported: {}",
+        ImageMime::supported_list()
+    )]
+    UnsupportedFormat { mime: &'static str },
+}
+
+impl ImageFormatError {
+    fn at_path(self, path: String) -> LoadImageError {
+        match self {
+            ImageFormatError::Unrecognized => LoadImageError::Unrecognized { path },
+            ImageFormatError::NotAnImage { detected } => LoadImageError::NotAnImage {
+                path,
+                detected: detected.to_string(),
+            },
+            ImageFormatError::UnsupportedFormat { mime } => LoadImageError::UnsupportedFormat {
+                path,
+                mime: mime.to_string(),
+            },
+        }
+    }
+}
+
+impl fmt::Display for LoadImageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.user_message())
+    }
+}
+
+impl std::error::Error for LoadImageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LoadImageError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Read `path` as a supported image no larger than [`MAX_IMAGE_BYTES`], returning the attachment
+/// and its size in bytes. The size is checked from metadata before the read, and the read stops
+/// past the limit.
+pub async fn load_image_attachment(path: &Path) -> Result<(Attachment, usize), LoadImageError> {
+    let display_path = || path.display().to_string();
+    let io_error = |source: io::Error| LoadImageError::Io {
+        path: display_path(),
+        source,
+    };
+    let too_large = |size| LoadImageError::TooLarge {
+        path: display_path(),
+        size,
+        max: MAX_IMAGE_BYTES,
+    };
+    let (file, size) = open_regular(path).await.map_err(io_error)?;
+    if size > MAX_IMAGE_BYTES {
+        return Err(too_large(size));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(io_error)?;
+    let read = bytes.len() as u64;
+    if read > MAX_IMAGE_BYTES {
+        return Err(too_large(read));
+    }
+    let mime = sniff_image(&bytes).map_err(|e| e.at_path(display_path()))?;
+    let byte_count = bytes.len();
+    Ok((Attachment::Image { mime, bytes }, byte_count))
+}
+
+/// Detect the format of `bytes` from its magic number, accepting only PNG, JPEG and WebP.
+pub fn sniff_image(bytes: &[u8]) -> Result<ImageMime, ImageFormatError> {
+    let detected = infer::get(bytes).ok_or(ImageFormatError::Unrecognized)?;
+    let mime = detected.mime_type();
+    if !infer::is_image(bytes) {
+        return Err(ImageFormatError::NotAnImage { detected: mime });
+    }
+    ImageMime::from_mime(mime).ok_or(ImageFormatError::UnsupportedFormat { mime })
+}
+
+async fn open_regular(path: &Path) -> io::Result<(tokio::fs::File, u64)> {
+    let path = path.to_owned();
+    let (file, size) = tokio::task::spawn_blocking(move || assistd_utils::fs::open_regular(&path))
+        .await
+        .map_err(io::Error::other)??;
+    Ok((tokio::fs::File::from_std(file), size))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rustix::fs::Mode;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    /// Minimal GIF89a: an image to `infer`, but not an [`ImageMime`].
+    const GIF_BYTES: &[u8] = &[
+        0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF,
+        0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B,
+    ];
+
+    #[tokio::test]
+    async fn gif_is_rejected_by_allowlist() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("anim.gif");
+        tokio::fs::write(&path, GIF_BYTES).await.unwrap();
+        let err = load_image_attachment(&path).await.unwrap_err();
+        match err {
+            LoadImageError::UnsupportedFormat { mime, .. } => assert_eq!(mime, "image/gif"),
+            other => panic!("expected UnsupportedFormat, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oversize_file_is_rejected_before_read() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        let sparse = tokio::fs::File::create(&path).await.unwrap();
+        sparse.set_len(MAX_IMAGE_BYTES + 1).await.unwrap();
+        drop(sparse);
+        let err = load_image_attachment(&path).await.unwrap_err();
+        match err {
+            LoadImageError::TooLarge { size, max, .. } => {
+                assert_eq!(size, MAX_IMAGE_BYTES + 1);
+                assert_eq!(max, MAX_IMAGE_BYTES);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        assert!(err.user_message().starts_with("image too large:"));
+    }
+
+    #[tokio::test]
+    async fn fifo_is_refused_without_blocking() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("pipe.png");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, Mode::from_raw_mode(0o600)).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(5), load_image_attachment(&fifo))
+            .await
+            .expect("loading a FIFO must not block")
+            .unwrap_err();
+        assert_eq!(
+            err.user_message(),
+            format!(
+                "{}: not a regular file (device, pipe, or socket)",
+                fifo.display()
+            )
+        );
     }
 }

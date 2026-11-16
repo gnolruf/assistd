@@ -4,10 +4,10 @@ use std::io::{self, Write};
 
 use anyhow::Result;
 use assistd_ipc::{EventBody, Request, StatusKind, VoiceCaptureState};
+use assistd_utils::terminal_text::{escape_controls, escape_controls_single_line};
 use uuid::Uuid;
 
 use super::run_one_shot;
-use super::terminal_text::{escape_controls, escape_controls_single_line};
 
 /// Sends the request `with_id` builds and prints the daemon's answer.
 pub(crate) async fn run(with_id: fn(String) -> Request) -> Result<()> {

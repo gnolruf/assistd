@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/assistd",
+    "crates/assistd-chat",
     "crates/assistd-config",
     "crates/assistd-core",
     "crates/assistd-embed",
@@ -24,6 +25,7 @@ license = "Apache-2.0"
 rust-version = "1.98"
 
 [workspace.dependencies]
+assistd-chat   = { version = "0", path = "crates/assistd-chat" }
 assistd-config = { version = "0", path = "crates/assistd-config" }
 assistd-core   = { version = "0", path = "crates/assistd-core" }
 assistd-embed  = { version = "0", path = "crates/assistd-embed" }

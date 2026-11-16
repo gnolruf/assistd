@@ -1,0 +1,85 @@
+//! Announcing a task run's final reply: broadcast for notifications, then spoken once the
+//! user's interaction has gone quiet, a user turn starting meanwhile cutting it off.
+
+use tokio::sync::mpsc;
+
+use assistd_ipc::{Event, EventBody, TaskName, TaskRunId};
+use assistd_voice::SentenceBuffer;
+
+use super::TaskService;
+use crate::state::interaction::InteractionState;
+use crate::state::query::run_speech_worker;
+
+/// A finished run's reply to announce, and the request id its events carry.
+pub(super) struct TaskReply {
+    pub(super) id: String,
+    pub(super) run: TaskRunId,
+    pub(super) task_name: TaskName,
+    pub(super) reply: String,
+}
+
+impl TaskService {
+    pub(super) async fn announce_task_reply(&self, reply: TaskReply) {
+        let TaskReply {
+            id,
+            run,
+            task_name,
+            reply,
+        } = reply;
+        let sentences = self.reply_sentences(&reply);
+        self.deps.bus.publish(&Event::new(
+            id.clone(),
+            EventBody::TaskReply {
+                run,
+                task_name,
+                reply,
+            },
+        ));
+        self.wait_for_quiet_interaction().await;
+        let voice_output = self.deps.voice.speech().clone();
+        let start_epoch = voice_output.current_epoch();
+        let (speech_tx, speech_rx) = mpsc::channel(sentences.len().max(1));
+        for sentence in sentences {
+            let _ = speech_tx.try_send(sentence);
+        }
+        drop(speech_tx);
+        run_speech_worker(
+            voice_output,
+            self.deps.bus.sender().clone(),
+            id,
+            start_epoch,
+            speech_rx,
+        )
+        .await;
+    }
+
+    /// Return once no user turn is in flight and nothing is being spoken.
+    async fn wait_for_quiet_interaction(&self) {
+        let mut interaction = self.deps.admission.interaction.subscribe();
+        let mut speaking = self.deps.voice.speech().subscribe_speaking();
+        loop {
+            let talking = matches!(
+                *interaction.borrow_and_update(),
+                InteractionState::Talking { .. }
+            );
+            if !talking && !*speaking.borrow_and_update() {
+                return;
+            }
+            let changed = tokio::select! {
+                changed = interaction.changed() => changed,
+                changed = speaking.changed() => changed,
+            };
+            if changed.is_err() {
+                return;
+            }
+        }
+    }
+
+    fn reply_sentences(&self, reply: &str) -> Vec<String> {
+        let max_chars = self.deps.config.voice.synthesis.max_sentence_chars.get() as usize;
+        let mut sentences = SentenceBuffer::new(max_chars);
+        let mut split = sentences.push(reply);
+        split.extend(sentences.finish());
+        split
+    }
+}

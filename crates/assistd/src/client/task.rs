@@ -5,12 +5,12 @@ use std::io::{self, Write};
 
 use anyhow::{Result, bail};
 use assistd_ipc::{EventBody, Request, RequestBody, TaskId, TaskRequest, TaskRunId, TaskSpec};
+use assistd_utils::terminal_text::escape_controls_single_line;
 use chrono::{DateTime, Local, Utc};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
 use super::run_one_shot;
-use super::terminal_text::escape_controls_single_line;
 
 #[derive(Args)]
 pub(crate) struct TaskArgs {

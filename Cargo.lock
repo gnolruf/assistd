@@ -155,10 +155,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "assistd-chat"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "assistd-config",
+ "assistd-ipc",
+ "assistd-utils",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "futures-util",
+ "image",
+ "pulldown-cmark",
+ "ratatui",
+ "ratatui-image",
+ "rustix 1.1.6",
+ "serde_json",
+ "shlex 2.0.1",
+ "tempfile",
+ "textwrap",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "assistd-cli"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "assistd-chat",
  "assistd-config",
  "assistd-core",
  "assistd-embed",
@@ -174,25 +205,15 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
- "crossterm",
  "dirs",
  "futures-util",
- "image",
  "ksni",
  "parking_lot 0.13.0",
- "pulldown-cmark",
- "ratatui",
- "ratatui-image",
- "rustix 1.1.6",
  "serde_json",
- "shlex 2.0.1",
  "tempfile",
- "textwrap",
  "tokio",
  "tokio-util",
- "toml",
  "tracing",
- "tracing-appender",
  "tracing-subscriber",
  "uuid",
  "zbus",
@@ -275,6 +296,7 @@ dependencies = [
  "assistd-utils",
  "base64 0.23.1",
  "chrono",
+ "infer",
  "rustix 1.1.6",
  "serde",
  "serde_json",
@@ -289,7 +311,6 @@ version = "0.6.0"
 dependencies = [
  "assistd-config",
  "assistd-ipc",
- "assistd-tools",
  "assistd-utils",
  "async-trait",
  "base64 0.23.1",
@@ -310,6 +331,7 @@ name = "assistd-mcp"
 version = "0.6.0"
 dependencies = [
  "assistd-config",
+ "assistd-ipc",
  "assistd-tools",
  "assistd-utils",
  "async-trait",
