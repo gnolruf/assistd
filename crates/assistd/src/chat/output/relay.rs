@@ -128,7 +128,7 @@ pub(in crate::chat) struct RelayStepTrace {
     steps: usize,
     state: StepState,
     calls: Vec<RelayEntry>,
-    /// Tokens its conversation has held, once reported.
+    /// Tokens its history has held, once reported.
     tokens: Option<u32>,
     transcript: OutputPane,
 }

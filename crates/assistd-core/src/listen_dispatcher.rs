@@ -54,7 +54,7 @@ impl ListenTurns {
     }
 
     /// After the running turn ends, start the waiting utterance or else open
-    /// a follow-up window, unless push-to-talk superseded the conversation.
+    /// a follow-up window, unless push-to-talk superseded the exchange.
     fn finish_running(&mut self, state: &Arc<AppState>, listener: &dyn ContinuousListener) {
         let superseded = |heard_at: Instant| {
             listener

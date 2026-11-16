@@ -78,7 +78,7 @@ pub struct Subsystems {
     /// Readiness of the SearXNG instance web search goes through.
     pub web_search: Arc<ReadinessCell<ChildServerStatus>>,
     pub tools_disabled: Option<ToolsDisabled>,
-    /// Keeps each conversation's slot state while another uses the slot.
+    /// Keeps each holder's slot state while another uses the slot.
     pub slot_stash: Option<Arc<SlotStash>>,
 }
 
@@ -145,7 +145,7 @@ impl Subsystems {
         self
     }
 
-    /// Keep each conversation's slot state in `slot_stash` while another uses the slot.
+    /// Keep each holder's slot state in `slot_stash` while another uses the slot.
     pub fn with_slot_stash(mut self, slot_stash: Arc<SlotStash>) -> Self {
         self.slot_stash = Some(slot_stash);
         self

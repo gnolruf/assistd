@@ -1,4 +1,4 @@
-//! The tools a chat turn moves through plan mode with: one asks the user to plan first, the
+//! The tools a user turn moves through plan mode with: one asks the user to plan first, the
 //! other hands the finished plan to the user to accept or revise.
 
 use std::borrow::Cow;

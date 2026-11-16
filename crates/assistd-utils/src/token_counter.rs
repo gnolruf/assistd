@@ -1,7 +1,7 @@
 //! Per-turn token count from a turn's streamed events. llama.cpp emits roughly
 //! one SSE chunk per token, so streamed chunks approximate generated tokens.
 
-/// The daemon's latest conversation sizes and the chunk count when they arrived.
+/// The daemon's latest history sizes and the chunk count when they arrived.
 #[derive(Debug, Clone, Copy)]
 struct ContextSnapshot {
     tokens: u64,
@@ -9,7 +9,7 @@ struct ContextSnapshot {
     chunks_at: u64,
 }
 
-/// Tokens a turn has added to the conversation, and the conversation's size.
+/// Tokens a turn has added to the history, and the history's size.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TokenCounter {
     chunk_count: u64,
@@ -32,7 +32,7 @@ impl TokenCounter {
         self.chunk_count += 1;
     }
 
-    /// Tokens the turn has added to the conversation since the last reset.
+    /// Tokens the turn has added to the history since the last reset.
     pub const fn tokens(&self) -> u64 {
         self.chunk_count + self.unstreamed
     }
@@ -51,12 +51,12 @@ impl TokenCounter {
         });
     }
 
-    /// Conversation tokens: the latest request's size plus chunks streamed since.
+    /// History tokens: the latest request's size plus chunks streamed since.
     pub fn context_tokens(&self) -> Option<u64> {
         self.context.map(|c| c.tokens + self.streamed_since(c))
     }
 
-    /// Tokens the conversation has held in all, compacted ones included.
+    /// Tokens the history has held in all, compacted ones included.
     pub fn total_tokens(&self) -> Option<u64> {
         self.context.map(|c| c.total + self.streamed_since(c))
     }

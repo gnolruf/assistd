@@ -12,7 +12,7 @@ use crate::values::Bounded;
 #[serde(rename_all = "snake_case")]
 pub enum TaskInterruption {
     /// The run suspends at its next model step, a tool call in flight finishing
-    /// first, and resumes once the conversation ends.
+    /// first, and resumes once the user's interaction ends.
     #[default]
     Interrupt,
     /// The message waits for the running task to finish, then goes before the queue.
@@ -27,13 +27,13 @@ choice_setting!(TaskInterruption {
     AfterQueue => "after_queue",
 });
 
-/// How saved tasks share the model with the user's conversation.
+/// How saved tasks share the model with the user's interaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TasksConfig {
     pub interruption: TaskInterruption,
     /// Seconds after a reply finishes, speech included, with no new user turn
-    /// before the conversation ends and the queue resumes, `0..=3600`. The
+    /// before the user's interaction ends and the queue resumes, `0..=3600`. The
     /// wake word's follow-up window keeps it open at least that long; `0` ends it
     /// as soon as the reply does.
     pub resume_after_idle_secs: Bounded<0, 3600>,

@@ -1,5 +1,5 @@
-//! `UserConversation`: whether the user is talking to the model, which keeps task
-//! runs off a lone lane from a turn's start until the conversation has been quiet a while.
+//! `UserInteraction`: whether the user is talking to the model, which keeps task
+//! runs off a lone lane from a turn's start until they have been quiet a while.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-/// Where the user's conversation stands.
+/// Where the user's interaction stands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(in crate::state) enum ConversationState {
+pub(in crate::state) enum InteractionState {
     #[default]
     Idle,
     /// `turns` user turns are waiting for the lane or running.
@@ -20,79 +20,79 @@ pub(in crate::state) enum ConversationState {
         /// Ended on request while talking, so it ends with its last turn.
         ends_with_turn: bool,
     },
-    /// No turn is in flight; the conversation ends at `until`, wall-clock `resumes_at`.
+    /// No turn is in flight; the interaction ends at `until`, wall-clock `resumes_at`.
     Quiet {
         until: Instant,
         resumes_at: DateTime<Utc>,
     },
 }
 
-/// The user's conversation, which holds the task queue while it is not
-/// [`ConversationState::Idle`].
+/// The user's interaction, which holds the task queue while it is not
+/// [`InteractionState::Idle`].
 #[derive(Debug, Default)]
-pub(in crate::state) struct UserConversation {
-    state: watch::Sender<ConversationState>,
+pub(in crate::state) struct UserInteraction {
+    state: watch::Sender<InteractionState>,
 }
 
-impl UserConversation {
-    pub(in crate::state) fn subscribe(&self) -> watch::Receiver<ConversationState> {
+impl UserInteraction {
+    pub(in crate::state) fn subscribe(&self) -> watch::Receiver<InteractionState> {
         self.state.subscribe()
     }
 
-    pub(in crate::state) fn state(&self) -> ConversationState {
+    pub(in crate::state) fn state(&self) -> InteractionState {
         *self.state.borrow()
     }
 
     pub(in crate::state) fn is_open(&self) -> bool {
-        self.state() != ConversationState::Idle
+        self.state() != InteractionState::Idle
     }
 
-    /// Open or continue the conversation with a turn; once its last turn ends the
-    /// conversation stays open for `quiet`.
-    pub(in crate::state) fn begin_turn(self: &Arc<Self>, quiet: Duration) -> ConversationTurn {
+    /// Open or continue the interaction with a turn; once its last turn ends the
+    /// interaction stays open for `quiet`.
+    pub(in crate::state) fn begin_turn(self: &Arc<Self>, quiet: Duration) -> InteractionTurn {
         self.state.send_modify(|state| {
             *state = match *state {
-                ConversationState::Talking {
+                InteractionState::Talking {
                     turns,
                     ends_with_turn,
-                } => ConversationState::Talking {
+                } => InteractionState::Talking {
                     turns: turns.saturating_add(1),
                     ends_with_turn,
                 },
-                ConversationState::Idle | ConversationState::Quiet { .. } => {
-                    ConversationState::Talking {
+                InteractionState::Idle | InteractionState::Quiet { .. } => {
+                    InteractionState::Talking {
                         turns: NonZeroU32::MIN,
                         ends_with_turn: false,
                     }
                 }
             };
         });
-        ConversationTurn {
-            conversation: Arc::clone(self),
+        InteractionTurn {
+            interaction: Arc::clone(self),
             quiet,
         }
     }
 
-    /// End the conversation now, or with its last turn if one is in flight.
+    /// End the interaction now, or with its last turn if one is in flight.
     pub(in crate::state) fn end(&self) {
         self.state.send_if_modified(|state| match state {
-            ConversationState::Idle => false,
-            ConversationState::Quiet { .. } => {
-                *state = ConversationState::Idle;
+            InteractionState::Idle => false,
+            InteractionState::Quiet { .. } => {
+                *state = InteractionState::Idle;
                 true
             }
-            ConversationState::Talking { ends_with_turn, .. } => {
+            InteractionState::Talking { ends_with_turn, .. } => {
                 *ends_with_turn = true;
                 true
             }
         });
     }
 
-    /// End a quiet conversation whose quiet time ran out by `now`.
+    /// End a quiet interaction whose quiet time ran out by `now`.
     pub(in crate::state) fn end_if_quiet_by(&self, now: Instant) {
         self.state.send_if_modified(|state| match *state {
-            ConversationState::Quiet { until, .. } if until <= now => {
-                *state = ConversationState::Idle;
+            InteractionState::Quiet { until, .. } if until <= now => {
+                *state = InteractionState::Idle;
                 true
             }
             _ => false,
@@ -101,7 +101,7 @@ impl UserConversation {
 
     fn end_turn(&self, quiet: Duration) {
         self.state.send_modify(|state| {
-            let ConversationState::Talking {
+            let InteractionState::Talking {
                 turns,
                 ends_with_turn,
             } = *state
@@ -109,12 +109,12 @@ impl UserConversation {
                 return;
             };
             *state = match NonZeroU32::new(turns.get() - 1) {
-                Some(turns) => ConversationState::Talking {
+                Some(turns) => InteractionState::Talking {
                     turns,
                     ends_with_turn,
                 },
-                None if ends_with_turn || quiet.is_zero() => ConversationState::Idle,
-                None => ConversationState::Quiet {
+                None if ends_with_turn || quiet.is_zero() => InteractionState::Idle,
+                None => InteractionState::Quiet {
                     until: Instant::now() + quiet,
                     resumes_at: Utc::now() + quiet,
                 },
@@ -123,22 +123,22 @@ impl UserConversation {
     }
 }
 
-/// One user turn of the conversation, ended when dropped.
+/// One user turn of the interaction, ended when dropped.
 #[derive(Debug)]
-pub(in crate::state) struct ConversationTurn {
-    conversation: Arc<UserConversation>,
+pub(in crate::state) struct InteractionTurn {
+    interaction: Arc<UserInteraction>,
     quiet: Duration,
 }
 
-impl ConversationTurn {
+impl InteractionTurn {
     /// End a turn that never ran, leaving no quiet time behind it.
     pub(in crate::state) fn abandon(mut self) {
         self.quiet = Duration::ZERO;
     }
 }
 
-impl Drop for ConversationTurn {
+impl Drop for InteractionTurn {
     fn drop(&mut self) {
-        self.conversation.end_turn(self.quiet);
+        self.interaction.end_turn(self.quiet);
     }
 }

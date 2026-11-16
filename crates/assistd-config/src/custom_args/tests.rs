@@ -7,7 +7,7 @@ fn parse_for<S: ServerKind>(source: &str) -> Result<Vec<String>, CustomArgsError
 }
 
 fn parse(source: &str) -> Result<Vec<String>, CustomArgsError> {
-    parse_for::<ChatServer>(source)
+    parse_for::<ModelServer>(source)
 }
 
 #[test]
@@ -112,6 +112,6 @@ fn exposing_flags_are_rejected_in_both_spellings() {
 #[test]
 fn serializing_returns_the_source_string() {
     let source = "--flash-attn on  -ot 'exps=CPU'";
-    let custom_args: CustomArgs<ChatServer> = source.parse().expect("parses");
+    let custom_args: CustomArgs<ModelServer> = source.parse().expect("parses");
     assert_eq!(String::from(custom_args), source);
 }

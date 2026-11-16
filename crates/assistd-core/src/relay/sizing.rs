@@ -4,7 +4,7 @@
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 
-/// Bytes of text per token in the estimate, as the chat history counts them.
+/// Bytes of text per token in the estimate, as the history counts them.
 const BYTES_PER_TOKEN: u64 = 4;
 
 /// Parts named in a refusal, largest first.

@@ -22,10 +22,7 @@ async fn task_runs_never_outnumber_the_lanes_beside_the_main_one() {
         .admit(TaskRunId(2))
         .now_or_never()
         .expect("a free lane");
-    assert_ne!(
-        first.slot(ConversationKey::Main),
-        second.slot(ConversationKey::Main)
-    );
+    assert_ne!(first.slot(SlotHolder::Main), second.slot(SlotHolder::Main));
     assert!(!first.on_main_lane() && !second.on_main_lane());
     let third = tokio::spawn({
         let lanes = Arc::clone(&lanes);
@@ -47,7 +44,7 @@ async fn task_runs_never_outnumber_the_lanes_beside_the_main_one() {
         .await
         .expect("the freed lane went unused")
         .unwrap();
-    assert_eq!(third.slot(ConversationKey::Main), SlotAssignment::Pinned(1));
+    assert_eq!(third.slot(SlotHolder::Main), SlotAssignment::Pinned(1));
 }
 
 #[tokio::test]
@@ -66,8 +63,8 @@ async fn with_one_lane_a_task_run_waits_out_the_user_turn_and_holds_off_the_next
         .await
         .expect("the run never took the free lane")
         .unwrap();
-    let key = ConversationKey::TaskRun(TaskRunId(1));
-    assert_eq!(lease.slot(key), SlotAssignment::Shared(key));
+    let holder = SlotHolder::TaskRun(TaskRunId(1));
+    assert_eq!(lease.slot(holder), SlotAssignment::Shared(holder));
     assert_eq!(lanes.holders(), [LaneHolder::Task { run: TaskRunId(1) }]);
     assert!(lanes.main.try_lock().is_err(), "a user turn could start");
 

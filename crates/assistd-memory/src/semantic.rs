@@ -44,7 +44,7 @@ pub enum ChunkLocator {
 }
 
 impl ChunkLocator {
-    /// Whether both chunks were cut from the same source: one chat session, or one document.
+    /// Whether both chunks were cut from the same source: one session, or one document.
     pub fn same_source(&self, other: &Self) -> bool {
         match (self, other) {
             (
@@ -152,8 +152,8 @@ pub enum SessionScope {
 /// Which sources a chunk search ranks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkScope {
-    /// Chat messages from the sessions in scope.
-    Chats(SessionScope),
+    /// Messages from the sessions in scope.
+    Messages(SessionScope),
     /// Every indexed document.
     Documents,
 }

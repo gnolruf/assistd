@@ -40,7 +40,7 @@ use crate::vision::VisionRevalidator;
 
 const SENTENCE_PREVIEW_CHARS: usize = 60;
 
-/// One prompt to run as a turn of the user's conversation.
+/// One prompt to run as a user turn.
 #[derive(Debug)]
 pub struct Query {
     /// Tags every event of the turn.
@@ -116,7 +116,7 @@ pub(super) struct TurnDeps {
     pub(super) bus: EventBus,
 }
 
-/// Runs the turns of the user's conversation and handles the chat's focus reports,
+/// Runs user turns and handles the chat's focus reports,
 /// which shape how a turn replies.
 #[derive(Debug)]
 pub struct TurnService {
@@ -166,7 +166,7 @@ impl TurnService {
         let MainLaneTurn {
             lane: agent_guard,
             user_turn,
-            turn: _conversation_turn,
+            turn: _interaction_turn,
         } = main_lane;
         if !self.revalidate_vision(&cancel).await {
             return finish_interrupted_before_start(&tx, id).await;
@@ -300,7 +300,7 @@ impl TurnService {
 
     async fn active_branch_host_reads(&self) -> HostReads {
         let (_session, branch) = self.deps.session_ctx.current().await;
-        let offered = Planner::chat_tools(&self.deps.tools.snapshot());
+        let offered = Planner::user_turn_tools(&self.deps.tools.snapshot());
         self.host_reads
             .of(branch, self.deps.transcript.store().as_ref(), &offered)
             .await
@@ -376,7 +376,7 @@ impl TurnService {
         let llm = self.deps.llm.clone();
         let tools = self.deps.tools.snapshot();
         if !plan.is_off() {
-            return self.deps.planner.chat_agent(turn, llm, &tools);
+            return self.deps.planner.user_turn_agent(turn, llm, &tools);
         }
         let health: Option<Arc<dyn LlmHealthProbe>> = Some(Arc::new(PresenceLlmHealthProbe::new(
             self.deps.presence.clone(),

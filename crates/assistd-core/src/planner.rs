@@ -1,4 +1,4 @@
-//! Plan mode: a turn over a conversation that may run only what asks for nothing, ending in a
+//! Plan mode: a turn over a backend that may run only what asks for nothing, ending in a
 //! plan the user accepts or revises, or in a task prompt rewritten with a [`Plan`] of its steps.
 
 use std::borrow::Cow;
@@ -34,7 +34,7 @@ use draft::RefinementDraft;
 use recommend::recommended_mode;
 use switch::{EnterPlanModeTool, ExitPlanModeTool};
 
-/// Opens the note rendered at the tail of the conversation on every step of a planning turn.
+/// Opens the note rendered at the tail of the history on every step of a planning turn.
 const PLAN_MODE_RULES: &str = "Plan mode: do not do the work yet. Find out what it needs \
      using only commands that change nothing. Anything that would ask for confirmation is \
      refused while planning; when a command is refused, note that the step needs approval \
@@ -46,8 +46,8 @@ const FINDINGS_ENDING: &str = "Once you know enough, reply with only a short lis
      refused. Do not write the plan or the steps yet; you will be asked for them next, in a \
      fixed format.";
 
-/// Ends the note of a chat turn while it plans.
-const CHAT_PLAN_ENDING: &str = "If something about the work is unclear, ask the user and \
+/// Ends the note of a user turn while it plans.
+const USER_TURN_PLAN_ENDING: &str = "If something about the work is unclear, ask the user and \
      stop. Once you know enough, call exit_plan_mode with the whole plan; do not write it as \
      a reply. The user accepts it there, and you then carry it out, or tells you what to \
      change.";
@@ -80,7 +80,7 @@ const PLAN_LAYOUT: &str = "`summary` says in a few lines \
 pub enum PlanAsk {
     /// Plan this piece of work.
     Work(String),
-    /// Revise `shown`, what the user was given from the conversation's last answer, with
+    /// Revise `shown`, what the user was given from the backend's last answer, with
     /// `feedback`.
     Revise { shown: String, feedback: String },
 }
@@ -165,14 +165,14 @@ impl Planner {
         }
     }
 
-    /// An agent for the chat turn `turn` over `conversation`. It acts with `acting` and a tool
+    /// An agent for the user turn `turn` over `backend`. It acts with `acting` and a tool
     /// that asks the user to plan first; while the turn plans, it is offered the planning tools
-    /// and one that hands the plan to the user, with the plan-mode note at the conversation's
+    /// and one that hands the plan to the user, with the plan-mode note at the history's
     /// tail.
-    pub fn chat_agent(
+    pub fn user_turn_agent(
         &self,
         turn: &TurnContext,
-        conversation: Arc<dyn TurnBackend>,
+        backend: Arc<dyn TurnBackend>,
         acting: &ToolRegistry,
     ) -> Agent {
         let mut acting = acting.clone();
@@ -180,7 +180,7 @@ impl Planner {
         let mut planning = ToolRegistry::clone(&self.tools.registry);
         planning.register(ExitPlanModeTool);
         Agent::new(
-            PlanModeConversation::new(conversation, CHAT_PLAN_ENDING, turn.clone()),
+            PlanModeBackend::new(backend, USER_TURN_PLAN_ENDING, turn.clone()),
             Arc::new(acting),
             self.health.clone(),
             self.tool_deadline,
@@ -188,33 +188,33 @@ impl Planner {
         .with_planning_tools(Arc::new(planning))
     }
 
-    /// Every tool a chat turn over `acting` may have called, acting or planning.
-    pub(crate) fn chat_tools(acting: &ToolRegistry) -> ToolRegistry {
+    /// Every tool a user turn over `acting` may have called, acting or planning.
+    pub(crate) fn user_turn_tools(acting: &ToolRegistry) -> ToolRegistry {
         let mut tools = acting.clone();
         tools.register(EnterPlanModeTool);
         tools.register(ExitPlanModeTool);
         tools
     }
 
-    /// Run a planning turn on `ask` in `conversation`, streaming it on `tx`, then ask for the
+    /// Run a planning turn on `ask` over `backend`, streaming it on `tx`, then ask for the
     /// task prompt rewritten as a brief for an unattended run, with the plan of that brief,
     /// each action checked against the machine and `permissions`, and the mode its runs are
     /// best given.
     pub async fn refine(
         &self,
-        conversation: Arc<dyn LlmBackend>,
+        backend: Arc<dyn LlmBackend>,
         ask: PlanAsk,
         permissions: WorkPermissions,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
         cancel: CancellationToken,
     ) -> Result<Refinement, PlanError> {
-        let exploring = Arc::clone(&conversation) as Arc<dyn TurnBackend>;
+        let exploring = Arc::clone(&backend) as Arc<dyn TurnBackend>;
         self.explore(exploring, ask, request_id, tx, &cancel)
             .await?;
         let instruction = format!("{REFINE_INSTRUCTION} {PLAN_LAYOUT}");
         let draft: RefinementDraft = draft_of(
-            conversation.as_ref(),
+            backend.as_ref(),
             instruction,
             RefinementDraft::schema(),
             &cancel,
@@ -239,10 +239,10 @@ impl Planner {
         })
     }
 
-    /// Run the planning turn on `ask` over `conversation` in plan mode.
+    /// Run the planning turn on `ask` over `backend` in plan mode.
     async fn explore(
         &self,
-        conversation: Arc<dyn TurnBackend>,
+        backend: Arc<dyn TurnBackend>,
         ask: PlanAsk,
         request_id: String,
         tx: mpsc::Sender<LlmEvent>,
@@ -250,7 +250,7 @@ impl Planner {
     ) -> Result<(), PlanError> {
         let turn = TurnContext::answered_by(ConfirmRouter::for_planning(request_id));
         let agent = Agent::new(
-            PlanModeConversation::new(conversation, FINDINGS_ENDING, turn.clone()),
+            PlanModeBackend::new(backend, FINDINGS_ENDING, turn.clone()),
             Arc::clone(&self.tools.registry),
             self.health.clone(),
             self.tool_deadline,
@@ -276,9 +276,9 @@ impl PlanAsk {
     }
 }
 
-/// Ask `conversation` for its answer to `instruction`, held to `schema` by grammar.
+/// Ask `backend` for its answer to `instruction`, held to `schema` by grammar.
 async fn draft_of<T: DeserializeOwned>(
-    conversation: &dyn LlmBackend,
+    backend: &dyn LlmBackend,
     instruction: String,
     schema: Map<String, Value>,
     cancel: &CancellationToken,
@@ -286,15 +286,15 @@ async fn draft_of<T: DeserializeOwned>(
     let reply = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(PlanError::Cancelled),
-        reply = conversation.complete_with_schema(instruction, schema) => reply?,
+        reply = backend.complete_with_schema(instruction, schema) => reply?,
     };
     serde_json::from_str(&reply).map_err(PlanError::Unreadable)
 }
 
-/// A conversation whose every step, while its turn plans, ends with the plan-mode note,
+/// A backend whose every step, while its turn plans, ends with the plan-mode note,
 /// ahead of any one-shot note the agent loop adds.
 #[derive(Debug)]
-struct PlanModeConversation {
+struct PlanModeBackend {
     inner: Arc<dyn TurnBackend>,
     turn: TurnContext,
     /// [`PLAN_MODE_RULES`] and how the turn should end.
@@ -302,7 +302,7 @@ struct PlanModeConversation {
     note: Mutex<Option<String>>,
 }
 
-impl PlanModeConversation {
+impl PlanModeBackend {
     /// `inner` with the plan-mode rules and then `ending` at its tail while `turn` plans.
     fn new(inner: Arc<dyn TurnBackend>, ending: &str, turn: TurnContext) -> Arc<Self> {
         Arc::new(Self {
@@ -315,7 +315,7 @@ impl PlanModeConversation {
 }
 
 #[async_trait]
-impl TurnBackend for PlanModeConversation {
+impl TurnBackend for PlanModeBackend {
     async fn push_user(&self, text: String, attachments: Vec<Attachment>) -> LlmResult<()> {
         self.inner.push_user(text, attachments).await
     }

@@ -142,7 +142,7 @@ pub const DEFAULT_EMBEDDING_SERVER_BINARY: &str = "llama-server";
 pub const DEFAULT_EMBEDDING_READY_TIMEOUT_SECS: NonZeroU64 = nz64(300);
 pub const DEFAULT_EMBEDDING_HOST: LoopbackAddr = LoopbackAddr::LOCALHOST;
 pub const DEFAULT_EMBEDDING_PORT: NonZeroU16 = nz16(8386);
-/// CPU-only so the embedder never contends with the chat model for VRAM.
+/// CPU-only so the embedder never contends with the agent's model for VRAM.
 pub const DEFAULT_EMBEDDING_GPU_LAYERS: u32 = 0;
 /// Its bound matches the largest `limit` the `reminisce` tool accepts.
 pub const DEFAULT_EMBEDDING_TOP_K: Bounded<1, 20> = bounded(5);

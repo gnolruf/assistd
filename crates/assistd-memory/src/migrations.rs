@@ -458,7 +458,7 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_root ON documents(root_id);
 ";
 
-/// V19: the session the user's conversation is on is the one `active_session` row, in
+/// V19: the session the user's turns are on is the one `active_session` row, in
 /// place of sessions being open or ended, and a task run's session names its run.
 const V19_SQL: &str = r"
 DROP INDEX idx_sessions_resumable;

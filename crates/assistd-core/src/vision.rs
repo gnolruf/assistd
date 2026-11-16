@@ -51,7 +51,7 @@ impl VisionRevalidator {
         Arc::clone(&self.gate)
     }
 
-    /// Watch how many conversations the server decodes at once.
+    /// Watch how many requests the server decodes at once.
     pub fn slot_count(&self) -> watch::Receiver<NonZeroU32> {
         self.slots.subscribe()
     }

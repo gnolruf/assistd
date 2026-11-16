@@ -467,8 +467,8 @@ pub struct TaskRunSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuspendReason {
-    /// The user's conversation holds the model.
-    UserConversation,
+    /// The user's interaction holds the model.
+    UserInteraction,
     /// Another process needs the GPU.
     GpuBusy,
 }
@@ -487,22 +487,22 @@ pub enum TaskQueueOp {
     CancelTurn { id: String },
     /// Start no more runs until [`TaskQueueOp::Resume`]; running ones carry on.
     Pause,
-    /// Start runs again, ending the user's conversation if it holds the queue.
+    /// Start runs again, ending the user's interaction if it holds the queue.
     Resume,
 }
 
 /// The task queue: its unfinished runs and waiting user turns, what holds each model
-/// lane, and whether it is paused or held for the user's conversation.
+/// lane, and whether it is paused or held for the user's interaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskQueueSnapshot {
     /// Running runs in the order they started, then waiting items in the order they start.
     pub items: Vec<QueueItem>,
-    /// One entry per lane the model can decode at once; lane 0 is the main conversation's.
+    /// One entry per lane the model can decode at once; lane 0 is the main backend's.
     pub lanes: Vec<LaneHolder>,
     pub paused: bool,
-    /// Set while the user's conversation keeps runs from the only lane.
+    /// Set while the user's interaction keeps runs from the only lane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held: Option<ConversationHold>,
+    pub held: Option<InteractionHold>,
 }
 
 /// One unfinished item in a [`TaskQueueSnapshot`].
@@ -526,9 +526,9 @@ pub enum QueueItem {
     UserTurn { id: String, preview: String },
 }
 
-/// The user's conversation holding the task queue.
+/// The user's interaction holding the task queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConversationHold {
+pub struct InteractionHold {
     /// When the queue resumes unless another user turn arrives; `None` while a turn is
     /// in flight.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,7 +539,7 @@ pub struct ConversationHold {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "holder", rename_all = "snake_case")]
 pub enum LaneHolder {
-    /// The main conversation, whether or not a turn is running in it.
+    /// The main backend, whether or not a turn is running on it.
     Main,
     Task {
         run: TaskRunId,
@@ -565,7 +565,7 @@ pub enum TaskRequest {
     Delete { task: TaskId },
     /// Turn a task's triggers on or off. Emits the updated `Task`, then `Done`.
     SetEnabled { task: TaskId, enabled: bool },
-    /// Queue a run of `task` in a conversation of its own, whose events are broadcast as
+    /// Queue a run of `task` on a backend of its own, whose events are broadcast as
     /// `TaskRun`. Emits `TaskRunQueued`, then `Done`, without waiting for the run.
     Run { task: TaskId },
     /// Cancel run `run`, dropping its turn; errors when it is not queued or running.
@@ -588,7 +588,7 @@ pub enum TaskRequest {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         always: bool,
     },
-    /// Explore task prompt `prompt` in a conversation of its own and rewrite it as a brief for
+    /// Explore task prompt `prompt` on a backend of its own and rewrite it as a brief for
     /// an unattended run under `mode` and `allowed_hosts`, or with `feedback` revise the last
     /// rewrite of it; a new refine ends the previous one. Streams the turn wrapped in
     /// `TaskPlan`, then emits `TaskRefined` and `Done`. Saves nothing. Errors when `mode` is

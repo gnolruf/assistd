@@ -164,7 +164,7 @@ pub struct BranchInfo {
     pub task_run: Option<TaskRunSummary>,
 }
 
-/// One persisted message on a branch, as replayed into the in-memory conversation.
+/// One persisted message on a branch, as replayed into the in-memory history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryRow {
     pub message_id: MessageId,
@@ -178,7 +178,7 @@ pub struct HistoryRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnStats {
     pub duration_ms: u64,
-    /// Tokens the turn added to the conversation.
+    /// Tokens the turn added to the history.
     pub generated_tokens: u64,
 }
 

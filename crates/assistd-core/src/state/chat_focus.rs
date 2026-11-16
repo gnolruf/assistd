@@ -109,7 +109,7 @@ impl TurnService {
         tx: EventSink,
     ) {
         self.chat_focus.close(peer_pid);
-        self.deps.admission.conversation.end();
+        self.deps.admission.interaction.end();
         self.refresh_chat_focus(&id);
         let _ = tx.send(Event::new(id, EventBody::Done)).await;
     }

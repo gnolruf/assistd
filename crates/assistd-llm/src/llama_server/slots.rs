@@ -1,5 +1,5 @@
 //! The private directory llama-server saves and restores slot state in, and
-//! the stash that keeps each conversation's slot state while others use the slot.
+//! the stash that keeps each holder's slot state while others use the slot.
 
 use std::fs::{self, DirBuilder};
 use std::future::Future;
@@ -25,9 +25,9 @@ use super::error::LlamaServerError;
 use crate::LlmHealthProbe;
 
 const OWNER_ONLY: u32 = 0o700;
-/// The main conversation's slot, the only one with `-np 1`.
+/// The main holder's slot, the only one with `-np 1`.
 const SLOT_PATH: &str = "/slots/0";
-/// Task conversations whose slot files are kept beside the main conversation's.
+/// Task runs whose slot files are kept beside the main holder's.
 const MAX_SUSPENDED_RUNS: usize = 2;
 const SLOT_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const SLOT_RESPONSE_MAX: usize = 64 * 1024;
@@ -65,16 +65,16 @@ impl SlotDir {
     }
 }
 
-/// A conversation whose slot state the [`SlotStash`] keeps while another uses the slot.
+/// A backend whose slot state the [`SlotStash`] keeps while another uses the slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ConversationKey {
+pub enum SlotHolder {
     Main,
     TaskRun(TaskRunId),
-    /// The planning conversation refining a task prompt.
+    /// The planning turn refining a task prompt.
     TaskRefine,
 }
 
-impl ConversationKey {
+impl SlotHolder {
     fn file_name(self) -> String {
         match self {
             Self::Main => "main.bin".to_string(),
@@ -84,20 +84,19 @@ impl ConversationKey {
     }
 }
 
-/// Which of the chat server's slots a conversation's requests use.
+/// Which of the model server's slots a backend's requests use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotAssignment {
-    /// Whichever slot the server picks; nothing is kept for the conversation.
+    /// Whichever slot the server picks; nothing is kept for the backend.
     Unassigned,
-    /// The main conversation's slot, the conversation's state stashed under this key
-    /// while another uses it.
-    Shared(ConversationKey),
-    /// The slot with this index, which no other conversation is given.
+    /// The main holder's slot, its state stashed for this holder while another uses it.
+    Shared(SlotHolder),
+    /// The slot with this index, which no other backend is given.
     Pinned(u32),
 }
 
-/// Keeps each conversation's state of the main conversation's slot in a file of
-/// its own while other conversations use the slot, so switching back skips
+/// Keeps each holder's state of the main holder's slot in a file of
+/// its own while other holders use the slot, so switching back skips
 /// re-processing its context. Every failure is logged and costs only that.
 #[derive(Debug)]
 pub struct SlotStash {
@@ -148,18 +147,18 @@ impl SlotStash {
         self
     }
 
-    /// Hand the slot to `key`: save it for the conversation holding it, then
-    /// restore `key`'s saved state, if any. Call before every request `key` makes.
+    /// Hand the slot to `holder`: save it for whoever holds it, then
+    /// restore `holder`'s saved state, if any. Call before every request `holder` makes.
     /// A switch that has begun finishes even if this future is dropped.
-    pub async fn switch_to(&self, key: ConversationKey) {
-        self.apply(Transition::SwitchTo(key)).await;
+    pub async fn switch_to(&self, holder: SlotHolder) {
+        self.apply(Transition::SwitchTo(holder)).await;
     }
 
     /// Run `group` of unkeyed requests between a save and a restore of the
-    /// conversation holding the slot. If this future is dropped, that
-    /// conversation's next [`Self::switch_to`] restores it. Hold the agent turn
-    /// lock across the call so no other conversation lands in between. With more
-    /// than one slot the main conversation keeps its slot, so `group` just runs.
+    /// slot's holder. If this future is dropped, that holder's next
+    /// [`Self::switch_to`] restores it. Hold the agent turn lock across the
+    /// call so no other holder lands in between. With more than one slot the
+    /// main holder keeps its slot, so `group` just runs.
     pub async fn preserve_across<F: Future>(&self, group: F) -> F::Output {
         if self.slots.borrow().get() > 1 {
             return group.await;
@@ -172,15 +171,15 @@ impl SlotStash {
         output
     }
 
-    /// Forget `key`'s conversation, which has ended, deleting its saved state
+    /// Forget `holder`, whose work has ended, deleting its saved state
     /// once every transition begun earlier has finished.
-    pub async fn end(&self, key: ConversationKey) {
-        self.apply(Transition::End(key)).await;
+    pub async fn end(&self, holder: SlotHolder) {
+        self.apply(Transition::End(holder)).await;
     }
 
     /// Queue `transition` behind those already begun and wait for it, returning
-    /// the conversation that held the slot before it.
-    async fn apply(&self, transition: Transition) -> Option<ConversationKey> {
+    /// whoever held the slot before it.
+    async fn apply(&self, transition: Transition) -> Option<SlotHolder> {
         let (done, applied) = oneshot::channel();
         let queued = QueuedTransition { transition, done };
         self.transitions.send(queued).await.ok()?;
@@ -190,17 +189,17 @@ impl SlotStash {
 
 #[derive(Debug)]
 enum Transition {
-    SwitchTo(ConversationKey),
+    SwitchTo(SlotHolder),
     /// Save the slot for its occupant and leave it to unkeyed requests.
     SetAside,
-    End(ConversationKey),
+    End(SlotHolder),
 }
 
 #[derive(Debug)]
 struct QueuedTransition {
     transition: Transition,
-    /// Sent the conversation that held the slot before the transition.
-    done: oneshot::Sender<Option<ConversationKey>>,
+    /// Sent whoever held the slot before the transition.
+    done: oneshot::Sender<Option<SlotHolder>>,
 }
 
 /// Applies the stash's transitions one at a time on a task of its own, so each
@@ -219,37 +218,37 @@ impl SlotWorker {
         while let Some(QueuedTransition { transition, done }) = queued.recv().await {
             let previous_occupant = self.state.occupant;
             match transition {
-                Transition::SwitchTo(key) => self.switch_to(key).await,
+                Transition::SwitchTo(holder) => self.switch_to(holder).await,
                 Transition::SetAside => self.set_aside().await,
-                Transition::End(key) => self.end(key).await,
+                Transition::End(holder) => self.end(holder).await,
             }
             let _ = done.send(previous_occupant);
         }
     }
 
-    async fn switch_to(&mut self, key: ConversationKey) {
-        if self.state.occupant == Some(key) {
+    async fn switch_to(&mut self, holder: SlotHolder) {
+        if self.state.occupant == Some(holder) {
             return;
         }
         self.set_aside().await;
-        if let Some(saved) = self.state.saved_for(key) {
-            self.restore(key, saved).await;
-            self.state.forget(key);
+        if let Some(saved) = self.state.saved_for(holder) {
+            self.restore(holder, saved).await;
+            self.state.forget(holder);
         }
-        self.state.occupant = Some(key);
-        self.remove_file(key).await;
+        self.state.occupant = Some(holder);
+        self.remove_file(holder).await;
     }
 
-    async fn end(&mut self, key: ConversationKey) {
-        if self.state.occupant == Some(key) {
+    async fn end(&mut self, holder: SlotHolder) {
+        if self.state.occupant == Some(holder) {
             self.state.occupant = None;
         }
-        self.state.forget(key);
-        self.remove_file(key).await;
+        self.state.forget(holder);
+        self.remove_file(holder).await;
     }
 
     /// Save the slot for its occupant, which holds it until the save returns,
-    /// evicting the oldest suspended task conversation past [`MAX_SUSPENDED_RUNS`].
+    /// evicting the oldest suspended task run past [`MAX_SUSPENDED_RUNS`].
     async fn set_aside(&mut self) {
         let Some(owner) = self.state.occupant else {
             return;
@@ -263,17 +262,17 @@ impl SlotWorker {
         }
     }
 
-    async fn save(&self, key: ConversationKey) -> Option<SavedSlot> {
+    async fn save(&self, holder: SlotHolder) -> Option<SavedSlot> {
         let Ok(pid) = self.serving_pid().await else {
-            warn!(target: "assistd::slots", ?key, "llama-server is not serving; slot not saved");
+            warn!(target: "assistd::slots", ?holder, "llama-server is not serving; slot not saved");
             return None;
         };
         let started = Instant::now();
-        match self.post_action("save", key).await {
+        match self.post_action("save", holder).await {
             Ok(response) => {
                 debug!(
                     target: "assistd::slots",
-                    ?key,
+                    ?holder,
                     tokens = response.n_saved.unwrap_or_default(),
                     size = %human_size(response.n_written.unwrap_or_default()),
                     elapsed = ?started.elapsed(),
@@ -282,37 +281,37 @@ impl SlotWorker {
                 Some(SavedSlot { pid })
             }
             Err(e) => {
-                warn!(target: "assistd::slots", ?key, "saving the slot failed: {e}");
+                warn!(target: "assistd::slots", ?holder, "saving the slot failed: {e}");
                 None
             }
         }
     }
 
-    async fn restore(&self, key: ConversationKey, saved: SavedSlot) {
+    async fn restore(&self, holder: SlotHolder, saved: SavedSlot) {
         if self.serving_pid().await.ok() != Some(saved.pid) {
             warn!(
                 target: "assistd::slots",
-                ?key,
+                ?holder,
                 "llama-server restarted since the slot was saved; restore skipped"
             );
             return;
         }
         let started = Instant::now();
-        match self.post_action("restore", key).await {
+        match self.post_action("restore", holder).await {
             Ok(response) => debug!(
                 target: "assistd::slots",
-                ?key,
+                ?holder,
                 tokens = response.n_restored.unwrap_or_default(),
                 size = %human_size(response.n_read.unwrap_or_default()),
                 elapsed = ?started.elapsed(),
                 "restored slot"
             ),
-            Err(e) => warn!(target: "assistd::slots", ?key, "restoring the slot failed: {e}"),
+            Err(e) => warn!(target: "assistd::slots", ?holder, "restoring the slot failed: {e}"),
         }
     }
 
-    async fn remove_file(&self, key: ConversationKey) {
-        let path = self.slot_dir.path().join(key.file_name());
+    async fn remove_file(&self, holder: SlotHolder) {
+        let path = self.slot_dir.path().join(holder.file_name());
         if let Err(e) = tokio::fs::remove_file(&path).await
             && e.kind() != ErrorKind::NotFound
         {
@@ -339,9 +338,9 @@ impl SlotWorker {
     async fn post_action(
         &self,
         action: &str,
-        key: ConversationKey,
+        holder: SlotHolder,
     ) -> Result<SlotActionResponse, LlamaServerError> {
-        let filename = key.file_name();
+        let filename = holder.file_name();
         let body = SlotActionRequest {
             model: &self.model,
             filename: &filename,
@@ -366,31 +365,32 @@ impl SlotWorker {
     }
 }
 
-/// Which conversation holds the slot, `None` while unkeyed requests use it, and
-/// the saved state of those set aside, oldest first; a key is held or saved, never both.
+/// Who holds the slot, `None` while unkeyed requests use it, and the saved state
+/// of those set aside, oldest first; a holder has the slot or a saved state, never both.
 #[derive(Debug, Default)]
 struct StashState {
-    occupant: Option<ConversationKey>,
-    saved: Vec<(ConversationKey, SavedSlot)>,
+    occupant: Option<SlotHolder>,
+    saved: Vec<(SlotHolder, SavedSlot)>,
 }
 
 impl StashState {
-    fn saved_for(&self, key: ConversationKey) -> Option<SavedSlot> {
+    fn saved_for(&self, holder: SlotHolder) -> Option<SavedSlot> {
         self.saved
             .iter()
-            .find_map(|(saved_key, saved)| (*saved_key == key).then_some(*saved))
+            .find_map(|(saved_holder, saved)| (*saved_holder == holder).then_some(*saved))
     }
 
-    fn forget(&mut self, key: ConversationKey) {
-        self.saved.retain(|(saved_key, _)| *saved_key != key);
+    fn forget(&mut self, holder: SlotHolder) {
+        self.saved
+            .retain(|(saved_holder, _)| *saved_holder != holder);
     }
 
-    fn evict_past_limit(&mut self) -> Option<ConversationKey> {
+    fn evict_past_limit(&mut self) -> Option<SlotHolder> {
         let mut runs = self
             .saved
             .iter()
             .enumerate()
-            .filter(|(_, (key, _))| *key != ConversationKey::Main);
+            .filter(|(_, (holder, _))| *holder != SlotHolder::Main);
         let (oldest, _) = runs.next()?;
         (runs.count() >= MAX_SUSPENDED_RUNS).then(|| self.saved.remove(oldest).0)
     }

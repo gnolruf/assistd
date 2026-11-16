@@ -109,7 +109,7 @@ pub struct MicContinuousListener {
     follow_up: Option<Duration>,
     /// The latest signal for the running session; each session subscribes
     /// at start, so signals sent while stopped are ignored.
-    conversation_tx: watch::Sender<Option<ConversationSignal>>,
+    signal_tx: watch::Sender<Option<SessionSignal>>,
     last_push_to_talk: parking_lot::Mutex<Option<Instant>>,
     /// `Off` exactly when no session's pipeline is running.
     phase_tx: watch::Sender<ListenPhase>,
@@ -120,9 +120,9 @@ pub struct MicContinuousListener {
     listen_mode: Mutex<ListenMode>,
 }
 
-/// Steers the running session's conversation from outside it.
+/// Steers the running session from outside it.
 #[derive(Debug, Clone, Copy)]
-enum ConversationSignal {
+enum SessionSignal {
     /// A reply to a wake-word command ended at this instant.
     FollowUp(Instant),
     /// Push-to-talk took the mic; act on nothing more this session.
@@ -268,7 +268,7 @@ impl MicContinuousListener {
             command_timeout: Duration::from_millis(config.wakeword.command_timeout_ms.get().into()),
             follow_up: (config.wakeword.follow_up_ms.get() > 0)
                 .then(|| Duration::from_millis(config.wakeword.follow_up_ms.get().into())),
-            conversation_tx: watch::channel(None).0,
+            signal_tx: watch::channel(None).0,
             last_push_to_talk: parking_lot::Mutex::new(None),
             phase_tx,
             heard,
@@ -302,7 +302,7 @@ impl MicContinuousListener {
             },
             TranscribeInputs {
                 utterances: pcm_rx,
-                signals: self.conversation_tx.subscribe(),
+                signals: self.signal_tx.subscribe(),
             },
             BargeIn::new(Arc::clone(&self.speech)),
         ));
@@ -416,8 +416,7 @@ impl ContinuousListener for MicContinuousListener {
         if let Some(session) = &session {
             session.capture_stop.request();
         }
-        self.conversation_tx
-            .send_replace(Some(ConversationSignal::Abandon));
+        self.signal_tx.send_replace(Some(SessionSignal::Abandon));
         shut_down(session).await;
         Ok(())
     }
@@ -439,8 +438,8 @@ impl ContinuousListener for MicContinuousListener {
     }
 
     fn open_follow_up(&self) {
-        self.conversation_tx
-            .send_replace(Some(ConversationSignal::FollowUp(Instant::now())));
+        self.signal_tx
+            .send_replace(Some(SessionSignal::FollowUp(Instant::now())));
     }
 
     fn set_replying(&self, replying: bool) {
@@ -462,14 +461,14 @@ impl ContinuousListener for MicContinuousListener {
 #[derive(Debug)]
 struct TranscribeInputs {
     utterances: mpsc::Receiver<ListenAudio>,
-    signals: watch::Receiver<Option<ConversationSignal>>,
+    signals: watch::Receiver<Option<SessionSignal>>,
 }
 
 impl TranscribeInputs {
     /// Whether push-to-talk took the mic since the last signal was applied.
     fn abandoned(&self) -> bool {
         self.signals.has_changed().unwrap_or(false)
-            && matches!(*self.signals.borrow(), Some(ConversationSignal::Abandon))
+            && matches!(*self.signals.borrow(), Some(SessionSignal::Abandon))
     }
 
     /// The next audio, or `None` once its sender is gone or push-to-talk
@@ -488,10 +487,10 @@ impl TranscribeInputs {
                 biased;
                 Ok(()) = self.signals.changed() => {
                     match *self.signals.borrow_and_update() {
-                        Some(ConversationSignal::FollowUp(reply_ended)) => {
+                        Some(SessionSignal::FollowUp(reply_ended)) => {
                             gate.open_follow_up(reply_ended);
                         }
-                        Some(ConversationSignal::Abandon) => return None,
+                        Some(SessionSignal::Abandon) => return None,
                         None => {}
                     }
                     outputs.set_phase(gate.phase(Instant::now()));

@@ -484,7 +484,7 @@ pub(super) fn run_state_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<TaskRu
         RUN_RUNNING => TaskRunState::Running,
         RUN_SUSPENDED => TaskRunState::Suspended {
             reason: match row.get::<_, i64>(idx + 1)? {
-                0 => SuspendReason::UserConversation,
+                0 => SuspendReason::UserInteraction,
                 1 => SuspendReason::GpuBusy,
                 _ => return Err(out_of_range()),
             },
@@ -604,7 +604,7 @@ fn fail_interrupted_runs(tx: &Transaction<'_>, reason: &str, now: i64) -> rusqli
 
 fn suspend_reason_code(reason: SuspendReason) -> i64 {
     match reason {
-        SuspendReason::UserConversation => 0,
+        SuspendReason::UserInteraction => 0,
         SuspendReason::GpuBusy => 1,
     }
 }

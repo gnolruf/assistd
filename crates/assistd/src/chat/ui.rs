@@ -635,7 +635,7 @@ fn render_thumbnails(
 }
 
 /// Spinner row for an open reply with its elapsed time, the turn's tokens,
-/// the conversation's current size and its total including compacted
+/// the history's current size and its total including compacted
 /// history, plus a warning when the daemon is about to compact history.
 fn render_generating_row(
     frame: &mut Frame<'_>,

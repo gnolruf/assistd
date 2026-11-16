@@ -4,7 +4,7 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 use assistd_config::TaskInterruption;
-use assistd_ipc::{ConversationHold, EventBody, SuspendReason};
+use assistd_ipc::{EventBody, InteractionHold, SuspendReason};
 
 use super::*;
 
@@ -12,16 +12,16 @@ use super::*;
 const QUIET_SECS: u32 = 1;
 
 /// The order in which turns reached the model, each user step as `user:<text>` and
-/// each task step as the task conversation's name.
+/// each task step as the task backend's name.
 type LaneLog = Arc<StdMutex<Vec<String>>>;
 
-/// The user's conversation, logging each step under the prompt it answers and handing
-/// out the queued task conversations in order.
+/// The main backend, logging each step under the prompt it answers and handing
+/// out the queued task backends in order.
 #[derive(Debug)]
 struct LoggedMain {
     log: LaneLog,
     last_prompt: StdMutex<String>,
-    task_conversations: StdMutex<VecDeque<Arc<dyn LlmBackend>>>,
+    task_backends: StdMutex<VecDeque<Arc<dyn LlmBackend>>>,
 }
 
 #[async_trait::async_trait]
@@ -62,19 +62,19 @@ impl TurnBackend for LoggedMain {
 }
 
 impl LlmBackend for LoggedMain {
-    fn isolated_conversation(
+    fn isolated_backend(
         &self,
         _system_prompt: String,
         _slot: SlotAssignment,
     ) -> assistd_llm::LlmResult<Arc<dyn LlmBackend>> {
-        self.task_conversations
+        self.task_backends
             .lock()
             .pop_front()
-            .ok_or_else(|| LlmError::Unavailable("no task conversation left".into()))
+            .ok_or_else(|| LlmError::Unavailable("no task backend left".into()))
     }
 }
 
-/// A task run's conversation that logs each step as it starts; its first step waits for
+/// A task run's backend that logs each step as it starts; its first step waits for
 /// `release`, when set, before it answers.
 #[derive(Debug)]
 struct LoggedTask {
@@ -132,7 +132,7 @@ impl TurnBackend for LoggedTask {
 
 impl LlmBackend for LoggedTask {}
 
-/// A one-lane daemon under `interruption` whose runs get, in order, a task conversation
+/// A one-lane daemon under `interruption` whose runs get, in order, a task backend
 /// per entry of `tasks`: its name, and the gate its first step waits on, if any.
 struct Harness {
     state: Arc<AppState>,
@@ -149,11 +149,11 @@ impl Harness {
     ) -> Self {
         let log = LaneLog::default();
         let mut entered = Vec::new();
-        let mut task_conversations = VecDeque::new();
+        let mut task_backends = VecDeque::new();
         for (name, release) in tasks {
             let notify = Arc::new(Notify::new());
             entered.push(Arc::clone(&notify));
-            task_conversations.push_back(Arc::new(LoggedTask {
+            task_backends.push_back(Arc::new(LoggedTask {
                 name,
                 log: Arc::clone(&log),
                 entered: notify,
@@ -164,7 +164,7 @@ impl Harness {
         let backend = Arc::new(LoggedMain {
             log: Arc::clone(&log),
             last_prompt: StdMutex::default(),
-            task_conversations: StdMutex::new(task_conversations),
+            task_backends: StdMutex::new(task_backends),
         });
         let mut config = Config::default();
         config.tasks.interruption = interruption;
@@ -222,7 +222,7 @@ impl Harness {
         Instant::now()
     }
 
-    fn held(&self) -> Option<ConversationHold> {
+    fn held(&self) -> Option<InteractionHold> {
         self.state.turns.deps.admission.queue_snapshot().held
     }
 
@@ -246,12 +246,12 @@ async fn first_event(events: &mut mpsc::Receiver<Event>) -> Event {
 fn assert_resumed_after_quiet(reply_finished: Instant) {
     assert!(
         reply_finished.elapsed() >= Duration::from_secs(QUIET_SECS.into()),
-        "the queue resumed before the conversation was quiet"
+        "the queue resumed before the interaction was quiet"
     );
 }
 
 #[tokio::test]
-async fn interrupt_suspends_the_run_mid_step_and_reruns_it_once_the_conversation_is_quiet() {
+async fn interrupt_suspends_the_run_mid_step_and_reruns_it_once_the_interaction_is_quiet() {
     let never = Arc::new(Notify::new());
     let harness = Harness::new(TaskInterruption::Interrupt, &[("task", Some(never))]).await;
     let run = queue_task_run(&harness.state, harness.task).await;
@@ -263,7 +263,7 @@ async fn interrupt_suspends_the_run_mid_step_and_reruns_it_once_the_conversation
         [(
             run,
             TaskRunState::Suspended {
-                reason: SuspendReason::UserConversation
+                reason: SuspendReason::UserInteraction
             }
         )]
     );

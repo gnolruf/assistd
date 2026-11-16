@@ -1067,7 +1067,7 @@ fn task_queue_event_cases() -> Vec<(Event, &'static str)> {
                         LaneHolder::Idle,
                     ],
                     paused: false,
-                    held: Some(ConversationHold {
+                    held: Some(InteractionHold {
                         resumes_at: Some(
                             NaiveDate::from_ymd_opt(2026, 11, 5)
                                 .unwrap()
@@ -1172,9 +1172,9 @@ fn task_run_states_match_pinned_wire_format() {
         (TaskRunState::Running, r#"{"state":"running"}"#),
         (
             TaskRunState::Suspended {
-                reason: SuspendReason::UserConversation,
+                reason: SuspendReason::UserInteraction,
             },
-            r#"{"state":"suspended","reason":"user_conversation"}"#,
+            r#"{"state":"suspended","reason":"user_interaction"}"#,
         ),
         (
             TaskRunState::Suspended {

@@ -9,12 +9,12 @@ use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, oneshot, watch};
 
 use assistd_ipc::{
-    ConversationHold, LaneHolder, PausedPrompt, QueueItem, SuspendReason, TaskId,
-    TaskQueueSnapshot, TaskRunId, TaskRunState,
+    InteractionHold, LaneHolder, PausedPrompt, QueueItem, SuspendReason, TaskId, TaskQueueSnapshot,
+    TaskRunId, TaskRunState,
 };
 use assistd_memory::{MemoryError, TaskRecord};
 
-use super::conversation::ConversationTurn;
+use super::interaction::InteractionTurn;
 use super::lanes::LaneLease;
 
 /// Why a change to the task queue was refused.
@@ -212,7 +212,7 @@ impl TaskQueue {
     }
 
     /// Put running run `run`, which gave up its lane to wait on a confirmation or the user's
-    /// conversation, first among the waiting items; the receiver gets its lane once it starts
+    /// interaction, first among the waiting items; the receiver gets its lane once it starts
     /// again. `None` when it is not running.
     pub(in crate::state) fn resume_first(
         &self,
@@ -346,12 +346,12 @@ impl TaskQueue {
         changed
     }
 
-    /// The queue as the wire shows it, beside the lanes' `holders` and the conversation's
+    /// The queue as the wire shows it, beside the lanes' `holders` and the interaction's
     /// `held`.
     pub(in crate::state) fn snapshot(
         &self,
         holders: Vec<LaneHolder>,
-        held: Option<ConversationHold>,
+        held: Option<InteractionHold>,
     ) -> TaskQueueSnapshot {
         let state = self.state.borrow();
         let running = state.running.iter().map(|queued| match &queued.stage {
@@ -391,11 +391,11 @@ pub(in crate::state) struct PausedRun {
 }
 
 /// What a queued user turn is handed when it may run: the main lane, and its place in
-/// the conversation, which holds the queue from then on.
+/// the user's interaction, which holds the queue from then on.
 #[derive(Debug)]
 pub(in crate::state) struct TurnStart {
     pub(in crate::state) lane: OwnedMutexGuard<()>,
-    pub(in crate::state) turn: ConversationTurn,
+    pub(in crate::state) turn: InteractionTurn,
 }
 
 /// The waiting item [`TaskQueue::next_to_start`] picks.

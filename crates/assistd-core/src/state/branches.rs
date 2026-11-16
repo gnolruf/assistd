@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 
 use assistd_ipc::{Event, EventBody};
 use assistd_llm::{
-    ConversationKey, HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, OneShotReply, SlotStash,
+    HistoryEntry, HistoryReplay, HistoryRole, LlmBackend, OneShotReply, SlotHolder, SlotStash,
     Thinking, ToolCallRecord,
 };
 use assistd_memory::{
@@ -41,7 +41,7 @@ enum ReplayPart {
     Kept,
 }
 
-/// Handles the fork, switch, undo and session requests on the user's conversation, and
+/// Handles the fork, switch, undo and session requests on the main backend, and
 /// titles its sessions.
 #[derive(Debug)]
 pub struct BranchService {
@@ -197,7 +197,7 @@ impl BranchService {
         let _agent_guard = self.admission.agent_turn_lock.clone().lock_owned().await;
         let Some(_request_guard) = self.presence.request_guard_if_active().await else {
             debug!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 "daemon not active; session stays untitled until its next turn"
             );
             return None;
@@ -215,7 +215,7 @@ impl BranchService {
             Ok(raw) => raw,
             Err(e) => {
                 debug!(
-                    target: "assistd::chat",
+                    target: "assistd::completion",
                     error = %e,
                     "title generation LLM call failed"
                 );
@@ -225,7 +225,7 @@ impl BranchService {
         let title = clean_generated_title(&raw);
         if title.is_empty() {
             debug!(
-                target: "assistd::chat",
+                target: "assistd::completion",
                 raw_len = raw.len(),
                 "title generation produced no usable text; session stays untitled"
             );
@@ -344,11 +344,11 @@ impl BranchService {
         id: String,
         tx: EventSink,
     ) -> Result<(), DispatchError> {
-        self.admission.conversation.end();
+        self.admission.interaction.end();
         let _user_turn = self.admission.user_turn_lock.clone().lock_owned().await;
         self.transcript.drain_inflight().await;
         if let Some(stash) = &self.slot_stash {
-            stash.end(ConversationKey::Main).await;
+            stash.end(SlotHolder::Main).await;
         }
         self.begin_unsaved_session(id, &tx, "/new").await;
         Ok(())

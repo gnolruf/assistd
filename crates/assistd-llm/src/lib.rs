@@ -1,4 +1,4 @@
-//! LLM backend trait, the llama-server chat client that implements it,
+//! LLM backend trait, the llama-server client that implements it,
 //! and the child-process supervisor that keeps llama-server alive.
 
 use std::fmt;
@@ -14,21 +14,21 @@ use tokio::sync::mpsc;
 use assistd_ipc::{Component, RelayEvent, StatusKind, StatusSeverity};
 use assistd_tools::{Attachment, ToolOutput};
 
-pub mod chat;
+pub mod completion;
 #[cfg(feature = "test-support")]
 mod echo;
 mod judge;
 pub mod llama_server;
 
 pub use assistd_utils::child_server::ReadyState;
-pub use chat::conversation::{CompactionCut, ToolCallRecord};
-pub use chat::{ChatClientError, LlamaChatClient};
+pub use completion::history::{CompactionCut, ToolCallRecord};
+pub use completion::{LlamaClient, LlamaClientError};
 #[cfg(feature = "test-support")]
 pub use echo::EchoBackend;
 pub use judge::BackendJudgeModel;
 pub use llama_server::{
-    ConversationKey, LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotAssignment,
-    SlotDir, SlotStash, VisionState, probe_capabilities_routed,
+    LlamaServerControl, LlamaServerError, LlamaServerSpec, SlotAssignment, SlotDir, SlotHolder,
+    SlotStash, VisionState, probe_capabilities_routed,
 };
 
 /// Reason an [`LlmHealthProbe::wait_for_ready`] call ended without
@@ -86,9 +86,9 @@ pub trait LlmHealthProbe: fmt::Debug + Send + Sync {
 /// Errors surfaced by the [`LlmBackend`] trait.
 #[derive(Debug, Error)]
 pub enum LlmError {
-    /// HTTP, SSE, timeout, or JSON failure inside the chat client.
+    /// HTTP, SSE, timeout, or JSON failure inside the llama-server client.
     #[error(transparent)]
-    Chat(#[from] ChatClientError),
+    Client(#[from] LlamaClientError),
 
     /// The model emitted a streamed tool call that could not be
     /// reassembled into a name plus JSON arguments.
@@ -159,8 +159,8 @@ pub enum LlmEvent {
     },
     /// Progress of a relay running inside the tool call in flight.
     Relay(RelayEvent),
-    /// Tokens in the conversation as sent with the request about to stream,
-    /// and `total` the conversation has held, counting what compaction removed.
+    /// Tokens in the history as sent with the request about to stream,
+    /// and `total` the history has held, counting what compaction removed.
     ContextSize { tokens: u32, total: u32 },
     /// Non-terminal recovery or status update.
     Status {
@@ -177,7 +177,7 @@ pub enum LlmEvent {
         elapsed: Duration,
     },
     /// The turn was cut off before the model finished; `reply` is what the
-    /// conversation keeps as its answer. No `Done` follows.
+    /// history keeps as its answer. No `Done` follows.
     Interrupted { reply: String },
     /// The model has finished generating.
     Done,
@@ -226,7 +226,7 @@ pub enum HistoryRole {
     Tool,
 }
 
-/// One persisted message replayed into a backend's conversation.
+/// One persisted message replayed into a backend's history.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     pub role: HistoryRole,
@@ -239,7 +239,7 @@ pub struct HistoryEntry {
     pub tool_name: Option<String>,
 }
 
-/// Persisted history to load into a backend's conversation.
+/// Persisted messages to load into a backend's history.
 #[derive(Debug, Default)]
 pub struct HistoryReplay {
     /// Compaction summary of the history before `entries`.
@@ -261,7 +261,7 @@ pub trait TurnBackend: fmt::Debug + Send + Sync + 'static {
     /// sees them on its next [`Self::step`].
     async fn push_tool_results(&self, results: Vec<ToolResultPayload>) -> LlmResult<()>;
 
-    /// Run one model invocation over the conversation with the given tool schemas, streaming text
+    /// Run one model invocation over the history with the given tool schemas, streaming text
     /// deltas through `tx`. Backends without tool support ignore `tools` and return
     /// [`StepOutcome::Final`].
     async fn step(&self, tools: Vec<Value>, tx: mpsc::Sender<LlmEvent>) -> LlmResult<StepOutcome>;
@@ -271,12 +271,12 @@ pub trait TurnBackend: fmt::Debug + Send + Sync + 'static {
     async fn push_interrupted_reply(&self, reply: String) -> LlmResult<()>;
 
     /// Stash a one-shot instruction rendered by the next [`Self::step`]
-    /// as the final message of the conversation, then discarded once
+    /// as the final message of the history, then discarded once
     /// that request commits.
     async fn set_transient_note(&self, text: String) -> LlmResult<()>;
 }
 
-/// A language model holding one in-memory conversation: what a turn drives, plus optional
+/// A language model holding one in-memory history: what a turn drives, plus optional
 /// capabilities whose defaults do nothing, or fail with [`LlmError::Unavailable`] where a
 /// result is required.
 #[async_trait]
@@ -286,7 +286,7 @@ pub trait LlmBackend: TurnBackend {
         Ok(())
     }
 
-    /// Replace the in-memory conversation with `replay`, preserving the
+    /// Replace the in-memory history with `replay`, preserving the
     /// static system prompt.
     async fn replace_history(&self, _replay: HistoryReplay) -> LlmResult<()> {
         Ok(())
@@ -299,9 +299,9 @@ pub trait LlmBackend: TurnBackend {
         Ok(0)
     }
 
-    /// Answer `prompt` outside the conversation within the summary token allowance, returning
+    /// Answer `prompt` outside the history within the summary token allowance, returning
     /// the final text with reasoning discarded. Chat-template tokens in `prompt` reach the
-    /// model as inert text, and the conversation's cached prompt on its slot survives.
+    /// model as inert text, and the history's cached prompt on its slot survives.
     async fn complete_oneshot(&self, _prompt: String, _reply: OneShotReply) -> LlmResult<String> {
         Err(LlmError::Unavailable(
             "complete_oneshot not supported by this backend".into(),
@@ -314,9 +314,9 @@ pub trait LlmBackend: TurnBackend {
         Vec::new()
     }
 
-    /// Answer `instruction`, appended to the conversation for this request only, with no
+    /// Answer `instruction`, appended to the history for this request only, with no
     /// tools, no thinking, and a reply held by grammar to the JSON `schema`. The
-    /// conversation is left unchanged.
+    /// history is left unchanged.
     async fn complete_with_schema(
         &self,
         _instruction: String,
@@ -327,20 +327,20 @@ pub trait LlmBackend: TurnBackend {
         ))
     }
 
-    /// An empty conversation with `system_prompt` on this backend's server and model, with
-    /// this backend's history budget, compacted as this backend's own conversation is, whose
+    /// A backend with an empty history and `system_prompt` on this backend's server and
+    /// model, with this backend's history budget, compacted as this backend is, whose
     /// requests use the server slot `slot` names.
-    fn isolated_conversation(
+    fn isolated_backend(
         &self,
         _system_prompt: String,
         _slot: SlotAssignment,
     ) -> LlmResult<Arc<dyn LlmBackend>> {
         Err(LlmError::Unavailable(
-            "isolated conversations not supported by this backend".into(),
+            "isolated backends not supported by this backend".into(),
         ))
     }
 
-    /// Send this conversation's later requests to the server slot `slot` names; call only
+    /// Send this backend's later requests to the server slot `slot` names; call only
     /// between requests. A backend without slots ignores it.
     fn move_to_slot(&self, _slot: SlotAssignment) {}
 }

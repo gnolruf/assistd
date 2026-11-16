@@ -1,5 +1,5 @@
 //! `RunLane`: the model lane a task run holds while its turn may decode, given up
-//! while it waits on the user or yields to the user's conversation, and the backend
+//! while it waits on the user or yields to the user's interaction, and the backend
 //! that makes each model step yield.
 
 use std::future::pending;
@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use assistd_ipc::{StatusKind, TaskId, TaskRunId};
 use assistd_llm::{
-    ConversationKey, LlmBackend, LlmError, LlmEvent, LlmResult, StepOutcome, ToolResultPayload,
+    LlmBackend, LlmError, LlmEvent, LlmResult, SlotHolder, StepOutcome, ToolResultPayload,
     TurnBackend,
 };
 use assistd_tools::{Attachment, YieldableLane};
@@ -36,7 +36,7 @@ pub(crate) struct RunLane {
     /// Tags the run's events.
     pub(in crate::state) request_id: String,
     pub(in crate::state) held: LaneHold,
-    /// The run's conversation, moved to the slot of each lane it regains.
+    /// The run's backend, moved to the slot of each lane it regains.
     pub(in crate::state) backend: Arc<dyn LlmBackend>,
     pub(in crate::state) events: EventSink,
     pub(in crate::state) cancel: CancellationToken,
@@ -77,7 +77,7 @@ impl RunLane {
         self.held.0.send_replace(None);
     }
 
-    /// Wait first in the queue for a lane, move the conversation to its slot, and wake the
+    /// Wait first in the queue for a lane, move the backend to its slot, and wake the
     /// model; `false` when the run was cancelled first.
     pub(in crate::state) async fn regain(&self) -> bool {
         let Some(lane) = self.tasks.deps.admission.task_queue.resume_first(self.run) else {
@@ -92,7 +92,7 @@ impl RunLane {
             },
         };
         self.backend
-            .move_to_slot(lease.slot(ConversationKey::TaskRun(self.run)));
+            .move_to_slot(lease.slot(SlotHolder::TaskRun(self.run)));
         let awake = match self
             .tasks
             .wake_for_task_run(&self.request_id, &self.events, &self.cancel)
@@ -120,11 +120,11 @@ impl RunLane {
 #[async_trait]
 impl YieldableLane for RunLane {
     async fn yield_requested(&self) {
-        let mut conversation = self.tasks.deps.admission.conversation.subscribe();
+        let mut interaction = self.tasks.deps.admission.interaction.subscribe();
         let mut held = self.held.0.subscribe();
         while !self.must_yield() {
             tokio::select! {
-                changed = conversation.changed() => {
+                changed = interaction.changed() => {
                     if changed.is_err() {
                         pending::<()>().await;
                     }
@@ -148,7 +148,7 @@ impl YieldableLane for RunLane {
     }
 }
 
-/// A task run's conversation whose model steps give way to the user's conversation:
+/// A task run's backend whose model steps give way to the user's interaction:
 /// before each step, and mid-step by discarding what streamed so far.
 #[derive(Debug)]
 pub(in crate::state) struct YieldingBackend {

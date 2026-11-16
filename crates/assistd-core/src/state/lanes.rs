@@ -1,5 +1,5 @@
-//! `ModelLanes`: the conversations the model decodes at once, one per server
-//! slot, of which the first is always the main conversation's.
+//! `ModelLanes`: the turns the model decodes at once, one per server
+//! slot, of which the first is always the main backend's.
 
 use std::collections::BTreeMap;
 use std::future::pending;
@@ -9,9 +9,9 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 
 use assistd_ipc::{LaneHolder, TaskRunId};
-use assistd_llm::{ConversationKey, SlotAssignment};
+use assistd_llm::{SlotAssignment, SlotHolder};
 
-/// The main conversation's lane, and the slot its requests are pinned to.
+/// The main backend's lane, and the slot its requests are pinned to.
 const MAIN_LANE: u32 = 0;
 
 /// The model's lanes. With one slot a task run takes the main lane only between user
@@ -140,16 +140,16 @@ pub(in crate::state) struct LaneLease {
 }
 
 impl LaneLease {
-    /// The slot assignment for conversation `key` on this lane.
-    pub(in crate::state) fn slot(&self, key: ConversationKey) -> SlotAssignment {
+    /// The slot assignment for `holder` on this lane.
+    pub(in crate::state) fn slot(&self, holder: SlotHolder) -> SlotAssignment {
         if self.on_main_lane() {
-            SlotAssignment::Shared(key)
+            SlotAssignment::Shared(holder)
         } else {
             SlotAssignment::Pinned(self.lane)
         }
     }
 
-    /// Whether the run shares the main conversation's lane and slot.
+    /// Whether the run shares the main backend's lane and slot.
     pub(in crate::state) fn on_main_lane(&self) -> bool {
         self.lane == MAIN_LANE
     }

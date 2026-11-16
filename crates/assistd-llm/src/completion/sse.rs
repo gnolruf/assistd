@@ -1,6 +1,6 @@
 //! Minimal SSE line parser for `/v1/chat/completions` streams.
 
-use super::error::ChatClientError;
+use super::error::LlamaClientError;
 
 /// A parsed SSE event from a `/v1/chat/completions` stream: the payload
 /// of a `data:` or `error:` line, or the terminal `data: [DONE]`.
@@ -43,7 +43,7 @@ impl SseLineReader {
     /// Extract the next complete SSE event from the buffer, if one is
     /// available. Returns `Ok(None)` if more bytes are needed; fails on
     /// a non-UTF-8 line or an incomplete one longer than [`LINE_MAX`].
-    pub fn next_event(&mut self) -> Result<Option<SseEvent>, ChatClientError> {
+    pub fn next_event(&mut self) -> Result<Option<SseEvent>, LlamaClientError> {
         loop {
             let Some(offset) = self.buf[self.scanned..].iter().position(|b| *b == b'\n') else {
                 self.scanned = self.buf.len();
@@ -59,10 +59,10 @@ impl SseLineReader {
         }
     }
 
-    fn check_pending_line(&self) -> Result<(), ChatClientError> {
+    fn check_pending_line(&self) -> Result<(), LlamaClientError> {
         let pending = self.buf.len() - self.consumed;
         if pending > LINE_MAX {
-            return Err(ChatClientError::Sse(format!(
+            return Err(LlamaClientError::Sse(format!(
                 "line exceeds {LINE_MAX} bytes without a newline"
             )));
         }
@@ -72,13 +72,13 @@ impl SseLineReader {
 
 /// The event carried by one line, without its `\n`; `None` for lines
 /// that are not `data:` or `error:` fields.
-fn parse_line(line: &[u8]) -> Result<Option<SseEvent>, ChatClientError> {
+fn parse_line(line: &[u8]) -> Result<Option<SseEvent>, LlamaClientError> {
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     if line.first().is_none_or(|b| *b == b':') {
         return Ok(None);
     }
     let line = std::str::from_utf8(line)
-        .map_err(|e| ChatClientError::Sse(format!("line is not valid UTF-8: {e}")))?;
+        .map_err(|e| LlamaClientError::Sse(format!("line is not valid UTF-8: {e}")))?;
     if let Some(rest) = line.strip_prefix("error:") {
         return Ok(Some(SseEvent::Error(field_value(rest).to_string())));
     }

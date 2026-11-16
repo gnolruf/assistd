@@ -21,7 +21,7 @@ use super::transcript_writer::{
 };
 use crate::recovery::spawn_supervised;
 
-/// The transcript of every conversation: queues writes for the single writer task and
+/// The transcript of every turn: queues writes for the single writer task and
 /// tracks the background work that follows a turn.
 #[derive(Debug)]
 pub(super) struct TranscriptLog {
@@ -31,14 +31,14 @@ pub(super) struct TranscriptLog {
     session_ctx: Arc<SessionContext>,
     /// The transcript writer's queue, once its first write started the writer.
     writes: OnceLock<mpsc::Sender<WriteCommand>>,
-    /// Seqs of the rows behind the user's conversation.
+    /// Seqs of the rows behind the main backend's history.
     pub(super) user_ledger: SharedLedger,
     /// Background session-title tasks, drained at daemon shutdown.
     pub(super) tracker: TaskTracker,
 }
 
 impl TranscriptLog {
-    /// A log over `transcripts` for the conversation `session_ctx` points at, waking
+    /// A log over `transcripts` for the session `session_ctx` points at, waking
     /// the embedding worker through `embed_wake` after each write.
     pub(super) fn new(
         transcripts: Arc<dyn TranscriptStore>,
@@ -72,7 +72,7 @@ impl TranscriptLog {
         Ok((session, branch))
     }
 
-    /// Queue the write opening a turn of the user's conversation on `branch`
+    /// Queue the write opening a user turn on `branch`
     /// with `prompt`, returning the target the turn's later messages go to.
     pub(super) async fn open_user_turn(
         &self,

@@ -4,7 +4,7 @@ use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
-use crate::custom_args::{ChatServer, CustomArgs};
+use crate::custom_args::{CustomArgs, ModelServer};
 use crate::defaults::{
     DEFAULT_MODEL_CONTEXT_LENGTH, DEFAULT_MODEL_GPU_LAYERS, DEFAULT_MODEL_HOST, DEFAULT_MODEL_NAME,
     DEFAULT_MODEL_PORT, DEFAULT_MODEL_READY_TIMEOUT_SECS, DEFAULT_MODEL_SERVER_BINARY,
@@ -12,7 +12,7 @@ use crate::defaults::{
 use crate::settings::{DescribeSettings, describe_fields};
 use crate::values::{LoopbackAddr, NonBlankString};
 
-/// The chat model and the local server process that serves it.
+/// The agent's model and the local server process that serves it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -36,7 +36,7 @@ pub struct ModelConfig {
     /// Extra server arguments. Flags assistd sets itself, the slot save
     /// directory included, or that expose files, tools or state through the
     /// server, fail to parse.
-    pub custom_args: CustomArgs<ChatServer>,
+    pub custom_args: CustomArgs<ModelServer>,
 }
 
 impl DescribeSettings for ModelConfig {

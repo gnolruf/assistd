@@ -175,7 +175,7 @@ erDiagram
         int task_id FK
         text trigger "JSON, the trigger that fired"
         int state "0 queued, 1 running, 2 suspended, 3 needs input, 4 succeeded, 5 failed, 6 cancelled"
-        int suspend_reason "0 user conversation, 1 GPU busy"
+        int suspend_reason "0 user interaction, 1 GPU busy"
         text failure
         int queued_at
         int started_at
@@ -279,7 +279,7 @@ as an ordinary one.
 - **`message_chunk_embeddings`** / **`document_chunk_embeddings`** /
   **`memory_embeddings`**: at most one vector per chunk or memory,
   L2-normalised by the embedder so a dot product is cosine similarity. A chunk's
-  vector goes in the table for its owner's kind, so a chat search never
+  vector goes in the table for its owner's kind, so a message search never
   reads document vectors. Message chunk and memory vectors are BLOBs of
   little-endian `f32`s. A document chunk vector is quantised to a
   quarter of that: a little-endian `f32` step, sized so the vector's
@@ -299,18 +299,18 @@ as an ordinary one.
   everything again.
 
 Search (`recall`, `reminisce`) scans every vector of one source kind,
-chats or documents, on that kind's own read-only connection and keeps
+messages or documents, on that kind's own read-only connection and keeps
 the top matches; there is no vector index. `reminisce` leaves out the
 current session's messages.
 
 One scan of 768-dimension vectors, measured on a Ryzen 7 9800X3D
 with the file in the page cache:
 
-| Chunks of the kind | `f32` (chats) | quantised (documents) |
-|--------------------|---------------|-----------------------|
-| 10,000             | 33 MB, 2 ms   | 8 MB, 1 ms            |
-| 100,000            | 328 MB, 35 ms | 82 MB, 14 ms          |
-| 1,000,000          | 3.3 GB, 330 ms | 820 MB, 200 ms       |
+| Chunks of the kind | `f32` (messages) | quantised (documents) |
+|--------------------|------------------|-----------------------|
+| 10,000             | 33 MB, 2 ms      | 8 MB, 1 ms            |
+| 100,000            | 328 MB, 35 ms    | 82 MB, 14 ms          |
+| 1,000,000          | 3.3 GB, 330 ms   | 820 MB, 200 ms       |
 
 Quantising moved no top-8 result in these runs and changed a
 similarity by at most 0.0005.
@@ -318,7 +318,7 @@ similarity by at most 0.0005.
 ## Storage
 
 - One read-write connection runs every write in order; three
-  read-only connections serve history loads, chat and memory vector
+  read-only connections serve history loads, message and memory vector
   scans, and document vector scans, so none blocks another.
 - The database runs in WAL mode with foreign keys and `secure_delete`
   on. After a delete or overwrite the WAL is checkpointed and truncated
