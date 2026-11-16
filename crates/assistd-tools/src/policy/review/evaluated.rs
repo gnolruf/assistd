@@ -1,9 +1,8 @@
 //! Text bash evaluates at run time as arithmetic, a variable name or a
 //! prompt string, where a subscript in a value runs command substitutions.
 
-use std::slice;
-
 use super::changed_variables;
+use super::options::{self, Flag, OptionSpec, Walked};
 use crate::policy::shell::{self, Script, Word};
 
 /// Characters of an arithmetic expression other than numbers.
@@ -25,38 +24,50 @@ const DECLARATIONS: &[&str] = &["declare", "export", "local", "readonly", "types
 const ATTRIBUTE_DECLARATIONS: &[&str] = &["declare", "local", "typeset"];
 
 const PRINTF: NameSyntax = NameSyntax {
-    name_options: "v",
-    value_options: "",
+    options: OptionSpec {
+        values: "v",
+        ..OptionSpec::LEADING
+    },
+    name_options: &[Flag::Short('v')],
     operands_are_names: false,
 };
 
 const READ: NameSyntax = NameSyntax {
-    name_options: "a",
-    value_options: "dinNptu",
+    options: OptionSpec {
+        flags: "eErs",
+        values: "adinNptu",
+        ..OptionSpec::LEADING
+    },
+    name_options: &[Flag::Short('a')],
     operands_are_names: true,
 };
 
 const UNSET: NameSyntax = NameSyntax {
-    name_options: "",
-    value_options: "",
+    options: OptionSpec {
+        flags: "fnv",
+        ..OptionSpec::LEADING
+    },
+    name_options: &[],
     operands_are_names: true,
 };
 
 const WAIT: NameSyntax = NameSyntax {
-    name_options: "p",
-    value_options: "",
+    options: OptionSpec {
+        flags: "fn",
+        values: "p",
+        ..OptionSpec::LEADING
+    },
+    name_options: &[Flag::Short('p')],
     operands_are_names: false,
 };
 
 /// How a builtin that assigns or reads variables by name takes its
 /// arguments.
 struct NameSyntax {
+    options: OptionSpec,
     /// Options whose value is a variable name.
-    name_options: &'static str,
-    /// Options whose value is anything else.
-    value_options: &'static str,
-    /// Its operands are variable names; otherwise its options end at the
-    /// first operand.
+    name_options: &'static [Flag],
+    /// Its operands are variable names.
     operands_are_names: bool,
 }
 
@@ -99,10 +110,10 @@ pub(super) fn by_builtin(program: &str, args: &[Word]) -> Option<String> {
             args.get(1)
                 .filter(|name| may_evaluate_subscript(&name.text))
         }),
-        "printf" => hidden_name(args, &PRINTF),
-        "read" => hidden_name(args, &READ),
-        "unset" => hidden_name(args, &UNSET),
-        "wait" => hidden_name(args, &WAIT),
+        "printf" => return by_name_syntax(program, args, &PRINTF),
+        "read" => return by_name_syntax(program, args, &READ),
+        "unset" => return by_name_syntax(program, args, &UNSET),
+        "wait" => return by_name_syntax(program, args, &WAIT),
         "test" | "[" => args
             .iter()
             .find(|arg| may_split(arg))
@@ -110,6 +121,19 @@ pub(super) fn by_builtin(program: &str, args: &[Word]) -> Option<String> {
         _ => None,
     };
     hidden.map(|arg| subscript_reason(program, &arg.text))
+}
+
+/// Why running builtin `program` with `args` needs confirmation, when it takes an option
+/// `syntax` does not list or a variable name the review cannot see.
+fn by_name_syntax(program: &str, args: &[Word], syntax: &NameSyntax) -> Option<String> {
+    let walked = options::walk(&syntax.options, args);
+    match walked.unlisted {
+        Some(option) => Some(format!(
+            "`{program} {}` is not a vetted option",
+            option.text
+        )),
+        None => hidden_name(args, &walked, syntax).map(|name| subscript_reason(program, &name)),
+    }
 }
 
 fn reads_variables(expression: &str) -> String {
@@ -217,67 +241,45 @@ fn declaration(program: &str, args: &[Word]) -> Option<String> {
     })
 }
 
-/// The first of `args` bash may take as a variable name with a subscript
-/// the review cannot see, or that may split into such a name.
-fn hidden_name<'w>(args: &'w [Word], syntax: &NameSyntax) -> Option<&'w Word> {
-    let mut args = args.iter();
-    let mut options = true;
-    while let Some(arg) = args.next() {
-        if may_split(arg) {
-            return Some(arg);
-        }
-        if options && !arg.dynamic && arg.text == "--" {
-            options = false;
-            continue;
-        }
-        let cluster = arg
-            .text
-            .strip_prefix('-')
-            .filter(|cluster| options && !cluster.is_empty());
-        match cluster {
-            Some(_) if arg.dynamic => return Some(arg),
-            Some(cluster) => {
-                if let Some(hidden) = option_value(cluster, arg, &mut args, syntax) {
-                    return Some(hidden);
-                }
-            }
-            None if syntax.operands_are_names => {
-                if may_evaluate_subscript(&arg.text) {
-                    return Some(arg);
-                }
-            }
-            None => {
-                let may_be_option = arg.dynamic && arg.text.starts_with(['$', '`']);
-                return args
-                    .next()
-                    .filter(|next| may_be_option && may_evaluate_subscript(&next.text));
-            }
-        }
-    }
-    None
+/// The text of the first of `args` bash may take as a variable name with a subscript the
+/// review cannot see, or that may split into such a name.
+fn hidden_name(args: &[Word], walked: &Walked<'_>, syntax: &NameSyntax) -> Option<String> {
+    let first_operand = walked.operands.first().copied().unwrap_or(args.len());
+    let operands = &args[first_operand..];
+    let read_as_names = if syntax.operands_are_names {
+        operands
+    } else {
+        &operands[..operands.len().min(1)]
+    };
+    let splits = args[..first_operand]
+        .iter()
+        .chain(read_as_names)
+        .find(|arg| may_split(arg));
+    let named_by_option = walked
+        .values_of(syntax.name_options)
+        .find(|name| may_evaluate_subscript(&name.text));
+    let named_by_operand = if syntax.operands_are_names {
+        operands
+            .iter()
+            .find(|name| may_evaluate_subscript(&name.text))
+    } else {
+        name_after_hidden_option(operands)
+    };
+    splits
+        .or(named_by_option)
+        .or(named_by_operand)
+        .map(|arg| arg.text.clone())
 }
 
-/// Consume the value of the option in `cluster` that takes one, returning
-/// it when it may hide a variable name.
-fn option_value<'w>(
-    cluster: &str,
-    arg: &'w Word,
-    rest: &mut slice::Iter<'w, Word>,
-    syntax: &NameSyntax,
-) -> Option<&'w Word> {
-    let (at, option) = cluster
-        .char_indices()
-        .find(|&(_, c)| syntax.name_options.contains(c) || syntax.value_options.contains(c))?;
-    let attached = &cluster[at + option.len_utf8()..];
-    let (value, name) = if attached.is_empty() {
-        let value = rest.next()?;
-        (value, value.text.as_str())
-    } else {
-        (arg, attached)
-    };
-    let hidden =
-        may_split(value) || (syntax.name_options.contains(option) && may_evaluate_subscript(name));
-    hidden.then_some(value)
+/// The second of `operands` when the first may become an option at run time and so make it a
+/// variable name, one with a subscript the review cannot see.
+fn name_after_hidden_option(operands: &[Word]) -> Option<&Word> {
+    match operands {
+        [option, name, ..] if option.dynamic && option.text.starts_with(['$', '`']) => {
+            Some(name).filter(|name| may_evaluate_subscript(&name.text))
+        }
+        _ => None,
+    }
 }
 
 /// The operand of a `-v` or `-R` test that may hide a subscript.

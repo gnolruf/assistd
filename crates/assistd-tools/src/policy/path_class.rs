@@ -864,7 +864,7 @@ mod tests {
         ] {
             let verdict = home.verdict(script);
             assert!(
-                matches!(verdict, PathVerdict::Ordinary(Class::Edit { .. })),
+                matches!(verdict, PathVerdict::Ordinary(Class::Edit)),
                 "{script:?}: {verdict:?}"
             );
         }
