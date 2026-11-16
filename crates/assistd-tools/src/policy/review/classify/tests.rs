@@ -65,6 +65,14 @@ const SHIPPED_BYPASSES: &[&str] = &[
     "cat \"$(echo ~/.ssh/id_ed25519)\"",
     "cat {..,x}/{..,y}/.ssh/id_ed25519",
     "wc -c < $f",
+    "cat < /dev/tcp/example.com/80",
+    "exec 3< /dev/udp/example.com/53",
+    "o=--files0-from=a; du $o",
+    "n='5 a'; head -$n",
+    "find -files0-from a -exec cat {} +",
+    "strings @list",
+    "HOME=/home/u/.ssh; cat ~/id_ed25519",
+    "HOME=/home/u/.ssh; cd; cat id_ed25519",
 ];
 
 /// Scripts that hide a command or a write somewhere bash runs one: after operators, in

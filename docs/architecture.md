@@ -565,11 +565,15 @@ write or delete the literal paths they name, or redirections to a
 literal path), or unvetted (anything else: another program, a path
 from a variable, substitution or brace expansion, which may lie anywhere,
 a command only known at run time, a changed `PATH`/`LD_*`/`GIT_*`, a
-disqualifying option such as `sort -o` or `find -exec`). The path guards
+disqualifying option such as `sort -o` or `find -exec`, a redirection
+from bash's `/dev/tcp` or `/dev/udp`). The path guards
 then resolve every target: destroying `$HOME`, a personal folder or a
 git work tree is refused in every mode, and touching credentials, an
 owner-only file in `$HOME`, a startup file, a shell profile or a
-directory on `PATH` always asks. Asking for an unvetted script offers
+directory on `PATH` always asks. What an unvetted command does to a path
+it names is unknown, so one that names `$HOME`, a personal folder or a
+directory holding them always asks too, and the script a shell is given
+(`bash -c`, a here-document) is classified for the same refusals. Asking for an unvetted script offers
 "always allow" for the programs on neither list, saved in
 `allowed_programs.toml` beside the config and pinned to the file the
 name resolved to; an approval covers one subcommand (`systemctl status …`),
@@ -621,7 +625,8 @@ A query connection starts in manual mode, where every prompt goes to the
 client. A client can switch modes with a mid-stream `RequestBody::SetPermissionMode`
 (the TUI's Shift+Tab). Read-only `bash` scripts run in every mode, scripts that
 would destroy the home directory, a personal folder or a work tree are refused
-in every mode, and those touching a sensitive path always ask. Accept-edits mode
+in every mode, and those touching a sensitive path, or handing the home directory
+or a personal folder to a command that could not be vetted, always ask. Accept-edits mode
 also runs, unasked, edits whose every target lands strictly below a
 `tools.write.writable_paths` entry or the scratch directory, and `write`s there
 whose content the prompt shows in full. A `cp` or `mv` whose source is a symlink, or a

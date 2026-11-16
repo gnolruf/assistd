@@ -1,8 +1,9 @@
 //! Sorts a script into read-only, edit or unvetted by the programs it runs and the files its
 //! redirections write, using short lists of programs whose effects are known and the user's
 //! "always allow" approvals, and lists the paths those programs read, write, delete or change
-//! the mode or owner of.
+//! the mode or owner of, and the paths an unvetted command names.
 
+use std::mem;
 use std::path::Path;
 
 use super::placeholder::{self, Placeholder};
@@ -134,8 +135,79 @@ const RECURSIVE_READERS: &[(&str, &[Flag])] = &[
     ("grep", GREP_RECURSIVE),
 ];
 
+/// The programs that take `grep`'s options.
+const GREP_PROGRAMS: &[&str] = &["egrep", "fgrep", "grep"];
+
+/// `grep`'s options that take a value, which may be the next word.
+const GREP_VALUE_FLAGS: &[Flag] = &[
+    Flag::Short('A'),
+    Flag::Short('B'),
+    Flag::Short('C'),
+    Flag::Short('D'),
+    Flag::Short('X'),
+    Flag::Short('d'),
+    Flag::Short('e'),
+    Flag::Short('f'),
+    Flag::Short('m'),
+    Flag::Long("after-context"),
+    Flag::Long("before-context"),
+    Flag::Long("binary-files"),
+    Flag::Long("context"),
+    Flag::Long("devices"),
+    Flag::Long("directories"),
+    Flag::Long("exclude"),
+    Flag::Long("exclude-dir"),
+    Flag::Long("exclude-from"),
+    Flag::Long("file"),
+    Flag::Long("group-separator"),
+    Flag::Long("include"),
+    Flag::Long("label"),
+    Flag::Long("max-count"),
+    Flag::Long("regexp"),
+];
+
+/// `grep`'s options that give its pattern, leaving every operand a file to search.
+const GREP_PATTERN_FLAGS: &[Flag] = &[
+    Flag::Short('e'),
+    Flag::Short('f'),
+    Flag::Long("file"),
+    Flag::Long("regexp"),
+];
+
 /// `find` options that come before its starting points.
 const FIND_LEADING_OPTIONS: &[&str] = &["-H", "-L", "-P"];
+
+/// `grep`'s option naming a file of patterns.
+const GREP_PATTERN_FILE: &[Flag] = &[Flag::Short('f')];
+
+/// Read-only programs' options naming a file they read, where its value would go unseen:
+/// attached to a short option, or given to a program whose operands are not read.
+const FILE_OPTIONS: &[(&str, &[Flag])] = &[
+    ("date", &[Flag::Short('f'), Flag::Long("file")]),
+    ("diff", &[Flag::Short('X')]),
+    (
+        "du",
+        &[
+            Flag::Short('X'),
+            Flag::Long("exclude-from"),
+            Flag::Long("files0-from"),
+        ],
+    ),
+    ("egrep", GREP_PATTERN_FILE),
+    ("fgrep", GREP_PATTERN_FILE),
+    ("find", &[Flag::Primary("-files0-from")]),
+    ("grep", GREP_PATTERN_FILE),
+    ("hexdump", &[Flag::Short('f')]),
+];
+
+/// Shells that run the script after `-c`, or on their stdin when given no operand.
+const SHELLS: &[&str] = &["ash", "bash", "dash", "ksh", "mksh", "sh", "zsh"];
+
+/// Programs that replace an `@file` argument with the arguments that file holds.
+const READS_ARGUMENT_FILES: &[&str] = &["strings"];
+
+/// Paths a redirection opens as a network connection to the host and port below them.
+const NETWORK_PATHS: &[&str] = &["/dev/tcp/", "/dev/udp/"];
 
 /// Programs that write or delete the literal paths they name, with the options vetted for each.
 const EDIT_PROGRAMS: &[EditProgram] = &[
@@ -283,6 +355,8 @@ pub enum Action {
     Delete,
     /// `chmod`.
     ChangeAttributes,
+    /// Whatever a command no list vets does to a path it names.
+    Unknown,
 }
 
 /// An option a program may be given.
@@ -298,17 +372,44 @@ enum Flag {
 
 impl Flag {
     fn matched_by(self, option: &str) -> bool {
-        match self {
-            Self::Short(flag) => {
-                short_options(option).is_some_and(|cluster| cluster.contains(flag))
-            }
-            Self::Long(name) => option
-                .strip_prefix("--")
-                .map(|given| given.split_once('=').map_or(given, |(given, _)| given))
-                .is_some_and(|given| !given.is_empty() && name.starts_with(given)),
-            Self::Primary(name) => option == name,
-        }
+        self.value_in(option).is_some()
     }
+
+    /// Where `option` puts this flag's value, if it gives the flag.
+    fn value_in(self, option: &str) -> Option<OptionValue<'_>> {
+        let value = match self {
+            Self::Short(flag) => {
+                let (_, attached) = short_options(option)?.split_once(flag)?;
+                Some(attached).filter(|attached| !attached.is_empty())
+            }
+            Self::Long(name) => {
+                let given = option.strip_prefix("--")?;
+                let (given, attached) = match given.split_once('=') {
+                    Some((given, attached)) => (given, Some(attached)),
+                    None => (given, None),
+                };
+                if given.is_empty() || !name.starts_with(given) {
+                    return None;
+                }
+                attached
+            }
+            Self::Primary(name) => {
+                if option != name {
+                    return None;
+                }
+                None
+            }
+        };
+        Some(value.map_or(OptionValue::NextWord, OptionValue::Attached))
+    }
+}
+
+/// Where an option's value is, for a [`Flag`] that takes one.
+#[derive(Debug, Clone, Copy)]
+enum OptionValue<'o> {
+    /// In the option's own word, after the flag or its `=`.
+    Attached(&'o str),
+    NextWord,
 }
 
 /// A program that writes or deletes the paths it names.
@@ -338,10 +439,14 @@ enum Targets {
     ChangesAllButFirst,
 }
 
-/// An [`EditProgram`]'s arguments, once its options are vetted.
+/// An [`EditProgram`]'s arguments.
+#[derive(Default)]
 struct EditArgs {
+    /// Its operands that are paths known before it runs.
     operands: Vec<String>,
     recursive: bool,
+    /// Why its first option not vetted for it, or operand only known at run time, is neither.
+    unvetted: Option<String>,
 }
 
 /// How the program being classified is run.
@@ -407,6 +512,8 @@ struct Classifier<'a> {
     relative_after_cd: Option<String>,
     /// Why the first command neither list vets is unvetted.
     unvetted: Option<String>,
+    /// How many times something has left the script unvetted.
+    unvetted_findings: usize,
     /// Approvals that would vet the programs on neither list.
     always_allow: Vec<ProgramApproval>,
     /// Something approvals cannot cover leaves the script unvetted.
@@ -423,21 +530,7 @@ impl Classifier<'_> {
         if script.incomplete {
             return Err("the script ends inside a quote or substitution".into());
         }
-        if let Some(variable) =
-            changed_sensitive_variable(&script).or_else(|| changed_git_variable(&script))
-        {
-            return Err(format!(
-                "the script changes {variable}, so what its programs do cannot be vetted"
-            ));
-        }
-        if let Some(variable) = exported_variable(&script) {
-            return Err(format!(
-                "the script exports {variable}, which the programs it runs may act on"
-            ));
-        }
-        if let Some(why) = evaluated::in_script(&script) {
-            return Err(why);
-        }
+        self.vet(unvettable_throughout(&script));
         self.home_changed |= changes(&script, "HOME");
         self.cdpath_changed |= changes(&script, "CDPATH");
         for (index, cmd) in script.commands.iter().enumerate() {
@@ -449,8 +542,12 @@ impl Classifier<'_> {
                 index,
                 depth,
             };
+            let findings = self.unvetted_findings;
             let ran = self.command(position);
             self.vet(ran);
+            if self.unvetted_findings > findings {
+                self.handed(position);
+            }
         }
         Ok(())
     }
@@ -459,6 +556,7 @@ impl Classifier<'_> {
     fn vet(&mut self, outcome: Result<(), String>) {
         if let Err(why) = outcome {
             self.unvetted.get_or_insert(why);
+            self.unvetted_findings += 1;
             self.unapprovable = true;
         }
     }
@@ -473,6 +571,7 @@ impl Classifier<'_> {
         if verdict == Some(Verdict::Approved) {
             return;
         }
+        self.unvetted_findings += 1;
         self.unvetted.get_or_insert_with(|| {
             format!("`{name}` is on neither the read-only nor the edit list")
         });
@@ -495,7 +594,7 @@ impl Classifier<'_> {
         for redirect in &cmd.redirects {
             if !redirect.writes() {
                 if redirect.operator == "<" {
-                    self.read(&redirect.target, false);
+                    self.opened_for_reading(&redirect.target);
                 }
                 continue;
             }
@@ -508,9 +607,50 @@ impl Classifier<'_> {
                     redirect.operator, redirect.target.text
                 ));
             }
-            self.target(Action::Write, redirect.target.text.clone(), false);
+            let target = spelled(&redirect.target, self.home_changed);
+            self.target(Action::Write, target, false);
         }
         Ok(())
+    }
+
+    /// Record each path the unvetted command at `position` names as handed to it, and classify
+    /// the scripts a shell it runs is given, for the effects in them.
+    fn handed(&mut self, position: Position<'_>) {
+        let words = &position.cmd.words;
+        let Some(start) = command_start(words) else {
+            return;
+        };
+        for word in words[start + 1..].iter().filter_map(operand_or_long_value) {
+            let named = static_path(&word, self.home_changed)
+                .or_else(|| every_entry_of(&spelled(&word, self.home_changed)));
+            if let Some(path) = named {
+                self.target(Action::Unknown, path, true);
+            }
+        }
+        let scripts = candidates(words, start)
+            .into_iter()
+            .filter(|candidate| candidate.may_be_command)
+            .flat_map(|candidate| shell_scripts(&words[candidate.at..], position));
+        for script in scripts {
+            let nested = self.script(script, position.depth + 1);
+            self.vet(nested);
+        }
+    }
+
+    /// Record the read a `<` of `target` is; one bash opens as a network connection leaves the
+    /// script unvetted.
+    fn opened_for_reading(&mut self, target: &Word) {
+        if NETWORK_PATHS
+            .iter()
+            .any(|prefix| target.text.starts_with(prefix))
+        {
+            self.vet(Err(format!(
+                "`< {}` opens a network connection",
+                target.text
+            )));
+        } else {
+            self.read(target, false);
+        }
     }
 
     /// Classify every program `position`'s command runs, following wrappers to what they run.
@@ -660,8 +800,14 @@ impl Classifier<'_> {
         }
     }
 
-    /// Vet a wrapper's own options; the command it runs is classified on its own.
+    /// Vet a wrapper's own options and record the file `xargs` reads its items from; the
+    /// command it runs is classified on its own.
     fn wrapper(&mut self, name: &str, args: &[Word]) -> Result<(), String> {
+        if name == FEEDS_ARGUMENTS {
+            for file in placeholder::xargs_arg_files(args) {
+                self.read(&file, false);
+            }
+        }
         if name != "env" {
             return Ok(());
         }
@@ -680,14 +826,17 @@ impl Classifier<'_> {
         Ok(())
     }
 
-    /// Record the files a read-only program reads the contents of.
+    /// Record the files a read-only program reads the contents of: its operands unless it is
+    /// one of [`READS_NO_CONTENTS`], and the values of its [`FILE_OPTIONS`].
     fn reads(
         &mut self,
         name: &str,
         args: &[Word],
         invocation: &Invocation<'_>,
     ) -> Result<(), String> {
-        if READS_NO_CONTENTS.contains(&name) {
+        let file_flags = file_options(name);
+        let reads_operands = !READS_NO_CONTENTS.contains(&name);
+        if !reads_operands && file_flags.is_empty() {
             return Ok(());
         }
         if invocation.fed {
@@ -696,8 +845,16 @@ impl Classifier<'_> {
             ));
         }
         if name == "find" {
-            self.find_reads(args);
-            return Ok(());
+            return self.find_reads(args, file_flags);
+        }
+        if let Some(arg) = args
+            .iter()
+            .find(|arg| self.may_become_unseen(arg, reads_operands && !invocation.fills(arg)))
+        {
+            return Err(format!(
+                "`{name} {}` may become an option or a file only known at run time",
+                arg.text
+            ));
         }
         let recursive = RECURSIVE_READERS
             .iter()
@@ -705,25 +862,51 @@ impl Classifier<'_> {
             .is_some_and(|(_, flags)| {
                 options(args).any(|arg| flags.iter().any(|flag| flag.matched_by(&arg.text)))
             });
-        let operands: Vec<Word> = read_operands(args)
+        let files: Vec<Word> = read_words(args, file_flags, reads_operands)
+            .into_iter()
             .filter(|word| !invocation.fills(word))
             .collect();
-        for operand in &operands {
-            self.read(operand, recursive);
+        for file in &files {
+            self.read(file, recursive);
         }
-        if recursive && operands.len() <= 1 {
+        let names_no_file = if GREP_PROGRAMS.contains(&name) {
+            grep_file_operands(args) == 0
+        } else {
+            files.len() <= 1
+        };
+        if recursive && names_no_file {
             self.target(Action::Read, ".".to_string(), true);
         }
-        Ok(())
+        match args.iter().find_map(|arg| argument_file(name, arg)) {
+            Some(list) => {
+                self.read(&list, false);
+                Err(format!(
+                    "`{name} @{}` takes its arguments from a file, only known at run time",
+                    list.text
+                ))
+            }
+            None => Ok(()),
+        }
     }
 
-    /// Record `find`'s starting points as read throughout when it runs a command on what it finds.
-    fn find_reads(&mut self, args: &[Word]) {
+    /// Record the file `find` takes its starting points from, and its starting points as read
+    /// throughout when it runs a command on what it finds.
+    fn find_reads(&mut self, args: &[Word], file_flags: &[Flag]) -> Result<(), String> {
+        let start_lists = read_words(find_own_args(args), file_flags, false);
+        for list in &start_lists {
+            self.read(list, false);
+        }
         if !args
             .iter()
             .any(|arg| FIND_EXEC_FLAGS.contains(&arg.text.as_str()))
         {
-            return;
+            return Ok(());
+        }
+        if let Some(list) = start_lists.first() {
+            return Err(format!(
+                "`find` runs a command on the files `{}` names, only known at run time",
+                list.text
+            ));
         }
         let starts: Vec<&Word> = args
             .iter()
@@ -735,6 +918,27 @@ impl Classifier<'_> {
         }
         for start in starts {
             self.read(start, true);
+        }
+        Ok(())
+    }
+
+    /// Whether `arg` may become at run time an option or further words that nothing vets: it
+    /// is an option holding an expansion outside a `--name=value` value that is `read_as_file`,
+    /// or a word not `read_as_file` that an expansion starts or may split.
+    fn may_become_unseen(&self, arg: &Word, read_as_file: bool) -> bool {
+        let text = spelled(arg, self.home_changed);
+        if !arg.dynamic || !text.contains(ANY_PATH_CHARS) {
+            return false;
+        }
+        match text.strip_prefix('-') {
+            Some(option) => {
+                let names_long_option = option
+                    .strip_prefix('-')
+                    .and_then(|long| long.split_once('='))
+                    .is_some_and(|(name, _)| !name.contains(ANY_PATH_CHARS));
+                !(read_as_file && names_long_option)
+            }
+            None => !read_as_file && (arg.splits || text.starts_with(ANY_PATH_CHARS)),
         }
     }
 
@@ -756,30 +960,34 @@ impl Classifier<'_> {
         }
     }
 
+    /// Record what an edit program does to its operands; with an argument that is not vetted,
+    /// only what it deletes or changes the mode of, whichever operand is which.
     fn edit(
         &mut self,
         edit: &EditProgram,
         args: &[Word],
         invocation: &Invocation<'_>,
     ) -> Result<(), String> {
-        if invocation.per_item {
-            return Err(format!(
-                "`{}` runs once per item find or xargs supplies",
-                edit.name
-            ));
-        }
+        let run_by_find = invocation.per_item && !invocation.fed;
+        let args = if run_by_find {
+            before_find_command_end(args)
+        } else {
+            args
+        };
         let EditArgs {
             operands,
             recursive,
-        } = edit_args(edit, args, self.home_changed)?;
+            unvetted,
+        } = edit_args(edit, args, self.home_changed);
         self.runs_edit_program = true;
         match (edit.targets, operands.split_last()) {
             (_, None) => {}
             (Targets::Removes, Some(_)) => self.each(Action::Delete, &operands, recursive),
-            (Targets::WritesAll, Some(_)) => self.each(Action::Write, &operands, false),
             (Targets::ChangesAllButFirst, Some(_)) => {
                 self.each(Action::ChangeAttributes, &operands[1..], recursive);
             }
+            _ if unvetted.is_some() => {}
+            (Targets::WritesAll, Some(_)) => self.each(Action::Write, &operands, false),
             (Targets::WritesLast, Some((last, sources))) if !sources.is_empty() => {
                 self.carry(Action::Read, sources, recursive);
                 self.copied_into(last, sources, recursive);
@@ -790,7 +998,10 @@ impl Classifier<'_> {
             }
             (Targets::WritesLast | Targets::Moves, Some(_)) => {}
         }
-        Ok(())
+        let per_item = invocation
+            .per_item
+            .then(|| format!("`{}` runs once per item find or xargs supplies", edit.name));
+        per_item.or(unvetted).map_or(Ok(()), Err)
     }
 
     fn each(&mut self, action: Action, paths: &[String], recursive: bool) {
@@ -842,7 +1053,8 @@ impl Classifier<'_> {
         let relative = is_relative(&path);
         let moved = !matches!(self.directory, Directory::Start);
         let unknown = matches!(self.directory, Directory::Unknown);
-        if relative && (unknown || (moved && action != Action::Read)) {
+        let vetted = action != Action::Unknown;
+        if vetted && relative && (unknown || (moved && action != Action::Read)) {
             self.relative_after_cd.get_or_insert_with(|| path.clone());
         }
         match &self.directory {
@@ -854,11 +1066,20 @@ impl Classifier<'_> {
     }
 
     fn into_analysis(self, outcome: Result<(), String>) -> Analysis {
-        let approvable = !self.unapprovable && outcome.is_ok() && self.relative_after_cd.is_none();
+        let below_changed_home = self
+            .effects
+            .iter()
+            .find(|effect| self.home_changed && effect.path.starts_with('~'))
+            .map(|effect| changed_home_why(&effect.path));
+        let approvable = !self.unapprovable
+            && outcome.is_ok()
+            && self.relative_after_cd.is_none()
+            && below_changed_home.is_none();
         let why = self
             .unvetted
             .or(outcome.err())
-            .or_else(|| self.relative_after_cd.as_deref().map(changed_directory_why));
+            .or_else(|| self.relative_after_cd.as_deref().map(changed_directory_why))
+            .or(below_changed_home);
         let class = match why {
             Some(why) => Class::Unvetted { why },
             None => edit_class(&self.effects, self.runs_edit_program),
@@ -896,6 +1117,10 @@ pub fn analyze(script: &str, scratch: Option<&Path>, approvals: Option<&Allowlis
 
 fn changed_directory_why(path: &str) -> String {
     format!("the script changes directory, so where `{path}` is cannot be known")
+}
+
+fn changed_home_why(path: &str) -> String {
+    format!("the script may change HOME, so where `{path}` is cannot be known")
 }
 
 /// Which runs an "always allow" for a program run with `args` covers: those with the same
@@ -996,56 +1221,178 @@ fn options(args: &[Word]) -> impl Iterator<Item = &Word> {
     args.iter().take_while(|arg| arg.text != "--")
 }
 
-/// The words a read-only program may read as files: its operands and the values of its
-/// `--name=value` options. Values of short options are not seen.
-fn read_operands(args: &[Word]) -> impl Iterator<Item = Word> + '_ {
-    let mut after_options = false;
-    args.iter().filter_map(move |arg| {
-        if after_options {
-            return Some(arg.clone());
-        }
-        if arg.text == "--" {
-            after_options = true;
-            return None;
-        }
-        if let Some((_, value)) = arg.text.strip_prefix("--").and_then(|o| o.split_once('=')) {
-            return Some(Word {
-                text: value.to_string(),
-                ..arg.clone()
-            });
-        }
-        (arg.text == "-" || !arg.text.starts_with('-')).then(|| arg.clone())
-    })
+/// The options naming a file that `name` reads, as [`FILE_OPTIONS`] lists them.
+fn file_options(name: &str) -> &'static [Flag] {
+    FILE_OPTIONS
+        .iter()
+        .find(|(program, _)| *program == name)
+        .map_or(&[], |&(_, flags)| flags)
 }
 
-/// `args` split into operands and vetted options; fails on an option not vetted for `edit` or
-/// an argument only known at run time, other than a glob for every entry of a directory.
-fn edit_args(edit: &EditProgram, args: &[Word], home_changed: bool) -> Result<EditArgs, String> {
-    let mut parsed = EditArgs {
-        operands: Vec::new(),
-        recursive: false,
-    };
+/// The words a read-only program may read as files: the values of its `file_flags`, wherever
+/// they are given, and when it `reads_operands`, its operands and the values of its
+/// `--name=value` options.
+fn read_words<'w>(
+    args: impl IntoIterator<Item = &'w Word>,
+    file_flags: &[Flag],
+    reads_operands: bool,
+) -> Vec<Word> {
+    let mut files = Vec::new();
+    let mut after_options = false;
+    let mut is_flag_value = false;
+    for arg in args {
+        if mem::take(&mut is_flag_value) {
+            files.push(arg.clone());
+        }
+        match file_flags.iter().find_map(|flag| flag.value_in(&arg.text)) {
+            Some(OptionValue::Attached(value)) => files.push(arg.part(value)),
+            Some(OptionValue::NextWord) => is_flag_value = true,
+            None => {}
+        }
+        if !reads_operands {
+            continue;
+        }
+        if after_options {
+            files.push(arg.clone());
+        } else if arg.text == "--" {
+            after_options = true;
+        } else {
+            files.extend(operand_or_long_value(arg));
+        }
+    }
+    files.dedup();
+    files
+}
+
+/// How many of `grep`'s `args` are files to search: its operands, less the pattern unless an
+/// option gives it. Errs toward fewer where a word may be an option's value.
+fn grep_file_operands(args: &[Word]) -> usize {
+    let mut operands: usize = 0;
+    let mut pattern_given = false;
+    let mut after_options = false;
+    let mut is_option_value = false;
+    for arg in args {
+        let text = arg.text.as_str();
+        if mem::take(&mut is_option_value) {
+            continue;
+        }
+        if after_options || text == "-" || !text.starts_with('-') {
+            operands += 1;
+        } else if text == "--" {
+            after_options = true;
+        } else {
+            pattern_given |= GREP_PATTERN_FLAGS.iter().any(|flag| flag.matched_by(text));
+            is_option_value = GREP_VALUE_FLAGS
+                .iter()
+                .any(|flag| matches!(flag.value_in(text), Some(OptionValue::NextWord)));
+        }
+    }
+    if pattern_given {
+        operands
+    } else {
+        operands.saturating_sub(1)
+    }
+}
+
+/// The file `name` takes more arguments from when `arg` is `@file`.
+fn argument_file(name: &str, arg: &Word) -> Option<Word> {
+    let file = arg
+        .text
+        .strip_prefix('@')
+        .filter(|_| READS_ARGUMENT_FILES.contains(&name))?;
+    Some(arg.part(file))
+}
+
+/// `arg` when it is an operand, or the value of the `--name=value` option it is.
+fn operand_or_long_value(arg: &Word) -> Option<Word> {
+    if let Some((_, value)) = arg.text.strip_prefix("--").and_then(|o| o.split_once('=')) {
+        return Some(arg.part(value));
+    }
+    (arg.text == "-" || !arg.text.starts_with('-')).then(|| arg.clone())
+}
+
+/// `args` split into operands and options, noting the first option not vetted for `edit` and
+/// the first operand only known at run time, other than a glob for every entry of a directory.
+fn edit_args(edit: &EditProgram, args: &[Word], home_changed: bool) -> EditArgs {
+    let mut parsed = EditArgs::default();
     let mut options = true;
     let mut words = args.iter();
     while let Some(arg) = words.next() {
         let text = arg.text.as_str();
-        if options && text == "--" {
+        let vetted = if options && text == "--" {
             options = false;
+            Ok(())
         } else if let Some(long) = text.strip_prefix("--").filter(|_| options && !arg.dynamic) {
-            if !edit.long_flags.contains(&long) {
-                return Err(format!("`{} {text}` is not a vetted option", edit.name));
+            parsed.recursive |= "recursive".starts_with(long);
+            if edit.long_flags.contains(&long) {
+                Ok(())
+            } else {
+                Err(format!("`{} {text}` is not a vetted option", edit.name))
             }
-            parsed.recursive |= long == "recursive";
         } else if let Some(cluster) = short_options(text).filter(|_| options && !arg.dynamic) {
-            if edit_flags(edit, cluster)? {
-                words.next();
-            }
             parsed.recursive |= cluster.contains(['r', 'R']);
+            edit_flags(edit, cluster).map(|value_is_next_word| {
+                if value_is_next_word {
+                    words.next();
+                }
+            })
         } else {
-            parsed.operands.push(edit_operand(edit, arg, home_changed)?);
+            edit_operand(edit, arg, home_changed).map(|operand| parsed.operands.push(operand))
+        };
+        if let Err(why) = vetted {
+            parsed.unvetted.get_or_insert(why);
         }
     }
-    Ok(parsed)
+    parsed
+}
+
+/// `args` up to the `;` or `+` that ends the command `find` runs.
+fn before_find_command_end(args: &[Word]) -> &[Word] {
+    let end = args
+        .iter()
+        .position(|arg| FIND_COMMAND_ENDS.contains(&arg.text.as_str()))
+        .unwrap_or(args.len());
+    &args[..end]
+}
+
+/// The scripts `command` gives the shell it runs, if it runs one: the word after `-c`, else
+/// its inputs when it has no operand.
+fn shell_scripts<'s>(command: &'s [Word], position: Position<'s>) -> Vec<&'s str> {
+    let Some((shell, args)) = command.split_first() else {
+        return Vec::new();
+    };
+    if !SHELLS.contains(&program(&shell.text).as_str()) {
+        return Vec::new();
+    }
+    let command_string = args
+        .iter()
+        .position(|arg| short_options(&arg.text).is_some_and(|cluster| cluster.contains('c')))
+        .and_then(|option| args.get(option + 1));
+    match command_string {
+        Some(script) => vec![script.text.as_str()],
+        None if args.iter().all(|arg| arg.text.starts_with('-')) => {
+            position.script.inputs_of(position.cmd).collect()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Why nothing `script` runs can be vetted: it changes a variable that decides which programs
+/// run, exports one a program may act on, or has bash evaluate text the classifier cannot see.
+fn unvettable_throughout(script: &Script) -> Result<(), String> {
+    if let Some(variable) =
+        changed_sensitive_variable(script).or_else(|| changed_git_variable(script))
+    {
+        return Err(format!(
+            "the script changes {variable}, so what its programs do cannot be vetted"
+        ));
+    }
+    if let Some(variable) = exported_variable(script) {
+        return Err(format!(
+            "the script exports {variable}, which the programs it runs may act on"
+        ));
+    }
+    evaluated::in_script(script).map_or(Ok(()), Err)
 }
 
 /// Whether `path` resolves against a working directory.
@@ -1057,12 +1404,6 @@ fn is_relative(path: &str) -> bool {
 fn edit_operand(edit: &EditProgram, arg: &Word, home_changed: bool) -> Result<String, String> {
     if let Some(path) = static_path(arg, home_changed) {
         return Ok(path);
-    }
-    if arg.quoted && arg.text.starts_with('~') {
-        return Err(format!(
-            "`{} {}` may quote its `~`, so where it points cannot be known",
-            edit.name, arg.text
-        ));
     }
     every_entry_of(&spelled(arg, home_changed)).ok_or_else(|| {
         format!(
@@ -1085,20 +1426,21 @@ fn edit_flags(edit: &EditProgram, cluster: &str) -> Result<bool, String> {
     Ok(false)
 }
 
-/// `word` as a path known before it runs, with a leading `$HOME` spelled `~`; `None` when it
-/// is only known at run time or starts with a `~` that may be quoted.
+/// `word` as a path known before it runs, spelled as [`spelled`] does; `None` when it is only
+/// known at run time.
 fn static_path(word: &Word, home_changed: bool) -> Option<String> {
-    if word.quoted && word.text.starts_with('~') {
-        return None;
-    }
     if !word.dynamic {
-        return Some(word.text.clone());
+        return Some(spelled(word, home_changed));
     }
     home_as_tilde(&word.text, home_changed).filter(|path| !path.contains(DYNAMIC_CHARS))
 }
 
-/// `word`'s text with a leading `$HOME` spelled `~` when it may be.
+/// `word`'s text with a leading `$HOME` spelled `~` when it may be, and a leading `~` that
+/// bash leaves as written spelled `./~`.
 fn spelled(word: &Word, home_changed: bool) -> String {
+    if word.literal_tilde {
+        return format!("./{}", word.text);
+    }
     word.dynamic
         .then(|| home_as_tilde(&word.text, home_changed))
         .flatten()

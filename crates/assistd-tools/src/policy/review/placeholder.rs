@@ -1,5 +1,5 @@
-//! Text a wrapper replaces with run-time input before running its command:
-//! `{}` after `find -exec`, and `xargs`'s replace string.
+//! What a wrapper takes from run-time input: the text it replaces before running its command
+//! (`{}` after `find -exec`, `xargs`'s replace string), and the file `xargs` reads items from.
 
 use super::{FEEDS_ARGUMENTS, INPUT_PLACEHOLDER, exec_flags, program};
 use crate::policy::shell::Word;
@@ -50,6 +50,9 @@ const XARGS_LONG_OPTIONS: &[(&str, Arity)] = &[
 /// The `xargs` options that set the replace string.
 const XARGS_REPLACE_OPTIONS: &[&str] = &["I", "i", "replace"];
 
+/// The `xargs` options naming a file it reads its items from, in place of stdin.
+const XARGS_ARG_FILE_OPTIONS: &[&str] = &["a", "arg-file"];
+
 /// Text a wrapper replaces with run-time input, so a command word holding
 /// it is only known at run time.
 pub(super) enum Placeholder<'w> {
@@ -83,6 +86,17 @@ struct ParsedOption<'w> {
     attached: Option<&'w str>,
 }
 
+/// One of `xargs`'s own options.
+enum XargsOption<'w> {
+    Given {
+        name: &'w str,
+        /// Its value and the word holding it, when it was given one.
+        value: Option<(&'w Word, &'w str)>,
+    },
+    /// Only known at run time, as is every word after it.
+    Unknown,
+}
+
 /// What `word`, in command position with `args`, fills in at run time in
 /// the command it runs.
 pub(super) fn placeholders<'w>(word: &Word, args: &'w [Word]) -> Vec<Placeholder<'w>> {
@@ -97,14 +111,46 @@ pub(super) fn placeholders<'w>(word: &Word, args: &'w [Word]) -> Vec<Placeholder
     out
 }
 
-/// The replace strings `xargs` options `args` set, read as GNU getopt
-/// does: up to the first operand, `--`, or an option it rejects.
+/// The replace strings `xargs` options `args` set.
 fn xargs_replace_strings(args: &[Word]) -> Vec<Placeholder<'_>> {
+    xargs_options(args)
+        .into_iter()
+        .filter_map(|option| match option {
+            XargsOption::Unknown => Some(Placeholder::Unknown),
+            XargsOption::Given { name, value } if XARGS_REPLACE_OPTIONS.contains(&name) => {
+                Some(match value {
+                    Some((source, _)) if source.dynamic => Placeholder::Unknown,
+                    Some((_, text)) => Placeholder::Text(text),
+                    None => Placeholder::Text(INPUT_PLACEHOLDER),
+                })
+            }
+            XargsOption::Given { .. } => None,
+        })
+        .collect()
+}
+
+/// The files `xargs` options `args` make it read its items from.
+pub(super) fn xargs_arg_files(args: &[Word]) -> Vec<Word> {
+    xargs_options(args)
+        .into_iter()
+        .filter_map(|option| match option {
+            XargsOption::Given {
+                name,
+                value: Some((source, text)),
+            } if XARGS_ARG_FILE_OPTIONS.contains(&name) => Some(source.part(text)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The options `args` give `xargs` itself, read as GNU getopt does: up to the first operand,
+/// `--`, or an option it rejects.
+fn xargs_options(args: &[Word]) -> Vec<XargsOption<'_>> {
     let mut out = Vec::new();
     let mut words = args.iter();
     while let Some(word) = words.next() {
         if word.dynamic && word.text.starts_with('-') {
-            out.push(Placeholder::Unknown);
+            out.push(XargsOption::Unknown);
             break;
         }
         let Some(option) = parse_xargs_option(&word.text) else {
@@ -115,13 +161,10 @@ fn xargs_replace_strings(args: &[Word]) -> Vec<Placeholder<'_>> {
             (None, Arity::Required) => words.next().map(|next| (next, next.text.as_str())),
             (None, _) => None,
         };
-        if XARGS_REPLACE_OPTIONS.contains(&option.name) {
-            out.push(match value {
-                Some((source, _)) if source.dynamic => Placeholder::Unknown,
-                Some((_, text)) => Placeholder::Text(text),
-                None => Placeholder::Text(INPUT_PLACEHOLDER),
-            });
-        }
+        out.push(XargsOption::Given {
+            name: option.name,
+            value,
+        });
     }
     out
 }
