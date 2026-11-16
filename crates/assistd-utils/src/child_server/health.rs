@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 
 use super::ChildServerSpec;
 use super::error::ChildServerError;
-use super::ownership::is_listening_in_group;
+use super::ownership::group_holds_every_listener;
 use crate::http::local_client_builder;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -20,7 +20,8 @@ const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUNG_AFTER_FAILED_PROBES: u32 = 3;
 
 /// Polls the spec's health path: until the child reports ready, then for liveness.
-/// A ready 200 only counts when the listener belongs to the child's process group.
+/// A 200 only counts when every listener on the address belongs to the child's
+/// process group.
 pub(super) struct HealthChecker {
     server: &'static str,
     client: reqwest::Client,
@@ -108,16 +109,21 @@ impl HealthChecker {
     }
 
     /// Probe a ready child every [`LIVENESS_INTERVAL`] and return once
-    /// [`HUNG_AFTER_FAILED_PROBES`] probes in a row got no 200.
+    /// [`HUNG_AFTER_FAILED_PROBES`] probes in a row got no 200 or found a
+    /// listener on the address that the child does not own.
     pub(super) async fn wait_hung(&self) {
         let mut failed_probes = 0;
         while failed_probes < HUNG_AFTER_FAILED_PROBES {
             tokio::time::sleep(LIVENESS_INTERVAL).await;
             let failure = match self.probe(LIVENESS_PROBE_TIMEOUT).await {
-                Ok(true) => {
+                Ok(true) if self.served_by_child().await => {
                     failed_probes = 0;
                     continue;
                 }
+                Ok(true) => format!(
+                    "{} does not own every listener on {}",
+                    self.server, self.addr
+                ),
                 Ok(false) => "non-200 response".to_owned(),
                 Err(e) => e.to_string(),
             };
@@ -132,7 +138,7 @@ impl HealthChecker {
 
     async fn served_by_child(&self) -> bool {
         let (addr, owner) = (self.addr, self.owner);
-        tokio::task::spawn_blocking(move || is_listening_in_group(addr, owner))
+        tokio::task::spawn_blocking(move || group_holds_every_listener(addr, owner))
             .await
             .map_err(io::Error::other)
             .and_then(|owned| owned)

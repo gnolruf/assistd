@@ -6,6 +6,8 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use rmcp::transport::auth::{AuthorizationRequest, AuthorizationSession};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -27,8 +29,14 @@ const MAX_REQUEST_HEAD_BYTES: u64 = 16 * 1024;
 /// How long one browser connection gets to send its request head.
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Most connections read at once; further ones wait in the accept queue.
+const MAX_OPEN_CONNECTIONS: usize = 16;
+
 /// Client name sent when registering dynamically.
 const CLIENT_NAME: &str = "assistd";
+
+/// Body answering a callback whose `state` is not the pending sign-in's.
+const FOREIGN_STATE_REPLY: &str = "assistd: this redirect does not belong to the pending sign-in.";
 
 /// A sign-in waiting for the browser's redirect. Dropping it closes the listener and abandons
 /// the flow. `Debug` never shows the state or the authorization URL.
@@ -39,11 +47,10 @@ pub struct PendingLogin {
     state: String,
 }
 
-/// The query of a request to [`CALLBACK_PATH`].
+/// The query of a request to [`CALLBACK_PATH`] that echoed the sign-in's `state`.
 #[derive(Default)]
 struct Callback {
     code: Option<String>,
-    state: Option<String>,
     issuer: Option<String>,
     error: Option<String>,
 }
@@ -54,12 +61,12 @@ impl PendingLogin {
         self.session.get_authorization_url()
     }
 
-    /// Wait up to [`LOGIN_TIMEOUT`] for the redirect, then trade its code for tokens and store
-    /// them. The first request to the callback path ends the flow: one whose `state` differs,
-    /// or that carries an error or no code, fails it without storing anything.
+    /// Wait up to [`LOGIN_TIMEOUT`] for the redirect echoing this sign-in's `state`, then trade
+    /// its code for tokens and store them. Redirects with another `state` are ignored; the first
+    /// matching one ends the flow, failing it when it carries an error or no code.
     pub async fn complete(self) -> Result<(), McpError> {
         let (mut browser, callback) =
-            tokio::time::timeout(LOGIN_TIMEOUT, next_callback(&self.listener))
+            tokio::time::timeout(LOGIN_TIMEOUT, next_callback(&self.listener, &self.state))
                 .await
                 .map_err(|_| {
                     McpError::Login(format!(
@@ -156,24 +163,43 @@ fn authorization_state(authorize_url: &str) -> Result<String, McpError> {
         .ok_or_else(|| McpError::OAuth("the authorization URL carries no state".into()))
 }
 
-/// Accept connections until one asks for [`CALLBACK_PATH`]; every other request is answered
-/// 404 and closed.
-async fn next_callback(listener: &TcpListener) -> (TcpStream, Callback) {
+/// Serve up to [`MAX_OPEN_CONNECTIONS`] connections at once until one delivers the callback
+/// echoing `state`, so a client that sends nothing does not hold up the browser.
+async fn next_callback(listener: &TcpListener, state: &str) -> (TcpStream, Callback) {
+    let mut open_connections = FuturesUnordered::new();
     loop {
-        let mut stream = match listener.accept().await {
-            Ok((stream, _)) => stream,
-            Err(e) => {
-                debug!(target: "assistd::mcp", error = %e, "redirect listener accept failed");
-                continue;
+        tokio::select! {
+            accepted = listener.accept(), if open_connections.len() < MAX_OPEN_CONNECTIONS => {
+                match accepted {
+                    Ok((stream, _)) => open_connections.push(callback_on(stream, state)),
+                    Err(e) => {
+                        debug!(target: "assistd::mcp", error = %e, "redirect listener accept failed");
+                    }
+                }
             }
-        };
-        match read_request_target(&mut stream).await {
-            Some(target) if target.path() == CALLBACK_PATH => {
-                return (stream, Callback::from_query(&target));
+            Some(answered) = open_connections.next() => {
+                if let Some(delivered) = answered {
+                    return delivered;
+                }
             }
-            _ => write_response(&mut stream, "404 Not Found", "Not found.").await,
         }
     }
+}
+
+/// The callback `stream` asks for when its request is to [`CALLBACK_PATH`] echoing `state`. A
+/// callback with another state is answered 400, every other request 404, and both are closed.
+async fn callback_on(mut stream: TcpStream, state: &str) -> Option<(TcpStream, Callback)> {
+    match read_request_target(&mut stream).await {
+        Some(target) if target.path() == CALLBACK_PATH => {
+            if let Some(callback) = Callback::echoing(state, &target) {
+                return Some((stream, callback));
+            }
+            debug!(target: "assistd::mcp", "ignoring a redirect with another sign-in's state");
+            write_response(&mut stream, "400 Bad Request", FOREIGN_STATE_REPLY).await;
+        }
+        _ => write_response(&mut stream, "404 Not Found", "Not found.").await,
+    }
+    None
 }
 
 /// The target of the GET request on `stream`, read whole so closing does not reset the
@@ -203,35 +229,30 @@ async fn read_request_target(stream: &mut TcpStream) -> Option<Url> {
 }
 
 impl Callback {
-    fn from_query(target: &Url) -> Self {
-        target
-            .query_pairs()
-            .fold(Self::default(), |mut callback, (key, value)| {
-                let slot = match key.as_ref() {
-                    "code" => &mut callback.code,
-                    "state" => &mut callback.state,
-                    "iss" => &mut callback.issuer,
-                    "error" => &mut callback.error,
-                    _ => return callback,
-                };
-                *slot = Some(value.into_owned());
-                callback
-            })
+    /// The callback in `target`'s query, or `None` unless that query's `state` is `state`.
+    fn echoing(state: &str, target: &Url) -> Option<Self> {
+        let mut callback = Self::default();
+        let mut echoed_state = None;
+        for (key, value) in target.query_pairs() {
+            let slot = match key.as_ref() {
+                "code" => &mut callback.code,
+                "state" => &mut echoed_state,
+                "iss" => &mut callback.issuer,
+                "error" => &mut callback.error,
+                _ => continue,
+            };
+            *slot = Some(value.into_owned());
+        }
+        (echoed_state.as_deref() == Some(state)).then_some(callback)
     }
 }
 
-/// Check `callback` against the flow's `state` and trade its code for tokens, which the
-/// session's store keeps.
+/// Trade `callback`'s code for tokens, which the session's store keeps.
 async fn redeem(
     session: &AuthorizationSession,
     state: &str,
     callback: Callback,
 ) -> Result<(), McpError> {
-    if callback.state.as_deref() != Some(state) {
-        return Err(McpError::Login(
-            "the redirect's state does not match this sign-in".into(),
-        ));
-    }
     if let Some(error) = callback.error {
         return Err(McpError::Login(format!(
             "the authorization server refused: {}",

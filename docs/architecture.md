@@ -129,8 +129,9 @@ finishes even when the turn that asked for it is interrupted. Any failure only
 costs re-processing that conversation's context. `assistd-utils`'s `ChildServer`
 supervisor, run on the `LlamaServerSpec`, health-probes
 `GET /health` until the server reports ready (a 200 counts only when
-`/proc` shows the listener belongs to the child's process group, so a
-stale server or squatter on the port is never trusted), then `LlamaChatClient`
+`/proc` shows every listener on the address belongs to the child's
+process group, so a stale server or squatter on the port is never
+trusted), then `LlamaChatClient`
 streams chat completions over `POST /v1/chat/completions`. Chat and
 control-plane requests are sent only while the supervisor is `Ready` with
 a live child, so nothing reaches the port between a crash and the next
@@ -148,9 +149,10 @@ agent turn surfaces an `LlmError::ServerRestarting`. The agent
 retries once after the new child reports healthy; further failures
 propagate up to the client as an `EventBody::Error`.
 
-A `Ready` child is still probed on `GET /health` every 30 seconds. Three
-failed probes in a row (10 second timeout each) mark it hung: the
-supervisor kills its process group and restarts it like a crash.
+A `Ready` child is still probed on `GET /health` every 30 seconds, with
+the same listener check. Three failed probes in a row (10 second timeout
+each) mark it hung: the supervisor kills its process group and restarts
+it like a crash.
 
 Vision support is detected dynamically: `probe_capabilities_routed()` calls
 `GET /props` on the running server to learn whether the model has a
@@ -873,10 +875,12 @@ that offers no registration fails with an error naming `client_id`.
 The daemon runs the sign-in itself, since only it holds the token
 store. `McpLogin` binds a one-shot listener on an ephemeral port of
 `127.0.0.1`, builds the PKCE authorization URL with that redirect, and
-sends it back as `McpAuthorizeUrl`; `assistd mcp login` opens it with
-`xdg-open` and prints it. The first request to the callback path ends
-the flow: a `state` other than the one in the URL is refused and stores
-nothing, a matching one has its code traded for tokens. The listener
+sends it back as `McpAuthorizeUrl`; `assistd mcp login` prints it and
+opens it with `xdg-open` through an owner-only file that forwards the
+browser there, which keeps the URL and its `state` out of every command
+line. A request to the callback path with a `state`
+other than the one in the URL is answered 400 and ignored; the first one
+echoing it ends the flow and has its code traded for tokens. The listener
 closes after that request or five minutes. The server is then stopped,
 its tools withdrawn from the catalog, and started afresh, and the reply
 reports its state once the first start attempt settles. `McpLogout`

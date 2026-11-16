@@ -48,7 +48,9 @@ assistd mcp login <server>
 The daemon finds the server's authorization server, registers a client
 there if the entry has no `client_id`, and listens for the browser's
 redirect on a random port of `127.0.0.1`. The command opens the sign-in
-page with `xdg-open` and prints its URL, then waits. Once you approve
+page with `xdg-open` and prints its URL, then waits. The browser is
+handed a private file that forwards it to that URL, so the URL shows up
+in no command line. Once you approve
 access, the daemon checks the redirect's `state`, trades its code for a
 token, stores the token in `~/.local/state/assistd/mcp-tokens.json`
 (mode 0600), and restarts the server; its tools are offered from the
