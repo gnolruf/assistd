@@ -335,6 +335,9 @@ pub struct Analysis {
     /// when it is vetted, or when something other than a program approvals can cover leaves it
     /// unvetted.
     pub always_allow: Vec<ProgramApproval>,
+    /// An "always allow" approval vetted a program on neither list, so what the script writes
+    /// is not known from its class.
+    pub runs_approved: bool,
 }
 
 /// A file operation a script performs on `path`: as written, with `$HOME` spelled `~`, or
@@ -518,6 +521,7 @@ struct Classifier<'a> {
     always_allow: Vec<ProgramApproval>,
     /// Something approvals cannot cover leaves the script unvetted.
     unapprovable: bool,
+    runs_approved: bool,
 }
 
 impl Classifier<'_> {
@@ -569,6 +573,7 @@ impl Classifier<'_> {
             .approvals
             .map(|approvals| approvals.verdict(name, scope.as_ref()));
         if verdict == Some(Verdict::Approved) {
+            self.runs_approved = true;
             return;
         }
         self.unvetted_findings += 1;
@@ -1093,6 +1098,7 @@ impl Classifier<'_> {
             } else {
                 Vec::new()
             },
+            runs_approved: self.runs_approved,
         }
     }
 }

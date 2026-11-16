@@ -190,7 +190,8 @@ pub struct ToolsBashConfig {
     /// `["--share-net"]` giving `bash` the network (it has none by default;
     /// needs Linux 6.12+ Landlock scoping to keep abstract sockets out, or
     /// tools are disabled), or a `--bind` making a dot entry of `$HOME`
-    /// writable (read-only).
+    /// writable (read-only). A script classified read-only gets a `--bind`
+    /// or `--overlay` read-only and no `--dev-bind`.
     pub bwrap_extra_args: Vec<String>,
 }
 

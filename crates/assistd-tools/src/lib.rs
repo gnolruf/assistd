@@ -33,10 +33,10 @@ pub use memory_tools::{RememberTool, ReminisceTool};
 pub use policy::{
     APPROVALS_FILE, APPROVED_APPS_FILE, APPROVED_HOSTS_FILE, APPROVED_MCP_TOOLS_FILE, ActionCheck,
     Allowlist, AllowlistError, Approval, ApprovalGate, Approvals, CONFIRM_TIMEOUT, ConfirmRouter,
-    ConfirmationGate, ConfirmationRequest, FileScope, IpcConfirmationGate, JUDGE_TIMEOUT,
-    JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm, NoPendingReview,
-    PromptParking, Protected, Risk, SCRATCH_MARKER, SafetyJudge, SandboxError, SandboxInfo,
-    SandboxPrograms, SandboxRequest, ScopeError, ScratchCap, SearchPath, SharedDirs,
+    ConfirmationGate, ConfirmationRequest, FileScope, HomeAccess, IpcConfirmationGate,
+    JUDGE_TIMEOUT, JudgeContext, JudgeModel, JudgedClass, JudgedCommand, NoPendingConfirm,
+    NoPendingReview, PromptParking, Protected, Risk, SCRATCH_MARKER, SafetyJudge, SandboxError,
+    SandboxInfo, SandboxPrograms, SandboxRequest, ScopeError, ScratchCap, SearchPath, SharedDirs,
     StandingApprovals, ToolSandbox, ToolsDisabled, Unattended, Verdict, probe_sandbox,
 };
 #[cfg(any(test, feature = "test-support"))]

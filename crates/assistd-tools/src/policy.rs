@@ -44,12 +44,13 @@ pub(crate) use path_class::{admits_edit, split_at_existing};
 pub use review::{Action, Analysis, Class, Confirmation, Delete, Effect, analyze, classify};
 pub(crate) use sandbox::{ConfinedSpawner, Guarded, InputBind, is_within_visible_home_entry};
 pub use sandbox::{
-    Protected, ResolvedSandboxMode, SCRATCH_MARKER, SandboxError, SandboxInfo, SandboxPrograms,
-    SandboxRequest, ScopeError, ScratchCap, SharedDirs, ToolSandbox, ToolsDisabled, probe_sandbox,
+    HomeAccess, Protected, ResolvedSandboxMode, SCRATCH_MARKER, SandboxError, SandboxInfo,
+    SandboxPrograms, SandboxRequest, ScopeError, ScratchCap, SharedDirs, ToolSandbox,
+    ToolsDisabled, probe_sandbox,
 };
 
-/// Policy for the commands that spawn subprocesses: read-only scripts run unasked, edits ask
-/// unless the permission mode accepts them, and unvetted scripts ask.
+/// Policy for the commands that spawn subprocesses: read-only scripts run unasked with `$HOME`
+/// read-only, edits ask unless the permission mode accepts them, and unvetted scripts ask.
 #[derive(Debug, Clone)]
 pub struct BashPolicyCfg {
     pub timeout: Duration,
@@ -88,6 +89,13 @@ pub(crate) enum Review {
     Refuse(String),
 }
 
+/// A script's [`Review`], and what of `$HOME` it may change once that lets it run.
+#[derive(Debug)]
+pub(crate) struct ScriptReview {
+    pub(crate) review: Review,
+    pub(crate) home: HomeAccess,
+}
+
 /// The policy, sandbox and gate a command runs model-chosen argv under.
 #[derive(Debug)]
 pub(crate) struct SubprocessPolicy {
@@ -100,13 +108,16 @@ impl SubprocessPolicy {
     /// The path guards, then the script's class, with "always allow" approvals vetting the
     /// programs they cover: an edit is checked against the edit scope, and an unvetted script
     /// asks. Runs on the blocking pool, since both read the filesystem.
-    pub(crate) async fn review_script(&self, script: String) -> Review {
+    pub(crate) async fn review_script(&self, script: String) -> ScriptReview {
         let cfg = Arc::clone(&self.cfg);
         let sandbox = Arc::clone(&self.sandbox);
         on_blocking_pool(move || {
             let guards = sandbox.path_guards();
             let analysis = analyze(&script, cfg.scratch.as_deref(), Some(&cfg.allowlist));
-            guarded_review(&guards, analysis, &cfg.edit_scope, &cfg.protected)
+            ScriptReview {
+                home: home_access(&analysis),
+                review: guarded_review(&guards, analysis, &cfg.edit_scope, &cfg.protected),
+            }
         })
         .await
     }
@@ -224,6 +235,16 @@ impl ReadPolicy {
                 .transpose()
         })
         .await
+    }
+}
+
+/// Read-only for a script that runs only programs on the read-only list, whatever the path
+/// guards make of it; an edit, an unvetted script and an approved program may all write.
+fn home_access(analysis: &Analysis) -> HomeAccess {
+    if analysis.class == Class::ReadOnly && !analysis.runs_approved {
+        HomeAccess::ReadOnly
+    } else {
+        HomeAccess::Writable
     }
 }
 

@@ -447,6 +447,7 @@ fn review_write(guards: &PathGuards, path: &Path, cfg: &WritePolicyCfg) -> Revie
         }],
         carried: Vec::new(),
         always_allow: Vec::new(),
+        runs_approved: false,
     };
     let edit_scope: Vec<PathBuf> = cfg.prefixes().cloned().collect();
     guarded_review(guards, analysis, &edit_scope, &cfg.protected)

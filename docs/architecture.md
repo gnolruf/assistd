@@ -592,7 +592,8 @@ and version control (`make`, `cargo`, `npm`, `git`): each runs code
 named by the project, config or options it is pointed at, which the
 model can write, so an approval would let it run its own code unasked.
 A script then runs in the bubblewrap
-sandbox; tools never run unsandboxed, so when `bwrap` is missing (or
+sandbox, with all of `$HOME` read-only when it was classified
+read-only; tools never run unsandboxed, so when `bwrap` is missing (or
 `tools.bash.sandbox = "none"`) the model is offered no tools at all and
 clients are told why. `wm open` is the one way out of the sandbox: it
 launches an installed desktop entry as the user, through the compositor's
@@ -984,7 +985,12 @@ A walk through "what files changed this week?" typed into `assistd chat`:
 
 6. **Sandbox.** `BashCommand` invokes the bubblewrap sandbox: a
    read-only root with writable entries
-   of `$HOME` other than dotfiles and symlinks, fresh `/tmp`, `/dev`,
+   of `$HOME` other than dotfiles and symlinks (none writable for a
+   script classified read-only, unless an "always allow" approval vetted
+   a program in it, and a `--bind` or `--overlay` from
+   `bwrap_extra_args` read-only for it too, with any `--dev-bind` left
+   out, so a misclassified one fails with `EROFS` rather than
+   writing), fresh `/tmp`, `/dev`,
    `/proc` and `/run`, unshared user/pid/ipc/uts/network namespaces,
    an environment cleared down to locale and terminal variables, and
    fixed `prlimit` caps of 512 tasks in the sandbox, 4 GiB of data

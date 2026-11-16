@@ -574,6 +574,29 @@ async fn bwrap_blocks_writes_under_usr_and_etc() {
     }
 }
 
+/// Returns early when the host home has no entry an edit could write.
+#[tokio::test]
+async fn bwrap_gives_a_read_only_script_no_writable_home_entry() {
+    let Some(sandbox) = bwrap_or_none() else {
+        return;
+    };
+    let list_writable = "for entry in ~/*; do test -w \"$entry\" && echo \"$entry\"; done";
+    let editing = bash_with(Arc::new(AlwaysAllowGate), sandbox.clone());
+    let as_edit = format!("touch /tmp/edit; {list_writable}");
+    if run_rendered(&editing, input(&as_edit))
+        .await
+        .stdout
+        .is_empty()
+    {
+        return;
+    }
+
+    let unasked = bash_with(Arc::new(PanicGate), sandbox);
+    let out = run_rendered(&unasked, input(list_writable)).await;
+
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{out:?}");
+}
+
 #[tokio::test]
 async fn bwrap_dev_holds_no_block_devices() {
     let Some(sandbox) = bwrap_or_none() else {
