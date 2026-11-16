@@ -10,6 +10,7 @@ use assistd_ipc::{
     EventBody, McpServerState, McpTransportKind, Request, RequestBody, TokenRevocation,
 };
 use clap::{Args, Subcommand};
+use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 use super::run_one_shot;
@@ -30,6 +31,13 @@ pub(crate) enum McpAction {
     Logout { server: String },
     /// One tab-separated row per configured server: name, transport, and state.
     Status,
+}
+
+/// A sign-in page handed to the browser as an owner-only file that forwards there, so the URL
+/// and the `state` it carries stay out of every command line. Dropping it deletes the file.
+struct OpenedSignIn {
+    opener: Child,
+    _forwarding_page: NamedTempFile,
 }
 
 pub(crate) async fn run(args: McpArgs) -> Result<()> {
@@ -66,8 +74,8 @@ async fn login(server: String) -> Result<()> {
         Ok(())
     })
     .await;
-    if let Some(mut browser) = browser {
-        let _ = browser.wait();
+    if let Some(mut opened) = browser {
+        let _ = opened.opener.wait();
     }
     outcome
 }
@@ -146,18 +154,63 @@ fn describe_state(server: &str, state: &McpServerState) -> String {
 }
 
 /// Open `url` with `xdg-open` when there is a graphical session to open it in.
-fn open_browser(url: &str) -> Option<Child> {
+fn open_browser(url: &str) -> Option<OpenedSignIn> {
     let graphical = ["WAYLAND_DISPLAY", "DISPLAY"]
         .iter()
         .any(|var| env::var_os(var).is_some_and(|value| !value.is_empty()));
     if !graphical {
         return None;
     }
-    Command::new("xdg-open")
-        .arg(url)
+    let forwarding_page = write_forwarding_page(url).ok()?;
+    let opener = Command::new("xdg-open")
+        .arg(forwarding_page.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .ok()
+        .ok()?;
+    Some(OpenedSignIn {
+        opener,
+        _forwarding_page: forwarding_page,
+    })
+}
+
+fn write_forwarding_page(url: &str) -> io::Result<NamedTempFile> {
+    let mut page = tempfile::Builder::new()
+        .prefix("assistd-mcp-login-")
+        .suffix(".html")
+        .tempfile_in(dirs::runtime_dir().unwrap_or_else(env::temp_dir))?;
+    page.write_all(forwarding_page(url).as_bytes())?;
+    Ok(page)
+}
+
+/// An HTML page that sends the browser on to `url` at once, with a link in case it does not.
+fn forwarding_page(url: &str) -> String {
+    let url = url
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    format!(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n\
+         <meta http-equiv=\"refresh\" content=\"0; url={url}\">\n\
+         <title>assistd sign-in</title>\n\
+         <a href=\"{url}\">Continue to sign in</a>\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwarding_page_keeps_the_url_inside_its_attributes() {
+        let page =
+            forwarding_page("https://auth.example/authorize?a=1&state=\"><script>x</script>");
+        assert!(
+            page.contains("authorize?a=1&amp;state=&quot;&gt;&lt;script&gt;"),
+            "{page}"
+        );
+        assert!(!page.contains("<script>"), "{page}");
+    }
 }

@@ -96,9 +96,9 @@ Whatever you run must stay in the foreground, honour the
 wrapper script that does too.
 
 The listening socket must also belong to a process the daemon started:
-a `200` from `/healthz` only counts if a process in the command's
-process group holds the socket on `host:port`, so another program
-answering on that port can't pass as SearXNG. This rules out docker
+a `200` from `/healthz` only counts if every socket listening on
+`host:port` is held by a process in the command's process group, so
+another program answering on that port can't pass as SearXNG. This rules out docker
 and podman. With port publishing the socket belongs to `docker-proxy`
 or `rootlessport`, and with host networking it belongs to a process
 under the container runtime, outside that process group.

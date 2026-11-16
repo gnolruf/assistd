@@ -5,16 +5,16 @@ use std::io;
 use std::process::ExitStatus;
 
 use rustix::io::Errno;
-use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
+use rustix::process::{Pid, Signal, kill_process_group};
 use tokio::process::{Child, Command};
 
 /// The process group a child spawned with `process_group(0)` leads. The id
-/// is fixed at spawn and outlives the leader's own exit. Dropping it
-/// SIGKILLs every process still in the group.
+/// is fixed at spawn. Dropping it SIGKILLs every process still in the group,
+/// unless the leader was reaped first.
 #[derive(Debug)]
 pub struct ProcessGroup {
     id: Pid,
-    emptied: bool,
+    leader_reaped: bool,
 }
 
 impl ProcessGroup {
@@ -24,7 +24,10 @@ impl ProcessGroup {
             .id()
             .and_then(|pid| i32::try_from(pid).ok())
             .and_then(Pid::from_raw)
-            .map(|id| Self { id, emptied: false })
+            .map(|id| Self {
+                id,
+                leader_reaped: false,
+            })
     }
 
     /// The process group id, equal to the leader's pid.
@@ -32,19 +35,20 @@ impl ProcessGroup {
         self.id
     }
 
-    /// Wait for `child`, the group's leader, to exit and be reaped. If no
-    /// member outlived it, the group is marked empty and never signalled
+    /// Wait for `child`, the group's leader, to exit and be reaped, then
+    /// SIGKILL every member that outlived it. The group is never signalled
     /// again, since the kernel may hand its id to an unrelated process.
     pub async fn reap_leader(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
         let status = child.wait().await?;
-        self.emptied |= test_kill_process_group(self.id) == Err(Errno::SRCH);
+        self.signal(Signal::KILL);
+        self.leader_reaped = true;
         Ok(status)
     }
 
     /// Send `signal` to every process in the group, ignoring failures; a
-    /// no-op once [`Self::reap_leader`] found the group empty.
+    /// no-op once [`Self::reap_leader`] has returned the leader's status.
     pub fn signal(&self, signal: Signal) {
-        if !self.emptied {
+        if !self.leader_reaped {
             let _ = kill_process_group(self.id, signal);
         }
     }

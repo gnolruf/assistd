@@ -26,7 +26,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::json;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::task::AbortOnDropHandle;
 use url::Url;
 
@@ -412,7 +412,7 @@ async fn a_login_refuses_an_authorization_endpoint_a_browser_must_not_open() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_login_stores_a_token_only_for_a_redirect_carrying_its_state() {
+async fn a_login_ignores_forged_redirects_and_silent_connections() {
     let mock = OAuthMock::default();
     let (url, _server) = mock.serve().await;
     let dir = tempfile::tempdir().unwrap();
@@ -420,19 +420,23 @@ async fn a_login_stores_a_token_only_for_a_redirect_carrying_its_state() {
     let oauth = oauth_config(CLIENT_ID, &tokens);
     let timeout = Duration::from_secs(10);
 
-    let forged = begin_login("remote", &url, &oauth, timeout).await.unwrap();
-    let (redirect_uri, _) = redirect_and_state(forged.authorize_url());
-    let browser = tokio::spawn(redirect_browser(redirect_uri, "forged".into()));
-    let refused = forged.complete().await;
-    assert!(matches!(refused, Err(McpError::Login(_))), "{refused:?}");
-    assert!(browser.await.unwrap().contains("failed"));
-    assert!(!tokens.exists(), "a refused redirect stored a token");
-
     let login = begin_login("remote", &url, &oauth, timeout).await.unwrap();
     let (redirect_uri, state) = redirect_and_state(login.authorize_url());
-    let browser = tokio::spawn(redirect_browser(redirect_uri, state));
-    login.complete().await.expect("the redirect is redeemed");
-    assert!(browser.await.unwrap().contains("signed in"));
+    let listener = redirect_uri.socket_addrs(|| None).unwrap();
+    let _silent = TcpStream::connect(listener.as_slice()).await.unwrap();
+    let browser = async {
+        let forged = redirect_browser(redirect_uri.clone(), "forged".into()).await;
+        assert!(!forged.contains("signed in"), "{forged}");
+        assert!(!tokens.exists(), "a forged redirect stored a token");
+        redirect_browser(redirect_uri, state).await
+    };
+    let (outcome, genuine) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(login.complete(), browser)
+    })
+    .await
+    .expect("a silent connection does not hold up the redirect");
+    outcome.expect("a forged redirect does not end the sign-in");
+    assert!(genuine.contains("signed in"), "{genuine}");
 
     let server = start_oauth(url, CLIENT_ID, &tokens)
         .await
