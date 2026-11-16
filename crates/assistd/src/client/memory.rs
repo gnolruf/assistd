@@ -5,11 +5,11 @@ use std::io::{self, Write};
 
 use anyhow::Result;
 use assistd_ipc::{EventBody, ReindexKind, Request, RequestBody};
+use assistd_utils::terminal_text::{escape_controls, escape_controls_single_line};
 use clap::{Args, Subcommand};
 use uuid::Uuid;
 
 use super::run_one_shot;
-use super::terminal_text::{escape_controls, escape_controls_single_line};
 
 #[derive(Args)]
 pub(crate) struct MemoryArgs {

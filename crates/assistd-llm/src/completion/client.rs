@@ -10,8 +10,7 @@ use std::time::Duration;
 use assistd_config::{
     ChatConfig, ModelConfig, NonBlankString, PresencePenalty, TimeoutsConfig, UnitInterval,
 };
-use assistd_ipc::{Component, StatusKind, StatusSeverity};
-use assistd_tools::Attachment;
+use assistd_ipc::{Attachment, Component, StatusKind, StatusSeverity};
 use assistd_utils::child_server::ApiKey;
 use assistd_utils::http::local_client_builder;
 use assistd_utils::text::neutralise_template_tokens;

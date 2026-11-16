@@ -9,12 +9,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use assistd_config::SynthesisConfig;
-use assistd_ipc::{Event, EventBody, EventKind, RelayEvent};
+use assistd_ipc::{Event, EventBody, EventKind, RelayEvent, ToolReport};
 use assistd_llm::{CompactionCut, LlmEvent, ToolCall};
 use assistd_memory::{
     PersistedMessage, PersistedRelayStep, PersistedToolCall, Reasoning, ToolOutcome, TurnStats,
 };
-use assistd_tools::ToolOutput;
 use assistd_utils::time::saturating_millis;
 use assistd_utils::token_counter::TokenCounter;
 use assistd_voice::SentenceBuffer;
@@ -187,8 +186,10 @@ impl TurnTranslator {
                 result,
             } => {
                 self.persist_tool_result(call_id, &name, &result).await;
-                let result = result.report();
-                EventBody::ToolResult { name, result }
+                EventBody::ToolResult {
+                    name,
+                    result: *result,
+                }
             }
             LlmEvent::Relay(event) => {
                 self.record_relay(&event);
@@ -260,11 +261,11 @@ impl TurnTranslator {
         self.persist_message(msg, None).await;
     }
 
-    async fn persist_tool_result(&mut self, call_id: String, name: &str, result: &ToolOutput) {
+    async fn persist_tool_result(&mut self, call_id: String, name: &str, result: &ToolReport) {
         self.awaiting_tool_result = false;
         let outcome = ToolOutcome {
             exit_code: result.exit_code.into(),
-            duration_ms: result.duration_ms(),
+            duration_ms: result.duration_ms,
         };
         let msg =
             PersistedMessage::tool_result(result.output.clone(), call_id, name.to_owned(), outcome);

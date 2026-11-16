@@ -15,12 +15,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use assistd_ipc::{RelayEvent, StatusKind};
+use assistd_ipc::{Attachment, RelayEvent, StatusKind};
 use assistd_llm::{
     HealthWaitError, LlmError, LlmEvent, LlmHealthProbe, StepOutcome, ToolCall, ToolResultPayload,
     TurnBackend,
 };
-use assistd_tools::{Attachment, RelayObserver, ToolOutput, ToolRegistry, TurnContext};
+use assistd_tools::{RelayObserver, ToolOutput, ToolRegistry, TurnContext};
 use assistd_utils::text::panic_message;
 
 use crate::recovery::{Component, StatusSeverity};
@@ -695,7 +695,7 @@ async fn send_tool_result(turn: &Turn, call: &ToolCall, result: ToolOutput) -> T
         .send(LlmEvent::ToolResult {
             id: call.id.clone(),
             name: call.name.clone(),
-            result: Box::new(result),
+            result: Box::new(result.report()),
         })
         .await;
     payload

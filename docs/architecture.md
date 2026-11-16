@@ -1,6 +1,6 @@
 # Architecture
 
-`assistd` is a Rust workspace split into twelve library crates plus a
+`assistd` is a Rust workspace split into thirteen library crates plus a
 binary. This page maps the crates, the external processes the daemon
 supervises, and the path a user query takes from keypress to spoken
 reply.
@@ -11,7 +11,7 @@ reply.
 flowchart TB
     subgraph clients["Clients"]
         direction LR
-        chat["assistd chat (TUI)"]
+        chat["assistd chat (TUI)<br/><b>assistd-chat</b>"]
         ptt["assistd ptt-start / sleep"]
         hooks["Compositor hooks<br/>(i3 / Sway exec)"]
     end
@@ -40,8 +40,8 @@ flowchart TB
     clients -- "Unix socket · line-delimited JSON<br/>Request / Event" --> bin
     bin --> core
     bin --> mcp & search
-    core --> llm & tools & voice & wm & memory & embed
-    tools --> memory & wm
+    core --> llm & tools & voice & wm & memory & embed & search
+    tools --> memory & wm & search
     mcp --> tools
     embed --> memory
     tools --> embed
@@ -57,23 +57,26 @@ flowchart TB
 | Crate            | Purpose                                                                                              | Depends on                                                                       |
 |------------------|------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
 | `assistd`        | Binary. CLI, daemon entry, per-subsystem init wiring (including MCP).                                | every other `assistd-*` crate                                                    |
+| `assistd-chat`   | The `assistd chat` terminal window and the `assistd settings` panel, a client that only reads and writes the socket. | `config`, `ipc`, `utils`                                                         |
 | `assistd-config` | TOML schema, defaults, validation. The single source of truth for every tunable, including its settings-panel metadata. | `utils`                                                                          |
 | `assistd-core`   | Daemon glue. `AppState`, agent loop, planner, presence machine with its idle and GPU-contention monitors, listen dispatcher, socket server, `build_tools()` factory. | `config`, `ipc`, `llm`, `tools`, `memory`, `embed`, `search`, `voice`, `wm`, `utils` |
 | `assistd-embed`  | Embedding HTTP client + job queue feeding the semantic store; launch spec for its llama-server.      | `config`, `memory`, `utils`                                                      |
-| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the socket client behind the `client` feature. | `utils`                                                                          |
-| `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `tools`, `utils`                                                |
-| `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `tools`, `utils`                                                                 |
+| `assistd-ipc`    | Wire-protocol types (`Hello` with the daemon version, `Request`, `Event`, `PresenceState`, `VoiceCaptureState`, `ImageAttachment`); the in-memory image `Attachment`, its format check and capped file loader; the socket path with its owner-only directory and lock files; the socket client behind the `client` feature. | `utils`                                                                          |
+| `assistd-llm`    | `LlmBackend` trait, its `TurnBackend` supertrait that an agent turn drives + `LlamaClient` (HTTP/SSE to llama-server) + router-mode launch spec + control plane. | `config`, `ipc`, `utils`                                                         |
+| `assistd-mcp`    | Stdio and Streamable HTTP MCP servers driven through `rmcp`, plus the adapter exposing their tools.  | `config`, `ipc`, `tools`, `utils`                                                |
 | `assistd-memory` | SQLite-backed persistent stores: `MemoryStore`, `TranscriptStore`, `SemanticStore`, `TaskStore`.   | `ipc`                                                                            |
 | `assistd-search` | Launch spec and generated settings for the supervised SearXNG instance behind web search, and the typed client for its JSON API. | `config`, `utils`                                                                |
 | `assistd-tools`  | `Tool` and `Command` traits, registries, `RunTool`, all built-in commands, policy gates.             | `config`, `embed`, `memory`, `ipc`, `search`, `wm`, `utils`                      |
-| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
+| `assistd-utils`  | Shared helpers: backoff + `RestartPolicy`, tilde expansion, `human_size`, Hugging Face file IDs and cached model downloads, non-blocking regular-file open, size-capped HTTP body reads, public-address classification and the `FilteredResolver` that drops non-public DNS answers, `find_program` (a `PATH` lookup that says why a program cannot be run), the chat-template token list and its neutraliser for text and JSON, terminal-safe escaping of daemon-supplied text, child-output line forwarding, `/proc` listener ownership, `ProcessGroup`, `ReadinessCell` for subsystems that start in the background, and the `ChildServer` supervisor. | none                                                                             |
 | `assistd-voice`  | `VoiceInput` (Parakeet STT, Silero VAD and wake-phrase keyword spotting through sherpa-onnx) + `VoiceOutput` (sherpa-onnx TTS, played through rodio) + per-sentence `SpeakDecision`, run in a supervised `voice-worker` child behind daemon-side proxies. | `config`, `ipc`, `utils`                                                         |
 | `assistd-wm`     | `WindowManager` trait + i3 (`tokio-i3ipc`) and Sway (`swayipc-async`) backends, plus `NoWindowManager`. | `config`, `utils`                                                                |
 
 `utils` sits at the bottom with no internal dependencies; `config`
 and `ipc` build only on it, and most other crates build on those
 three. `core` sits at the top because it's where every subsystem is
-wired into a working daemon.
+wired into a working daemon. `llm` and `tools` do not depend on each
+other: the types both handle (`Attachment`, `ToolReport`) live in `ipc`,
+and `core` supplies the model behind the tools' safety judge.
 
 The same binary also ships several client subcommands that speak the
 Unix-socket IPC: `chat`, `sleep` / `wake` / `drowse`,
@@ -87,7 +90,9 @@ generating → listening → presence), and provides a Sleep / Wake menu that is
 each turn as a freedesktop desktop notification over `zbus`, held back
 while the chat reports keyboard focus (`RequestBody::ChatState`). The binary
 always includes the daemon and the IPC client subcommands; `tray` and
-`chat` are optional features layered on top, never built standalone.
+`chat` are optional features layered on top, never built standalone. The
+chat's code is the `assistd-chat` crate, which the `chat` feature pulls in
+and which depends on no daemon-side crate.
 
 ## Subsystem walk-throughs
 

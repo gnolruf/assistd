@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-client = ["dep:tokio"]
+client = ["tokio/net"]
 
 [dependencies]
 chrono = { workspace = true }
@@ -15,7 +15,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 rustix = { workspace = true }
-tokio = { workspace = true, features = ["net", "io-util"], optional = true }
+infer = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

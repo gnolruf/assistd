@@ -11,15 +11,15 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use assistd_ipc::{StatusKind, TaskId, TaskRunId};
+use assistd_ipc::{Attachment, StatusKind, TaskId, TaskRunId};
 use assistd_llm::{
     LlmBackend, LlmError, LlmEvent, LlmResult, SlotHolder, StepOutcome, ToolResultPayload,
     TurnBackend,
 };
-use assistd_tools::{Attachment, YieldableLane};
+use assistd_tools::YieldableLane;
 
 use super::lanes::LaneLease;
-use super::task_service::TaskService;
+use super::tasks::TaskService;
 use crate::bus::EventSink;
 use crate::presence::RequestGuard;
 use crate::recovery::{Component, StatusSeverity};

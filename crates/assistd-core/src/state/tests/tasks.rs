@@ -1,0 +1,567 @@
+use super::*;
+
+#[tokio::test]
+async fn a_finished_task_run_leaves_the_main_backend_untouched() {
+    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
+    let (state, conv, branch, task) =
+        task_state(backend.clone(), Arc::new(ToolRegistry::default())).await;
+    let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun],
+    });
+
+    let run = queue_task_run(&state, task).await;
+    let replied = loop {
+        match bus.recv().await.unwrap().body {
+            EventBody::TaskRun { run: seen, event } if seen == run => {
+                if let EventBody::Delta { text } = event.body {
+                    break text;
+                }
+            }
+            other => panic!("unexpected bus event: {other:?}"),
+        }
+    };
+    settle_task_runs(&state).await;
+
+    assert_eq!(replied, "summarize my inbox");
+    assert!(backend.pushed.lock().is_empty());
+    assert_eq!(
+        conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
+        before
+    );
+    assert_eq!(state.session_ctx.current().await.1, Some(branch));
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
+}
+
+#[tokio::test]
+async fn an_announcing_task_broadcasts_and_speaks_its_final_reply() {
+    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
+    let (state, _conv, _branch, task) =
+        task_state(backend, Arc::new(ToolRegistry::default())).await;
+    let recorder = MockSpeechRecorder::new();
+    state
+        .subsystems
+        .voice
+        .set_speech(Readiness::Ready(recorder.clone()));
+    let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
+    spec.announce = true;
+    state.memory.tasks.save(Some(task), spec).await.unwrap();
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: vec![EventKind::TaskReply],
+    });
+
+    queue_task_run(&state, task).await;
+    let announced = tokio::time::timeout(Duration::from_secs(5), bus.recv())
+        .await
+        .expect("no TaskReply")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while recorder.calls().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reply was not spoken");
+    settle_task_runs(&state).await;
+
+    assert!(matches!(
+        announced.body,
+        EventBody::TaskReply { reply, .. } if reply == "summarize my inbox"
+    ));
+    assert_eq!(recorder.calls(), ["summarize my inbox"]);
+}
+
+#[tokio::test]
+async fn a_cancelled_task_run_leaves_the_main_backend_untouched() {
+    let entered = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let task_backend = ToolCallBackend::new(
+        "",
+        "done.",
+        vec![StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c1".into(),
+            name: "hang".into(),
+            arguments: serde_json::json!({}),
+        }])],
+    );
+    let mut tools = ToolRegistry::new();
+    tools.register(HangingTool {
+        entered: entered.clone(),
+        dropped: dropped.clone(),
+    });
+    let backend = MainBackend::new(task_backend);
+    let (state, conv, branch, task) = task_state(backend.clone(), Arc::new(tools)).await;
+    let before = conv.load_branch(branch, HistoryScope::Whole).await.unwrap();
+
+    let run = queue_task_run(&state, task).await;
+    entered.notified().await;
+    let (res, events) = dispatch(
+        &state,
+        Request::new("c", RequestBody::Task(TaskRequest::Cancel { run })),
+    )
+    .await;
+    res.unwrap();
+    assert_eq!(events, [done("c")]);
+    settle_task_runs(&state).await;
+
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the hung tool outlived the run"
+    );
+    assert!(backend.pushed.lock().is_empty());
+    assert_eq!(
+        conv.load_branch(branch, HistoryScope::Whole).await.unwrap(),
+        before
+    );
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Cancelled]);
+}
+
+async fn change_task_queue(state: &Arc<AppState>, op: TaskQueueOp) {
+    let label = format!("{op:?}");
+    let (res, events) = dispatch(
+        state,
+        Request::new("q", RequestBody::Task(TaskRequest::Queue { op })),
+    )
+    .await;
+    res.unwrap();
+    assert_eq!(events, [done("q")], "{label}");
+}
+
+#[tokio::test]
+async fn queue_order_and_pause_follow_moves_and_cancels_across_a_reload() {
+    let backend = MainBackend::new(Arc::new(EchoBackend::new()));
+    let (state, _conv, _branch, task) =
+        task_state(backend, Arc::new(ToolRegistry::default())).await;
+    change_task_queue(&state, TaskQueueOp::Pause).await;
+    let mut runs = Vec::new();
+    for _ in 0..4 {
+        runs.push(queue_task_run(&state, task).await);
+    }
+    let [first, second, third, fourth] = runs[..] else {
+        unreachable!()
+    };
+    change_task_queue(&state, TaskQueueOp::Move { run: fourth, to: 0 }).await;
+    change_task_queue(&state, TaskQueueOp::Move { run: first, to: 9 }).await;
+    change_task_queue(&state, TaskQueueOp::Cancel { run: second }).await;
+    let expected = [fourth, third, first].map(|run| (run, TaskRunState::Queued));
+    assert_eq!(queued_runs(&state), expected);
+    settle_task_runs(&state).await;
+
+    let reloaded = Arc::new(AppState::from_parts(
+        Config::default(),
+        Subsystems::new(
+            Arc::new(EchoBackend::new()),
+            PresenceManager::stub(PresenceTarget::Active),
+            Arc::new(ToolRegistry::default()),
+            VoiceManager::new(true),
+        ),
+        MemoryStack::disabled(state.config.embedding.clone())
+            .with_tasks(Arc::clone(&state.memory.tasks)),
+        Arc::new(SessionContext::new(SessionId::new(), None)),
+        watch::channel(NonZeroU32::MIN).1,
+    ));
+    reloaded.tasks.start_task_queue().await;
+    assert_eq!(queued_runs(&reloaded), expected);
+    assert!(reloaded.turns.deps.admission.queue_snapshot().paused);
+    settle_task_runs(&reloaded).await;
+}
+
+/// Asks to fetch from the `host` in its arguments, as `web` asks about a host not yet
+/// approved.
+#[derive(Debug)]
+struct FetchTool;
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for FetchTool {
+    fn name(&self) -> &'static str {
+        "fetch"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "fetches a page".into()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn invoke(
+        &self,
+        turn: &TurnContext,
+        args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let host = args["host"].as_str().unwrap_or_default().to_string();
+        let request = ConfirmationRequest {
+            tool: "web".into(),
+            script: format!("web fetch https://{host}"),
+            matched_pattern: format!("fetches from {host}, which is not yet approved"),
+            always_allow: vec![host.clone()],
+            risk: Risk::Elevated,
+            unattended: Unattended::WebHost(host),
+            source: assistd_tools::ConfirmSource::Main,
+        };
+        let approved = IpcConfirmationGate.confirm(turn, request).await != Approval::Deny;
+        Ok(ToolOutput::text(
+            if approved { "fetched" } else { "denied" },
+            Duration::ZERO,
+        ))
+    }
+}
+
+/// Asks before running a script that only the safety judge can approve unasked.
+#[derive(Debug)]
+struct UnvettedScriptTool;
+
+#[async_trait::async_trait]
+impl assistd_tools::Tool for UnvettedScriptTool {
+    fn name(&self) -> &'static str {
+        "script"
+    }
+    fn description(&self) -> Cow<'_, str> {
+        "runs a script".into()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn invoke(
+        &self,
+        turn: &TurnContext,
+        _args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let request = ConfirmationRequest {
+            tool: "bash".into(),
+            script: "make inbox-digest".into(),
+            matched_pattern: "`make` is not vetted".into(),
+            always_allow: Vec::new(),
+            risk: Risk::Elevated,
+            unattended: Unattended::Judged(JudgeContext {
+                class: JudgedClass::Unvetted,
+                cwd: None,
+                why: "`make` is not vetted".into(),
+            }),
+            source: assistd_tools::ConfirmSource::Main,
+        };
+        let approved = IpcConfirmationGate.confirm(turn, request).await != Approval::Deny;
+        Ok(ToolOutput::text(
+            if approved { "ran" } else { "denied" },
+            Duration::ZERO,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn an_auto_task_run_is_judged_against_its_own_prompt_and_nothing_the_user_said_in_chat() {
+    let run_script = StepOutcome::ToolCalls(vec![ToolCall {
+        id: "c".into(),
+        name: "script".into(),
+        arguments: serde_json::json!({}),
+    }]);
+    let task_backend = ToolCallBackend::new("", "done.", vec![run_script]);
+    let mut tools = ToolRegistry::new();
+    tools.register(UnvettedScriptTool);
+    let mut config = Config::default();
+    config.tools.allow_auto_mode = true;
+    let backend = MainBackend::new(task_backend);
+    backend
+        .push_user("wipe the backups".into(), Vec::new())
+        .await
+        .unwrap();
+    let (state, conv, _branch, task) =
+        task_state_with(config, backend.clone(), Arc::new(tools)).await;
+    let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
+    spec.mode = PermissionMode::Auto;
+    state.memory.tasks.save(Some(task), spec).await.unwrap();
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun],
+    });
+
+    queue_task_run(&state, task).await;
+    let result = loop {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
+            continue;
+        };
+        match event.body {
+            EventBody::ConfirmRequest { script, .. } => panic!("asked the user: {script}"),
+            EventBody::ToolResult { result, .. } => break result,
+            _ => {}
+        }
+    };
+    settle_task_runs(&state).await;
+
+    assert!(result.output.contains("ran"), "{result:?}");
+    let judge_prompts = backend.judge_prompts.lock().clone();
+    let [judge_prompt] = judge_prompts.as_slice() else {
+        panic!("expected one judged command: {judge_prompts:?}");
+    };
+    assert!(
+        judge_prompt.contains(
+            "<user_messages>\n<message>\nsummarize my inbox\n</message>\n</user_messages>"
+        ),
+        "{judge_prompt}"
+    );
+    assert!(!judge_prompt.contains("wipe the backups"), "{judge_prompt}");
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
+}
+
+#[tokio::test]
+async fn a_run_fetches_unasked_only_from_its_allowed_hosts_and_pauses_on_others() {
+    let fetch = |host: &str| {
+        StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c".into(),
+            name: "fetch".into(),
+            arguments: serde_json::json!({ "host": host }),
+        }])
+    };
+    let steps = vec![fetch("allowed.example"), fetch("other.example")];
+    let task_backend = ToolCallBackend::new("", "done.", steps);
+    let mut tools = ToolRegistry::new();
+    tools.register(FetchTool);
+    let mut config = Config::default();
+    config.timeouts.tool_call_secs = 1;
+    let backend = MainBackend::new(task_backend);
+    let (state, conv, _branch, task) = task_state_with(config, backend, Arc::new(tools)).await;
+    let mut spec = state.memory.tasks.get(task).await.unwrap().spec;
+    spec.allowed_hosts = vec!["allowed.example".to_string().try_into().unwrap()];
+    state.memory.tasks.save(Some(task), spec).await.unwrap();
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun],
+    });
+
+    let run = queue_task_run(&state, task).await;
+    let mut results = Vec::new();
+    let (confirm_id, script) = loop {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
+            continue;
+        };
+        match event.body {
+            EventBody::ConfirmRequest {
+                confirm_id, script, ..
+            } => break (confirm_id, script),
+            EventBody::ToolResult { result, .. } => results.push(result),
+            _ => {}
+        }
+    };
+    assert_eq!(script, "web fetch https://other.example");
+    assert_eq!(results.len(), 1, "the allowed host was fetched unasked");
+    assert_eq!(queued_runs(&state), [(run, TaskRunState::NeedsInput)]);
+    assert!(
+        state
+            .turns
+            .deps
+            .admission
+            .agent_turn_lock
+            .try_lock()
+            .is_ok(),
+        "a paused run holds no lane"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let (res, events) = dispatch(
+        &state,
+        Request::new(
+            "a",
+            RequestBody::Task(TaskRequest::Confirm {
+                run,
+                confirm_id,
+                allow: true,
+                always: false,
+            }),
+        ),
+    )
+    .await;
+    res.unwrap();
+    assert_eq!(events, [done("a")]);
+    while results.len() < 2 {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
+            continue;
+        };
+        match event.body {
+            EventBody::ConfirmRequest { script, .. } => panic!("asked again: {script}"),
+            EventBody::ToolResult { result, .. } => results.push(result),
+            _ => {}
+        }
+    }
+    settle_task_runs(&state).await;
+
+    assert!(
+        results
+            .iter()
+            .all(|result| result.output.contains("fetched")),
+        "the parked fetch outlived the tool deadline: {results:?}"
+    );
+    assert_eq!(listed_run_states(&conv).await, [TaskRunState::Succeeded]);
+}
+
+#[tokio::test]
+async fn always_allowing_a_paused_fetch_adds_its_host_to_the_task_and_stops_asking() {
+    let fetch = || {
+        StepOutcome::ToolCalls(vec![ToolCall {
+            id: "c".into(),
+            name: "fetch".into(),
+            arguments: serde_json::json!({ "host": "new.example" }),
+        }])
+    };
+    let task_backend = ToolCallBackend::new("", "done.", vec![fetch(), fetch()]);
+    let mut tools = ToolRegistry::new();
+    tools.register(FetchTool);
+    let backend = MainBackend::new(task_backend);
+    let (state, _conv, _branch, task) =
+        task_state_with(Config::default(), backend, Arc::new(tools)).await;
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: vec![EventKind::TaskRun, EventKind::TaskQueue],
+    });
+
+    let run = queue_task_run(&state, task).await;
+    let prompt = loop {
+        if let EventBody::TaskQueue { snapshot } = bus.recv().await.unwrap().body
+            && let Some(prompt) = snapshot.items.into_iter().find_map(|item| match item {
+                QueueItem::Run { prompt, .. } => prompt,
+                QueueItem::UserTurn { .. } => None,
+            })
+        {
+            break prompt;
+        }
+    };
+    assert_eq!(
+        prompt.host.as_ref().map(HostName::as_str),
+        Some("new.example")
+    );
+
+    let (res, events) = dispatch(
+        &state,
+        Request::new(
+            "a",
+            RequestBody::Task(TaskRequest::Confirm {
+                run,
+                confirm_id: prompt.confirm_id.clone(),
+                allow: true,
+                always: true,
+            }),
+        ),
+    )
+    .await;
+    res.unwrap();
+    let [
+        Event {
+            body: EventBody::Task { spec, .. },
+            ..
+        },
+        Event {
+            body: EventBody::Done,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("unexpected events: {events:?}");
+    };
+    assert_eq!(spec.allowed_hosts, [prompt.host.clone().unwrap()]);
+    let mut fetched = 0;
+    while fetched < 2 {
+        let EventBody::TaskRun { event, .. } = bus.recv().await.unwrap().body else {
+            continue;
+        };
+        match event.body {
+            EventBody::ConfirmRequest { confirm_id, .. } if confirm_id != prompt.confirm_id => {
+                panic!("asked again about an allowed host")
+            }
+            EventBody::ToolResult { .. } => fetched += 1,
+            _ => {}
+        }
+    }
+    settle_task_runs(&state).await;
+}
+
+#[tokio::test]
+async fn a_lagged_subscriber_is_resent_the_queue_and_the_prompt_of_a_paused_run() {
+    let fetch = StepOutcome::ToolCalls(vec![ToolCall {
+        id: "c".into(),
+        name: "fetch".into(),
+        arguments: serde_json::json!({ "host": "new.example" }),
+    }]);
+    let task_backend = ToolCallBackend::new("", "done.", vec![fetch]);
+    let mut tools = ToolRegistry::new();
+    tools.register(FetchTool);
+    let backend = MainBackend::new(task_backend);
+    let (state, _conv, _branch, task) =
+        task_state_with(Config::default(), backend, Arc::new(tools)).await;
+    let kinds = vec![EventKind::TaskRun, EventKind::TaskQueue];
+    let mut bus = state.bus.subscribe(SubscribeFilter {
+        kinds: kinds.clone(),
+    });
+    let run = queue_task_run(&state, task).await;
+    while !matches!(bus.recv().await.unwrap().body, EventBody::TaskRun { event, .. }
+        if matches!(event.body, EventBody::ConfirmRequest { .. }))
+    {}
+    drop(bus);
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let daemon = Arc::clone(&state);
+    let subscriber = tokio::spawn(async move {
+        let unpublished = EventSink::unpublished(tx);
+        daemon
+            .status
+            .handle_subscribe("sub".into(), SubscribeFilter { kinds }, unpublished)
+            .await;
+    });
+    assert!(matches!(
+        rx.recv().await,
+        Some(Event {
+            body: EventBody::TaskQueue { .. },
+            ..
+        })
+    ));
+    for _ in 0..1024 {
+        state.bus.publish(&Event::new(
+            "flood",
+            EventBody::TaskQueue {
+                snapshot: state.turns.deps.admission.queue_snapshot(),
+            },
+        ));
+    }
+
+    let Some(Event {
+        id,
+        body: EventBody::TaskQueue { snapshot },
+    }) = rx.recv().await
+    else {
+        panic!("no queue snapshot after the lag");
+    };
+    assert_eq!(id, "sub");
+    let prompt = snapshot
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            QueueItem::Run { prompt, .. } => prompt,
+            QueueItem::UserTurn { .. } => None,
+        })
+        .expect("the snapshot carries the paused prompt");
+    let Some(Event {
+        body: EventBody::TaskRun {
+            run: prompted,
+            event,
+        },
+        ..
+    }) = rx.recv().await
+    else {
+        panic!("the paused prompt was not resent");
+    };
+    let EventBody::ConfirmRequest { confirm_id, .. } = event.body else {
+        panic!("resent {event:?} instead of the prompt");
+    };
+    assert_eq!((prompted, confirm_id), (run, prompt.confirm_id.clone()));
+
+    drop(rx);
+    subscriber.await.unwrap();
+    let (res, _) = dispatch(
+        &state,
+        Request::new(
+            "a",
+            RequestBody::Task(TaskRequest::Confirm {
+                run,
+                confirm_id: prompt.confirm_id,
+                allow: false,
+                always: false,
+            }),
+        ),
+    )
+    .await;
+    res.unwrap();
+    settle_task_runs(&state).await;
+}

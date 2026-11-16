@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use assistd_config::SearchConfig;
-use assistd_core::{AppState, Config};
+use assistd_config::{Config, SearchConfig};
+use assistd_core::AppState;
 use assistd_ipc::{ComponentReadiness, StartupComponent};
 use assistd_search::SearxngServerSpec;
 use assistd_utils::child_server::{ChildServer, ChildServerStatus};

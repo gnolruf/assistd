@@ -727,11 +727,12 @@ mod tests {
 
     use tokio::sync::mpsc;
 
+    use assistd_ipc::Attachment;
     use assistd_llm::{
         LlmBackend, LlmError, LlmEvent, LlmResult, SlotAssignment, SlotDir, StepOutcome,
         ToolResultPayload, TurnBackend,
     };
-    use assistd_tools::{Approvals, Attachment, DenyAllGate};
+    use assistd_tools::{Approvals, DenyAllGate};
 
     use super::*;
 

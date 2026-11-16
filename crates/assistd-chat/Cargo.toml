@@ -1,0 +1,37 @@
+[package]
+name = "assistd-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+assistd-config = { workspace = true }
+assistd-ipc    = { workspace = true, features = ["client"] }
+assistd-utils  = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+image = { workspace = true }
+pulldown-cmark = { workspace = true }
+ratatui = { workspace = true }
+ratatui-image = { workspace = true }
+rustix = { workspace = true }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+textwrap = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use assistd_core::{
-    AppState, Component, ContinuousListener, PresenceManager, VisionRevalidator, VoiceCapture,
-    VoiceManager, listen_dispatcher, spawn_supervised,
+    AppState, Component, PresenceManager, VisionRevalidator, listen_dispatcher, spawn_supervised,
 };
+use assistd_voice::{ContinuousListener, VoiceCapture, VoiceManager};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};

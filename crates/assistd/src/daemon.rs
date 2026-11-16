@@ -12,16 +12,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use assistd_config::Config;
 use assistd_core::presence::PresenceLlmHealthProbe;
 use assistd_core::socket::StartupLock;
 use assistd_core::{
-    AppState, Config, MemoryStack, PresenceManager, RelayDeps, SessionContext, SubAgentRunner,
-    Subsystems, VisionRevalidator, VoiceManager, VramLedger, gpu_monitor, idle_monitor,
+    AppState, MemoryStack, PresenceManager, RelayDeps, SessionContext, SubAgentRunner, Subsystems,
+    VisionRevalidator, VramLedger, gpu_monitor, idle_monitor,
 };
 use assistd_llm::{
     HistoryReplay, LlamaClient, LlamaServerControl, LlmBackend, LlmHealthProbe, SlotDir, SlotStash,
 };
 use assistd_utils::child_server::ApiKey;
+use assistd_voice::VoiceManager;
 use clap::Args;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;

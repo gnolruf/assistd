@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use assistd_core::{PresenceManager, PresenceState, VramLedger};
+use assistd_core::{PresenceManager, VramLedger};
+use assistd_ipc::PresenceState;
 use assistd_voice::BusyProbe;
 
 /// Reports the GPU unavailable while presence is not `Active` or the GPU

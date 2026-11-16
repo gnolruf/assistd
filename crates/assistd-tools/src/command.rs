@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thiserror::Error;
 
-use assistd_ipc::ImageMime;
+use assistd_ipc::Attachment;
 
 use crate::TurnContext;
 use crate::chain::Word;
@@ -199,13 +199,6 @@ pub struct CommandInput {
     pub scope: FileScope,
     /// The turn the chain runs in, whose router answers the command's prompts.
     pub turn: TurnContext,
-}
-
-/// A side-channel payload alongside stdout, carried through pipes untouched
-/// so `see X | wc` still surfaces the image.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Attachment {
-    Image { mime: ImageMime, bytes: Vec<u8> },
 }
 
 /// Output of a single chain stage, whose non-zero `exit_code` `&&` and `||`

@@ -29,7 +29,7 @@ impl TurnBackend for LoggedMain {
     async fn push_user(
         &self,
         text: String,
-        _attachments: Vec<assistd_tools::Attachment>,
+        _attachments: Vec<assistd_ipc::Attachment>,
     ) -> assistd_llm::LlmResult<()> {
         *self.last_prompt.lock() = text;
         Ok(())
@@ -90,7 +90,7 @@ impl TurnBackend for LoggedTask {
     async fn push_user(
         &self,
         _text: String,
-        _attachments: Vec<assistd_tools::Attachment>,
+        _attachments: Vec<assistd_ipc::Attachment>,
     ) -> assistd_llm::LlmResult<()> {
         Ok(())
     }

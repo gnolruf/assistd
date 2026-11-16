@@ -6,14 +6,12 @@ use std::time::Duration;
 
 use anyhow::{Error, Result};
 use assistd_ipc::{IpcClientError, PresenceTarget, Request, RequestBody};
+use assistd_utils::terminal_text::escape_controls;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use client::terminal_text::escape_controls;
 use client::{listen, mcp, memory, presence, ptt, task, voice_ctl};
 
-#[cfg(feature = "chat")]
-mod chat;
 mod client;
 mod daemon;
 #[cfg(feature = "tray")]
@@ -88,12 +86,12 @@ enum Commands {
 
     /// Open an interactive chat TUI
     #[cfg(feature = "chat")]
-    Chat(chat::ChatArgs),
+    Chat(assistd_chat::ChatArgs),
 
     /// Edit the config file in a terminal settings panel; restart the
     /// daemon to apply saved changes
     #[cfg(feature = "chat")]
-    Settings(chat::settings::SettingsArgs),
+    Settings(assistd_chat::settings::SettingsArgs),
 
     /// Run the system-tray icon (StatusNotifierItem over DBus). Long-
     /// lived; suitable for compositor autostart (`exec assistd tray`).
@@ -176,9 +174,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             voice_ctl::run(|id| Request::new(id, RequestBody::GetVoiceState)).await
         }
         #[cfg(feature = "chat")]
-        Commands::Chat(args) => chat::run(args).await,
+        Commands::Chat(args) => assistd_chat::run(args).await,
         #[cfg(feature = "chat")]
-        Commands::Settings(args) => chat::settings::run(args).await,
+        Commands::Settings(args) => assistd_chat::settings::run(args).await,
         #[cfg(feature = "tray")]
         Commands::Tray(args) => tray::run(args).await,
         Commands::Memory(args) => memory::run(args).await,

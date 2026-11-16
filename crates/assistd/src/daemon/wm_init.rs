@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use assistd_core::{Config, WindowManager};
-use assistd_wm::{NoWindowManager, WmHandle};
+use assistd_config::Config;
+use assistd_wm::{NoWindowManager, WindowManager, WmHandle};
 use tokio::sync::watch;
 
 pub(super) struct WindowSubsystem {

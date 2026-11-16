@@ -9,12 +9,12 @@ use anyhow::Result;
 use assistd_ipc::{
     EventBody, McpServerState, McpTransportKind, Request, RequestBody, TokenRevocation,
 };
+use assistd_utils::terminal_text::escape_controls_single_line;
 use clap::{Args, Subcommand};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 use super::run_one_shot;
-use super::terminal_text::escape_controls_single_line;
 
 #[derive(Args)]
 pub(crate) struct McpArgs {

@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use assistd_config::Compositor;
-use assistd_ipc::ImageMime;
+use assistd_ipc::{Attachment, ImageMime};
 use assistd_utils::text::human_size;
 use async_trait::async_trait;
 
 use crate::chain::Word;
-use crate::command::{Attachment, Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
+use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage};
 use crate::vision::VisionGate;
 
 use capture::capture_target;

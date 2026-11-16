@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use assistd_config::ToolsOutputConfig;
+use assistd_ipc::Attachment;
 use assistd_utils::text::human_size;
 
-use crate::command::{Attachment, CommandOutput};
+use crate::command::CommandOutput;
 use crate::commands::cat::sniff_binary;
 
 /// Stem of the spill files `run` writes.
