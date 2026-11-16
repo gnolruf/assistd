@@ -84,6 +84,18 @@ const BIND_FLAGS: &[&str] = &[
     "--dev-bind-try",
 ];
 
+/// The `bwrap_extra_args` flags that bind a host path writable, each with
+/// its read-only form.
+const WRITABLE_BINDS: [(&str, &str); 3] = [
+    ("--bind", "--ro-bind"),
+    ("--bind-try", "--ro-bind-try"),
+    ("--bind-fd", "--ro-bind-fd"),
+];
+
+/// The `bwrap_extra_args` flags that bind a source on a destination with
+/// its devices usable, which bwrap cannot also make read-only.
+const DEVICE_BINDS: [&str; 2] = ["--dev-bind", "--dev-bind-try"];
+
 /// How sandboxing was requested for subprocess-spawning commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRequest {
@@ -152,7 +164,8 @@ pub struct SandboxPrograms {
 #[derive(Debug)]
 pub struct SandboxInfo {
     pub mode: ResolvedSandboxMode,
-    /// Extra args appended verbatim to the bwrap invocation before `--`.
+    /// Extra args appended to the bwrap invocation before `--`, verbatim
+    /// unless the command's [`HomeAccess`] is read-only.
     pub extra_args: Vec<String>,
     pub protected: Protected,
     pub shared: SharedDirs,
@@ -170,10 +183,21 @@ pub struct SandboxInfo {
 /// What of the host a bwrap sandbox mounts.
 #[derive(Debug, Clone)]
 enum Profile {
-    /// The host's root read-only, with `$HOME`'s visible entries writable,
-    /// and no `AF_UNIX` sockets.
+    /// The host's root read-only, with `$HOME`'s visible entries as each
+    /// command's [`HomeAccess`] has them, and no `AF_UNIX` sockets.
     Host,
     Quarantine(QuarantineProfile),
+}
+
+/// What a host-profile command may change under `$HOME`; a quarantine's
+/// home is its own scratch directory, writable either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeAccess {
+    /// Nothing, there or in what `bwrap_extra_args` mounts, whose device
+    /// binds it goes without: only `/tmp` and the scratch directory take writes.
+    ReadOnly,
+    /// Its visible entries that are not symlinks.
+    Writable,
 }
 
 /// Only `/usr`, a few `/etc` entries, the shared directories and `inputs`,
@@ -354,7 +378,9 @@ impl SandboxInfo {
             #[cfg(any(test, feature = "test-support"))]
             ResolvedSandboxMode::None => std::env::current_dir().ok(),
             ResolvedSandboxMode::Bwrap { .. } => {
-                let cmd = self.build_command("true", Vec::<String>::new()).ok()?;
+                let cmd = self
+                    .build_command("true", Vec::<String>::new(), HomeAccess::Writable)
+                    .ok()?;
                 self.mounts_of(&cmd)?.working_dir
             }
         }
@@ -384,7 +410,10 @@ impl SandboxInfo {
     /// The tmpfs mount that hides the host's `path` from sandboxed
     /// commands, if any.
     pub async fn private_dir_hiding(self: &Arc<Self>, path: PathBuf) -> Option<PathBuf> {
-        let cmd = self.command("true", Vec::new()).await.ok()?;
+        let cmd = self
+            .command("true", Vec::new(), HomeAccess::Writable)
+            .await
+            .ok()?;
         self.mounts_of(&cmd)?.private_dir_of(&path).cloned()
     }
 
@@ -398,7 +427,7 @@ impl SandboxInfo {
         }
     }
 
-    /// The [`ProcCommand`] that runs `program` with `args`, in bubblewrap under
+    /// The [`ProcCommand`] that runs `program` with `args`, in bubblewrap with `home` under
     /// [`ResolvedSandboxMode::Bwrap`]; otherwise with `PATH` limited to
     /// [`SandboxInfo::search_path`]. Fails when a quarantine input's
     /// descriptor cannot be duplicated for the command.
@@ -406,15 +435,21 @@ impl SandboxInfo {
         self: &Arc<Self>,
         program: &str,
         args: Vec<String>,
+        home: HomeAccess,
     ) -> io::Result<ProcCommand> {
         let info = Arc::clone(self);
         let program = program.to_owned();
-        on_blocking_pool(move || info.build_command(&program, args)).await
+        on_blocking_pool(move || info.build_command(&program, args, home)).await
     }
 
     /// Reads `$HOME` and the command directories to build the bwrap
     /// profile, so it blocks on the filesystem.
-    fn build_command<I, S>(&self, program: &str, args: I) -> io::Result<ProcCommand>
+    fn build_command<I, S>(
+        &self,
+        program: &str,
+        args: I,
+        access: HomeAccess,
+    ) -> io::Result<ProcCommand>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -424,7 +459,8 @@ impl SandboxInfo {
             ResolvedSandboxMode::None => Ok(self.unwrapped_command(program, args)),
             ResolvedSandboxMode::Bwrap(programs) => match &self.profile {
                 Profile::Host => {
-                    self.bwrap_command(programs, std::env::var("HOME").ok(), program, args)
+                    let home = std::env::var("HOME").ok();
+                    self.bwrap_command(programs, home, access, program, args)
                 }
                 Profile::Quarantine(quarantine) => {
                     self.quarantine_command(programs, quarantine, program, args)
@@ -456,6 +492,7 @@ impl SandboxInfo {
         &self,
         programs: &SandboxPrograms,
         home: Option<String>,
+        access: HomeAccess,
         program: &str,
         args: I,
     ) -> io::Result<ProcCommand>
@@ -466,11 +503,11 @@ impl SandboxInfo {
         let home = SandboxHome::read(home);
         let command_dirs = home
             .as_ref()
-            .map(|home| home.command_dirs(&self.host_path, &self.protected.dirs))
+            .map(|home| home.locked_command_dirs(access, &self.host_path, &self.protected.dirs))
             .unwrap_or_default();
         let mut cmd = scoped_bwrap(programs);
         cmd.args(
-            default_bwrap_flags_for(home.as_ref())
+            default_bwrap_flags_for(home.as_ref(), access)
                 .iter()
                 .map(OsStr::new),
         );
@@ -481,7 +518,7 @@ impl SandboxInfo {
         cmd.args(protection_flags(&self.protected, &writable));
         let filter = load_seccomp_filter(&mut cmd)?;
         cmd.preserved_fds(vec![filter]);
-        cmd.args(self.extra_args.iter().map(OsStr::new));
+        cmd.args(extra_args_for(&self.extra_args, access));
         let mounts = Mounts::of(&bwrap_flags(&cmd, &programs.bwrap));
         let home_dir = home.as_ref().map(|home| Path::new(&home.dir));
         if let Some(dir) = host_working_dir(std::env::current_dir().ok(), &mounts, home_dir) {
@@ -542,6 +579,45 @@ fn load_seccomp_filter(cmd: &mut ProcCommand) -> io::Result<OwnedFd> {
     let filter = seccomp::filter_fd()?;
     cmd.arg("--seccomp").arg(filter.as_raw_fd().to_string());
     Ok(filter)
+}
+
+/// `extra_args` as a command with `access` gets them: as they are, or
+/// [`read_only_extra_args`] under a read-only home.
+fn extra_args_for(extra_args: &[String], access: HomeAccess) -> Vec<&str> {
+    match access {
+        HomeAccess::Writable => extra_args.iter().map(String::as_str).collect(),
+        HomeAccess::ReadOnly => read_only_extra_args(extra_args),
+    }
+}
+
+/// `extra_args` mounting nothing writable: [`WRITABLE_BINDS`] in their read-only form, an
+/// `--overlay` as a read-only one with its upper directory the top layer, and no
+/// [`DEVICE_BINDS`], leaving the profile's own `/dev`.
+fn read_only_extra_args(extra_args: &[String]) -> Vec<&str> {
+    let mut args = Vec::with_capacity(extra_args.len());
+    let mut rest = extra_args;
+    while let [flag, tail @ ..] = rest {
+        rest = match (flag.as_str(), tail) {
+            (flag, [_, _, tail @ ..]) if DEVICE_BINDS.contains(&flag) => tail,
+            ("--overlay", [upper, _, dest, tail @ ..]) => {
+                args.extend(["--overlay-src", upper, "--ro-overlay", dest]);
+                tail
+            }
+            (flag, tail) => {
+                args.push(read_only_bind(flag));
+                tail
+            }
+        };
+    }
+    args
+}
+
+/// `flag` in its read-only form when it is one of [`WRITABLE_BINDS`], else itself.
+fn read_only_bind(flag: &str) -> &str {
+    WRITABLE_BINDS
+        .iter()
+        .find(|(writable, _)| *writable == flag)
+        .map_or(flag, |(_, read_only)| read_only)
 }
 
 /// Whether `extra_args` share the host's network namespace with commands.
@@ -750,12 +826,27 @@ impl SandboxHome {
             .filter_map(|entry| entry.path.to_str())
     }
 
-    fn bind_flags(&self) -> Vec<String> {
+    fn bind_flags(&self, access: HomeAccess) -> Vec<String> {
         let home = ["--ro-bind", self.dir.as_str(), self.dir.as_str()];
         let entries = self
             .writable_entries()
+            .filter(|_| access == HomeAccess::Writable)
             .flat_map(|entry| ["--bind", entry, entry]);
         home.into_iter().chain(entries).map(String::from).collect()
+    }
+
+    /// [`SandboxHome::command_dirs`] when `access` leaves entries writable; none for a
+    /// read-only home, where a guard's self-bind would be the one writable mount.
+    fn locked_command_dirs(
+        &self,
+        access: HomeAccess,
+        host_path: &[PathBuf],
+        protected: &[PathBuf],
+    ) -> CommandDirs {
+        match access {
+            HomeAccess::Writable => self.command_dirs(host_path, protected),
+            HomeAccess::ReadOnly => CommandDirs::default(),
+        }
     }
 
     /// The directories under visible entries that host shells look programs
@@ -987,15 +1078,15 @@ pub(crate) fn is_within_visible_home_entry(dir: &Path, real_home: &Path) -> bool
     })
 }
 
-/// Read-only root with `$HOME`'s visible entries writable when bindable, fresh `/tmp`, `/dev`,
-/// `/proc` and `/run`, isolated user/pid/ipc/uts namespaces, and no network (`--share-net` in
-/// `bwrap_extra_args` restores it).
-fn default_bwrap_flags_for(home: Option<&SandboxHome>) -> Vec<String> {
+/// Read-only root with `$HOME`'s visible entries writable when bindable and `access` allows,
+/// fresh `/tmp`, `/dev`, `/proc` and `/run`, isolated user/pid/ipc/uts namespaces, and no
+/// network (`--share-net` in `bwrap_extra_args` restores it).
+fn default_bwrap_flags_for(home: Option<&SandboxHome>, access: HomeAccess) -> Vec<String> {
     let mut flags: Vec<String> = ["--ro-bind", "/", "/", "--tmpfs", "/tmp"]
         .map(String::from)
         .into();
     match home {
-        Some(home) => flags.extend(home.bind_flags()),
+        Some(home) => flags.extend(home.bind_flags(access)),
         None => warn!(
             target: "assistd::policy",
             "HOME is unset or not a non-root absolute directory; sandboxed commands \
@@ -1299,13 +1390,16 @@ mod tests {
             .chain(["make", "-j4"])
             .map(String::from)
             .collect();
-        let profile = default_bwrap_flags_for(SandboxHome::read(home.clone()).as_ref());
+        let profile = default_bwrap_flags_for(
+            SandboxHome::read(home.clone()).as_ref(),
+            HomeAccess::Writable,
+        );
         for private in [["--tmpfs", "/tmp"], ["--tmpfs", "/run"]] {
             assert!(profile.windows(2).any(|w| w == private), "{private:?}");
         }
         assert!(profile.iter().any(|flag| flag == "--unshare-net"));
         let cmd = info
-            .bwrap_command(&programs(), home, "make", ["-j4"])
+            .bwrap_command(&programs(), home, HomeAccess::Writable, "make", ["-j4"])
             .expect("bwrap command");
         assert_eq!(cmd.as_std().get_program(), "/usr/bin/systemd-run");
         let argv = argv_of(&cmd);
@@ -1405,7 +1499,11 @@ mod tests {
             "/tmp/assistd-output",
             "/tmp/assistd-output",
         ];
-        let argv = argv_of(&info.build_command("true", [""; 0]).expect("command"));
+        let argv = argv_of(
+            &info
+                .build_command("true", [""; 0], HomeAccess::Writable)
+                .expect("command"),
+        );
         assert!(argv.windows(binds.len()).any(|w| w == binds), "{argv:?}");
         for shared in [
             "/run/user/1000/assistd/scratch/out.txt",
@@ -1449,7 +1547,7 @@ mod tests {
     fn bwrap_process_starts_from_a_cleared_environment() {
         let info = bwrap_info(Vec::new());
         let cmd = info
-            .build_command("true", Vec::<String>::new())
+            .build_command("true", Vec::<String>::new(), HomeAccess::Writable)
             .expect("command");
         let runtime_dir = (OsString::from("XDG_RUNTIME_DIR"), "/run/user/1000".into());
         let mut expected: Vec<_> = kept_env(std::env::vars_os())
@@ -1516,7 +1614,7 @@ mod tests {
         let dir_str = home.path().to_string_lossy().into_owned();
         let entry = |name: &str| home.path().join(name).to_string_lossy().into_owned();
 
-        let flags = default_bwrap_flags_for(Some(&sandbox_home(home.path())));
+        let flags = default_bwrap_flags_for(Some(&sandbox_home(home.path())), HomeAccess::Writable);
         assert!(
             flags
                 .windows(3)
@@ -1531,6 +1629,73 @@ mod tests {
             .find(|w| w[0] == "--setenv" && w[1] == "HOME")
             .expect("HOME is exported into the sandbox");
         assert_eq!(setenv[2], dir_str);
+    }
+
+    #[test]
+    fn a_read_only_home_leaves_only_the_private_and_scratch_mounts_writable() {
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        let home = std::fs::canonicalize(home_dir.path()).expect("canonical home");
+        let tools_bin = home.join("projects/tools/bin");
+        std::fs::create_dir_all(&tools_bin).expect("projects/tools/bin");
+        std::fs::create_dir(home.join("go")).expect("go");
+        let scratch = "/run/user/1000/assistd/scratch";
+        let info = SandboxInfo {
+            shared: SharedDirs {
+                scratch: Some(PathBuf::from(scratch)),
+                scratch_cap: None,
+                read_only: Vec::new(),
+            },
+            host_path: vec![tools_bin, home.join("go/bin")],
+            ..bwrap_info(
+                ["--bind", "/srv/data", "/srv/data"]
+                    .map(String::from)
+                    .into(),
+            )
+        };
+        let writable_mounts = |access: HomeAccess| -> Vec<String> {
+            let home = Some(home.to_string_lossy().into_owned());
+            let cmd = info
+                .bwrap_command(&programs(), home, access, "true", [""; 0])
+                .expect("bwrap command");
+            argv_of(&cmd)
+                .windows(2)
+                .filter(|w| matches!(w[0].as_str(), "--bind" | "--bind-try" | "--tmpfs"))
+                .map(|w| w[1].clone())
+                .collect()
+        };
+        let path_of = |entry: &str| home.join(entry).to_string_lossy().into_owned();
+
+        assert_eq!(
+            writable_mounts(HomeAccess::ReadOnly),
+            ["/tmp", "/run", scratch]
+        );
+        let unrestricted = writable_mounts(HomeAccess::Writable);
+        for mounted in ["go", "projects", "projects/tools", "go/bin"] {
+            assert!(unrestricted.contains(&path_of(mounted)), "{unrestricted:?}");
+        }
+        assert!(unrestricted.iter().any(|mounted| mounted == "/srv/data"));
+    }
+
+    #[test]
+    fn a_read_only_script_gets_the_extra_args_with_nothing_writable_in_them() {
+        let extra_args: Vec<String> = ["--bind", "/srv/data", "/srv/data"]
+            .into_iter()
+            .chain(["--dev-bind", "/dev", "/dev", "--share-net"])
+            .chain(["--overlay-src", "/srv/base"])
+            .chain(["--overlay", "/srv/upper", "/srv/work", "/srv/merged"])
+            .map(String::from)
+            .collect();
+        let read_only: Vec<&str> = ["--ro-bind", "/srv/data", "/srv/data", "--share-net"]
+            .into_iter()
+            .chain(["--overlay-src", "/srv/base", "--overlay-src", "/srv/upper"])
+            .chain(["--ro-overlay", "/srv/merged"])
+            .collect();
+
+        assert_eq!(extra_args_for(&extra_args, HomeAccess::ReadOnly), read_only);
+        assert_eq!(
+            extra_args_for(&extra_args, HomeAccess::Writable),
+            extra_args
+        );
     }
 
     fn sandbox_home(dir: &Path) -> SandboxHome {
@@ -1622,6 +1787,7 @@ mod tests {
                 .bwrap_command(
                     &programs(),
                     Some(home.to_string_lossy().into_owned()),
+                    HomeAccess::Writable,
                     "true",
                     [""; 0],
                 )
@@ -1787,7 +1953,13 @@ mod tests {
         };
         let argv = argv_of(
             &info
-                .bwrap_command(&programs(), Some(path_of("")), "true", [""; 0])
+                .bwrap_command(
+                    &programs(),
+                    Some(path_of("")),
+                    HomeAccess::Writable,
+                    "true",
+                    [""; 0],
+                )
                 .expect("bwrap command"),
         );
         let position_of = |flag: &str, dir: &str| {
@@ -1840,7 +2012,7 @@ mod tests {
         ] {
             let sandbox_home = SandboxHome::read(home.map(str::to_string));
             assert!(sandbox_home.is_none(), "HOME={home:?} must be unusable");
-            let flags = default_bwrap_flags_for(sandbox_home.as_ref());
+            let flags = default_bwrap_flags_for(sandbox_home.as_ref(), HomeAccess::Writable);
             assert!(
                 writable_binds(&flags).is_empty(),
                 "HOME={home:?} must leave nothing of the host writable: {flags:?}"

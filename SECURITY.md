@@ -43,7 +43,11 @@ the patched release is out.
   user whenever it is unsure, fails or times out.
 - **Sandbox.** Every command runs under bubblewrap, with a read-only
   root, no network unless configured, and assistd's own config
-  read-only. Without `bwrap` no tools are offered.
+  read-only. A script the classifier sorted as read-only, with no
+  approved program in it, also gets `$HOME` and any configured extra
+  bind or overlay read-only, and no extra device bind, so one it misread
+  fails instead of changing files.
+  Without `bwrap` no tools are offered.
 
 ## Supported versions
 

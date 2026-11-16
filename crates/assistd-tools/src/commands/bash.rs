@@ -14,7 +14,8 @@ use crate::chain::Word;
 use crate::command::{Command, CommandError, CommandInput, CommandOutput, Hint, Usage, error_line};
 use crate::exec::{SCRATCH_FULL_EXIT, SPAWN_FAILED_EXIT, supervise};
 use crate::policy::{
-    BashPolicyCfg, ConfirmationGate, Guarded, SandboxInfo, ScratchCap, SubprocessPolicy,
+    BashPolicyCfg, ConfirmationGate, Guarded, SandboxInfo, ScratchCap, ScriptReview,
+    SubprocessPolicy,
 };
 
 /// `bash SCRIPT`: run a policy-gated `bash -c <script>` subprocess. Policy
@@ -110,7 +111,8 @@ pub(crate) struct ScriptRun {
 }
 
 /// Run `script` as `bash -c` under `policy` within `turn`, reporting as `tool`: reviewed and authorized,
-/// then sandboxed, fed `stdin`, timed and capped, and killed if it outgrows the scratch cap.
+/// then sandboxed with the home access its review gave it, fed `stdin`, timed and capped, and
+/// killed if it outgrows the scratch cap.
 pub(crate) async fn run_script(
     policy: &SubprocessPolicy,
     turn: &TurnContext,
@@ -118,13 +120,13 @@ pub(crate) async fn run_script(
     script: String,
     stdin: &[u8],
 ) -> Result<ScriptRun, CommandError> {
-    let review = policy.review_script(script.clone()).await;
+    let ScriptReview { review, home } = policy.review_script(script.clone()).await;
     policy
         .authorize(turn, tool, "command", &script, review)
         .await?;
     let cmd = policy
         .sandbox
-        .command("bash", vec!["-c".to_string(), script.clone()])
+        .command("bash", vec!["-c".to_string(), script.clone()], home)
         .await
         .map_err(|error| spawn_failed(&error))?;
     let private_dirs = display_list(&policy.sandbox.private_dirs_named(&cmd, &script));
